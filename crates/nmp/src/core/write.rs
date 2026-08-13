@@ -630,6 +630,7 @@ impl<S: EventStore> EngineCore<S> {
                 self.emit_write_fact(
                     id,
                     WriteFact::Relay {
+                        event_id: key.event_id,
                         relay: key.relay.clone(),
                         state: RelayState::GaveUp,
                     },
@@ -658,6 +659,7 @@ impl<S: EventStore> EngineCore<S> {
             self.emit_write_fact(
                 id,
                 WriteFact::Relay {
+                    event_id: key.event_id,
                     relay: key.relay.clone(),
                     state: RelayState::Waiting(RelayWaiting::BackingOff {
                         attempt: ordinal,
@@ -791,6 +793,7 @@ impl<S: EventStore> EngineCore<S> {
                 self.emit_write_fact(
                     target.receipt,
                     WriteFact::Relay {
+                        event_id: key.event_id,
                         relay: target.session.relay,
                         state: RelayState::Sent {
                             attempt: ordinal,
@@ -806,6 +809,7 @@ impl<S: EventStore> EngineCore<S> {
                 self.emit_write_fact(
                     target.receipt,
                     WriteFact::Relay {
+                        event_id: key.event_id,
                         relay: target.session.relay.clone(),
                         state: RelayState::Waiting(RelayWaiting::NotConnected),
                     },
@@ -1021,6 +1025,7 @@ impl<S: EventStore> EngineCore<S> {
                     self.emit_write_fact(
                         id,
                         WriteFact::Relay {
+                            event_id: lane.key.event_id,
                             relay: lane.key.relay.clone(),
                             state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                         },
@@ -1054,6 +1059,7 @@ impl<S: EventStore> EngineCore<S> {
                     self.emit_write_fact(
                         id,
                         WriteFact::Relay {
+                            event_id: lane.key.event_id,
                             relay: lane.key.relay,
                             state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                                 detail: ATTEMPT_STALL_DETAIL.to_string(),
@@ -1242,6 +1248,7 @@ impl<S: EventStore> EngineCore<S> {
                 self.emit_write_fact(
                     id,
                     WriteFact::Relay {
+                        event_id: lane.key.event_id,
                         relay: lane.key.relay,
                         state: RelayState::Waiting(RelayWaiting::BackingOff {
                             attempt: lane.last_ordinal,
@@ -1998,6 +2005,7 @@ impl<S: EventStore> EngineCore<S> {
             let mut awaiting_auth = BTreeSet::new();
             let mut retry_eligible = BTreeSet::new();
             for attempt in attempts {
+                let event_id = attempt.event.id;
                 let replay_relay = attempt.relay.clone();
                 let replay_ordinal = attempt.ordinal;
                 let replay_key = |phase| ReceiptReplayFactKey::Attempt {
@@ -2017,6 +2025,7 @@ impl<S: EventStore> EngineCore<S> {
                                 replay.push((
                                     replay_key(ReceiptAttemptReplayPhase::Handoff),
                                     WriteFact::Relay {
+                                        event_id,
                                         relay: attempt.relay.clone(),
                                         state: RelayState::Waiting(RelayWaiting::NotConnected),
                                     },
@@ -2025,6 +2034,7 @@ impl<S: EventStore> EngineCore<S> {
                             HandoffEvidence::Written => replay.push((
                                 replay_key(ReceiptAttemptReplayPhase::Handoff),
                                 WriteFact::Relay {
+                                    event_id,
                                     relay: attempt.relay.clone(),
                                     state: RelayState::Sent {
                                         attempt: attempt.ordinal,
@@ -2045,6 +2055,7 @@ impl<S: EventStore> EngineCore<S> {
                             replay.push((
                                 replay_key(ReceiptAttemptReplayPhase::Transient),
                                 WriteFact::Relay {
+                                    event_id,
                                     relay: attempt.relay.clone(),
                                     state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                                 },
@@ -2058,6 +2069,7 @@ impl<S: EventStore> EngineCore<S> {
                             replay.push((
                                 replay_key(ReceiptAttemptReplayPhase::Transient),
                                 WriteFact::Relay {
+                                    event_id,
                                     relay: attempt.relay.clone(),
                                     state: RelayState::Waiting(RelayWaiting::BackingOff {
                                         attempt: attempt.ordinal,
@@ -2078,14 +2090,17 @@ impl<S: EventStore> EngineCore<S> {
                     // recreate the exact false claim this seam removes.
                     PublishQueueAttemptOutcome::Started => continue,
                     PublishQueueAttemptOutcome::Acked => WriteFact::Relay {
+                        event_id,
                         relay: attempt.relay,
                         state: RelayState::Published,
                     },
                     PublishQueueAttemptOutcome::Rejected(reason) => WriteFact::Relay {
+                        event_id,
                         relay: attempt.relay,
                         state: RelayState::Rejected { reason },
                     },
                     PublishQueueAttemptOutcome::GaveUp => WriteFact::Relay {
+                        event_id,
                         relay: attempt.relay,
                         state: RelayState::GaveUp,
                     },
@@ -2108,6 +2123,7 @@ impl<S: EventStore> EngineCore<S> {
                         replay.push((
                             replay_key,
                             WriteFact::Relay {
+                                event_id: lane.key.event_id,
                                 relay: lane.key.relay,
                                 state: RelayState::Waiting(RelayWaiting::NotConnected),
                             },
@@ -2120,6 +2136,7 @@ impl<S: EventStore> EngineCore<S> {
                         replay.push((
                             replay_key,
                             WriteFact::Relay {
+                                event_id: lane.key.event_id,
                                 relay: lane.key.relay,
                                 state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                             },
@@ -2132,6 +2149,7 @@ impl<S: EventStore> EngineCore<S> {
                         replay.push((
                             replay_key,
                             WriteFact::Relay {
+                                event_id: lane.key.event_id,
                                 relay: lane.key.relay,
                                 state: RelayState::AuthFailed {
                                     pubkey: receipt.expected_pubkey,
@@ -2156,6 +2174,7 @@ impl<S: EventStore> EngineCore<S> {
                         replay.push((
                             replay_key,
                             WriteFact::Relay {
+                                event_id: lane.key.event_id,
                                 relay: lane.key.relay,
                                 state: RelayState::Waiting(RelayWaiting::BackingOff {
                                     attempt: ordinal,
@@ -2179,6 +2198,7 @@ impl<S: EventStore> EngineCore<S> {
                         PersistenceStallKind::Attempt,
                     ),
                     WriteFact::Relay {
+                        event_id: pending.frozen.id,
                         relay: relay.clone(),
                         state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                             detail: ATTEMPT_STALL_DETAIL.to_string(),
@@ -2193,6 +2213,7 @@ impl<S: EventStore> EngineCore<S> {
                         PersistenceStallKind::Route,
                     ),
                     WriteFact::Relay {
+                        event_id: pending.frozen.id,
                         relay: relay.clone(),
                         state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                             detail: ROUTE_STALL_DETAIL.to_string(),
@@ -4113,6 +4134,7 @@ impl<S: EventStore> EngineCore<S> {
                     self.emit_write_fact(
                         id,
                         WriteFact::Relay {
+                            event_id: lane.key.event_id,
                             relay: lane.key.relay.clone(),
                             state: RelayState::Waiting(RelayWaiting::NotConnected),
                         },
@@ -4685,6 +4707,7 @@ impl<S: EventStore> EngineCore<S> {
             return;
         };
         let signing_pubkey = pending.signing_pubkey;
+        let event_id = pending.frozen.id;
         // Diff-and-append: only relays absent from everything this intent has
         // ever durably resolved to are new, so an acked lane is never
         // re-minted and a resolver repeating itself writes nothing.
@@ -4825,6 +4848,7 @@ impl<S: EventStore> EngineCore<S> {
             self.emit_write_fact(
                 id,
                 WriteFact::Relay {
+                    event_id,
                     relay,
                     state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                         detail: ROUTE_STALL_DETAIL.to_string(),
@@ -4847,6 +4871,7 @@ impl<S: EventStore> EngineCore<S> {
                         self.emit_write_fact(
                             id,
                             WriteFact::Relay {
+                                event_id,
                                 relay: relay.clone(),
                                 state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                                     detail: ATTEMPT_STALL_DETAIL.to_string(),
@@ -4972,6 +4997,7 @@ impl<S: EventStore> EngineCore<S> {
                         self.emit_write_fact(
                             id,
                             WriteFact::Relay {
+                                event_id,
                                 relay: relay.clone(),
                                 state: RelayState::Published,
                             },
@@ -4995,6 +5021,7 @@ impl<S: EventStore> EngineCore<S> {
                         self.emit_write_fact(
                             id,
                             WriteFact::Relay {
+                                event_id,
                                 relay: relay.clone(),
                                 state: RelayState::Rejected {
                                     reason: message.clone(),
@@ -5037,6 +5064,7 @@ impl<S: EventStore> EngineCore<S> {
                         self.emit_write_fact(
                             id,
                             WriteFact::Relay {
+                                event_id,
                                 relay: relay.clone(),
                                 state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                             },
@@ -5085,6 +5113,7 @@ impl<S: EventStore> EngineCore<S> {
                     self.emit_write_fact(
                         id,
                         WriteFact::Relay {
+                            event_id: lane.key.event_id,
                             relay: relay.clone(),
                             state: RelayState::Waiting(RelayWaiting::NotConnected),
                         },
@@ -5126,6 +5155,7 @@ impl<S: EventStore> EngineCore<S> {
                         self.emit_write_fact(
                             id,
                             WriteFact::Relay {
+                                event_id: lane.key.event_id,
                                 relay: relay.clone(),
                                 state: RelayState::Waiting(RelayWaiting::NotConnected),
                             },

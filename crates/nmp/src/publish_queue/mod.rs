@@ -269,6 +269,10 @@ pub enum WriteOutcome {
 pub enum WriteFact {
     Signing(SigningState),
     Relay {
+        /// Exact immutable event whose relay evidence this fact records.
+        /// Stable semantic receipts can span several successor generations;
+        /// the receipt id therefore cannot identify these bytes.
+        event_id: EventId,
         relay: RelayUrl,
         state: RelayState,
     },
