@@ -20,6 +20,7 @@ For read-only explanation or review, inspect the same authorities but do not cre
 ## Preserve NMP's architecture
 
 - Keep the app-facing model to a live query and a write intent. Diagnostics are proof over those nouns, not a third command surface.
+- For semantic capability surfaces, extend the ordinary `LiveQuery` and `WriteIntent`. Capability helpers may provide typed delivered values and composable `Binding` fragments, but must preserve reactive identity and each nested demand's source, access, cache, and freshness context. Do not introduce public row-projection boilerplate, capability-specific observation or receipt lifecycles, or app-managed observation waterfalls.
 - Prefer a type or API shape that excludes the bad path plus a falsifier that proves the exclusion. Prose and review memory are not structural mechanisms.
 - Apply the standing conventions before surface work: remove replaced spellings in the same change, keep Bech32 at human boundaries, and do not invent protocol categories or repository jargon.
 - Run the Noun, Reachability, Bool-Lifecycle, and Destructive-API gates by eye. Run cross-SDK parity and falsifier-honesty mechanically when the affected surface requires them.
