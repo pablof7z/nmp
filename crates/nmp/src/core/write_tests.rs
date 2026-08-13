@@ -909,7 +909,6 @@ mod persistence_stall_replay_tests {
                 _ => None,
             })
             .expect("publish takes custody and answers with the receipt id");
-
         // The same relay failed to commit BOTH durable facts.
         let pending = core.pending.get_mut(&id).expect("the write is pending");
         pending.unstarted_relays.insert(relay.clone());
@@ -982,11 +981,13 @@ mod persistence_stall_replay_tests {
                 _ => None,
             })
             .expect("publish takes custody and answers with the receipt id");
+        let event_id = core.pending[&id].frozen.id;
 
         let mut effects = Vec::new();
         core.emit_write_fact(
             id,
             WriteFact::Relay {
+                event_id,
                 relay: relay.clone(),
                 state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                     detail: ATTEMPT_STALL_DETAIL.to_string(),
@@ -1007,6 +1008,7 @@ mod persistence_stall_replay_tests {
         core.emit_write_fact(
             id,
             WriteFact::Relay {
+                event_id,
                 relay,
                 state: RelayState::Published,
             },
