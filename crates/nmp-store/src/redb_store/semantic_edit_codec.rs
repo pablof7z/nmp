@@ -2,21 +2,24 @@
 
 use std::collections::BTreeSet;
 
+use nmp_grammar::AccessContext;
 use nostr::nips::nip01::Coordinate;
-use nostr::{EventId, Timestamp};
+use nostr::{EventId, PublicKey, RelayUrl, Timestamp};
 
 use crate::semantic_edit::{
     AccessContextId, MaterializationId, OperationSourceRequirement, QualifiedSource,
     ReplayFormatId, ReplayProgramId, SemanticGeneration, SemanticOperation, SemanticPlan,
-    SemanticProgramDigest, SemanticResourceState, SourceEvidence, SourcePlanId, SourceRevision,
-    StartingSource, StartingSourceRequirement, MAX_CONTRIBUTING_OPERATIONS,
-    MAX_COORDINATE_IDENTIFIER_BYTES, MAX_PROGRAM_BYTES,
+    SemanticProgramDigest, SemanticResourceState, SemanticSource, SemanticSourceMemberState,
+    SemanticSourcePolicy, SemanticSourceRequest, SemanticSourceTerminal, SourceEvidence,
+    SourcePlanId, SourceRevision, SourceRoundId, StartingSource, StartingSourceRequirement,
+    MAX_CONTRIBUTING_OPERATIONS, MAX_COORDINATE_IDENTIFIER_BYTES, MAX_PROGRAM_BYTES,
+    MAX_RESOLUTION_REASON_BYTES,
 };
 use crate::{IntentId, MaterializationRef, PersistenceError};
 
 const RESOURCE_MAGIC: &[u8; 4] = b"NMSR";
 const OPERATION_MAGIC: &[u8; 4] = b"NMSO";
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 const HEADER: usize = 8;
 
 struct Encoder(Vec<u8>);
@@ -243,6 +246,146 @@ fn decode_revision(decoder: &mut Decoder<'_>) -> Result<SourceRevision, Persiste
         .map_err(|error| invariant(format!("invalid source revision: {error}")))
 }
 
+fn encode_source(encoder: &mut Encoder, source: &SemanticSource) -> Result<(), PersistenceError> {
+    encoder.bytes(
+        source.relay.as_str().as_bytes(),
+        MAX_COORDINATE_IDENTIFIER_BYTES,
+    )?;
+    match source.access {
+        AccessContext::Public => encoder.u8(0),
+        AccessContext::Nip42(pubkey) => {
+            encoder.u8(1);
+            encoder.fixed(pubkey.as_bytes());
+        }
+    }
+    Ok(())
+}
+
+fn decode_source(decoder: &mut Decoder<'_>) -> Result<SemanticSource, PersistenceError> {
+    let relay = String::from_utf8(decoder.bytes(MAX_COORDINATE_IDENTIFIER_BYTES)?)
+        .map_err(|_| invariant("semantic source relay is not UTF-8"))?;
+    let relay = RelayUrl::parse(&relay).map_err(|_| invariant("invalid semantic source relay"))?;
+    let access = match decoder.u8()? {
+        0 => AccessContext::Public,
+        1 => AccessContext::Nip42(
+            PublicKey::from_slice(&decoder.array::<32>()?)
+                .map_err(|_| invariant("invalid semantic source access pubkey"))?,
+        ),
+        _ => return Err(invariant("invalid semantic source access tag")),
+    };
+    Ok(SemanticSource { relay, access })
+}
+
+fn encode_request(
+    encoder: &mut Encoder,
+    request: &SemanticSourceRequest,
+) -> Result<(), PersistenceError> {
+    encoder.fixed(&request.round.0);
+    encode_source(encoder, &request.source)?;
+    encoder.u64(request.transport_generation);
+    encoder.u64(request.request_revision);
+    Ok(())
+}
+
+fn decode_request(decoder: &mut Decoder<'_>) -> Result<SemanticSourceRequest, PersistenceError> {
+    Ok(SemanticSourceRequest {
+        round: SourceRoundId(decoder.array()?),
+        source: decode_source(decoder)?,
+        transport_generation: decoder.u64()?,
+        request_revision: decoder.u64()?,
+    })
+}
+
+fn encode_terminal(
+    encoder: &mut Encoder,
+    terminal: &SemanticSourceTerminal,
+) -> Result<(), PersistenceError> {
+    match terminal {
+        SemanticSourceTerminal::Eose => encoder.u8(0),
+        SemanticSourceTerminal::Failed(reason) => {
+            encoder.u8(1);
+            encoder.bytes(reason.as_bytes(), MAX_RESOLUTION_REASON_BYTES)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_terminal(decoder: &mut Decoder<'_>) -> Result<SemanticSourceTerminal, PersistenceError> {
+    match decoder.u8()? {
+        0 => Ok(SemanticSourceTerminal::Eose),
+        1 => Ok(SemanticSourceTerminal::Failed(
+            String::from_utf8(decoder.bytes(MAX_RESOLUTION_REASON_BYTES)?)
+                .map_err(|_| invariant("semantic source failure is not UTF-8"))?,
+        )),
+        _ => Err(invariant("invalid semantic source terminal tag")),
+    }
+}
+
+fn encode_source_policy(
+    encoder: &mut Encoder,
+    policy: &SemanticSourcePolicy,
+) -> Result<(), PersistenceError> {
+    match policy {
+        SemanticSourcePolicy::Continuing => encoder.u8(0),
+        SemanticSourcePolicy::Finite(round) => {
+            encoder.u8(1);
+            encoder.fixed(&round.id.0);
+            encoder.u32(round.sources.len())?;
+            for (source, member) in &round.sources {
+                encode_source(encoder, source)?;
+                match member {
+                    SemanticSourceMemberState::Pending => encoder.u8(0),
+                    SemanticSourceMemberState::Open(request) => {
+                        encoder.u8(1);
+                        encode_request(encoder, request)?;
+                    }
+                    SemanticSourceMemberState::Settled { request, terminal } => {
+                        encoder.u8(2);
+                        encode_request(encoder, request)?;
+                        encode_terminal(encoder, terminal)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_source_policy(
+    decoder: &mut Decoder<'_>,
+) -> Result<SemanticSourcePolicy, PersistenceError> {
+    match decoder.u8()? {
+        0 => Ok(SemanticSourcePolicy::Continuing),
+        1 => {
+            let id = SourceRoundId(decoder.array()?);
+            let count = decoder.u32()?;
+            if count == 0 || count > MAX_CONTRIBUTING_OPERATIONS {
+                return Err(invariant("invalid finite semantic source count"));
+            }
+            let mut sources = std::collections::BTreeMap::new();
+            for _ in 0..count {
+                let source = decode_source(decoder)?;
+                let member = match decoder.u8()? {
+                    0 => SemanticSourceMemberState::Pending,
+                    1 => SemanticSourceMemberState::Open(decode_request(decoder)?),
+                    2 => SemanticSourceMemberState::Settled {
+                        request: decode_request(decoder)?,
+                        terminal: decode_terminal(decoder)?,
+                    },
+                    _ => return Err(invariant("invalid semantic source member tag")),
+                };
+                if sources.insert(source, member).is_some() {
+                    return Err(invariant("duplicate finite semantic source"));
+                }
+            }
+            Ok(SemanticSourcePolicy::Finite(
+                crate::FiniteSemanticSourceRound { id, sources },
+            ))
+        }
+        _ => Err(invariant("invalid semantic source policy tag")),
+    }
+}
+
 pub(super) fn encode_operation(operation: &SemanticOperation) -> Result<Vec<u8>, PersistenceError> {
     let mut encoder = Encoder::new(OPERATION_MAGIC);
     encoder.u64(operation.intent_id.0);
@@ -295,6 +438,7 @@ pub(super) fn decode_operation(bytes: &[u8]) -> Result<SemanticOperation, Persis
 pub(super) fn encode_resource(state: &SemanticResourceState) -> Result<Vec<u8>, PersistenceError> {
     let mut encoder = Encoder::new(RESOURCE_MAGIC);
     encode_revision(&mut encoder, &state.source_revision);
+    encode_source_policy(&mut encoder, &state.source_policy)?;
     match &state.source {
         None => encoder.u8(0),
         Some(source) => {
@@ -335,6 +479,7 @@ pub(super) fn decode_resource(
 ) -> Result<SemanticResourceState, PersistenceError> {
     let mut decoder = Decoder::new(bytes, RESOURCE_MAGIC)?;
     let source_revision = decode_revision(&mut decoder)?;
+    let source_policy = decode_source_policy(&mut decoder)?;
     let source = match decoder.u8()? {
         0 => None,
         1 => Some(
@@ -386,6 +531,7 @@ pub(super) fn decode_resource(
         source_revision,
         operations: Vec::new(),
         source,
+        source_policy,
         last_materialization_id,
         generation,
     })

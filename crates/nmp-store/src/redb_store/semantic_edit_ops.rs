@@ -5,9 +5,11 @@ use nostr::{Event, PublicKey, Timestamp};
 use redb::{ReadableDatabase, ReadableTable};
 
 use crate::semantic_edit::{
-    plan_accept, plan_rematerialize, plan_source_install, recovered, validate_resource_state,
-    SemanticAccept, SemanticInstallOutcome, SemanticOperation, SemanticRematerialize,
-    SemanticResourceState, SemanticSourceInstall, SemanticTransitionPlan,
+    advance_source_round, plan_accept, plan_rematerialize, plan_source_install, recovered,
+    validate_resource_state, SemanticAccept, SemanticCohortClose, SemanticCohortCloseOutcome,
+    SemanticDestinationPlanClosure, SemanticInstallOutcome, SemanticOperation,
+    SemanticRematerialize, SemanticResourceState, SemanticSourceInstall, SemanticSourcePolicy,
+    SemanticSourceRoundFact, SemanticSourceRoundOutcome, SemanticTransitionPlan,
 };
 use crate::{
     AcceptOutcome, IntentId, LocalOrigin, PersistenceError, PromoteOutcome, Provenance,
@@ -18,8 +20,9 @@ use crate::{
 use super::ingest_txn::{GovernedIngestTxn, GovernedWrite, RedbIngestTxn};
 use super::mutation::{remove_row_in_txn, tombstone_refuses};
 use super::publish_queue::{
-    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, PublishQueueIntentRecord,
-    PublishQueueIntentRecordWork, PublishQueueMaterializationRecord, PublishQueueReceiptRecord,
+    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, mark_terminal_receipt,
+    PublishQueueIntentRecord, PublishQueueIntentRecordWork, PublishQueueMaterializationRecord,
+    PublishQueueReceiptRecord,
 };
 use super::publish_queue_codec::{
     codec_error, deadline_by_intent_key, deadline_intent_range, deadline_key, decode_deadline,
@@ -28,6 +31,7 @@ use super::publish_queue_codec::{
     parse_lane_key, parse_route_revision_key, receipt_key, route_revision_key,
     route_revision_range,
 };
+use super::publish_queue_ops::terminal_intent_evidence_bytes;
 use super::query::expiration_key;
 use super::schema::{
     persist_err, PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES,
@@ -39,6 +43,7 @@ use super::semantic_edit_codec::{
     operation_key, operation_range,
 };
 use super::store::RedbStore;
+use crate::terminal_retention::wall_clock_now;
 
 /// Replace every predecessor delivery cursor with one fresh current-generation
 /// lane per relay, owned by the generation's deterministic lowest intent.
@@ -773,6 +778,285 @@ pub(super) fn snapshot(
     };
     let operations = read.open_table(SEMANTIC_OPERATIONS).map_err(persist_err)?;
     Ok(load_resource_from_tables(&resources, &operations, coordinate)?.map(recovered))
+}
+
+pub(super) fn advance_source_round_fact(
+    store: &mut RedbStore,
+    coordinate: &Coordinate,
+    fact: SemanticSourceRoundFact,
+) -> Result<SemanticSourceRoundOutcome, PersistenceError> {
+    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let outcome = {
+        let mut resources = write_txn
+            .open_table(SEMANTIC_RESOURCES)
+            .map_err(persist_err)?;
+        let operations = write_txn
+            .open_table(SEMANTIC_OPERATIONS)
+            .map_err(persist_err)?;
+        let Some(mut state) = load_resource_from_tables(&resources, &operations, coordinate)?
+        else {
+            return Ok(SemanticSourceRoundOutcome::Stale);
+        };
+        let outcome = advance_source_round(&mut state, fact);
+        if outcome == SemanticSourceRoundOutcome::Advanced {
+            validate_resource_state(&state)?;
+            let encoded = encode_resource(&state)?;
+            let key = coordinate_key(coordinate)?;
+            resources
+                .insert(key.as_slice(), encoded.as_slice())
+                .map_err(persist_err)?;
+        }
+        outcome
+    };
+    #[cfg(test)]
+    store.crash_if(super::store::RedbCrashPoint::SemanticSourceRoundBeforeCommit);
+    super::commit::commit_prepared(write_txn, outcome)
+}
+
+pub(super) fn close_cohort(
+    store: &mut RedbStore,
+    close: SemanticCohortClose,
+) -> Result<SemanticCohortCloseOutcome, PersistenceError> {
+    let coordinate = close.coordinate.clone();
+    let mut write = GovernedWrite::begin(store)?;
+    let outcome = write.apply(|ingest, write_txn| {
+        let mut resources = write_txn
+            .open_table(SEMANTIC_RESOURCES)
+            .map_err(persist_err)?;
+        let mut operations = write_txn
+            .open_table(SEMANTIC_OPERATIONS)
+            .map_err(persist_err)?;
+        let Some(state) = load_resource_from_tables(&resources, &operations, &coordinate)? else {
+            return Ok(SemanticCohortCloseOutcome::Stale);
+        };
+        if state.source_revision != close.expected_source_revision
+            || crate::semantic_edit::semantic_program_digest(&state.operations)
+                != close.expected_program_digest
+        {
+            return Ok(SemanticCohortCloseOutcome::Stale);
+        }
+        let SemanticSourcePolicy::Finite(round) = &state.source_policy else {
+            return Ok(SemanticCohortCloseOutcome::SourceRoundOpen);
+        };
+        if !round.is_closed() {
+            return Ok(SemanticCohortCloseOutcome::SourceRoundOpen);
+        }
+        let Some(generation) = state.generation.as_ref() else {
+            return Ok(SemanticCohortCloseOutcome::DestinationOpen);
+        };
+        if generation.materialization != close.expected_materialization
+            || generation.source_revision != close.expected_source_revision
+            || generation.program_digest != close.expected_program_digest
+            || generation.members
+                != state
+                    .operations
+                    .iter()
+                    .map(|operation| operation.intent_id)
+                    .collect()
+        {
+            return Ok(SemanticCohortCloseOutcome::Stale);
+        }
+        let owner = *generation.members.first().ok_or_else(|| {
+            PersistenceError::invariant("semantic close generation has no members")
+        })?;
+
+        let lanes = write_txn
+            .open_table(PUBLISH_QUEUE_LANES)
+            .map_err(persist_err)?;
+        let routes = write_txn
+            .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
+            .map_err(persist_err)?;
+        let mut lane_count = 0usize;
+        let mut route_count = 0usize;
+        for member in &generation.members {
+            let (lane_lower, lane_upper) = lane_range(*member);
+            for row in lanes
+                .range::<&[u8; 12]>(&lane_lower..=&lane_upper)
+                .map_err(persist_err)?
+            {
+                let (key, value) = row.map_err(persist_err)?;
+                let (key_intent, _) = parse_lane_key(key.value())
+                    .map_err(|error| codec_error("semantic close lane key", error))?;
+                let (event_id, _, _, lane_state) = decode_lane(value.value())
+                    .map_err(|error| codec_error("semantic close lane", error))?;
+                if key_intent != *member
+                    || *member != owner
+                    || event_id != generation.materialization.event_id
+                    || !matches!(lane_state, crate::PublishQueueLaneState::Terminal { .. })
+                {
+                    return Ok(SemanticCohortCloseOutcome::DestinationOpen);
+                }
+                lane_count += 1;
+            }
+            let (route_lower, route_upper) = route_revision_range(*member);
+            for row in routes
+                .range::<&[u8; 16]>(&route_lower..=&route_upper)
+                .map_err(persist_err)?
+            {
+                let (key, value) = row.map_err(persist_err)?;
+                let (key_intent, _) = parse_route_revision_key(key.value())
+                    .map_err(|error| codec_error("semantic close route key", error))?;
+                decode_route(value.value())
+                    .map_err(|error| codec_error("semantic close route", error))?;
+                if key_intent != *member || *member != owner {
+                    return Ok(SemanticCohortCloseOutcome::DestinationOpen);
+                }
+                route_count += 1;
+            }
+        }
+        let destination_closed = match close.destination {
+            SemanticDestinationPlanClosure::NoDestinations => lane_count == 0 && route_count == 0,
+            SemanticDestinationPlanClosure::AllCurrentDestinationsTerminal => {
+                lane_count > 0 && route_count > 0
+            }
+        };
+        if !destination_closed {
+            return Ok(SemanticCohortCloseOutcome::DestinationOpen);
+        }
+        drop(routes);
+        drop(lanes);
+
+        let mut member_records = Vec::with_capacity(generation.members.len());
+        for member in &generation.members {
+            let intent_storage_key = intent_key(*member);
+            let intent_bytes = ingest
+                .publish_queue_intents
+                .get(&intent_storage_key)
+                .map_err(persist_err)?
+                .map(|value| value.value().to_vec())
+                .ok_or_else(|| PersistenceError::invariant("semantic close member missing"))?;
+            let intent = decode_intent(&intent_bytes)
+                .map_err(|error| codec_error("semantic close member", error))?;
+            let materialization = match &intent.work {
+                PublishQueueIntentRecordWork::ReplaceableOperation {
+                    coordinate: member_coordinate,
+                    materialization: Some(materialization),
+                } if member_coordinate == &coordinate => materialization,
+                _ => return Ok(SemanticCohortCloseOutcome::Stale),
+            };
+            if materialization.current != generation.materialization
+                || materialization.sig_state != crate::IntentSigState::Signed
+            {
+                return Ok(SemanticCohortCloseOutcome::DestinationOpen);
+            }
+            let receipt_storage_key = receipt_key(intent.receipt_id);
+            let receipt_bytes = ingest
+                .publish_queue_receipts
+                .get(&receipt_storage_key)
+                .map_err(persist_err)?
+                .map(|value| value.value().to_vec())
+                .ok_or_else(|| PersistenceError::invariant("semantic close receipt missing"))?;
+            let receipt = decode_receipt(&receipt_bytes)
+                .map_err(|error| codec_error("semantic close receipt", error))?;
+            if receipt.intent_id != Some(*member)
+                || !matches!(
+                    &receipt.payload,
+                    PublishQueueReceiptPayload::ReplaceableOperation {
+                        coordinate: receipt_coordinate,
+                        state: ReplaceableOperationReceiptState::Contributing {
+                            current: Some(current),
+                        },
+                        ..
+                    } if receipt_coordinate == &coordinate
+                        && current.materialization == generation.materialization
+                        && current.sig_state == crate::IntentSigState::Signed
+                )
+            {
+                return Ok(SemanticCohortCloseOutcome::DestinationOpen);
+            }
+            let evidence_bytes = terminal_intent_evidence_bytes(write_txn, *member)?;
+            member_records.push((*member, intent, receipt, evidence_bytes));
+        }
+
+        let mut deadlines = write_txn
+            .open_table(PUBLISH_QUEUE_DEADLINES)
+            .map_err(persist_err)?;
+        let mut deadlines_by_intent = write_txn
+            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
+            .map_err(persist_err)?;
+        for (member, intent, mut receipt, evidence_bytes) in member_records {
+            let (lower, upper) = deadline_intent_range(member);
+            let deadline_rows = deadlines_by_intent
+                .range::<&[u8; 20]>(&lower..=&upper)
+                .map_err(persist_err)?
+                .map(|row| {
+                    row.map(|(key, value)| (*key.value(), value.value().to_vec()))
+                        .map_err(persist_err)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for (by_intent, encoded) in deadline_rows {
+                let (key_intent, at, relay_id) = parse_deadline_by_intent_key(&by_intent)
+                    .map_err(|error| codec_error("semantic close deadline key", error))?;
+                if key_intent != member {
+                    return Err(PersistenceError::invariant(
+                        "semantic close deadline range escaped member",
+                    ));
+                }
+                decode_deadline(&encoded)
+                    .map_err(|error| codec_error("semantic close deadline", error))?;
+                deadlines
+                    .remove(&deadline_key(at, member, relay_id))
+                    .map_err(persist_err)?;
+                deadlines_by_intent
+                    .remove(&by_intent)
+                    .map_err(persist_err)?;
+            }
+            ingest
+                .publish_queue_intents
+                .remove(&intent_key(member))
+                .map_err(persist_err)?;
+            let acceptance = match receipt.payload {
+                PublishQueueReceiptPayload::ReplaceableOperation { acceptance, .. } => acceptance,
+                PublishQueueReceiptPayload::Event { .. } => unreachable!("preflighted receipt"),
+            };
+            receipt.payload = PublishQueueReceiptPayload::ReplaceableOperation {
+                coordinate: coordinate.clone(),
+                acceptance,
+                state: ReplaceableOperationReceiptState::Settled,
+            };
+            let encoded = encode_receipt(&receipt);
+            ingest
+                .publish_queue_receipts
+                .insert(&receipt_key(intent.receipt_id), encoded.as_slice())
+                .map_err(persist_err)?;
+            mark_terminal_receipt(
+                &mut ingest.publish_queue_receipts,
+                &mut ingest.publish_queue_meta,
+                intent.receipt_id,
+                wall_clock_now(),
+                evidence_bytes,
+            )?;
+        }
+        drop(deadlines_by_intent);
+        drop(deadlines);
+
+        let (lower, upper) = operation_range(&coordinate)?;
+        let keys = operations
+            .range::<&[u8]>(lower.as_slice()..=upper.as_slice())
+            .map_err(persist_err)?
+            .map(|row| {
+                row.map(|(key, _)| key.value().to_vec())
+                    .map_err(persist_err)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for key in keys {
+            operations.remove(key.as_slice()).map_err(persist_err)?;
+        }
+        resources
+            .remove(coordinate_key(&coordinate)?.as_slice())
+            .map_err(persist_err)?;
+        drop(operations);
+        drop(resources);
+        Ok(SemanticCohortCloseOutcome::Closed {
+            members: generation.members.iter().copied().collect(),
+        })
+    })?;
+    if !matches!(outcome, SemanticCohortCloseOutcome::Closed { .. }) {
+        return Ok(outcome);
+    }
+    #[cfg(test)]
+    store.crash_if(super::store::RedbCrashPoint::SemanticCohortCloseBeforeCommit);
+    write.commit_prepared(outcome)
 }
 
 pub(super) fn install(

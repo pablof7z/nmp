@@ -101,13 +101,15 @@ pub use redb_store::{
     StoreBenchProcessCounters, StoreBenchVariant,
 };
 pub use semantic_edit::{
-    AccessContextId, MaterializationCandidate, MaterializationId, OperationResolution,
-    OperationSourceRequirement, PendingMaterializationState, QualifiedSource,
+    AccessContextId, FiniteSemanticSourceRound, MaterializationCandidate, MaterializationId,
+    OperationResolution, OperationSourceRequirement, PendingMaterializationState, QualifiedSource,
     RecoveredSemanticResource, ReplayFormatId, ReplayProgramId, ResolvedOperation, SemanticAccept,
-    SemanticCurrentState, SemanticGeneration, SemanticInstallOutcome, SemanticOperation,
-    SemanticPlan, SemanticProgramDigest, SemanticRefusal, SemanticRematerialize,
-    SemanticSourceInstall, SourceEvidence, SourcePlanId, SourceRevision, StartingSource,
-    StartingSourceRequirement,
+    SemanticCohortClose, SemanticCohortCloseOutcome, SemanticCurrentState,
+    SemanticDestinationPlanClosure, SemanticGeneration, SemanticInstallOutcome, SemanticOperation,
+    SemanticPlan, SemanticProgramDigest, SemanticRefusal, SemanticRematerialize, SemanticSource,
+    SemanticSourceInstall, SemanticSourceMemberState, SemanticSourcePolicy, SemanticSourceRequest,
+    SemanticSourceRoundFact, SemanticSourceRoundOutcome, SemanticSourceTerminal, SourceEvidence,
+    SourcePlanId, SourceRevision, SourceRoundId, StartingSource, StartingSourceRequirement,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -1415,6 +1417,7 @@ pub enum ReplaceableOperationReceiptState {
     Contributing {
         current: Option<MaterializationReceipt>,
     },
+    Settled,
     Resolved,
     Cancelled,
     Refused(String),
@@ -2149,6 +2152,31 @@ pub trait EventStore {
         &mut self,
         install: SemanticSourceInstall,
     ) -> Result<SemanticInstallOutcome, PersistenceError>;
+
+    /// Persist one typed request lifecycle fact owned by an exact finite
+    /// semantic source round. Unrelated rounds, sources, or request identities
+    /// are reported stale without mutation.
+    fn advance_replaceable_source_round(
+        &mut self,
+        _coordinate: &nostr::nips::nip01::Coordinate,
+        _fact: SemanticSourceRoundFact,
+    ) -> Result<SemanticSourceRoundOutcome, PersistenceError> {
+        Err(PersistenceError::invariant(
+            "semantic source rounds unsupported",
+        ))
+    }
+
+    /// Atomically close every contributing intent/receipt and compact its
+    /// semantic program after the store verifies the exact finite source round
+    /// and current destination generation are both terminal.
+    fn close_replaceable_operation_cohort(
+        &mut self,
+        _close: SemanticCohortClose,
+    ) -> Result<SemanticCohortCloseOutcome, PersistenceError> {
+        Err(PersistenceError::invariant(
+            "semantic cohort close unsupported",
+        ))
+    }
 
     /// Swap the sentinel signature on `intent_id`'s frozen body for
     /// `verified`'s real one and flip the canonical

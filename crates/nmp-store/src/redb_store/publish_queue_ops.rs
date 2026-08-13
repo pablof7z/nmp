@@ -1632,7 +1632,7 @@ pub(super) enum LaneShape {
     AllTerminal,
 }
 
-fn terminal_intent_evidence_bytes(
+pub(super) fn terminal_intent_evidence_bytes(
     write_txn: &redb::WriteTransaction,
     intent_id: IntentId,
 ) -> Result<u64, PersistenceError> {

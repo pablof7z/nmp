@@ -845,6 +845,7 @@ pub(crate) fn encode_receipt(record: &PublishQueueReceiptRecord) -> Vec<u8> {
                         }
                     }
                 }
+                crate::ReplaceableOperationReceiptState::Settled => encoder.u8(4),
                 crate::ReplaceableOperationReceiptState::Resolved => encoder.u8(1),
                 crate::ReplaceableOperationReceiptState::Cancelled => encoder.u8(2),
                 crate::ReplaceableOperationReceiptState::Refused(reason) => {
@@ -942,6 +943,7 @@ pub(crate) fn decode_receipt(
                 3 => crate::ReplaceableOperationReceiptState::Refused(
                     decoder.text(MAX_TEXT_BYTES, "operation refusal")?,
                 ),
+                4 => crate::ReplaceableOperationReceiptState::Settled,
                 other => {
                     return Err(PublishQueueCodecError::InvalidTag(
                         "operation receipt state",
