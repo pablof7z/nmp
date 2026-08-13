@@ -62,9 +62,8 @@ mod row_channel;
 pub use clock::EngineClock;
 
 pub use auth::{
-    AddAuthPolicyError, AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp,
-    AuthPolicyPendingSender, AuthPolicyRegistration, AuthPolicyRequest, AuthPolicyResolveError,
-    PendingAuthPolicyOp,
+    AddAuthPolicyError, AuthPolicy, AuthPolicyOp, AuthPolicyPendingSender, AuthPolicyRegistration,
+    AuthPolicyRequest, AuthPolicyResolveError, PendingAuthPolicyOp,
 };
 
 use std::cell::RefCell;

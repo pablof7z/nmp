@@ -20,6 +20,7 @@ use nmp_transport::{
 };
 use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl};
 
+use crate::auth::{AuthPolicyDecision, AuthPolicyError};
 use crate::core::{
     AuthCapability, AuthCapabilityInstance, AuthEffect, AuthEpoch, AuthOpToken, AuthPolicyOutcome,
     AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, EngineMsg,
@@ -63,31 +64,6 @@ impl AuthPolicyRequest {
         self.epoch_sequence
     }
 }
-
-/// App policy's closed semantic answer for one exact AUTH request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthPolicyDecision {
-    Allow,
-    Deny { reason: String },
-}
-
-/// Technical policy execution failures, separate from an explicit denial.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthPolicyError {
-    Unavailable,
-    Technical { reason: String },
-}
-
-impl std::fmt::Display for AuthPolicyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unavailable => f.write_str("AUTH policy unavailable"),
-            Self::Technical { reason } => write!(f, "AUTH policy failed: {reason}"),
-        }
-    }
-}
-
-impl std::error::Error for AuthPolicyError {}
 
 type PolicyResult = Result<AuthPolicyDecision, AuthPolicyError>;
 type PendingPolicyCancel = Box<dyn FnOnce() + Send + 'static>;
