@@ -47,7 +47,7 @@ use nostr::{EventId, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 use crate::auth::{AuthPolicy, EngineAuthPolicyAdapter};
 #[cfg(feature = "nip65")]
 use crate::config::build_nip65_sources;
-use crate::config::{build_admission_policy, build_routing_facts, EngineConfig};
+use crate::config::{build_routing_facts, EngineConfig};
 use crate::error::EngineError;
 use crate::relay_information::{
     RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot,
@@ -334,7 +334,6 @@ impl Engine {
         initial_session: crate::session::RestoredSession,
     ) -> Result<Self, EngineError> {
         let routing_facts = build_routing_facts(&config)?;
-        let admission = build_admission_policy(&config);
         // #20: one effective ceiling is threaded to both the whole-demand
         // compiler and transport. EngineThread normalizes legacy zero to the
         // finite default and resolves any mechanism-level mismatch downward.
@@ -394,7 +393,6 @@ impl Engine {
                     routing_facts,
                     config.max_relays,
                     pool_config,
-                    admission,
                     runtime_config,
                     initial_session,
                 )
@@ -407,7 +405,6 @@ impl Engine {
                     routing_facts,
                     config.max_relays,
                     pool_config,
-                    admission,
                     runtime_config,
                     initial_session,
                 )
@@ -437,17 +434,12 @@ impl Engine {
     /// (Unit A0), same as every other entry point.
     #[cfg(feature = "unstable-mechanism")]
     #[doc(hidden)]
-    pub fn from_parts<S>(
-        store: S,
-        cap: usize,
-        pool_config: PoolConfig,
-        admission: crate::core::RelayAdmissionPolicy,
-    ) -> Result<Self, EngineError>
+    pub fn from_parts<S>(store: S, cap: usize, pool_config: PoolConfig) -> Result<Self, EngineError>
     where
         S: nmp_store::EventStore + Send + 'static,
     {
-        let (engine_thread, handle) = EngineThread::spawn(store, cap, pool_config, admission)
-            .map_err(EngineError::from_start_error)?;
+        let (engine_thread, handle) =
+            EngineThread::spawn(store, cap, pool_config).map_err(EngineError::from_start_error)?;
         Ok(Self {
             inner: Mutex::new(Some(Inner {
                 handle,
@@ -465,19 +457,13 @@ impl Engine {
         facts: nmp_router::FixtureRoutingFacts,
         cap: usize,
         pool_config: PoolConfig,
-        admission: crate::core::RelayAdmissionPolicy,
     ) -> Result<Self, EngineError>
     where
         S: nmp_store::EventStore + Send + 'static,
     {
-        let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-            store,
-            facts,
-            cap,
-            pool_config,
-            admission,
-        )
-        .map_err(EngineError::from_start_error)?;
+        let (engine_thread, handle) =
+            EngineThread::spawn_with_fixture_routing_facts(store, facts, cap, pool_config)
+                .map_err(EngineError::from_start_error)?;
         Ok(Self {
             inner: Mutex::new(Some(Inner {
                 handle,
@@ -499,7 +485,6 @@ impl Engine {
         nip65_sources: Vec<RelayUrl>,
         cap: usize,
         pool_config: PoolConfig,
-        admission: crate::core::RelayAdmissionPolicy,
     ) -> Result<Self, EngineError>
     where
         S: nmp_store::EventStore + Send + 'static,
@@ -514,7 +499,6 @@ impl Engine {
             crate::core::RoutingFactStore::from_fixture(facts),
             cap,
             pool_config,
-            admission,
             runtime_config,
             crate::session::RestoredSession::empty(),
         )
@@ -1476,13 +1460,8 @@ mod tests {
         S: nmp_store::EventStore + Send + 'static,
     {
         let store = crate::lane_fault_store::FaultyLaneStore::new(store, faults);
-        let (engine_thread, handle) = EngineThread::spawn(
-            store,
-            4,
-            PoolConfig::default(),
-            crate::core::RelayAdmissionPolicy::default(),
-        )
-        .expect("fault-injecting engine construction");
+        let (engine_thread, handle) = EngineThread::spawn(store, 4, PoolConfig::default())
+            .expect("fault-injecting engine construction");
         Engine {
             inner: Mutex::new(Some(Inner {
                 handle,
@@ -1806,7 +1785,7 @@ mod tests {
     }
 
     #[test]
-    fn allowed_local_relay_host_reaches_the_facade_transport_pool() {
+    fn loopback_relay_reaches_the_facade_transport_pool_without_opt_in() {
         use std::collections::BTreeSet;
         use std::time::{Duration, Instant};
 
@@ -1872,10 +1851,9 @@ mod tests {
 
         let engine = Engine::new(EngineConfig {
             app_relays: vec![relay.to_string()],
-            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..EngineConfig::default()
         })
-        .expect("local relay opt-in must build");
+        .expect("loopback relay must build without opt-in");
         let query = LiveQuery::single(
             crate::Demand::new(
                 crate::Filter {
@@ -1922,7 +1900,7 @@ mod tests {
             let _ = std::net::TcpStream::connect(relay_address);
         }
         let relay_result = relay_thread.join();
-        assert!(found, "allowed local relay never reached the facade query");
+        assert!(found, "loopback relay never reached the facade query");
         assert!(execution.iter().any(|fact| {
             fact.kind == "concrete_filter"
                 && fact.path.as_deref() == Some("$")
@@ -2295,13 +2273,8 @@ mod tests {
         let fixture = tempfile::tempdir().expect("temporary directory");
         let path = fixture.path().join("from-parts.redb");
         let store = RedbStore::open(&path).expect("store must open");
-        let engine = Engine::from_parts(
-            store,
-            10,
-            PoolConfig::default(),
-            crate::core::RelayAdmissionPolicy::default(),
-        )
-        .expect("from_parts engine must build");
+        let engine = Engine::from_parts(store, 10, PoolConfig::default())
+            .expect("from_parts engine must build");
         assert!(matches!(
             Engine::reset_persistent_store(&path),
             Err(EngineError::StoreStillOpen { .. })
@@ -2318,7 +2291,6 @@ mod tests {
                 max_relays: usize::MAX,
                 ..PoolConfig::default()
             },
-            crate::core::RelayAdmissionPolicy::default(),
         )
         .err()
         .expect("unrepresentable relay envelope must refuse construction");
@@ -3718,7 +3690,6 @@ mod tests {
         // needs the same operator opt-in a real local relay would use.
         let engine = Arc::new(
             Engine::new(EngineConfig {
-                allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
                 ..EngineConfig::default()
             })
             .expect("engine must build"),
@@ -3818,7 +3789,6 @@ mod tests {
         // Issue #519: opt the mock server's loopback host in — see the
         // identical note in `live_nip11_cannot_outlive_real_engine_shutdown_with_retained_owners`.
         let engine = Engine::new(EngineConfig {
-            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..EngineConfig::default()
         })
         .expect("engine must build");

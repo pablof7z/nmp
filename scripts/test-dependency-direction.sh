@@ -161,10 +161,10 @@ done
 # A new family package is classified without an exact exception and may reach
 # the two generic value packages.
 allowed="$TEMP_ROOT/allowed-family"
-write_workspace "$allowed" nmp-nip99 nmp-grammar nmp-network-policy
-write_crate "$allowed" nmp-network-policy
+write_workspace "$allowed" nmp-nip99 nmp-grammar nmp-event-edit
+write_crate "$allowed" nmp-event-edit
 write_crate "$allowed" nmp-grammar \
-  $'[dependencies]\nnmp-network-policy = { path = "../nmp-network-policy" }'
+  $'[dependencies]\nnmp-event-edit = { path = "../nmp-event-edit" }'
 write_crate "$allowed" nmp-nip99 \
   $'[dependencies]\nnmp-grammar = { path = "../nmp-grammar" }'
 run_checker "$allowed" >/dev/null
@@ -172,10 +172,10 @@ run_checker "$allowed" >/dev/null
 # The NIP-29 proof is deliberately about rule origin as well as role. Adding an
 # exact exception with the same role must therefore fail.
 nip29="$TEMP_ROOT/nip29-family-origin"
-write_workspace "$nip29" nmp-nip29 nmp-grammar nmp-network-policy
-write_crate "$nip29" nmp-network-policy
+write_workspace "$nip29" nmp-nip29 nmp-grammar nmp-event-edit
+write_crate "$nip29" nmp-event-edit
 write_crate "$nip29" nmp-grammar \
-  $'[dependencies]\nnmp-network-policy = { path = "../nmp-network-policy" }'
+  $'[dependencies]\nnmp-event-edit = { path = "../nmp-event-edit" }'
 write_crate "$nip29" nmp-nip29 \
   $'[dependencies]\nnmp-grammar = { path = "../nmp-grammar" }'
 nip29_output=$(run_checker "$nip29")

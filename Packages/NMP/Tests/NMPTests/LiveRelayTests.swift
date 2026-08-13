@@ -744,7 +744,6 @@ private final class DiagnosticsRaceState: @unchecked Sendable {
             authSessions: [],
             uncoveredAuthorCount: 0,
             droppedMergeRules: [],
-            discoveredPrivateRelaysRejected: 0,
             sessionsRejectedOverCap: 0,
             transportDegraded: nil,
             stalledWrites: [],

@@ -646,11 +646,10 @@ owns the ordinary NMP handle and threads immutable cycle/depth context.
 ## 14. Security and privacy
 
 - Nostr URI parsing rejects secret-key entities and malformed payloads.
-- Relay hints pass through NMP's relay-admission policy; a renderer cannot turn
-  an arbitrary `.onion`, loopback, private, or otherwise disallowed URL into a
-  transport connection.
+- Relay hints remain protocol data passed to NMP routing; renderers do not open
+  transport connections themselves.
 - HTTP link previews and media loads are separate capabilities with explicit
-  SSRF, redirect, MIME, size, and privacy policy; they are not implied by Nostr
+  redirect, MIME, size, and privacy policy; they are not implied by Nostr
   event acquisition.
 - Embedded private/decrypted content must not be inserted into a public shared
   cache or rendered outside its authorized access context.

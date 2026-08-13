@@ -149,7 +149,6 @@ async fn removing_an_entry_with_open_delivery_work_is_still_active() {
             // connection: the lane is owned, live and nonterminal for the whole
             // test, which is exactly the state removal must refuse.
             app_relays: vec!["ws://127.0.0.1:1/".to_string()],
-            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..NmpEngineConfig::default()
         },
         None,

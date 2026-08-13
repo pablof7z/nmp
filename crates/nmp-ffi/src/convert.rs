@@ -2277,7 +2277,6 @@ pub fn diagnostics_snapshot_to_ffi(s: DiagnosticsSnapshot) -> FfiDiagnosticsSnap
             .into_iter()
             .map(|s| s.to_string())
             .collect(),
-        discovered_private_relays_rejected: s.discovered_private_relays_rejected,
         sessions_rejected_over_cap: s.sessions_rejected_over_cap,
         transport_degraded: s.transport_degraded,
         stalled_writes: s
@@ -3012,7 +3011,6 @@ mod tests {
             }],
             uncovered_author_count: 7,
             dropped_merge_rules: vec!["limit"],
-            discovered_private_relays_rejected: 0,
             sessions_rejected_over_cap: 0,
             sessions_refused_by_subscription_budget: 0,
             store_degraded: None,

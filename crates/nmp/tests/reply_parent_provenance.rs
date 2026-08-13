@@ -103,7 +103,6 @@ async fn verified_parent_provenance_becomes_a_real_lane_while_raw_hint_text_does
         // Parent provenance and the forged hint are both third-party data.
         // Admit loopback deliberately so the negative control would really
         // connect if routing ever trusted the hint.
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..EngineConfig::default()
     })
     .expect("build an in-memory engine");

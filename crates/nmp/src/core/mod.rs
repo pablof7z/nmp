@@ -29,7 +29,6 @@
 //! #49) lives in [`evidence`]. Both are engine-owned — the store
 //! (`nmp-store`) only stores whatever interval it is handed.
 
-mod admission;
 #[cfg(test)]
 mod admission_tests;
 mod attribution;
@@ -408,7 +407,6 @@ fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
     }
 }
 
-pub use admission::{RelayAdmissionPolicy, RelayRefusal};
 use attribution::{AttributionSendId, AttributionState, CompletedAttribution, EventFailureTarget};
 use diagnostics::{stalled_write_id, STALLED_WRITE_DETAIL_LIMIT};
 pub use diagnostics::{
@@ -417,7 +415,6 @@ pub use diagnostics::{
 };
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
-pub use nmp_network_policy::{Declarer, OnionReachability};
 use observation::{
     ActiveRequestEvidence, LiveWireRequest, ObservationExecutionState, PendingRequestEvidence,
 };
@@ -1391,9 +1388,6 @@ pub struct CoreOwnershipCensus {
     pub attribution_live_shape_refs: usize,
     pub attribution_inflight_shape_keys: usize,
     pub attribution_inflight_shape_refs: usize,
-    pub projected_rejection_demand_keys: usize,
-    pub projected_rejection_owner_keys: usize,
-    pub projected_rejection_owner_refs: usize,
     pub planned_read_sessions: usize,
     pub planned_read_relays: usize,
     pub plan_execution_metadata: usize,
@@ -2442,51 +2436,6 @@ pub struct EngineCore<S: EventStore> {
     /// removed the instant its one-and-only `HandoffResult` arrives — see
     /// `Self::on_event_handoff`.
     attempt_correlations: HashMap<AttemptCorrelation, AttemptCorrelationTarget>,
-    /// The provenance-aware relay admission policy for DISCOVERED relays
-    /// (issue #121). Protocol components consult it before replacing neutral
-    /// author routes.
-    /// Defaults to the secure policy (reject every discovered private/
-    /// loopback/onion host); production threads the operator's opt-in local
-    /// allowlist via [`Self::with_relay_admission`].
-    admission: RelayAdmissionPolicy,
-    /// Every public key this engine can currently act as: the current account
-    /// plus every attached signing capability. This is what "own" means in
-    /// provenance-aware admission (#1251), and it is deliberately a SET rather
-    /// than the single current account, because `Identity::Explicit` publishes
-    /// as a held key without making it current.
-    ///
-    /// The grant it produces is always keyed to the exact author whose list is
-    /// being read, so heeding one held key's own relay list can never widen
-    /// what a write signing as a different key is allowed to reach.
-    attached_signers: BTreeSet<PublicKey>,
-    /// Relays some trusted declaration named, in the exact spelling the
-    /// declaration used. It answers ONE question, at the socket boundary:
-    /// may this dial reach a local address? Routing has already decided that
-    /// nothing untrusted gets here, so this set never widens what is routable
-    /// -- it only stops the dial guard from refusing what routing admitted,
-    /// which would leave two owners disagreeing about one provenance answer.
-    ///
-    /// Grants are added, never removed. A relay dropped from a trusted
-    /// declaration stops being routed to immediately, so a stale grant names a
-    /// destination nothing can reach; revoking it would buy nothing and cost a
-    /// reference count over every declaration site.
-    heeded_relays: BTreeSet<RelayUrl>,
-    /// Monotonic count of discovered route rejections by `admission` before
-    /// they could become router candidates (issues #121/#11).
-    /// Selector-projected facts count once when a rejected
-    /// `(selection, evidence)` first enters current demand, not again on an
-    /// unchanged recompile. Surfaced in
-    /// [`DiagnosticsSnapshot::discovered_private_relays_rejected`]; the
-    /// separate worker-exhaustion cap count lives in the pool
-    /// (`nmp_transport::Pool::admission_rejections`) and is folded in by the
-    /// runtime.
-    discovered_private_relays_rejected: u64,
-    /// Rejected selector-projected routing facts present at the previous
-    /// recompile. Diffing this set prevents an unchanged demand from
-    /// inflating the monotonic rejection counter on every reducer pass.
-    rejected_projected_evidence_by_demand:
-        BTreeMap<nmp_router::DemandKey, BTreeSet<(DescriptorHash, RoutingEvidence)>>,
-    rejected_projected_evidence_owner_counts: BTreeMap<(DescriptorHash, RoutingEvidence), usize>,
     /// Degraded-store diagnostic retained from the first failed door in the
     /// current storage generation.
     ///
@@ -2630,15 +2579,6 @@ impl<S: EventStore> EngineCore<S> {
         routing_facts: RoutingFactStore,
         cap: usize,
     ) -> Self {
-        // The operator's own lanes are a trusted declaration, so the socket
-        // boundary must not refuse what routing already heeds (#1251). An app
-        // relay list naming `localhost` is the operator describing their own
-        // network, and needs no second opt-in to be dialed.
-        let heeded_relays = routing_facts
-            .operator_app_relays()
-            .into_iter()
-            .chain(routing_facts.operator_fallback_relays())
-            .collect();
         Self {
             resolver: ResolverEngine::new(store),
             router: Router::new(RuleRegistry::default_widen_only()),
@@ -2723,12 +2663,6 @@ impl<S: EventStore> EngineCore<S> {
             events_by_session_kind: HashMap::new(),
             next_attempt_correlation: Some(0),
             attempt_correlations: HashMap::new(),
-            admission: RelayAdmissionPolicy::default(),
-            attached_signers: BTreeSet::new(),
-            heeded_relays,
-            discovered_private_relays_rejected: 0,
-            rejected_projected_evidence_by_demand: BTreeMap::new(),
-            rejected_projected_evidence_owner_counts: BTreeMap::new(),
             store_degraded: None,
             store_failure_epoch: 0,
             store_recovery_requested: None,
@@ -2805,17 +2739,6 @@ impl<S: EventStore> EngineCore<S> {
         effects: &mut Vec<Effect>,
     ) {
         let before = self.routing_facts.author_routes(&author);
-        if self.is_own_identity(&author) {
-            if let AuthorRouteReplacement::Present(routes) = &replacement {
-                let declared = routes
-                    .outbound()
-                    .iter()
-                    .chain(routes.inbound())
-                    .cloned()
-                    .collect::<Vec<_>>();
-                self.heeded_relays.extend(declared);
-            }
-        }
         self.routing_facts.writer().replace(author, replacement);
         if self.routing_facts.author_routes(&author) != before {
             self.recompile(effects);
@@ -2823,83 +2746,6 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
-    /// Whether one relay may be used given whose declaration named it, counting a refusal
-    /// exactly once for diagnostics.
-    #[allow(dead_code)]
-    pub(crate) fn admits_relay(
-        &mut self,
-        relay: &RelayUrl,
-        declarer: Declarer,
-    ) -> Result<(), RelayRefusal> {
-        let outcome = self.admission.admits(relay, declarer);
-        if outcome.is_err() {
-            self.discovered_private_relays_rejected =
-                self.discovered_private_relays_rejected.saturating_add(1);
-        }
-        outcome
-    }
-
-    /// The current neutral author-route fact, including what admission
-    /// refused.
-    ///
-    /// Test-only, and deliberately so: production readers of this fact are
-    /// the router (which wants the routable sets) and `exhausted_source`
-    /// (which wants the refusals to explain an empty one), and both already
-    /// hold `routing_facts`. A second public read door with no production
-    /// caller would be a surface nobody needs.
-    #[cfg(test)]
-    pub(crate) fn author_routes(&self, author: &PublicKey) -> AuthorRouteState {
-        self.routing_facts.author_routes(author)
-    }
-
-    /// Whether `author` is an identity this engine can act as, and therefore
-    /// whether a relay list signed by that key is our own declaration.
-    ///
-    /// Authorship, not arrival, is the test: a list that reached us by
-    /// discovery from a stranger's relay is still ours if we hold the key that
-    /// signed it. Signed out with nothing attached, this is false for
-    /// everyone, so only the operator tier grants anything.
-    #[allow(dead_code)]
-    pub(crate) fn is_own_identity(&self, author: &PublicKey) -> bool {
-        self.active_pubkey.as_ref() == Some(author) || self.attached_signers.contains(author)
-    }
-
-    /// Classify one author's relay list by whose declaration it is.
-    #[allow(dead_code)]
-    pub(crate) fn relay_list_declarer(&self, author: &PublicKey) -> Declarer {
-        if self.is_own_identity(author) {
-            Declarer::Ourselves
-        } else {
-            Declarer::SomeoneElse
-        }
-    }
-
-    /// Record that a trusted declaration named these relays, so the socket
-    /// boundary gives the same provenance answer routing already gave.
-    pub(crate) fn heed_relays(&mut self, relays: impl IntoIterator<Item = RelayUrl>) {
-        self.heeded_relays.extend(relays);
-    }
-
-    /// The provenance answer for one relay at the moment a socket is opened.
-    ///
-    /// The socket boundary asks the narrower question routing already
-    /// answered — may this dial reach a local address? — so it consults the
-    /// grants trusted declarations left behind rather than re-deriving
-    /// admission from the address, which is how the two layers used to
-    /// disagree about one relay.
-    pub(crate) fn dial_declarer(&self, relay: &RelayUrl) -> Declarer {
-        if self.heeded_relays.contains(relay) {
-            Declarer::Ourselves
-        } else {
-            Declarer::SomeoneElse
-        }
-    }
-
-    /// Thread the operator's discovered-relay admission policy through
-    /// construction (issue #121). Chained onto [`Self::new`] by the runtime
-    /// (`engine_loop`); left at the secure default (reject every discovered
-    /// private/loopback/onion host) everywhere else, so every test and every
-    /// caller that does not opt local hosts in is fail-closed by default.
     /// Set the per-relay attempt ceiling (#1031). Zero is refused into the
     /// finite default: a ceiling of zero would give up before ever trying,
     /// which is a verdict without a single observation behind it.
@@ -2910,12 +2756,6 @@ impl<S: EventStore> EngineCore<S> {
         } else {
             max_publish_attempts
         };
-        self
-    }
-
-    #[must_use]
-    pub fn with_relay_admission(mut self, admission: RelayAdmissionPolicy) -> Self {
-        self.admission = admission;
         self
     }
 
@@ -3178,12 +3018,6 @@ impl<S: EventStore> EngineCore<S> {
             attribution_live_shape_refs,
             attribution_inflight_shape_keys,
             attribution_inflight_shape_refs,
-            projected_rejection_demand_keys: self.rejected_projected_evidence_by_demand.len(),
-            projected_rejection_owner_keys: self.rejected_projected_evidence_owner_counts.len(),
-            projected_rejection_owner_refs: self
-                .rejected_projected_evidence_owner_counts
-                .values()
-                .sum(),
             planned_read_sessions: self.planned_read_sessions.len(),
             planned_read_relays: self.planned_read_session_counts_by_relay.len(),
             plan_execution_metadata: self.plan_execution_metadata.len(),
@@ -3363,7 +3197,6 @@ impl<S: EventStore> EngineCore<S> {
             self.router.diagnostics(),
             self.router.plan(),
             &self.events_by_session_kind,
-            self.discovered_private_relays_rejected,
             |relay, key| self.resolver.store().get_coverage(key, relay),
         );
         // Surface the read-only degrade signal (issue #122) if an ingest/read

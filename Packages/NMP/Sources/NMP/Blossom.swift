@@ -189,7 +189,6 @@ public enum BlossomUploadError: Error, Sendable, Hashable {
         authorizedVerb: BlossomVerb,
         authorizedBlobSha256Hex: String?
     )
-    case localHostNotAdmitted(host: String)
     case network(detail: String)
     case redirectRefused(status: UInt16)
     case authRejected(status: UInt16, reason: String?)
@@ -212,7 +211,6 @@ public enum BlossomUploadError: Error, Sendable, Hashable {
                 authorizedVerb: BlossomVerb(authorizedVerb),
                 authorizedBlobSha256Hex: authorizedBlobSha256Hex
             )
-        case .LocalHostNotAdmitted(let host): self = .localHostNotAdmitted(host: host)
         case .Network(let detail): self = .network(detail: detail)
         case .RedirectRefused(let status): self = .redirectRefused(status: status)
         case .AuthRejected(let status, let reason):
@@ -246,7 +244,6 @@ public enum BlossomMirrorError: Error, Sendable, Hashable {
         authorizedVerb: BlossomVerb,
         authorizedBlobSha256Hex: String?
     )
-    case localHostNotAdmitted(host: String)
     case network(detail: String)
     case redirectRefused(status: UInt16)
     case authRejected(status: UInt16, reason: String?)
@@ -273,7 +270,6 @@ public enum BlossomMirrorError: Error, Sendable, Hashable {
                 authorizedVerb: BlossomVerb(authorizedVerb),
                 authorizedBlobSha256Hex: authorizedBlobSha256Hex
             )
-        case .LocalHostNotAdmitted(let host): self = .localHostNotAdmitted(host: host)
         case .Network(let detail): self = .network(detail: detail)
         case .RedirectRefused(let status): self = .redirectRefused(status: status)
         case .AuthRejected(let status, let reason):
@@ -308,7 +304,6 @@ public enum BlossomDeleteError: Error, Sendable, Hashable {
         authorizedVerb: BlossomVerb,
         authorizedBlobSha256Hex: String?
     )
-    case localHostNotAdmitted(host: String)
     case network(detail: String)
     case redirectRefused(status: UInt16)
     case authRejected(status: UInt16, reason: String?)
@@ -330,7 +325,6 @@ public enum BlossomDeleteError: Error, Sendable, Hashable {
                 authorizedVerb: BlossomVerb(authorizedVerb),
                 authorizedBlobSha256Hex: authorizedBlobSha256Hex
             )
-        case .LocalHostNotAdmitted(let host): self = .localHostNotAdmitted(host: host)
         case .Network(let detail): self = .network(detail: detail)
         case .RedirectRefused(let status): self = .redirectRefused(status: status)
         case .AuthRejected(let status, let reason):
@@ -354,7 +348,6 @@ public enum BlossomListError: Error, Sendable, Hashable {
     case runtimeUnavailable(reason: String)
     case clientBuild(reason: String)
     case wrongVerb(authorizedVerb: BlossomVerb)
-    case localHostNotAdmitted(host: String)
     case network(detail: String)
     case redirectRefused(status: UInt16)
     case authRejected(status: UInt16, reason: String?)
@@ -373,7 +366,6 @@ public enum BlossomListError: Error, Sendable, Hashable {
         case .ClientBuild(let reason): self = .clientBuild(reason: reason)
         case .WrongVerb(let authorizedVerb):
             self = .wrongVerb(authorizedVerb: BlossomVerb(authorizedVerb))
-        case .LocalHostNotAdmitted(let host): self = .localHostNotAdmitted(host: host)
         case .Network(let detail): self = .network(detail: detail)
         case .RedirectRefused(let status): self = .redirectRefused(status: status)
         case .AuthRejected(let status, let reason):
@@ -577,14 +569,6 @@ public final class BlossomAuthorization: @unchecked Sendable {
 /// `BlossomClient` construction knobs (`FfiBlossomClientConfig` mirror).
 /// `nil` means the Rust crate's default.
 public struct BlossomClientConfig: Sendable, Hashable {
-    /// Operator opt-in local-host allowlist (normalized bare-host form,
-    /// lowercase). Empty means NO loopback/private/link-local host may be
-    /// dialed. Says nothing about `.onion`, which `torReachable` owns.
-    public var allowedLocalHosts: [String]
-    /// Whether this process can reach a Tor hidden service. A Blossom server
-    /// URL arrives with no provenance NMP can inspect, so a `.onion` server
-    /// needs this declaration; the local-host allowlist grants it nothing.
-    public var torReachable: Bool
     /// Cap on a single-descriptor response body (upload/mirror).
     public var maxResponseBytes: UInt64?
     /// Cap on a `GET /list` response body.
@@ -593,14 +577,10 @@ public struct BlossomClientConfig: Sendable, Hashable {
     public var requestDeadlineSeconds: UInt64?
 
     public init(
-        allowedLocalHosts: [String] = [],
-        torReachable: Bool = false,
         maxResponseBytes: UInt64? = nil,
         maxListResponseBytes: UInt64? = nil,
         requestDeadlineSeconds: UInt64? = nil
     ) {
-        self.allowedLocalHosts = allowedLocalHosts
-        self.torReachable = torReachable
         self.maxResponseBytes = maxResponseBytes
         self.maxListResponseBytes = maxListResponseBytes
         self.requestDeadlineSeconds = requestDeadlineSeconds
@@ -608,8 +588,6 @@ public struct BlossomClientConfig: Sendable, Hashable {
 
     func toFfi() -> FfiBlossomClientConfig {
         FfiBlossomClientConfig(
-            allowedLocalHosts: allowedLocalHosts,
-            torReachable: torReachable,
             maxResponseBytes: maxResponseBytes,
             maxListResponseBytes: maxListResponseBytes,
             requestDeadlineSecs: requestDeadlineSeconds

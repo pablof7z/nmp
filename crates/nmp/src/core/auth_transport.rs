@@ -689,11 +689,6 @@ impl<S: EventStore> EngineCore<S> {
         capability: AuthCapability,
         instance: AuthCapabilityInstance,
     ) -> Vec<Effect> {
-        if capability == AuthCapability::Signer {
-            // The key stops being one we can act as, so its relay list stops
-            // being our own declaration (#1251).
-            self.attached_signers.remove(&pubkey);
-        }
         let sessions: Vec<_> = self
             .auth_sessions
             .iter()

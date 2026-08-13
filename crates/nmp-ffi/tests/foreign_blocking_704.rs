@@ -224,7 +224,6 @@ async fn blocking_foreign_completion_never_stalls_unrelated_engine_work() {
     let relay_url = spawn_nip11_ok_server();
     let engine = Arc::new(
         Engine::new(EngineConfig {
-            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..EngineConfig::default()
         })
         .expect("in-memory engine must build"),

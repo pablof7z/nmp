@@ -23,7 +23,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::core::{ObservationFact, RelayAdmissionPolicy, RowDelta};
+use nmp::mechanism::core::{ObservationFact, RowDelta};
 use nmp::mechanism::publish_queue::{RelayState, SigningState, WriteFact};
 use nmp::mechanism::runtime::{
     EngineThread, FifoReceiver, FifoTryRecvError, ReceiptReattachment, RowsReceiver,
@@ -183,10 +183,6 @@ fn subscribe_uses_current_wall_clock_for_the_one_time_max_age_decision() {
             reconnect_delay_initial: Some(Duration::from_secs(3600)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
     )
     .expect("spawn runtime");
     let mut demand = Demand::from_filter(selection);
@@ -228,16 +224,7 @@ fn raw_engine_thread_owns_persistent_reset_guard_until_join() {
     let fixture = tempfile::tempdir().unwrap();
     let path = fixture.path().join("raw-engine-thread.redb");
     let store = RedbStore::open(&path).unwrap();
-    let (engine_thread, handle) = EngineThread::spawn(
-        store,
-        10,
-        PoolConfig::default(),
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
-    )
-    .unwrap();
+    let (engine_thread, handle) = EngineThread::spawn(store, 10, PoolConfig::default()).unwrap();
 
     assert!(matches!(
         RedbStore::reset(&path),
@@ -414,10 +401,6 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
             reconnect_jitter_max: Some(Duration::ZERO),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
     )
     .expect("test engine thread construction");
 
@@ -545,16 +528,8 @@ async fn runtime_admission_deadline_groups_a_rapid_query_burst() {
         ..RelayConfig::default()
     };
     let relay = ScriptedRelay::start(&relay_config).await;
-    let (engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        PoolConfig::default(),
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
-    )
-    .expect("spawn runtime");
+    let (engine_thread, handle) =
+        EngineThread::spawn(MemoryStore::new(), 10, PoolConfig::default()).expect("spawn runtime");
 
     let (alice, _alice_rows) = handle
         .subscribe(pinned_tag_value(&relay.url, "alice"))
@@ -598,16 +573,8 @@ async fn withdrawing_last_demand_flushes_close_before_worker_retirement() {
         ..RelayConfig::default()
     })
     .await;
-    let (engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        PoolConfig::default(),
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
-    )
-    .expect("spawn runtime");
+    let (engine_thread, handle) =
+        EngineThread::spawn(MemoryStore::new(), 10, PoolConfig::default()).expect("spawn runtime");
 
     let (query, _rows) = handle
         .subscribe(pinned_tag_value(&relay.url, "android-close-proof"))
@@ -658,10 +625,6 @@ async fn accepted_requests_are_immutable_and_reconnect_replays_each_once() {
             reconnect_jitter_max: Some(Duration::ZERO),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
     )
     .expect("spawn runtime");
 
@@ -863,16 +826,9 @@ fn process_cpu_time() -> Duration {
 /// roughly one core's worth of CPU time per unit of wall time.
 #[test]
 fn no_deadlines_blocks_indefinitely() {
-    let (engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        PoolConfig::default(),
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
-    )
-    .expect("test engine thread construction");
+    let (engine_thread, handle) =
+        EngineThread::spawn(MemoryStore::new(), 10, PoolConfig::default())
+            .expect("test engine thread construction");
 
     // Let the engine thread settle onto its idle `recv()` before sampling.
     std::thread::sleep(Duration::from_millis(100));
@@ -1111,10 +1067,6 @@ fn neg_liveness_deadline_does_not_busy_spin() {
             reconnect_delay_initial: Some(Duration::from_secs(3600)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
     )
     .expect("test engine thread construction");
 
@@ -1227,10 +1179,6 @@ async fn expiring_event_retracts_with_no_further_input() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
     )
     .expect("test engine thread construction");
 
@@ -1298,10 +1246,6 @@ async fn earlier_expiration_from_ingest_rearms() {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
     )
     .expect("test engine thread construction");
 
@@ -1418,10 +1362,6 @@ fn boot_catches_up_past_due_expiry() {
             reconnect_delay_initial: Some(Duration::from_secs(3600)),
             ..PoolConfig::default()
         },
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
     )
     .expect("test engine thread construction");
 
@@ -1545,16 +1485,8 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
 #[test]
 fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() {
     let keys = Keys::generate();
-    let (thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        PoolConfig::default(),
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
-    )
-    .expect("test engine thread construction");
+    let (thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, PoolConfig::default())
+        .expect("test engine thread construction");
     handle.set_current_account(Some(keys.public_key()));
     let tracked = handle
         .publish(WriteIntent {
@@ -1632,16 +1564,8 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
     let keys = Keys::generate();
     let correlation =
         CorrelationToken::try_from("runtime-retry-isolation").expect("bounded fixture token");
-    let (thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        PoolConfig::default(),
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
-    )
-    .expect("test engine thread construction");
+    let (thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, PoolConfig::default())
+        .expect("test engine thread construction");
     handle.set_current_account(Some(keys.public_key()));
 
     let original = handle
@@ -1760,16 +1684,9 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
             .unwrap();
         nmp::mechanism::core::ReceiptId(outcome.journaled_receipt_id().unwrap())
     };
-    let (thread, handle) = EngineThread::spawn(
-        RedbStore::open(&path).unwrap(),
-        10,
-        PoolConfig::default(),
-        RelayAdmissionPolicy::new(
-            ["127.0.0.1".to_string()],
-            nmp_network_policy::OnionReachability::Unreachable,
-        ),
-    )
-    .expect("test engine thread construction");
+    let (thread, handle) =
+        EngineThread::spawn(RedbStore::open(&path).unwrap(), 10, PoolConfig::default())
+            .expect("test engine thread construction");
     // This is literally the first command sent to the new engine thread.
     let statuses = expect_attached(handle.reattach_receipt(receipt));
     assert_eq!(

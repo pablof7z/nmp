@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::core::{RelayAdmissionPolicy, RowDelta};
+use nmp::mechanism::core::RowDelta;
 use nmp::mechanism::runtime::{EngineThread, RowsReceiver};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{
@@ -110,13 +110,8 @@ fn bounded_runtime_working_sets_do_not_delete_default_durable_history() {
     // store-retention request.
     {
         let store = RedbStore::open(&path).expect("ordinary engine startup");
-        let (engine_thread, handle) = EngineThread::spawn(
-            store,
-            10,
-            PoolConfig::default(),
-            RelayAdmissionPolicy::default(),
-        )
-        .expect("spawn production runtime");
+        let (engine_thread, handle) = EngineThread::spawn(store, 10, PoolConfig::default())
+            .expect("spawn production runtime");
 
         for _ in 0..24 {
             let (query_handle, rows) = handle

@@ -163,16 +163,13 @@ Feature: Relay work waits briefly for compatible pending demand
     # nmp:id=ROUTING-PENDING-011
     # nmp:status=built
     # nmp:evidence=rust:nmp::disjoint_routing_evidence_owners_remain_exact_in_both_close_orders
-    # nmp:evidence=rust:nmp::a_covered_owner_can_add_the_first_rejected_fact_without_rewriting_wire
     # nmp:falsifier=Store one representative atom for owners that share a selection but carry different routing facts; one fact disappears on open or closing either owner erases the survivor, while an already-sent request may be rewritten.
     Scenario: Shared selection keeps each owner's routing facts independently cancellable
       Given independent observations share one exact selection and contribute different routing evidence
       When either observation withdraws first
       Then the effective routing evidence is exactly the union of the owners still active
-      And rejected routing facts retain only their live exact ownership
-      And pending or limited work keeps admission armed for that one selection
       And an already-sent request remains byte-for-byte unchanged
-      And the final owner releases all routing-evidence and rejected-evidence ownership
+      And the final owner releases all routing-evidence ownership
 
     # nmp:id=ROUTING-PENDING-014
     # nmp:status=built

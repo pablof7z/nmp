@@ -1289,10 +1289,11 @@ The exact recipient-selection algorithm belongs to the routing design, not to
 semantic operation materialization. This document requires only that semantic
 operations use it rather than bypass it.
 
-Likewise, a relay refused by universal network or user policy—including a
-user-blocked relay—must remain refused no matter whether it came from an app
-route, an author's relay list, a `p`-tagged recipient, an event hint, or a
-rematerialized event. Capability code cannot bypass connection admission.
+Likewise, a relay excluded by an explicit app-owned user rule must remain
+excluded no matter whether it came from an app route, an author's relay list,
+a `p`-tagged recipient, an event hint, or a rematerialized event. NMP itself
+does not classify a destination by its resolved address or hostname; connection
+success or failure remains an observed transport outcome.
 
 ### 13.3 Parent-event relay evidence is a routing concern
 

@@ -88,21 +88,23 @@ and join interior workers safely. Calling an explicit shutdown method must not
 leave a public object whose remaining methods panic or silently disconnect.
 
 Relay-information acquisition follows the same owner. Each distinct NIP-11
-flight reserves one immediately runnable slot from the engine's finite native
-executor; there is no separate worker pool or accepted-work queue. Same-relay
-callers join a finite waiter set. Shutdown closes that set with a typed terminal
-result, cancels Hickory DNS or HTTP body work, and joins the admitted task even
-if a cloned engine handle, live subscription, or cancellation token survives.
+flight reserves one of eight private network/body permits on the engine's
+shared async runtime; there is no public executor or accepted-work queue.
+Same-relay callers join one cancellable flight. Shutdown closes that set with a
+typed terminal result, cancels platform DNS or HTTP body work, and drains the
+task even if a cloned engine handle, live subscription, or cancellation token
+survives.
 The independent 250 ms capability-decision grace remains an engine-loop
 deadline, so a slow HTTP endpoint cannot hold the WebSocket NIP-77 fallback.
 
-The public Swift acquisition path is runtime-qualified on the macOS host:
-XCTest executes a hostname NIP-11 fetch through
+The public Swift acquisition path is runtime-qualified on macOS and an actual
+iOS Simulator process. Host XCTest executes a local-hostname NIP-11 fetch through
 `NMPEngine.relayInformation(for:policy:)`, proves the MainActor can progress
 while Rust waits for HTTP, and preserves typed malformed-document refusal.
-Master packages the complete device + simulator + macOS XCFramework slice set,
-but that compile/link boundary does not claim Hickory resolver behavior inside
-an iOS runtime. Physical-device runtime evidence remains separate.
+Simulator XCTest executes a public-hostname fetch through the same facade and
+therefore exercises the iOS platform resolver. Master packages the complete
+device + simulator + macOS XCFramework slice set. Physical-device runtime
+evidence remains separate.
 
 ## Current implementation
 

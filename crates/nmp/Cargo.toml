@@ -123,11 +123,9 @@ nmp-transport.workspace = true
 nmp-executor.workspace = true
 # The one pure destination-admission owner (#885): discovery admission and
 # the NIP-11 fetcher decide from it instead of re-deriving host rules.
-nmp-network-policy.workspace = true
 blake3.workspace = true
 crossbeam-channel = "0.5"
 futures-channel.workspace = true
-hickory-resolver.workspace = true
 httpdate.workspace = true
 # The negentropy reconciler is an engine MODULE (`src/negentropy/`), not a
 # crate (§1: reducer-coupled, driven turn-by-turn by `EngineCore`) -- but it
