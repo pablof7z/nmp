@@ -22,6 +22,11 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 
+pub use crate::relay_information::{
+    RelayInformationCachePolicy, RelayInformationDocument, RelayInformationError,
+    RelayInformationFreshness, RelayInformationLimitations, RelayInformationSnapshot,
+};
+
 const DEFAULT_FRESH_FOR: Duration = Duration::from_secs(60 * 60);
 // Engine teardown has a public <5s lifecycle falsifier. This is an overall
 // request deadline (headers and body), not a per-read timeout, so a peer that
@@ -36,280 +41,7 @@ const CACHE_CAPACITY: usize = 256;
 /// never receive a public saturation error.
 const MAX_ACTIVE_FETCHES: usize = 8;
 
-/// Whether a one-shot read may use a still-fresh cached result or must
-/// revalidate/refetch it. Concurrent reads of either kind still share one
-/// in-flight request per canonical relay URL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RelayInformationCachePolicy {
-    UseCache,
-    Refresh,
-}
-
-/// Freshness of the returned last-good document at the instant it is read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RelayInformationFreshness {
-    Fresh,
-    Stale,
-}
-
-/// A typed acquisition failure. HTTP and parse failures are deliberately
-/// values; they are never represented as an empty relay document.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RelayInformationError {
-    ServiceClosed,
-    /// Relay URL credentials are rejected before an HTTP request is
-    /// constructed; reqwest otherwise converts them into a Basic
-    /// `Authorization` header.
-    CredentialedRelayUrl,
-    Http {
-        reason: String,
-    },
-    ResponseTooLarge {
-        limit_bytes: u64,
-    },
-    InvalidDocument {
-        reason: String,
-    },
-}
-
-impl std::fmt::Display for RelayInformationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ServiceClosed => f.write_str("NIP-11 acquisition service is closed"),
-            Self::CredentialedRelayUrl => {
-                f.write_str("NIP-11 acquisition refuses relay URL userinfo")
-            }
-            Self::Http { reason } => write!(f, "NIP-11 HTTP request failed: {reason}"),
-            Self::ResponseTooLarge { limit_bytes } => {
-                write!(f, "NIP-11 response exceeds {limit_bytes} bytes")
-            }
-            Self::InvalidDocument { reason } => write!(f, "invalid NIP-11 document: {reason}"),
-        }
-    }
-}
-
-impl std::error::Error for RelayInformationError {}
-
-/// Presentation and capability fields NMP understands today. `raw_json` on
-/// [`RelayInformationSnapshot`] remains the forward-compatible authority;
-/// unknown fields are not discarded just because this typed projection has
-/// not learned them yet.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RelayInformationDocument {
-    pub name: Option<String>,
-    pub description: Option<String>,
-    pub banner: Option<String>,
-    pub icon: Option<String>,
-    pub pubkey: Option<String>,
-    pub self_pubkey: Option<String>,
-    pub contact: Option<String>,
-    /// `None` means the relay did not advertise a list. `Some(empty)` is an
-    /// explicit advertisement that no NIPs are supported.
-    pub supported_nips: Option<Vec<u16>>,
-    pub software: Option<String>,
-    pub version: Option<String>,
-    pub terms_of_service: Option<String>,
-    /// Advisory limits claimed by the relay. These are never runtime proof
-    /// and a planner may only consume them when it can remain exact or
-    /// surface an explicit shortfall.
-    pub limitation: RelayInformationLimitations,
-    /// Exact JSON fragments for structured fields whose schema evolves
-    /// independently (`limitation`, `fees`, ...).
-    pub structured: BTreeMap<String, String>,
-}
-
-/// The current well-known NIP-11 limitation fields. Every field is optional
-/// because omission is unknown, never an implicit zero/false claim. The
-/// enclosing document's `structured["limitation"]` retains the exact object,
-/// including fields this projection does not yet understand.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RelayInformationLimitations {
-    pub max_message_length: Option<u64>,
-    pub max_subscriptions: Option<u64>,
-    pub max_filters: Option<u64>,
-    pub max_limit: Option<u64>,
-    pub max_subid_length: Option<u64>,
-    pub max_event_tags: Option<u64>,
-    pub max_content_length: Option<u64>,
-    pub min_pow_difficulty: Option<u64>,
-    pub auth_required: Option<bool>,
-    pub payment_required: Option<bool>,
-    pub created_at_lower_limit: Option<u64>,
-    pub created_at_upper_limit: Option<u64>,
-}
-
-/// One last-good NIP-11 document plus acquisition metadata.
-///
-/// Cloning this mechanism value is deliberately shallow. The exact raw body,
-/// parsed document (including structured maps), and revision live in one
-/// immutable payload shared by the cache, a refreshing worker, every waiter,
-/// and the runtime's capability projection. Metadata-only transitions such as
-/// 304 revalidation and stale-on-error create another immutable version that
-/// cites the same payload.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RelayInformationSnapshot {
-    inner: Arc<RelayInformationSnapshotVersion>,
-}
-
-#[derive(Debug, PartialEq)]
-struct RelayInformationSnapshotVersion {
-    payload: Arc<RelayInformationSnapshotPayload>,
-    fetched_at: u64,
-    fresh_until: u64,
-    freshness: RelayInformationFreshness,
-    etag: Option<String>,
-    last_modified: Option<String>,
-    cache_control: Option<String>,
-    expires: Option<String>,
-    last_error: Option<RelayInformationError>,
-}
-
-#[derive(Debug, PartialEq)]
-struct RelayInformationSnapshotPayload {
-    relay: RelayUrl,
-    document: RelayInformationDocument,
-    raw_json: String,
-    /// Stable BLAKE3 identity of the exact received JSON representation.
-    /// Capability facts cite this revision rather than an unscoped boolean.
-    document_revision: String,
-}
-
 impl RelayInformationSnapshot {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        relay: RelayUrl,
-        document: RelayInformationDocument,
-        raw_json: String,
-        document_revision: String,
-        fetched_at: u64,
-        fresh_until: u64,
-        freshness: RelayInformationFreshness,
-        etag: Option<String>,
-        last_modified: Option<String>,
-        cache_control: Option<String>,
-        expires: Option<String>,
-        last_error: Option<RelayInformationError>,
-    ) -> Self {
-        Self {
-            inner: Arc::new(RelayInformationSnapshotVersion {
-                payload: Arc::new(RelayInformationSnapshotPayload {
-                    relay,
-                    document,
-                    raw_json,
-                    document_revision,
-                }),
-                fetched_at,
-                fresh_until,
-                freshness,
-                etag,
-                last_modified,
-                cache_control,
-                expires,
-                last_error,
-            }),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn with_metadata(
-        &self,
-        fetched_at: u64,
-        fresh_until: u64,
-        freshness: RelayInformationFreshness,
-        etag: Option<String>,
-        last_modified: Option<String>,
-        cache_control: Option<String>,
-        expires: Option<String>,
-        last_error: Option<RelayInformationError>,
-    ) -> Self {
-        Self {
-            inner: Arc::new(RelayInformationSnapshotVersion {
-                payload: Arc::clone(&self.inner.payload),
-                fetched_at,
-                fresh_until,
-                freshness,
-                etag,
-                last_modified,
-                cache_control,
-                expires,
-                last_error,
-            }),
-        }
-    }
-
-    fn with_read_state(
-        &self,
-        freshness: RelayInformationFreshness,
-        last_error: Option<RelayInformationError>,
-    ) -> Self {
-        self.with_metadata(
-            self.fetched_at(),
-            self.fresh_until(),
-            freshness,
-            self.etag().map(str::to_owned),
-            self.last_modified().map(str::to_owned),
-            self.cache_control().map(str::to_owned),
-            self.expires().map(str::to_owned),
-            last_error,
-        )
-    }
-
-    pub fn relay(&self) -> &RelayUrl {
-        &self.inner.payload.relay
-    }
-
-    pub fn document(&self) -> &RelayInformationDocument {
-        &self.inner.payload.document
-    }
-
-    pub fn raw_json(&self) -> &str {
-        &self.inner.payload.raw_json
-    }
-
-    pub fn document_revision(&self) -> &str {
-        &self.inner.payload.document_revision
-    }
-
-    pub fn fetched_at(&self) -> u64 {
-        self.inner.fetched_at
-    }
-
-    pub fn fresh_until(&self) -> u64 {
-        self.inner.fresh_until
-    }
-
-    pub fn freshness(&self) -> RelayInformationFreshness {
-        self.inner.freshness
-    }
-
-    pub fn etag(&self) -> Option<&str> {
-        self.inner.etag.as_deref()
-    }
-
-    pub fn last_modified(&self) -> Option<&str> {
-        self.inner.last_modified.as_deref()
-    }
-
-    pub fn cache_control(&self) -> Option<&str> {
-        self.inner.cache_control.as_deref()
-    }
-
-    pub fn expires(&self) -> Option<&str> {
-        self.inner.expires.as_deref()
-    }
-
-    pub fn last_error(&self) -> Option<&RelayInformationError> {
-        self.inner.last_error.as_ref()
-    }
-
-    /// Advertisement only. This never creates a behavioral capability token.
-    pub fn advertises_nip(&self, nip: u16) -> Option<bool> {
-        self.document()
-            .supported_nips
-            .as_ref()
-            .map(|nips| nips.contains(&nip))
-    }
-
     pub(crate) fn capability_evidence(&self) -> RelayInformationCapabilityEvidence {
         RelayInformationCapabilityEvidence {
             supported_nips: self.document().supported_nips.clone(),
@@ -319,16 +51,6 @@ impl RelayInformationSnapshot {
             fresh_until: self.fresh_until(),
             last_error: self.last_error().cloned(),
         }
-    }
-
-    #[cfg(any(test, feature = "test-instrumentation"))]
-    fn payload_identity_value(&self) -> usize {
-        Arc::as_ptr(&self.inner.payload) as usize
-    }
-
-    #[cfg(test)]
-    fn payload_identity(&self) -> usize {
-        self.payload_identity_value()
     }
 }
 
@@ -372,8 +94,8 @@ struct Shared {
 }
 
 /// Mechanism-only retention evidence used to falsify cache/flight ownership.
-/// Caller-owned values materialized by the supported `nmp` facade are outside
-/// this census by design.
+/// Caller-held snapshots share the cached payload. They are outside this
+/// census; only service-owned cache and flight state are counted.
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-instrumentation"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2250,7 +1972,7 @@ mod tests {
             },
         )
         .unwrap();
-        let old_payload = Arc::downgrade(&old.inner.payload);
+        let old_payload = old.payload_weak();
         complete(&shared, &relay, 1, Ok(old));
         assert!(
             old_payload.upgrade().is_none(),
@@ -2309,7 +2031,7 @@ mod tests {
         let snapshot = service
             .get(cached_relay.clone(), RelayInformationCachePolicy::Refresh)
             .unwrap();
-        let payload = Arc::downgrade(&snapshot.inner.payload);
+        let payload = snapshot.payload_weak();
         drop(snapshot);
 
         assert_eq!(service.retention_census().cached_entries, 1);
@@ -2407,7 +2129,7 @@ mod tests {
             },
         )
         .unwrap();
-        let late_payload = Arc::downgrade(&late.inner.payload);
+        let late_payload = late.payload_weak();
         complete(&service.shared, &active_a, generation, Ok(late));
         assert!(
             late_payload.upgrade().is_none(),
