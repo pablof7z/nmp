@@ -4356,10 +4356,50 @@ impl<S: EventStore> EngineCore<S> {
             parent_provenance_error,
         } = resolution;
         self.apply_route_answer(id, intent_id, answer, effects);
+        if semantic_promotion {
+            self.reacquire_semantic_successor_lanes(id, effects);
+        }
         if let Some(error) = parent_provenance_error {
             self.degrade_store(error, effects);
         }
         self.resync_route_needs(effects);
+    }
+
+    /// Rebuild the current semantic owner's worker projection when successor
+    /// installation already persisted its route union.
+    ///
+    /// The atomic source transition replaces E1 lanes with E2 lanes and the
+    /// reducer clears every member's stale E1 projection. If E2 resolves to
+    /// no new route, [`Self::apply_route_answer`] correctly appends nothing;
+    /// it therefore has no fresh-lane result from which to rebuild the
+    /// projection. Reacquire the already-persisted current lanes after E2 is
+    /// signed so worker ownership and connection wakeups cannot disappear
+    /// with the predecessor.
+    fn reacquire_semantic_successor_lanes(&mut self, id: ReceiptId, effects: &mut Vec<Effect>) {
+        let Some((intent_id, signing_pubkey, durable_routes, projection_missing)) =
+            self.pending.get(&id).map(|pending| {
+                (
+                    pending.intent_id,
+                    pending.signing_pubkey,
+                    pending.durable_routes.clone(),
+                    pending.lane_projection.persisted.is_empty(),
+                )
+            })
+        else {
+            return;
+        };
+        if !projection_missing || durable_routes.is_empty() {
+            return;
+        }
+        match self.bootstrap_projected_lanes(intent_id, Some(&durable_routes)) {
+            Ok(lanes) => self.open_fresh_lanes(id, signing_pubkey, lanes, effects),
+            Err(_) => {
+                // This is the only read that can prove which successor lanes
+                // exist, so retain workers conservatively until the ordinary
+                // bootstrap retry closes the gap.
+                self.lane_relay_index_degraded = true;
+            }
+        }
     }
 
     /// Turn one intent's freshly-minted lanes into live delivery work
