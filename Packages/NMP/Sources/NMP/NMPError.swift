@@ -24,6 +24,17 @@ import NMPFFI
 public enum NMPError: Error, Sendable, Equatable {
     case nonIndexableFilterTag(String)
     case invalidPublicKey(String)
+    case invalidPublicKeyBytes
+    case invalidPrivateKeyBytes
+    case sessionMalformedPayload
+    case sessionUnsupportedVersion(found: UInt16)
+    case sessionUnsupportedProvider(id: String)
+    case sessionUnsupportedProviderVersion(provider: String, found: UInt16)
+    case sessionDuplicateAccount
+    case sessionCurrentAccountMissing
+    case sessionProviderPayloadInvalid(provider: String)
+    case sessionProviderPublicKeyMismatch
+    case sessionAccountNotFound
     case invalidEventId(String)
     case invalidRelayUrl(String)
     // nmp-native:if nip65
@@ -31,17 +42,16 @@ public enum NMPError: Error, Sendable, Equatable {
     case automaticRoutingUnavailable
     // nmp-native:endif
     case invalidTag([String])
-    case invalidSecretKey
     case invalidSigner(String)
     case authCapabilityRegistryFull(limit: UInt64)
     case authCapabilityInstanceExhausted
-    case noActiveSigner
+    case noCurrentSigningProvider
     case invalidSignRequest(String)
     case signerUnavailable(String)
     case signerRejected(String)
     case invalidSignerOutput(String)
     /// `publish` refused the call outright: either NMP could not write
-    /// anything down, or the instruction could not resolve (no active
+    /// anything down, or the instruction could not resolve (no current
     /// account, a signature that does not verify, an explicit identity
     /// contradicting a signed payload's author, a reserved kind, an empty
     /// explicit route). Nothing durable exists and there is no queue entry to
@@ -231,6 +241,21 @@ public enum NMPError: Error, Sendable, Equatable {
         switch ffi {
         case .NonIndexableFilterTag(let got): self = .nonIndexableFilterTag(got)
         case .InvalidPublicKey(let got): self = .invalidPublicKey(got)
+        case .InvalidPublicKeyBytes: self = .invalidPublicKeyBytes
+        case .InvalidPrivateKeyBytes: self = .invalidPrivateKeyBytes
+        case .SessionMalformedPayload: self = .sessionMalformedPayload
+        case .SessionUnsupportedVersion(let found):
+            self = .sessionUnsupportedVersion(found: found)
+        case .SessionUnsupportedProvider(let id):
+            self = .sessionUnsupportedProvider(id: id)
+        case .SessionUnsupportedProviderVersion(let provider, let found):
+            self = .sessionUnsupportedProviderVersion(provider: provider, found: found)
+        case .SessionDuplicateAccount: self = .sessionDuplicateAccount
+        case .SessionCurrentAccountMissing: self = .sessionCurrentAccountMissing
+        case .SessionProviderPayloadInvalid(let provider):
+            self = .sessionProviderPayloadInvalid(provider: provider)
+        case .SessionProviderPublicKeyMismatch: self = .sessionProviderPublicKeyMismatch
+        case .SessionAccountNotFound: self = .sessionAccountNotFound
         case .InvalidEventId(let got): self = .invalidEventId(got)
         case .InvalidRelayUrl(let got): self = .invalidRelayUrl(got)
         // nmp-native:if nip65
@@ -238,13 +263,12 @@ public enum NMPError: Error, Sendable, Equatable {
         case .AutomaticRoutingUnavailable: self = .automaticRoutingUnavailable
         // nmp-native:endif
         case .InvalidTag(let got): self = .invalidTag(got)
-        case .InvalidSecretKey: self = .invalidSecretKey
         case .InvalidSigner(let reason): self = .invalidSigner(reason)
         case .AuthCapabilityRegistryFull(let limit):
             self = .authCapabilityRegistryFull(limit: limit)
         case .AuthCapabilityInstanceExhausted:
             self = .authCapabilityInstanceExhausted
-        case .NoActiveSigner: self = .noActiveSigner
+        case .NoCurrentSigningProvider: self = .noCurrentSigningProvider
         case .InvalidSignRequest(let reason): self = .invalidSignRequest(reason)
         case .PublishRefused(let reason): self = .publishRefused(reason)
         case .StoreOpenFailed(let reason): self = .storeOpenFailed(reason)
@@ -334,6 +358,28 @@ extension NMPError: LocalizedError {
             "Not indexable as a filter key: \(got.debugDescription)"
         case .invalidPublicKey(let got):
             "Invalid public key hex: \(got.debugDescription)"
+        case .invalidPublicKeyBytes:
+            "Invalid decoded public key"
+        case .invalidPrivateKeyBytes:
+            "Invalid decoded private key"
+        case .sessionMalformedPayload:
+            "Malformed session payload"
+        case .sessionUnsupportedVersion(let found):
+            "Unsupported session payload version \(found)"
+        case .sessionUnsupportedProvider(let id):
+            "Unsupported session provider \(id)"
+        case .sessionUnsupportedProviderVersion(let provider, let found):
+            "Unsupported \(provider) provider version \(found)"
+        case .sessionDuplicateAccount:
+            "Duplicate session account"
+        case .sessionCurrentAccountMissing:
+            "Current session account is missing"
+        case .sessionProviderPayloadInvalid(let provider):
+            "Invalid \(provider) provider payload"
+        case .sessionProviderPublicKeyMismatch:
+            "Session provider public key mismatch"
+        case .sessionAccountNotFound:
+            "Session account does not exist"
         case .invalidEventId(let got):
             "Invalid event ID hex: \(got.debugDescription)"
         case .invalidRelayUrl(let got):
@@ -346,16 +392,14 @@ extension NMPError: LocalizedError {
         // nmp-native:endif
         case .invalidTag(let got):
             "Invalid tag: \(String(reflecting: got))"
-        case .invalidSecretKey:
-            "Invalid secret key"
         case .invalidSigner(let reason):
             "Invalid signer: \(reason)"
         case .authCapabilityRegistryFull(let limit):
             "AUTH capability registry is full at \(limit) entries"
         case .authCapabilityInstanceExhausted:
             "AUTH capability instance space exhausted"
-        case .noActiveSigner:
-            "The active account has no registered signer"
+        case .noCurrentSigningProvider:
+            "The current account has no available signing provider"
         case .invalidSignRequest(let reason):
             "Invalid sign request: \(reason)"
         case .signerUnavailable(let reason):

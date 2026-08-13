@@ -14,8 +14,8 @@ class SigningTest {
     fun signEventReturnsExactBodyWithoutPublishingIt() =
         runBlocking {
             NMPEngine(NMPConfig()).use { engine ->
-                assertEquals(author, engine.addAccount(secret).publicKey)
-                engine.setActiveAccount(author)
+                val account = engine.session.add(secret.testPrivateKey(), makeCurrent = true)
+                assertEquals(author.testPublicKey(), account.publicKey)
                 val request =
                     NMPUnsignedEvent(
                         createdAt = 1_723_456_789uL,
@@ -41,10 +41,10 @@ class SigningTest {
         }
 
     @Test
-    fun signEventWithoutActiveSignerIsTyped() {
+    fun signEventWithoutCurrentSigningProviderIsTyped() {
         NMPEngine(NMPConfig()).use { engine ->
-            engine.setActiveAccount(author)
-            assertThrows(NMPError.NoActiveSigner::class.java) {
+            engine.session.add(author.testPublicKey(), makeCurrent = true)
+            assertThrows(NMPError.NoCurrentSigningProvider::class.java) {
                 runBlocking {
                     engine.signEvent(
                         NMPUnsignedEvent(

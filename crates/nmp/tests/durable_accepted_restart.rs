@@ -426,7 +426,7 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
 /// #47 falsifier (f), modeled on
 /// [`pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates`]:
 /// an unsigned intent accepted under an explicit `Identity::Explicit(B)`
-/// (named B while A was the active account, B's signer absent)
+/// (named B while A was the current account, B's signer absent)
 /// survives a genuine close/reopen still pinned to B. Replay shows
 /// `Accepted` + `AwaitingCapability`; re-rooting the reopened core onto A
 /// and attaching A's (wrong) signer produce no sign request; attaching the
@@ -460,7 +460,7 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
             directory(override_keys.public_key(), relay.clone()),
             10,
         );
-        // A is the active account; the override alone authorizes B's draft.
+        // A is the current account; the override alone authorizes B's draft.
         core.handle(EngineMsg::SetActivePubkey(Some(active.public_key())));
         let effects = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(body_of(&unsigned)),
@@ -500,11 +500,11 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
                 awaiting_author_routes: BTreeSet::new(),
             },
         ],
-        "the parked pubkey must be the frozen override B, never the active account A; the \
+        "the parked pubkey must be the frozen override B, never the current account A; the \
          route park names nobody because an unsigned write has no route lookup outstanding"
     );
 
-    // Post-restart retarget attempts: activating A (the OLD active account)
+    // Post-restart retarget attempts: activating A (the OLD current account)
     // and attaching A's signer must both leave the B-pinned intent silent.
     assert!(!core
         .handle(EngineMsg::SetActivePubkey(Some(active.public_key())))

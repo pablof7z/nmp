@@ -1,5 +1,5 @@
-//! #108: `nmp::nip51::active_account_demand()` proven against a REAL
-//! `EngineCore` -- signed-out state yields no active-account kind-10009
+//! #108: `nmp::nip51::current_account_demand()` proven against a REAL
+//! `EngineCore` -- signed-out state yields no current-account kind-10009
 //! demand, and signing in (or rerooting to a different account)
 //! reconstructs it correctly. This is a cross-crate integration proof
 //! `nmp-nip51` itself cannot make (it is deliberately engine-free).
@@ -23,10 +23,10 @@ fn kind_10009_atoms(atoms: &std::collections::BTreeSet<ContextualAtom>) -> usize
 }
 
 #[test]
-fn signed_out_active_account_demand_resolves_to_zero_atoms() {
+fn signed_out_current_account_demand_resolves_to_zero_atoms() {
     let mut core = new_core(FixtureRoutingFacts::new());
     let _ = core.handle(EngineMsg::Subscribe(LiveQuery::single(
-        nmp::nip51::active_account_demand(),
+        nmp::nip51::current_account_demand(),
     )));
     assert_eq!(
         kind_10009_atoms(&core.active_demand()),
@@ -37,14 +37,14 @@ fn signed_out_active_account_demand_resolves_to_zero_atoms() {
 }
 
 #[test]
-fn signing_in_reconstructs_the_active_account_kind_10009_demand() {
+fn signing_in_reconstructs_the_current_account_kind_10009_demand() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://relay-a.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay]);
     let mut core = new_core(dir);
 
     let _ = core.handle(EngineMsg::Subscribe(LiveQuery::single(
-        nmp::nip51::active_account_demand(),
+        nmp::nip51::current_account_demand(),
     )));
     assert_eq!(kind_10009_atoms(&core.active_demand()), 0);
 
@@ -52,7 +52,7 @@ fn signing_in_reconstructs_the_active_account_kind_10009_demand() {
     assert_eq!(
         kind_10009_atoms(&core.active_demand()),
         1,
-        "signing in must reconstruct exactly one kind:10009 atom for the newly-active account"
+        "signing in must reconstruct exactly one kind:10009 atom for the newly-current account"
     );
 }
 
@@ -67,7 +67,7 @@ fn rerooting_to_a_different_account_replaces_the_kind_10009_atom_not_adds_a_seco
     let mut core = new_core(dir);
 
     let _ = core.handle(EngineMsg::Subscribe(LiveQuery::single(
-        nmp::nip51::active_account_demand(),
+        nmp::nip51::current_account_demand(),
     )));
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
     assert_eq!(kind_10009_atoms(&core.active_demand()), 1);
@@ -86,6 +86,6 @@ fn rerooting_to_a_different_account_replaces_the_kind_10009_atom_not_adds_a_seco
     assert_eq!(
         atom.filter.authors,
         Some(std::collections::BTreeSet::from([b.public_key().to_hex()])),
-        "the surviving atom must resolve to the NEW active account, not the old one"
+        "the surviving atom must resolve to the NEW current account, not the old one"
     );
 }

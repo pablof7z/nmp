@@ -33,7 +33,7 @@ import uniffi.nmp_ffi.FfiFollowSnapshot
 import uniffi.nmp_ffi.NmpEngineInterface
 import uniffi.nmp_ffi.NmpFollowActionStream
 
-/** The active account's relationship to a `target` pubkey, as NMP's own
+/** The current account's relationship to a `target` pubkey, as NMP's own
  * kind:3 projection sees it right now (`FfiFollowRelationship` mirror). */
 enum class FollowRelationship {
     Unknown,
@@ -77,11 +77,11 @@ enum class FollowAvailability {
     }
 }
 
-/** One pushed state of the active account's relationship to `target`
+/** One pushed state of the current account's relationship to `target`
  * (`FfiFollowSnapshot` mirror). Delivered by `NMPEngine.observeFollowing`,
  * pushed reactively, never polled. */
 data class FollowingSnapshot(
-    val activePubkey: String?,
+    val currentPubkey: String?,
     val target: String,
     val relationship: FollowRelationship,
     val availability: FollowAvailability,
@@ -90,7 +90,7 @@ data class FollowingSnapshot(
     companion object {
         fun from(ffi: FfiFollowSnapshot): FollowingSnapshot =
             FollowingSnapshot(
-                activePubkey = ffi.activePubkey,
+                currentPubkey = ffi.currentPubkey,
                 target = ffi.target,
                 relationship = FollowRelationship.from(ffi.relationship),
                 availability = FollowAvailability.from(ffi.availability),
@@ -108,7 +108,7 @@ data class FollowingSnapshot(
          * engine-sourced snapshots. */
         fun initial(target: String): FollowingSnapshot =
             FollowingSnapshot(
-                activePubkey = null,
+                currentPubkey = null,
                 target = target,
                 relationship = FollowRelationship.Unknown,
                 availability = FollowAvailability.Acquiring,
@@ -192,7 +192,7 @@ sealed class FollowActionStatus {
  * [FollowActionStatus.Receipt] itself. */
 data class FollowAction(val status: Flow<FollowActionStatus>)
 
-/** Observe whether the active account follows [target] through the
+/** Observe whether the current account follows [target] through the
  * NMP-owned NIP-02 resource (mirrors `NMPEngine.observeFollowing`). This is
  * NMP's protocol projection, not an app-maintained boolean.
  *

@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use nmp_ffi::convert::FfiRowPullError;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
+#[cfg(feature = "nip02")]
+use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::FfiFilter;
 #[cfg(feature = "nip02")]
 use nmp_ffi::types::FfiFrame;
@@ -47,7 +49,7 @@ const TEST_SECRET_KEY_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000001";
 
 fn engine() -> Arc<NmpEngine> {
-    NmpEngine::new(NmpEngineConfig::default()).expect("in-memory engine must build")
+    NmpEngine::new(NmpEngineConfig::default(), None).expect("in-memory engine must build")
 }
 
 fn note_query() -> FfiFilter {
@@ -65,17 +67,18 @@ fn note_query() -> FfiFilter {
 #[cfg(feature = "nip02")]
 async fn dense_composition_never_refuses_and_delivers_current_state() {
     let engine = engine();
-    let account = engine
-        .add_account(TEST_SECRET_KEY_HEX.to_string())
-        .expect("test key parses");
-    let author = account.public_key();
-    // #1237: `Identity::Active` with no active account is now an instruction
+    let keys = nostr::Keys::parse(TEST_SECRET_KEY_HEX).unwrap();
+    let author = keys.public_key().to_hex();
+    // #1237: `Identity::Active` with no current account is now an instruction
     // that cannot resolve, so `publish` refuses the call outright. This
     // falsifier is about composition, not about that refusal — activate the
     // account so the receipt stream this test holds actually exists.
     engine
-        .set_active_account(Some(author.clone()))
-        .expect("active account activates");
+        .add_private_key_account(
+            FfiPrivateKey::from_bytes(keys.secret_key().to_secret_bytes().to_vec()).unwrap(),
+            true,
+        )
+        .expect("current account activates");
 
     // 64 simultaneous live row observations — the old design refused at 13.
     let mut rows = Vec::new();

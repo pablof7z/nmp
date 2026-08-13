@@ -2,7 +2,7 @@ import Foundation
 import NMPFFI
 
 /// Immutable event body for `NMPEngine.signEvent`. NMP freezes the author
-/// from the engine's active account before invoking the signer.
+/// from the engine's current account before invoking the signer.
 public struct NMPUnsignedEvent: Sendable, Hashable {
     public let createdAt: UInt64
     public let kind: UInt16
@@ -67,7 +67,7 @@ func mapSignEventFailure(_ failure: FfiSignEventFailure) -> Error {
 }
 
 extension NMPEngine {
-    /// Sign one exact event with the active signer without creating a write
+    /// Sign one exact event with the current account's signing provider without creating a write
     /// intent, pending row, receipt, relay plan, or publication (#680).
     ///
     /// `NmpEngine.signEvent` synchronously returns a one-shot

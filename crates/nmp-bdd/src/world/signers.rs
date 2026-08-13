@@ -109,7 +109,7 @@ impl NmpWorld {
 
     /// `Given that account's signer is offline` -- present in the scenario's
     /// world, absent from the engine's. Nothing can sign for this key until
-    /// something attaches, which is what makes the pin observable across a
+    /// something becomes available, which is what makes the pin observable across a
     /// restart.
     pub fn signer_is_offline(&mut self, label: &str) {
         self.identities_with_signers.retain(|l| l != label);
@@ -125,11 +125,11 @@ impl NmpWorld {
         gate.release();
     }
 
-    /// `When a NIP-46 signer for "<hex>" attaches` -- a signing capability
+    /// `When a NIP-46 signing provider for "<hex>" becomes available` -- a signing capability
     /// for exactly that key arriving after the write was already accepted
     /// and parked. What the park waits on is a CAPABILITY for one pubkey;
     /// which transport carries it is not something the write can observe,
-    /// and this world attaches the one it can drive in-process.
+    /// and this world becomes available the one it can drive in-process.
     pub async fn attach_signer_for(&mut self, label: &str) {
         self.ensure_started().await;
         let keys = self.person(label);

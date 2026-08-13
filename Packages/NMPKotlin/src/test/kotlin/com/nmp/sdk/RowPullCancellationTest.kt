@@ -16,7 +16,6 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collect
-import uniffi.nmp_ffi.FfiAccountRegistration
 import uniffi.nmp_ffi.FfiAcquisitionEvidence
 import uniffi.nmp_ffi.FfiAuthPolicyCallback
 import uniffi.nmp_ffi.FfiAuthPolicyRegistration
@@ -26,6 +25,8 @@ import uniffi.nmp_ffi.FfiFilter
 import uniffi.nmp_ffi.FfiFrame
 import uniffi.nmp_ffi.FfiLiveQuery
 import uniffi.nmp_ffi.FfiPublishQueueEntry
+import uniffi.nmp_ffi.FfiPrivateKey
+import uniffi.nmp_ffi.FfiPublicKey
 import uniffi.nmp_ffi.FfiReceiptReattachment
 import uniffi.nmp_ffi.FfiRelayInformation
 import uniffi.nmp_ffi.FfiRelayInformationCachePolicy
@@ -33,6 +34,9 @@ import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.FfiRowDelta
 import uniffi.nmp_ffi.FfiRowSignature
 import uniffi.nmp_ffi.FfiRowPullException
+import uniffi.nmp_ffi.FfiSessionAccount
+import uniffi.nmp_ffi.FfiSessionPayload
+import uniffi.nmp_ffi.FfiSessionSnapshot
 import uniffi.nmp_ffi.FfiSignEventRequest
 import uniffi.nmp_ffi.FfiWindow
 import uniffi.nmp_ffi.FfiWriteIntent
@@ -247,9 +251,15 @@ class RowPullCancellationTest {
     private class ScriptedRowFlowEngine(
         private val stream: NmpRowStream,
     ) : NmpEngineInterface {
-        override fun `activeAccount`(): String? = unusedByThisFalsifier()
+        override fun `addPrivateKeyAccount`(
+            `privateKey`: FfiPrivateKey,
+            `makeCurrent`: Boolean,
+        ): FfiSessionAccount = unusedByThisFalsifier()
 
-        override fun `addAccount`(`secretKey`: String): FfiAccountRegistration = unusedByThisFalsifier()
+        override fun `addPublicKeyAccount`(
+            `publicKey`: FfiPublicKey,
+            `makeCurrent`: Boolean,
+        ): FfiSessionAccount = unusedByThisFalsifier()
 
         override fun `addAuthPolicy`(
             `expectedPublicKey`: String,
@@ -258,7 +268,14 @@ class RowPullCancellationTest {
 
         override fun `cancel`(`receiptId`: ULong): FfiCancelWriteOutcome = unusedByThisFalsifier()
 
+        override fun `clearSession`(): Unit = unusedByThisFalsifier()
+
+        override fun `exportSession`(): FfiSessionPayload = unusedByThisFalsifier()
+
         override fun `follow`(`target`: String): NmpFollowActionStream = unusedByThisFalsifier()
+
+        override fun `makeCurrentAccount`(`account`: FfiSessionAccount): Unit =
+            unusedByThisFalsifier()
 
         override fun `observe`(`query`: FfiFilter, `window`: FfiWindow?): NmpRowStream = stream
 
@@ -294,12 +311,13 @@ class RowPullCancellationTest {
             `policy`: FfiRelayInformationCachePolicy,
         ): FfiRelayInformation = unusedByThisFalsifier()
 
-        override fun `removeAccount`(`registration`: FfiAccountRegistration): Boolean = unusedByThisFalsifier()
+        override fun `removeAccount`(`account`: FfiSessionAccount): Boolean =
+            unusedByThisFalsifier()
 
         override fun `removeAuthPolicy`(`registration`: FfiAuthPolicyRegistration): Boolean =
             unusedByThisFalsifier()
 
-        override fun `setActiveAccount`(`pubkey`: String?): Unit = unusedByThisFalsifier()
+        override fun `session`(): FfiSessionSnapshot = unusedByThisFalsifier()
 
         override fun `shutdown`(): Unit = unusedByThisFalsifier()
 

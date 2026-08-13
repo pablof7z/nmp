@@ -23,12 +23,13 @@ repository today?
 - Durable and at-most-once writes are atomically accepted as one canonical
   pending row plus obligation/receipt, then sign, promote, route, and stream
   per-relay statuses from the durable ids; ephemeral writes are receipt-only.
-- The active registered signer can sign an exact event without accepting or
-  publishing a write; Rust/FFI/Swift/Kotlin validate the returned event and
-  preserve bounded, cancellable ownership.
+- The current account's available signing provider can sign an exact event
+  without accepting or publishing a write; Rust/FFI/Swift/Kotlin validate the
+  returned event and preserve bounded, cancellable ownership.
 - Rust/FFI/Swift/Kotlin expose live queries, writes, and permanent diagnostics.
 - Rust/FFI/Swift/Kotlin expose an idempotent destructive reset for a closed
-  persistent store without deleting a separate platform account checkpoint.
+  persistent store without changing the opaque session payload the app stores
+  separately.
 - The canonical `nmp` facade and the one UniFFI native library have pinned
   reproducible surface snapshots with an append-only governance gate.
 - The Swift falsifier app runs against public relays as a normal SwiftUI app.
@@ -42,7 +43,7 @@ repository today?
 |---|---|---|
 | Canonical Rust product facade | facade, FFI, demo, direct-vs-FFI parity, surface snapshots, and append-only governance are built; v2 remains provisional while the broader promoted contracts below are open | [#52](https://github.com/pablof7z/nmp/issues/52) |
 | Durable acceptance and pending row | crash-atomic acceptance/promotion/cancellation are built; runtime restart recovery, receipt reattachment, and durable attempt resumption remain | [#2](https://github.com/pablof7z/nmp/issues/2), [#3](https://github.com/pablof7z/nmp/issues/3) |
-| Signer lifecycle | frozen-pubkey selection, governed sign-only, and app-supplied remote-signer reattachment are built; per-write override, NIP-55 execution, platform vault restore, and permanent signer diagnostics remain | [#47](https://github.com/pablof7z/nmp/issues/47), [#51](https://github.com/pablof7z/nmp/issues/51) |
+| Signer lifecycle | frozen-pubkey selection, governed sign-only, and whole-session local-provider restoration are built; NIP-55 execution, additional provider implementations, platform secure storage integration, and permanent signer diagnostics remain | [#47](https://github.com/pablof7z/nmp/issues/47), [#51](https://github.com/pablof7z/nmp/issues/51) |
 | Query descriptor/evidence | full `Demand` identity and scoped `AcquisitionEvidence` are built across Rust/FFI/Swift/Kotlin; live handles report their current active plan, while coverage-satisfied `MaxAge` handles retain only the compact opening source facts and watermarks that justified suppression; broader permanent diagnostics remain | [#49](https://github.com/pablof7z/nmp/issues/49), [#714](https://github.com/pablof7z/nmp/issues/714) |
 | Protocol modules | exact module ownership and immutable contextual publication are designed, not shipped; NIP-51 kind 10009 composition into NIP-29 remains queued | [#45](https://github.com/pablof7z/nmp/issues/45), [#63](https://github.com/pablof7z/nmp/issues/63) |
 | Bounded delivery | end-to-end queue, observer, ingress, and explicit-shortfall proof remains | [#46](https://github.com/pablof7z/nmp/issues/46) |
@@ -59,7 +60,7 @@ The umbrella ordering and design-signoff trail live in
 | Query identity | `Demand(selection, source authority, access context, cache, freshness)` | same semantic descriptor; public spelling remains provisional |
 | Nested derived query | `Derived(inner: Demand)` across Rust/FFI/Swift/Kotlin | explicit inner demand with independent source/access/cache/freshness policy |
 | Query output | row deltas/current rows plus scoped `AcquisitionEvidence`; diagnostics retain exact intervals | richer descriptor-scoped cache/acquisition/shortfall evidence |
-| Current identity | `setActiveAccount` supplies the default; accepted work pins its author and resumes only through a matching registered signing capability | registered providers plus explicit per-write identity override |
+| Current identity | the whole session owns accounts, optional persistable providers, and current selection; accepted work pins its author and resumes only through a matching available provider | same whole-session model plus additional provider implementations |
 | Accepted write | crash-atomic obligation, receipt, and canonical pending row; restart recovery remains | recovered/reattached durable work with exact attempt evidence |
 | Explicitly non-durable write | receipt-only `Ephemeral` path, never journaled as a pending row | same observable non-resumable policy across platform projections |
 | Rust construction | one canonical `nmp::Engine` facade; mechanism crates remain internal/test seams | same facade, promoted to v2 compatibility |

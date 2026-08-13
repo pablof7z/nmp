@@ -282,7 +282,7 @@ var body: some View {
 }
 ```
 
-`NMPFollowing` observes the active account's canonical NIP-02 relationship and
+`NMPFollowing` observes the current account's canonical NIP-02 relationship and
 copies NMP's closed availability/action state onto the main actor. The button
 owns only styling, accessibility, and its reduced-motion-aware confirmation
 animation. Its tap invokes `following.toggle()`; all acquisition, kind:3
@@ -338,7 +338,7 @@ that controlled-state pattern because NMP ships the NIP-02 resource and
 semantic action itself.
 
 These components do not transfer their unrelated protocol ownership into
-`nmp-content`. For example, `NMPFollowing` observes the active account's
+`nmp-content`. For example, `NMPFollowing` observes the current account's
 canonical kind:3 relationship and invokes NMP's guarded follow/unfollow action;
 it is not part of reference parsing.
 

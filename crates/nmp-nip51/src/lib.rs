@@ -22,7 +22,7 @@
 mod demand;
 mod simple_groups;
 
-pub use demand::active_account_demand;
+pub use demand::current_account_demand;
 pub use simple_groups::{
     parse_simple_groups_list_from_raw_tags_tolerant, parse_simple_groups_list_tolerant,
     SimpleGroupEntry, SimpleGroupsList,

@@ -38,7 +38,7 @@ struct Context {
     followed: PublicKey,
     outsider: PublicKey,
     writer: PublicKey,
-    _writer_registration: nmp::AccountRegistration,
+    _writer_account: nmp::SessionAccount,
     settle: Duration,
 }
 
@@ -65,15 +65,15 @@ impl Context {
         })
         .map_err(|error| format!("engine construction failed: {error}"))?;
         engine
-            .set_active_account(Some(viewer))
-            .map_err(|error| format!("active viewer installation failed: {error}"))?;
+            .add_public_key_account(viewer, true)
+            .map_err(|error| format!("current viewer installation failed: {error}"))?;
 
-        let secret = fs::read_to_string(&args.writer_secret_file)
-            .map_err(|error| format!("could not read writer secret file: {error}"))?;
-        let registration = engine
-            .add_account(secret.trim())
-            .map_err(|error| format!("writer registration failed: {error}"))?;
-        let writer = registration.public_key();
+        let mut secret = read_secret_key(&args.writer_secret_file)?;
+        let account_result = engine.add_private_key_account(&secret, false);
+        secret.fill(0);
+        let account = account_result
+            .map_err(|error| format!("writer account installation failed: {error}"))?;
+        let writer = account.public_key();
 
         Ok(Self {
             engine,
@@ -83,7 +83,7 @@ impl Context {
             followed,
             outsider,
             writer,
-            _writer_registration: registration,
+            _writer_account: account,
             settle: Duration::from_secs(args.settle_secs),
         })
     }
@@ -95,6 +95,46 @@ impl Context {
 
     fn shutdown(self) {
         self.engine.shutdown();
+    }
+}
+
+fn read_secret_key(path: &std::path::Path) -> Result<[u8; 32], String> {
+    let mut encoded =
+        fs::read(path).map_err(|error| format!("could not read writer secret file: {error}"))?;
+    let result = decode_hex_secret(&encoded);
+    encoded.fill(0);
+    result
+}
+
+fn decode_hex_secret(encoded: &[u8]) -> Result<[u8; 32], String> {
+    let encoded = encoded.strip_suffix(b"\n").unwrap_or(encoded);
+    let encoded = encoded.strip_suffix(b"\r").unwrap_or(encoded);
+    if encoded.len() != 64 {
+        return Err("writer secret file must contain one 64-character hex key".to_string());
+    }
+
+    let mut secret = [0_u8; 32];
+    let (pairs, remainder) = encoded.as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    for (index, pair) in pairs.iter().enumerate() {
+        let (high, low) = match (hex_nibble(pair[0]), hex_nibble(pair[1])) {
+            (Ok(high), Ok(low)) => (high, low),
+            _ => {
+                secret.fill(0);
+                return Err("writer secret file contains non-hex input".to_string());
+            }
+        };
+        secret[index] = (high << 4) | low;
+    }
+    Ok(secret)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err("not a hex digit".to_string()),
     }
 }
 
@@ -896,4 +936,31 @@ fn ensure(condition: bool, error: impl Into<String>) -> Result<(), String> {
 
 fn display(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod secret_key_tests {
+    use super::decode_hex_secret;
+
+    #[test]
+    fn decodes_exact_secret_bytes_at_the_application_boundary() {
+        let encoded = b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n";
+        assert_eq!(
+            decode_hex_secret(encoded).unwrap(),
+            [
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+                0x1c, 0x1d, 0x1e, 0x1f,
+            ]
+        );
+    }
+
+    #[test]
+    fn refuses_encoded_or_malformed_secret_values_below_the_boundary() {
+        assert!(decode_hex_secret(b"nsec1not-a-decoded-key").is_err());
+        assert!(decode_hex_secret(
+            b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1g"
+        )
+        .is_err());
+    }
 }

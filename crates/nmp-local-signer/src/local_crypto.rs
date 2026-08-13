@@ -158,6 +158,10 @@ impl CanonicalSecret {
         &mut self.0
     }
 
+    pub(super) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
     #[cfg(test)]
     pub(super) fn allocation_address(&self) -> *const u8 {
         (self.0.as_ref() as *const Sensitive<[u8; 32]>).cast()

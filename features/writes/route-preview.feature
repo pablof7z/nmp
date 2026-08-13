@@ -263,7 +263,7 @@ Feature: Asking what a write would compute to, before committing to anything
     # before an identity does -- and it is, because routing derives from the
     # kind and the tags, with the author an optional part of the question
     # rather than a precondition for asking it.
-    Given no account is active
+    Given no account is current
     When I ask what a note p-tagging Alice would route to
     Then the preview answers
     And no identity was resolved

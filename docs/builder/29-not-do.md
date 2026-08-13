@@ -52,10 +52,11 @@ Literal multi-account queries may remain live. Exceptional writes may select a
 different registered identity without changing `$currentPubkey`. AUTH and
 crypto choose the capability required for their operation.
 
-The app owns account list, login/logout UX, labels, import/removal/backup
-policy, and whether to attach a custom provider. Platform SDKs should provide
-standard secure signer providers so ordinary apps do not hand-roll vault
-plumbing.
+The app owns login/logout UX, labels, import/removal/backup policy, and secure
+storage of the opaque whole-session payload. NMP owns the session's accounts,
+optional persistable providers, and current selection as one value. Additional
+provider implementations belong behind that session model, not in a separate
+runtime-attachment category.
 
 ## It does not treat account switching as a privacy boundary
 

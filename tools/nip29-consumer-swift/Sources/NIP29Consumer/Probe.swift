@@ -21,14 +21,19 @@ enum Probe {
                 maxRelays: 4
             ))
             do {
-                try engine.setActiveAccount(args.viewer)
+                _ = try engine.session.add(
+                    publicKey: NMPPublicKey(bytes: try decodedHex(args.viewer)),
+                    makeCurrent: true
+                )
                 let secret = try String(contentsOfFile: args.writerSecretFile, encoding: .utf8)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                let registration = try await engine.addAccount(secretKey: secret)
+                let account = try engine.session.add(
+                    privateKey: NMPPrivateKey(bytes: try decodedHex(secret))
+                )
                 return Context(
                     engine: engine,
                     scope: try NMPRelayScope.on([args.relayA, args.relayB]),
-                    writer: registration.publicKey,
+                    writer: hex(account.publicKey.bytes),
                     args: args
                 )
             } catch {

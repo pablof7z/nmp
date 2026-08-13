@@ -204,12 +204,12 @@ final class FilterBuilderTests: XCTestCase {
     /// #47: naming nobody is not the absence of a choice -- the default init
     /// means `.active`, "whoever is active at acceptance", all the way
     /// through `toFfi()`. There is no third "unset" state to observe.
-    func testWriteIntentDefaultInitMeansTheActiveAccount() {
+    func testWriteIntentDefaultInitMeansTheCurrentAccount() {
         let intent = WriteIntent(
             payload: .event(
                 kind: 1,
                 tags: [],
-                content: "active-account default",
+                content: "current-account default",
                 createdAt: 1_700_000_000
             ),
             routing: .auto

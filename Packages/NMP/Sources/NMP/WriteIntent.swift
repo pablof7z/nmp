@@ -77,7 +77,7 @@ public enum WriteRouting: Sendable, Hashable {
 /// event NMP stamps, freezes and signs itself. The kind is the one thing it
 /// cannot invent, so the kind is the one thing it demands; the account it
 /// publishes as comes from the write's identity (see
-/// `NMPEngine.setActiveAccount` and `WriteIntent.identity`), never
+/// `current-account selection` and `WriteIntent.identity`), never
 /// from the payload, and `createdAt` is stamped at acceptance unless you
 /// state one -- state one and it is kept exactly.
 ///
@@ -132,7 +132,7 @@ public enum WritePayload: Sendable, Hashable {
 
 /// The identity one write publishes under (`FfiIdentity` mirror). Exactly
 /// two words, and neither of them is an absence: `.active` is a positive
-/// instruction ("whoever is the active account when this is accepted"),
+/// instruction ("whoever is the current account when this is accepted"),
 /// which is why there is no third "unset" case here or anywhere else.
 ///
 /// On an `.event` payload the identity SELECTS the author -- a builder
@@ -147,10 +147,11 @@ public enum WritePayload: Sendable, Hashable {
 /// thrown synchronously from `publish`): bech32 is how something is shown
 /// to a person or received from one, so an app that took an npub from a
 /// paste box decodes it there -- with `decodeNostrEntity` -- and hands NMP
-/// a key. Naming a pubkey with no registered signer is NOT an error: the
-/// write parks as `.awaitingCapability` until that capability attaches.
+/// a key. Naming a pubkey with no configured signing provider is NOT an error:
+/// the write parks as `.awaitingCapability` until that account's provider
+/// becomes available.
 /// Acceptance pins the resolved key either way, so a later
-/// `setActiveAccount` cannot retarget the write.
+/// current-account selection cannot retarget the write.
 public enum Identity: Sendable, Hashable {
     case active
     case explicit(pubkey: String)
@@ -177,7 +178,7 @@ public enum Identity: Sendable, Hashable {
 /// `SigningState.awaitingSigner`'s associated `pubkey` (#47 Unit B) is
 /// the exact frozen identity parked -- the key `.explicit` named, else the
 /// account that was active at publish time -- never a different,
-/// later-active account.
+/// later-current account.
 public struct WriteIntent: Sendable, Hashable {
     public var payload: WritePayload
     public var routing: WriteRouting
@@ -230,10 +231,10 @@ public struct WriteIntent: Sendable, Hashable {
 /// The signing state of the WHOLE write -- one signature, one author, one
 /// answer.
 public enum SigningState: Sendable, Hashable {
-    /// No registered signer answers for `pubkey` (64-char hex) -- the exact
-    /// identity FROZEN at acceptance, never whoever is active now. Re-armed
-    /// only by attaching a signer for THIS key, and re-emitted verbatim on
-    /// restart replay.
+    /// No configured signing provider answers for `pubkey` (64-char hex) --
+    /// the exact identity FROZEN at acceptance, never whichever account is
+    /// current now. Re-armed only when THIS account's provider becomes
+    /// available, and re-emitted verbatim on restart replay.
     ///
     /// **No clock ever ends this.** A device whose signer is simply not
     /// plugged in yet is not a device whose write failed; the app's own

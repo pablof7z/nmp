@@ -29,6 +29,22 @@ sealed class NMPError(message: String) : Exception(message) {
     data class NonIndexableFilterTag(val got: String) :
         NMPError("not indexable as a filter key: $got")
     data class InvalidPublicKey(val got: String) : NMPError("invalid public key: $got")
+    object InvalidPublicKeyBytes : NMPError("invalid decoded public key")
+    object InvalidPrivateKeyBytes : NMPError("invalid decoded private key")
+    object SessionMalformedPayload : NMPError("malformed session payload")
+    data class SessionUnsupportedVersion(val found: UShort) :
+        NMPError("unsupported session payload version $found")
+    data class SessionUnsupportedProvider(val id: String) :
+        NMPError("unsupported session provider $id")
+    data class SessionUnsupportedProviderVersion(val provider: String, val found: UShort) :
+        NMPError("unsupported $provider provider version $found")
+    object SessionDuplicateAccount : NMPError("duplicate session account")
+    object SessionCurrentAccountMissing : NMPError("current session account is missing")
+    data class SessionProviderPayloadInvalid(val provider: String) :
+        NMPError("invalid $provider provider payload")
+    object SessionProviderPublicKeyMismatch :
+        NMPError("session provider public key mismatch")
+    object SessionAccountNotFound : NMPError("session account does not exist")
     data class InvalidEventId(val got: String) : NMPError("invalid event id: $got")
     data class InvalidRelayUrl(val got: String) : NMPError("invalid relay url: $got")
     // nmp-native:if nip65
@@ -38,20 +54,19 @@ sealed class NMPError(message: String) : Exception(message) {
         NMPError("automatic routing is unavailable; configure outbox routing indexers")
     // nmp-native:endif
     data class InvalidTag(val got: List<String>) : NMPError("invalid tag: $got")
-    object InvalidSecretKey : NMPError("invalid secret key")
     data class InvalidSigner(val reason: String) : NMPError("invalid signer: $reason")
     data class AuthCapabilityRegistryFull(val limit: ULong) :
         NMPError("AUTH capability registry is full at $limit")
     object AuthCapabilityInstanceExhausted :
         NMPError("AUTH capability instance namespace exhausted")
-    object NoActiveSigner : NMPError("the active account has no registered signer")
+    object NoCurrentSigningProvider : NMPError("the current account has no signing provider")
     data class InvalidSignRequest(val reason: String) : NMPError("invalid sign request: $reason")
     data class SignerUnavailable(val reason: String) : NMPError("signer unavailable: $reason")
     data class SignerRejected(val reason: String) : NMPError("signer rejected request: $reason")
     data class InvalidSignerOutput(val reason: String) :
         NMPError("signer returned invalid output: $reason")
     /** `publish` refused the call outright: either NMP could not write
-     * anything down, or the instruction could not resolve (no active account,
+     * anything down, or the instruction could not resolve (no current account,
      * a signature that does not verify, an explicit identity contradicting a
      * signed payload's author, a reserved kind, an empty explicit route).
      * Nothing durable exists and there is no queue entry to inspect.
@@ -347,6 +362,22 @@ sealed class NMPError(message: String) : Exception(message) {
             when (ffi) {
                 is FfiException.NonIndexableFilterTag -> NonIndexableFilterTag(ffi.got)
                 is FfiException.InvalidPublicKey -> InvalidPublicKey(ffi.got)
+                is FfiException.InvalidPublicKeyBytes -> InvalidPublicKeyBytes
+                is FfiException.InvalidPrivateKeyBytes -> InvalidPrivateKeyBytes
+                is FfiException.SessionMalformedPayload -> SessionMalformedPayload
+                is FfiException.SessionUnsupportedVersion ->
+                    SessionUnsupportedVersion(ffi.found)
+                is FfiException.SessionUnsupportedProvider ->
+                    SessionUnsupportedProvider(ffi.id)
+                is FfiException.SessionUnsupportedProviderVersion ->
+                    SessionUnsupportedProviderVersion(ffi.provider, ffi.found)
+                is FfiException.SessionDuplicateAccount -> SessionDuplicateAccount
+                is FfiException.SessionCurrentAccountMissing -> SessionCurrentAccountMissing
+                is FfiException.SessionProviderPayloadInvalid ->
+                    SessionProviderPayloadInvalid(ffi.provider)
+                is FfiException.SessionProviderPublicKeyMismatch ->
+                    SessionProviderPublicKeyMismatch
+                is FfiException.SessionAccountNotFound -> SessionAccountNotFound
                 is FfiException.InvalidEventId -> InvalidEventId(ffi.got)
                 is FfiException.InvalidRelayUrl -> InvalidRelayUrl(ffi.got)
                 // nmp-native:if nip65
@@ -354,11 +385,10 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.AutomaticRoutingUnavailable -> AutomaticRoutingUnavailable
                 // nmp-native:endif
                 is FfiException.InvalidTag -> InvalidTag(ffi.got)
-                is FfiException.InvalidSecretKey -> InvalidSecretKey
                 is FfiException.InvalidSigner -> InvalidSigner(ffi.reason)
                 is FfiException.AuthCapabilityRegistryFull -> AuthCapabilityRegistryFull(ffi.limit)
                 is FfiException.AuthCapabilityInstanceExhausted -> AuthCapabilityInstanceExhausted
-                is FfiException.NoActiveSigner -> NoActiveSigner
+                is FfiException.NoCurrentSigningProvider -> NoCurrentSigningProvider
                 is FfiException.InvalidSignRequest -> InvalidSignRequest(ffi.reason)
                 is FfiException.PublishRefused -> PublishRefused(ffi.reason)
                 is FfiException.StoreOpenFailed -> StoreOpenFailed(ffi.reason)

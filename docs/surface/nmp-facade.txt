@@ -496,7 +496,7 @@ pub fn nmp::nip29::on(impl core::iter::traits::collect::IntoIterator<Item = nost
 pub mod nmp::nip51
 pub use nmp::nip51::SimpleGroupEntry
 pub use nmp::nip51::SimpleGroupsList
-pub use nmp::nip51::active_account_demand
+pub use nmp::nip51::current_account_demand
 pub use nmp::nip51::parse_simple_groups_list_from_raw_tags_tolerant
 pub use nmp::nip51::parse_simple_groups_list_tolerant
 pub mod nmp::nip65
@@ -698,7 +698,6 @@ pub nmp::EngineError::EngineStartFailed::component: alloc::string::String
 pub nmp::EngineError::EngineStartFailed::reason: alloc::string::String
 pub nmp::EngineError::InvalidRelayUrl
 pub nmp::EngineError::InvalidRelayUrl::url: alloc::string::String
-pub nmp::EngineError::InvalidSecretKey
 pub nmp::EngineError::ObservationUnavailable
 pub nmp::EngineError::ObservationUnavailable::reason: alloc::string::String
 pub nmp::EngineError::PublishRefused
@@ -1074,6 +1073,90 @@ impl core::marker::Unpin for nmp::RowSignature
 impl core::marker::UnsafeUnpin for nmp::RowSignature
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::RowSignature
 impl core::panic::unwind_safe::UnwindSafe for nmp::RowSignature
+pub enum nmp::SessionMutationError
+pub nmp::SessionMutationError::AccountNotFound
+pub nmp::SessionMutationError::AccountNotFound::public_key: nostr::key::public_key::PublicKey
+pub nmp::SessionMutationError::CapabilityInstanceExhausted
+pub nmp::SessionMutationError::CapabilityRegistryFull
+pub nmp::SessionMutationError::CapabilityRegistryFull::limit: usize
+pub nmp::SessionMutationError::EngineClosed
+pub nmp::SessionMutationError::InvalidSecretKey
+impl core::clone::Clone for nmp::SessionMutationError
+pub fn nmp::SessionMutationError::clone(&self) -> nmp::SessionMutationError
+impl core::cmp::Eq for nmp::SessionMutationError
+impl core::cmp::PartialEq for nmp::SessionMutationError
+pub fn nmp::SessionMutationError::eq(&self, &nmp::SessionMutationError) -> bool
+impl core::error::Error for nmp::SessionMutationError
+impl core::fmt::Debug for nmp::SessionMutationError
+pub fn nmp::SessionMutationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::SessionMutationError
+pub fn nmp::SessionMutationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::SessionMutationError
+impl core::marker::Freeze for nmp::SessionMutationError
+impl core::marker::Send for nmp::SessionMutationError
+impl core::marker::Sync for nmp::SessionMutationError
+impl core::marker::Unpin for nmp::SessionMutationError
+impl core::marker::UnsafeUnpin for nmp::SessionMutationError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::SessionMutationError
+impl core::panic::unwind_safe::UnwindSafe for nmp::SessionMutationError
+pub enum nmp::SessionProvider
+pub nmp::SessionProvider::LocalKey
+impl core::clone::Clone for nmp::SessionProvider
+pub fn nmp::SessionProvider::clone(&self) -> nmp::SessionProvider
+impl core::cmp::Eq for nmp::SessionProvider
+impl core::cmp::PartialEq for nmp::SessionProvider
+pub fn nmp::SessionProvider::eq(&self, &nmp::SessionProvider) -> bool
+impl core::fmt::Debug for nmp::SessionProvider
+pub fn nmp::SessionProvider::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for nmp::SessionProvider
+impl core::marker::StructuralPartialEq for nmp::SessionProvider
+impl core::marker::Freeze for nmp::SessionProvider
+impl core::marker::Send for nmp::SessionProvider
+impl core::marker::Sync for nmp::SessionProvider
+impl core::marker::Unpin for nmp::SessionProvider
+impl core::marker::UnsafeUnpin for nmp::SessionProvider
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::SessionProvider
+impl core::panic::unwind_safe::UnwindSafe for nmp::SessionProvider
+pub enum nmp::SessionRestoreError
+pub nmp::SessionRestoreError::CapabilityRegistryFull
+pub nmp::SessionRestoreError::CapabilityRegistryFull::limit: usize
+pub nmp::SessionRestoreError::CurrentAccountMissing
+pub nmp::SessionRestoreError::CurrentAccountMissing::public_key: nostr::key::public_key::PublicKey
+pub nmp::SessionRestoreError::DuplicateAccount
+pub nmp::SessionRestoreError::DuplicateAccount::public_key: nostr::key::public_key::PublicKey
+pub nmp::SessionRestoreError::EngineStartFailed
+pub nmp::SessionRestoreError::EngineStartFailed::reason: alloc::string::String
+pub nmp::SessionRestoreError::MalformedPayload
+pub nmp::SessionRestoreError::ProviderPayloadInvalid
+pub nmp::SessionRestoreError::ProviderPayloadInvalid::provider: nmp::SessionProvider
+pub nmp::SessionRestoreError::ProviderPublicKeyMismatch
+pub nmp::SessionRestoreError::ProviderPublicKeyMismatch::account: nostr::key::public_key::PublicKey
+pub nmp::SessionRestoreError::ProviderPublicKeyMismatch::provider_public_key: nostr::key::public_key::PublicKey
+pub nmp::SessionRestoreError::UnsupportedProvider
+pub nmp::SessionRestoreError::UnsupportedProvider::id: alloc::string::String
+pub nmp::SessionRestoreError::UnsupportedProviderVersion
+pub nmp::SessionRestoreError::UnsupportedProviderVersion::found: u16
+pub nmp::SessionRestoreError::UnsupportedProviderVersion::provider: nmp::SessionProvider
+pub nmp::SessionRestoreError::UnsupportedVersion
+pub nmp::SessionRestoreError::UnsupportedVersion::found: u16
+impl core::clone::Clone for nmp::SessionRestoreError
+pub fn nmp::SessionRestoreError::clone(&self) -> nmp::SessionRestoreError
+impl core::cmp::Eq for nmp::SessionRestoreError
+impl core::cmp::PartialEq for nmp::SessionRestoreError
+pub fn nmp::SessionRestoreError::eq(&self, &nmp::SessionRestoreError) -> bool
+impl core::error::Error for nmp::SessionRestoreError
+impl core::fmt::Debug for nmp::SessionRestoreError
+pub fn nmp::SessionRestoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for nmp::SessionRestoreError
+pub fn nmp::SessionRestoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::SessionRestoreError
+impl core::marker::Freeze for nmp::SessionRestoreError
+impl core::marker::Send for nmp::SessionRestoreError
+impl core::marker::Sync for nmp::SessionRestoreError
+impl core::marker::Unpin for nmp::SessionRestoreError
+impl core::marker::UnsafeUnpin for nmp::SessionRestoreError
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::SessionRestoreError
+impl core::panic::unwind_safe::UnwindSafe for nmp::SessionRestoreError
 pub enum nmp::ShortfallFact
 pub nmp::ShortfallFact::LocalLimit
 pub nmp::ShortfallFact::LocalLimit::atom: nmp_grammar::concrete::ConcreteFilter
@@ -1102,7 +1185,7 @@ pub nmp::SignEventError::InvalidRequest
 pub nmp::SignEventError::InvalidRequest::reason: alloc::string::String
 pub nmp::SignEventError::InvalidSignerOutput
 pub nmp::SignEventError::InvalidSignerOutput::reason: alloc::string::String
-pub nmp::SignEventError::NoActiveSigner
+pub nmp::SignEventError::NoCurrentSigningProvider
 pub nmp::SignEventError::SignerRejected
 pub nmp::SignEventError::SignerRejected::reason: alloc::string::String
 pub nmp::SignEventError::SignerUnavailable
@@ -1125,6 +1208,26 @@ impl core::marker::Unpin for nmp::SignEventError
 impl core::marker::UnsafeUnpin for nmp::SignEventError
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::SignEventError
 impl core::panic::unwind_safe::UnwindSafe for nmp::SignEventError
+pub enum nmp::SigningAvailability
+pub nmp::SigningAvailability::Available
+pub nmp::SigningAvailability::Unavailable
+pub nmp::SigningAvailability::Unavailable::reason: alloc::string::String
+pub nmp::SigningAvailability::Unsupported
+impl core::clone::Clone for nmp::SigningAvailability
+pub fn nmp::SigningAvailability::clone(&self) -> nmp::SigningAvailability
+impl core::cmp::Eq for nmp::SigningAvailability
+impl core::cmp::PartialEq for nmp::SigningAvailability
+pub fn nmp::SigningAvailability::eq(&self, &nmp::SigningAvailability) -> bool
+impl core::fmt::Debug for nmp::SigningAvailability
+pub fn nmp::SigningAvailability::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::SigningAvailability
+impl core::marker::Freeze for nmp::SigningAvailability
+impl core::marker::Send for nmp::SigningAvailability
+impl core::marker::Sync for nmp::SigningAvailability
+impl core::marker::Unpin for nmp::SigningAvailability
+impl core::marker::UnsafeUnpin for nmp::SigningAvailability
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::SigningAvailability
+impl core::panic::unwind_safe::UnwindSafe for nmp::SigningAvailability
 pub enum nmp::SigningState
 pub nmp::SigningState::AwaitingSigner
 pub nmp::SigningState::AwaitingSigner::pubkey: nostr::key::public_key::PublicKey
@@ -1289,24 +1392,6 @@ impl core::marker::Unpin for nmp::WriteOutcome
 impl core::marker::UnsafeUnpin for nmp::WriteOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::WriteOutcome
 impl core::panic::unwind_safe::UnwindSafe for nmp::WriteOutcome
-pub struct nmp::AccountRegistration
-impl nmp::AccountRegistration
-pub fn nmp::AccountRegistration::public_key(&self) -> nostr::key::public_key::PublicKey
-impl core::clone::Clone for nmp::AccountRegistration
-pub fn nmp::AccountRegistration::clone(&self) -> nmp::AccountRegistration
-impl core::cmp::Eq for nmp::AccountRegistration
-impl core::cmp::PartialEq for nmp::AccountRegistration
-pub fn nmp::AccountRegistration::eq(&self, &nmp::AccountRegistration) -> bool
-impl core::fmt::Debug for nmp::AccountRegistration
-pub fn nmp::AccountRegistration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for nmp::AccountRegistration
-impl core::marker::Freeze for nmp::AccountRegistration
-impl core::marker::Send for nmp::AccountRegistration
-impl core::marker::Sync for nmp::AccountRegistration
-impl core::marker::Unpin for nmp::AccountRegistration
-impl core::marker::UnsafeUnpin for nmp::AccountRegistration
-impl core::panic::unwind_safe::RefUnwindSafe for nmp::AccountRegistration
-impl core::panic::unwind_safe::UnwindSafe for nmp::AccountRegistration
 pub struct nmp::AcquisitionEvidence
 pub nmp::AcquisitionEvidence::shortfall: alloc::vec::Vec<nmp::ShortfallFact>
 pub nmp::AcquisitionEvidence::sources: alloc::vec::Vec<nmp::SourceEvidence>
@@ -1462,12 +1547,15 @@ impl !core::panic::unwind_safe::RefUnwindSafe for nmp::DiagnosticsSubscription
 impl !core::panic::unwind_safe::UnwindSafe for nmp::DiagnosticsSubscription
 pub struct nmp::Engine
 impl nmp::Engine
-pub fn nmp::Engine::active_account(&self) -> core::result::Result<core::option::Option<nostr::key::public_key::PublicKey>, nmp::EngineError>
-pub fn nmp::Engine::add_account(&self, &str) -> core::result::Result<nmp::AccountRegistration, nmp::EngineError>
 pub fn nmp::Engine::add_auth_policy<P>(&self, nostr::key::public_key::PublicKey, P) -> core::result::Result<nmp::AuthPolicyRegistration, nmp::EngineError> where P: nmp::AuthPolicy + 'static
-pub fn nmp::Engine::add_signer<Sig>(&self, Sig) -> core::result::Result<nmp::SignerRegistration, nmp::EngineError> where Sig: nmp_signer::capability::SigningCapability + core::marker::Send + 'static
+pub fn nmp::Engine::add_private_key_account(&self, &[u8; 32], bool) -> core::result::Result<nmp::SessionAccount, nmp::SessionMutationError>
+pub fn nmp::Engine::add_public_key_account(&self, nostr::key::public_key::PublicKey, bool) -> core::result::Result<nmp::SessionAccount, nmp::SessionMutationError>
 pub fn nmp::Engine::cancel(&self, nmp::ReceiptId) -> core::result::Result<nmp::CancelWriteOutcome, nmp::CancelWriteError>
+pub fn nmp::Engine::clear_session(&self) -> core::result::Result<(), nmp::SessionMutationError>
+pub fn nmp::Engine::export_session(&self) -> core::result::Result<nmp::SessionPayload, nmp::EngineError>
+pub fn nmp::Engine::make_current_account(&self, nostr::key::public_key::PublicKey) -> core::result::Result<(), nmp::SessionMutationError>
 pub fn nmp::Engine::new(nmp::EngineConfig) -> core::result::Result<Self, nmp::EngineError>
+pub fn nmp::Engine::new_with_session(nmp::EngineConfig, nmp::SessionPayload) -> core::result::Result<Self, nmp::SessionRestoreError>
 pub fn nmp::Engine::observe(&self, nmp_grammar::live_query::LiveQuery, core::option::Option<nmp::Window>) -> core::result::Result<nmp::Subscription, nmp::EngineError>
 pub fn nmp::Engine::observe_diagnostics(&self) -> core::result::Result<nmp::DiagnosticsSubscription, nmp::EngineError>
 pub fn nmp::Engine::publish(&self, nmp_grammar::write::WriteIntent) -> core::result::Result<nmp::ReceiptStream, nmp::EngineError>
@@ -1477,12 +1565,11 @@ pub fn nmp::Engine::reattach_by_correlation(&self, alloc::string::String) -> cor
 pub fn nmp::Engine::reattach_receipt(&self, nmp::ReceiptId) -> core::result::Result<nmp::ReceiptReattachment, nmp::EngineError>
 pub fn nmp::Engine::receipt_result(&self, nmp::ReceiptId) -> core::result::Result<nmp::ReceiptResult, nmp::ReceiptResultError>
 pub async fn nmp::Engine::relay_information(&self, &str, nmp::RelayInformationCachePolicy) -> core::result::Result<nmp::RelayInformationSnapshot, nmp::RelayInformationRequestError>
-pub fn nmp::Engine::remove_account(&self, &nmp::AccountRegistration) -> core::result::Result<bool, nmp::EngineError>
+pub fn nmp::Engine::remove_account(&self, &nmp::SessionAccount) -> core::result::Result<bool, nmp::SessionMutationError>
 pub fn nmp::Engine::remove_auth_policy(&self, &nmp::AuthPolicyRegistration) -> core::result::Result<bool, nmp::EngineError>
 pub fn nmp::Engine::remove_publish_queue_entry(&self, nmp::ReceiptId) -> core::result::Result<(), nmp::RemoveQueueEntryError>
-pub fn nmp::Engine::remove_signer(&self, nmp::SignerRegistration) -> core::result::Result<bool, nmp::EngineError>
 pub fn nmp::Engine::reset_persistent_store(impl core::convert::AsRef<std::path::Path>) -> core::result::Result<(), nmp::EngineError>
-pub fn nmp::Engine::set_active_account(&self, core::option::Option<nostr::key::public_key::PublicKey>) -> core::result::Result<(), nmp::EngineError>
+pub fn nmp::Engine::session(&self) -> core::result::Result<nmp::SessionSnapshot, nmp::EngineError>
 pub fn nmp::Engine::shutdown(&self)
 pub fn nmp::Engine::sign_event(&self, nmp::SignEventRequest) -> core::result::Result<nmp::SignEventOperation, nmp::SignEventError>
 impl core::ops::drop::Drop for nmp::Engine
@@ -1815,6 +1902,65 @@ impl core::marker::Unpin for nmp::Row
 impl core::marker::UnsafeUnpin for nmp::Row
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::Row
 impl core::panic::unwind_safe::UnwindSafe for nmp::Row
+pub struct nmp::SessionAccount
+pub nmp::SessionAccount::provider: core::option::Option<nmp::SessionProvider>
+pub nmp::SessionAccount::public_key: nostr::key::public_key::PublicKey
+pub nmp::SessionAccount::signing: nmp::SigningAvailability
+impl nmp::SessionAccount
+pub fn nmp::SessionAccount::public_key(&self) -> nostr::key::public_key::PublicKey
+impl core::clone::Clone for nmp::SessionAccount
+pub fn nmp::SessionAccount::clone(&self) -> nmp::SessionAccount
+impl core::cmp::Eq for nmp::SessionAccount
+impl core::cmp::PartialEq for nmp::SessionAccount
+pub fn nmp::SessionAccount::eq(&self, &nmp::SessionAccount) -> bool
+impl core::fmt::Debug for nmp::SessionAccount
+pub fn nmp::SessionAccount::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::SessionAccount
+impl core::marker::Freeze for nmp::SessionAccount
+impl core::marker::Send for nmp::SessionAccount
+impl core::marker::Sync for nmp::SessionAccount
+impl core::marker::Unpin for nmp::SessionAccount
+impl core::marker::UnsafeUnpin for nmp::SessionAccount
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::SessionAccount
+impl core::panic::unwind_safe::UnwindSafe for nmp::SessionAccount
+pub struct nmp::SessionPayload(_)
+impl nmp::SessionPayload
+pub fn nmp::SessionPayload::as_bytes(&self) -> &[u8]
+pub fn nmp::SessionPayload::from_bytes(alloc::vec::Vec<u8>) -> Self
+pub fn nmp::SessionPayload::into_bytes(self) -> alloc::vec::Vec<u8>
+impl core::cmp::Eq for nmp::SessionPayload
+impl core::cmp::PartialEq for nmp::SessionPayload
+pub fn nmp::SessionPayload::eq(&self, &nmp::SessionPayload) -> bool
+impl core::fmt::Debug for nmp::SessionPayload
+pub fn nmp::SessionPayload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::SessionPayload
+impl core::ops::drop::Drop for nmp::SessionPayload
+pub fn nmp::SessionPayload::drop(&mut self)
+impl core::marker::Freeze for nmp::SessionPayload
+impl core::marker::Send for nmp::SessionPayload
+impl core::marker::Sync for nmp::SessionPayload
+impl core::marker::Unpin for nmp::SessionPayload
+impl core::marker::UnsafeUnpin for nmp::SessionPayload
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::SessionPayload
+impl core::panic::unwind_safe::UnwindSafe for nmp::SessionPayload
+pub struct nmp::SessionSnapshot
+pub nmp::SessionSnapshot::accounts: alloc::vec::Vec<nmp::SessionAccount>
+pub nmp::SessionSnapshot::current_pubkey: core::option::Option<nostr::key::public_key::PublicKey>
+impl core::clone::Clone for nmp::SessionSnapshot
+pub fn nmp::SessionSnapshot::clone(&self) -> nmp::SessionSnapshot
+impl core::cmp::Eq for nmp::SessionSnapshot
+impl core::cmp::PartialEq for nmp::SessionSnapshot
+pub fn nmp::SessionSnapshot::eq(&self, &nmp::SessionSnapshot) -> bool
+impl core::fmt::Debug for nmp::SessionSnapshot
+pub fn nmp::SessionSnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for nmp::SessionSnapshot
+impl core::marker::Freeze for nmp::SessionSnapshot
+impl core::marker::Send for nmp::SessionSnapshot
+impl core::marker::Sync for nmp::SessionSnapshot
+impl core::marker::Unpin for nmp::SessionSnapshot
+impl core::marker::UnsafeUnpin for nmp::SessionSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for nmp::SessionSnapshot
+impl core::panic::unwind_safe::UnwindSafe for nmp::SessionSnapshot
 pub struct nmp::SignEventCancel
 impl nmp::SignEventCancel
 pub fn nmp::SignEventCancel::cancel(&self)
@@ -1860,23 +2006,6 @@ impl core::marker::Unpin for nmp::SignEventRequest
 impl core::marker::UnsafeUnpin for nmp::SignEventRequest
 impl core::panic::unwind_safe::RefUnwindSafe for nmp::SignEventRequest
 impl core::panic::unwind_safe::UnwindSafe for nmp::SignEventRequest
-pub struct nmp::SignerRegistration
-impl nmp::SignerRegistration
-pub fn nmp::SignerRegistration::public_key(&self) -> nostr::key::public_key::PublicKey
-impl core::clone::Clone for nmp::SignerRegistration
-pub fn nmp::SignerRegistration::clone(&self) -> nmp::SignerRegistration
-impl core::cmp::Eq for nmp::SignerRegistration
-impl core::cmp::PartialEq for nmp::SignerRegistration
-pub fn nmp::SignerRegistration::eq(&self, &Self) -> bool
-impl core::fmt::Debug for nmp::SignerRegistration
-pub fn nmp::SignerRegistration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Freeze for nmp::SignerRegistration
-impl core::marker::Send for nmp::SignerRegistration
-impl core::marker::Sync for nmp::SignerRegistration
-impl core::marker::Unpin for nmp::SignerRegistration
-impl core::marker::UnsafeUnpin for nmp::SignerRegistration
-impl core::panic::unwind_safe::RefUnwindSafe for nmp::SignerRegistration
-impl core::panic::unwind_safe::UnwindSafe for nmp::SignerRegistration
 pub struct nmp::SourceEvidence
 pub nmp::SourceEvidence::access: nmp_grammar::descriptor::AccessContext
 pub nmp::SourceEvidence::reconciled_through: core::option::Option<nostr::types::time::Timestamp>
@@ -37278,6 +37407,89 @@ reexport nmp::SigningCapability => nmp_signer::capability::SigningCapability
             }
           },
           "name": "is_available",
+          "visibility": "default"
+        },
+        {
+          "attrs": [],
+          "inner": {
+            "function": {
+              "default_unstable": null,
+              "generics": {
+                "params": [],
+                "where_predicates": []
+              },
+              "has_body": true,
+              "header": {
+                "abi": "Rust",
+                "is_async": false,
+                "is_const": false,
+                "is_unsafe": false
+              },
+              "sig": {
+                "inputs": [
+                  [
+                    "self",
+                    {
+                      "borrowed_ref": {
+                        "is_mutable": false,
+                        "lifetime": null,
+                        "type": {
+                          "generic": "Self"
+                        }
+                      }
+                    }
+                  ]
+                ],
+                "is_c_variadic": false,
+                "output": {
+                  "resolved_path": {
+                    "args": {
+                      "angle_bracketed": {
+                        "args": [
+                          {
+                            "type": {
+                              "resolved_path": {
+                                "args": null,
+                                "path": "SigningProviderDescriptor",
+                                "resolved_item": {
+                                  "definition": {
+                                    "attrs": [],
+                                    "inner": {
+                                      "struct": {
+                                        "generics": {
+                                          "params": [],
+                                          "where_predicates": []
+                                        },
+                                        "kind": {
+                                          "plain": {
+                                            "fields": [],
+                                            "has_stripped_fields": true
+                                          }
+                                        }
+                                      }
+                                    },
+                                    "name": "SigningProviderDescriptor",
+                                    "visibility": "public"
+                                  },
+                                  "path": "nmp_signer::capability::SigningProviderDescriptor"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "constraints": []
+                      }
+                    },
+                    "path": "Option",
+                    "resolved_item": {
+                      "path": "core::option::Option"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "name": "persistence_descriptor",
           "visibility": "default"
         },
         {

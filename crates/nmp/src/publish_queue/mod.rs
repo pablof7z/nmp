@@ -15,10 +15,10 @@
 //!    the disk failed under the acceptance transaction.
 //! 2. **The instruction cannot resolve** — a caller-supplied signature that
 //!    does not verify, an [`Identity::Active`](nmp_grammar::Identity::Active)
-//!    write with no active account, an explicit identity contradicting a
+//!    write with no current account, an explicit identity contradicting a
 //!    signed payload's own author, a kind the reducer owns. Nothing in this
-//!    class is a fact about the WORLD: no relays, no signer online and disk
-//!    trouble all take custody and fail in the queue instead, where the app
+//!    class is a fact about the WORLD: no relays, no signing provider available,
+//!    and disk trouble all take custody and fail in the queue instead, where the app
 //!    can see them. *"An instruction that cannot resolve is a refusal, not a
 //!    parked hope"* (`nmp-grammar/src/write.rs`).
 //!
@@ -30,9 +30,9 @@
 //! An attempt ceiling ([`EngineConfig::max_publish_attempts`](crate::EngineConfig))
 //! counts OBSERVATIONS and is therefore legitimate: "we tried N times and it
 //! failed N times." A time budget is not, because it converts ignorance into
-//! a verdict. A write parked on an unresolved route or a missing signer has
-//! no cap of any kind — it ends when knowledge is exhausted, when a signer
-//! arrives, or when the app removes it.
+//! a verdict. A write parked on an unresolved route or unavailable signing
+//! provider has no cap of any kind — it ends when knowledge is exhausted,
+//! when the configured provider becomes available, or when the app removes it.
 //!
 //! ## Optimistic publishing
 //!
@@ -83,13 +83,13 @@ pub enum RetryCause {
 /// answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SigningState {
-    /// No registered signer answers for `pubkey` — the exact identity FROZEN
-    /// at acceptance, never whoever happens to be active now. Re-armed only
-    /// by attaching a signer for THIS key, and re-emitted verbatim on
-    /// restart replay.
+    /// No available signing provider answers for `pubkey` — the exact identity
+    /// FROZEN at acceptance, never whoever happens to be current now. Re-armed
+    /// only when the configured provider for THIS key becomes available, and
+    /// re-emitted verbatim on restart replay.
     ///
-    /// **No clock ever ends this.** A device whose signer is simply not
-    /// plugged in yet is not a device whose write failed; the app's own
+    /// **No clock ever ends this.** A device whose provider is currently
+    /// unavailable is not a device whose write failed; the app's own
     /// decision is the only other exit, and it is two calls:
     /// `Handle::cancel_write` ends the obligation and compensates the
     /// optimistic row the write promised, then
@@ -324,7 +324,7 @@ pub enum WriteFact {
 /// Enumerating the queue is how an app answers "what have I got outstanding,
 /// and what went wrong with it" without having held a receipt stream open
 /// since acceptance. Removal is the companion half and is not optional:
-/// a write parked on a missing signer, and a permanently-failed entry, end
+/// a write parked on an unavailable signing provider, and a permanently-failed entry, end
 /// only by the app's own decision — cancel the parked one, then remove the
 /// terminal receipt either leaves behind — so removal is a termination path
 /// rather than housekeeping.
@@ -392,8 +392,8 @@ pub enum RemoveQueueEntryError {
         receipt_id: ReceiptId,
     },
     /// The write's obligation is still open — nothing has ended it yet,
-    /// whether it is signed with live lanes or parked on a signer nobody
-    /// has. Cancel it first; removal is for the terminal receipt that
+    /// whether it is signed with live lanes or parked on an unavailable
+    /// signing provider. Cancel it first; removal is for the terminal receipt that
     /// leaves behind.
     StillActive {
         receipt_id: ReceiptId,

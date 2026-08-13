@@ -360,48 +360,46 @@ async fn signer_is_registered(w: &mut NmpWorld) {
 // cares which key signed. Each hex string is an ordinary fixture-person label
 // (`NmpWorld::person`), so one hex names one keypair for the whole scenario.
 
-#[given(
-    regex = r#"^the account with pubkey "([0-9a-f]{64})" is registered with a working signer$"#
-)]
+#[given(regex = r#"^the account with pubkey "([0-9a-f]{64})" has an available signing provider$"#)]
 async fn account_registered_with_signer(w: &mut NmpWorld, pubkey: String) {
     w.register_identity_with_signer(&pubkey);
 }
 
-#[given(regex = r#"^my podcast identity "([0-9a-f]{64})" is registered with a working signer$"#)]
+#[given(regex = r#"^my podcast identity "([0-9a-f]{64})" has an available signing provider$"#)]
 async fn podcast_identity_registered(w: &mut NmpWorld, pubkey: String) {
     w.register_podcast_identity(&pubkey);
 }
 
 /// The keypair exists and can be named; nothing in the world can sign for it.
 /// That gap is the entire subject of `awaiting-signer.feature`.
-#[given(regex = r#"^no signer is registered for "([0-9a-f]{64})"$"#)]
+#[given(regex = r#"^the account with pubkey "([0-9a-f]{64})" has no signing provider$"#)]
 async fn no_signer_registered_for(w: &mut NmpWorld, pubkey: String) {
     w.register_identity_without_signer(&pubkey);
 }
 
-#[given(regex = r#"^"([0-9a-f]{64})" is the active account$"#)]
+#[given(regex = r#"^"([0-9a-f]{64})" is the current account$"#)]
 async fn identity_is_active(w: &mut NmpWorld, pubkey: String) {
     w.activate_identity(&pubkey).await;
 }
 
-#[given(regex = r#"^no account is active$"#)]
+#[given(regex = r#"^no account is current$"#)]
 async fn no_account_is_active(w: &mut NmpWorld) {
     w.no_account_is_active();
 }
 
-#[given(regex = r#"^the podcast identity's signer is slow to answer$"#)]
+#[given(regex = r#"^the podcast identity's signing provider is slow to answer$"#)]
 async fn podcast_signer_is_slow(w: &mut NmpWorld) {
     let label = w.podcast_identity();
     w.signer_is_slow(&label);
 }
 
-#[given(regex = r#"^that account's signer is slow to answer$"#)]
+#[given(regex = r#"^that account's signing provider is slow to answer$"#)]
 async fn that_accounts_signer_is_slow(w: &mut NmpWorld) {
     let label = w.current_identity();
     w.signer_is_slow(&label);
 }
 
-#[given(regex = r#"^that account's signer is offline$"#)]
+#[given(regex = r#"^that account's signing provider is unavailable$"#)]
 async fn that_accounts_signer_is_offline(w: &mut NmpWorld) {
     let label = w.current_identity();
     w.signer_is_offline(&label);

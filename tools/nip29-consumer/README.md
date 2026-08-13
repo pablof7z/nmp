@@ -10,6 +10,11 @@ by this program. The program obtains rows, per-relay provenance, acquisition
 evidence, exact wire filters, diagnostics, signatures, routes, and publication
 outcomes exclusively through NMP.
 
+The consumer decodes the harness's 64-character hex keys at its own file/CLI
+boundary. It hands NMP decoded `PublicKey` values and exact 32-byte private-key
+material, then installs the public-key-only viewer and private-key-backed writer
+as accounts in one engine session.
+
 ## Full run
 
 From the repository root, choose two paths that do not yet exist:

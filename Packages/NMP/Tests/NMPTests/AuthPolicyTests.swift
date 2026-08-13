@@ -64,7 +64,7 @@ final class AuthPolicyTests: XCTestCase {
     private final class ReentrantCancellationPolicy: NMPAuthPolicy, @unchecked Sendable {
         let engine: NMPEngine
         var completion: NMPAuthPolicyCompletion?
-        var activeAccountDuringCancellation: String?
+        var currentAccountDuringCancellation: NMPPublicKey?
         var reentrySucceeded = false
         var terminalError: NMPAuthPolicyCompletionError?
         var cancellations = 0
@@ -83,7 +83,7 @@ final class AuthPolicyTests: XCTestCase {
         func onCancelled(request: NMPAuthPolicyRequest) {
             cancellations += 1
             do {
-                activeAccountDuringCancellation = try engine.activeAccount()
+                currentAccountDuringCancellation = try engine.session.current?.publicKey
                 reentrySucceeded = true
             } catch {
                 XCTFail("AUTH cancellation could not reenter the engine: \(error)")
@@ -171,7 +171,7 @@ final class AuthPolicyTests: XCTestCase {
 
         XCTAssertEqual(policy.cancellations, 1)
         XCTAssertTrue(policy.reentrySucceeded)
-        XCTAssertNil(policy.activeAccountDuringCancellation)
+        XCTAssertNil(policy.currentAccountDuringCancellation)
         XCTAssertEqual(policy.terminalError, .cancelled)
     }
 
@@ -198,7 +198,7 @@ final class AuthPolicyTests: XCTestCase {
         let zero = try NMPEngine(config: NMPConfig(maxAuthCapabilities: 0))
         defer { zero.shutdown() }
         do {
-            _ = try await zero.addAccount(secretKey: secretKey)
+            _ = try zero.session.add(privateKey: testPrivateKey(secretKey))
             XCTFail("zero capacity must refuse the account")
         } catch {
             XCTAssertEqual(error as? NMPError, .authCapabilityRegistryFull(limit: 0))
@@ -214,7 +214,7 @@ final class AuthPolicyTests: XCTestCase {
 
         let one = try NMPEngine(config: NMPConfig(maxAuthCapabilities: 1))
         defer { one.shutdown() }
-        let account = try await one.addAccount(secretKey: secretKey)
+        let account = try one.session.add(privateKey: testPrivateKey(secretKey))
         XCTAssertThrowsError(
             try one.addAuthPolicy(
                 expectedPublicKey: publicKey,
@@ -223,7 +223,7 @@ final class AuthPolicyTests: XCTestCase {
         ) { error in
             XCTAssertEqual(error as? NMPError, .authCapabilityRegistryFull(limit: 1))
         }
-        XCTAssertTrue(try one.removeAccount(account))
+        XCTAssertTrue(try one.session.remove(account))
         let policy = try one.addAuthPolicy(
             expectedPublicKey: publicKey,
             policy: RecordingPolicy(mode: .inline)

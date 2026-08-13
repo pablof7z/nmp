@@ -7,7 +7,7 @@
 The same five moves exist everywhere:
 
 1. construct one engine;
-2. provide reactive inputs and capabilities;
+2. populate the whole session and choose its current account;
 3. observe a demand;
 4. fold snapshots into app state; and
 5. publish intents and observe receipts.
@@ -17,8 +17,8 @@ The same five moves exist everywhere:
 Swift uses `AsyncSequence` and ARC:
 
 ```swift
-let engine = try NMPEngine(configuration: configuration)
-try engine.setCurrentPubkey(selectedPubkey)
+let engine = try NMPEngine(config: configuration)
+try engine.session.add(publicKey: selectedPubkey, makeCurrent: true)
 
 let demand = NMPDemand(
     selection: NMPFilter(
@@ -39,10 +39,9 @@ for await snapshot in try engine.observe(demand) {
 Publishing uses the same engine and a native async receipt:
 
 ```swift
-let receipt = try engine.publish(.init(
-    draft: draft,
-    durability: .durable,
-    signer: nil                 // default signer for current pubkey
+let receipt = try engine.publish(WriteIntent(
+    payload: .event(kind: appKind, content: content),
+    routing: .auto
 ))
 
 for await fact in receipt.facts {
@@ -59,8 +58,8 @@ the primitive API. NMP does not require an environment key or scene hook.
 Kotlin uses cold `Flow` and coroutine cancellation:
 
 ```kotlin
-val engine = NmpEngine(configuration)
-engine.setCurrentPubkey(selectedPubkey)
+val engine = NMPEngine(configuration)
+engine.session.add(publicKey = selectedPubkey, makeCurrent = true)
 
 val demand = Demand(
     selection = Filter(
@@ -84,7 +83,10 @@ engine.observe(demand).collect { snapshot ->
 
 ```kotlin
 engine.publish(
-    WriteIntent(draft = draft, durability = Durability.Durable)
+    WriteIntent(
+        payload = WritePayload.Event(kind = appKind, content = content),
+        routing = WriteRouting.Auto
+    )
 ).facts.collect(receiptModel::apply)
 ```
 
@@ -132,7 +134,8 @@ Native syntax may differ, but these values and outcomes must agree:
 - descriptor identity and printed binding expansion;
 - rows plus cache/acquisition/shortfall evidence;
 - accepted pending row and signature promotion;
-- default signer, per-write override, pinning, and reattachment;
+- current-account provider selection, per-write override, pinning, and provider
+  availability resumption;
 - typed protocol context and final unsigned bytes;
 - per-relay receipt facts; and
 - diagnostics and bounded-delivery behavior.

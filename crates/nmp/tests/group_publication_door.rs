@@ -58,7 +58,6 @@ use nmp::{
     SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability, SigningState,
     WriteFact, WriteOutcome,
 };
-use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{Keys, Kind, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
@@ -71,11 +70,6 @@ const GROUP_MEMBERS_KIND: u16 = 39002;
 /// runner, short enough that a genuine failure reports rather than hangs.
 const SETTLE: Duration = Duration::from_secs(20);
 
-fn signer(keys: &Keys) -> LocalKeySigner {
-    LocalKeySigner::from_secret_bytes(keys.secret_key().as_secret_bytes())
-        .expect("fixture keys are valid secp256k1 scalars")
-}
-
 /// A live engine with ONE operator input: where to look for relay lists.
 /// Everything else about routing is discovered or minted.
 fn engine_reading_lists_from(indexer: &ScriptedRelay, keys: &Keys) -> Engine {
@@ -85,15 +79,9 @@ fn engine_reading_lists_from(indexer: &ScriptedRelay, keys: &Keys) -> Engine {
         ..EngineConfig::default()
     })
     .expect("an in-memory engine builds");
-    let registration = engine
-        .add_account(&keys.secret_key().to_secret_hex())
-        .expect("the account registers");
     engine
-        .set_active_account(Some(registration.public_key()))
-        .expect("the account activates");
-    engine
-        .add_signer(signer(keys))
-        .expect("a local signer registers");
+        .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
+        .expect("the account and local provider register");
     engine
 }
 
@@ -117,15 +105,9 @@ fn engine_with_signer(keys: &Keys) -> Engine {
         ..EngineConfig::default()
     })
     .expect("an in-memory engine builds");
-    let registration = engine
-        .add_account(&keys.secret_key().to_secret_hex())
-        .expect("the account registers");
     engine
-        .set_active_account(Some(registration.public_key()))
-        .expect("the account activates");
-    engine
-        .add_signer(signer(keys))
-        .expect("a local signer registers");
+        .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
+        .expect("the account and local provider register");
     engine
 }
 
@@ -156,10 +138,10 @@ fn engine_with_failing_signer(keys: &Keys) -> Engine {
     })
     .expect("an in-memory engine builds");
     engine
-        .set_active_account(Some(keys.public_key()))
-        .expect("the account activates");
+        .add_public_key_account(keys.public_key(), true)
+        .expect("the account becomes current");
     engine
-        .add_signer(FailingSigner {
+        .install_test_signing_capability(FailingSigner {
             pubkey: SignerPublicKey::new(keys.public_key().to_bytes()),
         })
         .expect("a failing signer still registers cleanly");

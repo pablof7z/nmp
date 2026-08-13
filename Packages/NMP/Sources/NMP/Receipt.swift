@@ -216,7 +216,7 @@ extension NMPEngine {
     /// Forget one queue entry.
     ///
     /// A real TERMINATION path, not housekeeping: a write parked forever on a
-    /// signer that never attached, and a permanently-failed refused entry,
+    /// account whose signing provider never became available, and a permanently-failed refused entry,
     /// end no other way. A write that still owns open delivery work is
     /// refused -- cancel that one instead.
     public func removePublishQueueEntry(receiptId: UInt64) throws {

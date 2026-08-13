@@ -24,7 +24,7 @@ public final class QualificationJava {
 
     public static boolean postCloseIsEngineClosed(NMPEngine engine) {
         try {
-            engine.activeAccount();
+            engine.getSession().getCurrent();
             return false;
         } catch (Throwable error) {
             return error instanceof NMPError.EngineClosed;

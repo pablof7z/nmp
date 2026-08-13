@@ -2,6 +2,7 @@ package com.nmp.qualification
 
 import com.nmp.sdk.NMPConfig
 import com.nmp.sdk.NMPEngine
+import com.nmp.sdk.NMPPrivateKey
 import com.nmp.sdk.OutboxRoutingConfig
 import com.nmp.sdk.RelayState
 import com.nmp.sdk.WriteIntent
@@ -24,8 +25,8 @@ fun main(args: Array<String>) = runBlocking {
             allowedLocalRelayHosts = listOf("localhost", "127.0.0.1"),
         ),
     ).use { engine ->
-        val account = engine.addAccount(value("secret_key"))
-        engine.setActiveAccount(account.publicKey)
+        val privateKey = NMPPrivateKey(value("secret_key").hexBytes())
+        engine.session.add(privateKey, makeCurrent = true)
         val result = engine.publish(
             WriteIntent(
                 payload = WritePayload.Event(1u, content = "kotlin prepared cold discovery"),
@@ -38,4 +39,12 @@ fun main(args: Array<String>) = runBlocking {
         check(result.relays.single().state == RelayState.Published)
     }
     println("PASS kotlin prepared outbox routing cold discovery")
+}
+
+private fun String.hexBytes(): ByteArray {
+    require(length % 2 == 0) { "invalid hex private key" }
+    return ByteArray(length / 2) { index ->
+        substring(index * 2, index * 2 + 2).toIntOrNull(16)?.toByte()
+            ?: error("invalid hex private key")
+    }
 }

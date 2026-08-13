@@ -274,12 +274,12 @@ async fn refused_for_failing_verification(w: &mut NmpWorld) {
     );
 }
 
-#[then(regex = r#"^nothing was refused for want of an active account$"#)]
+#[then(regex = r#"^nothing was refused for want of a current account$"#)]
 async fn nothing_refused_for_want_of_an_account(w: &mut NmpWorld) {
     let refusal = w.write_refusal_reason(None);
     assert!(
         refusal.is_none(),
-        "a signed event needs no signer, so it needs no active account, so being logged \
+        "a signed event needs no signing provider, so it needs no current account, so being logged \
          out is not a reason to refuse it -- but it was refused with {refusal:?}"
     );
 }

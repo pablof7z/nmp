@@ -49,8 +49,10 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         XCTAssertEqual(relay.snapshot().nip11Requests, 1)
 
         let secretKey = String(repeating: "0", count: 63) + "1"
-        let routeAccount = try await engine.addAccount(secretKey: secretKey)
-        try engine.setActiveAccount(routeAccount.publicKey)
+        let routeAccount = try engine.session.add(
+            privateKey: testPrivateKey(secretKey),
+            makeCurrent: true
+        )
 
         let routeEvent = try await engine.signEvent(
             NMPUnsignedEvent(
@@ -63,7 +65,7 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         relay.seed(routeEvent)
 
         let routeQuery = try engine.observe(
-            NMPFilter(kinds: [10_002], authors: .literal([routeAccount.publicKey])),
+            NMPFilter(kinds: [10_002], authors: .literal([testHex(routeAccount.publicKey)])),
             window: .expandable(initial: 1, max: 1)
         )
         let routeProbe = QueryProbe()
@@ -85,11 +87,13 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         // write follows. Routing therefore remains honestly open while the
         // already-known app-relay lane must still make progress.
         let publishSecretKey = String(repeating: "0", count: 63) + "2"
-        let publishAccount = try await engine.addAccount(secretKey: publishSecretKey)
-        try engine.setActiveAccount(publishAccount.publicKey)
+        let publishAccount = try engine.session.add(
+            privateKey: testPrivateKey(publishSecretKey),
+            makeCurrent: true
+        )
 
         let query = try engine.observe(
-            NMPFilter(kinds: [1], authors: .literal([publishAccount.publicKey])),
+            NMPFilter(kinds: [1], authors: .literal([testHex(publishAccount.publicKey)])),
             window: .expandable(initial: 1, max: 1)
         )
         let queryProbe = QueryProbe()
@@ -118,7 +122,7 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
                     content: "NMP issue 598 Swift host qualification"
                 ),
                 routing: .auto,
-                identity: .explicit(pubkey: publishAccount.publicKey)
+                identity: .explicit(pubkey: testHex(publishAccount.publicKey))
             )
         )
         let receiptProbe = ReceiptProbe()
@@ -163,7 +167,7 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
                     // the router, and the fact names that author.
                     return !complete
                         && relays.contains { isSameRelay($0, relay.relayURL) }
-                        && awaiting == [publishAccount.publicKey]
+                        && awaiting == [testHex(publishAccount.publicKey)]
                 }
                 return false
             },
@@ -219,8 +223,8 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         await queryTask.value
         let queryFailure = await queryProbe.failure()
         XCTAssertNil(queryFailure)
-        XCTAssertTrue(try engine.removeAccount(publishAccount))
-        XCTAssertTrue(try engine.removeAccount(routeAccount))
+        XCTAssertTrue(try engine.session.remove(publishAccount))
+        XCTAssertTrue(try engine.session.remove(routeAccount))
 
         engine.shutdown()
         let tornDown = await waitForRelay(relay, timeoutSeconds: 5) {

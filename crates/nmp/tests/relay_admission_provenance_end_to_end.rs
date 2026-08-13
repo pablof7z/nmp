@@ -20,7 +20,6 @@ use nmp::mechanism::runtime::FifoReceiver;
 use nmp::{
     Engine, EngineConfig, Identity, RelayState, WriteFact, WriteIntent, WritePayload, WriteRouting,
 };
-use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{Keys, Kind};
 
@@ -78,14 +77,8 @@ async fn an_app_declared_loopback_relay_is_reached_with_an_empty_allowlist() {
 
     let keys = Keys::generate();
     engine
-        .set_active_account(Some(keys.public_key()))
-        .expect("the account activates");
-    engine
-        .add_signer(
-            LocalKeySigner::from_secret_bytes(keys.secret_key().as_secret_bytes())
-                .expect("fixture keys are valid secp256k1 scalars"),
-        )
-        .expect("a local signer registers");
+        .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
+        .expect("the account and local provider register");
 
     let tracked = engine
         .publish(WriteIntent {

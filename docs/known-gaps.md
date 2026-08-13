@@ -157,12 +157,12 @@ about current code:
   was the load-bearing consequence of that removed artifact boundary;
   [#1169](https://github.com/pablof7z/nmp/issues/1169) owns the collapsed
   engine-routed shape it returns in, as an ordinary Cargo-feature-selected
-  family inside the one native library. An app gives NMP an identity by handing
-  over key material: `Engine::add_account` takes the secret, crosses FFI, and
-  is what a Swift or Kotlin app calls. A Rust app that wants to keep custody
-  instead implements `SigningCapability` and calls `Engine::add_signer`; that
-  trait is generic over a `sign` returning a poll-thunk, so it does not cross
-  UniFFI, and there is currently **no FFI-crossing door for a signing
+  family inside the one native library. NMP now owns one whole-session model:
+  signer-backed and public-key-only accounts plus current selection export and
+  restore as one opaque sensitive value. Account membership remains restored
+  when its configured provider is unavailable; reachability is runtime state,
+  not a second account category. The local-key provider is the only production
+  provider currently shipped. There is still **no FFI-crossing door for a signing
   capability the app itself implements** — a Secure Enclave or hardware-backed
   key reachable only from Swift or Kotlin has no way in. Whatever closes that
   gap must keep NMP the owner of when to sign and what, with the app's adapter
@@ -173,12 +173,11 @@ about current code:
   [#783](https://github.com/pablof7z/nmp/issues/783). Missing capabilities
   remain durable `AwaitingCapability`, and a real redb close/reopen proof
   promotes the exact frozen event, publishes, and receives a relay ACK.
-  An explicitly insecure SDK-owned plaintext file checkpoint provides opt-in
-  personal/development autologin (#197), while remaining distinct from the
-  secure-provider contract. Still open under #47/#51: explicit per-write
-  identity override, standard Keychain/Keystore providers and automatic
-  secure-vault restore, NIP-55 execution/Android AAR integration, and permanent
-  signer connection/correlation counters in engine diagnostics.
+  Session storage is app-owned: NMP ships no plaintext checkpoint and no
+  automatic Keychain/Keystore session store. Transactional app-owned session
+  storage remains tracked in #1398; NIP-55 execution/Android AAR integration
+  and permanent signer connection/correlation counters in engine diagnostics
+  remain open.
   The sign-only operation projects across Rust, FFI, Swift, and Kotlin:
   it binds an immutable request to the active registered signer, validates the
   exact returned event, remains bounded/cancellable, and creates no
@@ -426,8 +425,8 @@ about current code:
   dangling final symlink paths resolve to the store target; reset never
   unlinks the alias inode. Reset clears cached
   events, pending writes, receipts, coverage/evidence, and related persisted
-  state. Separately configured platform account checkpoints remain outside the
-  store path and untouched. **Remaining boundary:** arbitrary external
+  state. An app-stored opaque session payload remains outside the store path
+  and untouched. **Remaining boundary:** arbitrary external
   retargeting of the containing directory, or an uncooperative process creating
   another hard link after the locked final validation, is still a deployment
   concern callers must coordinate.
