@@ -1,5 +1,5 @@
-use nmp_document_edit::{
-    DocumentEditPlan, TagEdit, TagInsertion, TagItemPattern, TagItemSelector, TagRowPattern,
+use nmp_event_edit::{
+    EventEditPlan, TagEdit, TagInsertion, TagItemPattern, TagItemSelector, TagRowPattern,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,14 +14,14 @@ fn row(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
 
-fn plan() -> DocumentEditPlan {
+fn plan() -> EventEditPlan {
     let selector = TagItemSelector::one(
         TagItemPattern::new(vec![
             TagRowPattern::prefix(row(&["item", "wanted"])).unwrap()
         ])
         .unwrap(),
     );
-    DocumentEditPlan::tags(
+    EventEditPlan::tags(
         TagEdit::ensure_present(
             selector,
             vec![row(&["item", "wanted", "current"])],
@@ -31,7 +31,7 @@ fn plan() -> DocumentEditPlan {
     )
 }
 
-fn apply(plan: &DocumentEditPlan, source: &EventFixture) -> EventFixture {
+fn apply(plan: &EventEditPlan, source: &EventFixture) -> EventFixture {
     let replacement = plan.apply_tags(&source.tags).unwrap().replacement;
     EventFixture {
         kind: source.kind,

@@ -1,8 +1,8 @@
-//! Protocol-neutral, loss-preserving structural document edits.
+//! Protocol-neutral, loss-preserving structural event edits.
 //!
 //! Capability crates own typed values, identity, normalization, legacy
 //! decoding, current encoding, conflict meaning, and which operations exist.
-//! They compile those decisions into one closed, versioned [`DocumentEditPlan`].
+//! They compile those decisions into one closed, versioned [`EventEditPlan`].
 //! Replaying a plan needs only raw document data: no callback, module registry,
 //! protocol number, or global kind ownership enters this crate.
 //!
@@ -24,7 +24,7 @@ mod tags;
 
 pub use json::{JsonApplyError, JsonEditOutcome, JsonSpanPatch};
 pub use plan::{
-    Boundary, DocumentEditPlan, DocumentEditV1, JsonFieldEdit, JsonMissing, Occurrences, Partition,
+    Boundary, EventEditPlan, EventEditV1, JsonFieldEdit, JsonMissing, Occurrences, Partition,
     PartitionedTagEdit, PlanError, TagEdit, TagInsertion, TagItemPattern, TagItemSelector,
     TagRowPattern,
 };

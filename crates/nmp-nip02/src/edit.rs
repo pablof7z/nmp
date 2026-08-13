@@ -1,6 +1,6 @@
 use nmp::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
-use nmp_document_edit::{
-    DocumentEditPlan, TagEdit, TagInsertion, TagItemPattern, TagItemSelector, TagRowPattern,
+use nmp_event_edit::{
+    EventEditPlan, TagEdit, TagInsertion, TagItemPattern, TagItemSelector, TagRowPattern,
 };
 use nostr::{Event, EventId, Kind, PublicKey, Tag};
 
@@ -83,7 +83,7 @@ pub fn compose_follow_change(
     } else {
         TagEdit::remove(selector)
     };
-    let plan = DocumentEditPlan::tags(edit);
+    let plan = EventEditPlan::tags(edit);
     // Borrow raw cells for matching; only the final changed document is
     // reconstructed. There is no input-wide string clone before the edit.
     let source = base.tags.iter().map(Tag::as_slice).collect::<Vec<_>>();
