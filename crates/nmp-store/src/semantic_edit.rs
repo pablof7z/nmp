@@ -6,8 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use nmp_grammar::AccessContext;
 use nostr::nips::nip01::Coordinate;
-use nostr::{EventId, Timestamp, UnsignedEvent};
+use nostr::{EventId, RelayUrl, Timestamp, UnsignedEvent};
 
 use crate::{IntentId, IntentSigState, MaterializationRef, PersistenceError, StoredEvent};
 
@@ -34,6 +35,128 @@ pub struct SourcePlanId(pub [u8; 32]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AccessContextId(pub [u8; 32]);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourceRoundId(pub [u8; 32]);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SemanticSource {
+    pub relay: RelayUrl,
+    pub access: AccessContext,
+}
+
+impl SemanticSource {
+    #[must_use]
+    pub fn new(relay: RelayUrl, access: AccessContext) -> Self {
+        Self { relay, access }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticSourceRequest {
+    pub round: SourceRoundId,
+    pub source: SemanticSource,
+    pub transport_generation: u64,
+    pub request_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticSourceTerminal {
+    Eose,
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticSourceMemberState {
+    Pending,
+    Open(SemanticSourceRequest),
+    Settled {
+        request: SemanticSourceRequest,
+        terminal: SemanticSourceTerminal,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FiniteSemanticSourceRound {
+    pub id: SourceRoundId,
+    pub sources: BTreeMap<SemanticSource, SemanticSourceMemberState>,
+}
+
+impl FiniteSemanticSourceRound {
+    pub fn new(
+        id: SourceRoundId,
+        sources: BTreeSet<SemanticSource>,
+    ) -> Result<Self, SemanticRefusal> {
+        if sources.is_empty() {
+            return Err(SemanticRefusal::EmptySourceRound);
+        }
+        Ok(Self {
+            id,
+            sources: sources
+                .into_iter()
+                .map(|source| (source, SemanticSourceMemberState::Pending))
+                .collect(),
+        })
+    }
+
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.sources
+            .values()
+            .all(|state| matches!(state, SemanticSourceMemberState::Settled { .. }))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticSourcePolicy {
+    Continuing,
+    Finite(FiniteSemanticSourceRound),
+}
+
+impl Default for SemanticSourcePolicy {
+    fn default() -> Self {
+        Self::Continuing
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticSourceRoundFact {
+    RequestOpened(SemanticSourceRequest),
+    RequestSettled {
+        request: SemanticSourceRequest,
+        terminal: SemanticSourceTerminal,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticSourceRoundOutcome {
+    Advanced,
+    AlreadyApplied,
+    Stale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticDestinationPlanClosure {
+    NoDestinations,
+    AllCurrentDestinationsTerminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticCohortClose {
+    pub coordinate: Coordinate,
+    pub expected_source_revision: SourceRevision,
+    pub expected_program_digest: SemanticProgramDigest,
+    pub expected_materialization: MaterializationRef,
+    pub destination: SemanticDestinationPlanClosure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticCohortCloseOutcome {
+    Closed { members: Vec<IntentId> },
+    SourceRoundOpen,
+    DestinationOpen,
+    Stale,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticPlan {
@@ -220,6 +343,7 @@ pub struct RecoveredSemanticResource {
     pub coordinate: Coordinate,
     pub operations: Vec<SemanticOperation>,
     pub source: Option<StoredEvent>,
+    pub source_policy: SemanticSourcePolicy,
     pub current: SemanticCurrentState,
 }
 
@@ -259,6 +383,7 @@ pub struct SemanticAccept {
     pub expected_current_materialization: Option<MaterializationId>,
     pub starting_source: StartingSourceRequirement,
     pub source: SourceEvidence,
+    pub source_policy: SemanticSourcePolicy,
     /// The complete verified source named by `source`, including its relay
     /// provenance. Event-qualified acceptance must carry it; absent and
     /// unresolved acceptance must not.
@@ -313,6 +438,8 @@ pub enum SemanticRefusal {
     IncompatibleReplayProgram,
     SourceUnresolved,
     InvalidSourceRevision,
+    EmptySourceRound,
+    IncompatibleSourcePolicy,
     SourceRevisionExhausted,
     NonCanonicalOperationOrder,
     DuplicateOperation(IntentId),
@@ -343,6 +470,7 @@ pub(crate) struct SemanticResourceState {
     pub(crate) source_revision: SourceRevision,
     pub(crate) operations: Vec<SemanticOperation>,
     pub(crate) source: Option<StoredEvent>,
+    pub(crate) source_policy: SemanticSourcePolicy,
     pub(crate) last_materialization_id: Option<MaterializationId>,
     pub(crate) generation: Option<SemanticGeneration>,
 }
@@ -425,6 +553,12 @@ pub(crate) fn plan_accept(
         {
             return Err(SemanticRefusal::IncompatibleReplayProgram);
         }
+    }
+    if previous
+        .as_ref()
+        .is_some_and(|state| state.source_policy != accept.source_policy)
+    {
+        return Err(SemanticRefusal::IncompatibleSourcePolicy);
     }
 
     let source_revision = match previous.as_ref() {
@@ -565,6 +699,7 @@ pub(crate) fn plan_accept(
             source_revision,
             operations,
             source: retained_source,
+            source_policy: accept.source_policy,
             last_materialization_id,
             generation,
         }),
@@ -709,6 +844,7 @@ pub(crate) fn plan_rematerialize(
         .map(|generation| generation.materialization.materialization_id)
         .or(previous.last_materialization_id);
     let retained_source = previous.source.clone();
+    let source_policy = previous.source_policy.clone();
     Ok(SemanticTransitionPlan {
         previous: Some(previous),
         next: (!operations.is_empty()).then_some(SemanticResourceState {
@@ -716,6 +852,7 @@ pub(crate) fn plan_rematerialize(
             source_revision,
             operations,
             source: retained_source,
+            source_policy,
             last_materialization_id,
             generation,
         }),
@@ -730,6 +867,12 @@ pub(crate) fn plan_source_install(
     previous: SemanticResourceState,
     install: SemanticSourceInstall,
 ) -> Result<SemanticTransitionPlan, SemanticRefusal> {
+    if matches!(
+        previous.source_policy,
+        SemanticSourcePolicy::Finite(ref round) if round.is_closed()
+    ) {
+        return Err(SemanticRefusal::InvalidSourceRevision);
+    }
     validate_source_event(&install.successor.source, Some(&install.source))?;
     let coordinate = &install.successor.coordinate;
     let source_matches_coordinate = install.source.event.pubkey == coordinate.public_key
@@ -764,6 +907,48 @@ pub(crate) fn plan_source_install(
         next.source = Some(source);
     }
     Ok(plan)
+}
+
+pub(crate) fn advance_source_round(
+    state: &mut SemanticResourceState,
+    fact: SemanticSourceRoundFact,
+) -> SemanticSourceRoundOutcome {
+    let SemanticSourcePolicy::Finite(round) = &mut state.source_policy else {
+        return SemanticSourceRoundOutcome::Stale;
+    };
+    let (request, settled) = match fact {
+        SemanticSourceRoundFact::RequestOpened(request) => (request, None),
+        SemanticSourceRoundFact::RequestSettled { request, terminal } => (request, Some(terminal)),
+    };
+    if request.round != round.id {
+        return SemanticSourceRoundOutcome::Stale;
+    }
+    let Some(current) = round.sources.get_mut(&request.source) else {
+        return SemanticSourceRoundOutcome::Stale;
+    };
+    match (current.clone(), settled) {
+        (SemanticSourceMemberState::Pending, None) => {
+            *current = SemanticSourceMemberState::Open(request);
+            SemanticSourceRoundOutcome::Advanced
+        }
+        (SemanticSourceMemberState::Open(existing), None) if existing == request => {
+            SemanticSourceRoundOutcome::AlreadyApplied
+        }
+        (SemanticSourceMemberState::Open(existing), Some(terminal)) if existing == request => {
+            *current = SemanticSourceMemberState::Settled { request, terminal };
+            SemanticSourceRoundOutcome::Advanced
+        }
+        (
+            SemanticSourceMemberState::Settled {
+                request: existing,
+                terminal: existing_terminal,
+            },
+            Some(terminal),
+        ) if existing == request && existing_terminal == terminal => {
+            SemanticSourceRoundOutcome::AlreadyApplied
+        }
+        _ => SemanticSourceRoundOutcome::Stale,
+    }
 }
 
 fn validate_source_event(
@@ -1018,6 +1203,19 @@ pub(crate) fn validate_resource_state(
         .iter()
         .map(|operation| operation.intent_id)
         .collect::<BTreeSet<_>>();
+    let source_policy_valid = match &state.source_policy {
+        SemanticSourcePolicy::Continuing => true,
+        SemanticSourcePolicy::Finite(round) => {
+            !round.sources.is_empty()
+                && round.sources.iter().all(|(source, member)| match member {
+                    SemanticSourceMemberState::Pending => true,
+                    SemanticSourceMemberState::Open(request)
+                    | SemanticSourceMemberState::Settled { request, .. } => {
+                        request.round == round.id && request.source == *source
+                    }
+                })
+        }
+    };
     let valid = !state.operations.is_empty()
         && operation_ids.len() == state.operations.len()
         && state
@@ -1032,7 +1230,8 @@ pub(crate) fn validate_resource_state(
                 && state.last_materialization_id
                     == Some(generation.materialization.materialization_id)
         })
-        && validate_source_event(state.source_revision.evidence(), state.source.as_ref()).is_ok();
+        && validate_source_event(state.source_revision.evidence(), state.source.as_ref()).is_ok()
+        && source_policy_valid;
     valid
         .then_some(())
         .ok_or_else(|| PersistenceError::invariant("invalid active semantic resource state"))
@@ -1044,6 +1243,7 @@ pub(crate) fn recovered(state: SemanticResourceState) -> RecoveredSemanticResour
         coordinate: state.coordinate,
         operations: state.operations,
         source: state.source,
+        source_policy: state.source_policy,
         current: SemanticCurrentState {
             source_revision: state.source_revision,
             program_digest,

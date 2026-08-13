@@ -281,6 +281,21 @@ impl EventStore for RedbStore {
         semantic_edit_ops::install_source(self, install)
     }
 
+    fn advance_replaceable_source_round(
+        &mut self,
+        coordinate: &nostr::nips::nip01::Coordinate,
+        fact: crate::SemanticSourceRoundFact,
+    ) -> Result<crate::SemanticSourceRoundOutcome, PersistenceError> {
+        semantic_edit_ops::advance_source_round_fact(self, coordinate, fact)
+    }
+
+    fn close_replaceable_operation_cohort(
+        &mut self,
+        close: crate::SemanticCohortClose,
+    ) -> Result<crate::SemanticCohortCloseOutcome, PersistenceError> {
+        semantic_edit_ops::close_cohort(self, close)
+    }
+
     fn promote_signed(
         &mut self,
         target: crate::PromotionTarget,
