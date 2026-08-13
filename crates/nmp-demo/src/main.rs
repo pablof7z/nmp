@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     Binding, Demand, Derived, DiagnosticsSnapshot, Engine, EngineConfig, EventBuilder, Filter,
-    Frame, Identity, IdentityField, Kind, LiveQuery, PublicKey, RowDelta, Selector, Timestamp,
+    Frame, Identity, IdentityField, Kind, LiveQuery, PublicKey, Row, RowDelta, Selector, Timestamp,
     WriteIntent, WritePayload, WriteRouting,
 };
 use nostr::Keys;
@@ -260,7 +260,7 @@ fn main() {
     // delivered across the whole run -- with the fix, this should track the
     // distinct-note count (each note delivered ~once), not blow up
     // quadratically as the feed grows.
-    let mut known_notes: BTreeMap<nmp::EventId, nmp::Event> = BTreeMap::new();
+    let mut known_notes: BTreeMap<nmp::EventId, Row> = BTreeMap::new();
     let mut raw_delta_entries = 0usize;
     let mut total_batches = 0usize;
     let mut kind_counts: BTreeMap<u16, usize> = BTreeMap::new();
@@ -282,23 +282,23 @@ fn main() {
                 for delta in deltas {
                     match delta {
                         RowDelta::Added(row) => {
-                            let event = row.event;
-                            if known_notes.insert(event.id, event.clone()).is_some() {
+                            let id = row.id();
+                            if known_notes.insert(id, row.clone()).is_some() {
                                 continue; // already rendered this exact event; skip re-printing it
                             }
-                            *kind_counts.entry(event.kind.as_u16()).or_default() += 1;
-                            authors_seen.insert(event.pubkey.to_hex());
-                            let preview: String = event.content.chars().take(80).collect();
+                            *kind_counts.entry(row.kind().as_u16()).or_default() += 1;
+                            authors_seen.insert(row.pubkey().to_hex());
+                            let preview: String = row.content().chars().take(80).collect();
                             println!(
                                 "[note] author={} created_at={} \"{}\" (sources: {})",
-                                event.pubkey.to_hex(),
-                                event.created_at.as_secs(),
+                                row.pubkey().to_hex(),
+                                row.created_at().as_secs(),
                                 preview.replace('\n', " "),
-                                row.sources.len(),
+                                row.sources().len(),
                             );
                         }
                         RowDelta::Updated(row) => {
-                            known_notes.insert(row.event.id, row.event);
+                            known_notes.insert(row.id(), row);
                         }
                         RowDelta::SourcesGrew { id, sources } => {
                             if known_notes.contains_key(&id) {
