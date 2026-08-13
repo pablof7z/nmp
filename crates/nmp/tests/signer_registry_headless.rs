@@ -19,8 +19,8 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nmp::mechanism::core::PublishError;
 use nmp::mechanism::core::RowDelta;
-use nmp::mechanism::core::{PublishError, RelayAdmissionPolicy};
 use nmp::mechanism::publish_queue::{SigningState, WriteFact};
 use nmp::mechanism::runtime::{EngineThread, FifoReceiver, FifoRecvTimeoutError, RowsReceiver};
 use nmp_grammar::LiveQuery;
@@ -192,14 +192,9 @@ fn current_account_reroots_reads_but_each_write_uses_its_frozen_author() {
     // observed, which is all this test needs (see the module doc).
     let dir = FixtureRoutingFacts::new();
 
-    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        store,
-        dir,
-        10,
-        Default::default(),
-        RelayAdmissionPolicy::default(),
-    )
-    .expect("test engine thread construction");
+    let (engine_thread, handle) =
+        EngineThread::spawn_with_fixture_routing_facts(store, dir, 10, Default::default())
+            .expect("test engine thread construction");
 
     let registration_a = handle
         .add_signer(local_signer(&a))
@@ -327,14 +322,9 @@ fn no_current_account_cannot_select_an_arbitrary_registered_signer() {
     let a = Keys::generate();
     let store = MemoryStore::new();
     let dir = FixtureRoutingFacts::new();
-    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        store,
-        dir,
-        10,
-        Default::default(),
-        RelayAdmissionPolicy::default(),
-    )
-    .expect("test engine thread construction");
+    let (engine_thread, handle) =
+        EngineThread::spawn_with_fixture_routing_facts(store, dir, 10, Default::default())
+            .expect("test engine thread construction");
 
     // Register a signer but NEVER activate it.
     handle
@@ -379,13 +369,8 @@ fn no_current_account_cannot_select_an_arbitrary_registered_signer() {
 fn an_auto_write_on_a_cold_directory_parks_instead_of_failing() {
     let a = Keys::generate();
     let b = Keys::generate();
-    let (engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        Default::default(),
-        RelayAdmissionPolicy::default(),
-    )
-    .expect("test engine thread construction");
+    let (engine_thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, Default::default())
+        .expect("test engine thread construction");
     handle
         .add_signer(local_signer(&a))
         .expect("local signer has a public key");
@@ -448,13 +433,8 @@ fn a_builder_composed_before_a_switch_publishes_as_the_account_active_at_accepta
     let b = Keys::generate();
     let a_calls = Arc::new(AtomicUsize::new(0));
     let b_calls = Arc::new(AtomicUsize::new(0));
-    let (engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        Default::default(),
-        RelayAdmissionPolicy::default(),
-    )
-    .expect("test engine thread construction");
+    let (engine_thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, Default::default())
+        .expect("test engine thread construction");
     handle
         .add_signer(CountingSigner {
             pubkey: a.public_key(),
@@ -506,13 +486,8 @@ fn a_builder_composed_before_a_switch_publishes_as_the_account_active_at_accepta
 #[test]
 fn attaching_matching_signer_rearms_awaiting_intent() {
     let a = Keys::generate();
-    let (engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        Default::default(),
-        RelayAdmissionPolicy::default(),
-    )
-    .expect("test engine thread construction");
+    let (engine_thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, Default::default())
+        .expect("test engine thread construction");
 
     // Pin the current identity before its capability exists.
     handle.set_current_account(Some(a.public_key()));
@@ -562,13 +537,8 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
 fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
     let a = Keys::generate();
     let b = Keys::generate();
-    let (engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        Default::default(),
-        RelayAdmissionPolicy::default(),
-    )
-    .expect("test engine thread construction");
+    let (engine_thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, Default::default())
+        .expect("test engine thread construction");
     handle
         .add_signer(local_signer(&a))
         .expect("local signer has a public key");
@@ -620,13 +590,8 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
 #[test]
 fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
     let keys = Keys::generate();
-    let (engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        Default::default(),
-        RelayAdmissionPolicy::default(),
-    )
-    .expect("test engine thread construction");
+    let (engine_thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, Default::default())
+        .expect("test engine thread construction");
 
     // Exact replacement-race order: install A, install B for the same key,
     // detach stale A, then prove B still signs accepted work.
@@ -715,13 +680,8 @@ fn assert_no_status_within(
 fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active() {
     let a = Keys::generate();
     let b = Keys::generate();
-    let (engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        Default::default(),
-        RelayAdmissionPolicy::default(),
-    )
-    .expect("test engine thread construction");
+    let (engine_thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, Default::default())
+        .expect("test engine thread construction");
     handle
         .add_signer(local_signer(&a))
         .expect("local signer has a public key");
@@ -832,13 +792,8 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
 fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
     let a = Keys::generate();
     let b = Keys::generate();
-    let (engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        Default::default(),
-        RelayAdmissionPolicy::default(),
-    )
-    .expect("test engine thread construction");
+    let (engine_thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, Default::default())
+        .expect("test engine thread construction");
     // Only A's capability exists; B is the override target with none.
     handle
         .add_signer(local_signer(&a))
@@ -908,13 +863,8 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
 #[test]
 fn an_explicit_identity_signs_while_logged_out() {
     let b = Keys::generate();
-    let (engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        Default::default(),
-        RelayAdmissionPolicy::default(),
-    )
-    .expect("test engine thread construction");
+    let (engine_thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, Default::default())
+        .expect("test engine thread construction");
     handle
         .add_signer(local_signer(&b))
         .expect("local signer has a public key");
@@ -950,13 +900,8 @@ fn an_explicit_identity_signs_while_logged_out() {
 
 #[test]
 fn pubkeyless_capability_is_a_typed_registration_error() {
-    let (engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
-        10,
-        Default::default(),
-        RelayAdmissionPolicy::default(),
-    )
-    .expect("test engine thread construction");
+    let (engine_thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, Default::default())
+        .expect("test engine thread construction");
     assert_eq!(
         handle.add_signer(PubkeylessSigner),
         Err(nmp::mechanism::runtime::AddSignerError::MissingPublicKey)

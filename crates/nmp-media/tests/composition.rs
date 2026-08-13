@@ -29,11 +29,7 @@ use support::{MockServer, ScriptedResponse};
 // --- shared helpers -------------------------------------------------------
 
 fn loopback_client() -> BlossomClient {
-    BlossomClient::new(BlossomClientConfig {
-        allowed_local_hosts: std::collections::BTreeSet::from(["127.0.0.1".to_string()]),
-        ..BlossomClientConfig::default()
-    })
-    .expect("client construction")
+    BlossomClient::new(BlossomClientConfig::default()).expect("client construction")
 }
 
 /// Sign a prepared upload's authorization draft with test keys (standing in

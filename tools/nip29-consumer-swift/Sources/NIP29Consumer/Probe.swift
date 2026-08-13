@@ -17,7 +17,6 @@ enum Probe {
         static func open(_ args: Args) async throws -> Context {
             let engine = try NMPEngine(config: NMPConfig(
                 storePath: args.storePath,
-                allowedLocalRelayHosts: ["127.0.0.1"],
                 maxRelays: 4
             ))
             do {

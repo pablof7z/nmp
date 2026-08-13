@@ -60,43 +60,16 @@ about current code:
   such authority, no different relay is evicted, and the configured
   physical-session envelope is never exceeded. Other non-relay limit classes
   remain open under ledger #17.
-- **Relay admission is decided by whose declaration named the relay, not by
-  what the address is (#1251).** The previous rule asked only about the
-  address, and it ran inside `parse_relay_list`, which holds one event and no
-  identity: it could not tell an author's own relay list from a stranger's, so
-  it applied one address rule to both and dropped every refused row silently.
-  A user whose kind:10002 named only loopback / RFC-1918 hosts — the default
-  local-development shape — became byte-identical to a user who declared no
-  relays at all. Now: what this app declared (`app_relays`,
-  `fallback_relays`, `indexer_relays`, `WriteRouting::Explicit`, a pinned read
-  source) and what an identity this engine can sign as declared in its own
-  signed relay list are heeded whatever address they name, dial included;
-  everything else — another author's list, a relay hint in a third party's
-  `e`/`p`/`a` tag, a row's observed source — still faces the address rule, and
-  `allowed_local_relay_hosts` re-admits exact local hosts from those. Grants
-  are per author list and never pooled into a host set, so holding one key's
-  signer cannot widen where a write signing as a different key connects.
-  Refused relays are retained on the neutral author fact
-  (`AuthorRoutes::refused`), so "declared three relays, admitted none" is a
-  different value from "declared nothing" and the zero-destination receipt
-  detail names the refused relays and why. `.onion` moved off the local-address
-  axis onto `EngineConfig::tor_reachable`, which makes OTHER people's hidden
-  services usable; the local-host allowlist grants `.onion` nothing and Tor
-  grants local addresses nothing. **Deliberately NOT done, flagged so nothing
-  hides:** (1) NMP installs no Tor transport and never probes for one —
-  `tor_reachable` is the app stating that reachability exists, and admitting is
-  permission to try, so a hidden service with nothing listening simply fails to
-  connect and eventually gives up; (2) NIP-11 document acquisition is
-  provenance-blind and still asks the strictest question, so fetching a LOCAL
-  relay's NIP-11 document requires its host in `allowed_local_relay_hosts` even
-  though that relay's websocket now dials on the operator's declaration alone;
-  (3) a Blossom server URL reaches `nmp-blossom` as an opaque string with no
-  provenance NMP can inspect — there is no server-list parser here — so it is
-  treated as anyone else's claim and keeps its own `allowed_local_hosts` plus
-  the new `tor_reachable`; (4) the dial-time grant set only ever grows within a
-  process: a relay dropped from a trusted declaration stops being routed to
-  immediately, so a stale grant names a destination nothing can reach, but it
-  is not reference-counted away.
+- **Valid relay and Blossom URLs are ordinary destinations (#1429).** NMP does
+  not classify loopback, private, link-local, unspecified, DNS-resolved, or
+  `.onion` addresses as forbidden. NIP-65 rows, selector hints, provenance,
+  explicit routes, NIP-11, and Blossom all preserve the destination supplied
+  by their owning protocol value and use the platform resolver or ordinary
+  socket path. A target that is unreachable fails as a normal connection or
+  acquisition outcome; NMP installs no Tor transport and makes no reachability
+  promise. URL syntax, schemes, credentials, redirects, request deadlines,
+  body bounds, authentication, and integrity checks remain enforced because
+  they are separate protocol and resource boundaries.
 - **Crash-safe acceptance, restart reattachment, a real attempt ceiling, and
   governed SDK observation are built; whole-terminal retention is now bounded
   (#753).** Safely unsent superseded predecessors are destroyed outright;
@@ -344,8 +317,8 @@ about current code:
   strict 256-document bound. Refreshing last-good documents count toward that
   bound and remain available for stale-on-error; if all 256 are refreshing, a
   257th fresh result is delivered but not retained. Fetches are cancellable
-  async tasks on the engine-owned shared runtime (#704) and use Hickory DNS plus
-  HTTP under one three-second deadline; no caller-visible waiter or worker
+  async tasks on the engine-owned shared runtime (#704) and use the platform
+  resolver plus HTTP under one three-second deadline; no caller-visible waiter or worker
   admission refusal exists, and engine shutdown closes every waiter and drains
   the bounded tasks even when app handles survive. Relay URL credentials are rejected before
   request construction so reqwest cannot turn them into HTTP Basic

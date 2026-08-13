@@ -20,7 +20,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use nmp_grammar::RelaySessionKey;
-use nmp_network_policy::{Declarer, DestinationPolicy};
 use nostr::{Event, EventId, JsonUtil, RelayMessage, RelayUrl, SubscriptionId};
 
 use crate::handle::RelayHandle;
@@ -792,18 +791,6 @@ pub struct PoolConfig {
     /// Integration tests that force a reconnect pass `Some(Duration::ZERO)`
     /// so retries fire back-to-back instead of racing a per-URL lottery.
     pub reconnect_jitter_max: Option<Duration>,
-    /// The one pure destination-admission owner (#885) this pool dials
-    /// under. Empty by default, matching `nmp-engine`'s
-    /// `RelayAdmissionPolicy` default: no discovered-or-explicit relay may
-    /// dial a loopback/private/link-local/unspecified/broadcast address.
-    /// This is the SAME policy the engine enforces before a discovered relay
-    /// enters the routable directory; it is threaded down here so
-    /// `pool::connect`'s post-resolution answer-set check (the defense
-    /// against DNS-based SSRF and rebind — a URL host string can look public
-    /// and still resolve to an internal address) can still admit an
-    /// operator's INTENTIONAL local relay after DNS resolves it, instead of
-    /// only ever checking the URL string before a socket exists.
-    pub destination_policy: Arc<DestinationPolicy>,
 }
 
 impl Default for PoolConfig {
@@ -833,7 +820,6 @@ impl Default for PoolConfig {
             keepalive_pong_timeout: None,
             reconnect_delay_initial: None,
             reconnect_jitter_max: None,
-            destination_policy: Arc::new(DestinationPolicy::default()),
         }
     }
 }
@@ -871,18 +857,8 @@ impl Pool {
     /// previously closed via [`Self::close`], the slot reopens with a fresh
     /// generation — the prior handle is now stale. Every refusal is returned
     /// as a typed error; this API never manufactures an invalid handle.
-    ///
-    /// `declarer` is the caller's provenance answer for this destination
-    /// (#1251). It is a parameter rather than something the pool derives
-    /// because the pool never sees a declaration — only the layer that read
-    /// one can answer, and making every dial site answer is what stops the
-    /// socket boundary from silently disagreeing with routing.
-    pub fn ensure_open(
-        &self,
-        url: &RelayUrl,
-        declarer: Declarer,
-    ) -> Result<RelayHandle, RelayOpenError> {
-        self.ensure_session(&RelaySessionKey::public(url.clone()), declarer)
+    pub fn ensure_open(&self, url: &RelayUrl) -> Result<RelayHandle, RelayOpenError> {
+        self.ensure_session(&RelaySessionKey::public(url.clone()))
     }
 
     #[doc(hidden)]
@@ -909,13 +885,9 @@ impl Pool {
     }
 
     /// Ensure the exact physical relay session is dialing/connected.
-    pub fn ensure_session(
-        &self,
-        session: &RelaySessionKey,
-        declarer: Declarer,
-    ) -> Result<RelayHandle, RelayOpenError> {
+    pub fn ensure_session(&self, session: &RelaySessionKey) -> Result<RelayHandle, RelayOpenError> {
         match self.inner.lock() {
-            Ok(mut guard) => guard.try_ensure_session(session, declarer),
+            Ok(mut guard) => guard.try_ensure_session(session),
             Err(_) => Err(RelayOpenError::Unavailable),
         }
     }
@@ -1263,7 +1235,7 @@ mod thread_budget_tests {
         let (spawner, pool, _events) = test_pool(4, 1);
         let pool = pool.expect("fixed engine executors fit the injected budget");
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
-        let error = pool.ensure_open(&relay, Declarer::Ourselves).unwrap_err();
+        let error = pool.ensure_open(&relay).unwrap_err();
         assert!(matches!(
             error,
             RelayOpenError::ThreadUnavailable(ThreadSpawnError {
@@ -1283,9 +1255,9 @@ mod thread_budget_tests {
         let pool = pool.unwrap();
         let first = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
         let second = RelayUrl::parse("ws://127.0.0.1:10").unwrap();
-        let first_handle = pool.ensure_open(&first, Declarer::Ourselves).unwrap();
+        let first_handle = pool.ensure_open(&first).unwrap();
         pool.close(first_handle).unwrap();
-        let second_handle = pool.ensure_open(&second, Declarer::Ourselves).unwrap();
+        let second_handle = pool.ensure_open(&second).unwrap();
         pool.close(second_handle).unwrap();
 
         // Four fixed engine executors + at most two relay OS threads: one
@@ -1348,7 +1320,7 @@ mod ephemeral_send_tests {
             relay.clone(),
             AccessContext::Nip42(Keys::generate().public_key()),
         );
-        let handle = pool.ensure_session(&session, Declarer::Ourselves).unwrap();
+        let handle = pool.ensure_session(&session).unwrap();
         let wrong_session =
             RelaySessionKey::new(relay, AccessContext::Nip42(Keys::generate().public_key()));
         let stale = RelayHandle {

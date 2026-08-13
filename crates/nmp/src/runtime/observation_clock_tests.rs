@@ -27,7 +27,6 @@ fn runtime(store: MemoryStore, faults: LaneFaults) -> (EngineThread, Handle) {
         FaultyLaneStore::new(store, faults),
         4,
         PoolConfig::default(),
-        RelayAdmissionPolicy::default(),
     )
     .expect("engine construction")
 }

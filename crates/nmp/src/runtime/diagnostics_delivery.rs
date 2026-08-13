@@ -119,12 +119,10 @@ mod tests {
     use std::sync::mpsc::{self, TryRecvError};
 
     use nmp_grammar::{Binding, Filter, LiveQuery};
-    use nmp_network_policy::Declarer;
     use nmp_store::MemoryStore;
     use nmp_transport::{PoolConfig, RelayOpenError, RelaySessionKey};
     use nostr::{Keys, RelayUrl};
 
-    use crate::core::RelayAdmissionPolicy;
     use crate::runtime::diagnostics_channel::latest_channel;
     use crate::runtime::EngineThread;
 
@@ -176,10 +174,10 @@ mod tests {
         let second = RelaySessionKey::public(
             RelayUrl::parse("ws://127.0.0.1:10").expect("second relay URL"),
         );
-        pool.ensure_session(&first, Declarer::Ourselves)
+        pool.ensure_session(&first)
             .expect("first session owns the sole slot");
         assert!(matches!(
-            pool.ensure_session(&second, Declarer::Ourselves),
+            pool.ensure_session(&second),
             Err(RelayOpenError::AtCapacity { max_relays: 1 })
         ));
 
@@ -242,13 +240,8 @@ mod tests {
 
     #[test]
     fn engine_deadline_delivers_the_lazy_withdrawal_snapshot() {
-        let (engine, handle) = EngineThread::spawn(
-            MemoryStore::new(),
-            1,
-            PoolConfig::default(),
-            RelayAdmissionPolicy::default(),
-        )
-        .expect("test engine construction");
+        let (engine, handle) = EngineThread::spawn(MemoryStore::new(), 1, PoolConfig::default())
+            .expect("test engine construction");
         let (diagnostics, snapshots) = handle.observe_diagnostics();
         assert_eq!(
             snapshots

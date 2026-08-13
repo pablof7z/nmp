@@ -2235,7 +2235,6 @@ async fn run_direct_follow_scenario(
     let engine = Arc::new(
         Engine::new(EngineConfig {
             app_relays: vec![relay.url.to_string()],
-            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..direct_outbox_routing_config()
         })
         .expect("direct follow engine must construct"),
@@ -2300,7 +2299,6 @@ async fn run_ffi_follow_scenario(
         store_path: None,
         app_relays: vec![relay.url.to_string()],
         fallback_relays: vec![],
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..ffi_outbox_routing_config()
     })
     .expect("FFI follow engine must construct");
@@ -2366,7 +2364,6 @@ async fn run_direct_missing_contact_list(
     let engine = Arc::new(
         Engine::new(EngineConfig {
             app_relays: vec![relay.url.to_string()],
-            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..direct_outbox_routing_config()
         })
         .expect("direct missing-list engine must construct"),
@@ -2400,7 +2397,6 @@ async fn run_ffi_missing_contact_list(
         store_path: None,
         app_relays: vec![relay.url.to_string()],
         fallback_relays: vec![],
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..ffi_outbox_routing_config()
     })
     .expect("FFI missing-list engine must construct");
@@ -2433,7 +2429,6 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     let engine = Engine::new(EngineConfig {
         app_relays: vec![relay_url.clone()],
         // Both facades assemble the same optional provider and app policy.
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..direct_outbox_routing_config()
     })
     .expect("direct engine must construct");
@@ -2578,7 +2573,6 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
         // Same provider and operator policy as `run_direct_success`.
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..ffi_outbox_routing_config()
     })
     .expect("FFI engine must construct");
@@ -2689,7 +2683,6 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
     let relay_url = relay.url.to_string();
     let engine = Engine::new(EngineConfig {
         app_relays: vec![relay_url.clone()],
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..direct_outbox_routing_config()
     })
     .expect("direct auth-parked engine must construct");
@@ -2749,7 +2742,6 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
         store_path: None,
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..ffi_outbox_routing_config()
     })
     .expect("FFI auth-parked engine must construct");
@@ -2806,7 +2798,6 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
     let relay_url = relay.url.to_string();
     let engine = Engine::new(EngineConfig {
         app_relays: vec![relay_url.clone()],
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..direct_outbox_routing_config()
     })
     .expect("direct override engine must construct");
@@ -2860,7 +2851,6 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
         store_path: None,
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..ffi_outbox_routing_config()
     })
     .expect("FFI override engine must construct");
@@ -3482,7 +3472,6 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
     let superseded_id = {
         let engine = Engine::new(EngineConfig {
             store_path: Some(path.to_string_lossy().into_owned()),
-            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..EngineConfig::default()
         })
         .expect("direct engine must construct");
@@ -3562,7 +3551,6 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
     let superseded_id = {
         let engine = new_ffi_engine(NmpEngineConfig {
             store_path: Some(path.to_string_lossy().into_owned()),
-            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..NmpEngineConfig::default()
         })
         .expect("FFI engine must construct");
@@ -3880,7 +3868,6 @@ async fn direct_and_ffi_follow_refuse_a_reconciled_missing_contact_list() {
 async fn run_direct_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormStatus> {
     let relay_url = relay.url.to_string();
     let engine = Engine::new(EngineConfig {
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..EngineConfig::default()
     })
     .expect("direct engine must construct");
@@ -3916,7 +3903,6 @@ async fn run_ffi_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormS
         store_path: None,
         app_relays: vec![],
         fallback_relays: vec![],
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
         ..NmpEngineConfig::default()
     })
     .expect("FFI engine must construct");

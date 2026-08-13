@@ -134,8 +134,6 @@ fn main() {
         indexer_relays: Vec::new(),
         app_relays: relays.clone(),
         fallback_relays: Vec::new(),
-        allowed_local_relay_hosts: vec!["localhost".into(), "127.0.0.1".into()],
-        tor_reachable: false,
         max_relays: relays.len().max(1),
         max_auth_capabilities: 4,
         max_publish_attempts: nmp::DEFAULT_MAX_PUBLISH_ATTEMPTS,

@@ -12,8 +12,6 @@ bench-instrumentation = []
 blake3.workspace = true
 nostr.workspace = true
 nmp-grammar.workspace = true
-# The one pure destination-admission owner (#885) every dial goes through.
-nmp-network-policy.workspace = true
 # #680 falsifier instrumentation only: every production transport thread is
 # counted through `nmp_executor::note_thread_spawn` so the whole-engine
 # NMP-thread counter is comprehensive (no uninstrumented thread source).

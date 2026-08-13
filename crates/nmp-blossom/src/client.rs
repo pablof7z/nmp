@@ -1,24 +1,13 @@
 //! BUD-02/04/12 blob client (#545, #551): async, self-verifying `PUT
 //! /upload`, `PUT /mirror`, `DELETE /<sha256>`, and `GET /list/<pubkey>`
-//! with the SAME HTTP admission discipline as the engine's NIP-11
-//! fetcher (`crates/nmp/src/relay_information_service.rs`, issue #519): literal
-//! loopback/private/link-local/onion hosts are refused BEFORE any socket
-//! I/O unless operator opted-in, complete DNS answer sets are admitted or
-//! refused whole by the pure `nmp-network-policy` owner (#885),
-//! redirects/proxies/referrers/retries are disabled, and every response
-//! body is read streamed under a byte cap. Admission rules live in that
-//! engine-free crate, so this client never re-derives them. Each operation
-//! validates its authorization binding FIRST, then host admission, then
-//! performs I/O; each has its own exhaustive error enum (operation
-//! failures are never collapsed into one taxonomy).
+//! with redirects/proxies/referrers/retries disabled and every response
+//! body streamed under a byte cap. Each operation validates its authorization
+//! binding before performing I/O; each has its own exhaustive error enum
+//! (operation failures are never collapsed into one taxonomy).
 
-use std::collections::BTreeSet;
-use std::net::IpAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use nmp_asset::{Sha256Hash, VerifiedAsset};
-use nmp_network_policy::{Declarer, DestinationPolicy, DestinationRefusal, OnionReachability};
 
 use crate::auth::{BlossomVerb, SignedAuthorization};
 use crate::descriptor::{BlobDescriptor, DescriptorError};
@@ -43,7 +32,6 @@ pub const DEFAULT_MAX_LIST_RESPONSE_BYTES: usize = 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlossomServerUrl {
     url: reqwest::Url,
-    host: String,
 }
 
 /// [`BlossomServerUrl::parse`]'s failure modes. Exhaustive; each variant
@@ -98,10 +86,7 @@ impl BlossomServerUrl {
         let url = reqwest::Url::parse(input).map_err(|error| ServerUrlError::Parse {
             reason: error.to_string(),
         })?;
-        let host = url
-            .host_str()
-            .ok_or(ServerUrlError::MissingHost)?
-            .to_string();
+        url.host_str().ok_or(ServerUrlError::MissingHost)?;
         let scheme = url.scheme();
         if scheme != "http" && scheme != "https" {
             return Err(ServerUrlError::UnsupportedScheme {
@@ -119,18 +104,12 @@ impl BlossomServerUrl {
         if url.query().is_some() || url.fragment().is_some() {
             return Err(ServerUrlError::QueryOrFragment);
         }
-        Ok(Self { url, host })
+        Ok(Self { url })
     }
 
     /// The validated base URL text.
     pub fn as_str(&self) -> &str {
         self.url.as_str()
-    }
-
-    /// The URL's host component exactly as parsed (IPv6 hosts keep their
-    /// brackets, matching `Url::host_str`).
-    fn host_str(&self) -> &str {
-        &self.host
     }
 
     /// The BUD-02 upload endpoint at this server's root.
@@ -179,22 +158,6 @@ impl BlossomServerUrl {
 /// [`BlossomClient`] construction knobs.
 #[derive(Debug, Clone)]
 pub struct BlossomClientConfig {
-    /// Operator opt-in local-host allowlist, in
-    /// `nmp_network_policy::normalize_bare_host`'s normalized form -- the
-    /// same vocabulary the engine's `RelayAdmissionPolicy` uses (#519, #885).
-    /// Empty (the default) means NO loopback/private/link-local host or
-    /// resolved address may be uploaded to.
-    ///
-    /// This says nothing about `.onion`, which [`Self::tor_reachable`] owns
-    /// (#1251): the two are different questions, and a list of local hosts was
-    /// never the right place to answer a reachability one.
-    pub allowed_local_hosts: BTreeSet<String>,
-    /// Whether this process can reach a Tor hidden service. A Blossom server
-    /// URL arrives from the app with no provenance NMP can inspect -- there is
-    /// no Blossom server-list parser here to tell "my own servers" from "a
-    /// server named in someone else's list" -- so a `.onion` server is treated
-    /// as anyone else's and needs this declaration. Default: no Tor.
-    pub tor_reachable: bool,
     /// Cap on a single-descriptor response body (upload/mirror), enforced
     /// while streaming.
     pub max_response_bytes: usize,
@@ -209,8 +172,6 @@ pub struct BlossomClientConfig {
 impl Default for BlossomClientConfig {
     fn default() -> Self {
         Self {
-            allowed_local_hosts: BTreeSet::new(),
-            tor_reachable: false,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             max_list_response_bytes: DEFAULT_MAX_LIST_RESPONSE_BYTES,
             request_deadline: DEFAULT_REQUEST_DEADLINE,
@@ -254,13 +215,7 @@ pub enum UploadError {
         authorized_verb: BlossomVerb,
         authorized_blob: Option<Sha256Hash>,
     },
-    /// The server URL names a literal loopback/private/link-local/
-    /// unspecified/onion host the operator did not opt in -- refused
-    /// before ANY socket I/O (issue #519's discipline).
-    LocalHostNotAdmitted { host: String },
-    /// Transport failure: connect/DNS/TLS/timeout, or the body stream
-    /// died. (A DNS answer that is entirely unadmitted-local also surfaces
-    /// here, from the resolver's fail-closed refusal.)
+    /// Transport failure: connect/DNS/TLS/timeout, or the body stream died.
     Network { detail: String },
     /// The server answered with a redirect; redirects are never followed
     /// (an upload must not be silently re-aimed at another authority).
@@ -297,11 +252,6 @@ impl std::fmt::Display for UploadError {
                 "authorization ({authorized_verb}, blob {:?}) does not grant uploading blob {}",
                 authorized_blob.map(|hash| hash.to_hex()),
                 expected.to_hex()
-            ),
-            Self::LocalHostNotAdmitted { host } => write!(
-                f,
-                "refusing Blossom upload: host {host:?} is loopback/private/link-local/\
-                 unspecified/onion and not operator opted-in"
             ),
             Self::Network { detail } => write!(f, "Blossom upload transport failed: {detail}"),
             Self::RedirectRefused { status } => {
@@ -392,13 +342,7 @@ pub enum MirrorError {
         authorized_verb: BlossomVerb,
         authorized_blob: Option<Sha256Hash>,
     },
-    /// The server URL names a literal loopback/private/link-local/
-    /// unspecified/onion host the operator did not opt in -- refused
-    /// before ANY socket I/O (issue #519's discipline).
-    LocalHostNotAdmitted { host: String },
-    /// Transport failure: connect/DNS/TLS/timeout, or the body stream
-    /// died. (A DNS answer that is entirely unadmitted-local also surfaces
-    /// here, from the resolver's fail-closed refusal.)
+    /// Transport failure: connect/DNS/TLS/timeout, or the body stream died.
     Network { detail: String },
     /// The server answered with a redirect; redirects are never followed
     /// (a mirror must not be silently re-aimed at another authority).
@@ -445,11 +389,6 @@ impl std::fmt::Display for MirrorError {
                 "authorization ({authorized_verb}, blob {:?}) does not grant mirroring blob {}",
                 authorized_blob.map(|hash| hash.to_hex()),
                 expected.to_hex()
-            ),
-            Self::LocalHostNotAdmitted { host } => write!(
-                f,
-                "refusing Blossom mirror: host {host:?} is loopback/private/link-local/\
-                 unspecified/onion and not operator opted-in"
             ),
             Self::Network { detail } => write!(f, "Blossom mirror transport failed: {detail}"),
             Self::RedirectRefused { status } => {
@@ -513,13 +452,7 @@ pub enum DeleteError {
         authorized_verb: BlossomVerb,
         authorized_blob: Option<Sha256Hash>,
     },
-    /// The server URL names a literal loopback/private/link-local/
-    /// unspecified/onion host the operator did not opt in -- refused
-    /// before ANY socket I/O (issue #519's discipline).
-    LocalHostNotAdmitted { host: String },
-    /// Transport failure: connect/DNS/TLS/timeout, or the body stream
-    /// died. (A DNS answer that is entirely unadmitted-local also surfaces
-    /// here, from the resolver's fail-closed refusal.)
+    /// Transport failure: connect/DNS/TLS/timeout, or the body stream died.
     Network { detail: String },
     /// The server answered with a redirect; redirects are never followed
     /// (a delete must not be silently re-aimed at another authority).
@@ -550,11 +483,6 @@ impl std::fmt::Display for DeleteError {
                 "authorization ({authorized_verb}, blob {:?}) does not grant deleting blob {}",
                 authorized_blob.map(|hash| hash.to_hex()),
                 expected.to_hex()
-            ),
-            Self::LocalHostNotAdmitted { host } => write!(
-                f,
-                "refusing Blossom delete: host {host:?} is loopback/private/link-local/\
-                 unspecified/onion and not operator opted-in"
             ),
             Self::Network { detail } => write!(f, "Blossom delete transport failed: {detail}"),
             Self::RedirectRefused { status } => {
@@ -604,13 +532,7 @@ pub enum ListError {
     /// An authorization was supplied but is not a `list` grant -- refused
     /// before any admission or I/O (no cross-verb replay).
     WrongVerb { authorized_verb: BlossomVerb },
-    /// The server URL names a literal loopback/private/link-local/
-    /// unspecified/onion host the operator did not opt in -- refused
-    /// before ANY socket I/O (issue #519's discipline).
-    LocalHostNotAdmitted { host: String },
-    /// Transport failure: connect/DNS/TLS/timeout, or the body stream
-    /// died. (A DNS answer that is entirely unadmitted-local also surfaces
-    /// here, from the resolver's fail-closed refusal.)
+    /// Transport failure: connect/DNS/TLS/timeout, or the body stream died.
     Network { detail: String },
     /// The server answered with a redirect; redirects are never followed
     /// (a list must not be silently re-aimed at another authority).
@@ -645,11 +567,6 @@ impl std::fmt::Display for ListError {
             Self::WrongVerb { authorized_verb } => write!(
                 f,
                 "authorization verb {authorized_verb} does not grant listing (need `list`)"
-            ),
-            Self::LocalHostNotAdmitted { host } => write!(
-                f,
-                "refusing Blossom list: host {host:?} is loopback/private/link-local/\
-                 unspecified/onion and not operator opted-in"
             ),
             Self::Network { detail } => write!(f, "Blossom list transport failed: {detail}"),
             Self::RedirectRefused { status } => {
@@ -687,63 +604,15 @@ impl std::error::Error for ListError {}
 /// HTTP discipline (module doc); one client may serve many operations.
 pub struct BlossomClient {
     http: reqwest::Client,
-    destination_policy: Arc<DestinationPolicy>,
     max_response_bytes: usize,
     max_list_response_bytes: usize,
 }
 
 impl BlossomClient {
-    /// Build the HTTP client EXACTLY in the engine NIP-11 discipline:
-    /// hickory DNS behind a post-resolution local-IP admission filter, no
-    /// redirects, no retries, no proxy, no referer, one overall deadline.
+    /// Build the HTTP client with platform DNS, no redirects, no retries, no
+    /// proxy, no referer, and one overall deadline.
     pub fn new(config: BlossomClientConfig) -> Result<Self, ClientBuildError> {
-        Self::build(
-            config,
-            None,
-            hickory_resolver::config::LookupIpStrategy::Ipv4AndIpv6,
-        )
-    }
-
-    /// Test hook mirroring the engine precedent
-    /// (`HttpFetcher::with_resolver_config`,
-    /// `crates/nmp/src/relay_information_service.rs`): point hickory at an
-    /// injected nameserver (the unit tests below run a raw loopback UDP
-    /// DNS server) so the post-DNS admission filter can be falsified
-    /// without touching real DNS. IPv4-only lookup strategy, same as the
-    /// engine's hook, so the injected server answers exactly one A query.
-    #[cfg(test)]
-    fn with_resolver_config(
-        config: BlossomClientConfig,
-        resolver_config: hickory_resolver::config::ResolverConfig,
-    ) -> Result<Self, ClientBuildError> {
-        Self::build(
-            config,
-            Some(resolver_config),
-            hickory_resolver::config::LookupIpStrategy::Ipv4Only,
-        )
-    }
-
-    fn build(
-        config: BlossomClientConfig,
-        resolver_config: Option<hickory_resolver::config::ResolverConfig>,
-        resolver_strategy: hickory_resolver::config::LookupIpStrategy,
-    ) -> Result<Self, ClientBuildError> {
-        let destination_policy = Arc::new(DestinationPolicy::new(
-            config.allowed_local_hosts,
-            if config.tor_reachable {
-                OnionReachability::Reachable
-            } else {
-                OnionReachability::Unreachable
-            },
-        ));
-        let resolver = AdmittedDnsResolver::new(
-            resolver_config,
-            resolver_strategy,
-            Arc::clone(&destination_policy),
-        )
-        .map_err(|reason| ClientBuildError { reason })?;
         let http = reqwest::Client::builder()
-            .dns_resolver(Arc::new(resolver))
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .no_proxy()
@@ -755,7 +624,6 @@ impl BlossomClient {
             })?;
         Ok(Self {
             http,
-            destination_policy,
             max_response_bytes: config.max_response_bytes,
             max_list_response_bytes: config.max_list_response_bytes,
         })
@@ -765,8 +633,7 @@ impl BlossomClient {
     ///
     /// 1. refuse an authorization that is not an `upload` grant for
     ///    exactly these bytes (no cross-blob/cross-verb replay);
-    /// 2. refuse an unadmitted literal-local host BEFORE any socket I/O;
-    /// 3. send `Authorization`, `X-SHA-256`, and (when supplied)
+    /// 2. send `Authorization`, `X-SHA-256`, and (when supplied)
     ///    `Content-Type`; `Content-Length` rides the byte body;
     /// 4. stream the response under the configured byte cap;
     /// 5. map every non-success status into the separated taxonomy;
@@ -786,9 +653,6 @@ impl BlossomClient {
                 authorized_blob: auth.blob(),
             });
         }
-
-        self.reject_unadmitted_local_host(server.host_str())
-            .map_err(|host| UploadError::LocalHostNotAdmitted { host })?;
 
         let mut request = self
             .http
@@ -866,11 +730,7 @@ impl BlossomClient {
     ///
     /// 1. refuse an authorization that is not an `upload` grant (BUD-04
     ///    mirrors under the `upload` verb) bound to EXACTLY `expected`;
-    /// 2. refuse an unadmitted literal-local host BEFORE any socket I/O
-    ///    (`source_url` is an opaque payload for the DESTINATION server to
-    ///    fetch -- this client never dials it, so only `server` is
-    ///    admission-checked here);
-    /// 3. send `Authorization` and the `{"url": ...}` JSON body;
+    /// 2. send `Authorization` and the `{"url": ...}` JSON body;
     /// 4. stream the response under the configured byte cap;
     /// 5. map every non-success status into the separated taxonomy -- 409
     ///    (server refused: mirrored hash != authorized `x`) and 502
@@ -898,9 +758,6 @@ impl BlossomClient {
                 authorized_blob: auth.blob(),
             });
         }
-
-        self.reject_unadmitted_local_host(server.host_str())
-            .map_err(|host| MirrorError::LocalHostNotAdmitted { host })?;
 
         let body = serde_json::json!({ "url": source_url }).to_string();
         let mut response = self
@@ -978,8 +835,7 @@ impl BlossomClient {
     ///    request path, and BUD-12 mandates that extra `x` tags on the
     ///    token never widen that to other blobs (the
     ///    [`SignedAuthorization`] witness holds exactly one hash);
-    /// 2. refuse an unadmitted literal-local host BEFORE any socket I/O;
-    /// 3. send the DELETE with the `Authorization` header;
+    /// 2. send the DELETE with the `Authorization` header;
     /// 4. 200/204 succeed; every other status maps into the separated
     ///    taxonomy (404 keeps its own `NotFound` variant).
     ///
@@ -1004,9 +860,6 @@ impl BlossomClient {
                 authorized_blob: auth.blob(),
             });
         }
-
-        self.reject_unadmitted_local_host(server.host_str())
-            .map_err(|host| DeleteError::LocalHostNotAdmitted { host })?;
 
         let mut response = self
             .http
@@ -1068,8 +921,7 @@ impl BlossomClient {
     ///    (typed [`ListError::WrongVerb`], before any admission or I/O);
     ///    when `None`, NO `Authorization` header is sent -- a server that
     ///    requires one answers 401, surfaced as [`ListError::AuthRejected`];
-    /// 2. refuse an unadmitted literal-local host BEFORE any socket I/O;
-    /// 3. GET with `cursor`/`limit` query parameters only when set;
+    /// 2. GET with `cursor`/`limit` query parameters only when set;
     /// 4. stream the response under `max_list_response_bytes`;
     /// 5. parse STRICTLY: the top level must be a JSON array, and every
     ///    element must satisfy exactly the [`BlobDescriptor::parse_json`]
@@ -1090,9 +942,6 @@ impl BlossomClient {
                 });
             }
         }
-
-        self.reject_unadmitted_local_host(server.host_str())
-            .map_err(|host| ListError::LocalHostNotAdmitted { host })?;
 
         let mut request = self.http.get(server.list_endpoint(&owner, page));
         if let Some(auth) = auth {
@@ -1150,20 +999,6 @@ impl BlossomClient {
         }
         Ok(descriptors)
     }
-
-    /// Refuse a literal loopback/private/link-local/unspecified/onion HOST
-    /// that the operator did not explicitly opt in -- BEFORE any request
-    /// is built (issue #519's discipline; the resolver below cannot see an
-    /// IP-literal host because a literal never reaches DNS). The shared
-    /// `nmp-network-policy` owner decides, so this crate never re-derives
-    /// host normalization of its own. `Err` carries the refused host text;
-    /// each operation wraps it in its own `LocalHostNotAdmitted` variant.
-    fn reject_unadmitted_local_host(&self, host: &str) -> Result<(), String> {
-        self.destination_policy
-            .admit_host(host, Declarer::SomeoneElse)
-            .map(|_| ())
-            .map_err(|_| host.to_string())
-    }
 }
 
 /// The `X-Reason` header servers attach to refusals (BUD-01), captured
@@ -1205,79 +1040,6 @@ async fn read_bounded_body(
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
-}
-
-/// The post-DNS half of admission (issue #519's discipline, #885's single
-/// owner): resolve through hickory, then admit or refuse the COMPLETE fresh
-/// answer set. One unallowed local answer refuses the whole set, mixed
-/// public/local answers included -- nothing is narrowed to a convenient
-/// subset.
-struct AdmittedDnsResolver {
-    resolver: hickory_resolver::TokioResolver,
-    destination_policy: Arc<DestinationPolicy>,
-}
-
-impl AdmittedDnsResolver {
-    /// `config: None` reads the system DNS configuration (production);
-    /// `Some` injects a nameserver (the test hook,
-    /// [`BlossomClient::with_resolver_config`]) -- the SAME split as the
-    /// engine's `HickoryReqwestResolver::new`.
-    fn new(
-        config: Option<hickory_resolver::config::ResolverConfig>,
-        strategy: hickory_resolver::config::LookupIpStrategy,
-        destination_policy: Arc<DestinationPolicy>,
-    ) -> Result<Self, String> {
-        let mut builder = match config {
-            Some(config) => hickory_resolver::TokioResolver::builder_with_config(
-                config,
-                hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
-            ),
-            None => hickory_resolver::TokioResolver::builder_tokio()
-                .map_err(|error| format!("could not read the system DNS configuration: {error}"))?,
-        };
-        builder.options_mut().ip_strategy = strategy;
-        let resolver = builder
-            .build()
-            .map_err(|error| format!("could not construct the DNS resolver: {error}"))?;
-        Ok(Self {
-            resolver,
-            destination_policy,
-        })
-    }
-}
-
-/// Admit one COMPLETE fresh DNS answer for `host` and lift it into reqwest's
-/// address type. The set is admitted or refused whole: a mixed public/local
-/// answer is never reduced to its public subset, because that reduction is
-/// exactly what defeats rebinding protection.
-fn admitted_reqwest_addresses(
-    destination_policy: &DestinationPolicy,
-    host: &str,
-    addresses: impl IntoIterator<Item = IpAddr>,
-) -> Result<Vec<std::net::SocketAddr>, DestinationRefusal> {
-    let admitted_host = destination_policy.admit_host(host, Declarer::SomeoneElse)?;
-    let admitted = destination_policy.admit_resolved(&admitted_host, addresses)?;
-    Ok(admitted
-        .into_vec()
-        .into_iter()
-        .map(|address| std::net::SocketAddr::new(address, 0))
-        .collect())
-}
-
-impl reqwest::dns::Resolve for AdmittedDnsResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let resolver = self.resolver.clone();
-        let destination_policy = Arc::clone(&self.destination_policy);
-        let query_name = name.as_str().to_string();
-        Box::pin(async move {
-            let lookup = resolver.lookup_ip(query_name.clone()).await?;
-            let admitted =
-                admitted_reqwest_addresses(&destination_policy, &query_name, lookup.iter())
-                    .map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
-            let addrs: reqwest::dns::Addrs = Box::new(admitted.into_iter());
-            Ok(addrs)
-        })
-    }
 }
 
 #[cfg(test)]
@@ -1330,217 +1092,5 @@ mod tests {
             BlossomServerUrl::parse("https://cdn.example.com/#frag"),
             Err(ServerUrlError::QueryOrFragment)
         );
-    }
-
-    /// Invariant (#545, #885): the literal-host gate is the shared
-    /// `nmp-network-policy` owner's verdict -- IP literals, bracketed IPv6
-    /// literals, and `localhost`/`.localhost`/`.onion` names are refused by
-    /// default; ordinary public names pass.
-    #[test]
-    fn literal_host_admission_is_the_shared_destination_policy() {
-        let client = BlossomClient::new(BlossomClientConfig::default())
-            .expect("default client builds without network access");
-        for host in [
-            "127.0.0.1",
-            "10.0.0.1",
-            "::1",
-            "[::1]",
-            "localhost",
-            "LOCALHOST",
-            "foo.localhost",
-            "expyuzz4wqqyqhjn.onion",
-        ] {
-            assert_eq!(
-                client.reject_unadmitted_local_host(host),
-                Err(host.to_string()),
-                "{host} must be refused by default"
-            );
-        }
-        for host in ["cdn.example.com", "8.8.8.8"] {
-            assert_eq!(client.reject_unadmitted_local_host(host), Ok(()), "{host}");
-        }
-    }
-
-    /// #885 falsifier at the Blossom dial site: a mixed public+local DNS
-    /// answer refuses the WHOLE set, and the refusal names both halves. No
-    /// `SocketAddr` reaches reqwest, so the public subset is never dialed.
-    #[test]
-    fn mixed_dns_answer_is_refused_in_full() {
-        let public: IpAddr = "8.8.8.8".parse().unwrap();
-        let local: IpAddr = "127.0.0.1".parse().unwrap();
-        let refusal = admitted_reqwest_addresses(
-            &DestinationPolicy::default(),
-            "blossom.nmp.test",
-            [public, local],
-        )
-        .expect_err("a mixed answer must be refused in full");
-        assert_eq!(
-            refusal,
-            DestinationRefusal::ResolvedLocalAddressesNotAllowed {
-                host: "blossom.nmp.test".to_string(),
-                local_addresses: vec![local],
-                public_addresses: vec![public],
-            }
-        );
-    }
-
-    fn resolver_config_for_dns_server(
-        address: std::net::SocketAddr,
-    ) -> hickory_resolver::config::ResolverConfig {
-        let mut udp = hickory_resolver::config::ConnectionConfig::udp();
-        udp.port = address.port();
-        let mut tcp = hickory_resolver::config::ConnectionConfig::tcp();
-        tcp.port = address.port();
-        let nameserver =
-            hickory_resolver::config::NameServerConfig::new(address.ip(), true, vec![udp, tcp]);
-        hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), vec![nameserver])
-    }
-
-    /// Engine-precedent DNS harness (issue #519,
-    /// `crates/nmp/src/relay_information_service.rs` test module): a raw loopback
-    /// UDP server answering ANY A query with `127.0.0.1` (60-second TTL),
-    /// injected through [`BlossomClient::with_resolver_config`]. That
-    /// DNS-injection harness was the engine's confirmed exploit surface,
-    /// reused here to falsify this crate's reimplementation of the same
-    /// post-DNS admission filter (#551, deferred #545 review finding 3).
-    fn spawn_loopback_dns() -> (
-        hickory_resolver::config::ResolverConfig,
-        std::thread::JoinHandle<()>,
-    ) {
-        let dns = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let dns_address = dns.local_addr().unwrap();
-        let dns_server = std::thread::spawn(move || {
-            let mut query = [0u8; 512];
-            let (length, peer) = dns.recv_from(&mut query).unwrap();
-            assert!(length > 16);
-            let mut cursor = 12;
-            while query[cursor] != 0 {
-                cursor += query[cursor] as usize + 1;
-            }
-            cursor += 1;
-            assert_eq!(u16::from_be_bytes([query[cursor], query[cursor + 1]]), 1);
-            let question_end = cursor + 4;
-            let mut response = Vec::new();
-            response.extend_from_slice(&query[..2]);
-            response.extend_from_slice(&[0x81, 0x80]);
-            response.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0]);
-            response.extend_from_slice(&query[12..question_end]);
-            response.extend_from_slice(&[
-                0xc0, 0x0c, // compressed owner name
-                0x00, 0x01, // A
-                0x00, 0x01, // IN
-                0x00, 0x00, 0x00, 0x3c, // 60-second TTL
-                0x00, 0x04, 127, 0, 0, 1,
-            ]);
-            dns.send_to(&response, peer).unwrap();
-        });
-        let resolver = resolver_config_for_dns_server(dns_address);
-        (resolver, dns_server)
-    }
-
-    /// Draft -> sign -> validate a `delete` grant for `blob` (test keys
-    /// stand in for `nmp-signer`; the crate never signs).
-    fn signed_delete_auth(blob: Sha256Hash) -> SignedAuthorization {
-        let keys = nostr::Keys::generate();
-        let now = nostr::Timestamp::now();
-        let draft = crate::auth::delete_authorization_draft(
-            keys.public_key(),
-            blob,
-            nostr::Timestamp::from(now.as_secs() - 5),
-            nostr::Timestamp::from(now.as_secs() + 600),
-            "delete a test blob",
-        )
-        .expect("a future expiration");
-        let event = draft.sign_with_keys(&keys).expect("test signing");
-        SignedAuthorization::validate(
-            event,
-            &crate::auth::ExpectedAuthorization {
-                verb: BlossomVerb::Delete,
-                blob: Some(blob),
-            },
-            now,
-        )
-        .expect("freshly built authorization validates")
-    }
-
-    /// Falsifier (#551, deferred #545 review finding 3): a hostname whose
-    /// DNS answers are EXCLUSIVELY local addresses is refused fail-closed
-    /// by the post-DNS admission filter -- the request dies at resolution
-    /// time as a transport failure, and the loopback listener the answer
-    /// points at never observes a dial (its non-blocking `accept` still
-    /// has nothing). The literal-host pre-check cannot catch this case
-    /// (`blossom.nmp.test` classifies Public), so only the resolver gate
-    /// stands between a poisoned DNS answer and a private-network dial.
-    #[tokio::test]
-    async fn dns_resolution_to_loopback_is_refused_fail_closed_without_opt_in() {
-        let (resolver, dns_server) = spawn_loopback_dns();
-        let client = BlossomClient::with_resolver_config(BlossomClientConfig::default(), resolver)
-            .expect("client construction");
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        listener.set_nonblocking(true).unwrap();
-        let blob = Sha256Hash::of(b"resolver falsifier blob");
-        let auth = signed_delete_auth(blob);
-        let server = BlossomServerUrl::parse(&format!("http://blossom.nmp.test:{port}"))
-            .expect("hostname url");
-        let err = client
-            .delete(&server, blob, &auth)
-            .await
-            .expect_err("an all-local DNS answer must be refused without opt-in");
-        assert!(matches!(err, DeleteError::Network { .. }));
-        assert!(
-            matches!(
-                listener.accept(),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
-            ),
-            "the refusal must happen at resolution time, before any dial"
-        );
-        dns_server.join().unwrap();
-    }
-
-    /// Falsifier (#551, deferred #545 review finding 3): the EXACT same
-    /// DNS-to-loopback answer is admitted once the hostname is operator
-    /// opted-in via `allowed_local_hosts` -- the intentional local-server
-    /// path must keep working (the engine's issue-#519 "don't break the
-    /// opted-in relay" requirement, same harness). Also pins that a 204
-    /// delete success maps to `Ok(())`.
-    #[tokio::test]
-    async fn opted_in_host_resolving_to_loopback_is_admitted_through_hickory() {
-        use std::io::{Read as _, Write as _};
-
-        let (resolver, dns_server) = spawn_loopback_dns();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let http_server = std::thread::spawn(move || {
-            let (mut stream, _peer) = listener.accept().unwrap();
-            let mut received = Vec::new();
-            let mut buffer = [0u8; 1024];
-            while !received.windows(4).any(|window| window == b"\r\n\r\n") {
-                let count = stream.read(&mut buffer).unwrap();
-                assert!(count > 0, "request ended before its headers");
-                received.extend_from_slice(&buffer[..count]);
-            }
-            stream
-                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
-                .unwrap();
-        });
-        let client = BlossomClient::with_resolver_config(
-            BlossomClientConfig {
-                allowed_local_hosts: BTreeSet::from(["blossom.nmp.test".to_string()]),
-                ..BlossomClientConfig::default()
-            },
-            resolver,
-        )
-        .expect("client construction");
-        let blob = Sha256Hash::of(b"resolver falsifier blob");
-        let auth = signed_delete_auth(blob);
-        let server = BlossomServerUrl::parse(&format!("http://blossom.nmp.test:{port}"))
-            .expect("hostname url");
-        client
-            .delete(&server, blob, &auth)
-            .await
-            .expect("the opted-in host's loopback answer is admitted");
-        dns_server.join().unwrap();
-        http_server.join().unwrap();
     }
 }

@@ -6,11 +6,11 @@ use super::*;
 fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
     let relay = RelayUrl::parse("wss://evidence-owner.example").unwrap();
     let evidence_a = RoutingEvidence {
-        relay: RelayUrl::parse("ws://127.0.0.1:7701").unwrap(),
+        relay: RelayUrl::parse("wss://evidence-a.example").unwrap(),
         origin: nmp_grammar::RoutingEvidenceKind::Hint,
     };
     let evidence_b = RoutingEvidence {
-        relay: RelayUrl::parse("ws://127.0.0.1:7702").unwrap(),
+        relay: RelayUrl::parse("wss://evidence-b.example").unwrap(),
         origin: nmp_grammar::RoutingEvidenceKind::SourceProvenance,
     };
 
@@ -29,9 +29,9 @@ fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
         let key = nmp_router::DemandKey::for_atom(&first_atom);
 
         core.retain_wire_atom_owner(&first_atom);
-        let admitted = flush(&mut core);
+        let opened = flush(&mut core);
         assert_eq!(
-            wire_ops(&admitted)
+            wire_ops(&opened)
                 .into_iter()
                 .filter(|op| matches!(op, WireOp::Req(_, _)))
                 .count(),
@@ -43,49 +43,35 @@ fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
         assert!(core.pending_wire_atoms.is_empty());
         assert_eq!(
             core.wire_owner_counts[&key].0.routing_evidence,
-            BTreeSet::from([first.clone(), survivor.clone()])
+            BTreeSet::from([first, survivor.clone()])
         );
-        assert_eq!(core.rejected_projected_evidence_by_demand[&key].len(), 2);
         assert_eq!(
             core.router.plan().reqs.values().next().unwrap()[0],
             immutable_request
         );
 
-        core.routing_evidence_owner_keys_touched.set(0);
         assert!(core.release_wire_atom_owner(&first_atom).is_none());
-        assert_eq!(core.routing_evidence_owner_keys_touched.get(), 1);
         assert!(core.pending_wire_atoms.is_empty());
         assert_eq!(
             core.wire_owner_counts[&key].0.routing_evidence,
             BTreeSet::from([survivor.clone()])
         );
         assert_eq!(
-            core.rejected_projected_evidence_by_demand[&key]
-                .iter()
-                .map(|(_, evidence)| evidence)
-                .cloned()
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from([survivor.clone()])
-        );
-        assert_eq!(
             core.router.plan().reqs.values().next().unwrap()[0],
             immutable_request
         );
-        let full_live_union = core.wire_demand();
         assert_eq!(
-            full_live_union.iter().next().unwrap().routing_evidence,
+            core.wire_demand().iter().next().unwrap().routing_evidence,
             BTreeSet::from([survivor])
         );
 
-        core.routing_evidence_owner_keys_touched.set(0);
         let final_atom = core
             .release_wire_atom_owner(&survivor_atom)
-            .expect("the last exact owner retires the logical demand");
-        assert_eq!(core.routing_evidence_owner_keys_touched.get(), 1);
-        let mut effects = Vec::new();
-        core.withdraw_wire_demand(vec![final_atom], &mut effects);
+            .expect("the final exact owner retires the shared selection");
+        let mut closed = Vec::new();
+        core.withdraw_wire_demand(vec![final_atom], &mut closed);
         assert_eq!(
-            wire_ops(&effects)
+            wire_ops(&closed)
                 .into_iter()
                 .filter(|op| matches!(op, WireOp::Close(_)))
                 .count(),
@@ -257,70 +243,4 @@ fn preflush_hint_owner_churn_combines_pending_and_incumbent_assignment_truth() {
             CoreOwnershipCensus::default()
         );
     }
-}
-
-#[test]
-fn a_covered_owner_can_add_the_first_rejected_fact_without_rewriting_wire() {
-    let relay = RelayUrl::parse("wss://evidence-owner-covered.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
-    let mut accepted = bounded_atom(&relay, "shared-selection");
-    accepted.routing_evidence.insert(RoutingEvidence {
-        relay: RelayUrl::parse("wss://public-evidence.example").unwrap(),
-        origin: nmp_grammar::RoutingEvidenceKind::Hint,
-    });
-    let mut rejected = bounded_atom(&relay, "shared-selection");
-    let rejected_fact = RoutingEvidence {
-        relay: RelayUrl::parse("ws://127.0.0.1:7799").unwrap(),
-        origin: nmp_grammar::RoutingEvidenceKind::Hint,
-    };
-    rejected.routing_evidence.insert(rejected_fact.clone());
-    let key = nmp_router::DemandKey::for_atom(&accepted);
-
-    assert!(!core.retain_wire_atom_owner(&accepted));
-    let admitted = flush(&mut core);
-    assert_eq!(
-        wire_ops(&admitted)
-            .into_iter()
-            .filter(|op| matches!(op, WireOp::Req(_, _)))
-            .count(),
-        1
-    );
-    assert!(!core
-        .rejected_projected_evidence_by_demand
-        .contains_key(&key));
-    let immutable_request = core.router.plan().reqs.values().next().unwrap()[0].clone();
-
-    assert!(core.retain_wire_atom_owner(&rejected));
-    assert!(core.pending_wire_atoms.is_empty());
-    assert_eq!(
-        core.rejected_projected_evidence_by_demand[&key]
-            .iter()
-            .map(|(_, evidence)| evidence)
-            .cloned()
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([rejected_fact])
-    );
-    assert_eq!(
-        core.router.plan().reqs.values().next().unwrap()[0],
-        immutable_request
-    );
-
-    assert!(core.release_wire_atom_owner(&rejected).is_none());
-    assert!(!core
-        .rejected_projected_evidence_by_demand
-        .contains_key(&key));
-    let final_atom = core.release_wire_atom_owner(&accepted).unwrap();
-    let mut effects = Vec::new();
-    core.withdraw_wire_demand(vec![final_atom], &mut effects);
-    assert_eq!(
-        wire_ops(&effects)
-            .into_iter()
-            .filter(|op| matches!(op, WireOp::Close(_)))
-            .count(),
-        1
-    );
-    assert_eq!(
-        core.bench_ownership_census(),
-        CoreOwnershipCensus::default()
-    );
 }

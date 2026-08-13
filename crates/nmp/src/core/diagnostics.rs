@@ -262,14 +262,6 @@ pub struct DiagnosticsSnapshot {
     pub auth_sessions: Vec<AuthDiagnosticsSnapshot>,
     pub uncovered_author_count: usize,
     pub dropped_merge_rules: Vec<&'static str>,
-    /// Network-derived relay candidates rejected by the engine's SSRF
-    /// admission policy (issue #121) before they could become router
-    /// candidates or neutral route facts. This is a monotonic rejection-
-    /// occurrence tally, not a distinct-host or per-direction count. A
-    /// provider callback rejection counts once before directional projection;
-    /// rejected selector evidence counts once when that exact
-    /// `(selection, evidence)` first becomes current.
-    pub discovered_private_relays_rejected: u64,
     /// Relay candidates refused by the single whole-demand ceiling, plus
     /// any defense-in-depth dial refusal at the transport boundary. The
     /// router contributes the deterministic plan-time count; the runtime
@@ -323,7 +315,6 @@ pub(crate) fn build(
     diag: &Diagnostics,
     plan: &RelayPlan,
     events_by_session_kind: &HashMap<RelaySessionKey, BTreeMap<u16, u64>>,
-    discovered_private_relays_rejected: u64,
     get_coverage: impl Fn(&RelayUrl, CoverageKey) -> Result<Option<CoverageInterval>, PersistenceError>,
 ) -> DiagnosticsSnapshot {
     // A coverage read that could not answer is kept as the snapshot's own
@@ -398,7 +389,6 @@ pub(crate) fn build(
         auth_sessions: Vec::new(),
         uncovered_author_count: diag.uncovered_authors.len(),
         dropped_merge_rules: diag.dropped_merge_rules.clone(),
-        discovered_private_relays_rejected,
         sessions_rejected_over_cap: u64::try_from(diag.sessions_refused_by_cap).unwrap_or(u64::MAX),
         sessions_refused_by_subscription_budget: u64::try_from(
             diag.sessions_refused_by_subscription_budget,

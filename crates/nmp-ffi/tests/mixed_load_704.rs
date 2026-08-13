@@ -95,7 +95,6 @@ async fn mixed_engine_load_makes_progress_without_capacity_refusal() {
     let relay_url = spawn_nip11_ok_server();
     let engine = NmpEngine::new(
         NmpEngineConfig {
-            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             ..NmpEngineConfig::default()
         },
         None,

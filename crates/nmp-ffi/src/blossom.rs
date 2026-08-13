@@ -43,11 +43,11 @@
 //! global queue; Kotlin: `Dispatchers.IO`). Each call builds a fresh
 //! current-thread tokio runtime AND a fresh `BlossomClient` inside it,
 //! mirroring `crates/nmp/src/relay_information_service.rs`'s `http_runtime()`
-//! discipline: the reqwest/hickory stack is born and dropped inside the
-//! flight's own runtime, so hickory cannot retain DNS state bound to a
-//! runtime that no longer exists on the next call.
+//! discipline: the reqwest client is born and dropped inside the flight's own
+//! runtime, so connection state cannot remain bound to a runtime that no
+//! longer exists on the next call. Hostname resolution uses reqwest's platform
+//! resolver.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -609,20 +609,6 @@ impl FfiBlossomAuthorization {
 /// default.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct FfiBlossomClientConfig {
-    /// Operator opt-in local-host allowlist, in `nmp-transport`'s
-    /// normalized bare-host form (lowercase, no brackets) -- the same
-    /// vocabulary the engine's `allowed_local_relay_hosts` uses. Empty
-    /// means NO loopback/private/link-local host may be dialed.
-    ///
-    /// Says nothing about `.onion`, which `tor_reachable` owns (#1251).
-    pub allowed_local_hosts: Vec<String>,
-    /// Whether this process can reach a Tor hidden service (#1251). A Blossom
-    /// server URL arrives with no provenance NMP can inspect, so a `.onion`
-    /// server needs this declaration; the local-host allowlist grants it
-    /// nothing. `default = false` keeps the field optional for existing
-    /// callers.
-    #[uniffi(default = false)]
-    pub tor_reachable: bool,
     /// Cap on a single-descriptor response body (upload/mirror).
     pub max_response_bytes: Option<u64>,
     /// Cap on a `GET /list` response body.
@@ -637,11 +623,6 @@ fn byte_bound(bound: u64) -> usize {
 
 fn client_config_from_ffi(config: FfiBlossomClientConfig) -> BlossomClientConfig {
     BlossomClientConfig {
-        allowed_local_hosts: config
-            .allowed_local_hosts
-            .into_iter()
-            .collect::<BTreeSet<String>>(),
-        tor_reachable: config.tor_reachable,
         max_response_bytes: config
             .max_response_bytes
             .map(byte_bound)
@@ -678,9 +659,6 @@ pub enum FfiBlossomUploadError {
         authorized_verb: FfiBlossomVerb,
         authorized_blob_sha256_hex: Option<String>,
     },
-    /// Literal loopback/private/link-local/unspecified/onion host without
-    /// operator opt-in -- refused before ANY socket I/O.
-    LocalHostNotAdmitted { host: String },
     /// Transport failure: connect/DNS/TLS/timeout, or the body stream died.
     Network { detail: String },
     /// The server answered with a redirect; redirects are never followed.
@@ -723,10 +701,6 @@ impl std::fmt::Display for FfiBlossomUploadError {
                 f,
                 "authorization ({authorized_verb:?}, blob {authorized_blob_sha256_hex:?}) does \
                  not grant uploading blob {expected_sha256_hex}"
-            ),
-            Self::LocalHostNotAdmitted { host } => write!(
-                f,
-                "refusing Blossom upload: host {host:?} is local and not operator opted-in"
             ),
             Self::Network { detail } => write!(f, "Blossom upload transport failed: {detail}"),
             Self::RedirectRefused { status } => {
@@ -778,9 +752,6 @@ fn upload_error_to_ffi(error: UploadError) -> FfiBlossomUploadError {
             authorized_verb: verb_to_ffi(authorized_verb),
             authorized_blob_sha256_hex: authorized_blob.map(|hash| hash.to_hex()),
         },
-        UploadError::LocalHostNotAdmitted { host } => {
-            FfiBlossomUploadError::LocalHostNotAdmitted { host }
-        }
         UploadError::Network { detail } => FfiBlossomUploadError::Network { detail },
         UploadError::RedirectRefused { status } => {
             FfiBlossomUploadError::RedirectRefused { status }
@@ -831,8 +802,6 @@ pub enum FfiBlossomMirrorError {
         authorized_verb: FfiBlossomVerb,
         authorized_blob_sha256_hex: Option<String>,
     },
-    /// Unadmitted literal-local host -- refused before ANY socket I/O.
-    LocalHostNotAdmitted { host: String },
     /// Transport failure.
     Network { detail: String },
     /// Redirects are never followed.
@@ -885,10 +854,6 @@ impl std::fmt::Display for FfiBlossomMirrorError {
                 f,
                 "authorization ({authorized_verb:?}, blob {authorized_blob_sha256_hex:?}) does \
                  not grant mirroring blob {expected_sha256_hex}"
-            ),
-            Self::LocalHostNotAdmitted { host } => write!(
-                f,
-                "refusing Blossom mirror: host {host:?} is local and not operator opted-in"
             ),
             Self::Network { detail } => write!(f, "Blossom mirror transport failed: {detail}"),
             Self::RedirectRefused { status } => {
@@ -950,9 +915,6 @@ fn mirror_error_to_ffi(error: MirrorError) -> FfiBlossomMirrorError {
             authorized_verb: verb_to_ffi(authorized_verb),
             authorized_blob_sha256_hex: authorized_blob.map(|hash| hash.to_hex()),
         },
-        MirrorError::LocalHostNotAdmitted { host } => {
-            FfiBlossomMirrorError::LocalHostNotAdmitted { host }
-        }
         MirrorError::Network { detail } => FfiBlossomMirrorError::Network { detail },
         MirrorError::RedirectRefused { status } => {
             FfiBlossomMirrorError::RedirectRefused { status }
@@ -1007,8 +969,6 @@ pub enum FfiBlossomDeleteError {
         authorized_verb: FfiBlossomVerb,
         authorized_blob_sha256_hex: Option<String>,
     },
-    /// Unadmitted literal-local host -- refused before ANY socket I/O.
-    LocalHostNotAdmitted { host: String },
     /// Transport failure.
     Network { detail: String },
     /// Redirects are never followed.
@@ -1048,10 +1008,6 @@ impl std::fmt::Display for FfiBlossomDeleteError {
                 f,
                 "authorization ({authorized_verb:?}, blob {authorized_blob_sha256_hex:?}) does \
                  not grant deleting blob {expected_sha256_hex}"
-            ),
-            Self::LocalHostNotAdmitted { host } => write!(
-                f,
-                "refusing Blossom delete: host {host:?} is local and not operator opted-in"
             ),
             Self::Network { detail } => write!(f, "Blossom delete transport failed: {detail}"),
             Self::RedirectRefused { status } => {
@@ -1093,9 +1049,6 @@ fn delete_error_to_ffi(error: DeleteError) -> FfiBlossomDeleteError {
             authorized_verb: verb_to_ffi(authorized_verb),
             authorized_blob_sha256_hex: authorized_blob.map(|hash| hash.to_hex()),
         },
-        DeleteError::LocalHostNotAdmitted { host } => {
-            FfiBlossomDeleteError::LocalHostNotAdmitted { host }
-        }
         DeleteError::Network { detail } => FfiBlossomDeleteError::Network { detail },
         DeleteError::RedirectRefused { status } => {
             FfiBlossomDeleteError::RedirectRefused { status }
@@ -1132,8 +1085,6 @@ pub enum FfiBlossomListError {
     /// An authorization was supplied but is not a `list` grant -- refused
     /// before any admission or I/O (no cross-verb replay).
     WrongVerb { authorized_verb: FfiBlossomVerb },
-    /// Unadmitted literal-local host -- refused before ANY socket I/O.
-    LocalHostNotAdmitted { host: String },
     /// Transport failure.
     Network { detail: String },
     /// Redirects are never followed.
@@ -1182,10 +1133,6 @@ impl std::fmt::Display for FfiBlossomListError {
                 f,
                 "authorization verb {authorized_verb:?} does not grant listing (need `list`)"
             ),
-            Self::LocalHostNotAdmitted { host } => write!(
-                f,
-                "refusing Blossom list: host {host:?} is local and not operator opted-in"
-            ),
             Self::Network { detail } => write!(f, "Blossom list transport failed: {detail}"),
             Self::RedirectRefused { status } => {
                 write!(f, "Blossom list redirects are not followed (HTTP {status})")
@@ -1223,9 +1170,6 @@ fn list_error_to_ffi(error: ListError) -> FfiBlossomListError {
         ListError::WrongVerb { authorized_verb } => FfiBlossomListError::WrongVerb {
             authorized_verb: verb_to_ffi(authorized_verb),
         },
-        ListError::LocalHostNotAdmitted { host } => {
-            FfiBlossomListError::LocalHostNotAdmitted { host }
-        }
         ListError::Network { detail } => FfiBlossomListError::Network { detail },
         ListError::RedirectRefused { status } => FfiBlossomListError::RedirectRefused { status },
         ListError::AuthRejected { status, reason } => {
@@ -1250,9 +1194,9 @@ fn list_error_to_ffi(error: ListError) -> FfiBlossomListError {
 
 /// One current-thread tokio runtime per client call
 /// (`crates/nmp/src/relay_information_service.rs`'s `http_runtime()` discipline,
-/// mirrored deliberately): the reqwest/hickory stack is constructed AND
-/// dropped inside this flight's own runtime, so no runtime-bound DNS or
-/// connection state can leak into the next call.
+/// mirrored deliberately): the reqwest client is constructed AND dropped
+/// inside this flight's own runtime, so no runtime-bound connection state can
+/// leak into the next call. DNS uses the platform resolver.
 fn blocking_runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1679,9 +1623,6 @@ mod tests {
                 authorized_verb: BlossomVerb::Delete,
                 authorized_blob: Some(other),
             }),
-            upload_error_to_ffi(UploadError::LocalHostNotAdmitted {
-                host: "localhost".to_string(),
-            }),
             upload_error_to_ffi(UploadError::Network {
                 detail: "d".to_string(),
             }),
@@ -1714,7 +1655,7 @@ mod tests {
             }
         );
         assert_eq!(
-            all[9],
+            all[8],
             FfiBlossomUploadError::Sha256Mismatch {
                 expected_sha256_hex: blob.to_hex(),
                 returned_sha256_hex: other.to_hex(),
@@ -1740,9 +1681,6 @@ mod tests {
                 expected: blob,
                 authorized_verb: BlossomVerb::List,
                 authorized_blob: None,
-            }),
-            mirror_error_to_ffi(MirrorError::LocalHostNotAdmitted {
-                host: "127.0.0.1".to_string(),
             }),
             mirror_error_to_ffi(MirrorError::Network {
                 detail: "d".to_string(),
@@ -1774,13 +1712,13 @@ mod tests {
             }),
         ];
         assert_eq!(
-            all[5],
+            all[4],
             FfiBlossomMirrorError::HashMismatchRefused {
                 reason: Some("hash".to_string()),
             }
         );
         assert_eq!(
-            all[6],
+            all[5],
             FfiBlossomMirrorError::OriginFetchFailed {
                 reason: Some("origin".to_string()),
             }
@@ -1804,9 +1742,6 @@ mod tests {
                 authorized_verb: BlossomVerb::Upload,
                 authorized_blob: Some(blob),
             }),
-            delete_error_to_ffi(DeleteError::LocalHostNotAdmitted {
-                host: "h".to_string(),
-            }),
             delete_error_to_ffi(DeleteError::Network {
                 detail: "d".to_string(),
             }),
@@ -1828,7 +1763,7 @@ mod tests {
             }),
         ];
         assert_eq!(
-            all[5],
+            all[4],
             FfiBlossomDeleteError::NotFound {
                 reason: Some("gone".to_string()),
             }
@@ -1848,9 +1783,6 @@ mod tests {
         let all = vec![
             list_error_to_ffi(ListError::WrongVerb {
                 authorized_verb: BlossomVerb::Upload,
-            }),
-            list_error_to_ffi(ListError::LocalHostNotAdmitted {
-                host: "h".to_string(),
             }),
             list_error_to_ffi(ListError::Network {
                 detail: "d".to_string(),
@@ -1880,7 +1812,7 @@ mod tests {
             }),
         ];
         assert_eq!(
-            all[9],
+            all[8],
             FfiBlossomListError::InvalidDescriptor {
                 index: 3,
                 error: FfiBlossomDescriptorError::MissingSha256,
@@ -2176,13 +2108,10 @@ mod tests {
     #[test]
     fn client_config_nones_resolve_to_crate_defaults() {
         let defaults = client_config_from_ffi(FfiBlossomClientConfig {
-            allowed_local_hosts: vec![],
-            tor_reachable: false,
             max_response_bytes: None,
             max_list_response_bytes: None,
             request_deadline_secs: None,
         });
-        assert!(defaults.allowed_local_hosts.is_empty());
         assert_eq!(defaults.max_response_bytes, DEFAULT_MAX_RESPONSE_BYTES);
         assert_eq!(
             defaults.max_list_response_bytes,
@@ -2191,13 +2120,10 @@ mod tests {
         assert_eq!(defaults.request_deadline, DEFAULT_REQUEST_DEADLINE);
 
         let explicit = client_config_from_ffi(FfiBlossomClientConfig {
-            allowed_local_hosts: vec!["localhost".to_string(), "localhost".to_string()],
-            tor_reachable: false,
             max_response_bytes: Some(1024),
             max_list_response_bytes: Some(2048),
             request_deadline_secs: Some(5),
         });
-        assert_eq!(explicit.allowed_local_hosts.len(), 1, "hosts deduplicate");
         assert_eq!(explicit.max_response_bytes, 1024);
         assert_eq!(explicit.max_list_response_bytes, 2048);
         assert_eq!(explicit.request_deadline, Duration::from_secs(5));
@@ -2219,8 +2145,6 @@ mod tests {
         )
         .expect("a valid authorization");
         let client = FfiBlossomClient::new(FfiBlossomClientConfig {
-            allowed_local_hosts: vec![],
-            tor_reachable: false,
             max_response_bytes: None,
             max_list_response_bytes: None,
             request_deadline_secs: None,
@@ -2301,8 +2225,6 @@ mod tests {
         )
         .expect("a valid authorization");
         let client = FfiBlossomClient::new(FfiBlossomClientConfig {
-            allowed_local_hosts: vec![],
-            tor_reachable: false,
             max_response_bytes: None,
             max_list_response_bytes: None,
             request_deadline_secs: None,
@@ -2409,9 +2331,8 @@ mod tests {
 
     /// Falsifier (#555, Destructive gate): the pre-I/O admission and
     /// authorization-binding refusals survive the boundary through a REAL
-    /// blocking client call -- an unadmitted loopback host dies typed
-    /// before any socket I/O, and a cross-verb authorization dies typed
-    /// before admission.
+    /// blocking client call -- loopback is attempted as an ordinary target,
+    /// and a cross-verb authorization dies typed before I/O.
     #[test]
     fn blocking_client_call_carries_typed_refusals_across_the_boundary() {
         let keys = nostr::Keys::generate();
@@ -2426,24 +2347,21 @@ mod tests {
         )
         .expect("a valid upload authorization");
         let client = FfiBlossomClient::new(FfiBlossomClientConfig {
-            allowed_local_hosts: vec![],
-            tor_reachable: false,
             max_response_bytes: None,
             max_list_response_bytes: None,
             request_deadline_secs: Some(5),
         });
 
-        // Unadmitted loopback host: refused before ANY socket I/O.
+        // Loopback is an ordinary target; port 1 is expected to fail at the
+        // transport layer rather than in a destination policy.
         match client.upload(
             "http://127.0.0.1:1".to_string(),
             blob.clone(),
             None,
             Arc::clone(&upload_auth),
         ) {
-            Err(FfiBlossomUploadError::LocalHostNotAdmitted { host }) => {
-                assert_eq!(host, "127.0.0.1")
-            }
-            other => panic!("expected LocalHostNotAdmitted, got {other:?}"),
+            Err(FfiBlossomUploadError::Network { .. }) => {}
+            other => panic!("expected loopback transport failure, got {other:?}"),
         }
 
         // Cross-verb replay through the client: an upload grant does not

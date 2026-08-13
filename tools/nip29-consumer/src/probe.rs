@@ -59,7 +59,6 @@ impl Context {
             .to_string();
         let engine = Engine::new(EngineConfig {
             store_path: Some(store_path),
-            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
             max_relays: 4,
             ..EngineConfig::default()
         })

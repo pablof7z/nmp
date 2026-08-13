@@ -52,7 +52,6 @@ const KIND: u16 = 9999;
 
 fn engine() -> Engine {
     Engine::new(EngineConfig {
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string(), "localhost".to_string()],
         ..EngineConfig::default()
     })
     .expect("an in-memory engine builds")

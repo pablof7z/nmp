@@ -22,7 +22,6 @@ fun main(args: Array<String>) = runBlocking {
     NMPEngine(
         NMPConfig(
             outboxRouting = OutboxRoutingConfig(listOf(value("indexer"))),
-            allowedLocalRelayHosts = listOf("localhost", "127.0.0.1"),
         ),
     ).use { engine ->
         val privateKey = NMPPrivateKey(value("secret_key").hexBytes())
