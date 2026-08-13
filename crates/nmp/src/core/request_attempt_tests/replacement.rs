@@ -14,7 +14,7 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
     let second = atom(&relay, &"22".repeat(32));
     let first_claim = coverage_key(&first);
     let second_claim = coverage_key(&second);
-    let mut core = EngineCore::new(MemoryStore::new(), 8);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
     core.slot_to_relay
         .insert(handle.slot, (handle, session.clone()));
     core.connected_relays.insert(session.clone());
@@ -124,7 +124,7 @@ fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candida
     };
     let first = atom(&relay, &"33".repeat(32));
     let second = atom(&relay, &"44".repeat(32));
-    let mut core = EngineCore::new(MemoryStore::new(), 8);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
     core.slot_to_relay
         .insert(handle.slot, (handle, session.clone()));
     core.connected_relays.insert(session.clone());

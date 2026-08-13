@@ -47,6 +47,24 @@ fn durable_facts(path: &std::path::Path) -> BTreeMap<String, u64> {
     facts
 }
 
+#[test]
+fn temporary_store_removes_its_redb_directory_on_drop() {
+    let store = RedbStore::temporary().expect("temporary Redb store");
+    let database_path = store._ownership.target().to_path_buf();
+    let directory = database_path
+        .parent()
+        .expect("temporary Redb path has a parent")
+        .to_path_buf();
+
+    assert!(database_path.exists());
+    assert!(directory.exists());
+    drop(store);
+    assert!(
+        !directory.exists(),
+        "the engine-owned Redb directory must be released with its store"
+    );
+}
+
 fn assert_refuses_without_mutation(path: &std::path::Path, what: &str) {
     let before = durable_facts(path);
     let error = match RedbStore::open(path) {
@@ -2041,7 +2059,7 @@ fn multi_value_tag_merge_deduplicates_one_event_without_candidate_set() {
 }
 
 #[test]
-fn ordered_planner_is_differentially_equivalent_over_mixed_filters() {
+fn ordered_planner_matches_fixture_derived_expectations_over_mixed_filters() {
     use nostr::{Alphabet, EventBuilder, Tag};
 
     fn next(state: &mut u64) -> u64 {
@@ -2052,8 +2070,7 @@ fn ordered_planner_is_differentially_equivalent_over_mixed_filters() {
     }
 
     let dir = tempfile::tempdir().unwrap();
-    let mut redb = RedbStore::open(dir.path().join("planner-differential.redb")).unwrap();
-    let mut memory = crate::MemoryStore::new();
+    let mut redb = RedbStore::open(dir.path().join("planner-expected-results.redb")).unwrap();
     let authors: Vec<_> = (0..8).map(|_| nostr::Keys::generate()).collect();
     let relay = RelayUrl::parse("wss://planner-differential.example").unwrap();
     let mut events = Vec::new();
@@ -2077,8 +2094,7 @@ fn ordered_planner_is_differentially_equivalent_over_mixed_filters() {
             .sign_with_keys(&authors[(i as usize) % authors.len()])
             .unwrap();
         let observed = RelayObserved::new(relay.clone(), Timestamp::from(2_000 + i));
-        redb.insert(event.clone(), observed.clone()).unwrap();
-        memory.insert(event.clone(), observed).unwrap();
+        redb.insert(event.clone(), observed).unwrap();
         events.push(event);
     }
 
@@ -2152,13 +2168,12 @@ fn ordered_planner_is_differentially_equivalent_over_mixed_filters() {
             .into_iter()
             .map(|row| row.event.id)
             .collect();
-        let memory_complete: BTreeSet<_> = memory
-            .query(&filter)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.event.id)
+        let expected_complete: BTreeSet<_> = events
+            .iter()
+            .filter(|event| filter.match_event(event, nostr::filter::MatchEventOptions::new()))
+            .map(|event| event.id)
             .collect();
-        assert_eq!(redb_complete, memory_complete, "complete round {round}");
+        assert_eq!(redb_complete, expected_complete, "complete round {round}");
 
         let limit = 1 + (random as usize % 12);
         let redb_newest: Vec<_> = redb
@@ -2167,16 +2182,24 @@ fn ordered_planner_is_differentially_equivalent_over_mixed_filters() {
             .into_iter()
             .map(|row| row.event.id)
             .collect();
-        let memory_newest: Vec<_> = memory
-            .query_newest(&filter, limit)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.event.id)
+        let mut expected_newest: Vec<_> = events
+            .iter()
+            .filter(|event| filter.match_event(event, nostr::filter::MatchEventOptions::new()))
             .collect();
-        assert_eq!(redb_newest, memory_newest, "bounded round {round}");
+        expected_newest.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let expected_newest: Vec<_> = expected_newest
+            .into_iter()
+            .take(limit)
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(redb_newest, expected_newest, "bounded round {round}");
         assert_eq!(
             redb.query_newest_ids(&filter, limit).unwrap(),
-            memory.query_newest_ids(&filter, limit).unwrap(),
+            expected_newest,
             "projected bounded round {round}"
         );
 
@@ -2200,7 +2223,7 @@ fn ordered_planner_is_differentially_equivalent_over_mixed_filters() {
                     .map(|row| row.event.id)
                     .collect();
                 assert_eq!(
-                    complete, memory_complete,
+                    complete, expected_complete,
                     "round {round} complete under {:?}",
                     plan.index
                 );
@@ -2211,14 +2234,14 @@ fn ordered_planner_is_differentially_equivalent_over_mixed_filters() {
                     .map(|row| row.event.id)
                     .collect();
                 assert_eq!(
-                    bounded, memory_newest,
+                    bounded, expected_newest,
                     "round {round} bounded under {:?}",
                     plan.index
                 );
                 assert_eq!(
                     redb.query_ordered_ids(&read_txn, &plan, &filter, limit)
                         .unwrap(),
-                    memory_newest,
+                    expected_newest,
                     "round {round} projected under {:?}",
                     plan.index
                 );

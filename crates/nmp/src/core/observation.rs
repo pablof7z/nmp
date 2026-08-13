@@ -1134,7 +1134,7 @@ mod tests {
     use nmp_grammar::LiveQuery;
     use nmp_grammar::{Binding, Demand, Derived, Filter, Freshness, Selector, SourceAuthority};
     use nmp_router::FixtureRoutingFacts;
-    use nmp_store::{MemoryStore, RelayObserved};
+    use nmp_store::{RedbStore, RelayObserved};
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     fn articles_by_follows() -> LiveQuery {
@@ -1210,7 +1210,7 @@ mod tests {
         let followed_a = Keys::generate();
         let followed_b = Keys::generate();
         let relay = RelayUrl::parse("wss://evidence.fixture").unwrap();
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         for (event, observed_at) in [
             (
                 EventBuilder::new(Kind::ContactList, "")
@@ -1349,7 +1349,7 @@ mod tests {
     #[test]
     fn request_target_multiplicity_replaces_and_tears_down_exactly() {
         let relay = RelayUrl::parse("wss://request-target-multiplicity.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let observation =
             opened_observation(&core.handle(EngineMsg::Subscribe(pinned_kind_one(&relay))));
         let handle = core.observations[&observation].branches[0];
@@ -1380,7 +1380,7 @@ mod tests {
         let followed_a = Keys::generate();
         let followed_b = Keys::generate();
         let relay = RelayUrl::parse("wss://request-target-revision.example").unwrap();
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         for (event, observed_at) in [
             (
                 EventBuilder::new(Kind::ContactList, "")

@@ -1061,7 +1061,7 @@ async fn watermark_cold_start_offline() {
 /// The authoritative ledger-#5 falsifier (insert-time provenance MERGE, not
 /// a second stored row) already lives at the store's own public surface --
 /// `nmp-store/tests/store_contract.rs::provenance_merges_across_relays`,
-/// exercised against BOTH `MemoryStore` and this exact `RedbStore` backend
+/// exercised against this exact `RedbStore` backend
 /// -- because `nmp::mechanism::core::RowDelta` deliberately carries no
 /// provenance field (M3 plan §7: raw rows + coverage only; provenance is a
 /// store-internal fact, not part of the two-noun read result), so there is
@@ -1110,7 +1110,7 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
         .with_outbound_routes(a.public_key(), [url_1.clone(), url_2.clone()]);
 
     let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        nmp_store::MemoryStore::new(),
+        nmp_store::RedbStore::temporary().expect("temporary Redb store"),
         dir,
         10,
         PoolConfig {
@@ -1187,7 +1187,7 @@ fn write_ack_per_relay_over_real_relays() {
         .with_outbound_routes(a.public_key(), [url_ok.clone(), url_bad.clone()]);
 
     let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        nmp_store::MemoryStore::new(),
+        nmp_store::RedbStore::temporary().expect("temporary Redb store"),
         dir,
         10,
         PoolConfig {
@@ -1331,7 +1331,7 @@ fn auth_policy_denial_keeps_real_relay_work_parked() {
     let url = relay.url();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [url.clone()]);
     let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        nmp_store::MemoryStore::new(),
+        nmp_store::RedbStore::temporary().expect("temporary Redb store"),
         dir,
         10,
         PoolConfig {
@@ -1385,7 +1385,7 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
     let url = relay.url();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [url.clone()]);
     let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        nmp_store::MemoryStore::new(),
+        nmp_store::RedbStore::temporary().expect("temporary Redb store"),
         dir,
         10,
         PoolConfig {
@@ -1542,7 +1542,7 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
         .with_outbound_routes(c.public_key(), [url.clone()]);
 
     let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        nmp_store::MemoryStore::new(),
+        nmp_store::RedbStore::temporary().expect("temporary Redb store"),
         dir,
         10,
         PoolConfig {

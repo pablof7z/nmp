@@ -156,7 +156,7 @@ mod tests {
         AccessContext, Binding, Filter, Identity, RelaySessionKey, WriteIntent, WritePayload,
         WriteRouting,
     };
-    use nmp_store::{EventStore, MemoryStore, RedbStore};
+    use nmp_store::{EventStore, RedbStore};
     use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
     use nostr::{EventBuilder, EventId, Keys, Kind, RelayMessage, Tag, Timestamp};
 
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn needs_open_one_exact_query_noop_when_unchanged_and_close_when_empty() {
-        let mut core = EngineCore::new(MemoryStore::new(), 8);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
         let mut assembly = RuntimeAssembly::new([relay(19_870), relay(19_871)]);
         let needs = BTreeSet::from([author()]);
 
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn zero_sources_leave_needs_unknown_without_opening_a_query() {
-        let mut core = EngineCore::new(MemoryStore::new(), 8);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
         let mut assembly = RuntimeAssembly::new([]);
 
         assert!(
@@ -288,7 +288,7 @@ mod tests {
         let author = Keys::generate();
         let local = relay(19_872);
         let source = RelayUrl::parse("wss://indexer.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 8);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
         let query = LiveQuery::from_filter(Filter {
             authors: Some(Binding::Literal(BTreeSet::from([author
                 .public_key()

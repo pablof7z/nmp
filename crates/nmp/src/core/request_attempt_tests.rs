@@ -3,7 +3,7 @@
 use std::{borrow::Cow, collections::BTreeSet};
 
 use nmp_grammar::{Binding, Demand, Filter, IndexedTagName};
-use nmp_store::{coverage_key, MemoryStore};
+use nmp_store::{coverage_key, RedbStore};
 
 use super::query::PlanDeltaMode;
 use super::*;
@@ -83,7 +83,7 @@ fn atom(relay: &RelayUrl, author: &str) -> ContextualAtom {
 }
 
 fn apply_compile(
-    core: &mut EngineCore<MemoryStore>,
+    core: &mut EngineCore<RedbStore>,
     demand: BTreeSet<ContextualAtom>,
 ) -> Vec<Effect> {
     let outcome = core
@@ -108,7 +108,7 @@ fn repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_
         slot: 81,
         generation: 1,
     };
-    let mut core = EngineCore::new(MemoryStore::new(), 8);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
     core.handle(EngineMsg::RelayConnected(handle, session.clone()));
     let opened = core.handle(EngineMsg::Subscribe(live_query(&relay)));
     let observation = observation_id(&opened);
@@ -241,7 +241,7 @@ fn nip77_candidate_status_projects_its_role_id_to_the_live_plan_request() {
         slot: 97,
         generation: 1,
     };
-    let mut core = EngineCore::new(MemoryStore::new(), 8);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
     core.prober
         .states
         .insert(relay.clone(), crate::negentropy::ProbeState::Supported);
@@ -276,7 +276,7 @@ fn dynamic_full_recompile_publishes_awaiting_request_before_wire_dispatch() {
         slot: 96,
         generation: 1,
     };
-    let mut core = EngineCore::new(MemoryStore::new(), 8);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
     core.handle(EngineMsg::RelayConnected(handle, session));
     let opened = core.handle(EngineMsg::Subscribe(live_query(&relay)));
     let observation = observation_id(&opened);

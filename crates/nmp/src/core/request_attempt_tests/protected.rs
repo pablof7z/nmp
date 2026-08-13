@@ -30,7 +30,7 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
         slot: 95,
         generation: 2,
     };
-    let mut core = EngineCore::new(MemoryStore::new(), 8);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
     core.attribution.observe_atom(&atom);
     core.attribution
         .retain_live_request_claims(&sub_id, claims.clone());

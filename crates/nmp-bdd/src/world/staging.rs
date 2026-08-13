@@ -25,7 +25,7 @@ use nostr::{Keys, PublicKey, Timestamp, UnsignedEvent};
 use nmp::mechanism::runtime::Handle;
 use nmp::Engine;
 use nmp_router::FixtureRoutingFacts;
-use nmp_store::{EventStore, MemoryStore, RedbStore};
+use nmp_store::{EventStore, RedbStore};
 use nmp_transport::PoolConfig;
 
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -420,9 +420,10 @@ impl NmpWorld {
         // commits real transactions to real files, and a suite that ingests a
         // fixture backlog per scenario would pay that on every one of them.
         //
-        // On disk when the scenario staged an identity by key. A
-        // `MemoryStore` cannot be reopened, so a world that will be asked to
-        // reconstruct its engine over the SAME store needs a real one -- and
+        // On a retained path when the scenario crosses a restart. An
+        // engine-owned temporary Redb directory cannot outlive its store, so
+        // a world asked to reconstruct its engine over the SAME store needs a
+        // retained path -- and
         // every restart step in the catalog belongs to `features/identity/`,
         // whose scenarios all name their accounts that way (see
         // `world::identity`). The flag is set by those `Given`s rather than
@@ -432,7 +433,7 @@ impl NmpWorld {
             let store = self.open_durable_store();
             self.spawn_over(store, facts)
         } else {
-            self.spawn_over(MemoryStore::new(), facts)
+            self.spawn_over(RedbStore::temporary().expect("temporary Redb store"), facts)
         };
 
         self.engine = Some(engine);

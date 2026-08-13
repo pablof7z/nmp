@@ -33,10 +33,8 @@ required-features = ["bench-instrumentation"]
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
-# M3 §3.1: the persistent backend (`RedbStore`) lives here, behind the same
-# `EventStore` trait `MemoryStore` already implements. Pure-Rust embedded
-# ACID key-value store — no C toolchain/`build.rs`, no wasm landmine. A1
-# lands `RedbStore`.
+# Redb is the one complete `EventStore` implementation. It is a pure-Rust
+# embedded ACID key-value store with no C toolchain or build script.
 redb = "4.1"
 fjall = { version = "=3.1.6", optional = true }
 # Native-only LMDB ceiling adapter for #658. This remains benchmark-gated:
@@ -48,6 +46,7 @@ heed = { version = "=0.22.1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1"
+tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
@@ -55,5 +54,4 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Stora
 [dev-dependencies]
 libc = "0.2"
 syn = { version = "2", features = ["full", "visit"] }
-tempfile = "3"
 wait-timeout = "0.2"

@@ -282,7 +282,7 @@ fn nip77_candidate_and_fallback_target_only_the_current_wire_participating_scope
             let relay = RelayUrl::parse("wss://neg-request-target-scope.example.com").unwrap();
             let directory = FixtureRoutingFacts::new()
                 .with_outbound_routes(primer.public_key(), [relay.clone()]);
-            let mut store = MemoryStore::new();
+            let mut store = RedbStore::temporary().expect("temporary Redb store");
             store
                 .insert(
                     UnsignedEvent::new(

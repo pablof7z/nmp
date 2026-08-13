@@ -2,13 +2,13 @@
 
 use std::{borrow::Cow, collections::BTreeSet};
 
-use nmp_store::{coverage_key, MemoryStore};
+use nmp_store::{coverage_key, RedbStore};
 
 use super::query::PlanDeltaMode;
 use super::*;
 
 struct Fixture {
-    core: EngineCore<MemoryStore>,
+    core: EngineCore<RedbStore>,
     relay: RelayUrl,
     session: RelaySessionKey,
     handle: TransportRelayHandle,
@@ -22,7 +22,7 @@ impl Fixture {
             slot: 93,
             generation: 1,
         };
-        let mut core = EngineCore::new(MemoryStore::new(), 8);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
         core.slot_to_relay
             .insert(handle.slot, (handle, session.clone()));
         core.connected_relays.insert(session.clone());

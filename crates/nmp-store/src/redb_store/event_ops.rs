@@ -317,7 +317,7 @@ pub(super) fn query_newest_before(
     }
     // Exact ids are already a caller-bounded lookup rather than an
     // ordered index range. Preserve that narrow path, then apply the
-    // same exact exclusive cursor predicate as the MemoryStore oracle.
+    // same exact exclusive cursor predicate as the EventStore contract.
     if filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
         let mut rows = store.query(filter)?;
         rows.retain(|row| {
@@ -589,7 +589,7 @@ pub(super) fn gc(
 
         // Pass 1: find victims (regular events matched by no claim, and
         // not an open — unsigned — local intent: Fable checkpoint R5,
-        // mirrors `MemoryStore::gc`'s exclusion exactly). A row
+        // mirrors `RedbStore::gc`'s exclusion exactly). A row
         // currently hidden by a still-open kind:5 suppression claim is
         // pinned the same way (architecture review requirement — GC
         // must never evict a target a pending cancel/promote can still
@@ -699,7 +699,7 @@ pub(super) fn gc(
 
         // Pass 2 (issue #507): a SINGLE pass over coverage rows,
         // using `GcVictimIndex` (shared verbatim with
-        // `MemoryStore::gc` — see its doc comment for the proof) to
+        // `RedbStore::gc` — see its doc comment for the proof) to
         // find each row's maximum matching victim timestamp directly,
         // instead of re-walking the full victim list per row. Same
         // write transaction as the event removals above — the
@@ -708,7 +708,7 @@ pub(super) fn gc(
         // coverage of evicted data). `coverage_rows_shrunk`/
         // `coverage_rows_deleted` stay per-ROW, unchanged from
         // before (this was already `RedbStore`'s counting; only
-        // `MemoryStore`'s per-(victim, row) counting needed
+        // `RedbStore`'s per-(victim, row) counting needed
         // unifying).
         let victim_index = GcVictimIndex::new(&victims);
         let mut row_updates: Vec<(String, Option<CoverageRowRecord>)> = Vec::new();

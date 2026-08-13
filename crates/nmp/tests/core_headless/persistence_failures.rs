@@ -5,12 +5,12 @@ use super::*;
 // A fault-injecting `EventStore` whose ONE mutating ingest door (`insert`)
 // returns a `PersistenceError` (a stand-in for disk-full / an I/O error on
 // the real redb backend) while every OTHER door delegates to a healthy
-// in-memory store. This isolates the ingest failure so the falsifiers below
+// temporary Redb store. This isolates the ingest failure so the falsifiers below
 // prove (a) the door surfaces `Err` rather than panicking, and (b) the
 // engine degrades the local cache to read-only and emits a diagnostic
 // instead of crashing the host app on a relay EVENT frame.
 pub(super) struct FailIngestStore {
-    inner: MemoryStore,
+    inner: RedbStore,
     fail_insert: bool,
     fail_coverage: bool,
     fail_query: Rc<Cell<bool>>,
@@ -26,7 +26,7 @@ pub(super) struct FailIngestStore {
 impl FailIngestStore {
     pub(super) fn armed() -> Self {
         Self {
-            inner: MemoryStore::new(),
+            inner: RedbStore::temporary().expect("temporary Redb store"),
             fail_insert: true,
             fail_coverage: false,
             fail_query: Rc::new(Cell::new(false)),
@@ -37,7 +37,7 @@ impl FailIngestStore {
 
     fn coverage_armed(coverage_batch_sizes: Rc<RefCell<Vec<usize>>>) -> Self {
         Self {
-            inner: MemoryStore::new(),
+            inner: RedbStore::temporary().expect("temporary Redb store"),
             fail_insert: false,
             fail_coverage: true,
             fail_query: Rc::new(Cell::new(false)),
@@ -48,7 +48,7 @@ impl FailIngestStore {
 
     fn projection_armed(fail_query: Rc<Cell<bool>>) -> Self {
         Self {
-            inner: MemoryStore::new(),
+            inner: RedbStore::temporary().expect("temporary Redb store"),
             fail_insert: false,
             fail_coverage: false,
             fail_query,
@@ -61,7 +61,7 @@ impl FailIngestStore {
     /// `fail_peeks` is set.
     fn peek_armed(fail_peeks: Rc<Cell<bool>>) -> Self {
         Self {
-            inner: MemoryStore::new(),
+            inner: RedbStore::temporary().expect("temporary Redb store"),
             fail_insert: false,
             fail_coverage: false,
             fail_query: Rc::new(Cell::new(false)),
@@ -232,8 +232,8 @@ impl EventStore for FailIngestStore {
 
 /// Door-level falsifier (issue #122): the `insert` ingest door surfaces a
 /// realistic persistence I/O failure as `Err(PersistenceError)` rather than
-/// panicking. `MemoryStore` never fails, so the fault is entirely the
-/// injected one — this is the exact contract the redb backend now honors via
+/// panicking. The ordinary Redb fixture is not fault-injected, so the fault is
+/// entirely the injected one — this is the exact contract the backend honors via
 /// `.map_err(persist_err)?` on every real redb operation.
 ///
 /// It also pins #895's classification across the crate boundary: the fault
@@ -990,7 +990,7 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
 /// `bootstrap_publish_queue_lanes` exactly once to exercise the degraded-mode
 /// safety valve.
 struct WakeLaneProbeStore {
-    inner: MemoryStore,
+    inner: RedbStore,
     recover_publish_queue_lanes_calls: Rc<Cell<u64>>,
     fail_next_bootstrap: bool,
 }
@@ -998,7 +998,7 @@ struct WakeLaneProbeStore {
 impl WakeLaneProbeStore {
     fn new(recover_publish_queue_lanes_calls: Rc<Cell<u64>>) -> Self {
         Self {
-            inner: MemoryStore::new(),
+            inner: RedbStore::temporary().expect("temporary Redb store"),
             recover_publish_queue_lanes_calls,
             fail_next_bootstrap: false,
         }
@@ -1006,7 +1006,7 @@ impl WakeLaneProbeStore {
 
     fn with_failing_bootstrap(recover_publish_queue_lanes_calls: Rc<Cell<u64>>) -> Self {
         Self {
-            inner: MemoryStore::new(),
+            inner: RedbStore::temporary().expect("temporary Redb store"),
             recover_publish_queue_lanes_calls,
             fail_next_bootstrap: true,
         }

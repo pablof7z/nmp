@@ -16,20 +16,15 @@
 
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, EventStore, InsertOutcome,
-    IntentSigState, MemoryStore, PersistenceFault, PromoteOutcome, PromotionTarget,
-    PublishQueueReceiptPayload, PublishQueueWork, ReceiptState, RedbStore, RefuseReason,
-    RelayObserved, SigState, VerifiedSignature,
+    IntentSigState, PersistenceFault, PromoteOutcome, PromotionTarget, PublishQueueReceiptPayload,
+    PublishQueueWork, ReceiptState, RedbStore, RefuseReason, RelayObserved, SigState,
+    VerifiedSignature,
 };
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
 
-fn for_each_backend(mut body: impl FnMut(&mut dyn EventStore)) {
-    let mut mem = MemoryStore::new();
-    body(&mut mem);
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("store.redb");
-    let mut redb = RedbStore::open(&path).expect("open redb store");
-    body(&mut redb);
+fn with_store(body: impl FnOnce(&mut dyn EventStore)) {
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    body(&mut store);
 }
 
 fn compose(keys: &Keys, kind: Kind, content: &str, created_at: u64) -> (Event, Event) {
@@ -84,7 +79,7 @@ fn do_accept(store: &mut dyn EventStore, request: AcceptWrite) -> AcceptOutcome 
 /// row or of its journal.
 #[test]
 fn a_valid_signature_from_another_intent_is_refused() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = Keys::generate();
         let (frozen_a, signed_a) = compose(&k, Kind::TextNote, "alpha", 100);
         let (frozen_b, _signed_b) = compose(&k, Kind::TextNote, "beta", 200);
@@ -131,7 +126,7 @@ fn a_valid_signature_from_another_intent_is_refused() {
             ),
             "a refused promotion does not advance the receipt"
         );
-        // `MemoryStore::recover_publish_queue` is empty by construction
+        // `RedbStore::recover_publish_queue` is empty by construction
         // (Fable checkpoint Q4), so the durable journal claim is asserted
         // wherever there is a journal to read.
         for record in store.recover_publish_queue().expect("recover") {
@@ -198,7 +193,7 @@ fn a_cryptographically_invalid_signature_yields_no_evidence() {
 /// mis-bound evidence must not cross that line.
 #[test]
 fn a_foreign_signature_cannot_commit_a_pending_kind5_to_permanent_tombstones() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = Keys::generate();
         let target = EventBuilder::new(Kind::TextNote, "please delete me")
             .custom_created_at(Timestamp::from(50))

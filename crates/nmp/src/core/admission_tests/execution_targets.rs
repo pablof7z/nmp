@@ -6,7 +6,7 @@ use super::*;
 fn incompatible_requests_visit_only_their_exact_execution_targets() {
     const OWNERS: u16 = 64;
     let relay = RelayUrl::parse("wss://admission-request-targets.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let observations: Vec<_> = (0..OWNERS)
         .map(|index| {
             observation_id(
@@ -75,7 +75,7 @@ fn cache_only_siblings_are_not_execution_targets_of_a_live_request() {
     for live_closes_first in [false, true] {
         let relay = RelayUrl::parse("wss://admission-request-target-owner.example").unwrap();
         let session = RelaySessionKey::public(relay.clone());
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let live = observation_id(&core.handle(EngineMsg::Subscribe(query(
             &relay,
             "same",
@@ -153,7 +153,7 @@ fn cache_only_siblings_are_not_execution_targets_of_a_live_request() {
 fn a_shared_request_targets_every_wire_active_owner_and_no_cache_only_sibling() {
     let relay = RelayUrl::parse("wss://admission-request-target-shared.example").unwrap();
     let session = RelaySessionKey::public(relay.clone());
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let live_a =
         observation_id(&core.handle(EngineMsg::Subscribe(query(&relay, "same", Freshness::Live))));
     let live_b =
@@ -192,7 +192,7 @@ fn window_distinct_requests_target_only_their_exact_demand_owners_on_send_and_re
     for limited_closes_first in [false, true] {
         let relay = RelayUrl::parse("wss://admission-request-target-window.example").unwrap();
         let session = RelaySessionKey::public(relay.clone());
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let unbounded = observation_id(&core.handle(EngineMsg::Subscribe(query(
             &relay,
             "same",

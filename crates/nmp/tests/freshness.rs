@@ -11,7 +11,7 @@ use nmp_grammar::{
     RelaySessionKey, Selector, SourceAuthority,
 };
 use nmp_router::{FixtureRoutingFacts, WireOp};
-use nmp_store::{CoverageInterval, EventStore, MemoryStore, RedbStore, RelayObserved};
+use nmp_store::{CoverageInterval, EventStore, RedbStore, RelayObserved};
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{Event, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
 
@@ -115,8 +115,8 @@ fn pinned_query(keys: &Keys, relay: &RelayUrl, freshness: Freshness) -> LiveQuer
     LiveQuery::single(demand)
 }
 
-fn seeded_nested_store(keys: &Keys, inner_relay: &RelayUrl) -> MemoryStore {
-    let mut store = MemoryStore::new();
+fn seeded_nested_store(keys: &Keys, inner_relay: &RelayUrl) -> RedbStore {
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .insert(
             event(keys, 90_000),
@@ -126,7 +126,7 @@ fn seeded_nested_store(keys: &Keys, inner_relay: &RelayUrl) -> MemoryStore {
     store
 }
 
-fn core(store: MemoryStore, keys: &Keys, relay: &RelayUrl) -> EngineCore<MemoryStore> {
+fn core(store: RedbStore, keys: &Keys, relay: &RelayUrl) -> EngineCore<RedbStore> {
     EngineCore::new_with_fixture_routing_facts(
         store,
         FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [relay.clone()]),
@@ -135,10 +135,10 @@ fn core(store: MemoryStore, keys: &Keys, relay: &RelayUrl) -> EngineCore<MemoryS
 }
 
 fn core_with_relays(
-    store: MemoryStore,
+    store: RedbStore,
     keys: &Keys,
     relays: impl IntoIterator<Item = RelayUrl>,
-) -> EngineCore<MemoryStore> {
+) -> EngineCore<RedbStore> {
     EngineCore::new_with_fixture_routing_facts(
         store,
         FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), relays),
@@ -260,7 +260,7 @@ fn fresh_cached_profile_uses_coverage_and_zero_wire() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://fresh.example").unwrap();
     let profile = event(&keys, 90_000);
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .insert(
             profile.clone(),
@@ -302,7 +302,7 @@ fn stale_max_age_is_live_but_recent_empty_coverage_is_fresh() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://age.example").unwrap();
     let demand_atom = atom(&keys, SourceAuthority::AuthorOutboxes);
-    let mut stale_store = MemoryStore::new();
+    let mut stale_store = RedbStore::temporary().expect("temporary Redb store");
     record(&mut stale_store, &demand_atom, &relay, 82_000);
     let mut stale = core(stale_store, &keys, &relay);
     tick(&mut stale, 100_000);
@@ -312,7 +312,11 @@ fn stale_max_age_is_live_but_recent_empty_coverage_is_fresh() {
         100_000,
     );
     assert_eq!(reqs(&stale_effects), 1);
-    let mut live = core(MemoryStore::new(), &keys, &relay);
+    let mut live = core(
+        RedbStore::temporary().expect("temporary Redb store"),
+        &keys,
+        &relay,
+    );
     tick(&mut live, 100_000);
     let live_effects = subscribe(&mut live, query(&keys, Freshness::Live), 100_000);
     assert_eq!(
@@ -321,7 +325,7 @@ fn stale_max_age_is_live_but_recent_empty_coverage_is_fresh() {
         "stale MaxAge must use the exact ordinary Live plan"
     );
 
-    let mut empty_store = MemoryStore::new();
+    let mut empty_store = RedbStore::temporary().expect("temporary Redb store");
     record(&mut empty_store, &demand_atom, &relay, 96_400);
     let mut empty = core(empty_store, &keys, &relay);
     tick(&mut empty, 100_000);
@@ -343,7 +347,11 @@ fn stale_max_age_is_live_but_recent_empty_coverage_is_fresh() {
 fn cache_only_does_not_borrow_live_sibling_wire_or_evidence() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://cache-only.example").unwrap();
-    let mut core = core(MemoryStore::new(), &keys, &relay);
+    let mut core = core(
+        RedbStore::temporary().expect("temporary Redb store"),
+        &keys,
+        &relay,
+    );
     tick(&mut core, 100_000);
     let live = subscribe(&mut core, query(&keys, Freshness::Live), 100_000);
     let (live_id, _, _) = initial(&live);
@@ -363,7 +371,7 @@ fn cache_only_never_opens_wire_with_populated_cache_and_coverage() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://cache-only-populated.example").unwrap();
     let cached = event(&keys, 99_000);
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .insert(
             cached.clone(),
@@ -453,7 +461,7 @@ fn nested_strict_pins_do_not_contaminate_public_root_cache_projection() {
     let root_relay = RelayUrl::parse("wss://nested-root-isolation-b.example").unwrap();
     let inner_row = event(&inner_author, 100);
     let root_row = reaction(&inner_author, 200);
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .insert(
             inner_row,
@@ -743,7 +751,7 @@ fn nested_max_age_scoped_coverage_survives_redb_restart() {
 fn live_and_satisfied_max_age_drop_independently() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://siblings.example").unwrap();
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     record(
         &mut store,
         &atom(&keys, SourceAuthority::AuthorOutboxes),
@@ -771,7 +779,7 @@ fn live_and_satisfied_max_age_drop_independently() {
     );
     assert_eq!(closes(&forward.handle(EngineMsg::Unsubscribe(fresh_id))), 0);
 
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     record(
         &mut store,
         &atom(&keys, SourceAuthority::AuthorOutboxes),
@@ -799,7 +807,7 @@ fn max_age_requires_fresh_coverage_from_every_assigned_outbox() {
     let second = RelayUrl::parse("wss://second-outbox.example").unwrap();
     let demand_atom = atom(&keys, SourceAuthority::AuthorOutboxes);
 
-    let mut partial_store = MemoryStore::new();
+    let mut partial_store = RedbStore::temporary().expect("temporary Redb store");
     record(&mut partial_store, &demand_atom, &first, 99_000);
     let mut partial = core_with_relays(partial_store, &keys, [first.clone(), second.clone()]);
     tick(&mut partial, 100_000);
@@ -810,7 +818,7 @@ fn max_age_requires_fresh_coverage_from_every_assigned_outbox() {
     );
     assert_eq!(reqs(&partial_effects), 2, "one fresh relay is insufficient");
 
-    let mut complete_store = MemoryStore::new();
+    let mut complete_store = RedbStore::temporary().expect("temporary Redb store");
     record(&mut complete_store, &demand_atom, &first, 99_000);
     record(&mut complete_store, &demand_atom, &second, 99_000);
     let mut complete = core_with_relays(complete_store, &keys, [first.clone(), second.clone()]);
@@ -838,7 +846,11 @@ fn stale_max_age_refreshes_coverage_once_and_remains_live() {
         slot: 1,
         generation: 1,
     };
-    let mut core = core(MemoryStore::new(), &keys, &relay);
+    let mut core = core(
+        RedbStore::temporary().expect("temporary Redb store"),
+        &keys,
+        &relay,
+    );
     let _ = core.handle(EngineMsg::RelayConnected(handle, session.clone()));
     let _ = core.handle(EngineMsg::RelayInformationResolved(relay.clone(), None));
     tick(&mut core, 100_000);
@@ -881,7 +893,7 @@ fn pinned_strict_max_age_uses_pinned_scope_for_coverage_and_rows() {
     let other = RelayUrl::parse("wss://other.example").unwrap();
     let source = SourceAuthority::Pinned(BTreeSet::from([pinned.clone()]));
     let demand_atom = atom(&keys, source.clone());
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .insert(
             event(&keys, 90_000),
@@ -905,7 +917,11 @@ fn pinned_strict_max_age_uses_pinned_scope_for_coverage_and_rows() {
 fn future_event_time_never_inflates_coverage_or_freshness() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://future.example").unwrap();
-    let mut core = core(MemoryStore::new(), &keys, &relay);
+    let mut core = core(
+        RedbStore::temporary().expect("temporary Redb store"),
+        &keys,
+        &relay,
+    );
     let session = RelaySessionKey::public(relay.clone());
     let handle = RelayHandle {
         slot: 1,
@@ -958,7 +974,7 @@ fn future_event_time_never_inflates_coverage_or_freshness() {
 fn satisfied_max_age_window_growth_stays_store_only() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://fresh-window.example").unwrap();
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .insert(
             event(&keys, 99_000),

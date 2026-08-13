@@ -22,8 +22,8 @@ data class OutboxRoutingConfig(val indexers: List<String>)
 /** Construction config for `NMPEngine`. Build-time feature selection controls
  * which fields exist; runtime relay values remain app-owned inputs. */
 data class NMPConfig(
-    /** `null` -> in-memory store (nothing survives a restart). A path ->
-     * a persistent store reopened at that path across launches. */
+    /** `null` -> an engine-owned temporary Redb store (nothing survives a
+     * restart). A path -> a persistent Redb store reopened across launches. */
     val storePath: String? = null,
     /** Operator app relay set (`Lane::OperatorApp`) -- every kind, every
      * author, always, additive. Default empty. */

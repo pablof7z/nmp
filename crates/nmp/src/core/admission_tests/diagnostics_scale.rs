@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn distinct_physical_closes_defer_diagnostic_coverage_projection() {
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let mut observations = Vec::new();
     let relay = RelayUrl::parse("wss://diagnostic-close.example").unwrap();
     for index in 0..8 {
@@ -51,7 +51,7 @@ fn distinct_physical_closes_defer_diagnostic_coverage_projection() {
 
 #[test]
 fn a_later_admission_cohort_never_visits_ten_thousand_incumbents() {
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let relay = RelayUrl::parse("wss://incremental-admission.example").unwrap();
     let session = RelaySessionKey::public(relay.clone());
     let incumbent_atoms: BTreeSet<_> = (0..10_000)

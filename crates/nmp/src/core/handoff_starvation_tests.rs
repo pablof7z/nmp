@@ -11,7 +11,7 @@
 //! slot for the life of the process — which is what wedged a production
 //! publish lane behind one entry while the backlog grew monotonically.
 
-use nmp_store::{EventStore, MemoryStore, PersistenceFault, RedbStore};
+use nmp_store::{EventStore, PersistenceFault, RedbStore};
 use nostr::{Keys, Kind, RelayUrl, Timestamp};
 
 use crate::lane_fault_store::{FaultyLaneStore, LaneFaults};
@@ -108,7 +108,13 @@ fn a_handoff_that_can_never_arrive_must_not_starve_its_relay() {
         generation: 1,
     };
     let faults = LaneFaults::default();
-    let mut core = EngineCore::new(FaultyLaneStore::new(MemoryStore::new(), faults.clone()), 10);
+    let mut core = EngineCore::new(
+        FaultyLaneStore::new(
+            RedbStore::temporary().expect("temporary Redb store"),
+            faults.clone(),
+        ),
+        10,
+    );
 
     core.handle(EngineMsg::RelayConnected(handle, session.clone()));
     let (receipt_a, _, _) = publish_narrow(&mut core, &author, &relay, 900);
@@ -202,7 +208,10 @@ fn a_live_in_flight_attempt_still_holds_its_relays_only_slot() {
         generation: 1,
     };
     let mut core = EngineCore::new(
-        FaultyLaneStore::new(MemoryStore::new(), LaneFaults::default()),
+        FaultyLaneStore::new(
+            RedbStore::temporary().expect("temporary Redb store"),
+            LaneFaults::default(),
+        ),
         10,
     );
 

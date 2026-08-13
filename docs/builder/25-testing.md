@@ -87,7 +87,7 @@ ownership boundary.
 NMP needs a supported test surface that can instantiate the canonical facade
 with:
 
-- an in-memory or temporary persistent store;
+- an isolated temporary Redb store;
 - an injected clock and deterministic randomness where time/jitter matter;
 - scripted relay and signer capabilities;
 - bounded observation channels; and

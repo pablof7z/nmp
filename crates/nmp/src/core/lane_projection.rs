@@ -359,7 +359,7 @@ impl<S: EventStore> EngineCore<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_store::{MemoryStore, PersistenceFault, RedbStore};
+    use nmp_store::{PersistenceFault, RedbStore};
     use nostr::{Keys, Kind};
     use std::time::Instant;
 
@@ -466,7 +466,7 @@ mod tests {
         let relay = RelayUrl::parse("wss://projection-lifecycle.example.com").unwrap();
         let session =
             RelaySessionKey::new(relay.clone(), AccessContext::Nip42(author.public_key()));
-        let mut core = EngineCore::new(MemoryStore::new(), 10);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
 
         let (receipt, signed) = publish_waiting(&mut core, &author, &relay, 1);
         assert_projection_matches_store(&core);
@@ -510,7 +510,7 @@ mod tests {
         let author_a = Keys::generate();
         let author_b = Keys::generate();
         let relay = RelayUrl::parse("wss://projection-identity.example.com").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 10);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
 
         publish_waiting(&mut core, &author_a, &relay, 10);
         publish_waiting(&mut core, &author_b, &relay, 11);
@@ -565,7 +565,7 @@ mod tests {
     fn durability_unknown_marks_the_lane_uncertain_and_retains_its_worker() {
         let author = Keys::generate();
         let relay = RelayUrl::parse("wss://projection-unknown.example.com").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 10);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
         let (receipt, _) = publish_waiting(&mut core, &author, &relay, 30);
         let key = PublishQueueLaneKey {
             intent_id: core.pending[&receipt].intent_id,
@@ -598,7 +598,7 @@ mod tests {
     fn durability_absent_leaves_the_exact_projection_unchanged() {
         let author = Keys::generate();
         let relay = RelayUrl::parse("wss://projection-absent.example.com").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 10);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
         let (receipt, _) = publish_waiting(&mut core, &author, &relay, 31);
         let key = PublishQueueLaneKey {
             intent_id: core.pending[&receipt].intent_id,

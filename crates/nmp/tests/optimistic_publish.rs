@@ -68,7 +68,7 @@ fn engine() -> Engine {
     Engine::new(EngineConfig {
         ..EngineConfig::default()
     })
-    .expect("an in-memory engine builds")
+    .expect("a temporary Redb engine builds")
 }
 
 /// A real loopback URL with nothing listening on it: the port is bound just

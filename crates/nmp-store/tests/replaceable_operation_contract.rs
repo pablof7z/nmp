@@ -1,7 +1,7 @@
 use nmp_store::{
     AcceptOutcome, AcceptWrite, AcceptWritePayload, AccessContextId, EventStore, IntentSigState,
-    MaterializationCandidate, MaterializationId, MemoryStore, PendingMaterializationState,
-    PromoteOutcome, PromotionTarget, PublishQueueReceiptPayload, QualifiedSource, RedbStore,
+    MaterializationCandidate, MaterializationId, PendingMaterializationState, PromoteOutcome,
+    PromotionTarget, PublishQueueReceiptPayload, QualifiedSource, RedbStore,
     ReplaceableOperationReceiptState, ReplayFormatId, ReplayProgramId, SemanticAccept,
     SemanticInstallOutcome, SemanticPlan, SemanticRematerialize, SourceEvidence, SourcePlanId,
     StartingSource, StartingSourceRequirement, VerifiedSignature,
@@ -315,13 +315,9 @@ fn exercise_bodyless_shared_lifecycle(store: &mut dyn EventStore) {
 }
 
 #[test]
-fn bodyless_accept_install_shared_generation_and_promote_have_memory_redb_parity() {
-    let mut memory = MemoryStore::new();
-    exercise_bodyless_shared_lifecycle(&mut memory);
-
-    let dir = tempfile::tempdir().unwrap();
-    let mut redb = RedbStore::open(dir.path().join("replaceable.redb")).unwrap();
-    exercise_bodyless_shared_lifecycle(&mut redb);
+fn bodyless_accept_install_shared_generation_and_promote_use_redb_transitions() {
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    exercise_bodyless_shared_lifecycle(&mut store);
 }
 
 #[test]
@@ -409,7 +405,7 @@ fn body_complete_receipt_keeps_accepted_id_while_current_advances_across_reopen(
         (first_receipt, second_receipt, first_event, second_event)
     }
 
-    let mut memory = MemoryStore::new();
+    let mut memory = RedbStore::temporary().expect("temporary Redb store");
     exercise(&mut memory);
 
     let dir = tempfile::tempdir().unwrap();

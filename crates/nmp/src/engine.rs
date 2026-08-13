@@ -39,7 +39,7 @@ use crate::runtime::{
 use nmp_grammar::LiveQuery;
 use nmp_grammar::WriteIntent;
 use nmp_signer::SigningCapability;
-use nmp_store::{MemoryStore, RedbStore, RedbStoreOpenError, RedbStoreResetError};
+use nmp_store::{RedbStore, RedbStoreOpenError, RedbStoreResetError};
 use nmp_transport::PoolConfig;
 use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
 use nostr::RelayUrl;
@@ -406,6 +406,7 @@ impl Engine {
                     // one variant because the branch is one branch, not
                     // because nobody looked.
                     error @ (RedbStoreOpenError::PathResolutionFailed { .. }
+                    | RedbStoreOpenError::TemporaryDirectoryFailed { .. }
                     | RedbStoreOpenError::LockFileOpenFailed { .. }
                     | RedbStoreOpenError::LockFailed { .. }
                     | RedbStoreOpenError::TargetChanged { .. }
@@ -424,7 +425,10 @@ impl Engine {
                 .map_err(EngineError::from_start_error)?
             }
             None => {
-                let store = MemoryStore::new();
+                let store =
+                    RedbStore::temporary().map_err(|error| EngineError::StoreOpenFailed {
+                        reason: error.to_string(),
+                    })?;
                 EngineThread::spawn_with_routing_facts_and_runtime_config(
                     store,
                     routing_facts,
@@ -1496,7 +1500,10 @@ mod tests {
     }
 
     fn engine_with_lane_faults(faults: crate::lane_fault_store::LaneFaults) -> Engine {
-        engine_with_store_and_lane_faults(MemoryStore::new(), faults)
+        engine_with_store_and_lane_faults(
+            RedbStore::temporary().expect("temporary Redb store"),
+            faults,
+        )
     }
 
     #[test]
@@ -2883,12 +2890,13 @@ mod tests {
     use nmp_grammar::{Identity, WritePayload, WriteRouting};
     use nostr::ToBech32;
 
-    /// `EngineConfig::default()` (no `store_path`) must select the
-    /// in-memory store and construct cleanly with no network at all -- no
-    /// operator app/fallback relay configured.
+    /// `EngineConfig::default()` (no `store_path`) must select an isolated
+    /// engine-owned temporary Redb store and construct cleanly with no
+    /// network at all -- no operator app/fallback relay configured.
     #[test]
-    fn config_with_no_store_path_selects_memory_store() {
-        let engine = Engine::new(EngineConfig::default()).expect("in-memory engine must build");
+    fn config_with_no_store_path_selects_temporary_redb_store() {
+        let engine =
+            Engine::new(EngineConfig::default()).expect("temporary Redb engine must build");
         engine.shutdown();
     }
 

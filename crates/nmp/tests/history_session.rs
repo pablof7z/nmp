@@ -7,7 +7,7 @@ use nmp::mechanism::core::{
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter};
 use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
-use nmp_store::{EventStore, MemoryStore, RelayObserved};
+use nmp_store::{EventStore, RedbStore, RelayObserved};
 use nostr::{Event, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
 
 fn signed(keys: &Keys, created_at: u64, content: &str) -> Event {
@@ -36,14 +36,14 @@ fn query(keys: &Keys, page_size: usize, max_rows: usize) -> HistoryQuery {
     )
 }
 
-fn seeded(count: usize) -> (EngineCore<MemoryStore>, Keys, RelayUrl, Vec<Event>) {
+fn seeded(count: usize) -> (EngineCore<RedbStore>, Keys, RelayUrl, Vec<Event>) {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://history.example").unwrap();
     let mut events: Vec<_> = (0..count)
         .map(|index| signed(&keys, 100, &format!("same-second-{index}")))
         .collect();
     events.sort_by_key(|event| event.id);
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     for event in &events {
         store
             .insert(
@@ -62,7 +62,7 @@ fn seeded(count: usize) -> (EngineCore<MemoryStore>, Keys, RelayUrl, Vec<Event>)
     )
 }
 
-fn handle_and_flush(core: &mut EngineCore<MemoryStore>, message: EngineMsg) -> Vec<Effect> {
+fn handle_and_flush(core: &mut EngineCore<RedbStore>, message: EngineMsg) -> Vec<Effect> {
     let mut effects = core.handle(message);
     effects.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
     effects
@@ -386,7 +386,7 @@ fn track_wire(open: &mut BTreeSet<SubId>, effects: &[Effect], relay: &RelayUrl) 
 fn deep_scroll_holds_bounded_live_subscriptions_per_relay() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://history.example").unwrap();
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     // Strictly descending, distinct-second rows so every advance genuinely
     // opens a fresh tie-second AND older-range acquisition.
     let total = 210usize;

@@ -8,7 +8,8 @@ fn outstanding_request_terminals_follow_current_exact_owners_after_attachment_ch
         for relay_closes_before_eose in [false, true] {
             let relay = RelayUrl::parse("wss://admission-active-request-owners.example").unwrap();
             let session = RelaySessionKey::public(relay.clone());
-            let mut core = EngineCore::new(MemoryStore::new(), 20);
+            let mut core =
+                EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
             let first = observation_id(&core.handle(EngineMsg::Subscribe(query(
                 &relay,
                 "same",
@@ -109,7 +110,7 @@ fn outstanding_request_terminals_follow_current_exact_owners_after_attachment_ch
 #[test]
 fn settled_departing_shape_remains_owned_by_the_shared_immutable_request() {
     let relay = RelayUrl::parse("wss://admission-attribution-prune.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let a = observation_id(&core.handle(EngineMsg::Subscribe(query(
         &relay,
         "alice",
@@ -171,7 +172,7 @@ fn settled_departing_shape_remains_owned_by_the_shared_immutable_request() {
 #[test]
 fn departing_shape_remains_owned_through_atomic_eose_persistence() {
     let relay = RelayUrl::parse("wss://admission-attribution-completion.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let a = observation_id(&core.handle(EngineMsg::Subscribe(query(
         &relay,
         "alice",
@@ -253,7 +254,7 @@ fn departing_shape_remains_owned_through_atomic_eose_persistence() {
 fn closing_an_incumbent_rearms_an_already_pending_limited_atom_without_a_rebuild() {
     let first_relay = RelayUrl::parse("wss://admission-cap-first.example").unwrap();
     let second_relay = RelayUrl::parse("wss://admission-cap-second.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 1);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 1);
     let first = observation_id(&core.handle(EngineMsg::Subscribe(query(
         &first_relay,
         "alice",
@@ -306,7 +307,7 @@ fn closing_an_incumbent_rearms_an_already_pending_limited_atom_without_a_rebuild
 #[test]
 fn ten_thousand_distinct_pending_cancellations_never_rebuild_surviving_demand() {
     let relay = RelayUrl::parse("wss://admission-pending-withdraw-10k.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let mut observations = Vec::with_capacity(10_000);
     for index in 0..10_000 {
         observations.push(observation_id(&core.handle(EngineMsg::Subscribe(query(

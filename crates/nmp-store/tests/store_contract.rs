@@ -1,22 +1,20 @@
-//! The `EventStore` contract suite — every test here runs against BOTH
-//! `MemoryStore` (the oracle) and a fresh `RedbStore` backed by a temp file
-//! (M3 step A1: "MemoryStore updated in lockstep as the oracle" + "run
-//! against both backends"). Covers: M1's dedup/supersession semantics
+//! The `EventStore` contract suite. Every test runs against an isolated
+//! filesystem-backed Redb store. Covers M1's dedup/supersession semantics
 //! (preserved unchanged), provenance merge (ledger #5, plan §5 test 8),
 //! coverage record/get/merge (the Fable ruling), and claim-based GC with
 //! watermark-lowering (plan §5 test 13).
 //!
 //! `persistence_roundtrip_events_and_coverage_survive_reopen` (plan §5 test
 //! 12) is `RedbStore`-only — it specifically exercises closing and
-//! reopening the same file, which `MemoryStore` has no equivalent of.
+//! reopening the same file.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 use nmp_store::{
     coverage_key, sentinel_signature, AcceptWrite, AcceptWritePayload, CoverageInterval,
-    EventCursor, EventStore, GcRetentionSet, InsertOutcome, IntentSigState, MemoryStore,
-    Provenance, RedbStore, RefuseReason, RelayObserved, RetractReason, StoredEvent,
+    EventCursor, EventStore, GcRetentionSet, InsertOutcome, IntentSigState, Provenance, RedbStore,
+    RefuseReason, RelayObserved, RetractReason, StoredEvent,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -100,17 +98,11 @@ fn atom(filter: &ConcreteFilter) -> ContextualAtom {
     }
 }
 
-/// Run `body` against both backends: `MemoryStore` first (the oracle), then
-/// a fresh `RedbStore` in its own throwaway temp file. Every shared contract
-/// test goes through this so the two backends can never silently diverge.
-fn for_each_backend(mut body: impl FnMut(&mut dyn EventStore)) {
-    let mut mem = MemoryStore::new();
-    body(&mut mem);
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("store.redb");
-    let mut redb = RedbStore::open(&path).expect("open redb store");
-    body(&mut redb);
+/// Run a contract against the one complete store implementation, isolated by
+/// an engine-owned temporary directory.
+fn with_store(body: impl FnOnce(&mut dyn EventStore)) {
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    body(&mut store);
 }
 
 // ---------------------------------------------------------------------
@@ -119,7 +111,7 @@ fn for_each_backend(mut body: impl FnMut(&mut dyn EventStore)) {
 
 #[test]
 fn insert_batch_preserves_input_order_and_governed_supersession() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let author = keys();
         let old = kind3_event(&author, 100);
         let newer = kind3_event(&author, 200);
@@ -153,7 +145,7 @@ fn insert_batch_preserves_input_order_and_governed_supersession() {
 
 #[test]
 fn newest_created_at_wins_replaceable() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
 
         let old = kind3_event(&k, 100);
@@ -181,7 +173,7 @@ fn newest_created_at_wins_replaceable() {
 
 #[test]
 fn lexically_smallest_id_wins_on_created_at_tie() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
 
         let mut candidates: Vec<Event> = (0..6)
@@ -229,7 +221,7 @@ fn lexically_smallest_id_wins_on_created_at_tie() {
 
 #[test]
 fn stale_older_event_rejected() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
 
         let newer = kind3_event(&k, 200);
@@ -256,7 +248,7 @@ fn stale_older_event_rejected() {
 
 #[test]
 fn replaceable_keyed_by_pubkey_kind_not_by_id_alone() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let alice = keys();
         let bob = keys();
 
@@ -280,7 +272,7 @@ fn replaceable_keyed_by_pubkey_kind_not_by_id_alone() {
 
 #[test]
 fn addressable_keyed_by_pubkey_kind_d_distinct_from_replaceable() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
 
         let g1_old = addressable_event(&k, 30_003, "g1", 100);
@@ -342,7 +334,7 @@ fn addressable_keyed_by_pubkey_kind_d_distinct_from_replaceable() {
 /// (kind, d) and this is the test that fails.
 #[test]
 fn addressable_divergence_across_signers_is_preserved_not_collapsed() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let relay_a = keys();
         let relay_b = keys();
 
@@ -400,7 +392,7 @@ fn addressable_divergence_across_signers_is_preserved_not_collapsed() {
 
 #[test]
 fn query_returns_only_current_winners_never_superseded() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
 
         let old = kind3_event(&k, 100);
@@ -418,12 +410,12 @@ fn query_returns_only_current_winners_never_superseded() {
 /// precisely -- `filter.limit` is NOT consulted locally, deliberately (see
 /// that doc for why: honoring it requires an ordering decision reserved
 /// for #9's Collection Tier-A gate). This pins that CURRENT contract
-/// across both backends so it can never silently regress un-noticed, and
+/// through Redb so it cannot silently regress unnoticed, and
 /// gives whoever resolves #9 an obvious test to flip once ordered/
 /// truncated local reads are actually implemented.
 #[test]
-fn query_ignores_limit_and_returns_every_matching_row_on_both_backends() {
-    for_each_backend(|store| {
+fn query_ignores_limit_and_returns_every_matching_row() {
+    with_store(|store| {
         let k = keys();
         let matching_count = 5;
         for i in 0..matching_count {
@@ -451,8 +443,8 @@ fn query_ignores_limit_and_returns_every_matching_row_on_both_backends() {
 }
 
 #[test]
-fn query_newest_is_an_explicit_bounded_door_on_both_backends() {
-    for_each_backend(|store| {
+fn query_newest_is_an_explicit_bounded_door() {
+    with_store(|store| {
         let k = keys();
         for created_at in [100, 500, 300, 200, 400] {
             store
@@ -477,7 +469,7 @@ fn query_newest_is_an_explicit_bounded_door_on_both_backends() {
 
 #[test]
 fn query_newest_before_pages_same_second_rows_without_gaps_or_duplicates() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let mut expected = Vec::new();
         for i in 0..11u64 {
@@ -529,7 +521,7 @@ fn query_newest_before_pages_same_second_rows_without_gaps_or_duplicates() {
 
 #[test]
 fn strict_ordered_pages_count_only_rows_visible_under_the_pin() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let wanted = RelayUrl::parse("wss://wanted.example").unwrap();
         let other = RelayUrl::parse("wss://other.example").unwrap();
@@ -581,7 +573,7 @@ fn strict_ordered_pages_count_only_rows_visible_under_the_pin() {
 
 #[test]
 fn union_replacement_page_is_global_deduplicated_exclusive_and_strict_eligible() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let a = keys();
         let b = keys();
         let wanted = relay("wss://wanted-union.example");
@@ -638,7 +630,7 @@ fn union_replacement_page_is_global_deduplicated_exclusive_and_strict_eligible()
 
 #[test]
 fn query_newest_before_preserves_filter_winner_and_provenance_semantics() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let author = keys();
         let old_profile = EventBuilder::new(Kind::Metadata, "old")
             .custom_created_at(Timestamp::from(100u64))
@@ -684,7 +676,7 @@ fn query_newest_before_preserves_filter_winner_and_provenance_semantics() {
 
 #[test]
 fn query_newest_before_handles_zero_empty_and_filter_window_intersection() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let newer = regular_event_at(&k, "newer", 300);
         let middle = regular_event_at(&k, "middle", 200);
@@ -742,7 +734,7 @@ fn query_newest_before_handles_zero_empty_and_filter_window_intersection() {
 
 #[test]
 fn provenance_merges_across_relays() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let e = regular_event(&k, "hello");
 
@@ -771,7 +763,7 @@ fn provenance_merges_across_relays() {
 
 #[test]
 fn provenance_does_not_grow_on_earlier_or_equal_redelivery_from_same_relay() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let e = regular_event(&k, "hello");
 
@@ -817,7 +809,7 @@ fn provenance_does_not_grow_on_earlier_or_equal_redelivery_from_same_relay() {
 
 #[test]
 fn record_coverage_then_get_coverage_roundtrip() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let s = shape(&[1], None);
         let r = relay("wss://r1");
         store
@@ -840,7 +832,7 @@ fn record_coverage_then_get_coverage_roundtrip() {
 
 #[test]
 fn get_coverage_returns_none_when_no_row_recorded() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let s = shape(&[1], None);
         let key = coverage_key(&atom(&s));
         assert!(store
@@ -852,7 +844,7 @@ fn get_coverage_returns_none_when_no_row_recorded() {
 
 #[test]
 fn coverage_key_is_window_erased_a_floored_refetch_finds_the_same_row() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let unfloored = shape(&[1], None);
         let r = relay("wss://r1");
         store
@@ -887,7 +879,7 @@ fn limited_fetch_that_never_calls_record_coverage_leaves_get_coverage_none() {
     // was exhausted, so the caller (the engine reducer, out of this crate's
     // scope) must simply never call `record_coverage` for it. This pins
     // down the store's half of that contract: no call in => no row out.
-    for_each_backend(|store| {
+    with_store(|store| {
         let limited_shape = shape(&[1], None);
         let limited_shape = ConcreteFilter {
             limit: Some(500),
@@ -905,7 +897,7 @@ fn limited_fetch_that_never_calls_record_coverage_leaves_get_coverage_none() {
 
 #[test]
 fn coverage_merge_extends_across_two_record_coverage_calls() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let s = shape(&[1], None);
         let r = relay("wss://r1");
         store
@@ -934,7 +926,7 @@ fn coverage_merge_extends_across_two_record_coverage_calls() {
 
 #[test]
 fn coverage_merge_keeps_greater_through_on_disjoint_recording() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let s = shape(&[1], None);
         let r = relay("wss://r1");
         store
@@ -966,7 +958,7 @@ fn coverage_merge_keeps_greater_through_on_disjoint_recording() {
 
 #[test]
 fn explicit_gc_policy_evicts_durable_row_and_lowers_covering_watermark() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let e = regular_event_at(&k, "hello", 150);
         let e_id = e.id;
@@ -1005,7 +997,7 @@ fn explicit_gc_policy_evicts_durable_row_and_lowers_covering_watermark() {
 
 #[test]
 fn gc_deletes_watermark_row_when_shrink_empties_it() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let e = regular_event_at(&k, "hello", 100);
         store.insert(e, observed("wss://r1", 1)).unwrap();
@@ -1036,7 +1028,7 @@ fn gc_deletes_watermark_row_when_shrink_empties_it() {
 
 #[test]
 fn gc_deletes_coverage_when_evicting_the_maximum_timestamp_boundary() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let event = regular_event_at(&k, "maximum timestamp", u64::MAX);
         let event_id = event.id;
@@ -1071,7 +1063,7 @@ fn gc_deletes_coverage_when_evicting_the_maximum_timestamp_boundary() {
 
 #[test]
 fn gc_retains_claimed_event_and_replaceable_current_winner() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
 
         // A regular event that IS claimed by a live query -> must survive.
@@ -1098,7 +1090,7 @@ fn gc_retains_claimed_event_and_replaceable_current_winner() {
 
 #[test]
 fn gc_evicts_unclaimed_event_even_when_unrelated_claims_exist() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let other = keys();
         let e = regular_event_at(&k, "hello", 50);
@@ -1119,15 +1111,13 @@ fn gc_evicts_unclaimed_event_even_when_unrelated_claims_exist() {
 // ---------------------------------------------------------------------
 // gc coverage-shrink batching (issue #507): a coverage row is shrunk (or
 // deleted) at most ONCE per `gc` call, using only the MAXIMUM matching
-// victim's `created_at` -- never once per (victim, row) pair -- and both
-// backends must agree byte-for-byte on the resulting `GcReport` and
-// coverage row for the identical scenario (`for_each_backend` runs every
-// assertion below against both, so parity is checked by construction).
+// victim's `created_at` -- never once per (victim, row) pair. The assertions
+// below pin the resulting `GcReport` and coverage row directly.
 // ---------------------------------------------------------------------
 
 #[test]
 fn gc_coverage_shrink_uses_only_the_max_matching_victim_and_counts_once_per_row() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let smaller = regular_event_at(&k, "older", 50);
         let larger = regular_event_at(&k, "newer", 100);
@@ -1167,7 +1157,7 @@ fn gc_coverage_shrink_uses_only_the_max_matching_victim_and_counts_once_per_row(
 
 #[test]
 fn gc_coverage_shrink_deletes_when_only_the_max_victim_would_empty_the_row() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         // A row whose interval the smaller victim (50) alone would only
         // SHRINK ([51, 100]) -- but the larger victim (100) alone would
@@ -1203,7 +1193,7 @@ fn gc_coverage_shrink_deletes_when_only_the_max_victim_would_empty_the_row() {
 
 #[test]
 fn gc_coverage_shrink_ignores_victims_of_a_non_matching_kind() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         // A kind:9 event sitting squarely inside a kind:1-shaped row's
         // interval must never shrink it -- shape-fingerprint pruning
@@ -1251,7 +1241,7 @@ fn gc_coverage_shrink_ignores_victims_of_a_non_matching_kind() {
 
 #[test]
 fn superseded_returns_the_full_evicted_row() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
 
         let old = kind3_event(&k, 100);
@@ -1281,7 +1271,7 @@ fn superseded_returns_the_full_evicted_row() {
 
 #[test]
 fn remove_returns_the_removed_row_and_clears_indexes() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
 
         let e = kind3_event(&k, 100);
@@ -1300,7 +1290,7 @@ fn remove_returns_the_removed_row_and_clears_indexes() {
         // Address index misses too: if `remove` had left `addr_index`
         // pointing at the now-gone `e_id`, inserting a fresh event at the
         // SAME address (even an older `created_at`) would either panic
-        // (memory store: `addr_index must always point at a stored event`)
+        // (`addr_index must always point at a stored event`)
         // or wrongly lose to a ghost winner. It must simply win as the
         // first event at a now-empty address.
         let fresh = kind3_event(&k, 50);
@@ -1325,7 +1315,7 @@ fn remove_returns_the_removed_row_and_clears_indexes() {
 
 #[test]
 fn refused_event_is_never_stored() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
 
         let expired = EventBuilder::new(Kind::TextNote, "bye")
@@ -1354,7 +1344,7 @@ fn refused_event_is_never_stored() {
 
 // ---------------------------------------------------------------------
 // Persistence roundtrip (plan §5 test 12) — `RedbStore`-only: exercises
-// closing and reopening the SAME file, which `MemoryStore` has no
+// closing and reopening the SAME file, which `RedbStore` has no
 // equivalent of.
 // ---------------------------------------------------------------------
 
@@ -1474,7 +1464,7 @@ fn expiring_event(keys: &Keys, content: &str, created_at: u64, expiration: u64) 
 
 #[test]
 fn kind5_from_author_drops_held_target_and_returns_it() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let target = regular_event_at(&k, "delete me", 100);
         let target_id = target.id;
@@ -1506,7 +1496,7 @@ fn kind5_from_author_drops_held_target_and_returns_it() {
 
 #[test]
 fn kind5_from_non_author_does_not_delete() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let author = keys();
         let attacker = keys();
         let target = regular_event_at(&author, "keep me", 100);
@@ -1529,7 +1519,7 @@ fn kind5_from_non_author_does_not_delete() {
 
 #[test]
 fn tombstoned_event_is_refused_on_redelivery() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let target = regular_event_at(&k, "delete me", 100);
         let target_id = target.id;
@@ -1554,7 +1544,7 @@ fn tombstoned_event_is_refused_on_redelivery() {
 
 #[test]
 fn kind5_before_target_arrives_still_tombstones_then_refuses() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let target = regular_event_at(&k, "delete me", 100);
         let target_id = target.id;
@@ -1584,7 +1574,7 @@ fn unauthorized_kind5_cannot_resurrect_authorized_deletion() {
     // author, never collapsed to one overwritable slot per id -- else an
     // unauthorized third party naming an already-deleted id can silently
     // undo the real author's permanent, authorized deletion.
-    for_each_backend(|store| {
+    with_store(|store| {
         let author = keys();
         let attacker = keys();
         let target = regular_event_at(&author, "delete me", 100);
@@ -1636,7 +1626,7 @@ fn unauthorized_kind5_cannot_resurrect_authorized_deletion() {
 fn kind5_id_claims_are_independent_per_author() {
     // Positive companion to the falsifier above: distinct (id, author)
     // claims never interfere with each other in either direction.
-    for_each_backend(|store| {
+    with_store(|store| {
         let author = keys();
         let bystander = keys();
 
@@ -1689,7 +1679,7 @@ fn kind5_id_claims_are_independent_per_author() {
 
 #[test]
 fn kind5_a_tag_deletes_addressable_target_and_ceiling_blocks_older_redelivery() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let g1 = addressable_event(&k, 30_003, "g1", 100);
         let g1_id = g1.id;
@@ -1762,7 +1752,7 @@ fn tombstones_survive_reopen() {
 
 #[test]
 fn expiration_index_drains_due_and_reports_next() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let soon = expiring_event(&k, "soon", 1, 150);
         let soon_id = soon.id;
@@ -1827,8 +1817,8 @@ fn expired_events_retract_at_reopen() {
 }
 
 #[test]
-fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
-    for_each_backend(|store| {
+fn coverage_remains_exact_across_all_retractions_and_only_gc_lowers_it() {
+    with_store(|store| {
         let k = keys();
         let r = relay("wss://r1");
         let s = shape(&[1, 3], Some(&k));
@@ -1946,7 +1936,7 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
 
 #[test]
 fn query_returns_same_rows_after_indexing() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let alice = keys();
         let bob = keys();
 
@@ -2059,7 +2049,7 @@ fn query_returns_same_rows_after_indexing() {
 /// (PR #1173's fix, which this must not regress).
 #[test]
 fn a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_bound() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let pinned_relay = RelayUrl::parse("wss://pinned-1182.example").unwrap();
         let other = RelayUrl::parse("wss://other-1182.example").unwrap();

@@ -7,7 +7,7 @@ fn one_handle_partial_resolver_closes_touch_only_departing_refcounts_in_both_ord
     const ATOMS: usize = 10_000;
     for reverse in [false, true] {
         let relay = RelayUrl::parse("wss://partial-resolver-owner.example").unwrap();
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let observation = observation_id(&core.handle(EngineMsg::Subscribe(query(
             &relay,
             "shared-owner",
@@ -87,7 +87,7 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
     for terminal in ["accepted", "refused", "eose"] {
         let relay = RelayUrl::parse("wss://partial-resolver-distinct.example").unwrap();
         let session = RelaySessionKey::public(relay.clone());
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let observation =
             observation_id(&core.handle(EngineMsg::Subscribe(bounded_query(&relay, "departing"))));
         let handle = core.observations[&observation].branches[0];
@@ -244,7 +244,7 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
 fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
     let relay = RelayUrl::parse("wss://core-metadata-delta-10k.example").unwrap();
     let session = RelaySessionKey::public(relay.clone());
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let mut atoms = Vec::with_capacity(10_001);
     let mut incumbent_claims = BTreeSet::new();
     for kind in 10_000..20_000 {

@@ -24,7 +24,7 @@ use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter};
 use nmp_local_signer::LocalKeySigner;
 use nmp_router::FixtureRoutingFacts;
-use nmp_store::MemoryStore;
+use nmp_store::RedbStore;
 use nmp_transport::PoolConfig;
 use nostr::{EventId, Keys, RelayUrl};
 
@@ -164,7 +164,7 @@ async fn subscribe_widens_via_negentropy_and_surfaces_the_backfilled_post() {
         .with_outbound_routes(b.public_key(), [url.clone()]);
 
     let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        MemoryStore::new(),
+        RedbStore::temporary().expect("temporary Redb store"),
         dir,
         10,
         PoolConfig {

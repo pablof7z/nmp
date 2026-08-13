@@ -616,7 +616,7 @@ pub(super) fn addr_has_covering_claimant_in_txn(
 /// suppression claim — consulted by `query` and `gc`. Never affects
 /// `EVENTS`/`ADDR_INDEX` themselves: a suppressed row is fully present,
 /// just filtered out of read results (see [`SuppressClaimRecord`]'s doc).
-/// Mirrors `MemoryStore::is_suppressed` exactly, including the
+/// Mirrors `RedbStore::is_suppressed` exactly, including the
 /// per-claimant ceiling check for address claims (issue #61 P0
 /// correction). Generic over `ReadableTable` (not the concrete
 /// `Table`/`ReadOnlyTable` types) so it works from BOTH `gc`'s write

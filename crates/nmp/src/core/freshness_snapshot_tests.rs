@@ -4,7 +4,7 @@ use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness, LiveQuery,
     SourceAuthority,
 };
-use nmp_store::{CoverageInterval, EventStore, MemoryStore};
+use nmp_store::{CoverageInterval, EventStore, RedbStore};
 use nostr::{Keys, RelayUrl, Timestamp};
 
 use super::{Effect, EngineCore, EngineMsg, SourceStatus};
@@ -34,7 +34,7 @@ fn fresh_max_age_reads_each_coverage_row_once() {
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .record_coverage(&[(
             atom,
@@ -110,7 +110,7 @@ fn max_age_opening_retains_only_its_scoped_candidate_plan() {
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .record_coverage(&[(
             candidate_atom,
@@ -201,7 +201,7 @@ fn max_age_opening_retains_only_its_scoped_candidate_plan() {
 #[test]
 fn live_and_cache_only_openings_do_zero_freshness_planning() {
     let relay = RelayUrl::parse("wss://no-freshness-preview.example").unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 256);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 256);
     let mut observations = Vec::new();
     for index in 0..207 {
         let freshness = if index % 2 == 0 {

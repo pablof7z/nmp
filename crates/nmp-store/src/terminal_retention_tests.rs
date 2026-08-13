@@ -6,8 +6,8 @@ use nostr::{Event, EventBuilder, Keys, Kind, Timestamp};
 use crate::terminal_retention::TerminalRetentionLimits;
 use crate::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, EventStore, IntentSigState,
-    MemoryStore, PublishQueueReceipt, PublishQueueReceiptPayload, ReceiptState, RedbStore,
-    RefuseReason, RemoveQueueEntryOutcome,
+    PublishQueueReceipt, PublishQueueReceiptPayload, ReceiptState, RedbStore, RefuseReason,
+    RemoveQueueEntryOutcome,
 };
 
 trait RetentionTestStore: EventStore {
@@ -16,16 +16,6 @@ trait RetentionTestStore: EventStore {
         now: Timestamp,
         limits: TerminalRetentionLimits,
     ) -> Result<Vec<u64>, crate::PersistenceError>;
-}
-
-impl RetentionTestStore for MemoryStore {
-    fn maintain_at(
-        &mut self,
-        now: Timestamp,
-        limits: TerminalRetentionLimits,
-    ) -> Result<Vec<u64>, crate::PersistenceError> {
-        self.maintain_terminal_receipts_at(now, limits)
-    }
 }
 
 impl RetentionTestStore for RedbStore {
@@ -147,9 +137,7 @@ fn exercise_global_fifo(store: &mut dyn RetentionTestStore) {
 
 #[test]
 fn all_terminal_receipt_kinds_share_one_fifo() {
-    exercise_global_fifo(&mut MemoryStore::new());
-    let dir = tempfile::tempdir().unwrap();
-    exercise_global_fifo(&mut RedbStore::open(dir.path().join("global-fifo.redb")).unwrap());
+    exercise_global_fifo(&mut RedbStore::temporary().expect("temporary Redb store"));
 }
 
 #[test]
@@ -198,11 +186,9 @@ fn terminal_receipt_fifo_survives_redb_reopen() {
 #[test]
 fn terminal_age_count_and_bytes_each_force_whole_eviction() {
     for trigger in ["age", "count", "bytes"] {
-        exercise_limit(trigger, &mut MemoryStore::new());
-        let dir = tempfile::tempdir().unwrap();
         exercise_limit(
             trigger,
-            &mut RedbStore::open(dir.path().join(format!("{trigger}.redb"))).unwrap(),
+            &mut RedbStore::temporary().expect("temporary Redb store"),
         );
     }
 }

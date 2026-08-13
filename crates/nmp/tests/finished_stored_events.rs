@@ -54,7 +54,7 @@ fn engine() -> Engine {
     Engine::new(EngineConfig {
         ..EngineConfig::default()
     })
-    .expect("an in-memory engine builds")
+    .expect("a temporary Redb engine builds")
 }
 
 /// One branch per relay, each pinned to exactly that relay, so every source

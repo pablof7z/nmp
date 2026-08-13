@@ -27,7 +27,6 @@ fn main() -> Result<(), ProbeError> {
             "--corpus-output" => {
                 config.corpus_output = Some(path_value(&mut args, "--corpus-output")?)
             }
-            "--memory-store" => config.memory_store = true,
             "--redb-nondurable-diagnostic" => config.redb_nondurable_diagnostic = true,
             "--queue-capacity" => config.queue_capacity = value(&mut args, "--queue-capacity")?,
             "--verified-cache-capacity" => {
@@ -135,7 +134,6 @@ fn print_help() {
          --payload-bytes N   event content bytes (default 128)\n\
          --shape-corpus PATH generate the signed workload from a #620 private-free shape corpus\n\
          --corpus-output PATH retain the generated signed JSONL corpus\n\
-         --memory-store       use the volatile semantic oracle as a no-persistence ceiling\n\
          --redb-nondurable-diagnostic\n\
                              benchmark nondurable foreground commits plus a timed final checkpoint\n\
          --queue-capacity N  every bounded runtime queue (default 1024)\n\

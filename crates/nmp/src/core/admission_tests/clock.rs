@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use super::*;
 use crate::lane_fault_store::{FaultyLaneStore, LaneFaults};
-use nmp_store::{EventStore, MemoryStore};
+use nmp_store::{EventStore, RedbStore};
 use nostr::SubscriptionId;
 
 fn prove_nip77<S: EventStore>(
@@ -42,7 +42,10 @@ fn nip77_liveness_is_anchored_to_admission_time_without_maintenance() {
     let old_time = Timestamp::from(100u64);
     let admission_time = Timestamp::from(10_000u64);
     let faults = LaneFaults::default();
-    let store = FaultyLaneStore::new(MemoryStore::new(), faults.clone());
+    let store = FaultyLaneStore::new(
+        RedbStore::temporary().expect("temporary Redb store"),
+        faults.clone(),
+    );
     let mut core = EngineCore::new(store, 20);
 
     core.handle(EngineMsg::Subscribe(query(
@@ -79,7 +82,10 @@ fn nip77_reconnect_liveness_is_anchored_to_connect_time_without_maintenance() {
     let old_time = Timestamp::from(100u64);
     let connect_time = Timestamp::from(10_000u64);
     let faults = LaneFaults::default();
-    let store = FaultyLaneStore::new(MemoryStore::new(), faults.clone());
+    let store = FaultyLaneStore::new(
+        RedbStore::temporary().expect("temporary Redb store"),
+        faults.clone(),
+    );
     let mut core = EngineCore::new(store, 20);
 
     core.handle(EngineMsg::Subscribe(query(

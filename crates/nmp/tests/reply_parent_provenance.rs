@@ -105,7 +105,7 @@ async fn verified_parent_provenance_becomes_a_real_lane_while_raw_hint_text_does
         // connect if routing ever trusted the hint.
         ..EngineConfig::default()
     })
-    .expect("build an in-memory engine");
+    .expect("build a temporary Redb engine");
 
     let mut parent_demand = Demand::new(
         Filter {

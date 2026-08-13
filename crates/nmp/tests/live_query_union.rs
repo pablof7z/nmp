@@ -45,9 +45,9 @@ use nmp_router::{FixtureRoutingFacts, WireOp};
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CompensateOutcome, CompensationReason, CoverageInterval,
     CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome, IntentId,
-    MemoryStore, PersistenceError, PromoteOutcome, PublishQueueAttempt, PublishQueueIntent,
-    PublishQueueReceipt, PublishQueueRouteRevision, RedbStore, RefuseReason, RelayObserved,
-    RemoveQueueEntryOutcome, RetractReason, StoredEvent,
+    PersistenceError, PromoteOutcome, PublishQueueAttempt, PublishQueueIntent, PublishQueueReceipt,
+    PublishQueueRouteRevision, RedbStore, RefuseReason, RelayObserved, RemoveQueueEntryOutcome,
+    RetractReason, StoredEvent,
 };
 use nostr::{Event, EventId, Keys, Kind, PublicKey, RelayUrl, Timestamp, UnsignedEvent};
 
@@ -61,11 +61,11 @@ fn relay(host: &str) -> RelayUrl {
     RelayUrl::parse(&format!("wss://{host}.example")).expect("fixture relay url")
 }
 
-fn core() -> EngineCore<MemoryStore> {
-    core_over(MemoryStore::new())
+fn core() -> EngineCore<RedbStore> {
+    core_over(RedbStore::temporary().expect("temporary Redb store"))
 }
 
-fn core_over(store: MemoryStore) -> EngineCore<MemoryStore> {
+fn core_over(store: RedbStore) -> EngineCore<RedbStore> {
     EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10)
 }
 
@@ -121,7 +121,7 @@ fn union_of(branches: [Demand; 2], aggregate_result_limit: Option<usize>) -> Liv
 }
 
 fn store_event(
-    store: &mut MemoryStore,
+    store: &mut RedbStore,
     keys: &Keys,
     created_at: u64,
     identifier: &str,
@@ -453,7 +453,7 @@ fn an_unplannable_branch_reports_its_own_shortfall() {
 fn rows_union_by_event_id_with_merged_provenance() {
     let (a, b) = (relay("a"), relay("b"));
     let keys = Keys::generate();
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
 
     let only_a = store_event(&mut store, &keys, 200, "a-only", &[&a]);
     let only_b = store_event(&mut store, &keys, 200, "b-only", &[&b]);
@@ -499,7 +499,7 @@ fn rows_union_by_event_id_with_merged_provenance() {
 fn the_aggregate_bound_is_applied_after_the_union() {
     let (a, b) = (relay("a"), relay("b"));
     let keys = Keys::generate();
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
 
     // Four rows: three at the same second (so the tie order is event id ASC)
     // and one strictly older that must never win.
@@ -693,7 +693,7 @@ fn an_over_cap_union_refuses_the_whole_declaration() {
 fn a_window_bounds_the_union_globally() {
     let (a, b) = (relay("a"), relay("b"));
     let keys = Keys::generate();
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
 
     for (index, host) in [(0u64, &a), (1, &a), (2, &a), (3, &b), (4, &b), (5, &b)] {
         store_event(
@@ -749,7 +749,7 @@ fn a_window_and_an_aggregate_bound_are_two_owners_of_row_membership() {
         [host_branch(&relay("a")), host_branch(&relay("b"))],
         Some(3),
     );
-    let engine = nmp::Engine::new(nmp::EngineConfig::default()).expect("in-memory engine");
+    let engine = nmp::Engine::new(nmp::EngineConfig::default()).expect("temporary Redb engine");
     let window = nmp::Window::Expandable {
         initial: std::num::NonZeroUsize::new(2).unwrap(),
         max: std::num::NonZeroUsize::new(4).unwrap(),
@@ -846,7 +846,7 @@ fn only_the_branch_tells_two_identical_resolver_facts_apart() {
 // arms a fault that fails the NEXT canonical read, so on a union it can only
 // ever fail branch 0 and nothing is rolled back. This store instead fails the
 // read that asks for ONE named kind, and delegates every other door to a
-// healthy `MemoryStore`. Because canonical branch order sorts on the
+// healthy `RedbStore`. Because canonical branch order sorts on the
 // selection first, aiming the fault at `OTHER_KIND` fails a LATER branch with
 // the earlier one already opened -- the case a per-branch subscribe-and-merge
 // implementation gets wrong.
@@ -876,12 +876,12 @@ impl BranchReadFault {
 }
 
 struct BranchReadFailureStore {
-    inner: MemoryStore,
+    inner: RedbStore,
     fault: BranchReadFault,
 }
 
 impl BranchReadFailureStore {
-    fn new(inner: MemoryStore, fault: BranchReadFault) -> Self {
+    fn new(inner: RedbStore, fault: BranchReadFault) -> Self {
         Self { inner, fault }
     }
 }
@@ -1058,7 +1058,10 @@ fn a_union_branch_that_cannot_open_leaves_no_earlier_branch_installed() {
     let (a, b, c) = (relay("a"), relay("b"), relay("c"));
     let fault = BranchReadFault::default();
     let mut core = EngineCore::new_with_fixture_routing_facts(
-        BranchReadFailureStore::new(MemoryStore::new(), fault.clone()),
+        BranchReadFailureStore::new(
+            RedbStore::temporary().expect("temporary Redb store"),
+            fault.clone(),
+        ),
         FixtureRoutingFacts::new(),
         10,
     );
@@ -1137,7 +1140,10 @@ fn one_branchs_refresh_failure_retracts_no_sibling_row() {
     let (a, b) = (relay("a"), relay("b"));
     let keys = Keys::generate();
     let fault = BranchReadFault::default();
-    let mut store = BranchReadFailureStore::new(MemoryStore::new(), fault.clone());
+    let mut store = BranchReadFailureStore::new(
+        RedbStore::temporary().expect("temporary Redb store"),
+        fault.clone(),
+    );
     let from_a = store_event_of_kind(&mut store, &keys, KIND, 200, "a", &[&a]);
     let from_b = store_event_of_kind(&mut store, &keys, OTHER_KIND, 201, "b", &[&b]);
     let mut core =
