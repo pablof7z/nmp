@@ -13,8 +13,7 @@ final class TaggingTests: XCTestCase {
             kind: kind,
             tags: tags,
             content: "body",
-            sig: String(repeating: "c", count: 128),
-            signatureState: .signed,
+            signature: .signed(signature: String(repeating: "c", count: 128)),
             sources: sources
         )
     }

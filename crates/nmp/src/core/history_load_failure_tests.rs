@@ -1068,7 +1068,7 @@ fn boundary_second(core: &EngineCore<ControlledFailureStore>, id: HistorySession
     core.histories[&id]
         .last_rows
         .values()
-        .map(|row| row.event.created_at.as_secs())
+        .map(|row| row.created_at().as_secs())
         .min()
         .expect("an opened window holds at least one row")
 }

@@ -464,7 +464,7 @@ impl ObservationState {
         for delta in deltas {
             match delta {
                 RowDelta::Added(row) => {
-                    let ordinal = parse_ordinal(row.event.created_at)?;
+                    let ordinal = parse_ordinal(row.created_at())?;
                     if ordinal >= config.events {
                         return Err(format!("out-of-range event ordinal {ordinal}").into());
                     }
@@ -482,7 +482,7 @@ impl ObservationState {
                         return Err("more Added deltas than canonical corpus rows".into());
                     }
                     if let Some(visible_ids) = &mut self.visible_ids {
-                        if !visible_ids.insert(row.event.id) {
+                        if !visible_ids.insert(row.id()) {
                             return Err("duplicate Added delta for a visible row".into());
                         }
                     }

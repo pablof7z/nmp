@@ -222,8 +222,7 @@ extension Row {
     func toFfi() -> FfiRow {
         FfiRow(
             id: id, pubkey: pubkey, createdAt: createdAt, kind: kind,
-            tags: tags, content: content, sig: sig,
-            signatureState: signatureState.ffi, sources: sources
+            tags: tags, content: content, signature: signature.ffi, sources: sources
         )
     }
 }

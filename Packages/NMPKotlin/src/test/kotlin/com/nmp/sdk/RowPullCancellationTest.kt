@@ -31,7 +31,7 @@ import uniffi.nmp_ffi.FfiRelayInformation
 import uniffi.nmp_ffi.FfiRelayInformationCachePolicy
 import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.FfiRowDelta
-import uniffi.nmp_ffi.FfiRowSignatureState
+import uniffi.nmp_ffi.FfiRowSignature
 import uniffi.nmp_ffi.FfiRowPullException
 import uniffi.nmp_ffi.FfiSignEventRequest
 import uniffi.nmp_ffi.FfiWindow
@@ -139,8 +139,7 @@ class RowPullCancellationTest {
                     kind = 1u,
                     tags = emptyList(),
                     content = "ticketed",
-                    sig = "sig",
-                    signatureState = FfiRowSignatureState.SIGNED,
+                    signature = FfiRowSignature.Signed("sig"),
                     sources = listOf("wss://cancel-window.example"),
                 )
             val frame =

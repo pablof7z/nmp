@@ -26,7 +26,7 @@ import uniffi.nmp_ffi.FfiReceiptReattachment
 import uniffi.nmp_ffi.FfiRetryCause
 import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.FfiRowDelta
-import uniffi.nmp_ffi.FfiRowSignatureState
+import uniffi.nmp_ffi.FfiRowSignature
 
 class EvidenceMappingTest {
     @Test
@@ -98,8 +98,7 @@ class EvidenceMappingTest {
                 kind = 1u,
                 tags = emptyList(),
                 content = "hi",
-                sig = "sig",
-                signatureState = FfiRowSignatureState.SIGNED,
+                signature = FfiRowSignature.Signed("sig"),
                 sources = listOf("wss://r0.example"),
             )
 
@@ -121,22 +120,21 @@ class EvidenceMappingTest {
         val pending =
             FfiRow(
                 id = "same-id", pubkey = "pk", createdAt = 1uL, kind = 1u,
-                tags = emptyList(), content = "body", sig = "placeholder",
-                signatureState = FfiRowSignatureState.PENDING, sources = emptyList(),
+                tags = emptyList(), content = "body",
+                signature = FfiRowSignature.Pending, sources = emptyList(),
             )
         applyRowDelta(order, byId, FfiRowDelta.Added(pending))
         val signed =
             FfiRow(
                 id = "same-id", pubkey = "pk", createdAt = 1uL, kind = 1u,
-                tags = emptyList(), content = "body", sig = "verified",
-                signatureState = FfiRowSignatureState.SIGNED, sources = emptyList(),
+                tags = emptyList(), content = "body",
+                signature = FfiRowSignature.Signed("verified"), sources = emptyList(),
             )
         applyRowDelta(order, byId, FfiRowDelta.Updated(signed))
 
         assertEquals(listOf("same-id"), order)
         assertEquals(1, byId.size)
-        assertEquals("verified", byId["same-id"]?.sig)
-        assertEquals(RowSignatureState.Signed, byId["same-id"]?.signatureState)
+        assertEquals(RowSignature.Signed("verified"), byId["same-id"]?.signature)
     }
 
     @Test

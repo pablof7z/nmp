@@ -17,14 +17,16 @@ Feature: Publishing tells the truth, per relay
   # nmp:status=built
   # nmp:evidence=rust:nmp::an_unsigned_write_is_still_explicitly_pending_after_a_restart
   # nmp:evidence=rust:nmp::pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates
-  # nmp:falsifier=Infer signed from the stored Event shape after reopen; the cold query reports the sentinel row as signed instead of preserving Pending and the same durable obligation.
+  # nmp:evidence=rust:nmp::pending_has_no_signature_or_event_projection
+  # nmp:evidence=rust:nmp-ffi::pending_ffi_row_contains_no_signature_sentinel
+  # nmp:falsifier=Expose the store's sentinel as an app signature, or infer Signed from the store's Event shape after reopen; the cold query either leaks fake bytes or loses Pending and the same durable obligation.
   @ledger-9 @ledger-15
   Scenario: Durable acceptance survives restart through the ordinary store
     Given an unsigned kind 9999 draft matches an open ordinary query
     When the durable write is accepted and the process stops immediately
     And I reconstruct the engine from the same durable store
     Then the ordinary query shows the same final event id and body as pending
-    And it does not present the placeholder signature as a signed event
+    And its closed signature value carries no signature bytes
     And the receipt can be reattached by its stable id
 
   # nmp:id=WRITES-RECEIPTS-003
@@ -32,9 +34,10 @@ Feature: Publishing tells the truth, per relay
   # nmp:evidence=rust:nmp::delayed_signer_promotes_the_same_visible_row_from_pending_to_signed
   # nmp:evidence=rust:nmp::signer_unavailable_keeps_accepted_row_visible
   # nmp:evidence=rust:nmp::slow_observer_never_retains_a_pending_row_after_signature_promotion
+  # nmp:evidence=rust:nmp::signed_always_projects_the_exact_supplied_signature
   # nmp:evidence=swift:NMP::testRowAccumulatorSignaturePromotionReplacesTheSameRow
   # nmp:evidence=kotlin:NMPKotlin::signaturePromotionReplacesTheSameRow
-  # nmp:falsifier=Omit signature state from remembered-row comparison or mailbox composition; the open or slow observation retains the sentinel, while a native accumulator may append a duplicate.
+  # nmp:falsifier=Split signature bytes from their lifecycle state, or omit the closed signature value from remembered-row comparison or mailbox composition; an invalid combination becomes constructible or an open or slow observation retains Pending while a native accumulator may append a duplicate.
   @ledger-10 @ledger-19
   Scenario: A delayed signer promotes the row an open query already received
     Given an ordinary query is open for an unsigned kind 9999 draft
@@ -46,7 +49,7 @@ Feature: Publishing tells the truth, per relay
     Then the same row remains pending with no update
     When the matching signer answers with an exactly valid signature
     Then the query updates that same event id to signed
-    And the updated row carries the verified signature instead of the placeholder
+    And the updated row's Signed arm carries the exact verified signature
 
   # nmp:id=WRITES-RECEIPTS-010
   # nmp:status=built

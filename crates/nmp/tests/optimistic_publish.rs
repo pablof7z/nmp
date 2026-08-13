@@ -148,15 +148,15 @@ fn apply(observed: &mut Observed, deltas: Vec<RowDelta>) {
     for delta in deltas {
         match delta {
             RowDelta::Added(row) => {
-                *observed.added_counts.entry(row.event.id).or_default() += 1;
+                *observed.added_counts.entry(row.id()).or_default() += 1;
                 observed
                     .first_sources
-                    .entry(row.event.id)
+                    .entry(row.id())
                     .or_insert_with(|| row.sources.clone());
-                observed.rows.insert(row.event.id, row);
+                observed.rows.insert(row.id(), row);
             }
             RowDelta::Updated(row) => {
-                observed.rows.insert(row.event.id, row);
+                observed.rows.insert(row.id(), row);
             }
             RowDelta::SourcesGrew { id, sources } => {
                 if let Some(row) = observed.rows.get_mut(&id) {
@@ -189,7 +189,7 @@ fn wait_for_rows(
                 observed
                     .rows
                     .values()
-                    .map(|row| (row.event.id, row.sources.clone()))
+                    .map(|row| (row.id(), row.sources.clone()))
                     .collect::<Vec<_>>()
             );
         }

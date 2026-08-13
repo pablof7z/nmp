@@ -76,8 +76,7 @@ use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::subscription::AsyncSubscription;
 use crate::{
-    AcquisitionEvidence, ConcurrentNext, ObservationCancel, Row, RowDelta, ShortfallFact,
-    SourceStatus,
+    AcquisitionEvidence, ConcurrentNext, ObservationCancel, RowDelta, ShortfallFact, SourceStatus,
 };
 
 use super::read::GroupReadError;
@@ -377,9 +376,10 @@ impl Accumulator {
     fn apply(&mut self, deltas: Vec<RowDelta>) {
         for delta in deltas {
             match delta {
-                RowDelta::Added(Row { event, sources, .. })
-                | RowDelta::Updated(Row { event, sources, .. }) => {
-                    self.rows.insert(event.id, (event, sources));
+                RowDelta::Added(row) | RowDelta::Updated(row) => {
+                    let id = row.id();
+                    let event = row.event_for_store();
+                    self.rows.insert(id, (event, row.sources));
                 }
                 RowDelta::Removed(id) => {
                     self.rows.remove(&id);

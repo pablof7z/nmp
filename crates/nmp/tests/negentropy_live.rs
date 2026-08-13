@@ -78,10 +78,16 @@ fn wait_for_rows(
                 for delta in deltas {
                     match delta {
                         RowDelta::Added(row) => {
-                            current.insert(row.event.id, row.event);
+                            current.insert(
+                                row.id(),
+                                row.signed_event().expect("relay rows are signed"),
+                            );
                         }
                         RowDelta::Updated(row) => {
-                            current.insert(row.event.id, row.event);
+                            current.insert(
+                                row.id(),
+                                row.signed_event().expect("relay rows are signed"),
+                            );
                         }
                         RowDelta::SourcesGrew { .. } => {}
                         RowDelta::Removed(id) => {

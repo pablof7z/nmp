@@ -114,7 +114,7 @@ fn two_group_ids_on_the_same_host_stay_separated_by_h_at_the_wire() {
     assert!(
         delivered_mine
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == mine.id)),
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == mine.id)),
         "the photographers-scoped query must surface its own event: {delivered_mine:?}"
     );
 

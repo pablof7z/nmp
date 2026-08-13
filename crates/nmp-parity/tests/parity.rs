@@ -100,11 +100,16 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
         .custom_created_at(nostr::Timestamp::from(1_700_000_000u64))
         .sign_with_keys(&parent_keys)
         .expect("parity fixture signs");
-    let row = nmp::Row {
-        event: parent.clone(),
-        signature_state: nmp::RowSignatureState::Signed,
-        sources: std::collections::BTreeSet::from([relay.clone()]),
-    };
+    let row = nmp::Row::from_parts(
+        parent.id,
+        parent.pubkey,
+        parent.created_at,
+        parent.kind,
+        parent.tags.clone(),
+        parent.content.clone(),
+        nmp::RowSignature::Signed(parent.sig),
+        std::collections::BTreeSet::from([relay.clone()]),
+    );
 
     let direct = nmp_nip22::comment_intent(
         &row,
@@ -429,8 +434,7 @@ struct NormRow {
     kind: u16,
     tags: Vec<Vec<String>>,
     content: String,
-    sig: String,
-    signature_state: String,
+    signature: Option<String>,
     /// #105: the row's relay-provenance set, normalized the same way every
     /// other relay identifier in this file is (loopback placeholder).
     sources: Vec<String>,
@@ -1284,21 +1288,19 @@ fn ffi_filter(pubkey: &str, kind: u16) -> FfiFilter {
 }
 
 fn direct_row(row: &Row, relay: &str) -> NormRow {
-    let event = &row.event;
     NormRow {
-        id: event.id.to_hex(),
-        pubkey: event.pubkey.to_hex(),
-        created_at: event.created_at.as_secs(),
-        kind: event.kind.as_u16(),
-        tags: event.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
-        content: event.content.clone(),
-        sig: event.sig.to_string(),
-        signature_state: match row.signature_state {
-            nmp::RowSignatureState::Pending => "pending".to_string(),
-            nmp::RowSignatureState::Signed => "signed".to_string(),
+        id: row.id().to_hex(),
+        pubkey: row.pubkey().to_hex(),
+        created_at: row.created_at().as_secs(),
+        kind: row.kind().as_u16(),
+        tags: row.tags().iter().map(|tag| tag.clone().to_vec()).collect(),
+        content: row.content().to_owned(),
+        signature: match row.signature() {
+            nmp::RowSignature::Pending => None,
+            nmp::RowSignature::Signed(signature) => Some(signature.to_string()),
         },
         sources: row
-            .sources
+            .sources()
             .iter()
             .map(|url| normalize_url(url.as_str(), relay))
             .collect(),
@@ -1343,10 +1345,9 @@ fn apply_ffi_deltas(rows: &mut BTreeMap<String, NormRow>, deltas: Vec<FfiRowDelt
                     kind: row.kind,
                     tags: row.tags,
                     content: row.content,
-                    sig: row.sig,
-                    signature_state: match row.signature_state {
-                        nmp_ffi::types::FfiRowSignatureState::Pending => "pending".to_string(),
-                        nmp_ffi::types::FfiRowSignatureState::Signed => "signed".to_string(),
+                    signature: match row.signature {
+                        nmp_ffi::types::FfiRowSignature::Pending => None,
+                        nmp_ffi::types::FfiRowSignature::Signed { signature } => Some(signature),
                     },
                     sources: row
                         .sources
@@ -1364,10 +1365,9 @@ fn apply_ffi_deltas(rows: &mut BTreeMap<String, NormRow>, deltas: Vec<FfiRowDelt
                     kind: row.kind,
                     tags: row.tags,
                     content: row.content,
-                    sig: row.sig,
-                    signature_state: match row.signature_state {
-                        nmp_ffi::types::FfiRowSignatureState::Pending => "pending".to_string(),
-                        nmp_ffi::types::FfiRowSignatureState::Signed => "signed".to_string(),
+                    signature: match row.signature {
+                        nmp_ffi::types::FfiRowSignature::Pending => None,
+                        nmp_ffi::types::FfiRowSignature::Signed { signature } => Some(signature),
                     },
                     sources: row
                         .sources

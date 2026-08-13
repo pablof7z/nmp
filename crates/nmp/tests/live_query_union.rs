@@ -198,10 +198,10 @@ impl Projection {
             for delta in deltas {
                 match delta {
                     RowDelta::Added(row) => {
-                        self.rows.insert(row.event.id, row.sources.clone());
+                        self.rows.insert(row.id(), row.sources.clone());
                     }
                     RowDelta::Updated(row) => {
-                        self.rows.insert(row.event.id, row.sources.clone());
+                        self.rows.insert(row.id(), row.sources.clone());
                     }
                     RowDelta::SourcesGrew { id, sources } => {
                         self.rows.insert(*id, sources.clone());
@@ -727,11 +727,7 @@ fn a_window_bounds_the_union_globally() {
         2,
         "an initial window of 2 holds 2 rows across the whole union, never 2 \
          per branch: {:?}",
-        batch
-            .rows
-            .iter()
-            .map(|row| row.event.id)
-            .collect::<Vec<_>>()
+        batch.rows.iter().map(|row| row.id()).collect::<Vec<_>>()
     );
     assert_eq!(
         batch.evidence.len(),
@@ -740,11 +736,11 @@ fn a_window_bounds_the_union_globally() {
          unbounded one"
     );
     assert_eq!(
-        batch.rows[0].event.created_at.as_secs(),
+        batch.rows[0].created_at().as_secs(),
         205,
         "the window holds the globally newest rows"
     );
-    assert_eq!(batch.rows[1].event.created_at.as_secs(), 204);
+    assert_eq!(batch.rows[1].created_at().as_secs(), 204);
 }
 
 #[test]

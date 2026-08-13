@@ -59,7 +59,7 @@ Once expected author identity is resolved, temporary provider absence does not
 reject a durable intent. The canonical row remains:
 
 ```text
-signatureState = Pending(intentId)
+signature = Pending
 ```
 
 The receipt reports:
