@@ -225,7 +225,7 @@ pub use session::{
 #[doc(hidden)]
 #[must_use]
 pub fn nmp_threads_spawned() -> u64 {
-    nmp_executor::nmp_threads_spawned()
+    nmp_transport::thread_census::nmp_threads_spawned()
 }
 
 /// The number of real NMP-owned OS threads currently ALIVE (#704 review
@@ -237,7 +237,7 @@ pub fn nmp_threads_spawned() -> u64 {
 #[doc(hidden)]
 #[must_use]
 pub fn nmp_threads_live() -> u64 {
-    nmp_executor::nmp_threads_live()
+    nmp_transport::thread_census::nmp_threads_live()
 }
 // The pull-based async observation API (#680) is the FFI/SDK delivery
 // mechanism — its app contract is documented in `nmp-ffi` and the Swift/Kotlin

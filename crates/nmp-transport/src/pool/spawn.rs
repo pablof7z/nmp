@@ -20,7 +20,7 @@ impl ThreadSpawner for SystemThreadSpawner {
         // paired on the same thread) so the live gauge cannot race and returns
         // to baseline when a pool is dropped. Injected test spawners do not
         // bump it.
-        builder.spawn(move || nmp_executor::run_counted_thread(task))
+        builder.spawn(move || crate::thread_census::run_counted_thread(task))
     }
 }
 
