@@ -1,8 +1,9 @@
 use nmp_store::RelayObserved;
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, AcceptWritePayload, AccessContextId, EventStore, IntentSigState,
-    MaterializationCandidate, MaterializationId, PendingMaterializationState, PromoteOutcome,
-    PromotionTarget, PublishQueueReceiptPayload, QualifiedSource, RedbStore,
+    AcceptOutcome, AcceptWrite, AcceptWritePayload, AccessContextId, EventStore, HandoffEvidence,
+    IntentSigState, MaterializationCandidate, MaterializationId, PendingMaterializationState,
+    PromoteOutcome, PromotionTarget, PublishQueueAttemptHandoff, PublishQueueLaneState,
+    PublishQueuePostHandoffState, PublishQueueReceiptPayload, QualifiedSource, RedbStore,
     ReplaceableOperationReceiptState, ReplayFormatId, ReplayProgramId, SemanticAccept,
     SemanticInstallOutcome, SemanticPlan, SemanticRematerialize, SemanticSourceInstall,
     SourceEvidence, SourcePlanId, StartingSource, StartingSourceRequirement, VerifiedSignature,
@@ -417,6 +418,69 @@ fn exercise_source_successor(store: &mut dyn EventStore) {
             .event,
         base
     );
+    store
+        .record_route_revision(intent, std::collections::BTreeSet::from([relay.clone()]))
+        .unwrap();
+    let first_lane = store
+        .bootstrap_publish_queue_lanes(intent)
+        .unwrap()
+        .remove(0);
+    let eligible = store
+        .set_lane_eligible(&first_lane.key, first_lane.revision, Timestamp::from(3))
+        .unwrap();
+    let first_row = store.query(&Filter::new().id(first_id)).unwrap().remove(0);
+    let first_signed = UnsignedEvent::new(
+        first_row.event.pubkey,
+        first_row.event.created_at,
+        first_row.event.kind,
+        first_row.event.tags.clone(),
+        first_row.event.content.clone(),
+    )
+    .sign_with_keys(&keys)
+    .unwrap();
+    let first_current = store
+        .replaceable_operation_snapshot(&coordinate)
+        .unwrap()
+        .unwrap()
+        .current;
+    let first_generation = first_current.generation.as_ref().unwrap();
+    store
+        .promote_signed(
+            PromotionTarget::ReplaceableMaterialization(Box::new(
+                nmp_store::ReplaceableMaterializationTarget {
+                    coordinate: coordinate.clone(),
+                    expected_source_revision: first_current.source_revision,
+                    expected_program_digest: first_current.program_digest,
+                    expected_materialization: first_generation.materialization.materialization_id,
+                    expected_event_id: first_id,
+                },
+            )),
+            VerifiedSignature::verify(&first_signed).unwrap(),
+        )
+        .unwrap();
+    let (_, awaiting_handoff) = store
+        .start_lane_attempt(
+            &eligible.key,
+            eligible.revision,
+            first_signed,
+            Timestamp::from(3),
+        )
+        .unwrap();
+    store
+        .record_lane_handoff(
+            &awaiting_handoff.key,
+            awaiting_handoff.revision,
+            1,
+            PublishQueueAttemptHandoff {
+                at: Timestamp::from(3),
+                result: HandoffEvidence::Written,
+            },
+            PublishQueuePostHandoffState::AwaitingAck {
+                deadline: Timestamp::from(4),
+            },
+        )
+        .unwrap();
+    assert!(store.next_publish_queue_deadline().unwrap().is_some());
 
     let newer = EventBuilder::new(Kind::ContactList, "B5")
         .custom_created_at(Timestamp::from(5))
@@ -479,6 +543,17 @@ fn exercise_source_successor(store: &mut dyn EventStore) {
     assert_eq!(reopened.source.unwrap().event, newer);
     assert_ne!(installed.event.id, first_id);
     assert_eq!(receipt_ids(store, receipt), (first_id, installed.event.id));
+    let successor_lane = store.recover_publish_queue_lanes(intent).unwrap().remove(0);
+    assert_eq!(successor_lane.key.event_id, installed.event.id);
+    assert_eq!(successor_lane.last_ordinal, 1);
+    assert_eq!(
+        successor_lane.state,
+        PublishQueueLaneState::WaitingConnection
+    );
+    assert_eq!(store.next_publish_queue_deadline().unwrap(), None);
+    let attempts = store.recover_attempts(intent).unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].event.id, first_id);
 }
 
 #[test]

@@ -37,6 +37,7 @@ use super::{
     ReceiptState, RelayUrl, Timestamp,
 };
 use crate::terminal_retention::{wall_clock_now, TerminalRetentionLimits};
+use crate::EventStore;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
 /// Replay every still-open intent (#3 §2.3), fallible end to end (#790).
@@ -1143,12 +1144,30 @@ pub(super) fn start_lane_attempt(
             .ok_or_else(|| PersistenceError::invariant("attempt intent is not open"))?;
         decode_intent(&encoded).map_err(|error| codec_error("attempt intent", error))?
     };
-    let Some((intent_event, sig_state)) = intent.event() else {
-        return Err(PersistenceError::invariant(
-            "operation intent cannot own a delivery lane",
-        ));
+    let (intent_event, sig_state) = match &intent.work {
+        super::publish_queue::PublishQueueIntentRecordWork::Event {
+            frozen, sig_state, ..
+        } => (frozen.clone(), *sig_state),
+        super::publish_queue::PublishQueueIntentRecordWork::ReplaceableOperation {
+            materialization: Some(materialization),
+            ..
+        } => {
+            let rows = store.query(&nostr::Filter::new().id(materialization.current.event_id))?;
+            let stored = rows.into_iter().next().ok_or_else(|| {
+                PersistenceError::invariant("operation materialization event is missing")
+            })?;
+            (stored.event, materialization.sig_state)
+        }
+        super::publish_queue::PublishQueueIntentRecordWork::ReplaceableOperation {
+            materialization: None,
+            ..
+        } => {
+            return Err(PersistenceError::invariant(
+                "operation intent has no current materialization",
+            ))
+        }
     };
-    if sig_state != IntentSigState::Signed || *intent_event != event {
+    if sig_state != IntentSigState::Signed || intent_event != event {
         return Err(PersistenceError::invariant(
             "attempt bytes are not the intent's promoted signed bytes",
         ));
