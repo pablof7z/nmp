@@ -572,18 +572,43 @@ impl<S: EventStore> EngineCore<S> {
         fact: WriteFact,
         effects: &mut Vec<Effect>,
     ) {
+        let recipients = match &fact {
+            WriteFact::Relay { event_id, .. } => self
+                .event_to_receipts
+                .get(event_id)
+                .cloned()
+                .unwrap_or_else(|| BTreeSet::from([id])),
+            WriteFact::Destinations { .. }
+                if self.pending.get(&id).is_some_and(|pending| {
+                    matches!(pending.target, PendingWriteTarget::ReplaceableOperation(_))
+                }) =>
+            {
+                self.pending
+                    .get(&id)
+                    .and_then(|pending| self.event_to_receipts.get(&pending.frozen.id))
+                    .cloned()
+                    .unwrap_or_else(|| BTreeSet::from([id]))
+            }
+            _ => BTreeSet::from([id]),
+        };
         if let WriteFact::Relay {
             state: RelayState::Waiting(RelayWaiting::PersistenceStalled { detail }),
             ..
         } = &fact
         {
-            if let Some(pending) = self.pending.get_mut(&id) {
-                if pending.persistence_fault.is_none() {
-                    pending.persistence_fault = Some(detail.clone());
+            for recipient in &recipients {
+                if let Some(pending) = self.pending.get_mut(recipient) {
+                    if pending.persistence_fault.is_none() {
+                        pending.persistence_fault = Some(detail.clone());
+                    }
                 }
             }
         }
-        effects.push(Effect::EmitReceipt(id, fact));
+        effects.extend(
+            recipients
+                .into_iter()
+                .map(|recipient| Effect::EmitReceipt(recipient, fact.clone())),
+        );
     }
 
     /// One lane attempt ended in a way that PERMITS another try; the ceiling
@@ -630,6 +655,7 @@ impl<S: EventStore> EngineCore<S> {
                 self.emit_write_fact(
                     id,
                     WriteFact::Relay {
+                        event_id: key.event_id,
                         relay: key.relay.clone(),
                         state: RelayState::GaveUp,
                     },
@@ -658,6 +684,7 @@ impl<S: EventStore> EngineCore<S> {
             self.emit_write_fact(
                 id,
                 WriteFact::Relay {
+                    event_id: key.event_id,
                     relay: key.relay.clone(),
                     state: RelayState::Waiting(RelayWaiting::BackingOff {
                         attempt: ordinal,
@@ -697,7 +724,8 @@ impl<S: EventStore> EngineCore<S> {
                 // lane it has is trivially terminal, and closing on that
                 // would delete the exact obligation the queue rewriter is
                 // waiting to complete. Nothing auto-abandons.
-                pending.route_complete
+                !matches!(pending.target, PendingWriteTarget::ReplaceableOperation(_))
+                    && pending.route_complete
                     && pending.route_blocked_relays.is_empty()
                     && pending.lane_projection.can_close()
             })
@@ -737,14 +765,10 @@ impl<S: EventStore> EngineCore<S> {
             return effects;
         };
 
-        let Some((intent_id, ordinal)) = target.lane else {
+        let Some((key, ordinal)) = target.lane else {
             return effects;
         };
-
-        let key = PublishQueueLaneKey {
-            intent_id,
-            relay: target.session.relay.clone(),
-        };
+        let intent_id = key.intent_id;
         let Ok(Some(lane)) = self
             .resolver
             .store()
@@ -795,6 +819,7 @@ impl<S: EventStore> EngineCore<S> {
                 self.emit_write_fact(
                     target.receipt,
                     WriteFact::Relay {
+                        event_id: key.event_id,
                         relay: target.session.relay,
                         state: RelayState::Sent {
                             attempt: ordinal,
@@ -810,6 +835,7 @@ impl<S: EventStore> EngineCore<S> {
                 self.emit_write_fact(
                     target.receipt,
                     WriteFact::Relay {
+                        event_id: key.event_id,
                         relay: target.session.relay.clone(),
                         state: RelayState::Waiting(RelayWaiting::NotConnected),
                     },
@@ -865,9 +891,12 @@ impl<S: EventStore> EngineCore<S> {
     /// `attempt_correlations` is bounded by `MAX_GLOBAL_ATTEMPTS`, so this is
     /// a scan of at most 32 entries and never a store read.
     fn handoff_is_outstanding(&self, intent_id: IntentId, ordinal: u64) -> bool {
-        self.attempt_correlations
-            .values()
-            .any(|target| target.lane == Some((intent_id, ordinal)))
+        self.attempt_correlations.values().any(|target| {
+            target
+                .lane
+                .as_ref()
+                .is_some_and(|(key, current)| key.intent_id == intent_id && *current == ordinal)
+        })
     }
 
     /// Give back the relay slot held by an attempt whose handoff can never
@@ -1022,6 +1051,7 @@ impl<S: EventStore> EngineCore<S> {
                     self.emit_write_fact(
                         id,
                         WriteFact::Relay {
+                            event_id: lane.key.event_id,
                             relay: lane.key.relay.clone(),
                             state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                         },
@@ -1055,6 +1085,7 @@ impl<S: EventStore> EngineCore<S> {
                     self.emit_write_fact(
                         id,
                         WriteFact::Relay {
+                            event_id: lane.key.event_id,
                             relay: lane.key.relay,
                             state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                                 detail: ATTEMPT_STALL_DETAIL.to_string(),
@@ -1088,7 +1119,7 @@ impl<S: EventStore> EngineCore<S> {
                 AttemptCorrelationTarget {
                     receipt: id,
                     session: session.clone(),
-                    lane: Some((lane.key.intent_id, attempt.ordinal)),
+                    lane: Some((lane.key.clone(), attempt.ordinal)),
                 },
             );
             effects.push(Effect::PublishEvent(session, event, correlation));
@@ -1243,6 +1274,7 @@ impl<S: EventStore> EngineCore<S> {
                 self.emit_write_fact(
                     id,
                     WriteFact::Relay {
+                        event_id: lane.key.event_id,
                         relay: lane.key.relay,
                         state: RelayState::Waiting(RelayWaiting::BackingOff {
                             attempt: lane.last_ordinal,
@@ -1360,6 +1392,7 @@ impl<S: EventStore> EngineCore<S> {
             }
         };
         let mut recovered_ids = Vec::new();
+        let mut recovered_semantic_owners = Vec::new();
         // This is the one deterministic, from-scratch rebuild of `pending`
         // (and, with it, every index derived from `pending`) -- the exact
         // moment `receipts_by_lane_relay` can be trusted again regardless of
@@ -1408,6 +1441,8 @@ impl<S: EventStore> EngineCore<S> {
                 let Some(row) = row else { continue };
                 let parsed_routing = Self::parse_routing_snapshot(&materialization.routing);
                 let id = ReceiptId(intent.receipt_id);
+                let already_signed = materialization.receipt.sig_state == IntentSigState::Signed;
+                let is_owner = generation.members.first() == Some(&intent.intent_id);
                 self.pending.insert(
                     id,
                     PendingWrite {
@@ -1430,10 +1465,10 @@ impl<S: EventStore> EngineCore<S> {
                         accepted_at: intent.accepted_at,
                         signing_pubkey: intent.expected_pubkey,
                         frozen: row.event.clone(),
-                        already_signed: false,
+                        already_signed,
                         sign_request_in_flight: false,
                         sign_generation: 0,
-                        event_id: None,
+                        event_id: already_signed.then_some(row.event.id),
                         pending_relays: BTreeSet::new(),
                         unstarted_relays: BTreeSet::new(),
                         route_blocked_relays: BTreeSet::new(),
@@ -1451,6 +1486,10 @@ impl<S: EventStore> EngineCore<S> {
                     .entry(generation.materialization.event_id)
                     .or_default()
                     .insert(id);
+                recovered_ids.push(id);
+                if is_owner {
+                    recovered_semantic_owners.push((id, intent.intent_id, already_signed));
+                }
                 continue;
             }
             let Some((frozen, _, routing_snapshot, sig_state)) = intent.event_work() else {
@@ -1624,6 +1663,41 @@ impl<S: EventStore> EngineCore<S> {
                     }
                 };
             self.open_bootstrapped_lanes(id, intent.expected_pubkey, lanes, &mut effects);
+        }
+
+        for (id, intent_id, already_signed) in recovered_semantic_owners {
+            if already_signed {
+                let revisions = match self.resolver.store().recover_route_revisions(intent_id) {
+                    Ok(revisions) => revisions,
+                    Err(error) => {
+                        self.record_store_failure(&error);
+                        self.schedule_lane_bootstrap_retry(intent_id, None);
+                        continue;
+                    }
+                };
+                let durable_relays = revisions
+                    .iter()
+                    .flat_map(|revision| revision.relays.iter().cloned())
+                    .collect::<BTreeSet<_>>();
+                let signing_pubkey = self.pending[&id].signing_pubkey;
+                if let Some(pending) = self.pending.get_mut(&id) {
+                    pending.durable_routes = durable_relays.clone();
+                }
+                match self.bootstrap_projected_lanes(intent_id, Some(&durable_relays)) {
+                    Ok(lanes) => {
+                        self.open_bootstrapped_lanes(id, signing_pubkey, lanes, &mut effects)
+                    }
+                    Err(error) => self.record_store_failure(&error),
+                }
+            } else if let Some(pending) = self.pending.get_mut(&id) {
+                pending.sign_request_in_flight = true;
+                pending.sign_generation = pending.sign_generation.saturating_add(1);
+                effects.push(Effect::RequestSign(
+                    id,
+                    pending.sign_generation,
+                    unsigned_from_frozen(&pending.frozen),
+                ));
+            }
         }
 
         self.retry_scheduler_blocked = false;
@@ -1860,36 +1934,56 @@ impl<S: EventStore> EngineCore<S> {
                 return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable)
             }
         };
-        if let PublishQueueReceiptPayload::ReplaceableOperation {
-            acceptance: nmp_store::ReplaceableOperationAcceptance::BodyComplete(accepted_event_id),
-            state: nmp_store::ReplaceableOperationReceiptState::Contributing { current: Some(_) },
-            ..
-        } = &receipt.payload
-        {
-            if limit == 0 {
-                return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable);
-            }
-            return ReceiptReplayPage {
-                outcome: ReattachOutcome::Attached,
-                facts: Vec::new(),
-                next_cursor: None,
-                end_cursor: Some(cursor),
-                frozen_id: Some(*accepted_event_id),
-                isolated_fact_cursors: Vec::new(),
-            };
-        }
-        let Some(receipt_state) = receipt.event_state() else {
+        let semantic = match &receipt.payload {
+            PublishQueueReceiptPayload::ReplaceableOperation {
+                coordinate,
+                acceptance: nmp_store::ReplaceableOperationAcceptance::BodyComplete(accepted),
+                state:
+                    nmp_store::ReplaceableOperationReceiptState::Contributing {
+                        current: Some(current),
+                    },
+            } => Some((coordinate.clone(), *accepted, current.clone())),
+            _ => None,
+        };
+        let receipt_state = semantic
+            .as_ref()
+            .map(|(_, _, current)| match current.sig_state {
+                IntentSigState::Signed => ReceiptState::Signed,
+                IntentSigState::AwaitingSigner | IntentSigState::Pending => ReceiptState::Accepted,
+            })
+            .or_else(|| receipt.event_state());
+        let Some(receipt_state) = receipt_state else {
             // The store can truthfully reattach this ordinary receipt, but
             // #841 has not yet installed the runtime projection for semantic
             // materialization facts. Never reinterpret it as event work.
             return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable);
         };
-        let receipt_event_id = receipt
-            .event_id()
-            .expect("event receipt state and event id share one closed arm");
+        let receipt_event_id = semantic
+            .as_ref()
+            .map(|(_, _, current)| current.materialization.event_id)
+            .or_else(|| receipt.event_id())
+            .expect("active receipt carries a current event id");
+        let evidence_intent = if let Some((coordinate, _, _)) = &semantic {
+            match self
+                .resolver
+                .store()
+                .replaceable_operation_snapshot(coordinate)
+            {
+                Ok(Some(snapshot)) => snapshot
+                    .current
+                    .generation
+                    .and_then(|generation| generation.members.first().copied()),
+                _ => return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable),
+            }
+        } else {
+            receipt.intent_id
+        };
+        let projection_id = evidence_intent
+            .and_then(|intent| self.intent_receipts.get(&intent).copied())
+            .unwrap_or(id);
         if self
             .pending
-            .get(&id)
+            .get(&projection_id)
             .is_some_and(|pending| !pending.routing_valid)
         {
             // Boot retained the obligation but could not interpret its
@@ -1899,7 +1993,7 @@ impl<S: EventStore> EngineCore<S> {
             // signer facts from an obligation whose destination is unknown.
             return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable);
         }
-        let (attempts, details, lanes) = match receipt.intent_id {
+        let (attempts, details, lanes) = match evidence_intent {
             Some(intent_id) => {
                 let attempts = match self.resolver.store().recover_attempts(intent_id) {
                     Ok(attempts) => attempts,
@@ -1958,14 +2052,14 @@ impl<S: EventStore> EngineCore<S> {
         if receipt_state == ReceiptState::Accepted
             && self
                 .pending
-                .get(&id)
+                .get(&projection_id)
                 .is_some_and(|pending| !pending.already_signed)
         {
             replay.push((
                 ReceiptReplayFactKey::AwaitingCapability,
                 WriteFact::Signing(Self::signing_park(
                     receipt.expected_pubkey,
-                    self.pending.get(&id),
+                    self.pending.get(&projection_id),
                 )),
             ));
         }
@@ -1978,7 +2072,7 @@ impl<S: EventStore> EngineCore<S> {
         // is waiting.
         if let Some(pending) = self
             .pending
-            .get(&id)
+            .get(&projection_id)
             .filter(|pending| pending.durable_routes.is_empty() && !pending.route_complete)
         {
             replay.push((
@@ -1999,6 +2093,7 @@ impl<S: EventStore> EngineCore<S> {
             let mut awaiting_auth = BTreeSet::new();
             let mut retry_eligible = BTreeSet::new();
             for attempt in attempts {
+                let event_id = attempt.event.id;
                 let replay_relay = attempt.relay.clone();
                 let replay_ordinal = attempt.ordinal;
                 let replay_key = |phase| ReceiptReplayFactKey::Attempt {
@@ -2018,6 +2113,7 @@ impl<S: EventStore> EngineCore<S> {
                                 replay.push((
                                     replay_key(ReceiptAttemptReplayPhase::Handoff),
                                     WriteFact::Relay {
+                                        event_id,
                                         relay: attempt.relay.clone(),
                                         state: RelayState::Waiting(RelayWaiting::NotConnected),
                                     },
@@ -2026,6 +2122,7 @@ impl<S: EventStore> EngineCore<S> {
                             HandoffEvidence::Written => replay.push((
                                 replay_key(ReceiptAttemptReplayPhase::Handoff),
                                 WriteFact::Relay {
+                                    event_id,
                                     relay: attempt.relay.clone(),
                                     state: RelayState::Sent {
                                         attempt: attempt.ordinal,
@@ -2046,6 +2143,7 @@ impl<S: EventStore> EngineCore<S> {
                             replay.push((
                                 replay_key(ReceiptAttemptReplayPhase::Transient),
                                 WriteFact::Relay {
+                                    event_id,
                                     relay: attempt.relay.clone(),
                                     state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                                 },
@@ -2059,6 +2157,7 @@ impl<S: EventStore> EngineCore<S> {
                             replay.push((
                                 replay_key(ReceiptAttemptReplayPhase::Transient),
                                 WriteFact::Relay {
+                                    event_id,
                                     relay: attempt.relay.clone(),
                                     state: RelayState::Waiting(RelayWaiting::BackingOff {
                                         attempt: attempt.ordinal,
@@ -2079,14 +2178,17 @@ impl<S: EventStore> EngineCore<S> {
                     // recreate the exact false claim this seam removes.
                     PublishQueueAttemptOutcome::Started => continue,
                     PublishQueueAttemptOutcome::Acked => WriteFact::Relay {
+                        event_id,
                         relay: attempt.relay,
                         state: RelayState::Published,
                     },
                     PublishQueueAttemptOutcome::Rejected(reason) => WriteFact::Relay {
+                        event_id,
                         relay: attempt.relay,
                         state: RelayState::Rejected { reason },
                     },
                     PublishQueueAttemptOutcome::GaveUp => WriteFact::Relay {
+                        event_id,
                         relay: attempt.relay,
                         state: RelayState::GaveUp,
                     },
@@ -2109,6 +2211,7 @@ impl<S: EventStore> EngineCore<S> {
                         replay.push((
                             replay_key,
                             WriteFact::Relay {
+                                event_id: lane.key.event_id,
                                 relay: lane.key.relay,
                                 state: RelayState::Waiting(RelayWaiting::NotConnected),
                             },
@@ -2121,6 +2224,7 @@ impl<S: EventStore> EngineCore<S> {
                         replay.push((
                             replay_key,
                             WriteFact::Relay {
+                                event_id: lane.key.event_id,
                                 relay: lane.key.relay,
                                 state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                             },
@@ -2133,6 +2237,7 @@ impl<S: EventStore> EngineCore<S> {
                         replay.push((
                             replay_key,
                             WriteFact::Relay {
+                                event_id: lane.key.event_id,
                                 relay: lane.key.relay,
                                 state: RelayState::AuthFailed {
                                     pubkey: receipt.expected_pubkey,
@@ -2157,6 +2262,7 @@ impl<S: EventStore> EngineCore<S> {
                         replay.push((
                             replay_key,
                             WriteFact::Relay {
+                                event_id: lane.key.event_id,
                                 relay: lane.key.relay,
                                 state: RelayState::Waiting(RelayWaiting::BackingOff {
                                     attempt: ordinal,
@@ -2172,7 +2278,7 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
         }
-        if let Some(pending) = self.pending.get(&id) {
+        if let Some(pending) = self.pending.get(&projection_id) {
             for relay in &pending.unstarted_relays {
                 replay.push((
                     ReceiptReplayFactKey::PersistenceStalled(
@@ -2180,6 +2286,7 @@ impl<S: EventStore> EngineCore<S> {
                         PersistenceStallKind::Attempt,
                     ),
                     WriteFact::Relay {
+                        event_id: pending.frozen.id,
                         relay: relay.clone(),
                         state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                             detail: ATTEMPT_STALL_DETAIL.to_string(),
@@ -2194,6 +2301,7 @@ impl<S: EventStore> EngineCore<S> {
                         PersistenceStallKind::Route,
                     ),
                     WriteFact::Relay {
+                        event_id: pending.frozen.id,
                         relay: relay.clone(),
                         state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                             detail: ROUTE_STALL_DETAIL.to_string(),
@@ -2538,6 +2646,20 @@ impl<S: EventStore> EngineCore<S> {
         let Some(generation) = current.generation.as_ref() else {
             return true;
         };
+        let Some(delivery_owner) = super::semantic_delivery::MaterializationDeliveryOwner::new(
+            generation.materialization,
+            generation.members.iter().copied(),
+        ) else {
+            self.degrade_store(
+                nmp_store::PersistenceError::invariant(
+                    "installed semantic generation has no delivery owner",
+                ),
+                effects,
+            );
+            return true;
+        };
+        debug_assert_eq!(delivery_owner.materialization(), generation.materialization);
+        debug_assert_eq!(delivery_owner.members().count(), generation.members.len());
         let target =
             PendingWriteTarget::ReplaceableOperation(Box::new(ReplaceableMaterializationTarget {
                 coordinate,
@@ -2565,10 +2687,28 @@ impl<S: EventStore> EngineCore<S> {
             pending.sign_request_in_flight = false;
             pending.sign_generation = pending.sign_generation.saturating_add(1);
             pending.event_id = None;
+            pending.pending_relays.clear();
+            pending.unstarted_relays.clear();
+            pending.route_blocked_relays.clear();
+            pending.attempt_ordinals.clear();
+            pending.lane_projection = LaneWorkerProjection::default();
             self.event_to_receipts
                 .entry(installed.event.id)
                 .or_default()
                 .insert(receipt);
+        }
+        let owner_receipt = self
+            .intent_receipts
+            .get(&delivery_owner.physical_owner())
+            .copied()
+            .expect("semantic delivery owner was runtime-preflighted");
+        if let Some(pending) = self.pending.get_mut(&owner_receipt) {
+            pending.sign_request_in_flight = true;
+            effects.push(Effect::RequestSign(
+                owner_receipt,
+                pending.sign_generation,
+                unsigned_from_frozen(&pending.frozen),
+            ));
         }
         self.apply_committed_mutation(committed, effects);
         true
@@ -2909,6 +3049,19 @@ impl<S: EventStore> EngineCore<S> {
                 }
                 previous.frozen = frozen.clone();
                 previous.target = parked_target.clone();
+                previous.already_signed = false;
+                previous.sign_request_in_flight = false;
+                previous.sign_generation = previous.sign_generation.saturating_add(1);
+                previous.event_id = None;
+                previous.pending_relays.clear();
+                previous.unstarted_relays.clear();
+                previous.route_blocked_relays.clear();
+                previous.attempt_ordinals.clear();
+                previous.lane_projection = LaneWorkerProjection::default();
+                previous.durable_routes.clear();
+                previous.route_complete = false;
+                previous.destinations_reported = false;
+                previous.route_needs.clear();
             } else {
                 self.pending.insert(
                     member_receipt,
@@ -2942,6 +3095,25 @@ impl<S: EventStore> EngineCore<S> {
                 .entry(frozen.id)
                 .or_default()
                 .insert(member_receipt);
+        }
+        if let Some(owner) = current
+            .generation
+            .as_ref()
+            .and_then(|generation| generation.members.first())
+            .and_then(|owner| self.intent_receipts.get(owner))
+            .copied()
+        {
+            if let Some(pending) = self.pending.get_mut(&owner) {
+                if !pending.sign_request_in_flight && !pending.already_signed {
+                    pending.sign_request_in_flight = true;
+                    pending.sign_generation = pending.sign_generation.saturating_add(1);
+                    effects.push(Effect::RequestSign(
+                        owner,
+                        pending.sign_generation,
+                        unsigned_from_frozen(&pending.frozen),
+                    ));
+                }
+            }
         }
         self.apply_committed_mutation(committed, &mut effects);
         effects
@@ -3433,9 +3605,33 @@ impl<S: EventStore> EngineCore<S> {
 
     pub(super) fn on_signer_attached(&mut self, pk: PublicKey) -> Vec<Effect> {
         let mut effects = Vec::new();
+        let semantic_owners = self
+            .event_to_receipts
+            .iter()
+            .filter_map(|(event_id, receipts)| {
+                receipts
+                    .iter()
+                    .filter_map(|receipt| {
+                        self.pending
+                            .get(receipt)
+                            .filter(|pending| {
+                                matches!(
+                                    pending.target,
+                                    PendingWriteTarget::ReplaceableOperation(_)
+                                )
+                            })
+                            .map(|pending| (pending.intent_id, *receipt))
+                    })
+                    .min_by_key(|(intent, _)| *intent)
+                    .map(|(_, receipt)| (*event_id, receipt))
+            })
+            .collect::<BTreeMap<_, _>>();
         for (id, pending) in &mut self.pending {
+            let is_physical_owner =
+                !matches!(pending.target, PendingWriteTarget::ReplaceableOperation(_))
+                    || semantic_owners.get(&pending.frozen.id) == Some(id);
             if pending.signing_pubkey == pk
-                && pending.target.accepts_ordinary_signer()
+                && is_physical_owner
                 && pending.event_id.is_none()
                 && !pending.already_signed
                 && !pending.sign_request_in_flight
@@ -3592,6 +3788,15 @@ impl<S: EventStore> EngineCore<S> {
                 ..
             } = &receipt.payload
             {
+                let owner_pending = self
+                    .event_to_receipts
+                    .get(&current.materialization.event_id)
+                    .and_then(|receipts| {
+                        receipts
+                            .iter()
+                            .filter_map(|receipt| self.pending.get(receipt))
+                            .min_by_key(|pending| pending.intent_id)
+                    });
                 entries.push(PublishQueueEntry {
                     receipt_id: id,
                     event_id: current.materialization.event_id,
@@ -3607,11 +3812,16 @@ impl<S: EventStore> EngineCore<S> {
                             }
                         }
                     },
-                    relays: BTreeSet::new(),
-                    route_complete: false,
-                    relay_states: Vec::new(),
+                    relays: owner_pending
+                        .map(|pending| pending.durable_routes.clone())
+                        .unwrap_or_default(),
+                    route_complete: owner_pending.is_some_and(|pending| pending.route_complete),
+                    relay_states: owner_pending
+                        .map(|pending| self.relay_states_for(pending))
+                        .unwrap_or_default(),
                     outcome: None,
-                    persistence_fault: None,
+                    persistence_fault: owner_pending
+                        .and_then(|pending| pending.persistence_fault.clone()),
                 });
                 continue;
             }
@@ -3971,11 +4181,17 @@ impl<S: EventStore> EngineCore<S> {
         let mut signature_promoted = false;
         {
             let intent_id = pending.intent_id;
+            let promotion_target = match &pending.target {
+                PendingWriteTarget::Event => PromotionTarget::Event(intent_id),
+                PendingWriteTarget::ReplaceableOperation(target) => {
+                    PromotionTarget::ReplaceableMaterialization(target.clone())
+                }
+            };
             if !pending.already_signed {
                 match self
                     .resolver
                     .store_mut()
-                    .promote_signed(PromotionTarget::Event(intent_id), verified)
+                    .promote_signed(promotion_target, verified)
                 {
                     Ok(PromoteOutcome::Promoted { co_signed, .. }) => {
                         signature_promoted = true;
@@ -4003,13 +4219,30 @@ impl<S: EventStore> EngineCore<S> {
                         );
                         return;
                     }
-                    Ok(PromoteOutcome::MaterializationPromoted { .. })
-                    | Ok(PromoteOutcome::Stale) => {
-                        self.fail_and_compensate(
-                            id,
-                            "event promotion returned a replaceable-operation outcome".to_string(),
-                            effects,
-                        );
+                    Ok(PromoteOutcome::MaterializationPromoted { members, .. }) => {
+                        signature_promoted = true;
+                        // A semantic materialization has one physical signer
+                        // request but every contributing operation owns the
+                        // resulting evidence. The store promoted all member
+                        // journals atomically; advance their in-memory
+                        // projections without invoking promotion again.
+                        for member in members {
+                            if let Some((receipt_id, member_pending)) = self
+                                .pending
+                                .iter_mut()
+                                .find(|(_, candidate)| candidate.intent_id == member)
+                            {
+                                member_pending.already_signed = true;
+                                if *receipt_id != id {
+                                    co_receipts.push(*receipt_id);
+                                }
+                            }
+                        }
+                    }
+                    Ok(PromoteOutcome::Stale) => {
+                        // The callback names a generation that lost its CAS
+                        // race. It is historical evidence only: never fail,
+                        // compensate, or otherwise settle the successor.
                         return;
                     }
                     Err(err) => {
@@ -4030,8 +4263,25 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
-        for co_receipt in co_receipts {
-            self.on_signed(co_receipt, event.clone(), effects);
+        let semantic_promotion = matches!(
+            self.pending.get(&id).map(|pending| &pending.target),
+            Some(PendingWriteTarget::ReplaceableOperation(_))
+        );
+        if semantic_promotion {
+            for co_receipt in &co_receipts {
+                if let Some(pending) = self.pending.get_mut(co_receipt) {
+                    pending.event_id = Some(event.id);
+                    pending.frozen = event.clone();
+                }
+                effects.push(Effect::EmitReceipt(
+                    *co_receipt,
+                    WriteFact::Signing(SigningState::Signed { event_id: event.id }),
+                ));
+            }
+        } else {
+            for co_receipt in co_receipts {
+                self.on_signed(co_receipt, event.clone(), effects);
+            }
         }
 
         if let Some(pending) = self.pending.get_mut(&id) {
@@ -4054,12 +4304,39 @@ impl<S: EventStore> EngineCore<S> {
         // that comes up short here parks and is re-executed at every later
         // moment (`resolution-lifecycle.md` §5) rather than killing a
         // durable, already-journaled obligation.
-        let Some(resolution) = self
-            .pending
-            .get(&id)
-            .map(|pending| self.resolve_routes(&pending.routing, &event))
-        else {
-            return;
+        let resolution = if semantic_promotion {
+            let member_receipts = self
+                .event_to_receipts
+                .get(&event.id)
+                .cloned()
+                .unwrap_or_else(|| BTreeSet::from([id]));
+            let mut answer = RouteAnswer {
+                complete: true,
+                ..RouteAnswer::default()
+            };
+            let mut parent_provenance_error = None;
+            for receipt in member_receipts {
+                let Some(pending) = self.pending.get(&receipt) else {
+                    continue;
+                };
+                let member = self.resolve_routes(&pending.routing, &event);
+                answer.relays.extend(member.answer.relays);
+                answer
+                    .author_route_needs
+                    .extend(member.answer.author_route_needs);
+                answer.complete &= member.answer.complete;
+                parent_provenance_error =
+                    parent_provenance_error.or(member.parent_provenance_error);
+            }
+            RouteResolution {
+                answer,
+                parent_provenance_error,
+            }
+        } else {
+            let Some(pending) = self.pending.get(&id) else {
+                return;
+            };
+            self.resolve_routes(&pending.routing, &event)
         };
 
         let Some(intent_id) = self.pending.get(&id).map(|pending| pending.intent_id) else {
@@ -4114,6 +4391,7 @@ impl<S: EventStore> EngineCore<S> {
                     self.emit_write_fact(
                         id,
                         WriteFact::Relay {
+                            event_id: lane.key.event_id,
                             relay: lane.key.relay.clone(),
                             state: RelayState::Waiting(RelayWaiting::NotConnected),
                         },
@@ -4656,11 +4934,54 @@ impl<S: EventStore> EngineCore<S> {
         if !pending.routing_valid || pending.event_id.is_none() || pending.route_complete {
             return;
         }
+        let semantic = matches!(pending.target, PendingWriteTarget::ReplaceableOperation(_));
+        let event = pending.frozen.clone();
+        if semantic
+            && self.event_to_receipts.get(&event.id).and_then(|receipts| {
+                receipts
+                    .iter()
+                    .filter_map(|receipt| {
+                        self.pending
+                            .get(receipt)
+                            .map(|candidate| (candidate.intent_id, *receipt))
+                    })
+                    .min_by_key(|(intent, _)| *intent)
+                    .map(|(_, receipt)| receipt)
+            }) != Some(id)
+        {
+            return;
+        }
         let intent_id = pending.intent_id;
         let RouteResolution {
             answer,
             parent_provenance_error,
-        } = self.resolve_routes(&pending.routing, &pending.frozen);
+        } = if semantic {
+            let mut answer = RouteAnswer {
+                complete: true,
+                ..RouteAnswer::default()
+            };
+            let mut error = None;
+            if let Some(receipts) = self.event_to_receipts.get(&event.id) {
+                for receipt in receipts {
+                    let Some(member) = self.pending.get(receipt) else {
+                        continue;
+                    };
+                    let resolved = self.resolve_routes(&member.routing, &event);
+                    answer.relays.extend(resolved.answer.relays);
+                    answer
+                        .author_route_needs
+                        .extend(resolved.answer.author_route_needs);
+                    answer.complete &= resolved.answer.complete;
+                    error = error.or(resolved.parent_provenance_error);
+                }
+            }
+            RouteResolution {
+                answer,
+                parent_provenance_error: error,
+            }
+        } else {
+            self.resolve_routes(&pending.routing, &event)
+        };
         self.apply_route_answer(id, intent_id, answer, effects);
         if let Some(error) = parent_provenance_error {
             self.degrade_store(error, effects);
@@ -4686,6 +5007,7 @@ impl<S: EventStore> EngineCore<S> {
             return;
         };
         let signing_pubkey = pending.signing_pubkey;
+        let event_id = pending.frozen.id;
         // Diff-and-append: only relays absent from everything this intent has
         // ever durably resolved to are new, so an acked lane is never
         // re-minted and a resolver repeating itself writes nothing.
@@ -4826,6 +5148,7 @@ impl<S: EventStore> EngineCore<S> {
             self.emit_write_fact(
                 id,
                 WriteFact::Relay {
+                    event_id,
                     relay,
                     state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                         detail: ROUTE_STALL_DETAIL.to_string(),
@@ -4848,6 +5171,7 @@ impl<S: EventStore> EngineCore<S> {
                         self.emit_write_fact(
                             id,
                             WriteFact::Relay {
+                                event_id,
                                 relay: relay.clone(),
                                 state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
                                     detail: ATTEMPT_STALL_DETAIL.to_string(),
@@ -4937,6 +5261,7 @@ impl<S: EventStore> EngineCore<S> {
             let relay = &session.relay;
             let key = PublishQueueLaneKey {
                 intent_id,
+                event_id,
                 relay: relay.clone(),
             };
             let lane = self
@@ -4972,6 +5297,7 @@ impl<S: EventStore> EngineCore<S> {
                         self.emit_write_fact(
                             id,
                             WriteFact::Relay {
+                                event_id,
                                 relay: relay.clone(),
                                 state: RelayState::Published,
                             },
@@ -4995,6 +5321,7 @@ impl<S: EventStore> EngineCore<S> {
                         self.emit_write_fact(
                             id,
                             WriteFact::Relay {
+                                event_id,
                                 relay: relay.clone(),
                                 state: RelayState::Rejected {
                                     reason: message.clone(),
@@ -5037,6 +5364,7 @@ impl<S: EventStore> EngineCore<S> {
                         self.emit_write_fact(
                             id,
                             WriteFact::Relay {
+                                event_id,
                                 relay: relay.clone(),
                                 state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                             },
@@ -5085,6 +5413,7 @@ impl<S: EventStore> EngineCore<S> {
                     self.emit_write_fact(
                         id,
                         WriteFact::Relay {
+                            event_id: lane.key.event_id,
                             relay: relay.clone(),
                             state: RelayState::Waiting(RelayWaiting::NotConnected),
                         },
@@ -5126,6 +5455,7 @@ impl<S: EventStore> EngineCore<S> {
                         self.emit_write_fact(
                             id,
                             WriteFact::Relay {
+                                event_id: lane.key.event_id,
                                 relay: relay.clone(),
                                 state: RelayState::Waiting(RelayWaiting::NotConnected),
                             },

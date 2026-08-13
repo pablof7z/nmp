@@ -520,6 +520,7 @@ mod durable_retry_policy_tests {
     fn key() -> PublishQueueLaneKey {
         PublishQueueLaneKey {
             intent_id: IntentId(42),
+            event_id: EventId::from_byte_array([42; 32]),
             relay: RelayUrl::parse("wss://retry-policy.example").unwrap(),
         }
     }
@@ -585,6 +586,7 @@ mod durable_retry_policy_tests {
             retry_delay_secs(
                 &PublishQueueLaneKey {
                     intent_id: IntentId(43),
+                    event_id: EventId::from_byte_array([43; 32]),
                     relay: key.relay,
                 },
                 1

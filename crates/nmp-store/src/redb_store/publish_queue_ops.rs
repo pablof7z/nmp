@@ -37,6 +37,7 @@ use super::{
     ReceiptState, RelayUrl, Timestamp,
 };
 use crate::terminal_retention::{wall_clock_now, TerminalRetentionLimits};
+use crate::EventStore;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
 /// Replay every still-open intent (#3 §2.3), fallible end to end (#790).
@@ -417,15 +418,15 @@ pub(super) fn bootstrap_publish_queue_lanes(
         let intents = write_txn
             .open_table(PUBLISH_QUEUE_INTENTS)
             .map_err(persist_err)?;
-        if intents
+        let intent_bytes = intents
             .get(&intent_key(intent_id))
             .map_err(persist_err)?
-            .is_none()
-        {
-            return Err(PersistenceError::invariant(
-                "lane bootstrap intent is not open",
-            ));
-        }
+            .map(|value| value.value().to_vec())
+            .ok_or_else(|| PersistenceError::invariant("lane bootstrap intent is not open"))?;
+        let event_id = decode_intent(&intent_bytes)
+            .map_err(|error| codec_error("lane bootstrap intent", error))?
+            .current_event_id()
+            .ok_or_else(|| PersistenceError::invariant("lane bootstrap has no current event"))?;
         let route_revisions = write_txn
             .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
             .map_err(persist_err)?;
@@ -552,7 +553,11 @@ pub(super) fn bootstrap_publish_queue_lanes(
         }
         for relay_id in &relay_ids {
             let relay = store.publish_queue_relay(*relay_id)?;
-            let key = PublishQueueLaneKey { intent_id, relay };
+            let key = PublishQueueLaneKey {
+                intent_id,
+                event_id,
+                relay,
+            };
             let storage_key = lane_key(intent_id, *relay_id);
             let lane_attempts: Vec<_> = attempts
                 .iter()
@@ -582,8 +587,13 @@ pub(super) fn bootstrap_publish_queue_lanes(
                 ));
             }
             if let Some(existing) = lanes.get(&storage_key).map_err(persist_err)? {
-                let (revision, last_ordinal, state) =
+                let (lane_event_id, revision, last_ordinal, state) =
                     decode_lane(existing.value()).map_err(|error| codec_error("lane", error))?;
+                if lane_event_id != event_id {
+                    return Err(PersistenceError::invariant(
+                        "delivery lane belongs to a predecessor event",
+                    ));
+                }
                 let lane = PublishQueueLane {
                     version: 1,
                     key: key.clone(),
@@ -643,8 +653,13 @@ pub(super) fn bootstrap_publish_queue_lanes(
                 last_ordinal: 0,
                 state: PublishQueueLaneState::WaitingConnection,
             };
-            let encoded = encode_lane(lane.revision, lane.last_ordinal, &lane.state)
-                .map_err(|error| codec_error("lane", error))?;
+            let encoded = encode_lane(
+                lane.key.event_id,
+                lane.revision,
+                lane.last_ordinal,
+                &lane.state,
+            )
+            .map_err(|error| codec_error("lane", error))?;
             lanes
                 .insert(&storage_key, encoded.as_slice())
                 .map_err(persist_err)?;
@@ -676,11 +691,15 @@ pub(super) fn bootstrap_publish_queue_lanes(
                 ));
             }
             let relay = store.publish_queue_relay(relay_id)?;
-            let (revision, last_ordinal, state) =
+            let (lane_event_id, revision, last_ordinal, state) =
                 decode_lane(value.value()).map_err(|error| codec_error("lane", error))?;
             recovered.push(PublishQueueLane {
                 version: 1,
-                key: PublishQueueLaneKey { intent_id, relay },
+                key: PublishQueueLaneKey {
+                    intent_id,
+                    event_id: lane_event_id,
+                    relay,
+                },
                 revision,
                 last_ordinal,
                 state,
@@ -724,12 +743,13 @@ pub(super) fn recover_publish_queue_lanes(
                 "lane range escaped intent prefix",
             ));
         }
-        let (revision, last_ordinal, state) =
+        let (lane_event_id, revision, last_ordinal, state) =
             decode_lane(value.value()).map_err(|error| codec_error("lane", error))?;
         recovered.push(PublishQueueLane {
             version: 1,
             key: PublishQueueLaneKey {
                 intent_id,
+                event_id: lane_event_id,
                 relay: store.publish_queue_relay(relay_id)?,
             },
             revision,
@@ -797,13 +817,14 @@ pub(super) fn due_publish_queue_deadlines(
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
             .ok_or_else(|| PersistenceError::invariant("deadline references missing lane"))?;
-        let (revision, last_ordinal, state) =
+        let (lane_event_id, revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
         let relay = store.publish_queue_relay(relay_id)?;
         let lane = PublishQueueLane {
             version: 1,
             key: PublishQueueLaneKey {
                 intent_id,
+                event_id: lane_event_id,
                 relay: relay.clone(),
             },
             revision,
@@ -812,7 +833,11 @@ pub(super) fn due_publish_queue_deadlines(
         };
         let deadline = PublishQueueDeadline {
             at,
-            key: PublishQueueLaneKey { intent_id, relay },
+            key: PublishQueueLaneKey {
+                intent_id,
+                event_id: lane_event_id,
+                relay,
+            },
             lane_revision,
             kind,
         };
@@ -868,13 +893,14 @@ pub(super) fn next_publish_queue_deadline(
         .map_err(persist_err)?
         .map(|guard| guard.value().to_vec())
         .ok_or_else(|| PersistenceError::invariant("deadline references missing lane"))?;
-    let (revision, last_ordinal, state) =
+    let (lane_event_id, revision, last_ordinal, state) =
         decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
     let relay = store.publish_queue_relay(relay_id)?;
     let lane = PublishQueueLane {
         version: 1,
         key: PublishQueueLaneKey {
             intent_id,
+            event_id: lane_event_id,
             relay: relay.clone(),
         },
         revision,
@@ -883,7 +909,11 @@ pub(super) fn next_publish_queue_deadline(
     };
     let deadline = PublishQueueDeadline {
         at,
-        key: PublishQueueLaneKey { intent_id, relay },
+        key: PublishQueueLaneKey {
+            intent_id,
+            event_id: lane_event_id,
+            relay,
+        },
         lane_revision,
         kind,
     };
@@ -961,9 +991,9 @@ pub(super) fn set_lane_transient(
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
             .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
-        let (_, last_ordinal, _) =
+        let (lane_event_id, _, last_ordinal, _) =
             decode_lane(&encoded).map_err(|error| codec_error("lane", error))?;
-        if last_ordinal != ordinal {
+        if lane_event_id != key.event_id || last_ordinal != ordinal {
             return Err(PersistenceError::invariant("stale attempt ordinal"));
         }
         if ordinal > 0 {
@@ -1047,9 +1077,13 @@ pub(super) fn suspend_lane_attempt(
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
             .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
-        let (revision, last_ordinal, _) =
+        let (lane_event_id, revision, last_ordinal, _) =
             decode_lane(&encoded).map_err(|error| codec_error("lane", error))?;
-        if revision != expected_revision || last_ordinal != ordinal || ordinal == 0 {
+        if lane_event_id != key.event_id
+            || revision != expected_revision
+            || last_ordinal != ordinal
+            || ordinal == 0
+        {
             return Err(PersistenceError::invariant("stale suspended attempt"));
         }
         let detail_key = attempt_key(key.intent_id, relay_id, ordinal);
@@ -1110,12 +1144,30 @@ pub(super) fn start_lane_attempt(
             .ok_or_else(|| PersistenceError::invariant("attempt intent is not open"))?;
         decode_intent(&encoded).map_err(|error| codec_error("attempt intent", error))?
     };
-    let Some((intent_event, sig_state)) = intent.event() else {
-        return Err(PersistenceError::invariant(
-            "operation intent cannot own a delivery lane",
-        ));
+    let (intent_event, sig_state) = match &intent.work {
+        super::publish_queue::PublishQueueIntentRecordWork::Event {
+            frozen, sig_state, ..
+        } => (frozen.clone(), *sig_state),
+        super::publish_queue::PublishQueueIntentRecordWork::ReplaceableOperation {
+            materialization: Some(materialization),
+            ..
+        } => {
+            let rows = store.query(&nostr::Filter::new().id(materialization.current.event_id))?;
+            let stored = rows.into_iter().next().ok_or_else(|| {
+                PersistenceError::invariant("operation materialization event is missing")
+            })?;
+            (stored.event, materialization.sig_state)
+        }
+        super::publish_queue::PublishQueueIntentRecordWork::ReplaceableOperation {
+            materialization: None,
+            ..
+        } => {
+            return Err(PersistenceError::invariant(
+                "operation intent has no current materialization",
+            ))
+        }
     };
-    if sig_state != IntentSigState::Signed || *intent_event != event {
+    if sig_state != IntentSigState::Signed || intent_event != event {
         return Err(PersistenceError::invariant(
             "attempt bytes are not the intent's promoted signed bytes",
         ));
@@ -1147,9 +1199,11 @@ pub(super) fn start_lane_attempt(
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
             .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
-        let (revision, last_ordinal, state) =
+        let (lane_event_id, revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
-        if revision != expected_revision || !matches!(state, PublishQueueLaneState::Eligible { .. })
+        if lane_event_id != key.event_id
+            || revision != expected_revision
+            || !matches!(state, PublishQueueLaneState::Eligible { .. })
         {
             return Err(PersistenceError::invariant(
                 "lane is not expected eligible cursor",
@@ -1247,9 +1301,10 @@ pub(super) fn record_lane_handoff(
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
             .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
-        let (revision, last_ordinal, current_state) =
+        let (lane_event_id, revision, last_ordinal, current_state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
-        if revision != expected_revision || last_ordinal != ordinal {
+        if lane_event_id != key.event_id || revision != expected_revision || last_ordinal != ordinal
+        {
             return Err(PersistenceError::invariant("stale lane handoff"));
         }
         if !matches!(
@@ -1373,7 +1428,7 @@ pub(super) fn finish_lane_attempt(
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
             .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
-        let (revision, last_ordinal, state) =
+        let (lane_event_id, revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
         let current = PublishQueueLane {
             version: 1,
@@ -1382,7 +1437,10 @@ pub(super) fn finish_lane_attempt(
             last_ordinal,
             state,
         };
-        if current.revision != expected_revision || current.last_ordinal != ordinal {
+        if lane_event_id != key.event_id
+            || current.revision != expected_revision
+            || current.last_ordinal != ordinal
+        {
             return Err(PersistenceError::invariant("stale terminal attempt"));
         }
         let detail_key = attempt_key(key.intent_id, relay_id, ordinal);
@@ -1467,7 +1525,7 @@ pub(super) fn deny_lane_auth(
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
             .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
-        let (revision, last_ordinal, state) =
+        let (lane_event_id, revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
         let current = PublishQueueLane {
             version: 1,
@@ -1476,7 +1534,7 @@ pub(super) fn deny_lane_auth(
             last_ordinal,
             state,
         };
-        if current.revision != expected_revision {
+        if lane_event_id != key.event_id || current.revision != expected_revision {
             return Err(PersistenceError::invariant(
                 "authentication denial lane revision is stale",
             ));
@@ -1672,7 +1730,7 @@ fn close_intent(
                         "lane close range escaped intent prefix",
                     ));
                 }
-                let (_, _, state) =
+                let (_, _, _, state) =
                     decode_lane(value.value()).map_err(|error| codec_error("lane", error))?;
                 lanes_snapshot.push(state);
             }

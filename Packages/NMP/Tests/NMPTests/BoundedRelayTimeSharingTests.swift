@@ -130,7 +130,7 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         }
         let completedStatuses = await waitForStatuses(receiptProbe, timeoutSeconds: 15) { statuses in
             statuses.contains { status in
-                if case .relay(let relayURL, .published) = status {
+                if case .relay(_, let relayURL, .published) = status {
                     return isSameRelay(relayURL, relay.relayURL)
                 }
                 return false
@@ -174,8 +174,8 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         )
         XCTAssertTrue(
             statuses.contains { status in
-                if case .relay(let relayURL, .sent) = status {
-                    return isSameRelay(relayURL, relay.relayURL)
+                if case .relay(let relayEventID, let relayURL, .sent) = status {
+                    return relayEventID == eventID && isSameRelay(relayURL, relay.relayURL)
                 }
                 return false
             },
@@ -183,8 +183,8 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         )
         XCTAssertTrue(
             statuses.contains { status in
-                if case .relay(let relayURL, .published) = status {
-                    return isSameRelay(relayURL, relay.relayURL)
+                if case .relay(let relayEventID, let relayURL, .published) = status {
+                    return relayEventID == eventID && isSameRelay(relayURL, relay.relayURL)
                 }
                 return false
             },

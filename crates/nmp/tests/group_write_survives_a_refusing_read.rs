@@ -220,6 +220,7 @@ fn drain_until_all_acked(
                 if let WriteFact::Relay {
                     relay,
                     state: RelayState::Published,
+                    ..
                 } = &status
                 {
                     acked.insert(relay.clone());
@@ -279,13 +280,13 @@ async fn a_join_request_is_delivered_while_the_same_groups_read_reports_one_host
     assert!(
         write_statuses
             .iter()
-            .any(|status| matches!(status, WriteFact::Relay { relay, state: RelayState::Published } if *relay == host_a.url)),
+            .any(|status| matches!(status, WriteFact::Relay { relay, state: RelayState::Published, .. } if *relay == host_a.url)),
         "host A refuses READS, not writes -- it must still ack the join request: {write_statuses:?}"
     );
     assert!(
         write_statuses
             .iter()
-            .any(|status| matches!(status, WriteFact::Relay { relay, state: RelayState::Published } if *relay == host_b.url)),
+            .any(|status| matches!(status, WriteFact::Relay { relay, state: RelayState::Published, .. } if *relay == host_b.url)),
         "host B must ack the join request too: {write_statuses:?}"
     );
     let delivered_to_b = {

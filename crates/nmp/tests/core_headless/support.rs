@@ -1138,8 +1138,9 @@ const ROUTE_STALL_DETAIL: &str =
 
 /// The attempt-log stall: the relay URL survives a crash, the attempt fact
 /// does not.
-fn attempt_stalled(relay: &RelayUrl) -> WriteFact {
+fn attempt_stalled(event_id: nostr::EventId, relay: &RelayUrl) -> WriteFact {
     WriteFact::Relay {
+        event_id,
         relay: relay.clone(),
         state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
             detail: ATTEMPT_STALL_DETAIL.to_string(),
@@ -1149,8 +1150,9 @@ fn attempt_stalled(relay: &RelayUrl) -> WriteFact {
 
 /// The route-revision stall: not even the resolved relay URL is claimed to
 /// survive a crash.
-fn route_stalled(relay: &RelayUrl) -> WriteFact {
+fn route_stalled(event_id: nostr::EventId, relay: &RelayUrl) -> WriteFact {
     WriteFact::Relay {
+        event_id,
         relay: relay.clone(),
         state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
             detail: ROUTE_STALL_DETAIL.to_string(),

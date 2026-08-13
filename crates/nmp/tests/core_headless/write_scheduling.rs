@@ -84,7 +84,7 @@ fn ordinary_author_relay_without_auth_challenge_publishes_and_acks() {
     ));
     assert!(acked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteFact::Relay { relay: candidate, state: RelayState::Published })
+        Effect::EmitReceipt(id, WriteFact::Relay { relay: candidate, state: RelayState::Published, .. })
             if *id == receipt && candidate == &relay
     )));
 }
@@ -134,6 +134,7 @@ fn challenged_author_relay_suppresses_event_until_exact_auth_ready() {
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
     assert!(receipt_statuses(&scheduled).contains(&WriteFact::Relay {
+        event_id: event.id,
         relay,
         state: RelayState::Waiting(RelayWaiting::NeedsAuth)
     }));
@@ -191,6 +192,7 @@ fn auth_required_session_reconnect_cannot_publish_before_fresh_generation_auth()
         .iter()
         .any(|effect| matches!(effect, Effect::PublishEvent(..))));
     assert!(receipt_statuses(&parked).contains(&WriteFact::Relay {
+        event_id: event.id,
         relay: relay.clone(),
         state: RelayState::Waiting(RelayWaiting::NeedsAuth)
     }));
@@ -274,6 +276,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         let (receipt, event, offline) = publish_explicit(&mut core, &author, [relay.clone()]);
         let session = signer_session(&relay, event.pubkey);
         assert!(receipt_statuses(&offline).contains(&WriteFact::Relay {
+            event_id: event.id,
             relay: relay.clone(),
             state: RelayState::Waiting(RelayWaiting::NotConnected)
         }));
@@ -295,6 +298,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         let recovered = core.reattach_receipt(receipt);
         assert!(recovered.is_attached());
         assert!(recovered.facts.contains(&WriteFact::Relay {
+            event_id: event.id,
             relay: relay.clone(),
             state: RelayState::Waiting(RelayWaiting::NotConnected)
         }));
@@ -326,13 +330,14 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
         assert!(auth.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(_, WriteFact::Relay { relay: waiting, state: RelayState::Waiting(RelayWaiting::NeedsAuth) })
+            Effect::EmitReceipt(_, WriteFact::Relay { relay: waiting, state: RelayState::Waiting(RelayWaiting::NeedsAuth), .. })
                 if waiting == &relay
         )));
         let auth_replay = core.reattach_receipt(receipt);
         assert!(auth_replay.is_attached());
         let auth_replay = auth_replay.facts;
         assert!(auth_replay.contains(&WriteFact::Relay {
+            event_id: event.id,
             relay: relay.clone(),
             state: RelayState::Sent {
                 attempt: 1,
@@ -340,6 +345,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             }
         }));
         assert!(auth_replay.contains(&WriteFact::Relay {
+            event_id: event.id,
             relay: relay.clone(),
             state: RelayState::Waiting(RelayWaiting::NeedsAuth)
         }));
@@ -421,7 +427,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             effect,
             Effect::EmitReceipt(
                 _,
-                WriteFact::Relay { relay: eligible, state: RelayState::Waiting(RelayWaiting::BackingOff { .. }) }
+                WriteFact::Relay { relay: eligible, state: RelayState::Waiting(RelayWaiting::BackingOff { .. }), .. }
             ) if eligible == &relay
         )));
         assert_eq!(
@@ -493,7 +499,7 @@ fn parked_auth_write_is_redriven_across_reconnect_not_wedged() {
     ));
     assert!(parked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(_, WriteFact::Relay { relay: waiting, state: RelayState::Waiting(RelayWaiting::NeedsAuth) }) if waiting == &relay
+        Effect::EmitReceipt(_, WriteFact::Relay { relay: waiting, state: RelayState::Waiting(RelayWaiting::NeedsAuth), .. }) if waiting == &relay
     )));
 
     // The socket drops mid-handshake (before any AUTH OK), and a fresh
@@ -590,7 +596,7 @@ fn boot_recovers_parked_auth_write_as_redrivable_not_wedged() {
         ));
         assert!(parked.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(_, WriteFact::Relay { relay: waiting, state: RelayState::Waiting(RelayWaiting::NeedsAuth) }) if waiting == &relay
+            Effect::EmitReceipt(_, WriteFact::Relay { relay: waiting, state: RelayState::Waiting(RelayWaiting::NeedsAuth), .. }) if waiting == &relay
         )));
         event
     };
@@ -639,7 +645,7 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("retry-receipt-restart.redb");
 
-    let (receipt, retry_at) = {
+    let (receipt, event_id, retry_at) = {
         let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
         connect_signer(&mut core, 0, &auth, author.public_key());
         connect_signer(&mut core, 1, &retry, author.public_key());
@@ -674,7 +680,7 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
         ));
         assert!(auth_wait.iter().any(|effect| matches!(
             effect,
-            Effect::EmitReceipt(_, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth) }) if relay == &auth
+            Effect::EmitReceipt(_, WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::NeedsAuth), .. }) if relay == &auth
         )));
 
         let _ = core.handle(EngineMsg::Tick(Timestamp::from(12)));
@@ -700,6 +706,7 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
                                 eligible_at,
                                 ..
                             }),
+                        ..
                     },
                 ) if relay == &retry => Some(*eligible_at),
                 _ => None,
@@ -729,7 +736,7 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
             "an ambiguous handoff proves nothing about the write, so it states \
              nothing: {ambiguity:?}"
         );
-        (receipt, retry_at)
+        (receipt, event.id, retry_at)
     };
 
     let mut recovered = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
@@ -739,10 +746,12 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
     let replay = replay.facts;
 
     assert!(replay.contains(&WriteFact::Relay {
+        event_id,
         relay: offline.clone(),
         state: RelayState::Waiting(RelayWaiting::NotConnected)
     }));
     assert!(replay.contains(&WriteFact::Relay {
+        event_id,
         relay: auth.clone(),
         state: RelayState::Sent {
             attempt: 1,
@@ -750,10 +759,12 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
         }
     }));
     assert!(replay.contains(&WriteFact::Relay {
+        event_id,
         relay: auth.clone(),
         state: RelayState::Waiting(RelayWaiting::NeedsAuth)
     }));
     assert!(replay.contains(&WriteFact::Relay {
+        event_id,
         relay: retry.clone(),
         state: RelayState::Sent {
             attempt: 1,
@@ -761,6 +772,7 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
         }
     }));
     assert!(replay.contains(&WriteFact::Relay {
+        event_id,
         relay: retry.clone(),
         state: RelayState::Waiting(RelayWaiting::BackingOff {
             attempt: 1,
@@ -777,7 +789,7 @@ fn restart_reattachment_preserves_every_active_retry_fact_exactly() {
          nothing to replay for it: {replay:?}"
     );
     assert!(!replay.iter().any(
-        |status| matches!(status, WriteFact::Relay { relay, state: RelayState::Sent { .. } } if relay == &ambiguous || relay == &offline)
+        |status| matches!(status, WriteFact::Relay { relay, state: RelayState::Sent { .. }, .. } if relay == &ambiguous || relay == &offline)
     ));
 }
 
@@ -807,6 +819,7 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
         .expect("transient retry must arm one deadline");
     assert!((3..8).contains(&due.as_secs()));
     assert!(receipt_statuses(&classified).contains(&WriteFact::Relay {
+        event_id: event.id,
         relay: relay.clone(),
         state: RelayState::Waiting(RelayWaiting::BackingOff {
             attempt: 1,
@@ -818,6 +831,7 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
     let replay = core.reattach_receipt(receipt);
     assert!(replay.is_attached());
     assert!(replay.facts.contains(&WriteFact::Relay {
+        event_id: event.id,
         relay: relay.clone(),
         state: RelayState::Waiting(RelayWaiting::BackingOff {
             attempt: 1,
@@ -884,7 +898,7 @@ fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
             effect,
             Effect::EmitReceipt(
                 _,
-                WriteFact::Relay { relay: got, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: got_attempt, .. }) }
+                WriteFact::Relay { relay: got, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: got_attempt, .. }), .. }
             ) if got == &relay && *got_attempt == attempt
         )));
         let due = core
@@ -976,7 +990,7 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
             effect,
             Effect::EmitReceipt(
                 _,
-                WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: got, .. }) }
+                WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: got, .. }), .. }
             ) if relay == &late && *got == attempt
         )));
         let due = core
@@ -1026,7 +1040,7 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
             .iter()
             .filter(|status| matches!(
                 status,
-                WriteFact::Relay { relay, state: RelayState::Sent { attempt: 1, .. } } if relay == &early
+                WriteFact::Relay { relay, state: RelayState::Sent { attempt: 1, .. }, .. } if relay == &early
             ))
             .count(),
         1,
@@ -1038,7 +1052,7 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
                 .iter()
                 .filter(|status| matches!(
                     status,
-                    WriteFact::Relay { relay, state: RelayState::Sent { attempt: got, .. } } if relay == &late && *got == attempt
+                    WriteFact::Relay { relay, state: RelayState::Sent { attempt: got, .. }, .. } if relay == &late && *got == attempt
                 ))
                 .count(),
             1,
@@ -1049,7 +1063,7 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
                 .iter()
                 .filter(|status| matches!(
                     status,
-                    WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: got, .. }) } if relay == &late && *got == attempt
+                    WriteFact::Relay { relay, state: RelayState::Waiting(RelayWaiting::BackingOff { attempt: got, .. }), .. } if relay == &late && *got == attempt
                 ))
                 .count(),
             1,

@@ -258,7 +258,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
         !first
             .facts
             .iter()
-            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Sent { .. } } if r == &relay)),
+            .any(|s| matches!(s, WriteFact::Relay { relay: r, state: RelayState::Sent { .. }, .. } if r == &relay)),
         "a recovered Started attempt predates transport Written and cannot replay as Sent"
     );
     let relay_handle = RelayHandle {
@@ -303,7 +303,7 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
     ));
     assert!(acked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(receipt, WriteFact::Relay { relay: acked_relay, state: RelayState::Published })
+        Effect::EmitReceipt(receipt, WriteFact::Relay { relay: acked_relay, state: RelayState::Published, .. })
             if *receipt == id && acked_relay == &relay
     )));
     drop(core);
@@ -843,7 +843,8 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
             _,
             WriteFact::Relay {
                 relay: _,
-                state: RelayState::Published
+                state: RelayState::Published,
+                ..
             }
         ) | Effect::PublishEvent(..)
             | Effect::RequestSign(..)

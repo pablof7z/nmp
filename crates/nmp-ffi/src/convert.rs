@@ -2032,7 +2032,12 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteFact {
         GWriteStatus::Signing(state) => FfiWriteFact::Signing {
             state: signing_state_to_ffi(state),
         },
-        GWriteStatus::Relay { relay, state } => FfiWriteFact::Relay {
+        GWriteStatus::Relay {
+            event_id,
+            relay,
+            state,
+        } => FfiWriteFact::Relay {
+            event_id: event_id.to_hex(),
             relay: relay.to_string(),
             state: relay_state_to_ffi(state),
         },
@@ -2379,10 +2384,12 @@ mod write_fact_tests {
             ),
             (
                 GWriteStatus::Relay {
+                    event_id,
                     relay: relay.clone(),
                     state: GRelayState::Waiting(GRelayWaiting::NotConnected),
                 },
                 FfiWriteFact::Relay {
+                    event_id: event_id.to_hex(),
                     relay: relay.to_string(),
                     state: FfiRelayState::Waiting {
                         waiting: FfiRelayWaiting::NotConnected,
@@ -2391,10 +2398,12 @@ mod write_fact_tests {
             ),
             (
                 GWriteStatus::Relay {
+                    event_id,
                     relay: relay.clone(),
                     state: GRelayState::Waiting(GRelayWaiting::NeedsAuth),
                 },
                 FfiWriteFact::Relay {
+                    event_id: event_id.to_hex(),
                     relay: relay.to_string(),
                     state: FfiRelayState::Waiting {
                         waiting: FfiRelayWaiting::NeedsAuth,
@@ -2405,6 +2414,7 @@ mod write_fact_tests {
                 // #1032's second half: a backoff that cannot say WHY is a
                 // silently reverted fix.
                 GWriteStatus::Relay {
+                    event_id,
                     relay: relay.clone(),
                     state: GRelayState::Waiting(GRelayWaiting::BackingOff {
                         attempt: 4,
@@ -2414,6 +2424,7 @@ mod write_fact_tests {
                     }),
                 },
                 FfiWriteFact::Relay {
+                    event_id: event_id.to_hex(),
                     relay: relay.to_string(),
                     state: FfiRelayState::Waiting {
                         waiting: FfiRelayWaiting::BackingOff {
@@ -2427,12 +2438,14 @@ mod write_fact_tests {
             ),
             (
                 GWriteStatus::Relay {
+                    event_id,
                     relay: relay.clone(),
                     state: GRelayState::Waiting(GRelayWaiting::PersistenceStalled {
                         detail: "disk".into(),
                     }),
                 },
                 FfiWriteFact::Relay {
+                    event_id: event_id.to_hex(),
                     relay: relay.to_string(),
                     state: FfiRelayState::Waiting {
                         waiting: FfiRelayWaiting::PersistenceStalled {
@@ -2443,6 +2456,7 @@ mod write_fact_tests {
             ),
             (
                 GWriteStatus::Relay {
+                    event_id,
                     relay: relay.clone(),
                     state: GRelayState::Sent {
                         attempt: 40,
@@ -2450,6 +2464,7 @@ mod write_fact_tests {
                     },
                 },
                 FfiWriteFact::Relay {
+                    event_id: event_id.to_hex(),
                     relay: relay.to_string(),
                     state: FfiRelayState::Sent {
                         attempt: 40,
@@ -2459,22 +2474,26 @@ mod write_fact_tests {
             ),
             (
                 GWriteStatus::Relay {
+                    event_id,
                     relay: relay.clone(),
                     state: GRelayState::Published,
                 },
                 FfiWriteFact::Relay {
+                    event_id: event_id.to_hex(),
                     relay: relay.to_string(),
                     state: FfiRelayState::Published,
                 },
             ),
             (
                 GWriteStatus::Relay {
+                    event_id,
                     relay: relay.clone(),
                     state: GRelayState::Rejected {
                         reason: "no".into(),
                     },
                 },
                 FfiWriteFact::Relay {
+                    event_id: event_id.to_hex(),
                     relay: relay.to_string(),
                     state: FfiRelayState::Rejected {
                         reason: "no".into(),
@@ -2486,6 +2505,7 @@ mod write_fact_tests {
                 // authenticate into the relay's rejection tells the user a
                 // relay refused them when their own client declined to ask.
                 GWriteStatus::Relay {
+                    event_id,
                     relay: relay.clone(),
                     state: GRelayState::AuthFailed {
                         pubkey,
@@ -2494,6 +2514,7 @@ mod write_fact_tests {
                     },
                 },
                 FfiWriteFact::Relay {
+                    event_id: event_id.to_hex(),
                     relay: relay.to_string(),
                     state: FfiRelayState::AuthFailed {
                         pubkey: pubkey.to_hex(),
@@ -2504,10 +2525,12 @@ mod write_fact_tests {
             ),
             (
                 GWriteStatus::Relay {
+                    event_id,
                     relay: relay.clone(),
                     state: GRelayState::GaveUp,
                 },
                 FfiWriteFact::Relay {
+                    event_id: event_id.to_hex(),
                     relay: relay.to_string(),
                     state: FfiRelayState::GaveUp,
                 },
@@ -2578,6 +2601,42 @@ mod write_fact_tests {
         for (source, expected) in cases {
             assert_eq!(write_status_to_ffi(WriteStatusRef(&source)), expected);
         }
+    }
+
+    #[test]
+    fn relay_facts_keep_the_exact_event_generation() {
+        let relay = RelayUrl::parse("wss://generation.example").unwrap();
+        let first_id = EventId::from_hex(&"11".repeat(32)).unwrap();
+        let second_id = EventId::from_hex(&"22".repeat(32)).unwrap();
+
+        let first = write_status_to_ffi(WriteStatusRef(&GWriteStatus::Relay {
+            event_id: first_id,
+            relay: relay.clone(),
+            state: GRelayState::Published,
+        }));
+        let second = write_status_to_ffi(WriteStatusRef(&GWriteStatus::Relay {
+            event_id: second_id,
+            relay,
+            state: GRelayState::Published,
+        }));
+
+        assert_eq!(
+            first,
+            FfiWriteFact::Relay {
+                event_id: first_id.to_hex(),
+                relay: "wss://generation.example".into(),
+                state: FfiRelayState::Published,
+            }
+        );
+        assert_eq!(
+            second,
+            FfiWriteFact::Relay {
+                event_id: second_id.to_hex(),
+                relay: "wss://generation.example".into(),
+                state: FfiRelayState::Published,
+            }
+        );
+        assert_ne!(first, second);
     }
 }
 

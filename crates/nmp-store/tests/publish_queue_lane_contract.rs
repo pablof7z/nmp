@@ -6,12 +6,13 @@ use std::path::Path;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, AuthDenial,
     AuthDenialSource, CloseIntentOutcome, EventStore, HandoffEvidence, IntentId, IntentSigState,
-    PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueDeadline,
-    PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
-    PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueTerminalOutcome,
-    PublishQueueTransientCause, RedbStore, RemoveQueueEntryOutcome, VerifiedSignature,
+    PersistenceFault, PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
+    PublishQueueDeadline, PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane,
+    PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState,
+    PublishQueueTerminalOutcome, PublishQueueTransientCause, RedbStore, RemoveQueueEntryOutcome,
+    VerifiedSignature,
 };
-use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
+use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 /// The verified, intent-bound evidence `promote_signed` takes (#768). Every
@@ -85,7 +86,11 @@ fn seed(
     assert_eq!(lane.revision, 1);
     assert_eq!(lane.last_ordinal, 0);
     assert_eq!(lane.state, PublishQueueLaneState::WaitingConnection);
-    let key = PublishQueueLaneKey { intent_id, relay };
+    let key = PublishQueueLaneKey {
+        intent_id,
+        event_id: signed.id,
+        relay,
+    };
     assert_eq!(lane.key, key);
     (intent_id, receipt_id, signed, key, lane)
 }
@@ -93,6 +98,27 @@ fn seed(
 fn with_store(body: impl FnOnce(&mut dyn EventStore)) {
     let mut store = RedbStore::temporary().expect("temporary Redb store");
     body(&mut store);
+}
+
+#[test]
+fn a_predecessor_event_key_cannot_advance_the_current_lane() {
+    with_store(|store| {
+        let relay = RelayUrl::parse("wss://exact-generation.example").unwrap();
+        let (_, _, signed, current, lane) = seed(store, "exact-generation", 81, relay);
+        let mut predecessor = current.clone();
+        predecessor.event_id = EventId::from_byte_array([0x55; 32]);
+        assert_ne!(predecessor.event_id, signed.id);
+
+        let error = store
+            .set_lane_eligible(&predecessor, lane.revision, Timestamp::from(82))
+            .expect_err("a predecessor event must not mutate the current lane");
+        assert_eq!(error.fault(), PersistenceFault::Invariant);
+
+        let advanced = store
+            .set_lane_eligible(&current, lane.revision, Timestamp::from(82))
+            .expect("the exact current event advances its lane");
+        assert_eq!(advanced.key.event_id, signed.id);
+    });
 }
 
 #[test]
@@ -385,6 +411,42 @@ fn auth_denial_is_a_durable_terminal_lane_fact_and_revision_precedes_idempotence
 }
 
 #[test]
+fn pre_attempt_auth_denial_retains_its_exact_event_after_terminal_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth-denial-exact-event.redb");
+    let (intent, terminal) = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let relay = RelayUrl::parse("wss://auth-denial-restart.example").unwrap();
+        let (intent, _, signed, key, seeded) = seed(&mut store, "auth denial restart", 176, relay);
+        let waiting = store.set_lane_waiting(&key, seeded.revision, true).unwrap();
+        let terminal = store
+            .deny_lane_auth(
+                &key,
+                waiting.revision,
+                AuthDenial {
+                    source: AuthDenialSource::Policy,
+                    reason: "account not permitted".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(terminal.key.event_id, signed.id);
+        assert_eq!(terminal.last_ordinal, 0);
+        assert_eq!(
+            store.close_terminal_intent(intent).unwrap(),
+            CloseIntentOutcome::Closed
+        );
+        (intent, terminal)
+    };
+
+    let store = RedbStore::open(&path).unwrap();
+    assert_eq!(
+        store.recover_publish_queue_lanes(intent).unwrap(),
+        vec![terminal]
+    );
+    assert!(store.recover_attempts(intent).unwrap().is_empty());
+}
+
+#[test]
 fn due_deadlines_are_ordered_bounded_and_close_rejects_nonterminal_lanes() {
     with_store(|store| {
         let empty_keys = Keys::generate();
@@ -555,6 +617,7 @@ fn relay_identity_uses_canonical_url_but_preserves_meaningful_path_slashes() {
             .set_lane_transient(
                 &PublishQueueLaneKey {
                     intent_id: intent,
+                    event_id: signed.id,
                     relay: root_slash,
                 },
                 root.revision,
@@ -746,7 +809,7 @@ fn redb_bootstrap_rejects_cross_table_terminal_state_contradictions() {
             "wss://terminal-donor.example"
         })
         .unwrap();
-        let intent = {
+        let (intent, event_id) = {
             let mut store = reopen(&path);
             let (intent, _, signed, key, lane) =
                 seed(&mut store, "state-mismatch", 274, relay.clone());
@@ -802,12 +865,13 @@ fn redb_bootstrap_rejects_cross_table_terminal_state_contradictions() {
                     )
                     .unwrap();
             }
-            intent
+            (intent, key.event_id)
         };
         let target_key = raw_lane_key(intent, raw_relay_id(&path, &relay));
         let donor_key = raw_lane_key(intent, raw_relay_id(&path, &donor));
         if terminal_attempt {
             let mut waiting = b"NMDL\x01\0\0\0".to_vec();
+            waiting.extend_from_slice(event_id.as_bytes());
             waiting.extend_from_slice(&4u64.to_be_bytes());
             waiting.extend_from_slice(&1u64.to_be_bytes());
             waiting.push(0);
