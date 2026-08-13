@@ -135,7 +135,7 @@ fn a_fresh_store_creates_exactly_the_named_publish_queue_inventory() {
         meta.get(b"codec_version".as_slice())
             .unwrap()
             .map(|value| value.value().to_vec()),
-        Some(5u64.to_be_bytes().to_vec())
+        Some(6u64.to_be_bytes().to_vec())
     );
 }
 
