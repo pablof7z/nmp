@@ -30,6 +30,8 @@ pub(super) const PUBLISH_QUEUE_CODEC_VERSION_KEY: &[u8] = b"codec_version";
 pub(super) const NEXT_INTENT_ID_KEY: &[u8] = b"next_intent_id";
 pub(super) const NEXT_RECEIPT_ID_KEY: &[u8] = b"next_receipt_id";
 pub(super) const NEXT_RELAY_ID_KEY: &[u8] = b"next_relay_id";
+pub(super) const SUPERSEDED_RECEIPT_COUNT_KEY: &[u8] = b"superseded_receipt_count";
+pub(super) const SUPERSEDED_RECEIPT_PREFIX: &[u8] = b"superseded_receipt/";
 
 pub(super) const MAX_RELAY_BYTES: usize = 4_096;
 pub(super) const MAX_TEXT_BYTES: usize = 65_536;
@@ -37,6 +39,50 @@ pub(super) const MAX_REASON_BYTES: usize = 4_096;
 pub(super) const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const MAX_ROUTE_RELAYS: usize = 4_096;
 pub(super) const MAX_SUPPRESSION_CLAIMS: usize = 65_536;
+
+pub(super) fn superseded_receipt_key(accepted_at: Timestamp, receipt_id: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(SUPERSEDED_RECEIPT_PREFIX.len() + 16);
+    key.extend_from_slice(SUPERSEDED_RECEIPT_PREFIX);
+    key.extend_from_slice(&accepted_at.as_secs().to_be_bytes());
+    key.extend_from_slice(&receipt_id.to_be_bytes());
+    key
+}
+
+pub(super) fn superseded_receipt_range() -> (Vec<u8>, Vec<u8>) {
+    let mut lower = Vec::with_capacity(SUPERSEDED_RECEIPT_PREFIX.len() + 16);
+    lower.extend_from_slice(SUPERSEDED_RECEIPT_PREFIX);
+    lower.extend_from_slice(&[0; 16]);
+    let mut upper = Vec::with_capacity(SUPERSEDED_RECEIPT_PREFIX.len() + 16);
+    upper.extend_from_slice(SUPERSEDED_RECEIPT_PREFIX);
+    upper.extend_from_slice(&[u8::MAX; 16]);
+    (lower, upper)
+}
+
+pub(super) fn parse_superseded_receipt_key(
+    key: &[u8],
+) -> Result<(Timestamp, u64), PublishQueueCodecError> {
+    let suffix =
+        key.strip_prefix(SUPERSEDED_RECEIPT_PREFIX)
+            .ok_or(PublishQueueCodecError::InvalidValue(
+                "superseded receipt key prefix",
+            ))?;
+    if suffix.len() != 16 {
+        return Err(PublishQueueCodecError::InvalidValue(
+            "superseded receipt key width",
+        ));
+    }
+    let (accepted_at, receipt_id) = suffix.split_at(8);
+    let accepted_at: [u8; 8] = accepted_at
+        .try_into()
+        .map_err(|_| PublishQueueCodecError::InvalidValue("superseded receipt key width"))?;
+    let receipt_id: [u8; 8] = receipt_id
+        .try_into()
+        .map_err(|_| PublishQueueCodecError::InvalidValue("superseded receipt key width"))?;
+    Ok((
+        Timestamp::from(u64::from_be_bytes(accepted_at)),
+        u64::from_be_bytes(receipt_id),
+    ))
+}
 
 const INTENT_MAGIC: [u8; 4] = *b"NMDI";
 const RECEIPT_MAGIC: [u8; 4] = *b"NMDR";

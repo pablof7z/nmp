@@ -2,7 +2,8 @@ use super::publish_queue_codec::{
     codec_error, deadline_by_intent_key, deadline_key, decode_addr_claimants, decode_claimants,
     decode_lane, decode_meta_u64, decode_receipt, encode_addr_claimants, encode_claimants,
     encode_deadline, encode_lane, encode_meta_u64, encode_receipt, lane_key, receipt_key,
-    PublishQueueRelayId, NEXT_INTENT_ID_KEY, NEXT_RECEIPT_ID_KEY,
+    superseded_receipt_key, PublishQueueRelayId, NEXT_INTENT_ID_KEY, NEXT_RECEIPT_ID_KEY,
+    SUPERSEDED_RECEIPT_COUNT_KEY,
 };
 use super::schema::persist_err;
 use super::{
@@ -194,6 +195,7 @@ pub(super) struct PublishQueueReceiptRecord {
 /// cancellation fabricate a terminal fact that was never retained.
 pub(super) fn update_publish_queue_receipt(
     publish_queue_receipts: &mut redb::Table<'_, &'static [u8; 8], &'static [u8]>,
+    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
     receipt_id: u64,
     state: ReceiptState,
 ) -> Result<(), PersistenceError> {
@@ -208,10 +210,91 @@ pub(super) fn update_publish_queue_receipt(
         })?;
     let mut record = decode_receipt(&encoded)
         .map_err(|error| codec_error(&format!("receipt {receipt_id}"), error))?;
+    update_superseded_receipt_index(publish_queue_meta, receipt_id, &record, state)?;
     record.state = state;
     let encoded = encode_receipt(&record);
     publish_queue_receipts
         .insert(&key, encoded.as_slice())
+        .map_err(persist_err)?;
+    Ok(())
+}
+
+pub(super) fn remove_superseded_receipt_index(
+    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    receipt_id: u64,
+    record: &PublishQueueReceiptRecord,
+) -> Result<(), PersistenceError> {
+    if record.state != ReceiptState::Superseded {
+        return Ok(());
+    }
+    let accepted_at = record
+        .accepted_at
+        .ok_or_else(|| PersistenceError::invariant("superseded receipt has no acceptance time"))?;
+    let key = superseded_receipt_key(accepted_at, receipt_id);
+    if publish_queue_meta
+        .remove(key.as_slice())
+        .map_err(persist_err)?
+        .is_none()
+    {
+        return Err(PersistenceError::invariant(
+            "superseded receipt is absent from its ordered index",
+        ));
+    }
+    change_superseded_receipt_count(publish_queue_meta, -1)
+}
+
+fn update_superseded_receipt_index(
+    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    receipt_id: u64,
+    record: &PublishQueueReceiptRecord,
+    state: ReceiptState,
+) -> Result<(), PersistenceError> {
+    match (
+        record.state == ReceiptState::Superseded,
+        state == ReceiptState::Superseded,
+    ) {
+        (false, true) => {
+            let accepted_at = record.accepted_at.ok_or_else(|| {
+                PersistenceError::invariant("superseded receipt has no acceptance time")
+            })?;
+            let key = superseded_receipt_key(accepted_at, receipt_id);
+            let empty: &[u8] = &[];
+            if publish_queue_meta
+                .insert(key.as_slice(), empty)
+                .map_err(persist_err)?
+                .is_some()
+            {
+                return Err(PersistenceError::invariant(
+                    "superseded receipt already exists in its ordered index",
+                ));
+            }
+            change_superseded_receipt_count(publish_queue_meta, 1)
+        }
+        (true, false) => remove_superseded_receipt_index(publish_queue_meta, receipt_id, record),
+        _ => Ok(()),
+    }
+}
+
+fn change_superseded_receipt_count(
+    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    delta: i8,
+) -> Result<(), PersistenceError> {
+    let current = publish_queue_meta
+        .get(SUPERSEDED_RECEIPT_COUNT_KEY)
+        .map_err(persist_err)?
+        .map(|guard| decode_meta_u64(guard.value(), "superseded receipt count"))
+        .transpose()
+        .map_err(|error| codec_error("superseded receipt count", error))?
+        .unwrap_or(0);
+    let next = match delta {
+        1 => current.checked_add(1),
+        -1 => current.checked_sub(1),
+        _ => None,
+    }
+    .ok_or_else(|| PersistenceError::invariant("superseded receipt count overflow"))?;
+    let encoded = encode_meta_u64(next);
+    publish_queue_meta
+        .insert(SUPERSEDED_RECEIPT_COUNT_KEY, encoded.as_slice())
         .map_err(persist_err)?;
     Ok(())
 }
