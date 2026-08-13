@@ -1978,9 +1978,12 @@ impl<S: EventStore> EngineCore<S> {
         } else {
             receipt.intent_id
         };
+        let projection_id = evidence_intent
+            .and_then(|intent| self.intent_receipts.get(&intent).copied())
+            .unwrap_or(id);
         if self
             .pending
-            .get(&id)
+            .get(&projection_id)
             .is_some_and(|pending| !pending.routing_valid)
         {
             // Boot retained the obligation but could not interpret its
@@ -2049,14 +2052,14 @@ impl<S: EventStore> EngineCore<S> {
         if receipt_state == ReceiptState::Accepted
             && self
                 .pending
-                .get(&id)
+                .get(&projection_id)
                 .is_some_and(|pending| !pending.already_signed)
         {
             replay.push((
                 ReceiptReplayFactKey::AwaitingCapability,
                 WriteFact::Signing(Self::signing_park(
                     receipt.expected_pubkey,
-                    self.pending.get(&id),
+                    self.pending.get(&projection_id),
                 )),
             ));
         }
@@ -2069,7 +2072,7 @@ impl<S: EventStore> EngineCore<S> {
         // is waiting.
         if let Some(pending) = self
             .pending
-            .get(&id)
+            .get(&projection_id)
             .filter(|pending| pending.durable_routes.is_empty() && !pending.route_complete)
         {
             replay.push((
@@ -2275,7 +2278,7 @@ impl<S: EventStore> EngineCore<S> {
                 }
             }
         }
-        if let Some(pending) = self.pending.get(&id) {
+        if let Some(pending) = self.pending.get(&projection_id) {
             for relay in &pending.unstarted_relays {
                 replay.push((
                     ReceiptReplayFactKey::PersistenceStalled(

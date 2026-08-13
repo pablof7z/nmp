@@ -564,6 +564,8 @@ mod semantic_successor_tests {
         let carol = Keys::generate().public_key();
         let dave = Keys::generate().public_key();
         let relay = RelayUrl::parse("wss://semantic-source.example").unwrap();
+        let destination_a = RelayUrl::parse("wss://semantic-a.example").unwrap();
+        let destination_b = RelayUrl::parse("wss://semantic-b.example").unwrap();
         let base = source(&author, 1, "base", &[]);
         let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
@@ -594,7 +596,8 @@ mod semantic_successor_tests {
         let original = UnsignedEvent::from(base.clone());
         let mut current = original.clone();
         let mut receipts = Vec::new();
-        for person in [alice, bob] {
+        for (person, destination) in [(alice, destination_a.clone()), (bob, destination_b.clone())]
+        {
             let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
                 instance,
                 original.clone(),
@@ -604,7 +607,7 @@ mod semantic_successor_tests {
             .unwrap();
             let effects = core.handle(EngineMsg::Publish(WriteIntent {
                 payload: WritePayload::ReplaceableOperation(payload),
-                routing: WriteRouting::Auto,
+                routing: WriteRouting::Explicit(vec![destination]),
                 identity: Identity::Active,
                 correlation: None,
             }));
@@ -794,7 +797,7 @@ mod semantic_successor_tests {
         .unwrap();
         let accepted_later = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::ReplaceableOperation(later_operation),
-            routing: WriteRouting::Auto,
+            routing: WriteRouting::Explicit(vec![destination_a.clone()]),
             identity: Identity::Active,
             correlation: None,
         }));
@@ -891,6 +894,29 @@ mod semantic_successor_tests {
                 ) if candidate == receipt && *event_id == signed.id
             )));
         }
+        let owner_intent = core.pending[&owner].intent_id;
+        let lanes = core
+            .resolver
+            .store()
+            .recover_publish_queue_lanes(owner_intent)
+            .unwrap();
+        assert_eq!(
+            lanes
+                .iter()
+                .map(|lane| lane.key.relay.clone())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([destination_a, destination_b]),
+            "all contributing routes union into the one physical owner"
+        );
+        assert!(core.pending.iter().all(|(receipt, pending)| {
+            *receipt == owner
+                || core
+                    .resolver
+                    .store()
+                    .recover_publish_queue_lanes(pending.intent_id)
+                    .unwrap()
+                    .is_empty()
+        }));
     }
 }
 
