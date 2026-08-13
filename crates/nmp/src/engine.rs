@@ -1110,12 +1110,9 @@ impl Engine {
             )?
         };
         handle
-            .relay_information_async(relay, policy.into_engine())
+            .relay_information_async(relay, policy)
             .await
-            .map(RelayInformationSnapshot::from_engine)
-            .map_err(|error| {
-                RelayInformationRequestError::Acquisition(RelayInformationError::from_engine(error))
-            })
+            .map_err(RelayInformationRequestError::Acquisition)
     }
 
     #[cfg(test)]
@@ -3836,7 +3833,7 @@ mod tests {
         }
         assert!(caller_owned
             .iter()
-            .all(|snapshot| snapshot.raw_json.len() == BODY_BYTES));
+            .all(|snapshot| snapshot.raw_json().len() == BODY_BYTES));
 
         let while_callers_retain = engine.relay_information_retention_census();
         assert_eq!(while_callers_retain.cached_entries, 1);
@@ -3845,9 +3842,8 @@ mod tests {
         assert_eq!(while_callers_retain.active_flights, 0);
         assert_eq!(while_callers_retain.subscribed_callers, 0);
 
-        // The 64 ordinary facade values above intentionally own 64 public
-        // copies. Dropping them cannot change the engine census because those
-        // copies transferred to the caller at the supported value boundary.
+        // Caller-held snapshots share the cached payload. Dropping them cannot
+        // change the engine census: the service retains its own cache entry.
         drop(caller_owned);
         assert_eq!(
             engine.relay_information_retention_census(),
