@@ -18,7 +18,8 @@ reset_fixture() {
   rm -rf "$FIXTURE_ROOT"
   mkdir -p \
     "$FIXTURE_ROOT/Packages/NMP/Tests/NMPTests" \
-    "$FIXTURE_ROOT/apps/Falsifier"
+    "$FIXTURE_ROOT/apps/Falsifier/Tests/FalsifierTests" \
+    "$FIXTURE_ROOT/scripts"
   cp -R "$ROOT/.github" "$FIXTURE_ROOT/.github"
   cp \
     "$ROOT/Packages/NMP/Tests/NMPTests/BoundedRelayTimeSharingTests.swift" \
@@ -26,6 +27,12 @@ reset_fixture() {
     "$ROOT/Packages/NMP/Tests/NMPTests/RelayInformationTests.swift" \
     "$FIXTURE_ROOT/Packages/NMP/Tests/NMPTests/"
   cp "$ROOT/apps/Falsifier/project.yml" "$FIXTURE_ROOT/apps/Falsifier/project.yml"
+  cp \
+    "$ROOT/apps/Falsifier/Tests/FalsifierTests/NMPSimulatorQualificationTests.swift" \
+    "$FIXTURE_ROOT/apps/Falsifier/Tests/FalsifierTests/"
+  cp \
+    "$ROOT/scripts/pick-ios-simulator-destination.py" \
+    "$FIXTURE_ROOT/scripts/"
 }
 
 expect_failure() {
@@ -112,10 +119,10 @@ expect_failure "removed PR trigger" "pull_request:"
 
 reset_fixture
 sed -i.bak \
-  's/mode=--macos-only/mode=--sim-only/' \
+  's/mode=--sim-only/mode=--macos-only/' \
   "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
 rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
-expect_failure "thick PR scope" 'echo "mode=--macos-only"'
+expect_failure "host-only PR scope" 'echo "mode=--sim-only"'
 
 reset_fixture
 sed -i.bak \
@@ -144,10 +151,10 @@ expect_failure "duplicated native build" "expected exactly one Apple native buil
 
 reset_fixture
 sed -i.bak \
-  's/run: swift build/run: swift build \\&\\& xcodebuild test/' \
+  's/xcodebuild test/xcodebuild build/' \
   "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
 rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
-expect_failure "reintroduced simulator orchestration" "xcodebuild test"
+expect_failure "removed simulator execution" "xcodebuild test"
 
 reset_fixture
 sed -i.bak \
@@ -163,6 +170,6 @@ sed -i.bak \
         run: cargo test' \
   "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml"
 rm "$FIXTURE_ROOT/.github/workflows/macos-qualification.yml.bak"
-expect_failure "portable work drifted onto macOS" "exactly six named Apple qualification steps"
+expect_failure "portable work drifted onto macOS" "exactly eleven named Apple qualification steps"
 
 echo "macOS CI throughput test: baseline and thirteen mutations passed"
