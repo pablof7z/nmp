@@ -696,11 +696,14 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
     ));
     assert!(acked.iter().any(|effect| matches!(
         effect,
-        Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Published, .. }) if *id == id_a && relay == &ack
+        Effect::EmitReceipt(id, WriteFact::Relay { event_id, relay, state: RelayState::Published })
+            if *id == id_a && event_id == &signed.id && relay == &ack
     )));
-    assert!(!acked
-        .iter()
-        .any(|effect| matches!(effect, Effect::EmitReceipt(id, _) if *id == id_b)));
+    assert!(acked.iter().any(|effect| matches!(
+        effect,
+        Effect::EmitReceipt(id, WriteFact::Relay { event_id, relay, state: RelayState::Published })
+            if *id == id_b && event_id == &signed.id && relay == &ack
+    )));
 
     let nacked = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
