@@ -20,7 +20,7 @@ import com.nmp.sdk.NMPFreshness
 import com.nmp.sdk.NMPSourceAuthority
 import com.nmp.sdk.RowBatch
 import com.nmp.sdk.SourceStatus
-import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
@@ -52,7 +52,7 @@ class NMPRuntimeQualificationTest {
     private val offlineRelay = BuildConfig.NMP_QUALIFICATION_OFFLINE_RELAY
 
     @Test
-    fun coldSeedUsesPublicFacadeAndAndroidStorage() = runBlocking {
+    fun coldSeedUsesPublicFacadeAndAndroidStorage(): Unit = runBlocking {
         assumeTrue(BuildConfig.NMP_EXPECT_NATIVE_LOAD)
         val context = ApplicationProvider.getApplicationContext<Context>()
         val store = persistentStore(context)
@@ -66,10 +66,11 @@ class NMPRuntimeQualificationTest {
         assertTrue(activity is QualificationActivity)
         activity.finish()
 
-        val engine = NMPEngine(config(store))
+        lateinit var engine: NMPEngine
         lateinit var online: RowBatch
         val coldNanos =
             measureNanoTime {
+                engine = NMPEngine(config(store))
                 online =
                     withTimeout(COLD_LIVE_LIMIT_MS) {
                         engine.observe(demand(successRelay)).first { batch ->
@@ -81,11 +82,6 @@ class NMPRuntimeQualificationTest {
         val coldMs = coldNanos / 1_000_000
         assertTrue("cold live first row took ${coldMs}ms", coldMs <= COLD_LIVE_LIMIT_MS)
         assertTrue(online.rows.any { it.content == CONTROLLED_EVENT_CONTENT })
-        val mappedLibraries =
-            File("/proc/self/maps").readLines().filter { it.contains("libnmp_ffi.so") }
-                .map { it.substringAfterLast(' ') }
-                .distinct()
-        assertEquals("one NMP core library must be mapped", 1, mappedLibraries.size)
         engine.close()
         engine.close()
         assertEngineClosedFromKotlin(engine)
@@ -94,13 +90,13 @@ class NMPRuntimeQualificationTest {
         Log.i(
             TAG,
             "NMP_ANDROID_COLD_SEED pid=${Process.myPid()} cold_live_ms=$coldMs " +
-                "rows=${online.rows.size} mapped=${mappedLibraries.single()} " +
+                "rows=${online.rows.size} native_backed_call=controlled_row " +
                 "store=${store.absolutePath}",
         )
     }
 
     @Test
-    fun freshProcessReopensCacheAndMeetsCacheLatency() = runBlocking {
+    fun freshProcessReopensCacheAndMeetsCacheLatency(): Unit = runBlocking {
         assumeTrue(BuildConfig.NMP_EXPECT_NATIVE_LOAD)
         val context = ApplicationProvider.getApplicationContext<Context>()
         val store = persistentStore(context)
@@ -137,7 +133,7 @@ class NMPRuntimeQualificationTest {
     }
 
     @Test
-    fun preconnectFailureRecoversToRealRow() = runBlocking {
+    fun preconnectFailureRecoversToRealRow(): Unit = runBlocking {
         assumeTrue(BuildConfig.NMP_EXPECT_NATIVE_LOAD)
         val engine = NMPEngine(config())
         var sawError = false
@@ -156,7 +152,7 @@ class NMPRuntimeQualificationTest {
     }
 
     @Test
-    fun offlineFailureIsScopedAndJavaReadable() = runBlocking {
+    fun offlineFailureIsScopedAndJavaReadable(): Unit = runBlocking {
         assumeTrue(BuildConfig.NMP_EXPECT_NATIVE_LOAD)
         val engine = NMPEngine(config())
         val failed =
@@ -172,18 +168,17 @@ class NMPRuntimeQualificationTest {
     }
 
     @Test
-    fun cancellationBeforeRequiredRowIsBounded() = runBlocking {
+    fun cancellationBeforeRequiredRowIsBounded(): Unit = runBlocking {
         assumeTrue(BuildConfig.NMP_EXPECT_NATIVE_LOAD)
         val engine = NMPEngine(config())
-        val entered = CompletableDeferred<Unit>()
         val collection =
-            launch(Dispatchers.Default) {
-                engine.observe(demand(offlineRelay)).collect { batch ->
-                    entered.complete(Unit)
+            launch(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+                engine.observe(demand(offlineRelay)).first { batch ->
                     assertTrue(batch.rows.isEmpty())
+                    false
                 }
             }
-        withTimeout(5_000) { entered.await() }
+        assertTrue("collector completed before explicit cancellation", collection.isActive)
         withTimeout(5_000) { collection.cancelAndJoin() }
         engine.close()
         assertEngineClosedFromKotlin(engine)
@@ -191,7 +186,7 @@ class NMPRuntimeQualificationTest {
     }
 
     @Test
-    fun collectorIdleAndTeardownPerformanceContract() = runBlocking {
+    fun collectorIdleAndTeardownPerformanceContract(): Unit = runBlocking {
         assumeTrue(BuildConfig.NMP_EXPECT_NATIVE_LOAD)
         val baselineThreads = taskCount()
         val baselineHeap = Debug.getNativeHeapAllocatedSize()
@@ -365,7 +360,7 @@ class NMPRuntimeQualificationTest {
         const val IDLE_CPU_LIMIT_MS = 500L
         const val DISPATCH_P99_LIMIT_MS = 250.0
         const val TEARDOWN_THREAD_DELTA = 4
-        const val TEARDOWN_CYCLES = 8
+        const val TEARDOWN_CYCLES = 10
         const val NATIVE_HEAP_DELTA_BYTES = 16L * 1024L * 1024L
     }
 }

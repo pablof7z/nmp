@@ -9,7 +9,7 @@ binding, and `libnmp_ffi.so` ABI slices selected by the application's
 From the repository root:
 
 ```sh
-nmp --manifest native/examples/android-normal-client.toml prepare \
+nmp --manifest native/examples/android-core.toml prepare \
   --output /tmp/nmp-native-android
 ```
 
@@ -26,8 +26,9 @@ The project template cannot assemble alone after a clean checkout because the
 feature-selected sources and native libraries are deliberate generated inputs.
 
 `.github/workflows/android-emulator.yml` qualifies the generated Maven artifact
-as an external API-35 application. It exercises `NMPEngine` construction, a
-controlled live observation, scoped failure/recovery, structured cancellation,
-fresh-process app-private-store reopen, deterministic close, wrong-ABI refusal,
-and bounded 64-collector performance; it never uses generated bindings or an
-app-owned relay socket.
+from the consumer fixture's committed core-only `.nmp.toml` as an external
+API-35 application. It exercises `NMPEngine` construction, a controlled live
+observation, scoped failure/recovery, structured cancellation, fresh-process
+app-private-store reopen, deterministic close, wrong-ABI refusal, and bounded
+64-collector performance; it never uses generated bindings or an app-owned
+relay socket.
