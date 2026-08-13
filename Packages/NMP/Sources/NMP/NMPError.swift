@@ -180,6 +180,11 @@ public enum NMPError: Error, Sendable, Equatable {
     /// reassemble without the guard.
     case replaceableEditHasNoWireForm
     // nmp-native:endif
+    /// #1437: registered replaceable operations are capability-owned internal
+    /// write payloads. They cannot be projected as a standalone native payload
+    /// without losing the registered materializer that gives the bytes their
+    /// meaning.
+    case replaceableOperationHasNoWireForm
     // nmp-native:if nip29
     /// #1033: `NMPRelayScope.on`/`FfiRelayScope.on` was given an empty
     /// relay set -- a group must be hosted somewhere.
@@ -319,6 +324,7 @@ public enum NMPError: Error, Sendable, Equatable {
         // nmp-native:if nip22
         case .ReplaceableEditHasNoWireForm: self = .replaceableEditHasNoWireForm
         // nmp-native:endif
+        case .ReplaceableOperationHasNoWireForm: self = .replaceableOperationHasNoWireForm
         // nmp-native:if nip29
         case .EmptyRelayScope: self = .emptyRelayScope
         case .GroupCallerSuppliedContext: self = .groupCallerSuppliedContext
@@ -486,6 +492,8 @@ extension NMPError: LocalizedError {
         case .replaceableEditHasNoWireForm:
             "A replaceable edit crosses this boundary only inside the semantic method that owns its precondition, never as a payload"
         // nmp-native:endif
+        case .replaceableOperationHasNoWireForm:
+            "A registered replaceable operation has no standalone FFI payload"
         // nmp-native:if nip29
         case .emptyRelayScope:
             "RelayScope.on requires a nonempty relay set -- a group must be hosted somewhere"

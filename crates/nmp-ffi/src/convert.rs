@@ -327,7 +327,6 @@ pub enum FfiError {
     /// as a VALUE instead of panicking on an exported path.
     #[cfg(feature = "nip22")]
     ReplaceableEditHasNoWireForm,
-    #[cfg(feature = "nip22")]
     ReplaceableOperationHasNoWireForm,
     InvalidCorrelationToken {
         got: String,
@@ -767,7 +766,6 @@ impl std::fmt::Display for FfiError {
                 "a replaceable edit crosses this boundary only inside the semantic method that \
                  owns its precondition, never as a payload"
             ),
-            #[cfg(feature = "nip22")]
             Self::ReplaceableOperationHasNoWireForm => write!(
                 f,
                 "a registered replaceable operation has no standalone FFI payload"
