@@ -376,8 +376,12 @@ pub use nostr::{Event, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, Unsig
 // validates every external signer result against the frozen accepted event;
 // concrete providers remain optional crates and are not re-exported here.
 pub use nmp_signer::{
-    CryptoCapability, PendingSignerResolveError, PendingSignerSender, SignerError, SignerOp,
-    SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
+    DecryptCapability, DecryptOperation, DecryptPayloadRequest, EncryptCapability,
+    EncryptOperation, EncryptPayloadRequest, EncryptedPayload, EncryptedPayloadService,
+    FencedCiphertext, FencedPlaintext, PayloadEncryption, PayloadError, PayloadFence,
+    PayloadLimits, PendingSignerResolveError, PendingSignerSender, SignerError, SignerOp,
+    SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability, StalePayloadResult,
+    TransientPlaintext,
 };
 
 // The concrete mechanism types are internal by default (#52's "internal or

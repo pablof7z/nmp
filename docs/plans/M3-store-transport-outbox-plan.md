@@ -24,7 +24,7 @@ nostr, negentropy, redb, tungstenite/mio/rustls (external)
   ├── nmp-router     (M2) demand → per-relay WireDelta          (UNCHANGED)
   ├── nmp-transport  (M3 NEW) generational WebSocket Pool; the async/threaded edge
   │                     deps: nmp-relay-url-ish, tungstenite/mio/rustls (feature `native`)
-  ├── nmp-signer     (M3 NEW) SigningCapability + CryptoCapability + LocalKeySigner
+  ├── nmp-signer     (M3 NEW) SigningCapability + separate decrypt/encrypt capabilities
   │                     deps: nostr (Keys/NIP-44); NO tokio (SignerOp poll model)
   └── nmp-engine     (M3 NEW) the runtime. THE sync/async seam.
         src/core/       EngineCore — the PURE synchronous reducer (headless)
@@ -149,14 +149,13 @@ pub trait SigningCapability {
     fn public_key(&self) -> Option<Pubkey>;
     fn sign(&self, unsigned: UnsignedEvent) -> SignerOp<SignedEvent>;
 }
-/// Co-located with the signer because the KEY LIVES IN THE ENGINE (ledger #12
-/// M0 amendment: else identity-as-input breaks). Emits decrypted RAW tokens —
-/// still zero presentation.
-pub trait CryptoCapability {
-    fn nip44_encrypt(&self, peer: Pubkey, plaintext: &str) -> SignerOp<String>;
-    fn nip44_decrypt(&self, peer: Pubkey, ciphertext: &str) -> SignerOp<String>;
+pub trait DecryptCapability {
+    fn decrypt(&self, request: DecryptPayloadRequest) -> SignerOp<TransientPlaintext>;
 }
-pub struct LocalKeySigner { keys: nostr::Keys }   // impls both; sufficient for M3
+pub trait EncryptCapability {
+    fn encrypt(&self, request: EncryptPayloadRequest) -> SignerOp<EncryptedPayload>;
+}
+pub struct LocalKeySigner { /* one zeroizing secret owner */ }
 // Remote signer is a SEAM only: `trait RemoteSignerHandle` exists, NIP-46/55 NOT built (non-goal §7).
 ```
 
@@ -221,7 +220,7 @@ Nothing crosses verbatim. Each row: old file to READ, and what must be re-justif
 | **Transport pool** | `crates/nmp-network/src/pool/{mod,types,inner}.rs`, `relay_worker/{connect,socket_io,mod}.rs`, `relay_protocol.rs`, `keepalive.rs` | Generational `RelayHandle`, push-model (no send-to-all), backoff+jitter constants, keepalive FSM, reconnect-preamble replay hook — **operational lessons re-earned, not re-invented** (VISION §8) | Strip all `nmp-core`/kernel coupling; the `PoolEvent`↔`EngineMsg` translation is fresh (new reducer vocabulary). Keep `mio`, drop the actor-seam adapter. |
 | **Negentropy** | `crates/nmp-nip77/src/{runtime,reconciler,filter,messages,codec}.rs` | `RelayNegentropyState` FSM (→`ProbeState`), `EligibleFilter` parse (search-unsupported etc.), `Reconciler` over the `negentropy` crate, the 30s liveness-deadline REQ fallback | The kernel "substrate seam" (outbound-REQ interceptor / inbound-text interceptor) is DROPPED — the reducer drives the prober directly. `ProbedRelay` token type is new (ledger #8 as a *type*, not a runtime check). |
 | **Store semantics** | `crates/nmp-store/src/types/coverage.rs` (`CoverageRow`), `crates/nmp-core/src/kernel/coverage_ledger.rs` (`build_watermark_fn`, "no row ⇒ refuse the floor", "presence ≠ coverage") | The downward-closed watermark model, the refuse-to-floor rule, the eviction-lowers-`covered_through` invariant — **the whole ledger-#7 doctrine is already worked out; harvest the reasoning** | The redb table layout + candidate-index `query` is fresh (M1's `MemoryStore` is the oracle). Provenance-merge-in-insert is fresh (M1 stubbed it). |
-| **Signer / crypto** | `crates/nmp-signer-iface/src/{op,signing,handle,nip44_session}.rs` | `SignerOp` poll-thunk (no-tokio), `SignedEvent`/`UnsignedEvent`, `RemoteSignerHandle` trait shape, NIP-44 session vocabulary | `CryptoCapability` co-location is fresh framing (M0 amendment). Local-key impl fresh. NIP-46 transport NOT harvested (non-goal). |
+| **Signer / crypto** | `crates/nmp-signer-iface/src/{op,signing,handle,nip44_session}.rs` | `SignerOp` poll-thunk (no-tokio), `SignedEvent`/`UnsignedEvent`, `RemoteSignerHandle` trait shape, NIP-44 session vocabulary | Independent decrypt/encrypt capabilities and their bounded fenced envelope are fresh framing. Local-key impl fresh. NIP-46 transport NOT harvested (non-goal). |
 | **Write outbox** | `crates/nmp-core/src/publish/engine/{types,mod}.rs`, `kernel/publish_engine_terminals.rs` | Per-relay terminal model (`TerminalOutcome`, accepted/failed split), enqueue≠converged discipline | The `Durability` class + `WriteStatus` stream + `PrivateRoute` narrow-only type are fresh (M0 amendment / ledger #6 as types). Drop the action-ledger/correlation-id machinery (that was v1 app-framework). |
 
 ### 4.2 The biggest harvest-vs-rewrite call
@@ -262,7 +261,7 @@ Preserved: **all M1 contract tests + M2 property/differential/kill suites stay g
 - **Step 0 — scaffold.** Add `nmp-transport`, `nmp-signer`, `nmp-engine` to the workspace; `redb`/`negentropy` deps; empty modules. *Green:* `cargo build`.
 - **A1 ‖ — `nmp-store` persistence.** `RedbStore` behind `EventStore`; provenance-merge-in-insert; `CoverageRow` + `record/get_coverage`; claim-GC; `MemoryStore` updated in lockstep as the oracle. *Green:* 8, 12, 13 (store-level) + all M1 store tests.
 - **A2 ‖ — `nmp-transport`.** Harvest the pool; generational handles, backoff+jitter, keepalive, health, reconnect-preamble. *Green:* 7 + transport unit suite.
-- **A3 ‖ — `nmp-signer`.** `SigningCapability` + `CryptoCapability` + `LocalKeySigner` + `SignerOp`; `RemoteSignerHandle` seam. *Green:* signer unit suite (sign/verify, NIP-44 round-trip).
+- **A3 ‖ — `nmp-signer`.** `SigningCapability` + separate decrypt/encrypt capabilities + `LocalKeySigner` + `SignerOp`; `RemoteSignerHandle` seam. *Green:* signer unit suite (sign/verify, NIP-44 round-trip).
 - **B — `nmp-engine::core` reducer.** `EngineMsg`/`Effect`; wire resolver+router+store; ingest→recompile→`Wire`+`EmitRows`; EOSE→coverage; row coverage variant. Depends on A1. *Green:* 1, 2, 9(headless half).
 - **C — `nmp-engine::runtime`.** `EngineThread`, `Handle`, `PoolEvent`↔`EngineMsg` wiring, reconnection replay. Depends on B + A2. *Green:* 6, 14.
 - **D — outbox.** Intents/receipts/`Durability`/`PrivateNarrow`; signing orchestration via A3; per-relay ack from `OK`. Depends on B + A3. *Green:* 4, 5, 11.

@@ -5,8 +5,10 @@ use std::fmt;
 use bech32::primitives::decode::CheckedHrpstring;
 use bech32::Bech32;
 use nmp_signer::{
-    CryptoCapability, SignerError, SignerOp, SignerPublicKey, SignerSignedEvent,
+    DecryptCapability, DecryptPayloadRequest, EncryptCapability, EncryptPayloadRequest,
+    EncryptedPayload, PayloadEncryption, SignerError, SignerOp, SignerPublicKey, SignerSignedEvent,
     SignerUnsignedEvent, SigningCapability, SigningProviderDescriptor, SigningProviderId,
+    TransientPlaintext,
 };
 use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
 use nostr::{Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -34,8 +36,8 @@ impl fmt::Display for LocalKeySignerError {
 
 impl std::error::Error for LocalKeySignerError {}
 
-/// Implements both `SigningCapability` and `CryptoCapability` over exactly one
-/// long-lived secret owner.
+/// Implements signing, decrypt, and encrypt capabilities over exactly one
+/// long-lived secret owner. Each capability remains independently bindable.
 ///
 /// #765: `secret` is a non-`Clone`, non-`Copy`, compiler-fenced owner whose
 /// `Drop` wipes the scalar. This type deliberately retains no parallel
@@ -206,33 +208,43 @@ impl SigningCapability for LocalKeySigner {
     }
 }
 
-/// Co-located with the signer because the KEY LIVES IN THE ENGINE (M0
-/// amendment, ledger #12): decrypting gift-wrap/private-list ciphertext
-/// requires the same secret material `sign` uses, so this capability lives
-/// on the same type rather than behind a separate app-facing door.
-impl CryptoCapability for LocalKeySigner {
-    /// NIP-44 v2 encrypt through the crate's own zeroizing operation path.
-    fn nip44_encrypt(&self, peer: SignerPublicKey, plaintext: &str) -> SignerOp<String> {
+impl EncryptCapability for LocalKeySigner {
+    fn encrypt(&self, request: EncryptPayloadRequest) -> SignerOp<EncryptedPayload> {
+        let (scheme, peer, plaintext) = request.into_parts();
+        if scheme != PayloadEncryption::Nip44V2 {
+            return SignerOp::err(SignerError::Rejected(
+                "local-key provider does not support requested encryption scheme".to_string(),
+            ));
+        }
         let Ok(peer) = PublicKey::from_slice(peer.as_bytes()) else {
             return SignerOp::err(SignerError::Rejected("invalid peer public key".to_string()));
         };
+        let Ok(plaintext) = plaintext.as_str() else {
+            return SignerOp::err(SignerError::Rejected(
+                "encryption plaintext is not UTF-8".to_string(),
+            ));
+        };
         into_signer_op(
             "nip44 encrypt",
-            local_crypto::nip44_encrypt(&self.secret, peer, plaintext),
+            local_crypto::nip44_encrypt(&self.secret, peer, plaintext).map(EncryptedPayload::new),
         )
     }
+}
 
-    /// NIP-44 v2 decrypt. Turns gift-wrap/private-list ciphertext into raw
-    /// plaintext tokens — the caller (engine) owns any further parsing; this
-    /// capability never assumes the stored content was plaintext to begin
-    /// with.
-    fn nip44_decrypt(&self, peer: SignerPublicKey, ciphertext: &str) -> SignerOp<String> {
+impl DecryptCapability for LocalKeySigner {
+    fn decrypt(&self, request: DecryptPayloadRequest) -> SignerOp<TransientPlaintext> {
+        let (scheme, peer, ciphertext) = request.into_parts();
+        if scheme != PayloadEncryption::Nip44V2 {
+            return SignerOp::err(SignerError::Rejected(
+                "local-key provider does not support requested decryption scheme".to_string(),
+            ));
+        }
         let Ok(peer) = PublicKey::from_slice(peer.as_bytes()) else {
             return SignerOp::err(SignerError::Rejected("invalid peer public key".to_string()));
         };
         into_signer_op(
             "nip44 decrypt",
-            local_crypto::nip44_decrypt(&self.secret, peer, ciphertext),
+            local_crypto::nip44_decrypt(&self.secret, peer, &ciphertext),
         )
     }
 }
@@ -273,6 +285,31 @@ mod tests {
             SignerOp::Ready(result) => result,
             SignerOp::Pending(_) => panic!("local signer must resolve synchronously"),
         }
+    }
+
+    fn encrypt_ready(
+        signer: &LocalKeySigner,
+        peer: SignerPublicKey,
+        plaintext: &str,
+    ) -> Result<String, SignerError> {
+        ready(signer.encrypt(EncryptPayloadRequest::new(
+            PayloadEncryption::Nip44V2,
+            peer,
+            TransientPlaintext::new(plaintext.as_bytes().to_vec()),
+        )))
+        .map(EncryptedPayload::into_string)
+    }
+
+    fn decrypt_ready(
+        signer: &LocalKeySigner,
+        peer: SignerPublicKey,
+        ciphertext: &str,
+    ) -> Result<TransientPlaintext, SignerError> {
+        ready(signer.decrypt(DecryptPayloadRequest::new(
+            PayloadEncryption::Nip44V2,
+            peer,
+            ciphertext.to_string(),
+        )))
     }
 
     #[test]
@@ -357,21 +394,25 @@ mod tests {
         let plaintext = "the quick brown fox — nip-44 round trip";
 
         clear_wipe_audit();
-        let ciphertext =
-            ready(alice.nip44_encrypt(SignerPublicKey::new(bob.public_key.to_bytes()), plaintext))
-                .expect("encrypt");
+        let ciphertext = encrypt_ready(
+            &alice,
+            SignerPublicKey::new(bob.public_key.to_bytes()),
+            plaintext,
+        )
+        .expect("encrypt");
         let encrypt_audit = take_wipe_audit();
         assert!(encrypt_audit.contains(&SensitiveKind::PaddedPlaintext));
         assert!(encrypt_audit.contains(&SensitiveKind::SymmetricCipher));
         assert!(encrypt_audit.contains(&SensitiveKind::HashState));
 
         clear_wipe_audit();
-        let decrypted = ready(bob.nip44_decrypt(
+        let decrypted = decrypt_ready(
+            &bob,
             SignerPublicKey::new(alice.public_key.to_bytes()),
             &ciphertext,
-        ))
+        )
         .expect("decrypt");
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(decrypted.as_str().unwrap(), plaintext);
         let decrypt_audit = take_wipe_audit();
         assert!(decrypt_audit.contains(&SensitiveKind::DecryptedPlaintext));
         assert!(decrypt_audit.contains(&SensitiveKind::SymmetricCipher));
@@ -390,11 +431,9 @@ mod tests {
                 .expect("valid vector public key");
         let ciphertext = "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABee0G5VSK0/9YypIObAtDKfYEAjD35uVkHyB0F4DwrcNaCXlCWZKaArsGrY6M9wnuTMxWfp1RTN9Xga8no+kF5Vsb";
 
-        assert_eq!(
-            ready(signer.nip44_decrypt(SignerPublicKey::new(peer.to_bytes()), ciphertext,))
-                .expect("decrypt official vector"),
-            "a"
-        );
+        let decrypted = decrypt_ready(&signer, SignerPublicKey::new(peer.to_bytes()), ciphertext)
+            .expect("decrypt official vector");
+        assert_eq!(decrypted.as_str().unwrap(), "a");
     }
 
     #[test]
@@ -420,18 +459,22 @@ mod tests {
     fn invalid_nip44_mac_drops_keys_without_plaintext_output() {
         let alice = LocalKeySigner::generate();
         let bob = LocalKeySigner::generate();
-        let ciphertext =
-            ready(alice.nip44_encrypt(SignerPublicKey::new(bob.public_key.to_bytes()), "wipe me"))
-                .expect("encrypt");
+        let ciphertext = encrypt_ready(
+            &alice,
+            SignerPublicKey::new(bob.public_key.to_bytes()),
+            "wipe me",
+        )
+        .expect("encrypt");
         let mut payload = BASE64.decode(ciphertext).expect("base64");
         *payload.last_mut().expect("mac") ^= 1;
         let corrupted = BASE64.encode(payload);
         clear_wipe_audit();
 
-        assert!(ready(bob.nip44_decrypt(
+        assert!(decrypt_ready(
+            &bob,
             SignerPublicKey::new(alice.public_key.to_bytes()),
             &corrupted,
-        ))
+        )
         .is_err());
         let audit = take_wipe_audit();
         assert!(audit.contains(&SensitiveKind::Nip44OperationSecret));
@@ -509,12 +552,14 @@ mod tests {
         let signing_error = ready(signer.sign(unsigned_for(&other, "wrong identity")))
             .expect_err("identity mismatch")
             .to_string();
-        let crypto_error = ready(signer.nip44_decrypt(
+        let crypto_error = match decrypt_ready(
+            &signer,
             SignerPublicKey::new(signer.public_key.to_bytes()),
             "invalid",
-        ))
-        .expect_err("invalid payload")
-        .to_string();
+        ) {
+            Ok(_) => panic!("invalid payload unexpectedly decrypted"),
+            Err(error) => error.to_string(),
+        };
 
         for output in [signing_error, crypto_error] {
             assert!(!output.contains(secret));

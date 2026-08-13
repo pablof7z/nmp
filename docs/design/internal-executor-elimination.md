@@ -13,7 +13,7 @@ blocking foreign call** (category 3):
 
 - Every foreign callback returns *ready-or-pending, non-blocking*:
   `SigningCapability::sign -> SignerOp{Ready|Pending}` (`capability.rs:20`),
-  `CryptoCapability` (`capability.rs:27`), `AuthPolicy::evaluate ->
+  `DecryptCapability` / `EncryptCapability` (`capability.rs`), `AuthPolicy::evaluate ->
   AuthPolicyOp{Ready|Pending}` with an explicit "must not block" contract
   (`auth.rs:253`), NIP-46 `request_string -> SignerOp` (`nip46.rs:1576`).
 - Every thread that "blocks" is parked on a `crossbeam bounded(1)` **completion

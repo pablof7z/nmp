@@ -1,6 +1,9 @@
 //! Protocol-neutral signing and cryptography capabilities.
 
 use crate::op::SignerOp;
+use crate::payload::{
+    DecryptPayloadRequest, EncryptPayloadRequest, EncryptedPayload, TransientPlaintext,
+};
 use crate::value::{SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent};
 use zeroize::Zeroize;
 
@@ -93,10 +96,19 @@ pub trait SigningCapability {
     fn sign(&self, unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent>;
 }
 
-/// Co-located with the signer because the KEY LIVES IN THE ENGINE (ledger
-/// #12, M0 amendment: identity-as-input otherwise breaks). Emits decrypted
-/// RAW tokens — still zero presentation. Step 0: signature only.
-pub trait CryptoCapability {
-    fn nip44_encrypt(&self, peer: SignerPublicKey, plaintext: &str) -> SignerOp<String>;
-    fn nip44_decrypt(&self, peer: SignerPublicKey, ciphertext: &str) -> SignerOp<String>;
+/// Decrypt capability for one provider identity.
+///
+/// Decryption is deliberately separate from signing and encryption: a remote
+/// provider may expose any subset at a given moment. The request owns its
+/// ciphertext and the result has one zeroizing plaintext owner.
+pub trait DecryptCapability {
+    fn decrypt(&self, request: DecryptPayloadRequest) -> SignerOp<TransientPlaintext>;
+}
+
+/// Encrypt capability for one provider identity.
+///
+/// The request moves its one zeroizing plaintext owner into the provider, so
+/// an asynchronous adapter cannot outlive a borrowed plaintext buffer.
+pub trait EncryptCapability {
+    fn encrypt(&self, request: EncryptPayloadRequest) -> SignerOp<EncryptedPayload>;
 }

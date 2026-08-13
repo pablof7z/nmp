@@ -2,8 +2,10 @@
 //! implement the signer/crypto interface without importing a provider crate.
 
 use nmp::{
-    CryptoCapability, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,
-    SigningCapability,
+    DecryptCapability, DecryptPayloadRequest, EncryptCapability, EncryptPayloadRequest,
+    EncryptedPayload, EncryptedPayloadService, PayloadEncryption, PayloadFence, PayloadLimits,
+    SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
+    TransientPlaintext,
 };
 
 struct ConsumerSigner;
@@ -21,18 +23,21 @@ impl SigningCapability for ConsumerSigner {
     }
 }
 
-impl CryptoCapability for ConsumerSigner {
-    fn nip44_encrypt(&self, _peer: SignerPublicKey, plaintext: &str) -> SignerOp<String> {
-        SignerOp::ok(format!("opaque:{plaintext}"))
+impl EncryptCapability for ConsumerSigner {
+    fn encrypt(&self, request: EncryptPayloadRequest) -> SignerOp<EncryptedPayload> {
+        let (_, _, plaintext) = request.into_parts();
+        SignerOp::ok(EncryptedPayload::new(format!(
+            "opaque:{}",
+            plaintext.as_str().unwrap()
+        )))
     }
+}
 
-    fn nip44_decrypt(&self, _peer: SignerPublicKey, ciphertext: &str) -> SignerOp<String> {
-        SignerOp::ok(
-            ciphertext
-                .strip_prefix("opaque:")
-                .unwrap_or(ciphertext)
-                .to_string(),
-        )
+impl DecryptCapability for ConsumerSigner {
+    fn decrypt(&self, request: DecryptPayloadRequest) -> SignerOp<TransientPlaintext> {
+        let (_, _, ciphertext) = request.into_parts();
+        let plaintext = ciphertext.strip_prefix("opaque:").unwrap_or(&ciphertext);
+        SignerOp::ok(TransientPlaintext::new(plaintext.as_bytes().to_vec()))
     }
 }
 
@@ -53,15 +58,38 @@ fn nmp_only_signer_surface_is_implementable() {
     assert_eq!(signed.public_key(), public_key);
     assert_eq!(signed.content(), "hello");
 
-    let encrypted = signer
-        .nip44_encrypt(public_key, "secret")
-        .wait(std::time::Duration::ZERO)
-        .unwrap();
+    let fence = PayloadFence::new([1; 32], [2; 32], 3, [4; 32]);
+    let limits = PayloadLimits::new(64, 64);
+    let encrypted = EncryptedPayloadService::encrypt(
+        &signer,
+        fence,
+        PayloadEncryption::Nip44V2,
+        public_key,
+        TransientPlaintext::new(b"secret".to_vec()),
+        limits,
+    )
+    .unwrap()
+    .wait(std::time::Duration::ZERO)
+    .unwrap()
+    .accept(fence)
+    .unwrap();
+    let decrypted = EncryptedPayloadService::decrypt(
+        &signer,
+        fence,
+        PayloadEncryption::Nip44V2,
+        public_key,
+        encrypted.into_string(),
+        limits,
+    )
+    .unwrap()
+    .wait(std::time::Duration::ZERO)
+    .unwrap()
+    .accept(fence)
+    .unwrap();
     assert_eq!(
-        signer
-            .nip44_decrypt(public_key, &encrypted)
-            .wait(std::time::Duration::ZERO)
-            .unwrap(),
+        decrypted
+            .as_str()
+            .expect("consumer capability returned UTF-8"),
         "secret"
     );
 }

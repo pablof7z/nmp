@@ -4,7 +4,7 @@
 //! `crates/nmp-signer-iface/src/{op,signing,handle,nip44_session}.rs` in
 //! the old repo (`nostr-multi-platform`) — the `SignerOp` poll-thunk shape is
 //! re-justified there; the exact immutable request/result values and
-//! `CryptoCapability` co-location are fresh framing.
+//! separate decrypt/encrypt capability contracts are fresh framing.
 //!
 //! NO tokio anywhere in this crate: [`SignerOp`] is a pollable thunk driven
 //! by the engine's blocking recv loop (D8), never an `async fn`.
@@ -15,13 +15,21 @@
 
 mod capability;
 mod op;
+mod payload;
 mod value;
 
 pub use capability::{
-    CryptoCapability, SigningCapability, SigningProviderDescriptor, SigningProviderId,
+    DecryptCapability, EncryptCapability, SigningCapability, SigningProviderDescriptor,
+    SigningProviderId,
 };
 pub use op::{
     Canceller, PendingSignerOp, PendingSignerResolveError, PendingSignerSender, SignerError,
     SignerOp,
+};
+pub use payload::{
+    DecryptOperation, DecryptPayloadRequest, EncryptOperation, EncryptPayloadRequest,
+    EncryptedPayload, EncryptedPayloadService, FencedCiphertext, FencedPlaintext,
+    PayloadEncryption, PayloadError, PayloadFence, PayloadLimits, StalePayloadResult,
+    TransientPlaintext,
 };
 pub use value::{SignerPublicKey, SignerSignedEvent, SignerSignedEventParts, SignerUnsignedEvent};

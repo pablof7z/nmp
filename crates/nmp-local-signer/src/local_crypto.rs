@@ -17,6 +17,7 @@ use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::subtle::ConstantTimeEq;
 use k256::{FieldBytes, NonZeroScalar, ProjectivePoint, PublicKey as K256PublicKey, Scalar};
+use nmp_signer::TransientPlaintext;
 use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
 use nostr::secp256k1::schnorr::Signature;
 use nostr::PublicKey;
@@ -353,7 +354,7 @@ pub(super) fn nip44_decrypt(
     secret: &CanonicalSecret,
     peer: PublicKey,
     ciphertext: &str,
-) -> Result<String, LocalCryptoError> {
+) -> Result<TransientPlaintext, LocalCryptoError> {
     let payload = BASE64
         .decode(ciphertext)
         .map_err(|_| LocalCryptoError::InvalidPayload)?;
@@ -393,11 +394,11 @@ pub(super) fn nip44_decrypt(
     }
 
     let unpadded = &plaintext[2..2 + declared_len];
-    let text = std::str::from_utf8(unpadded).map_err(|_| LocalCryptoError::InvalidUtf8)?;
-    // This is the one intentional plaintext transfer: the returned `String`
-    // becomes the capability caller's owner. `plaintext`, the internal padded
-    // buffer, still wipes immediately after this copy on both success/error.
-    Ok(text.to_owned())
+    std::str::from_utf8(unpadded).map_err(|_| LocalCryptoError::InvalidUtf8)?;
+    // The only transfer out of the internal padded owner goes directly into
+    // the non-Clone, zeroizing capability result. The padded owner still wipes
+    // immediately after this copy on both success and error.
+    Ok(TransientPlaintext::new(unpadded.to_vec()))
 }
 
 fn sensitive_nonzero_scalar(
@@ -766,10 +767,10 @@ mod tests {
         drop(conversation);
         clear_wipe_audit();
 
-        assert_eq!(
+        assert!(matches!(
             nip44_decrypt(&secret, peer, &ciphertext),
             Err(LocalCryptoError::InvalidPadding)
-        );
+        ));
         let audit = take_wipe_audit();
         assert!(audit.contains(&SensitiveKind::DecryptedPlaintext));
         assert!(audit.contains(&SensitiveKind::MessageKeys));
