@@ -578,6 +578,17 @@ impl<S: EventStore> EngineCore<S> {
                 .get(event_id)
                 .cloned()
                 .unwrap_or_else(|| BTreeSet::from([id])),
+            WriteFact::Destinations { .. }
+                if self.pending.get(&id).is_some_and(|pending| {
+                    matches!(pending.target, PendingWriteTarget::ReplaceableOperation(_))
+                }) =>
+            {
+                self.pending
+                    .get(&id)
+                    .and_then(|pending| self.event_to_receipts.get(&pending.frozen.id))
+                    .cloned()
+                    .unwrap_or_else(|| BTreeSet::from([id]))
+            }
             _ => BTreeSet::from([id]),
         };
         if let WriteFact::Relay {
@@ -1923,33 +1934,50 @@ impl<S: EventStore> EngineCore<S> {
                 return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable)
             }
         };
-        if let PublishQueueReceiptPayload::ReplaceableOperation {
-            acceptance: nmp_store::ReplaceableOperationAcceptance::BodyComplete(accepted_event_id),
-            state: nmp_store::ReplaceableOperationReceiptState::Contributing { current: Some(_) },
-            ..
-        } = &receipt.payload
-        {
-            if limit == 0 {
-                return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable);
-            }
-            return ReceiptReplayPage {
-                outcome: ReattachOutcome::Attached,
-                facts: Vec::new(),
-                next_cursor: None,
-                end_cursor: Some(cursor),
-                frozen_id: Some(*accepted_event_id),
-                isolated_fact_cursors: Vec::new(),
-            };
-        }
-        let Some(receipt_state) = receipt.event_state() else {
+        let semantic = match &receipt.payload {
+            PublishQueueReceiptPayload::ReplaceableOperation {
+                coordinate,
+                acceptance: nmp_store::ReplaceableOperationAcceptance::BodyComplete(accepted),
+                state:
+                    nmp_store::ReplaceableOperationReceiptState::Contributing {
+                        current: Some(current),
+                    },
+            } => Some((coordinate.clone(), *accepted, current.clone())),
+            _ => None,
+        };
+        let receipt_state = semantic
+            .as_ref()
+            .map(|(_, _, current)| match current.sig_state {
+                IntentSigState::Signed => ReceiptState::Signed,
+                IntentSigState::AwaitingSigner | IntentSigState::Pending => ReceiptState::Accepted,
+            })
+            .or_else(|| receipt.event_state());
+        let Some(receipt_state) = receipt_state else {
             // The store can truthfully reattach this ordinary receipt, but
             // #841 has not yet installed the runtime projection for semantic
             // materialization facts. Never reinterpret it as event work.
             return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable);
         };
-        let receipt_event_id = receipt
-            .event_id()
-            .expect("event receipt state and event id share one closed arm");
+        let receipt_event_id = semantic
+            .as_ref()
+            .map(|(_, _, current)| current.materialization.event_id)
+            .or_else(|| receipt.event_id())
+            .expect("active receipt carries a current event id");
+        let evidence_intent = if let Some((coordinate, _, _)) = &semantic {
+            match self
+                .resolver
+                .store()
+                .replaceable_operation_snapshot(coordinate)
+            {
+                Ok(Some(snapshot)) => snapshot
+                    .current
+                    .generation
+                    .and_then(|generation| generation.members.first().copied()),
+                _ => return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable),
+            }
+        } else {
+            receipt.intent_id
+        };
         if self
             .pending
             .get(&id)
@@ -1962,7 +1990,7 @@ impl<S: EventStore> EngineCore<S> {
             // signer facts from an obligation whose destination is unknown.
             return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable);
         }
-        let (attempts, details, lanes) = match receipt.intent_id {
+        let (attempts, details, lanes) = match evidence_intent {
             Some(intent_id) => {
                 let attempts = match self.resolver.store().recover_attempts(intent_id) {
                     Ok(attempts) => attempts,
@@ -3757,6 +3785,15 @@ impl<S: EventStore> EngineCore<S> {
                 ..
             } = &receipt.payload
             {
+                let owner_pending = self
+                    .event_to_receipts
+                    .get(&current.materialization.event_id)
+                    .and_then(|receipts| {
+                        receipts
+                            .iter()
+                            .filter_map(|receipt| self.pending.get(receipt))
+                            .min_by_key(|pending| pending.intent_id)
+                    });
                 entries.push(PublishQueueEntry {
                     receipt_id: id,
                     event_id: current.materialization.event_id,
@@ -3772,11 +3809,16 @@ impl<S: EventStore> EngineCore<S> {
                             }
                         }
                     },
-                    relays: BTreeSet::new(),
-                    route_complete: false,
-                    relay_states: Vec::new(),
+                    relays: owner_pending
+                        .map(|pending| pending.durable_routes.clone())
+                        .unwrap_or_default(),
+                    route_complete: owner_pending.is_some_and(|pending| pending.route_complete),
+                    relay_states: owner_pending
+                        .map(|pending| self.relay_states_for(pending))
+                        .unwrap_or_default(),
                     outcome: None,
-                    persistence_fault: None,
+                    persistence_fault: owner_pending
+                        .and_then(|pending| pending.persistence_fault.clone()),
                 });
                 continue;
             }
@@ -4259,12 +4301,39 @@ impl<S: EventStore> EngineCore<S> {
         // that comes up short here parks and is re-executed at every later
         // moment (`resolution-lifecycle.md` §5) rather than killing a
         // durable, already-journaled obligation.
-        let Some(resolution) = self
-            .pending
-            .get(&id)
-            .map(|pending| self.resolve_routes(&pending.routing, &event))
-        else {
-            return;
+        let resolution = if semantic_promotion {
+            let member_receipts = self
+                .event_to_receipts
+                .get(&event.id)
+                .cloned()
+                .unwrap_or_else(|| BTreeSet::from([id]));
+            let mut answer = RouteAnswer {
+                complete: true,
+                ..RouteAnswer::default()
+            };
+            let mut parent_provenance_error = None;
+            for receipt in member_receipts {
+                let Some(pending) = self.pending.get(&receipt) else {
+                    continue;
+                };
+                let member = self.resolve_routes(&pending.routing, &event);
+                answer.relays.extend(member.answer.relays);
+                answer
+                    .author_route_needs
+                    .extend(member.answer.author_route_needs);
+                answer.complete &= member.answer.complete;
+                parent_provenance_error =
+                    parent_provenance_error.or(member.parent_provenance_error);
+            }
+            RouteResolution {
+                answer,
+                parent_provenance_error,
+            }
+        } else {
+            let Some(pending) = self.pending.get(&id) else {
+                return;
+            };
+            self.resolve_routes(&pending.routing, &event)
         };
 
         let Some(intent_id) = self.pending.get(&id).map(|pending| pending.intent_id) else {
@@ -4862,22 +4931,20 @@ impl<S: EventStore> EngineCore<S> {
         if !pending.routing_valid || pending.event_id.is_none() || pending.route_complete {
             return;
         }
-        if matches!(pending.target, PendingWriteTarget::ReplaceableOperation(_))
-            && self
-                .event_to_receipts
-                .get(&pending.frozen.id)
-                .and_then(|receipts| {
-                    receipts
-                        .iter()
-                        .filter_map(|receipt| {
-                            self.pending
-                                .get(receipt)
-                                .map(|candidate| (candidate.intent_id, *receipt))
-                        })
-                        .min_by_key(|(intent, _)| *intent)
-                        .map(|(_, receipt)| receipt)
-                })
-                != Some(id)
+        let semantic = matches!(pending.target, PendingWriteTarget::ReplaceableOperation(_));
+        let event = pending.frozen.clone();
+        if semantic
+            && self.event_to_receipts.get(&event.id).and_then(|receipts| {
+                receipts
+                    .iter()
+                    .filter_map(|receipt| {
+                        self.pending
+                            .get(receipt)
+                            .map(|candidate| (candidate.intent_id, *receipt))
+                    })
+                    .min_by_key(|(intent, _)| *intent)
+                    .map(|(_, receipt)| receipt)
+            }) != Some(id)
         {
             return;
         }
@@ -4885,7 +4952,33 @@ impl<S: EventStore> EngineCore<S> {
         let RouteResolution {
             answer,
             parent_provenance_error,
-        } = self.resolve_routes(&pending.routing, &pending.frozen);
+        } = if semantic {
+            let mut answer = RouteAnswer {
+                complete: true,
+                ..RouteAnswer::default()
+            };
+            let mut error = None;
+            if let Some(receipts) = self.event_to_receipts.get(&event.id) {
+                for receipt in receipts {
+                    let Some(member) = self.pending.get(receipt) else {
+                        continue;
+                    };
+                    let resolved = self.resolve_routes(&member.routing, &event);
+                    answer.relays.extend(resolved.answer.relays);
+                    answer
+                        .author_route_needs
+                        .extend(resolved.answer.author_route_needs);
+                    answer.complete &= resolved.answer.complete;
+                    error = error.or(resolved.parent_provenance_error);
+                }
+            }
+            RouteResolution {
+                answer,
+                parent_provenance_error: error,
+            }
+        } else {
+            self.resolve_routes(&pending.routing, &event)
+        };
         self.apply_route_answer(id, intent_id, answer, effects);
         if let Some(error) = parent_provenance_error {
             self.degrade_store(error, effects);
