@@ -54,6 +54,7 @@ pub(super) enum RedbCrashPoint {
     LaneHandoffBeforeCommit,
     DenyLaneAuthBeforeCommit,
     LaneCloseBeforeCommit,
+    TerminalRetentionBeforeCommit,
     ObservationBeforeCommit,
     ObservationAfterCommit,
     CoverageBeforeCommit,
@@ -247,6 +248,7 @@ impl RedbStore {
             .map_err(|_| PersistenceError::invariant("delivery relay cache poisoned"))?
             .clear();
         self.db = Some(db);
+        super::publish_queue_ops::maintain_terminal_receipts(self)?;
         Ok(())
     }
 
@@ -604,7 +606,7 @@ impl RedbStore {
             write_txn.commit()?;
             _open_write_transactions += 1;
         }
-        Ok(Self {
+        let mut store = Self {
             db: Some(db),
             _ownership: ownership,
             publish_queue_relays: Mutex::new(PublishQueueRelayCache::default()),
@@ -628,7 +630,13 @@ impl RedbStore {
             route_revision_range_rows: AtomicU64::new(0),
             #[cfg(test)]
             unstaged_lane_bootstraps: AtomicU64::new(0),
-        })
+        };
+        super::publish_queue_ops::maintain_terminal_receipts(&mut store).map_err(|error| {
+            RedbStoreOpenError::Database(redb::Error::Corrupted(format!(
+                "terminal receipt maintenance failed during open: {error}"
+            )))
+        })?;
+        Ok(store)
     }
 
     /// Destructively remove one unowned persistent store target.

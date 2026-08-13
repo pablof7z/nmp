@@ -3596,10 +3596,6 @@ impl<S: EventStore> EngineCore<S> {
             Ok(_) => {}
             Err(e) => self.degrade_store(e, &mut effects),
         }
-        if let Err(error) = self.resolver.store_mut().prune_superseded_receipts(now) {
-            self.degrade_store(error, &mut effects);
-        }
-
         // `>=` against the EXACT `Timestamp` threshold `next_deadline()`
         // arms for (`started_at + NEG_LIVENESS_DEADLINE_SECS`) -- not the
         // `as_secs()`-truncated, strictly-greater subtraction this used to
@@ -3675,7 +3671,6 @@ impl<S: EventStore> EngineCore<S> {
     /// the store on `Err`, which is the #122 fact an app already reads.
     pub fn next_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
         let expiry = self.resolver.store().next_expiration()?;
-        let superseded_receipt = self.resolver.store().next_superseded_receipt_deadline()?;
         let neg_liveness = self
             .neg_sessions
             .values()
@@ -3723,7 +3718,6 @@ impl<S: EventStore> EngineCore<S> {
             bootstrap,
             request_claim_transfer,
             request_retry,
-            superseded_receipt,
         ]
         .into_iter()
         .flatten()
