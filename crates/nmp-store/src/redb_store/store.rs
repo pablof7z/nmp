@@ -18,8 +18,8 @@ use super::schema::{
     PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_RELAYS,
     PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS, PUBLISH_QUEUE_SUPPRESS_BY_ADDR,
     PUBLISH_QUEUE_SUPPRESS_BY_ID, REDB_CACHE_BYTES, RELAYS, RELAY_IDS, SCHEMA_VERSION,
-    SCHEMA_VERSION_KEY, SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_META, SEMANTIC_OPERATIONS,
-    SEMANTIC_RECEIPTS, SEMANTIC_RESOURCES, STORE_META, TOMBSTONES,
+    SCHEMA_VERSION_KEY, SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS,
+    SEMANTIC_RESOURCES, STORE_META, TOMBSTONES,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use super::AtomicU64;
@@ -621,9 +621,7 @@ impl RedbStore {
                 write_txn.open_table(PUBLISH_QUEUE_RELAY_IDS)?;
                 write_txn.open_table(SEMANTIC_RESOURCES)?;
                 write_txn.open_table(SEMANTIC_OPERATIONS)?;
-                write_txn.open_table(SEMANTIC_RECEIPTS)?;
                 write_txn.open_table(SEMANTIC_MATERIALIZATION_HIGH_WATER)?;
-                write_txn.open_table(SEMANTIC_META)?;
                 let mut store_meta = write_txn.open_table(STORE_META)?;
                 store_meta.insert(POSTINGS_READY, 1)?;
                 store_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;

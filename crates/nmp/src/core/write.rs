@@ -3158,7 +3158,7 @@ impl<S: EventStore> EngineCore<S> {
                 match self
                     .resolver
                     .store_mut()
-                    .promote_signed(intent_id, verified)
+                    .promote_signed(crate::PromotionTarget::Event(intent_id), verified)
                 {
                     Ok(PromoteOutcome::Promoted { co_signed, .. }) => {
                         signature_promoted = true;

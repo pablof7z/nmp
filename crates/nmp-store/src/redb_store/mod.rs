@@ -111,6 +111,7 @@ use schema::*;
 pub(crate) mod publish_queue;
 pub(crate) mod publish_queue_codec;
 mod semantic_edit_codec;
+mod semantic_edit_ops;
 #[cfg(test)]
 use publish_queue::*;
 mod canonical;
@@ -260,12 +261,45 @@ impl EventStore for RedbStore {
         write_ops::accept_write(self, accept)
     }
 
+    fn replaceable_operation_snapshot(
+        &self,
+        coordinate: &nostr::nips::nip01::Coordinate,
+    ) -> Result<Option<crate::RecoveredSemanticResource>, PersistenceError> {
+        semantic_edit_ops::snapshot(self, coordinate)
+    }
+
+    fn install_replaceable_materialization(
+        &mut self,
+        rematerialize: crate::SemanticRematerialize,
+    ) -> Result<crate::SemanticInstallOutcome, PersistenceError> {
+        semantic_edit_ops::install(self, rematerialize)
+    }
+
     fn promote_signed(
         &mut self,
-        intent_id: IntentId,
+        target: crate::PromotionTarget,
         verified: VerifiedSignature,
     ) -> Result<PromoteOutcome, PersistenceError> {
-        write_ops::promote_signed(self, intent_id, verified)
+        match target {
+            crate::PromotionTarget::Event(intent_id) => {
+                write_ops::promote_signed(self, intent_id, verified)
+            }
+            crate::PromotionTarget::ReplaceableMaterialization {
+                coordinate,
+                expected_source_revision,
+                expected_program_digest,
+                expected_materialization,
+                expected_event_id,
+            } => semantic_edit_ops::promote(
+                self,
+                coordinate,
+                expected_source_revision,
+                expected_program_digest,
+                expected_materialization,
+                expected_event_id,
+                verified,
+            ),
+        }
     }
 
     fn compensate_write_with_state(
@@ -496,53 +530,6 @@ impl EventStore for RedbStore {
         reason: crate::RefuseReason,
     ) -> Result<u64, PersistenceError> {
         publish_queue_ops::accept_refused(self, frozen_id, expected_pubkey, reason)
-    }
-}
-
-impl crate::SemanticEditStore for RedbStore {
-    fn accept_semantic_edit(
-        &mut self,
-        accept: crate::SemanticAccept,
-    ) -> Result<(crate::SemanticEditReceipt, crate::SemanticCurrentState), crate::SemanticStoreError>
-    {
-        semantic_edit_ops::accept(self, accept)
-    }
-
-    fn rematerialize_semantic_edit(
-        &mut self,
-        rematerialize: crate::SemanticRematerialize,
-    ) -> Result<Option<crate::SemanticCurrentState>, crate::SemanticStoreError> {
-        semantic_edit_ops::rematerialize(self, rematerialize)
-    }
-
-    fn promote_semantic_materialization(
-        &mut self,
-        promotion: crate::SemanticPromotion,
-    ) -> Result<crate::SemanticPromotionOutcome, crate::SemanticStoreError> {
-        semantic_edit_ops::promote(self, promotion)
-    }
-
-    fn recover_semantic_resources(
-        &self,
-    ) -> Result<Vec<crate::RecoveredSemanticResource>, crate::SemanticStoreError> {
-        semantic_edit_ops::recover(self)
-    }
-
-    fn semantic_receipt(
-        &self,
-        operation_id: crate::OperationId,
-    ) -> Result<Option<crate::SemanticEditReceipt>, crate::SemanticStoreError> {
-        semantic_edit_ops::receipt(self, operation_id)
-    }
-
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    fn semantic_store_counters(&self) -> crate::SemanticStoreCounters {
-        semantic_edit_ops::counters(self)
-    }
-
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    fn reset_semantic_store_counters(&self) {
-        semantic_edit_ops::reset_counters(self);
     }
 }
 

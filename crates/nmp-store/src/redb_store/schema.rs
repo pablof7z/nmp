@@ -341,13 +341,10 @@ pub(super) const SEMANTIC_RESOURCES: TableDefinition<&[u8], &[u8]> =
 pub(super) const SEMANTIC_OPERATIONS: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("semantic_operations");
 /// Independent receipt evidence keyed by globally monotonic operation id.
-pub(super) const SEMANTIC_RECEIPTS: TableDefinition<&[u8; 8], &[u8]> =
-    TableDefinition::new("semantic_receipts");
 /// Per-coordinate generation high-water retained after the active resource is
 /// removed. Delayed signatures can therefore never match a recreated body.
 pub(super) const SEMANTIC_MATERIALIZATION_HIGH_WATER: TableDefinition<&[u8], u64> =
     TableDefinition::new("semantic_materialization_high_water");
-pub(super) const SEMANTIC_META: TableDefinition<&str, u64> = TableDefinition::new("semantic_meta");
 
 /// The [`EVENT_COL_ROW`] key of one event.
 pub(super) fn event_row_key(event_key: EventKey) -> [u8; 9] {
