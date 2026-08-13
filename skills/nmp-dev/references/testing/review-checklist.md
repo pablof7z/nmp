@@ -64,6 +64,7 @@ Use this checklist for behavioral changes, test additions, scenario edits, and a
 
 ## Test architecture
 
+- [ ] Is requested behavior exercised on the normal runtime path, with no unrequested environment, config, rollout, experimental, or opt-in gate leaving it dormant?
 - [ ] Is the feature corpus acting as behavioral memory rather than a duplicate project plan?
 - [ ] Is GitHub still the owner of temporary implementation work?
 - [ ] Are mechanism tests kept in their owning crates?
