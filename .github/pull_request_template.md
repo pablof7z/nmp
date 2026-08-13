@@ -9,17 +9,7 @@
 - [ ] Running/result-level proof is recorded where compilation alone is insufficient.
 - [ ] New falsifiers fail against the old behavior and pass here.
 
-## Public-surface protocol
+## Public-surface impact
 
-- [ ] **Failure evidence:** the issue/PR explains what breaks or remains unproved.
-- [ ] **Changed projections:** the exact governed set (`ffi,kotlin,rust,swift`, or `correction`) matches the CI context.
-- [ ] **Rust / FFI / Swift / Kotlin impact:** every projection is assessed and synchronized tests are named.
-- [ ] **Persistence impact:** store/journal/key compatibility is described, including “none.”
-- [ ] **Diagnostics impact:** evidence/coverage/receipt consequences are described, including “none.”
-- [ ] **Updated falsifiers:** concrete tests are linked or listed.
-- [ ] **Superseded path removed:** the obsolete API/semantic path is deleted; no compatibility alias remains.
-- [ ] **Component catalog:** every active UniFFI namespace has one closed-schema `docs/surface/components/<key>/component.toml`; owner/co-location, platform roots or omission reasons, and optional Android identities are exact.
-- [ ] **Surface snapshots:** `scripts/regenerate-surface-snapshots.sh` was run and every active component's `uniffi.txt` plus `nmp-facade.txt` diff is committed.
-- [ ] **Retirements:** an active component is replaced only by the checker's exact derived tombstone; removed paths are gone, reserved identities are not reused, and an artifact owner has no live child.
-- [ ] **Append-only trail:** if a snapshot changed, a complete entry was appended to `docs/surface-change-log.md`; old entries were not edited.
-- [ ] **Approval trail:** independent exact-head review and required CI cover the snapshot delta and log entry.
+- [ ] Rust / FFI / Swift / Kotlin impact is described, including “none.”
+- [ ] Superseded path removed: the obsolete API/semantic path is deleted in the same PR; no compatibility alias remains.

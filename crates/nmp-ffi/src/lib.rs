@@ -1,5 +1,5 @@
 //! `nmp-ffi` -- the UniFFI boundary crate (M4 plan §1/§2): the minimal
-//! two-noun surface (live query, write intent) plus diagnostics, exported as
+//! two-noun API (live query, write intent) plus diagnostics, exported as
 //! native Swift (and, later, Kotlin -- M6) values via UniFFI's proc-macro
 //! mode (no `.udl` file). Nothing in the workspace depends on this crate;
 //! it wraps [`nmp::Engine`] (#52) and is the top of the graph, replacing
@@ -12,7 +12,7 @@
 //! it (see [`facade`]'s doc). What genuinely stays FFI-boundary work: type
 //! mirroring (`convert`/`types`) and the pull-based async UniFFI object
 //! handles (`NmpRowStream`/`NmpDiagnosticsStream`/`NmpReceiptStream`/…) whose
-//! `next()` awaits `nmp`'s waker-driven async observation surface (#680) —
+//! `next()` awaits `nmp`'s waker-driven async observation API (#680) —
 //! costing zero NMP-owned OS threads per observation.
 //!
 //! Module layout mirrors the plan's §2 sketch:

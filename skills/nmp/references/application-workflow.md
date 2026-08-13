@@ -35,4 +35,4 @@ Avoid these boundary errors:
 - Are identity persistence and destructive store reset separate operations?
 - Are secrets absent from logs and source?
 
-For repo implementation work, surface changes are governed. Inspect `docs/surface/`, `docs/surface-change-log.md`, and the base-loaded surface CI before changing Rust, FFI, or native wrappers.
+For repo implementation work, public API changes must update every affected projection (Rust, FFI, Swift, Kotlin) and their tests in the same PR.

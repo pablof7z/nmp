@@ -21,7 +21,6 @@ members = [
     # canonical product facade.
     "crates/nmp",
     "crates/nmp-consumer-check",
-    "crates/nmp-demo",
     # First-class application tooling: `.nmp.toml` capability selection and
     # prepared Apple/Android products (#1392).
     "crates/nmp-cli",

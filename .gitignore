@@ -8,8 +8,6 @@
 # GitHub answered the push with HTTP 500 three times before anyone looked past
 # "network error". The glob covers the whole family.
 /target*
-/tools/component-interface-snapshot/target/
-/tools/rust-facade-snapshot/target/
 **/*.rs.bk
 __pycache__/
 *.pyc

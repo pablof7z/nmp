@@ -188,18 +188,12 @@ def validate_sources(
         for revision in REVISION_RE.findall(markdown.read_text(encoding="utf-8")):
             revisions.append((markdown, revision))
     revision_files = {path.relative_to(skill_dir) for path, _ in revisions}
-    required_revision_files = {
-        Path("SKILL.md"),
-        Path("references/current-surface.md"),
-    }
-    if revision_files != required_revision_files or len(revisions) != 2:
+    required_revision_files = {Path("SKILL.md")}
+    if revision_files != required_revision_files or len(revisions) != 1:
         fail(
             errors,
-            "SKILL.md and references/current-surface.md must each declare one Verified-Revision",
+            "SKILL.md must declare exactly one Verified-Revision",
         )
-        revision = None
-    elif revisions[0][1] != revisions[1][1]:
-        fail(errors, "Verified-Revision pins do not match")
         revision = None
     else:
         revision = revisions[0][1]

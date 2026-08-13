@@ -1,4 +1,4 @@
-//! `nmp` -- THE supported Rust product surface (#52,
+//! `nmp` -- THE supported Rust product API (#52,
 //! `docs/design/canonical-facade-52-plan.md`). Every direct-Rust app and
 //! `nmp-ffi` both depend on this crate alone; the mechanism crates
 //! (`nmp-store`, `nmp-router`, `nmp-transport`, `nmp-resolver`, `nmp-signer`,
@@ -9,7 +9,7 @@
 //!
 //! - [`Engine::new`] -- config in, a running engine out. Owns
 //!   config -> store/neutral-routing-fact selection and the router cap that
-//!   `nmp-ffi`/`nmp-demo` used to each assemble by hand.
+//!   `nmp-ffi` used to assemble by hand.
 //! - [`Engine::observe`] -- a live query (and an optional [`Window`]) in, a
 //!   [`Subscription`] streaming [`Frame`]s out.
 //! - [`Engine::publish`] -- a [`WriteIntent`] in, a receipt stream of
@@ -43,7 +43,7 @@
 //!
 //! This crate re-exports every value type an app needs to drive the two
 //! nouns, and to name every `DiagnosticsSnapshot` field, without reaching
-//! past it -- that re-export list below IS the product surface. It is
+//! past it -- that re-export list below IS the public API. It is
 //! proved by `nmp-consumer-check`, a separate crate whose `Cargo.toml`
 //! depends on `nmp` alone.
 
@@ -58,10 +58,10 @@ mod subscription;
 
 // #827: the M3 engine, folded in from the former `nmp-engine` crate. These are
 // the SAME modules, at the same names, moved verbatim -- the crate boundary
-// they used to sit behind added nothing but a second published surface.
+// they used to sit behind added nothing but a second public API.
 //
 // - [`mod@core`] -- `EngineCore`: the PURE synchronous reducer. No I/O, no
-//   threads, no imposed runtime. Its whole surface is
+//   threads, no imposed runtime. Its whole interface is
 //   `handle(EngineMsg) -> Vec<Effect>` / `tick(Timestamp) -> Vec<Effect>`.
 //   This is what keeps the whole engine headlessly testable (plan §2
 //   position 1).
@@ -79,11 +79,11 @@ mod subscription;
 //   name, since a crate cannot have two `relay_information` modules.
 //
 // They are PRIVATE, exactly like every other module of this facade, which is
-// what keeps ~242 mechanism items out of the governed surface snapshot: the
-// product surface stays the selective `pub use crate::core::…` /
+// what keeps ~242 mechanism items out of the public API: the
+// public API stays the selective `pub use crate::core::…` /
 // `crate::runtime::…` list below, byte-for-byte the list that used to read
 // `nmp_engine::core::…`. Making them `pub` (even `#[doc(hidden)]`) would
-// instead dump the whole mechanism into `docs/surface/nmp-facade.txt`.
+// instead dump the whole mechanism into the facade.
 mod core;
 #[cfg(feature = "bench-instrumentation")]
 mod ingest_attribution;
@@ -111,10 +111,9 @@ mod session;
 /// named door rather than by making five modules public.
 ///
 /// `#[doc(hidden)]`, so rustdoc omits it and everything beneath it: nothing
-/// here reaches `docs/surface/nmp-facade.txt`, and none of it is an app
-/// contract. An application uses the re-exported product surface below; if
-/// something in here is genuinely needed by an app, the answer is to project
-/// it through that surface, not to reach in.
+/// here is an app contract. An application uses the re-exported public API
+/// below; if something in here is genuinely needed by an app, the answer is
+/// to project it through that API, not to reach in.
 #[doc(hidden)]
 pub mod mechanism {
     pub mod core {
@@ -224,7 +223,7 @@ pub use session::{
 /// falsifier instrumentation). The thread-scaling falsifier asserts opening
 /// many observations leaves this delta at 0: an observation is a lightweight
 /// `Arc`+waker, never an OS thread. Doc-hidden test instrumentation, not part
-/// of the product surface.
+/// of the public API.
 #[doc(hidden)]
 #[must_use]
 pub fn nmp_threads_spawned() -> u64 {
@@ -236,19 +235,18 @@ pub fn nmp_threads_spawned() -> u64 {
 /// gauge decrements when a thread exits, so a teardown falsifier can assert it
 /// returns to baseline after sessions are dropped and the engine is shut down —
 /// proving no orphaned worker survives cancellation/drop/shutdown. Doc-hidden
-/// test instrumentation, not part of the product surface.
+/// test instrumentation, not part of the public API.
 #[doc(hidden)]
 #[must_use]
 pub fn nmp_threads_live() -> u64 {
     nmp_executor::nmp_threads_live()
 }
-// The pull-based async observation surface (#680) is the FFI/SDK delivery
-// mechanism — its app contract is documented in `nmp-ffi`'s own surface
-// snapshot and the Swift/Kotlin SDKs. The documented direct-Rust product
-// surface stays the blocking `Subscription`/`recv()` nouns below; these async
-// twins remain fully usable (nmp-ffi and any direct-Rust app await them) but
-// are doc-hidden so they do not double the facade snapshot with generic
-// auto-trait expansions.
+// The pull-based async observation API (#680) is the FFI/SDK delivery
+// mechanism — its app contract is documented in `nmp-ffi` and the Swift/Kotlin
+// SDKs. The documented direct-Rust public API stays the blocking
+// `Subscription`/`recv()` nouns below; these async twins remain fully usable
+// (nmp-ffi and any direct-Rust app await them) but are doc-hidden so they do
+// not double the facade with generic auto-trait expansions.
 #[doc(hidden)]
 pub use crate::runtime::ConcurrentNext;
 pub use relay_information::{
@@ -303,7 +301,7 @@ pub use crate::runtime::{
 // external `std::sync::mpsc::Receiver` (never a documented nmp noun); it is now
 // the engine-owned waker-aware FIFO `FifoReceiver` (blocking `recv` for direct
 // Rust) plus its async `AsyncFifoReceiver` twin. Both stay doc-hidden so the
-// documented product surface keeps its previous shape: `publish` returns a
+// documented public API keeps its previous shape: `publish` returns a
 // receipt stream you drain, not a new documented type family.
 #[doc(hidden)]
 pub use crate::runtime::{
@@ -311,8 +309,8 @@ pub use crate::runtime::{
     FifoTryRecvError, ReceiptReplayCursor, FACT_CHANNEL_CAPACITY,
 };
 // Producer-side FIFO mechanism, used only by protocol modules (e.g. nmp-nip02's
-// follow-action worker) to feed a receipt/status stream — not app product
-// surface, so doc-hidden and kept out of the facade snapshot.
+// follow-action worker) to feed a receipt/status stream — not app public API,
+// so doc-hidden.
 #[doc(hidden)]
 pub use crate::runtime::{fifo_channel, FifoSender};
 // `EventBuilder` collides with `nostr::EventBuilder`, but only INSIDE this
@@ -337,9 +335,8 @@ pub use nmp_grammar::{
 // needs to do so. Every one of those crates depends on `nmp-grammar`
 // directly and takes these from there; they are re-exported here only so an
 // `nmp`-only consumer can still name the bound on `reply_to`. Doc-hidden for
-// the same reason the runtime FIFO family is: the documented product surface
-// is the two nouns plus the verbs an app calls, and a governed snapshot that
-// grows to carry implementor scaffolding stops describing that.
+// the same reason the runtime FIFO family is: the documented public API
+// is the two nouns plus the verbs an app calls.
 #[doc(hidden)]
 pub use nmp_grammar::{
     entity_rows, Pointer, RootScope, TagOptions, TagRows, Tagged, ThreadPosition,
@@ -355,7 +352,7 @@ pub use nmp_grammar::{
 // `DiagnosticsSubscription` delivery boundary -- rather than re-exported
 // from the engine (the `bc8fb97` NIP-11 pattern).
 //
-// Two distinct coverage surfaces live here, deliberately not conflated
+// Two distinct coverage scopes live here, deliberately not conflated
 // (`docs/design/scoped-evidence-49-12-plan.md` §4): `AcquisitionEvidence`
 // (+ `SourceEvidence`/`SourceStatus`/`AuthPhase`/`ShortfallFact`) is the
 // scoped, per-query acquisition evidence delivered on every `Frame` --
@@ -377,7 +374,7 @@ pub use nmp_store::CoverageInterval;
 // argument has to be nameable.
 pub use nostr::{Event, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
-// Protocol-neutral signer/provider surface. The engine's promotion boundary
+// Protocol-neutral signer/provider interface. The engine's promotion boundary
 // validates every external signer result against the frozen accepted event;
 // concrete providers remain optional crates and are not re-exported here.
 pub use nmp_signer::{

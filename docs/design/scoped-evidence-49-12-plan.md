@@ -15,11 +15,10 @@
   substrate (`nmp-store::coverage`, `attribution.rs`) already exists and is
   correctly scoped; the collapse into a global claim lives in exactly one place
   (`coverage_query.rs`) plus its FFI projection. That is what this frame deletes.
-- **Governs a public surface change** → the #49/#12 PR records the complete
-  surface delta in its body and updates synchronized falsifiers. The missing
-  change-log/snapshot infrastructure is not improvised here: Unit D builds
-  parity after this shape settles, then Unit F creates the first governance
-  baseline and reconciles every accumulated delta.
+- **Changes a public API** → the #49/#12 PR records the complete
+  API delta in its body and updates synchronized falsifiers. The missing
+  parity infrastructure is not improvised here: Unit D builds parity after
+  this shape settles.
 
 Authoritative contract (from #43 / #49 / `docs/known-gaps.md` /
 `docs/design/query-demand-and-evidence.md`):
@@ -42,7 +41,7 @@ Authoritative contract (from #43 / #49 / `docs/known-gaps.md` /
 | **The collapse (the bug surface)** | `nmp-engine/src/core/coverage_query.rs` | `QueryCoverage{CompleteUpTo(Timestamp)\|Unknown}` + `query_coverage(atoms, plan, store)` — min-over-atoms-and-relays → one query-global verdict | **REWRITE.** This is the "authoritative-empty arriving through the derivation chain" (#12) and the "over-interprets relay evidence" global claim (#49). |
 | Handle emit path | `nmp-engine/src/core/mod.rs` — `rows_and_coverage_for` (~L1506), `Effect::EmitRows(HandleId, Vec<RowDelta>, QueryCoverage)` (L183), `HandleState.last_coverage` (L214) | Computes coverage from `resolver.root_atoms(id)` **only** (#12 bug at L1510); ships it on every batch | **REWIRE.** Input widens root→subtree; value type changes. |
 | Diagnostics (retained surface) | `nmp-engine/src/core/diagnostics.rs` — `FilterCoverageEntry{filter, coverage: QueryCoverage}` | Per-`(relay, filter)` coverage, **reuses** the query enum | **RETYPE.** Diagnostics legitimately keeps exact per-relay watermark evidence, but must stop borrowing the deleted query enum. |
-| Public FFI/Swift/Kotlin | `nmp-ffi/src/{types,convert,facade,observer}.rs` — `FfiCoverage{CompleteUpTo{unix_seconds}\|Unknown}`, `FfiBatch.coverage`, `FfiFilterCoverage`, `on_batch(deltas, coverage)` | Projects `QueryCoverage` across the boundary | **REPLACE** (governed change). |
+| Public FFI/Swift/Kotlin | `nmp-ffi/src/{types,convert,facade,observer}.rs` — `FfiCoverage{CompleteUpTo{unix_seconds}\|Unknown}`, `FfiBatch.coverage`, `FfiFilterCoverage`, `on_batch(deltas, coverage)` | Projects `QueryCoverage` across the boundary | **REPLACE** (breaking public-API change). |
 
 Key insight that shapes the whole plan: **the store never lied.** A
 `CoverageInterval` at `(shape, relay)` is exactly-scoped, honest evidence. The
@@ -132,9 +131,9 @@ lossless reshape of what `query_coverage` computed:
 `AwaitingAuth(AuthPhase)` (#8) are **enrichment**: they require the engine to
 fold in the same connection/AUTH state diagnostics already reads.
 **Recommendation (owner Q3):** define the full closed enum now — so the closed
-set is ratified once under governance — but document `Connecting/Disconnected/
+set is ratified once — but document `Connecting/Disconnected/
 Error/AwaitingAuth` as "reserved; populated when the transport-state fold and #8
-wire half land." Adding a variant later is itself a governed surface change; do
+wire half land." Adding a variant later is itself a public-API change; do
 it once.
 
 ### 2.2 Ratified vocabulary (codex-nova, this frame) — supersedes §2's names
@@ -297,31 +296,6 @@ in one PR):**
 
 ---
 
-## 5. Surface governance (#52) — coordinated order
-
-This is a public Rust-facade + FFI + Swift + Kotlin shape change. The repository
-does not yet contain `docs/surface-change-log.md`, `docs/surface/*.txt`, or the
-Unit-D parity harness. Creating lookalike infrastructure inside #49/#12 would
-fragment Unit F's ownership and produce a baseline it would have to replace.
-The coordinated order is therefore:
-
-1. **The #49/#12 surface PR lands the cohesive shape and falsifiers.** Its PR
-   body records the full delta: failure evidence; Rust/FFI/Swift/Kotlin impact;
-   no persistence-schema impact; diagnostics' distinct interval type; updated
-   falsifiers; and the deleted paths (`QueryCoverage`/`FfiCoverage`, no alias).
-2. **Unit D builds `nmp-parity` on the settled shape.** It proves the canonical
-   Rust facade and FFI project identical `AcquisitionEvidence`; this PR does not
-   touch or pre-empt that lane.
-3. **Unit F creates the first change-log/snapshot baseline.** It captures all
-   accumulated surface deltas, including #49/#12, in the canonical artifact
-   format and CI gate rather than asking each earlier surface PR to invent one.
-
-Generated UniFFI Swift/Kotlin bindings and both hand-written SDK projections
-remain same-PR requirements for #49/#12. The deferral above applies only to the
-absent governance/parity infrastructure, never to the actual public surface or
-its current falsifiers.
-
----
 
 ## 6. Collision-safe decomposition
 
@@ -331,17 +305,16 @@ built by parallel agents in the SAME worktree, in dependency order:
 
 | Unit | Crate / files | Depends on | Collision / coordination |
 |---|---|---|---|
-| **U1 — subtree accessor** | `nmp-resolver`: `subtree_atoms(id)` over `atoms_in_structural_order` | — | Internal crate, no governed surface. Isolated. |
+| **U1 — subtree accessor** | `nmp-resolver`: `subtree_atoms(id)` over `atoms_in_structural_order` | — | Internal crate, no public API. Isolated. |
 | **U2 — evidence core (heart; folds #12)** | `nmp-engine/core/coverage_query.rs` rewrite → `acquisition_evidence`; new `AcquisitionEvidence`/`SourceEvidence`/`SourceStatus`/`AuthPhase`/`ShortfallFact`; rewire `rows_and_coverage_for`, `Effect::EmitRows`, `HandleState` | U1 | Store READ path only (`get_coverage`) — **does not touch `nmp-store/coverage.rs`**, so minimal collision with #2/#3 store work. No persistence schema change. |
 | **U3 — diagnostics retype** | `nmp-engine/core/diagnostics.rs`: `FilterCoverageEntry.coverage` becomes `Option<CoverageInterval>`; coalesced wire-request diagnostics intersect the persisted intervals of every absorbed narrow atom | U2 (type deletion) | Query evidence and diagnostics remain deliberately distinct. AUTH/error status population stays tracked by #8/#51. |
-| **U4 — facade + FFI + native SDKs** | `nmp`, `nmp-consumer-check`, `nmp-ffi/{types,convert,facade,observer}.rs`; generated bindings; hand-written Swift/Kotlin Row/Query/Diagnostics mirrors | U2 | Same-wave governed surface. Full delta is recorded in the PR body under §5's coordinated order. |
-| **U5 — falsifiers + recorded surface delta** | Reshaped engine/BDD/FFI/Swift/Kotlin falsifiers, known-gaps truth update, this doc's heuristic, and the complete cross-surface delta recorded in the PR body | U2–U4 | This wave does **not** invent the absent parity/snapshot/change-log infrastructure. Unit D adds parity on the settled shape next; Unit F creates and reconciles the first baseline after D. |
+| **U4 — facade + FFI + native SDKs** | `nmp`, `nmp-consumer-check`, `nmp-ffi/{types,convert,facade,observer}.rs`; generated bindings; hand-written Swift/Kotlin Row/Query/Diagnostics mirrors | U2 | Same-wave public-API change. Full delta is recorded in the PR body. |
+| **U5 — falsifiers + recorded API delta** | Reshaped engine/BDD/FFI/Swift/Kotlin falsifiers, known-gaps truth update, this doc's heuristic, and the complete cross-API delta recorded in the PR body | U2–U4 | This wave does **not** invent the absent parity/snapshot/change-log infrastructure. Unit D adds parity on the settled shape next; Unit F creates and reconciles the first baseline after D. |
 
 Order for this wave: **U1 → U2 → {U3, U4} → U5.** Scope `cargo test -p
 nmp-resolver -p nmp-engine -p nmp -p nmp-consumer-check -p nmp-ffi -p
 nmp-bdd`, generated Swift/Kotlin bindings, both SDK suites where the host
-toolchains exist, and `cargo build --workspace`. Follow-on order is **Unit D
-parity → Unit F governance baseline**.
+toolchains exist, and `cargo build --workspace`. Follow-on order is **Unit D parity**.
 
 ---
 
@@ -351,13 +324,13 @@ parity → Unit F governance baseline**.
    compact per-current-plan acquisition facts." A query-level `min-through` is a
    convenience but re-introduces the exact collapse #49 removes and risks reading
    as "complete." **Recommendation: per-source facts only; the app rolls up.** No
-   query-global watermark on the public surface. Confirm.
+   query-global watermark on the public API. Confirm.
 2. **AUTH vocabulary timing (#8 evidence half).** Reserve `AwaitingAuth(AuthPhase)`
    in the enum now (populated when #8's wire half lands), or add it when #8
    lands? **Recommendation: reserve now** — #8 is a committed sibling in the same
-   #43 step-5; adding it later is a second governed surface change for no benefit.
-3. **Ratify the closed `SourceState` set.** It's a public governed enum; adding a
-   variant later is a governed change. Proposed closed set: `Requesting`,
+   #43 step-5; adding it later is a second public-API change for no benefit.
+3. **Ratify the closed `SourceState` set.** It's a public enum; adding a
+   variant later is a public-API change. Proposed closed set: `Requesting`,
    `Reconciled{through}`, `Connecting`, `Disconnected`, `Error`,
    `AwaitingAuth(AuthPhase)`. Ship the full set now with the transport/AUTH
    variants documented "reserved / not-yet-populated" (per "always right, never
@@ -412,9 +385,9 @@ reshaped in the same PR; none are optional):
    `FilterCoverage`) and `Packages/NMPKotlin/.../` (`Row.kt` `Coverage`,
    `Query.kt` `onBatch`, `Diagnostics.kt`). "Swift/Kotlin regenerated"
    under-describes U4: `gen/` regenerates; these are hand-reshaped and are
-   themselves governed surface.
+   themselves public API.
 3. **`crates/nmp` (the #52 facade, in flight now)** — it will expose the batch
-   evidence value on the product surface. U4's scope must include it (see
+   evidence value on the public API. U4's scope must include it (see
    sequencing). The plan predates it; this is a missing unit.
 4. **Engine integration falsifiers** carry semantics, not just types:
    `integration_capstone.rs`'s offline-authoritative-read phases,
@@ -427,7 +400,7 @@ reshaped in the same PR; none are optional):
    `nmp-store/lib.rs:226`, `nmp-grammar/concrete.rs:45`,
    `nmp-ffi/facade.rs:49` ("authoritative"). Sweep in U5.
 
-`crates/nmp-demo` has zero coverage consumers — confirmed clean.
+
 
 ### The three owner decisions — resolved
 
@@ -439,7 +412,7 @@ policy. Three teeth the builder must add:
 
 - **No aggregate anywhere** — no helper fn, no computed property on the Swift/
   Kotlin wrappers either (an `isComplete` convenience in `Row.swift` would be
-  the same collapse one layer up; the parity/governance review must watch the
+  the same collapse one layer up; the parity review must watch the
   hand-written wrappers for exactly this).
 - **Vacuous-emptiness guard:** a query whose subtree yields zero atoms or zero
   planned sources must read as explicit `shortfall`, never as an empty
@@ -452,8 +425,8 @@ policy. Three teeth the builder must add:
   revision").
 
 **Q2 — Reserve the AUTH vocabulary now. YES, with a corrected shape.** #8 is a
-committed sibling in the same #43 step-5; re-opening a governed enum later is
-a second surface change for zero benefit. But the proposed
+committed sibling in the same #43 step-5; re-opening a public enum later is
+a second public-API change for zero benefit. But the proposed
 `AwaitingAuth(AuthPhase{AwaitingPolicy, AwaitingSignature, Authenticated,
 Denied})` bakes two lies into a ratified vocabulary:
 `AwaitingAuth(Authenticated)` is a representable non-state (an authenticated
@@ -573,7 +546,7 @@ orthogonal to every one of these effective current acquisition states.
 6. Deterministic `sources` ordering + `PartialEq` + no-spurious-emit falsifier.
 7. No roll-up anywhere, including no convenience aggregate on the Swift/Kotlin
    wrappers; reviewers watch for `isComplete`-shaped helpers.
-8. Coordinated gate: #49/#12 records its full surface delta in the PR body;
+8. Coordinated order: #49/#12 records its full API delta in the PR body;
    Unit D builds parity after the shape lands; Unit F then creates and
    reconciles the first change-log/snapshot baseline.
 9. Prose sweep of the deleted vocabulary in doc comments (leak list item 5);
@@ -595,7 +568,7 @@ orthogonal to every one of these effective current acquisition states.
    (the Magpie/depth-3 probe). Same asymptotics as today's `query_coverage`
    over a wider set; bounded by the demand graph. Acceptable.
 4. **The wrappers can quietly reintroduce judgment** (a Swift `Coverage`-like
-   enum "for ergonomics"). The governance review of the paired snapshot diff
-   is the backstop; required change 7 names it so reviewers look.
+   enum "for ergonomics"). Review of the paired SDK-snapshot diff is the backstop; required change 7
+   names it so reviewers look.
 
 — Fable, design checkpoint, 2026-07-11.

@@ -57,7 +57,7 @@ Add `AwaitingRelay`, `AwaitingAuth`, `RetryEligible`, and `HandoffAmbiguous`; em
 - Complies with VISION section 3.3 and bug-class ledger #16: transport owns sockets, outbox owns durable attempts, one engine scheduler owns retry time and caps.
 - Complies with the crash-safe Accepted correction: retry deadlines enter next_deadline only with the transition that consumes them.
 - Complies with store boundaries: persistence enforces atomic facts; engine owns policy.
-- Complies with surface governance: #96 updates every platform, snapshots, parity, and change log together.
+- Complies with cross-SDK parity: #96 updates every platform and the parity harness together.
 
 ## Possible Rule Or ADR Loosening
 
