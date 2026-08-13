@@ -154,8 +154,8 @@ Feature: A replaceable edit says which version it replaces, and is checked again
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-018
   # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1465
+  # nmp:gap=implementation
+  # nmp:issue=#1473
   Scenario: Shared operation receipts observe one physical generation delivery
     Given Alice and Bob have distinct operation receipts sharing current generation E2
     And their destination plans overlap
