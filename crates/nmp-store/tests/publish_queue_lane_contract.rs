@@ -809,7 +809,7 @@ fn redb_bootstrap_rejects_cross_table_terminal_state_contradictions() {
             "wss://terminal-donor.example"
         })
         .unwrap();
-        let intent = {
+        let (intent, event_id) = {
             let mut store = reopen(&path);
             let (intent, _, signed, key, lane) =
                 seed(&mut store, "state-mismatch", 274, relay.clone());
@@ -865,12 +865,13 @@ fn redb_bootstrap_rejects_cross_table_terminal_state_contradictions() {
                     )
                     .unwrap();
             }
-            intent
+            (intent, key.event_id)
         };
         let target_key = raw_lane_key(intent, raw_relay_id(&path, &relay));
         let donor_key = raw_lane_key(intent, raw_relay_id(&path, &donor));
         if terminal_attempt {
             let mut waiting = b"NMDL\x01\0\0\0".to_vec();
+            waiting.extend_from_slice(event_id.as_bytes());
             waiting.extend_from_slice(&4u64.to_be_bytes());
             waiting.extend_from_slice(&1u64.to_be_bytes());
             waiting.push(0);
