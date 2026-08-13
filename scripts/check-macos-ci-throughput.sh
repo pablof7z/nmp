@@ -100,8 +100,8 @@ require_text "$MACOS_WORKFLOW" "    name: macOS qualification"
 require_text "$MACOS_WORKFLOW" '  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}'
 require_text "$MACOS_WORKFLOW" "  cancel-in-progress: true"
 macos_named_step_count=$(grep -E -c '^[[:space:]]+- name:' "$MACOS_WORKFLOW" || true)
-[[ "$macos_named_step_count" -eq 5 ]] ||
-  fail "expected exactly five named Apple qualification steps, found $macos_named_step_count"
+[[ "$macos_named_step_count" -eq 6 ]] ||
+  fail "expected exactly six named Apple qualification steps, found $macos_named_step_count"
 
 # One native library, built once. Pull requests need only the macOS host
 # architecture exercised by SwiftPM/XCTest; master remains the least-frequent
@@ -126,6 +126,8 @@ forbid_text "$MACOS_WORKFLOW" "--sim-only"
 # Core Swift package and public host-XCTest behavior.
 require_text "$MACOS_WORKFLOW" "      - name: Build the Swift package"
 require_text "$MACOS_WORKFLOW" "      - name: Test the Swift package"
+require_text "$MACOS_WORKFLOW" "      - name: Test prepared Swift and Kotlin outbox routing"
+require_text "$MACOS_WORKFLOW" "        run: scripts/check-native-outbox-routing-runtime.sh"
 require_text "$MACOS_WORKFLOW" "        run: swift build"
 require_text "$MACOS_WORKFLOW" "working-directory: Packages/NMP"
 swift_test_count=$(

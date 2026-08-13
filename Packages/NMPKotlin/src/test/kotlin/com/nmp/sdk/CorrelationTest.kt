@@ -19,7 +19,7 @@ class CorrelationTest {
     fun doubleSubmitWithTheSameTokenReattachesInsteadOfEnqueuingASecondWrite() =
         runBlocking {
             NMPEngine(
-                NMPConfig(nip65 = NIP65Config(indexerRelays = listOf("wss://indexer.example"))),
+                NMPConfig(outboxRouting = OutboxRoutingConfig(indexers = listOf("wss://indexer.example"))),
             ).use { engine ->
                 engine.setActiveAccount(author)
                 val token = "kotlin-sdk-correlation-token"
@@ -85,7 +85,7 @@ class CorrelationTest {
     fun reattachByCorrelationRecoversAReceiptTheCallerNeverLearnedTheIdOf() =
         runBlocking {
             NMPEngine(
-                NMPConfig(nip65 = NIP65Config(indexerRelays = listOf("wss://indexer.example"))),
+                NMPConfig(outboxRouting = OutboxRoutingConfig(indexers = listOf("wss://indexer.example"))),
             ).use { engine ->
                 engine.setActiveAccount(author)
                 val token = "kotlin-sdk-reattach-by-correlation"

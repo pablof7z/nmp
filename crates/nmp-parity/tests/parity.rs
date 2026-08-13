@@ -23,7 +23,7 @@ use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 // stream objects whose `next()` we bridge into the existing mpsc drains via a
 // forwarding Tokio task (all parity tests are `#[tokio::test(multi_thread)]`).
 use nmp_ffi::facade::{
-    FfiNip65Config, NmpDiagnosticsStream, NmpEngine, NmpEngineConfig, NmpReceiptStream,
+    FfiOutboxRoutingConfig, NmpDiagnosticsStream, NmpEngine, NmpEngineConfig, NmpReceiptStream,
     NmpRowStream,
 };
 use nmp_ffi::nip02::{
@@ -57,17 +57,17 @@ const WRITE_CREATED_AT: u64 = 1_700_000_200;
 const SECRET_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 const PARITY_INDEXER: &str = "wss://indexer.example";
 
-fn direct_nip65_config() -> EngineConfig {
+fn direct_outbox_routing_config() -> EngineConfig {
     EngineConfig {
         indexer_relays: vec![PARITY_INDEXER.to_string()],
         ..EngineConfig::default()
     }
 }
 
-fn ffi_nip65_config() -> NmpEngineConfig {
+fn ffi_outbox_routing_config() -> NmpEngineConfig {
     NmpEngineConfig {
-        nip65: Some(FfiNip65Config {
-            indexer_relays: vec![PARITY_INDEXER.to_string()],
+        outbox_routing: Some(FfiOutboxRoutingConfig {
+            indexers: vec![PARITY_INDEXER.to_string()],
         }),
         ..NmpEngineConfig::default()
     }
@@ -2221,7 +2221,7 @@ async fn run_direct_follow_scenario(
         Engine::new(EngineConfig {
             app_relays: vec![relay.url.to_string()],
             allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-            ..direct_nip65_config()
+            ..direct_outbox_routing_config()
         })
         .expect("direct follow engine must construct"),
     );
@@ -2290,7 +2290,7 @@ async fn run_ffi_follow_scenario(
         app_relays: vec![relay.url.to_string()],
         fallback_relays: vec![],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..ffi_nip65_config()
+        ..ffi_outbox_routing_config()
     })
     .expect("FFI follow engine must construct");
     let active = engine
@@ -2359,7 +2359,7 @@ async fn run_direct_missing_contact_list(
         Engine::new(EngineConfig {
             app_relays: vec![relay.url.to_string()],
             allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-            ..direct_nip65_config()
+            ..direct_outbox_routing_config()
         })
         .expect("direct missing-list engine must construct"),
     );
@@ -2397,7 +2397,7 @@ async fn run_ffi_missing_contact_list(
         app_relays: vec![relay.url.to_string()],
         fallback_relays: vec![],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..ffi_nip65_config()
+        ..ffi_outbox_routing_config()
     })
     .expect("FFI missing-list engine must construct");
     let active = engine
@@ -2433,7 +2433,7 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
         app_relays: vec![relay_url.clone()],
         // Both facades assemble the same optional provider and app policy.
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..direct_nip65_config()
+        ..direct_outbox_routing_config()
     })
     .expect("direct engine must construct");
     let pubkey = engine
@@ -2581,7 +2581,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
         fallback_relays: vec![],
         // Same provider and operator policy as `run_direct_success`.
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..ffi_nip65_config()
+        ..ffi_outbox_routing_config()
     })
     .expect("FFI engine must construct");
     let registration = engine
@@ -2695,7 +2695,7 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
     let engine = Engine::new(EngineConfig {
         app_relays: vec![relay_url.clone()],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..direct_nip65_config()
+        ..direct_outbox_routing_config()
     })
     .expect("direct auth-parked engine must construct");
     let pubkey = engine
@@ -2758,7 +2758,7 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..ffi_nip65_config()
+        ..ffi_outbox_routing_config()
     })
     .expect("FFI auth-parked engine must construct");
     let registration = engine
@@ -2818,7 +2818,7 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
     let engine = Engine::new(EngineConfig {
         app_relays: vec![relay_url.clone()],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..direct_nip65_config()
+        ..direct_outbox_routing_config()
     })
     .expect("direct override engine must construct");
     let active_pubkey = engine
@@ -2876,7 +2876,7 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
         allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..ffi_nip65_config()
+        ..ffi_outbox_routing_config()
     })
     .expect("FFI override engine must construct");
     let active_pubkey = engine
@@ -2924,7 +2924,7 @@ async fn run_direct_tampered(keys: &Keys) -> TamperedOutcome {
     let relay_url = relay.url.to_string();
     let engine = Engine::new(EngineConfig {
         app_relays: vec![relay_url.clone()],
-        ..direct_nip65_config()
+        ..direct_outbox_routing_config()
     })
     .expect("direct tampered engine must construct");
     let mut event = nostr::EventBuilder::new(Kind::Custom(WRITE_KIND), "original")
@@ -2963,7 +2963,7 @@ async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
         store_path: None,
         app_relays: vec![relay_url.clone()],
         fallback_relays: vec![],
-        ..ffi_nip65_config()
+        ..ffi_outbox_routing_config()
     })
     .expect("FFI tampered engine must construct");
     let event = nostr::EventBuilder::new(Kind::Custom(WRITE_KIND), "original")
@@ -3062,7 +3062,7 @@ async fn run_direct_reattach_live() -> ReattachProof {
     // A per-run `Keys::generate()` would make the two halves disagree by
     // construction; a shared fixed key makes the payload-parity real.
     let keys = fixed_keys();
-    let engine = Engine::new(direct_nip65_config()).expect("direct engine must construct");
+    let engine = Engine::new(direct_outbox_routing_config()).expect("direct engine must construct");
     engine
         .set_active_account(Some(keys.public_key()))
         .expect("direct account must activate");
@@ -3131,7 +3131,7 @@ async fn run_ffi_reattach_live() -> ReattachProof {
     // there: the reattach `AwaitingSigner` payload is now the frozen
     // author pubkey, and the direct-vs-FFI proof compares it.
     let keys = fixed_keys();
-    let engine = NmpEngine::new(ffi_nip65_config()).expect("FFI engine must construct");
+    let engine = NmpEngine::new(ffi_outbox_routing_config()).expect("FFI engine must construct");
     engine
         .set_active_account(Some(keys.public_key().to_hex()))
         .expect("FFI account must activate");
@@ -3216,7 +3216,7 @@ struct CorrelationProof {
 
 fn run_direct_correlation() -> CorrelationProof {
     let keys = fixed_keys();
-    let engine = Engine::new(direct_nip65_config()).expect("direct engine must construct");
+    let engine = Engine::new(direct_outbox_routing_config()).expect("direct engine must construct");
     engine
         .set_active_account(Some(keys.public_key()))
         .expect("direct account must activate");
@@ -3280,7 +3280,7 @@ fn run_direct_correlation() -> CorrelationProof {
 
 fn run_ffi_correlation() -> CorrelationProof {
     let keys = fixed_keys();
-    let engine = NmpEngine::new(ffi_nip65_config()).expect("FFI engine must construct");
+    let engine = NmpEngine::new(ffi_outbox_routing_config()).expect("FFI engine must construct");
     engine
         .set_active_account(Some(keys.public_key().to_hex()))
         .expect("FFI account must activate");
@@ -3360,7 +3360,7 @@ struct CancellationProof {
 
 fn run_direct_cancellation() -> CancellationProof {
     let keys = fixed_keys();
-    let engine = Engine::new(direct_nip65_config()).expect("direct engine must construct");
+    let engine = Engine::new(direct_outbox_routing_config()).expect("direct engine must construct");
     engine
         .set_active_account(Some(keys.public_key()))
         .expect("direct account must activate");
@@ -3412,7 +3412,7 @@ fn run_direct_cancellation() -> CancellationProof {
 
 async fn run_ffi_cancellation() -> CancellationProof {
     let keys = fixed_keys();
-    let engine = NmpEngine::new(ffi_nip65_config()).expect("FFI engine must construct");
+    let engine = NmpEngine::new(ffi_outbox_routing_config()).expect("FFI engine must construct");
     engine
         .set_active_account(Some(keys.public_key().to_hex()))
         .expect("FFI account must activate");

@@ -78,13 +78,13 @@ pub struct NmpEngineConfig {
     pub app_relays: Vec<String>,
     /// Operator fallback relay set (`Lane::OperatorFallback`). Default empty.
     pub fallback_relays: Vec<String>,
-    /// Optional runtime assembly for automatic NIP-65 routing. This field
-    /// exists only in a native build that selected the `nip65` app feature.
+    /// Optional runtime assembly for outbox routing. This field exists only
+    /// in a native build that selected the `outbox routing` capability.
     /// `None` constructs an explicit-routing-only engine; `Some` must name at
     /// least one app-owned indexer relay or construction is refused.
     #[cfg(feature = "nip65")]
     #[uniffi(default = None)]
-    pub nip65: Option<FfiNip65Config>,
+    pub outbox_routing: Option<FfiOutboxRoutingConfig>,
     /// Local/private relay HOSTS to re-admit from OTHER PEOPLE's data
     /// (issues #121, #1251). A loopback / RFC-1918 / link-local relay named by
     /// someone else's relay list or event is rejected by default; listing its
@@ -132,13 +132,13 @@ pub struct NmpEngineConfig {
     pub max_auth_capabilities: u32,
 }
 
-/// App-owned runtime inputs for the selected NIP-65 assembly. These values do
-/// not participate in the native artifact's feature or cache identity.
+/// App-owned runtime inputs for outbox routing. These values do not
+/// participate in the native artifact's feature or cache identity.
 #[cfg(feature = "nip65")]
 #[derive(uniffi::Record, Clone, Debug)]
-pub struct FfiNip65Config {
+pub struct FfiOutboxRoutingConfig {
     /// Relays queried for kind:10002 relay lists. NMP supplies no defaults.
-    pub indexer_relays: Vec<String>,
+    pub indexers: Vec<String>,
 }
 
 /// The default relay-count ceiling for a freshly-constructed engine config
@@ -158,7 +158,7 @@ impl Default for NmpEngineConfig {
             app_relays: Vec::new(),
             fallback_relays: Vec::new(),
             #[cfg(feature = "nip65")]
-            nip65: None,
+            outbox_routing: None,
             allowed_local_relay_hosts: Vec::new(),
             tor_reachable: false,
             max_relays: DEFAULT_MAX_RELAYS,
@@ -202,8 +202,8 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
             store_path: config.store_path,
             #[cfg(feature = "nip65")]
             indexer_relays: config
-                .nip65
-                .map(|nip65| nip65.indexer_relays)
+                .outbox_routing
+                .map(|outbox_routing| outbox_routing.indexers)
                 .unwrap_or_default(),
             #[cfg(not(feature = "nip65"))]
             indexer_relays: Vec::new(),
@@ -241,10 +241,10 @@ enum AutomaticRoutingAssembly {
 #[cfg(feature = "nip65")]
 impl AutomaticRoutingAssembly {
     fn from_config(config: &NmpEngineConfig) -> Result<Self, FfiError> {
-        match &config.nip65 {
+        match &config.outbox_routing {
             None => Ok(Self::Unavailable),
-            Some(nip65) if nip65.indexer_relays.is_empty() => {
-                Err(FfiError::Nip65IndexerRelaysEmpty)
+            Some(outbox_routing) if outbox_routing.indexers.is_empty() => {
+                Err(FfiError::OutboxRoutingIndexersEmpty)
             }
             Some(_) => Ok(Self::Nip65),
         }
@@ -1634,22 +1634,22 @@ mod tests {
 
     #[test]
     #[cfg(feature = "nip65")]
-    fn selected_nip65_refuses_an_empty_runtime_indexer_set() {
+    fn selected_outbox_routing_refuses_an_empty_runtime_indexer_set() {
         let result = NmpEngine::new(NmpEngineConfig {
-            nip65: Some(FfiNip65Config {
-                indexer_relays: Vec::new(),
+            outbox_routing: Some(FfiOutboxRoutingConfig {
+                indexers: Vec::new(),
             }),
             ..NmpEngineConfig::default()
         });
-        assert!(matches!(result, Err(FfiError::Nip65IndexerRelaysEmpty)));
+        assert!(matches!(result, Err(FfiError::OutboxRoutingIndexersEmpty)));
     }
 
     #[test]
     #[cfg(feature = "nip65")]
-    fn selected_nip65_projects_only_the_app_owned_indexers() {
+    fn selected_outbox_routing_projects_only_the_app_owned_indexers() {
         let config = NmpEngineConfig {
-            nip65: Some(FfiNip65Config {
-                indexer_relays: vec!["wss://indexer.example".to_string()],
+            outbox_routing: Some(FfiOutboxRoutingConfig {
+                indexers: vec!["wss://indexer.example".to_string()],
             }),
             ..NmpEngineConfig::default()
         };
@@ -1703,7 +1703,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[cfg(feature = "nip65")]
-    async fn selected_nip65_native_engine_discovers_and_publishes_to_the_cold_outbox() {
+    async fn selected_outbox_routing_discovers_and_publishes_to_the_cold_outbox() {
         use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 
         let author = nostr::Keys::generate();
@@ -1714,8 +1714,8 @@ mod tests {
             .await;
 
         let engine = NmpEngine::new(NmpEngineConfig {
-            nip65: Some(FfiNip65Config {
-                indexer_relays: vec![indexer.url.to_string()],
+            outbox_routing: Some(FfiOutboxRoutingConfig {
+                indexers: vec![indexer.url.to_string()],
             }),
             allowed_local_relay_hosts: vec!["127.0.0.1".to_string(), "localhost".to_string()],
             ..NmpEngineConfig::default()

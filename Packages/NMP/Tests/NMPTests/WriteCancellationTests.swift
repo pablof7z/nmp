@@ -40,7 +40,7 @@ final class WriteCancellationTests: XCTestCase {
     func testAcceptedUnsignedWriteCancelsStreamsAndReattachesAsCancelled() async throws {
         let engine = try NMPEngine(
             config: NMPConfig(
-                nip65: NIP65Config(indexerRelays: ["wss://indexer.example"])
+                outboxRouting: OutboxRoutingConfig(indexers: ["wss://indexer.example"])
             )
         )
         defer { engine.shutdown() }

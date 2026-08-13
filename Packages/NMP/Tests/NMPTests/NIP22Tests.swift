@@ -173,7 +173,7 @@ final class NIP22Tests: XCTestCase {
     func testOfflineSignerDurableAcceptanceAndCorrelationReattachment() async throws {
         let engine = try NMPEngine(
             config: NMPConfig(
-                nip65: NIP65Config(indexerRelays: ["wss://indexer.example"])
+                outboxRouting: OutboxRoutingConfig(indexers: ["wss://indexer.example"])
             )
         )
         defer { engine.shutdown() }
@@ -239,7 +239,7 @@ final class NIP22Tests: XCTestCase {
     func testDurableAcceptanceMakesOneCanonicalPendingCommentVisibleThroughTheQueryPath() async throws {
         let engine = try NMPEngine(
             config: NMPConfig(
-                nip65: NIP65Config(indexerRelays: ["wss://indexer.example"])
+                outboxRouting: OutboxRoutingConfig(indexers: ["wss://indexer.example"])
             )
         )
         defer { engine.shutdown() }

@@ -20,6 +20,20 @@ fn catalog() -> Catalog {
     Catalog::load(&root.join("native/features.toml"), &root).unwrap()
 }
 
+fn source_tree(path: &Path, extension: &str, files: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(path).unwrap() {
+        let entry = entry.unwrap();
+        let file_type = entry.file_type().unwrap();
+        if file_type.is_dir() {
+            source_tree(&entry.path(), extension, files);
+        } else if file_type.is_file()
+            && entry.path().extension().and_then(|value| value.to_str()) == Some(extension)
+        {
+            files.push(entry.path());
+        }
+    }
+}
+
 #[test]
 fn manifest_is_canonical_and_runtime_fields_are_refused() {
     let temp = tempfile::tempdir().unwrap();
@@ -108,6 +122,65 @@ fn source_filter_keeps_only_selected_capability_blocks() {
         filter_source(source, &selected, &known, "fixture").unwrap(),
         "core\nalpha\n"
     );
+}
+
+#[test]
+fn outbox_routing_native_surface_is_hard_cut_and_feature_gated() {
+    let root = repository();
+    let catalog = catalog();
+    let known = catalog
+        .features
+        .iter()
+        .map(|feature| feature.key.clone())
+        .collect::<BTreeSet<_>>();
+    let selected = BTreeSet::from(["nip65".to_owned()]);
+    for (relative, extension) in [
+        ("Packages/NMP/Sources", "swift"),
+        ("Packages/NMPKotlin/src/main", "kt"),
+    ] {
+        let mut files = Vec::new();
+        source_tree(&root.join(relative), extension, &mut files);
+        for path in files {
+            let source = std::fs::read_to_string(&path).unwrap();
+            for retired in [
+                "NIP65Config",
+                "FfiNip65Config",
+                "Nip65IndexerRelaysEmpty",
+                "nip65IndexerRelaysEmpty",
+                "indexerRelays",
+                " nip65:",
+                " nip65 =",
+            ] {
+                assert!(
+                    !source.contains(retired),
+                    "{} retains provider-named native spelling {retired:?}",
+                    path.display()
+                );
+            }
+        }
+    }
+    for relative in [
+        "Packages/NMP/Sources/NMP/Engine.swift",
+        "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Engine.kt",
+    ] {
+        let source = std::fs::read_to_string(root.join(relative)).unwrap();
+        let feature_on = filter_source(&source, &selected, &known, relative).unwrap();
+        assert!(feature_on.contains("OutboxRoutingConfig"));
+        assert!(feature_on.contains("outboxRouting"));
+
+        let feature_off = filter_source(&source, &BTreeSet::new(), &known, relative).unwrap();
+        assert!(!feature_off.contains("OutboxRoutingConfig"));
+        assert!(!feature_off.contains("outboxRouting"));
+        assert!(!feature_off.contains("indexers"));
+    }
+
+    let ffi = std::fs::read_to_string(root.join("crates/nmp-ffi/src/facade.rs")).unwrap();
+    assert!(ffi.contains("FfiOutboxRoutingConfig"));
+    assert!(ffi.contains("outbox_routing"));
+    assert!(!ffi.contains("FfiNip65Config"));
+    assert!(!ffi.contains("pub nip65:"));
+    let ffi_errors = std::fs::read_to_string(root.join("crates/nmp-ffi/src/convert.rs")).unwrap();
+    assert!(!ffi_errors.contains("Nip65IndexerRelaysEmpty"));
 }
 
 #[test]

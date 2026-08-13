@@ -95,6 +95,6 @@ final class FollowingTests: XCTestCase {
     }
 
     private static var config: NMPConfig {
-        NMPConfig(nip65: NIP65Config(indexerRelays: ["wss://indexer.example"]))
+        NMPConfig(outboxRouting: OutboxRoutingConfig(indexers: ["wss://indexer.example"]))
     }
 }
