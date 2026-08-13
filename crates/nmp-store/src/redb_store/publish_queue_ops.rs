@@ -384,7 +384,7 @@ pub(super) fn recover_attempts(
         });
     }
     // Table-key layout is a storage detail (currently length-prefixed
-    // relay text), not public recovery order. Match MemoryStore and the
+    // relay text), not public recovery order. Match RedbStore and the
     // typed contract explicitly.
     recovered.sort_by(|left, right| {
         left.relay

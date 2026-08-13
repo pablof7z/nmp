@@ -9,8 +9,8 @@
 //! relay supersession, kind:5 deletion, and NIP-40 expiry uniformly),
 //! kind:5 immediate local delete on `accept_write`, and fallible
 //! persistence doors. Mirrors `store_contract.rs`'s convention of running
-//! shared-contract tests against BOTH `MemoryStore` and a fresh
-//! `RedbStore`; recovery/atomicity tests that specifically need a durable
+//! shared-contract tests against an isolated `RedbStore`; recovery/atomicity
+//! tests that specifically need a durable
 //! reopen are `RedbStore`-only.
 
 use std::collections::BTreeSet;
@@ -19,7 +19,7 @@ use std::path::Path;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, CompensateOutcome,
     EventCursor, EventStore, GcRetentionSet, InsertOutcome, IntentSigState, LocalOrigin,
-    MemoryStore, PersistenceFault, PromoteOutcome, PromotionTarget, PublishQueueAttemptOutcome,
+    PersistenceFault, PromoteOutcome, PromotionTarget, PublishQueueAttemptOutcome,
     PublishQueueIntent, PublishQueueReceipt, PublishQueueReceiptPayload, PublishQueueWork,
     ReceiptState, RedbStore, RefuseReason, RelayObserved, RemoveQueueEntryOutcome, RetractReason,
     SigState, StoredEvent, VerifiedSignature,
@@ -182,24 +182,16 @@ fn start_publish_queue_attempt(
         .expect("start delivery attempt");
 }
 
-/// Run `body` against both backends, exactly like `store_contract.rs`'s
-/// helper of the same name — every shared door-contract test goes through
-/// this so the two backends can never silently diverge.
-fn for_each_backend(mut body: impl FnMut(&mut dyn EventStore)) {
-    let mut mem = MemoryStore::new();
-    body(&mut mem);
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("store.redb");
-    let mut redb = RedbStore::open(&path).expect("open redb store");
-    body(&mut redb);
+fn with_store(body: impl FnOnce(&mut dyn EventStore)) {
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    body(&mut store);
 }
 
 // ---------------------------------------------------------------------
 
 #[test]
 fn replaceable_base_precondition_rejects_a_concurrent_winner_atomically() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let relay = RelayUrl::parse("wss://source.example").unwrap();
         let (_base_frozen, base) = compose(&k, Kind::ContactList, "base", 10);
@@ -248,7 +240,7 @@ fn replaceable_base_precondition_rejects_a_concurrent_winner_atomically() {
 
 #[test]
 fn replaceable_base_precondition_accepts_the_exact_winner_and_none_means_none() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (first, _) = compose(&k, Kind::ContactList, "first", 10);
         let mut create = accept(first.clone(), k.public_key(), 10);
@@ -281,7 +273,7 @@ fn replaceable_base_precondition_accepts_the_exact_winner_and_none_means_none() 
 
 #[test]
 fn replaceable_base_precondition_on_regular_event_fails_closed() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (note, _) = compose(&k, Kind::TextNote, "not replaceable", 10);
         let mut guarded = accept(note, k.public_key(), 10);
@@ -299,7 +291,7 @@ fn replaceable_base_precondition_on_regular_event_fails_closed() {
 
 #[test]
 fn accept_write_inserts_pending_row_and_journal_in_one_txn() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen, _signed) = compose(&k, Kind::TextNote, "hello", 100);
         let frozen_id = frozen.id;
@@ -330,7 +322,7 @@ fn accept_write_inserts_pending_row_and_journal_in_one_txn() {
 
 #[test]
 fn pending_row_projects_sig_state_and_is_queryable_like_any_row() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen, _signed) = compose(&k, Kind::TextNote, "hi", 200);
         let frozen_id = frozen.id;
@@ -431,7 +423,7 @@ fn promote_signed_swaps_sig_in_place_zero_id_churn_and_clears_displaced() {
 
 #[test]
 fn compensate_removes_pending_and_restores_displaced() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_a, signed_a) = compose(&k, Kind::ContactList, "v1", 100);
         let frozen_a_id = frozen_a.id;
@@ -497,7 +489,7 @@ fn compensate_removes_pending_and_restores_displaced() {
 
 #[test]
 fn refused_accept_leaves_no_journal_residue() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen, _signed) = compose_with_tags(
             &k,
@@ -541,7 +533,7 @@ fn refused_accept_leaves_no_journal_residue() {
 
 #[test]
 fn pending_row_is_not_gc_evicted_while_intent_open() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen, signed) = compose(&k, Kind::TextNote, "unsigned draft", 100);
         let frozen_id = frozen.id;
@@ -689,8 +681,8 @@ fn recover_publish_queue_reconstructs_inflight_after_reopen() {
 }
 
 #[test]
-fn resolved_route_revisions_are_append_only_canonical_and_backend_identical() {
-    for_each_backend(|store| {
+fn resolved_route_revisions_are_append_only_and_canonical() {
+    with_store(|store| {
         let k = keys();
         let (frozen, _) = compose(&k, Kind::TextNote, "route revisions", 102);
         let outcome = do_accept(store, accept(frozen, k.public_key(), 102));
@@ -744,7 +736,7 @@ fn resolved_route_revision_survives_real_redb_reopen_without_an_attempt() {
 
 #[test]
 fn newer_replaceable_write_retires_offline_work_before_any_attempt() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let relay = RelayUrl::parse("wss://offline.example").unwrap();
         let (older_frozen, older_signed) = compose(&k, Kind::Metadata, "older profile", 100);
@@ -810,7 +802,7 @@ fn newer_replaceable_write_retires_offline_work_before_any_attempt() {
 
 #[test]
 fn every_nip01_replaceable_class_retires_its_offline_predecessor() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let relay = RelayUrl::parse("wss://offline-classes.example").unwrap();
         let cases = [
@@ -907,7 +899,7 @@ fn superseded_unsent_body_and_receipt_are_destroyed_across_redb_reopen() {
 
 #[test]
 fn a_newer_replaceable_stops_an_older_started_obligation_but_keeps_bounded_safety_evidence() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let relay = RelayUrl::parse("wss://attempted.example").unwrap();
         let (older_frozen, older_signed) = compose(&k, Kind::ContactList, "older contacts", 100);
@@ -970,7 +962,7 @@ fn a_newer_replaceable_stops_an_older_started_obligation_but_keeps_bounded_safet
 
 #[test]
 fn explicit_not_handed_off_evidence_destroys_the_obsolete_receipt_and_correlation() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let relay = RelayUrl::parse("wss://not-handed-off.example").unwrap();
         let (older_frozen, older_signed) = compose(&k, Kind::ContactList, "older contacts", 100);
@@ -1042,7 +1034,7 @@ fn explicit_not_handed_off_evidence_destroys_the_obsolete_receipt_and_correlatio
 
 #[test]
 fn already_expired_refusal_cannot_be_retained_as_a_receipt() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen, _) = compose(&k, Kind::Metadata, "already expired", 100);
         let result = store.accept_refused(frozen.id, k.public_key(), RefuseReason::AlreadyExpired);
@@ -1053,7 +1045,7 @@ fn already_expired_refusal_cannot_be_retained_as_a_receipt() {
 
 #[test]
 fn addressable_writes_with_different_identifiers_do_not_retire_each_other() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let kind = Kind::from(30_001u16);
         let (first, _) = compose_with_tags(
@@ -1091,12 +1083,11 @@ fn addressable_writes_with_different_identifiers_do_not_retire_each_other() {
 }
 
 #[test]
-fn recover_attempt_order_is_canonical_and_identical_across_backends() {
+fn recover_attempt_order_is_canonical() {
     // Lexically `aa` sorts before `z`, while the length-prefixed Redb key
     // sorts the shorter `z` URL first. Recovery must ignore that storage
-    // order and return `(relay, ordinal)` canonically on both backends.
-    let mut backend_orders = Vec::new();
-    for_each_backend(|store| {
+    // order and return `(relay, ordinal)` canonically.
+    with_store(|store| {
         let k = keys();
         let (frozen, signed) = compose(&k, Kind::TextNote, "ordering", 109);
         let z_short = RelayUrl::parse("wss://z.example/x").unwrap();
@@ -1175,10 +1166,7 @@ fn recover_attempt_order_is_canonical_and_identical_across_backends() {
             order,
             vec![(aa_long, 1), (z_short.clone(), 1), (z_short, 2)]
         );
-        backend_orders.push(order);
     });
-    assert_eq!(backend_orders.len(), 2);
-    assert_eq!(backend_orders[0], backend_orders[1]);
 }
 
 fn raw_route_revision_key(intent_id: nmp_store::IntentId, ordinal: u64) -> [u8; 16] {
@@ -1689,10 +1677,10 @@ fn terminal_receipt_still_reattachable_after_recover() {
         "an unknown receipt id must reattach to nothing"
     );
 
-    // Retention (not crash-survival) is the contract — `MemoryStore`
+    // Retention (not crash-survival) is the contract — `RedbStore`
     // answers a freshly-accepted, still-open receipt just as faithfully,
     // within the life of the process.
-    let mut mem = MemoryStore::new();
+    let mut mem = RedbStore::temporary().expect("temporary Redb store");
     let (frozen_fresh, _signed_fresh) = compose(&k, Kind::TextNote, "still open", 300);
     let outcome_fresh = do_accept(&mut mem, accept(frozen_fresh, k.public_key(), 300));
     let intent_fresh = outcome_fresh.journaled_intent_id().expect("journaled");
@@ -1700,7 +1688,7 @@ fn terminal_receipt_still_reattachable_after_recover() {
     let receipt_fresh = mem
         .reattach_receipt(receipt_fresh_id)
         .expect("receipt lookup must be readable")
-        .expect("fresh receipt reattachable on MemoryStore too");
+        .expect("fresh receipt reattachable on RedbStore too");
     assert_eq!(receipt_fresh.intent_id, Some(intent_fresh));
     assert_eq!(event_receipt(&receipt_fresh).1, &ReceiptState::Accepted);
 }
@@ -1781,8 +1769,8 @@ fn a_refused_write_is_taken_into_custody_as_one_permanently_failed_receipt() {
         other => panic!("refusal reason did not survive the restart: {other:?}"),
     }
 
-    // MemoryStore: same receipt-only, terminal-at-birth shape.
-    let mut mem = MemoryStore::new();
+    // RedbStore: same receipt-only, terminal-at-birth shape.
+    let mut mem = RedbStore::temporary().expect("temporary Redb store");
     let (frozen2, _signed2) = compose(&k, Kind::TextNote, "refused 2", 200);
     let receipt2_id = mem
         .accept_refused(frozen2.id, k.public_key(), RefuseReason::Tombstoned)
@@ -1791,7 +1779,7 @@ fn a_refused_write_is_taken_into_custody_as_one_permanently_failed_receipt() {
     let mem_receipt = mem
         .reattach_receipt(receipt2_id)
         .expect("receipt lookup must be readable")
-        .expect("refused receipt reattachable on MemoryStore too");
+        .expect("refused receipt reattachable on RedbStore too");
     assert_eq!(mem_receipt.intent_id, None);
     assert_eq!(
         event_receipt(&mem_receipt).1,
@@ -1805,7 +1793,7 @@ fn removing_a_queue_entry_forgets_it_and_refuses_while_work_is_open() {
     // and a write parked forever on a missing signer end no other way. A
     // write that still owns open delivery work is refused instead — that one
     // is cancelled, not removed.
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (refused_frozen, _) = compose(&k, Kind::TextNote, "removable", 301);
         let refused = store
@@ -1847,7 +1835,7 @@ fn removing_a_queue_entry_forgets_it_and_refuses_while_work_is_open() {
 /// own `PUBLISH_QUEUE_INTENTS.frozen_json`, not off `EVENTS`.
 #[test]
 fn duplicate_and_stale_intents_are_promotable_and_compensable_via_intent_id() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
 
         // Duplicate: the exact same frozen body accepted twice.
@@ -1949,7 +1937,7 @@ fn attempted_predecessor_is_not_restored_after_newer_cancellation() {
 /// cancelled or resurrected if the newer intent is itself cancelled.
 #[test]
 fn retired_pending_predecessor_never_resurrects_when_newer_is_cancelled() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_a, _signed_a) = compose(&k, Kind::ContactList, "a", 100);
         let outcome_a = do_accept(store, accept(frozen_a, k.public_key(), 100));
@@ -2005,7 +1993,7 @@ fn retired_pending_predecessor_never_resurrects_when_newer_is_cancelled() {
 /// regardless.
 #[test]
 fn relay_supersession_orphans_pending_intent_still_compensable() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_a, _signed_a) = compose(&k, Kind::ContactList, "local", 100);
         let frozen_a_id = frozen_a.id;
@@ -2047,7 +2035,7 @@ fn relay_supersession_orphans_pending_intent_still_compensable() {
 /// remain compensable via its own `IntentId`.
 #[test]
 fn kind5_deletion_orphans_pending_intent_still_compensable() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_a, _signed_a) = compose(&k, Kind::TextNote, "will be deleted", 100);
         let frozen_a_id = frozen_a.id;
@@ -2080,7 +2068,7 @@ fn kind5_deletion_orphans_pending_intent_still_compensable() {
 /// intent must remain compensable via its own `IntentId`.
 #[test]
 fn expiry_orphans_pending_intent_still_compensable() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_a, _signed_a) = compose_with_tags(
             &k,
@@ -2118,7 +2106,7 @@ fn expiry_orphans_pending_intent_still_compensable() {
 /// `AcceptOutcome::Kind5Processed`'s doc for why that was unsound).
 #[test]
 fn kind5_immediate_delete_hides_target_before_relay_echo() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         // The target is already held (e.g. relay-observed earlier).
         let target = EventBuilder::new(Kind::TextNote, "please delete me")
@@ -2187,7 +2175,7 @@ fn kind5_immediate_delete_hides_target_before_relay_echo() {
 /// a (now-invalid) later `compensate_write`.
 #[test]
 fn pending_kind5_delete_commits_to_permanent_on_promote() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let target = EventBuilder::new(Kind::TextNote, "please delete me")
             .custom_created_at(Timestamp::from(50))
@@ -2267,7 +2255,7 @@ fn pending_kind5_delete_commits_to_permanent_on_promote() {
 /// had no live row left to dedup against in the first place).
 #[test]
 fn late_arrival_while_hidden_is_stored_not_refused_and_reveals_on_cancel() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let target = EventBuilder::new(Kind::TextNote, "please delete me")
             .custom_created_at(Timestamp::from(50))
@@ -2335,7 +2323,7 @@ fn late_arrival_while_hidden_is_stored_not_refused_and_reveals_on_cancel() {
 /// both observations when the claim is cancelled.
 #[test]
 fn first_arrival_while_suppressed_is_retained_deduped_and_revealed_on_cancel() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let target = EventBuilder::new(Kind::TextNote, "late target")
             .custom_created_at(Timestamp::from(50))
@@ -2416,7 +2404,7 @@ fn first_arrival_while_suppressed_is_retained_deduped_and_revealed_on_cancel() {
 /// just work.
 #[test]
 fn target_signs_while_hidden() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_t, signed_t) = compose(&k, Kind::TextNote, "target", 50);
         let target_id = frozen_t.id;
@@ -2474,7 +2462,7 @@ fn target_signs_while_hidden() {
 /// never resurrect the properly-cancelled target.
 #[test]
 fn target_cancels_while_hidden() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_t, _signed_t) = compose(&k, Kind::TextNote, "target", 50);
         let target_id = frozen_t.id;
@@ -2527,7 +2515,7 @@ fn target_cancels_while_hidden() {
 /// while EITHER claim applies, visible again only once BOTH are dropped.
 #[test]
 fn overlapping_kind5_claims_hide_while_any_applies_reveal_only_when_all_drop() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let target = EventBuilder::new(Kind::TextNote, "please delete me")
             .custom_created_at(Timestamp::from(50))
@@ -2595,7 +2583,7 @@ fn overlapping_kind5_claims_hide_while_any_applies_reveal_only_when_all_drop() {
 /// tombstone without depending on the cancelled intent's metadata.
 #[test]
 fn independent_kind5_claims_cancel_then_promote_commit_the_remaining_delete() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let target = EventBuilder::new(Kind::TextNote, "target")
             .custom_created_at(Timestamp::from(50))
@@ -2667,7 +2655,7 @@ fn independent_kind5_claims_cancel_then_promote_commit_the_remaining_delete() {
 /// must neither reveal nor resurrect the target.
 #[test]
 fn independent_kind5_claims_promote_then_cancel_preserve_permanent_delete() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let target = EventBuilder::new(Kind::TextNote, "target")
             .custom_created_at(Timestamp::from(50))
@@ -2734,7 +2722,7 @@ fn independent_kind5_claims_promote_then_cancel_preserve_permanent_delete() {
 /// erase the older permanent deletion or make a redelivery admissible.
 #[test]
 fn pending_kind5_claim_over_permanent_tombstone_cannot_reveal_target() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let target = EventBuilder::new(Kind::TextNote, "target")
             .custom_created_at(Timestamp::from(50))
@@ -2799,7 +2787,7 @@ fn pending_kind5_claim_over_permanent_tombstone_cannot_reveal_target() {
 /// one intent reveals both rows through the same lifecycle.
 #[test]
 fn mixed_e_and_a_tag_kind5_intent_hides_and_reveals_both_targets() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let regular = EventBuilder::new(Kind::TextNote, "regular")
             .custom_created_at(Timestamp::from(50))
@@ -2876,7 +2864,7 @@ fn mixed_e_and_a_tag_kind5_intent_hides_and_reveals_both_targets() {
 /// candidate for the `a` target is address-tombstoned.
 #[test]
 fn mixed_e_and_a_tag_kind5_promotion_permanently_deletes_both_targets() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let regular = EventBuilder::new(Kind::TextNote, "regular")
             .custom_created_at(Timestamp::from(50))
@@ -2974,7 +2962,7 @@ fn mixed_e_and_a_tag_kind5_promotion_permanently_deletes_both_targets() {
 /// duplicate's already-promoted deletion.
 #[test]
 fn duplicate_delete_b_promote_then_a_cancel_keeps_b_deletion() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let target = EventBuilder::new(Kind::TextNote, "please delete me")
             .custom_created_at(Timestamp::from(50))
@@ -3075,7 +3063,7 @@ fn duplicate_delete_b_promote_then_a_cancel_keeps_b_deletion() {
 /// `AcceptOutcome::Kind5Processed`'s doc).
 #[test]
 fn a_tag_kind5_claim_hides_addressable_winner_then_commits_on_promote() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_g1, _signed_g1) = compose_with_tags(
             &k,
@@ -3158,7 +3146,7 @@ fn a_tag_kind5_claim_hides_addressable_winner_then_commits_on_promote() {
 /// rule: "a fresh post-deletion event at the same address wins normally").
 #[test]
 fn address_claim_ceiling_does_not_hide_post_ceiling_winner() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_r1, _signed_r1) = compose(&k, Kind::ContactList, "v1", 50);
         do_accept(store, accept(frozen_r1, k.public_key(), 50));
@@ -3231,7 +3219,7 @@ fn address_claim_ceiling_does_not_hide_post_ceiling_winner() {
 /// claim that covers it has cleared.
 #[test]
 fn overlapping_address_claims_with_different_ceilings_compose_correctly() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_r, _signed_r) = compose(&k, Kind::ContactList, "v1", 50);
         do_accept(store, accept(frozen_r, k.public_key(), 50));
@@ -3502,7 +3490,7 @@ fn pending_kind5_cancel_and_promote_both_survive_real_redb_restart() {
 /// cancelling afterward must report no phantom reveal.
 #[test]
 fn suppressed_target_is_gc_pinned_but_nip40_expiry_still_removes_it() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let gc_target = EventBuilder::new(Kind::TextNote, "gc target")
             .custom_created_at(Timestamp::from(50))
@@ -3688,7 +3676,7 @@ fn pending_suppression_has_one_persisted_event_row_owner_and_no_visible_copy() {
 /// doc). Only once EVERY owner cancels does the row actually retract.
 #[test]
 fn duplicate_pending_b_survives_cancel_of_canonical_a() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_a, _signed_a) = compose(&k, Kind::TextNote, "shared body", 100);
         let frozen_id = frozen_a.id;
@@ -3755,7 +3743,7 @@ fn duplicate_pending_b_survives_cancel_of_canonical_a() {
 /// signed and queryable throughout.
 #[test]
 fn duplicate_b_signs_then_a_cancels_leaves_signed_row_queryable() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_a, _signed_a) = compose(&k, Kind::TextNote, "shared body", 100);
         let frozen_id = frozen_a.id;
@@ -3820,8 +3808,7 @@ fn duplicate_b_signs_then_a_cancels_leaves_signed_row_queryable() {
 
 /// Issue #2 required falsifier #3: neither sequence above may leave an
 /// open obligation without its canonical row after a durable restart —
-/// `RedbStore`-only, since `MemoryStore` never survives a real process
-/// crash (Fable checkpoint Q4).
+/// this is a Redb process-death proof (Fable checkpoint Q4).
 #[test]
 fn duplicate_ownership_survives_restart() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -3876,7 +3863,7 @@ fn duplicate_ownership_survives_restart() {
 /// duplicate to sign.
 #[test]
 fn duplicate_of_already_signed_local_row_starts_signed() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_a, signed_a) = compose(&k, Kind::TextNote, "shared body", 100);
         let frozen_id = frozen_a.id;
@@ -3936,7 +3923,7 @@ fn duplicate_of_already_signed_local_row_starts_signed() {
 /// there is nothing provisional about it either.
 #[test]
 fn duplicate_of_already_signed_relay_row_starts_signed() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let relay_event = EventBuilder::new(Kind::TextNote, "relay body")
             .custom_created_at(Timestamp::from(50))
@@ -3992,7 +3979,7 @@ fn duplicate_of_already_signed_relay_row_starts_signed() {
 /// an event a relay has already confirmed.
 #[test]
 fn relay_redelivery_onto_pending_duplicate_row_adopts_signature_and_fans_out_all_owners() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_a, signed_a) = compose(&k, Kind::TextNote, "shared body", 100);
         let frozen_id = frozen_a.id;
@@ -4131,7 +4118,7 @@ fn obsolete_attempt_body_does_not_survive_restart_as_hidden_duplicate_state() {
 /// reinforce each other here.
 #[test]
 fn duplicate_kind5_intent_b_keeps_target_hidden_after_canonical_a_cancels() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let target = EventBuilder::new(Kind::TextNote, "please delete me")
             .custom_created_at(Timestamp::from(50))
@@ -4206,7 +4193,7 @@ fn duplicate_kind5_intent_b_keeps_target_hidden_after_canonical_a_cancels() {
 /// resurrect the invalid sentinel row.
 #[test]
 fn supersession_retires_every_unattempted_duplicate_owner() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_a, _signed_a) = compose(&k, Kind::ContactList, "a", 100);
         let outcome_a = do_accept(store, accept(frozen_a.clone(), k.public_key(), 100));
@@ -4268,7 +4255,7 @@ fn supersession_retires_every_unattempted_duplicate_owner() {
 /// only the owner whose bytes crossed a handoff keeps a bounded receipt.
 #[test]
 fn supersession_retires_all_duplicate_coowners_and_retains_only_handoff_evidence() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen_a, signed_a) = compose(&k, Kind::ContactList, "a", 100);
         let frozen_a_id = frozen_a.id;
@@ -4338,7 +4325,7 @@ fn supersession_retires_all_duplicate_coowners_and_retains_only_handoff_evidence
 /// (especially under `AtMostOnce`). A repeat promotion must be a no-op.
 #[test]
 fn repeat_promotion_of_an_already_signed_intent_is_a_no_op() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let k = keys();
         let (frozen, signed) = compose(&k, Kind::TextNote, "hello", 100);
         let frozen_id = frozen.id;
@@ -4374,8 +4361,8 @@ fn repeat_promotion_of_an_already_signed_intent_is_a_no_op() {
 }
 
 #[test]
-fn explicit_cancellation_is_a_distinct_durable_receipt_fact_on_both_backends() {
-    for_each_backend(|store| {
+fn explicit_cancellation_is_a_distinct_durable_receipt_fact() {
+    with_store(|store| {
         let k = keys();
         let (frozen, _) = compose(&k, Kind::TextNote, "cancel me", 100);
         let outcome = do_accept(store, accept(frozen, k.public_key(), 100));

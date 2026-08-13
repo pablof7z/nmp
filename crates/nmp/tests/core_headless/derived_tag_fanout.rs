@@ -285,7 +285,7 @@ impl WireLedger {
 // ---- scenario scaffolding ----------------------------------------------
 
 struct Study {
-    core: EngineCore<MemoryStore>,
+    core: EngineCore<RedbStore>,
     handles: BTreeMap<RelaySessionKey, RelayHandle>,
     me: Keys,
     group_author: Keys,

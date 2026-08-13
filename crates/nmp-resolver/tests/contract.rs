@@ -18,7 +18,7 @@ use nmp_resolver::testkit::{
 use nmp_resolver::{
     Engine, HandleId, QueryHandle, ResolutionNodeKind, ResolvedValue, SubscribeOutcome,
 };
-use nmp_store::{EventStore, MemoryStore, RelayObserved};
+use nmp_store::{EventStore, RedbStore, RelayObserved};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
 fn opened(outcome: SubscribeOutcome) -> (QueryHandle, DemandDelta) {
@@ -486,7 +486,7 @@ fn derived_inner_strict_cache_filters_provenance_before_limit() {
     let newer_ineligible = kind1(&newer_ineligible_author, "seen only on B", 300);
     let shared = kind1(&shared_author, "seen on A and B", 200);
 
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .insert(
             older_eligible,
@@ -561,7 +561,7 @@ fn derived_inner_agnostic_cache_accepts_rows_from_any_provenance_before_limit() 
     let other = nostr::RelayUrl::parse("wss://agnostic-inner-b.example").unwrap();
     let older_author = Keys::generate();
     let newer_author = Keys::generate();
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .insert(
             kind1(&older_author, "older on A", 100),
@@ -609,7 +609,7 @@ fn derived_inner_agnostic_cache_accepts_rows_from_any_provenance_before_limit() 
     );
 }
 
-fn derived_scalar_values(engine: &Engine<MemoryStore>, handle: HandleId) -> BTreeSet<String> {
+fn derived_scalar_values(engine: &Engine<RedbStore>, handle: HandleId) -> BTreeSet<String> {
     engine
         .resolution_snapshot(handle)
         .into_iter()
@@ -643,7 +643,7 @@ fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
     let second_author = Keys::generate();
     let first = kind1(&first_author, "first B-only row", 100);
     let second = kind1(&second_author, "second B-only row", 200);
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .insert(
             first.clone(),
@@ -1369,7 +1369,7 @@ fn different_selectors_share_identical_inner_wire_atom() {
 
 #[test]
 fn duplicate_source_observation_grows_projected_routing_evidence() {
-    let mut engine = Engine::new(MemoryStore::new());
+    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
     let author = Keys::generate();
     let target = dummy_event_id("provenance-growth");
     engine.set_active_pubkey(Some(author.public_key())).unwrap();

@@ -31,7 +31,7 @@ use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CompensateOutcome, CompensationReason, CoverageInterval,
     CoverageKey, DurabilityOutcome, EventStore, GcReport, GcRetentionSet, InsertOutcome,
-    MemoryStore, PersistenceError, PersistenceFault, PromoteOutcome, PublishQueueAttempt,
+    PersistenceError, PersistenceFault, PromoteOutcome, PublishQueueAttempt,
     PublishQueueAttemptOutcome, PublishQueueIntent, PublishQueueReceipt, PublishQueueRouteRevision,
     RedbStore, RelayObserved, RetractReason, StoredEvent,
 };
@@ -123,14 +123,18 @@ fn literal_query(kinds: &[u16], author_hex: &str) -> LiveQuery {
     })
 }
 
-fn new_core(dir: FixtureRoutingFacts) -> EngineCore<MemoryStore> {
-    EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), dir, 10)
+fn new_core(dir: FixtureRoutingFacts) -> EngineCore<RedbStore> {
+    EngineCore::new_with_fixture_routing_facts(
+        RedbStore::temporary().expect("temporary Redb store"),
+        dir,
+        10,
+    )
 }
 
 /// A core whose per-relay attempt ceiling (#1031) is deliberately out of the
 /// way. The ceiling is its own falsifier; a test about replay PAGING must not
 /// quietly turn into a test about giving up when its retry loop crosses 16.
-fn new_core_without_attempt_ceiling(dir: FixtureRoutingFacts) -> EngineCore<MemoryStore> {
+fn new_core_without_attempt_ceiling(dir: FixtureRoutingFacts) -> EngineCore<RedbStore> {
     new_core(dir).with_max_publish_attempts(u64::MAX)
 }
 
@@ -139,7 +143,7 @@ fn activate<S: EventStore>(core: &mut EngineCore<S>, keys: &Keys) {
 }
 
 struct FailOnceCompensationStore {
-    inner: MemoryStore,
+    inner: RedbStore,
     fail_next_compensation: bool,
     fail_next_attempt_finish: bool,
 }
@@ -274,7 +278,7 @@ macro_rules! delegate_lane_methods {
 impl FailOnceCompensationStore {
     fn new() -> Self {
         Self {
-            inner: MemoryStore::new(),
+            inner: RedbStore::temporary().expect("temporary Redb store"),
             fail_next_compensation: true,
             fail_next_attempt_finish: false,
         }
@@ -282,7 +286,7 @@ impl FailOnceCompensationStore {
 
     fn failing_attempt_finish() -> Self {
         Self {
-            inner: MemoryStore::new(),
+            inner: RedbStore::temporary().expect("temporary Redb store"),
             fail_next_compensation: false,
             fail_next_attempt_finish: true,
         }
@@ -441,14 +445,14 @@ impl EventStore for FailOnceCompensationStore {
 }
 
 struct SharedFailStartStore {
-    inner: MemoryStore,
+    inner: RedbStore,
     failed_relays: BTreeSet<RelayUrl>,
 }
 
 impl SharedFailStartStore {
     fn new(failed_relays: impl IntoIterator<Item = RelayUrl>) -> Self {
         Self {
-            inner: MemoryStore::new(),
+            inner: RedbStore::temporary().expect("temporary Redb store"),
             failed_relays: failed_relays.into_iter().collect(),
         }
     }

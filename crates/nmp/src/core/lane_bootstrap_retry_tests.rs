@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use nmp_store::{EventStore, MemoryStore, PersistenceFault, RedbStore};
+use nmp_store::{EventStore, PersistenceFault, RedbStore};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, Timestamp};
 
 use crate::lane_fault_store::{FaultyLaneStore, LaneFaults};
@@ -144,7 +144,13 @@ fn transient_bootstrap_failure_is_fully_reversible(fault: PersistenceFault, seq:
     let relay_b = RelayUrl::parse("wss://bootstrap-retry-b.example.com").unwrap();
     let faults = LaneFaults::default();
     faults.fail_bootstrap(fault);
-    let mut core = EngineCore::new(FaultyLaneStore::new(MemoryStore::new(), faults.clone()), 10);
+    let mut core = EngineCore::new(
+        FaultyLaneStore::new(
+            RedbStore::temporary().expect("temporary Redb store"),
+            faults.clone(),
+        ),
+        10,
+    );
 
     let (receipt, signed, blocked) =
         publish_narrow(&mut core, &author, &[relay_a.clone(), relay_b.clone()], seq);
@@ -238,7 +244,13 @@ fn failed_auth_denial_commit_emits_no_terminal_receipt_fact() {
     };
     let faults = LaneFaults::default();
     faults.fail_auth_denial(PersistenceFault::Invariant);
-    let mut core = EngineCore::new(FaultyLaneStore::new(MemoryStore::new(), faults), 10);
+    let mut core = EngineCore::new(
+        FaultyLaneStore::new(
+            RedbStore::temporary().expect("temporary Redb store"),
+            faults,
+        ),
+        10,
+    );
     core.handle(EngineMsg::RelayConnected(handle, session.clone()));
     let (receipt, _, parked) =
         publish_narrow(&mut core, &author, std::slice::from_ref(&relay), 705);
@@ -302,7 +314,13 @@ fn a_failed_bootstrap_never_parks_an_intent_permanently() {
     let relay = RelayUrl::parse("wss://bootstrap-parked.example.com").unwrap();
     let faults = LaneFaults::default();
     faults.fail_bootstrap(PersistenceFault::Io);
-    let mut core = EngineCore::new(FaultyLaneStore::new(MemoryStore::new(), faults.clone()), 10);
+    let mut core = EngineCore::new(
+        FaultyLaneStore::new(
+            RedbStore::temporary().expect("temporary Redb store"),
+            faults.clone(),
+        ),
+        10,
+    );
 
     let (receipt, signed, _) =
         publish_narrow(&mut core, &author, std::slice::from_ref(&relay), 702);
@@ -339,7 +357,13 @@ fn an_unresolved_bootstrap_keeps_retaining_and_backs_off() {
     let relay_b = RelayUrl::parse("wss://bootstrap-retain-b.example.com").unwrap();
     let faults = LaneFaults::default();
     faults.fail_bootstrap(PersistenceFault::Io);
-    let mut core = EngineCore::new(FaultyLaneStore::new(MemoryStore::new(), faults.clone()), 10);
+    let mut core = EngineCore::new(
+        FaultyLaneStore::new(
+            RedbStore::temporary().expect("temporary Redb store"),
+            faults.clone(),
+        ),
+        10,
+    );
 
     let (receipt, _, _) =
         publish_narrow(&mut core, &author, &[relay_a.clone(), relay_b.clone()], 703);

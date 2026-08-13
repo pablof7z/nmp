@@ -2232,8 +2232,7 @@ The experiment therefore did not prove:
 Relay ingest now extracts the changed replaceable coordinate and prepares only
 that target, but this is code-inspected rather than proven by a two-target
 runtime falsifier. Queue inspection is bounded at the public door and uses
-cursor-ranged receipt pages in redb; the in-memory experimental backend still
-scans its held receipt map to construct that bounded page.
+cursor-ranged receipt pages in Redb.
 
 Handler execution is bounded, but handler registration and restart recovery
 still enumerate every active semantic resource and eagerly clone all ready

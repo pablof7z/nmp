@@ -5,7 +5,7 @@ use super::*;
 #[cfg(test)]
 mod relay_session_key_tests {
     use super::*;
-    use nmp_store::{coverage_key, CoverageInterval, MemoryStore};
+    use nmp_store::{coverage_key, CoverageInterval, RedbStore};
     use nostr::{Keys, SubscriptionId};
 
     fn relay() -> RelayUrl {
@@ -334,7 +334,7 @@ mod relay_session_key_tests {
         let public = RelaySessionKey::public(relay.clone());
         let session_a = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(a));
         let session_b = RelaySessionKey::new(relay, AccessContext::Nip42(b));
-        let mut core = EngineCore::new(MemoryStore::new(), 10);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
         let handles = [
             TransportRelayHandle {
                 slot: 0,
@@ -390,7 +390,7 @@ mod relay_session_key_tests {
                 routing_evidence: BTreeSet::new(),
             },
         ]);
-        let mut core = EngineCore::new(MemoryStore::new(), 10);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
         core.router.compile(&atoms, &core.routing_facts, core.cap);
         let public_handle = TransportRelayHandle {
             slot: 5,
@@ -492,7 +492,7 @@ mod relay_session_key_tests {
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
-        let mut core = EngineCore::new(MemoryStore::new(), 10);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
         core.router
             .compile(&BTreeSet::from([atom]), &core.routing_facts, core.cap);
         let handle = TransportRelayHandle {
@@ -597,11 +597,11 @@ mod durable_retry_policy_tests {
 #[cfg(test)]
 mod relay_health_tests {
     use super::*;
-    use nmp_store::MemoryStore;
+    use nmp_store::RedbStore;
 
     #[test]
     fn verifier_outage_reaches_engine_diagnostics_without_false_misbehavior() {
-        let mut core = EngineCore::new(MemoryStore::new(), 10);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
         let handle = TransportRelayHandle {
             slot: 7,
             generation: 1,

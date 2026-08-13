@@ -37,8 +37,8 @@ use nmp_grammar::{CorrelationToken, Identity, WriteIntent, WritePayload, WriteRo
 use nmp_local_signer::LocalKeySigner;
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
-    sentinel_signature, AcceptWrite, CoverageInterval, EventStore, IntentSigState, MemoryStore,
-    RedbStore, RedbStoreResetError, RelayObserved,
+    sentinel_signature, AcceptWrite, CoverageInterval, EventStore, IntentSigState, RedbStore,
+    RedbStoreResetError, RelayObserved,
 };
 use nmp_test_support::{
     relays::{AdvertisedLimits, RelayConfig, ScriptedRelay},
@@ -163,7 +163,7 @@ fn subscribe_uses_current_wall_clock_for_the_one_time_max_age_decision() {
         routing_evidence: BTreeSet::new(),
     };
     let now = Timestamp::now().as_secs();
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .record_coverage(&[(
             atom.clone(),
@@ -393,7 +393,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
         .with_outbound_routes(b.public_key(), [url.clone()]);
 
     let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        MemoryStore::new(),
+        RedbStore::temporary().expect("temporary Redb store"),
         dir,
         10,
         PoolConfig {
@@ -528,8 +528,12 @@ async fn runtime_admission_deadline_groups_a_rapid_query_burst() {
         ..RelayConfig::default()
     };
     let relay = ScriptedRelay::start(&relay_config).await;
-    let (engine_thread, handle) =
-        EngineThread::spawn(MemoryStore::new(), 10, PoolConfig::default()).expect("spawn runtime");
+    let (engine_thread, handle) = EngineThread::spawn(
+        RedbStore::temporary().expect("temporary Redb store"),
+        10,
+        PoolConfig::default(),
+    )
+    .expect("spawn runtime");
 
     let (alice, _alice_rows) = handle
         .subscribe(pinned_tag_value(&relay.url, "alice"))
@@ -573,8 +577,12 @@ async fn withdrawing_last_demand_flushes_close_before_worker_retirement() {
         ..RelayConfig::default()
     })
     .await;
-    let (engine_thread, handle) =
-        EngineThread::spawn(MemoryStore::new(), 10, PoolConfig::default()).expect("spawn runtime");
+    let (engine_thread, handle) = EngineThread::spawn(
+        RedbStore::temporary().expect("temporary Redb store"),
+        10,
+        PoolConfig::default(),
+    )
+    .expect("spawn runtime");
 
     let (query, _rows) = handle
         .subscribe(pinned_tag_value(&relay.url, "android-close-proof"))
@@ -618,7 +626,7 @@ async fn accepted_requests_are_immutable_and_reconnect_replays_each_once() {
     };
     let mut relay = ScriptedRelay::start(&relay_config).await;
     let (engine_thread, handle) = EngineThread::spawn(
-        MemoryStore::new(),
+        RedbStore::temporary().expect("temporary Redb store"),
         10,
         PoolConfig {
             reconnect_delay_initial: Some(Duration::from_millis(20)),
@@ -826,9 +834,12 @@ fn process_cpu_time() -> Duration {
 /// roughly one core's worth of CPU time per unit of wall time.
 #[test]
 fn no_deadlines_blocks_indefinitely() {
-    let (engine_thread, handle) =
-        EngineThread::spawn(MemoryStore::new(), 10, PoolConfig::default())
-            .expect("test engine thread construction");
+    let (engine_thread, handle) = EngineThread::spawn(
+        RedbStore::temporary().expect("temporary Redb store"),
+        10,
+        PoolConfig::default(),
+    )
+    .expect("test engine thread construction");
 
     // Let the engine thread settle onto its idle `recv()` before sampling.
     std::thread::sleep(Duration::from_millis(100));
@@ -1057,7 +1068,7 @@ fn neg_liveness_deadline_does_not_busy_spin() {
         .with_outbound_routes(b.public_key(), [url]);
 
     let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        MemoryStore::new(),
+        RedbStore::temporary().expect("temporary Redb store"),
         dir,
         10,
         PoolConfig {
@@ -1172,7 +1183,7 @@ async fn expiring_event_retracts_with_no_further_input() {
 
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [url.clone()]);
     let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        MemoryStore::new(),
+        RedbStore::temporary().expect("temporary Redb store"),
         dir,
         10,
         PoolConfig {
@@ -1239,7 +1250,7 @@ async fn earlier_expiration_from_ingest_rearms() {
 
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [url.clone()]);
     let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        MemoryStore::new(),
+        RedbStore::temporary().expect("temporary Redb store"),
         dir,
         10,
         PoolConfig {
@@ -1485,8 +1496,12 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
 #[test]
 fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() {
     let keys = Keys::generate();
-    let (thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, PoolConfig::default())
-        .expect("test engine thread construction");
+    let (thread, handle) = EngineThread::spawn(
+        RedbStore::temporary().expect("temporary Redb store"),
+        10,
+        PoolConfig::default(),
+    )
+    .expect("test engine thread construction");
     handle.set_current_account(Some(keys.public_key()));
     let tracked = handle
         .publish(WriteIntent {
@@ -1564,8 +1579,12 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
     let keys = Keys::generate();
     let correlation =
         CorrelationToken::try_from("runtime-retry-isolation").expect("bounded fixture token");
-    let (thread, handle) = EngineThread::spawn(MemoryStore::new(), 10, PoolConfig::default())
-        .expect("test engine thread construction");
+    let (thread, handle) = EngineThread::spawn(
+        RedbStore::temporary().expect("temporary Redb store"),
+        10,
+        PoolConfig::default(),
+    )
+    .expect("test engine thread construction");
     handle.set_current_account(Some(keys.public_key()));
 
     let original = handle

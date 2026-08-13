@@ -31,7 +31,7 @@ pub(super) fn missing_addr_index_target(event_key: EventKey) -> PersistenceError
 
 /// Read-side tombstone check shared by `insert`
 /// (retraction-and-negative-deltas.md §2): `true` iff `event` must be
-/// `Refused(Tombstoned)`. Mirrors `MemoryStore::tombstone_refuses` exactly,
+/// `Refused(Tombstoned)`. Mirrors `RedbStore::tombstone_refuses` exactly,
 /// including the deferred NIP-09 author-only check for an id-tombstone
 /// written before its target ever arrived: refused iff `event.pubkey`
 /// itself claimed this exact id, regardless of any OTHER author's
@@ -195,7 +195,7 @@ pub(super) fn process_kind5_deletions<T: GovernedIngestTxn>(
 /// fan out IDENTICALLY — an offline co-owner signer must never strand a
 /// receipt behind an event that's already validly signed, regardless of
 /// HOW that signature became canonical. Mirrors
-/// `MemoryStore::fan_out_signed` exactly. Returns every intent THIS call
+/// `RedbStore::fan_out_signed` exactly. Returns every intent THIS call
 /// actually transitioned (an already-`Signed` owner is left untouched and
 /// excluded).
 fn update_publish_queue_receipt<T: GovernedIngestTxn>(
@@ -356,7 +356,7 @@ pub(super) fn fan_out_signed_in_txn<T: GovernedIngestTxn>(
 /// of THIS call — a true visibility delta (issue #61 P1 correction),
 /// computed from before/after suppression state and deduped by event id
 /// — and the exact claims staged (for `PUBLISH_QUEUE_KIND5_CLAIMS`). Mirrors
-/// `MemoryStore::process_kind5_deletions_provisional` exactly.
+/// `RedbStore::process_kind5_deletions_provisional` exactly.
 pub(super) fn process_kind5_deletions_provisional_in_txn(
     txn: &mut RedbIngestTxn<'_, '_>,
     intent_id: IntentId,
@@ -543,7 +543,7 @@ pub(super) fn find_any_displaced_key_by_event_id_in_txn(
 /// `compensate_write`'s compensating re-insert (retraction-and-negative-
 /// deltas.md §4.2: "through the same one door... wins its address back by
 /// ordinary supersession rules", never an un-supersede operation). Mirrors
-/// `MemoryStore::reinsert_stashed` exactly. Returns the row as it now
+/// `RedbStore::reinsert_stashed` exactly. Returns the row as it now
 /// stands if `se` actually (re)claims a slot; `None` if it is refused,
 /// deduped away, or loses the address race (`Stale` — the correct, silent
 /// §3.4 outcome for a re-offered grand-predecessor: nothing churns).

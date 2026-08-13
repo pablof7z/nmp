@@ -116,9 +116,8 @@ impl CoverageInterval {
 /// - disjoint → keep whichever interval has the greater `through` (recency
 ///   wins); the discarded interval costs bandwidth, never correctness.
 ///
-/// This is the ONLY merge algorithm in the crate — both `MemoryStore` and
-/// `RedbStore` call it, so the oracle and the persistent backend can never
-/// diverge on merge semantics.
+/// This is the only merge algorithm in the crate, shared by every Redb
+/// coverage mutation path.
 pub(crate) fn merge_interval(
     existing: Option<CoverageInterval>,
     incoming: CoverageInterval,
@@ -177,11 +176,8 @@ pub(crate) fn shape_matches(shape: &ConcreteFilter, event: &Event) -> bool {
         .match_event(event, MatchEventOptions::new())
 }
 
-/// A one-shot index over a single `gc` call's victim set (issue #507),
-/// shared verbatim by `MemoryStore::gc` and `RedbStore::gc` — the same
-/// "one algorithm, both backends call it" pattern [`merge_interval`]
-/// already establishes, so the two can never diverge on coverage-shrink
-/// arithmetic.
+/// A one-shot index over a single `gc` call's victim set (issue #507), used by
+/// `RedbStore::gc` to keep coverage-shrink arithmetic in one place.
 ///
 /// **Why the maximum alone determines a row's outcome** (the fact this
 /// type exists to exploit): [`shrink_after_eviction`] only ever RAISES
@@ -209,8 +205,7 @@ pub(crate) fn shape_matches(shape: &ConcreteFilter, event: &Event) -> bool {
 ///   `through` (the same rule `shrink_after_eviction` already encodes for a
 ///   single victim).
 ///
-/// This lets `gc` replace an O(victims × rows) nested loop (the eviction
-/// pass's original shape, mirrored in both backends before issue #507)
+/// This lets `gc` replace an O(victims × rows) nested loop
 /// with a single O(rows) pass: each row calls [`Self::max_matching_within`]
 /// once, which walks its own pre-sorted, shape-pruned candidate slice
 /// with an early exit on the first (descending-order) match, rather than
@@ -231,8 +226,8 @@ pub(crate) struct GcVictimIndex<'a> {
 
 impl<'a> GcVictimIndex<'a> {
     /// Build the index once per `gc` call, from the victims that call
-    /// already collected (owned `Event`s — both backends gather the full
-    /// victim set up front, before touching any coverage row).
+    /// already collected (owned `Event`s gathered before touching any
+    /// coverage row).
     pub(crate) fn new(victims: &'a [Event]) -> Self {
         let mut global: Vec<&'a Event> = victims.iter().collect();
         global.sort_by_key(|event| event.created_at);
@@ -642,8 +637,8 @@ mod tests {
 
     // -----------------------------------------------------------------
     // `GcVictimIndex` (issue #507): the shared gc coverage-shrink batching
-    // helper both backends call, so they can never diverge on this
-    // arithmetic — see the type's own doc comment for the max-only-
+    // helper every Redb path calls, so they cannot diverge on this arithmetic
+    // — see the type's own doc comment for the max-only-
     // matters proof these tests exercise.
     // -----------------------------------------------------------------
 

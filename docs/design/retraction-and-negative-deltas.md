@@ -27,8 +27,8 @@ half:
   diffing the store's **full current matching set** against `last_rows`. If a row leaves
   the store and a refresh runs, the app receives `Removed(id)` today, through machinery
   it already handles. Nothing new crosses the FFI. **Q4 is answered by construction.**
-- The store's one door already removes rows (supersession drops the loser,
-  `memory_store.rs:91`), and `refresh_all_handles` runs after every ingest — so a
+- The store's one door already removes rows (supersession drops the loser),
+  and `refresh_all_handles` runs after every ingest — so a
   superseded event **already retracts correctly from root-level live queries**.
 
 At the time this design was written, everything upstream of that diff was

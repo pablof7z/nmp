@@ -457,7 +457,7 @@ pub(super) fn candidate_ordered_plans(filter: &Filter) -> Vec<OrderedPlan> {
 /// Choose the ordered index to scan for `filter`.
 ///
 /// Fixed priority — Author > Tag > Kind > Global — the same choice
-/// `MemoryStore::plan_ordered_query` makes ("simple and obviously correct
+/// `RedbStore::plan_ordered_query` makes ("simple and obviously correct
 /// beats optimal here"). NMP kept a durable sampled row-count table to rank
 /// these instead, and deleted it (#1248): the estimate could not affect
 /// correctness, 1/16 sampling quantized every bucket under ~16 rows to zero

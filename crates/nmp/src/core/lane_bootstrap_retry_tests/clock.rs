@@ -9,7 +9,10 @@ fn waiting_connection_attempt_is_anchored_to_connect_time_without_maintenance() 
     let old_time = Timestamp::from(100u64);
     let connect_time = Timestamp::from(10_000u64);
     let faults = LaneFaults::default();
-    let store = FaultyLaneStore::new(MemoryStore::new(), faults.clone());
+    let store = FaultyLaneStore::new(
+        RedbStore::temporary().expect("temporary Redb store"),
+        faults.clone(),
+    );
     let mut core = EngineCore::new(store, 10);
     core.advance_clock(old_time);
 

@@ -226,7 +226,7 @@ async fn blocking_foreign_completion_never_stalls_unrelated_engine_work() {
         Engine::new(EngineConfig {
             ..EngineConfig::default()
         })
-        .expect("in-memory engine must build"),
+        .expect("temporary Redb engine must build"),
     );
 
     let keys = nostr::Keys::parse(TEST_SECRET_KEY_HEX).unwrap();

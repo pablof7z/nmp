@@ -20,8 +20,8 @@ public struct OutboxRoutingConfig: Sendable {
 /// Construction config for `NMPEngine`. Build-time feature selection controls
 /// which fields exist; runtime relay values remain app-owned inputs.
 public struct NMPConfig: Sendable {
-    /// `nil` -> in-memory store (nothing survives a restart). A path ->
-    /// a persistent store reopened at that path across launches.
+    /// `nil` -> an engine-owned temporary Redb store (nothing survives a
+    /// restart). A path -> a persistent Redb store reopened across launches.
     public var storePath: String?
     /// Operator app relay set (`Lane::OperatorApp`) -- every kind, every
     /// author, always, additive. Default empty.

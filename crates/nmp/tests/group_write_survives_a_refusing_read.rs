@@ -75,7 +75,7 @@ fn bare_engine() -> Engine {
     Engine::new(EngineConfig {
         ..EngineConfig::default()
     })
-    .expect("an in-memory engine builds")
+    .expect("a temporary Redb engine builds")
 }
 
 /// A bare engine, plus one registered signing capability for `keys` -- what

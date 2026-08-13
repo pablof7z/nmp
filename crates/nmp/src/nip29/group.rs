@@ -371,7 +371,7 @@ mod tests {
     }
 
     fn engine() -> Engine {
-        Engine::new(crate::config::EngineConfig::default()).expect("an in-memory engine builds")
+        Engine::new(crate::config::EngineConfig::default()).expect("a temporary Redb engine builds")
     }
 
     fn author() -> PublicKey {

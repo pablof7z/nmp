@@ -8619,7 +8619,7 @@ record Record {
             },
             default: None,
             docstring: Some(
-                "`None` -> in-memory store (nothing survives a restart). `Some(path)`\n-> a persistent `RedbStore` opened at that path (the same file\nreopened across restarts is what preserves source-scoped evidence for\na cold, offline read -- ledger #7).",
+                "`None` -> an engine-owned temporary Redb store (nothing survives the\nengine's lifetime). `Some(path)` -> a persistent `RedbStore` opened at that path (the same file\nreopened across restarts is what preserves source-scoped evidence for\na cold, offline read -- ledger #7).",
             ),
         },
         Field {

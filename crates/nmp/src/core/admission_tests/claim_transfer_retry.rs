@@ -30,7 +30,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
     let added_claim = coverage_key(&added);
     let old = CoverageInterval::new(Timestamp::from(0), Timestamp::from(99));
     let generation = CoverageInterval::new(Timestamp::from(100), Timestamp::from(200));
-    let mut memory = MemoryStore::new();
+    let mut memory = RedbStore::temporary().expect("temporary Redb store");
     memory
         .record_coverage(&[(added.clone(), relay.clone(), old)])
         .unwrap();
@@ -172,7 +172,10 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
     let added_claim = coverage_key(&added);
     let control = StoreFailureControl::default();
     let mut core = EngineCore::new(
-        ControlledFailureStore::new(MemoryStore::new(), control.clone()),
+        ControlledFailureStore::new(
+            RedbStore::temporary().expect("temporary Redb store"),
+            control.clone(),
+        ),
         20,
     );
     core.attribution.observe_atom(&incumbent);

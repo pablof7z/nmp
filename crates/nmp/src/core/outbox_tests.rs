@@ -16,7 +16,7 @@ mod outbox_resolver_tests {
 
     use crate::core::write::RouteAnswer;
     use nmp_router::FixtureRoutingFacts;
-    use nmp_store::{EventStore, MemoryStore, RelayObserved};
+    use nmp_store::{EventStore, RedbStore, RelayObserved};
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     fn relay(name: &str) -> RelayUrl {
@@ -102,11 +102,15 @@ mod outbox_resolver_tests {
 
     /// Resolve `event` under `Auto` against exactly these facts.
     fn route(facts: FixtureRoutingFacts, event: &SignedEvent) -> RouteAnswer {
-        route_with_store(MemoryStore::new(), facts, event)
+        route_with_store(
+            RedbStore::temporary().expect("temporary Redb store"),
+            facts,
+            event,
+        )
     }
 
     fn route_with_store(
-        store: MemoryStore,
+        store: RedbStore,
         facts: FixtureRoutingFacts,
         event: &SignedEvent,
     ) -> RouteAnswer {
@@ -114,7 +118,7 @@ mod outbox_resolver_tests {
             .resolve_routes(&WriteRouting::Auto, event);
         assert!(
             resolution.parent_provenance_error.is_none(),
-            "the in-memory fixture store cannot fail: {resolution:?}"
+            "the ordinary temporary-store fixture has no injected failure: {resolution:?}"
         );
         resolution.answer
     }
@@ -308,7 +312,7 @@ mod outbox_resolver_tests {
             .expect("sign parent fixture");
         let conversation = relay("conversation-relay");
         let unverified_hint = relay("unverified-hint-relay");
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert(
                 parent.clone(),
@@ -353,7 +357,7 @@ mod outbox_resolver_tests {
             .sign_with_keys(&parent_author)
             .expect("sign parent fixture");
         let conversation = relay("nip22-conversation-relay");
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert(
                 parent.clone(),
@@ -395,7 +399,7 @@ mod outbox_resolver_tests {
         let first = relay("a-conversation-relay");
         let second = relay("z-conversation-relay");
         let authored_hint = relay("authored-hint");
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         for (relay, at) in [
             (second.clone(), 1_700_000_000),
             (first.clone(), 1_700_000_001),
@@ -475,7 +479,7 @@ mod outbox_resolver_tests {
             .expect("sign target fixture");
         let target_relay = relay("target-source");
         let target_hex = target.id.to_hex();
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert(
                 target.clone(),

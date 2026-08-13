@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use nmp_grammar::{Binding, Demand, Filter, Freshness, LiveQuery};
-use nmp_store::{EventStore, MemoryStore, RelayObserved};
+use nmp_store::{EventStore, RedbStore, RelayObserved};
 use nostr::{Keys, Kind, RelayUrl, Timestamp};
 
 use super::*;
@@ -22,7 +22,7 @@ fn query(author: &Keys, freshness: Freshness) -> LiveQuery {
     LiveQuery::single(demand)
 }
 
-fn runtime(store: MemoryStore, faults: LaneFaults) -> (EngineThread, Handle) {
+fn runtime(store: RedbStore, faults: LaneFaults) -> (EngineThread, Handle) {
     EngineThread::spawn(
         FaultyLaneStore::new(store, faults),
         4,
@@ -34,7 +34,10 @@ fn runtime(store: MemoryStore, faults: LaneFaults) -> (EngineThread, Handle) {
 #[test]
 fn many_live_and_cache_only_opens_run_zero_maintenance_sweeps() {
     let faults = LaneFaults::default();
-    let (thread, handle) = runtime(MemoryStore::new(), faults.clone());
+    let (thread, handle) = runtime(
+        RedbStore::temporary().expect("temporary Redb store"),
+        faults.clone(),
+    );
     let author = Keys::generate();
     let mut observations = Vec::new();
 
@@ -76,7 +79,7 @@ fn due_deadline_runs_before_a_simultaneously_ready_command() {
         expiry.as_secs(),
     );
     let event_id = event.id;
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .insert(event, RelayObserved::new(relay, base))
         .expect("seed expiring event");
@@ -135,7 +138,7 @@ fn explicit_tick_at_a_due_deadline_runs_maintenance_once() {
         expiry.as_secs(),
     );
     let event_id = event.id;
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .insert(event, RelayObserved::new(relay, base))
         .expect("seed expiring event");

@@ -16,7 +16,7 @@ use nmp::mechanism::core::{HistoryQuery, RowDelta};
 use nmp::mechanism::runtime::{EngineThread, HistoryReceiver, RowsMsg, RowsReceiver};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
-use nmp_store::{EventStore, MemoryStore, RedbStore};
+use nmp_store::{EventStore, RedbStore};
 use nmp_transport::PoolConfig;
 use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -95,7 +95,6 @@ pub struct ProbeConfig {
     pub payload_bytes: usize,
     pub shape_corpus: Option<PathBuf>,
     pub corpus_output: Option<PathBuf>,
-    pub memory_store: bool,
     pub redb_nondurable_diagnostic: bool,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
@@ -128,7 +127,6 @@ impl Default for ProbeConfig {
             payload_bytes: 128,
             shape_corpus: None,
             corpus_output: None,
-            memory_store: false,
             redb_nondurable_diagnostic: false,
             queue_capacity: 1_024,
             verified_cache_capacity: 131_072,
@@ -202,14 +200,6 @@ impl ProbeConfig {
         if self.expect_rejection && (self.events != 1 || self.relays != 1 || self.passes != 1) {
             return Err(
                 "expect-rejection requires exactly one event, one relay, and one pass".into(),
-            );
-        }
-        if self.memory_store && self.store_path.is_some() {
-            return Err("memory-store cannot retain a persistent --store path".into());
-        }
-        if self.memory_store && self.redb_nondurable_diagnostic {
-            return Err(
-                "memory-store and redb-nondurable-diagnostic are mutually exclusive".into(),
             );
         }
         #[cfg(not(feature = "bench-instrumentation"))]
@@ -621,17 +611,15 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         .store_path
         .clone()
         .unwrap_or_else(|| scratch.path().join("probe.redb"));
-    if !config.memory_store && store_path.exists() {
+    if store_path.exists() {
         return Err(format!(
             "refusing to overwrite existing store {}",
             store_path.display()
         )
         .into());
     }
-    if !config.memory_store {
-        if let Some(parent) = store_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = store_path.parent() {
+        fs::create_dir_all(parent)?;
     }
 
     #[cfg(feature = "bench-instrumentation")]
@@ -722,23 +710,19 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         reconnect_jitter_max: Some(Duration::ZERO),
         ..PoolConfig::default()
     };
-    let (engine_thread, handle) = if config.memory_store {
-        EngineThread::spawn(MemoryStore::default(), config.relays, pool_config)?
+    let store = if config.redb_nondurable_diagnostic {
+        #[cfg(feature = "bench-instrumentation")]
+        {
+            RedbStore::open_benchmark_nondurable(&store_path)?
+        }
+        #[cfg(not(feature = "bench-instrumentation"))]
+        {
+            return Err("redb-nondurable-diagnostic requires bench-instrumentation".into());
+        }
     } else {
-        let store = if config.redb_nondurable_diagnostic {
-            #[cfg(feature = "bench-instrumentation")]
-            {
-                RedbStore::open_benchmark_nondurable(&store_path)?
-            }
-            #[cfg(not(feature = "bench-instrumentation"))]
-            {
-                return Err("redb-nondurable-diagnostic requires bench-instrumentation".into());
-            }
-        } else {
-            RedbStore::open(&store_path)?
-        };
-        EngineThread::spawn(store, config.relays, pool_config)?
+        RedbStore::open(&store_path)?
     };
+    let (engine_thread, handle) = EngineThread::spawn(store, config.relays, pool_config)?;
     let live_query = LiveQuery::single(demand);
     let rows = match config.visible_limit {
         Some(limit) => {
@@ -1010,9 +994,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let allocator_trim_attempted = trim_allocator();
     let memory_after_allocator_trim = current_memory();
 
-    let (database_bytes, reopen_and_verify) = if config.memory_store {
-        (0, Duration::ZERO)
-    } else {
+    let (database_bytes, reopen_and_verify) = {
         let verify_started = Instant::now();
         let reopened = RedbStore::open(&store_path)?;
         let mut persisted_selection = selection.clone();
@@ -1058,14 +1040,8 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         payload_bytes: config.payload_bytes,
         corpus_mode: corpus.mode,
         shape_source_blake3: corpus.shape_source_blake3,
-        store_backend: if config.memory_store {
-            "memory"
-        } else {
-            "redb"
-        },
-        store_durability: if config.memory_store {
-            "not-applicable"
-        } else if config.redb_nondurable_diagnostic {
+        store_backend: "redb",
+        store_durability: if config.redb_nondurable_diagnostic {
             "none-then-immediate-checkpoint-diagnostic"
         } else {
             "immediate"
@@ -1255,12 +1231,6 @@ fn ingest_attribution_json() -> serde_json::Value {
             "commit_ns": store.commit_ns, "durability_checkpoint_ns": store.durability_checkpoint_ns,
             "encode_event_ns": store.encode_event_ns,
             "encoded_event_bytes": store.encoded_event_bytes, "canonical_insert_ns": store.canonical_insert_ns,
-            "memory_insert_ns": store.memory_insert_ns,
-            "memory_event_build_ns": store.memory_event_build_ns,
-            "memory_expiration_index_ns": store.memory_expiration_index_ns,
-            "memory_query_index_ns": store.memory_query_index_ns,
-            "memory_canonical_insert_ns": store.memory_canonical_insert_ns,
-            "event_clones": store.event_clones
         }
     })
 }

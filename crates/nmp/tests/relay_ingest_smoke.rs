@@ -16,7 +16,6 @@ fn websocket_runtime_to_redb_smoke_crosses_every_bounded_queue() {
         payload_bytes: 256,
         shape_corpus: None,
         corpus_output: None,
-        memory_store: false,
         redb_nondurable_diagnostic: false,
         queue_capacity: 8,
         verified_cache_capacity: 257,
@@ -58,48 +57,6 @@ fn websocket_runtime_to_redb_smoke_crosses_every_bounded_queue() {
     }
 }
 
-#[test]
-fn websocket_runtime_to_memory_store_pins_the_no_persistence_ceiling() {
-    let result = relay_ingest_probe::run(ProbeConfig {
-        events: 65,
-        relays: 1,
-        passes: 1,
-        payload_bytes: 128,
-        shape_corpus: None,
-        corpus_output: None,
-        memory_store: true,
-        redb_nondurable_diagnostic: false,
-        queue_capacity: 8,
-        verified_cache_capacity: 65,
-        committed_observation_cache_capacity: 65,
-        diagnostic_duplicate_ceiling_capacity: 0,
-        diagnostic_duplicate_ceiling_event_payload: false,
-        diagnostic_preparsed_ceiling: false,
-        diagnostic_skip_event_id_validation: false,
-        diagnostic_skip_signature_verification: false,
-        verifier_workers: 0,
-        verify_batch_size: 7,
-        engine_batch_size: 7,
-        engine_batch_bytes: 8 * 1024 * 1024,
-        engine_batch_wait: Duration::ZERO,
-        visible_limit: Some(32),
-        trim_allocator_during_ingest: false,
-        frame_delay: Duration::ZERO,
-        expect_rejection: false,
-        timeout: Duration::from_secs(30),
-        store_path: None,
-        completion_window_output: None,
-    })
-    .expect("end-to-end memory-store ceiling smoke");
-
-    assert_eq!(result.store_backend, "memory");
-    assert_eq!(result.expected_relay_frames, 65);
-    assert_eq!(result.observed_relay_frames, 65);
-    assert_eq!(result.final_visible_rows, 32);
-    assert_eq!(result.database_bytes, 0);
-    assert_eq!(result.reopen_and_verify_ms, 0.0);
-}
-
 #[cfg(feature = "bench-instrumentation")]
 #[test]
 fn nondurable_redb_diagnostic_finishes_with_a_timed_durable_checkpoint() {
@@ -110,7 +67,6 @@ fn nondurable_redb_diagnostic_finishes_with_a_timed_durable_checkpoint() {
         payload_bytes: 128,
         shape_corpus: None,
         corpus_output: None,
-        memory_store: false,
         redb_nondurable_diagnostic: true,
         queue_capacity: 8,
         verified_cache_capacity: 65,
@@ -160,7 +116,6 @@ fn duplicate_ceiling_bypasses_second_pass_parse_resolver_and_store_work() {
         payload_bytes: 128,
         shape_corpus: None,
         corpus_output: None,
-        memory_store: false,
         redb_nondurable_diagnostic: false,
         queue_capacity: 128,
         verified_cache_capacity: 65,
@@ -204,7 +159,6 @@ fn websocket_runtime_rejects_a_message_above_the_one_mib_ceiling() {
         payload_bytes: 1_049_000,
         shape_corpus: None,
         corpus_output: None,
-        memory_store: false,
         redb_nondurable_diagnostic: false,
         queue_capacity: 8,
         verified_cache_capacity: 1,

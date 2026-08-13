@@ -28,7 +28,6 @@ required_paths=(
   crates/nmp-resolver/src/engine.rs
   crates/nmp-store/src/coverage.rs
   crates/nmp-store/src/lib.rs
-  crates/nmp-store/src/memory_store.rs
   crates/nmp-store/src/redb_store/event_ops.rs
 )
 for path in "${required_paths[@]}"; do

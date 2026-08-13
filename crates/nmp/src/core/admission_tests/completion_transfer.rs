@@ -27,7 +27,7 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
     let incumbent_claim = coverage_key(&incumbent_piece);
     let residual_claim = coverage_key(&residual_piece);
     let owner = DemandKey::for_atom(&whole);
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     for shape in [&whole, &incumbent_piece, &residual_piece] {
         core.attribution.observe_atom(shape);
     }
@@ -38,7 +38,7 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
     core.slot_to_relay
         .insert(transport.slot, (transport, session.clone()));
 
-    let open_piece = |core: &mut EngineCore<MemoryStore>, piece: &ContextualAtom| {
+    let open_piece = |core: &mut EngineCore<RedbStore>, piece: &ContextualAtom| {
         let sub_id = SubId::for_wire(relay.clone(), &piece.filter, &piece.source, piece.access);
         let claim = coverage_key(piece);
         core.attribution
@@ -159,7 +159,10 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
         let added_claim = coverage_key(&added);
         let control = StoreFailureControl::default();
         let mut core = EngineCore::new(
-            ControlledFailureStore::new(MemoryStore::new(), control.clone()),
+            ControlledFailureStore::new(
+                RedbStore::temporary().expect("temporary Redb store"),
+                control.clone(),
+            ),
             20,
         );
         core.attribution.observe_atom(&incumbent);
@@ -244,7 +247,10 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
     let incumbent_claim = coverage_key(&incumbent);
     let control = StoreFailureControl::default();
     let mut core = EngineCore::new(
-        ControlledFailureStore::new(MemoryStore::new(), control.clone()),
+        ControlledFailureStore::new(
+            RedbStore::temporary().expect("temporary Redb store"),
+            control.clone(),
+        ),
         20,
     );
     core.attribution.observe_atom(&incumbent);

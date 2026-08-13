@@ -99,7 +99,7 @@ async fn mixed_engine_load_makes_progress_without_capacity_refusal() {
         },
         None,
     )
-    .expect("in-memory engine must build");
+    .expect("temporary Redb engine must build");
 
     let keys = nostr::Keys::parse(TEST_SECRET_KEY_HEX).unwrap();
     let author = keys.public_key().to_hex();

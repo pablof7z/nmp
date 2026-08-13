@@ -17,7 +17,7 @@ use heed::{Database as LmdbDatabase, Env, EnvOpenOptions, RoTxn, RwTxn};
 use nostr::{Event, EventId, Filter, RelayUrl, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::MemoryStore;
+use crate::RedbStore;
 
 use super::ingest::insert_with_tables;
 use super::ingest_txn::{GovernedIngestTxn, GovernedPublishQueueMap};
@@ -241,24 +241,25 @@ pub fn run_lmdb_governed_ingest_bench(
     #[cfg(not(unix))]
     let database_allocated_bytes = database_file_bytes;
 
-    // Build the independent policy oracle outside the timed and process-sampled
-    // region so its allocations do not inflate the LMDB peak-RSS measurement.
-    let mut oracle = MemoryStore::default();
+    // Build the Redb production-path baseline outside the timed and
+    // process-sampled region so its allocations do not inflate the LMDB
+    // peak-RSS measurement.
+    let mut expected_store = RedbStore::temporary().expect("temporary Redb store");
     for event in &events {
-        oracle
+        expected_store
             .insert(
                 event.clone(),
                 RelayObserved::new(relay.clone(), Timestamp::from(observed_at)),
             )
             .map_err(|error| error.message().to_owned())?;
     }
-    let expected_ids: HashSet<_> = oracle
+    let expected_ids: HashSet<_> = expected_store
         .query(&Filter::new())
         .map_err(|error| error.message().to_owned())?
         .into_iter()
         .map(|row| *row.event.id.as_bytes())
         .collect();
-    drop(oracle);
+    drop(expected_store);
 
     let reopen_started = Instant::now();
     let reopened = unsafe {

@@ -1248,7 +1248,7 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
 #[test]
 fn a_refused_publish_mints_no_receipt_and_no_fact() {
     let mut core = new_core(FixtureRoutingFacts::new());
-    let refuse = |core: &mut EngineCore<MemoryStore>, seq| {
+    let refuse = |core: &mut EngineCore<RedbStore>, seq| {
         core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(draft(seq, "unaccepted")),
             routing: WriteRouting::Auto,

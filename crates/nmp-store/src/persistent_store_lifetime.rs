@@ -684,9 +684,12 @@ fn acquire_ownership_with_hooks(
     Ok(ownership)
 }
 
-/// Every reachable failure from opening one persistent database.
+/// Every reachable failure from constructing a temporary or persistent Redb database.
 #[derive(Debug)]
 pub enum RedbStoreOpenError {
+    /// The filesystem could not provide an isolated temporary directory for
+    /// a temporary Redb database. No store or ownership token was created.
+    TemporaryDirectoryFailed { source: io::Error },
     /// Another live owner — in this process or any other — holds the same
     /// canonical store target. No second database owner was created.
     StoreAlreadyOpen { path: PathBuf },
@@ -791,6 +794,9 @@ impl From<StoreOwnershipError> for RedbStoreOpenError {
 impl std::fmt::Display for RedbStoreOpenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::TemporaryDirectoryFailed { source } => {
+                write!(f, "could not create temporary Redb store directory: {source}")
+            }
             Self::StoreAlreadyOpen { path } => {
                 write!(f, "persistent store is already open: {}", path.display())
             }
@@ -848,7 +854,8 @@ impl std::fmt::Display for RedbStoreOpenError {
 impl std::error::Error for RedbStoreOpenError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::PathResolutionFailed { source, .. }
+            Self::TemporaryDirectoryFailed { source }
+            | Self::PathResolutionFailed { source, .. }
             | Self::LockFileOpenFailed { source, .. }
             | Self::LockFailed { source, .. } => Some(source),
             Self::Database(error) => Some(error),

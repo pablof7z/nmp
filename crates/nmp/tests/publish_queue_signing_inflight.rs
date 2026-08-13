@@ -32,7 +32,7 @@ use nmp_signer::{
     PendingSignerSender, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,
     SigningCapability,
 };
-use nmp_store::MemoryStore;
+use nmp_store::RedbStore;
 use nostr::{Keys, Kind, PublicKey, Timestamp, UnsignedEvent};
 
 /// A signer that answers for its key and then holds the request open. It is
@@ -118,7 +118,7 @@ fn a_signature_in_flight_is_not_reported_as_a_write_parked_on_a_missing_signer()
         Arc::new(Mutex::new(Vec::new()));
 
     let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        MemoryStore::new(),
+        RedbStore::temporary().expect("temporary Redb store"),
         FixtureRoutingFacts::new(),
         10,
         Default::default(),

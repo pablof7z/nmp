@@ -8,7 +8,7 @@ fn grouped_handoff_shares_one_immutable_filter_across_every_observation_fact() {
     const OWNERS: usize = 207;
     let relay = RelayUrl::parse("wss://shared-request-filter.example").unwrap();
     let session = RelaySessionKey::public(relay.clone());
-    let mut core = EngineCore::new(MemoryStore::new(), 20);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let observations = (0..OWNERS)
         .map(|index| {
             observation_id(&core.handle(EngineMsg::Subscribe(query(

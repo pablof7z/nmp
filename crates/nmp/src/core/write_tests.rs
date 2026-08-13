@@ -7,7 +7,7 @@ mod receipt_allocator_tests {
     use super::*;
 
     use nmp_router::FixtureRoutingFacts;
-    use nmp_store::{MemoryStore, RedbStore, RefuseReason};
+    use nmp_store::{RedbStore, RefuseReason};
     use nostr::{Keys, Kind};
 
     /// The same frozen note, `p`-tagging the given recipients — the shape
@@ -64,7 +64,7 @@ mod receipt_allocator_tests {
             .custom_created_at(Timestamp::from(20u64))
             .sign_with_keys(&keys)
             .unwrap();
-        let mut store = MemoryStore::new();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert(
                 base.clone(),
@@ -137,7 +137,7 @@ mod receipt_allocator_tests {
 
     #[test]
     fn last_attempt_correlation_is_issued_once_then_exhaustion_is_stable_and_typed() {
-        let mut core = EngineCore::new(MemoryStore::new(), 10);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
         core.set_next_attempt_correlation_for_test(Some(u64::MAX));
 
         assert_eq!(
@@ -161,8 +161,11 @@ mod receipt_allocator_tests {
         let relay = RelayUrl::parse("wss://correlation-exhausted.example").unwrap();
         let directory =
             FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [relay.clone()]);
-        let mut core =
-            EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), directory, 10);
+        let mut core = EngineCore::new_with_fixture_routing_facts(
+            RedbStore::temporary().expect("temporary Redb store"),
+            directory,
+            10,
+        );
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let accepted = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(nmp_grammar::EventBuilder {
@@ -223,7 +226,11 @@ mod receipt_allocator_tests {
         let b = RelayUrl::parse("wss://chosen-b.example").unwrap();
         let unrelated = RelayUrl::parse("wss://unrelated.example").unwrap();
         let directory = FixtureRoutingFacts::new().with_outbound_routes(author, [unrelated]);
-        let core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), directory, 10);
+        let core = EngineCore::new_with_fixture_routing_facts(
+            RedbStore::temporary().expect("temporary Redb store"),
+            directory,
+            10,
+        );
         let route = WriteRouting::Explicit(vec![b.clone(), a.clone()]);
 
         let created_at = Timestamp::from(1_700_000_000);
@@ -265,7 +272,7 @@ mod receipt_allocator_tests {
         // Still looking: nobody has finished the lookup, so nothing has been
         // learned yet and NOTHING may expire this.
         let core = EngineCore::new_with_fixture_routing_facts(
-            MemoryStore::new(),
+            RedbStore::temporary().expect("temporary Redb store"),
             FixtureRoutingFacts::new(),
             10,
         );
@@ -293,7 +300,11 @@ mod receipt_allocator_tests {
                 FixtureRoutingFacts::new().with_author_absent(author),
             ),
         ] {
-            let core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), facts, 10);
+            let core = EngineCore::new_with_fixture_routing_facts(
+                RedbStore::temporary().expect("temporary Redb store"),
+                facts,
+                10,
+            );
             let answer = core.resolve_routes(&WriteRouting::Auto, &event).answer;
 
             assert!(
@@ -328,7 +339,7 @@ mod receipt_allocator_tests {
 
         // Both recipients unlooked-up: the answer waits on both.
         let before = EngineCore::new_with_fixture_routing_facts(
-            MemoryStore::new(),
+            RedbStore::temporary().expect("temporary Redb store"),
             FixtureRoutingFacts::new().with_outbound_routes(author, [outbox.clone()]),
             10,
         )
@@ -338,7 +349,7 @@ mod receipt_allocator_tests {
         // One of them settles as a definitive absence. It contributes no
         // relay, so the destination set cannot move.
         let after = EngineCore::new_with_fixture_routing_facts(
-            MemoryStore::new(),
+            RedbStore::temporary().expect("temporary Redb store"),
             FixtureRoutingFacts::new()
                 .with_outbound_routes(author, [outbox.clone()])
                 .with_author_absent(settling),
@@ -383,7 +394,11 @@ mod receipt_allocator_tests {
         let facts = FixtureRoutingFacts::new()
             .with_author_absent(author)
             .with_operator_app([app.clone()]);
-        let core = EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), facts, 10);
+        let core = EngineCore::new_with_fixture_routing_facts(
+            RedbStore::temporary().expect("temporary Redb store"),
+            facts,
+            10,
+        );
 
         let answer = core
             .resolve_routes(&WriteRouting::Auto, &frozen_note(author))
@@ -405,16 +420,16 @@ mod receipt_allocator_tests {
         let a = RelayUrl::parse("wss://chosen-a.example").unwrap();
         let b = RelayUrl::parse("wss://chosen-b.example").unwrap();
 
-        let auto = EngineCore::<MemoryStore>::routing_snapshot(&WriteRouting::Auto);
+        let auto = EngineCore::<RedbStore>::routing_snapshot(&WriteRouting::Auto);
         assert_eq!(auto, "auto", "Auto stores a label, never a relay set");
         assert!(matches!(
-            EngineCore::<MemoryStore>::parse_routing_snapshot(&auto),
+            EngineCore::<RedbStore>::parse_routing_snapshot(&auto),
             Some(WriteRouting::Auto)
         ));
 
         let route = WriteRouting::Explicit(vec![b.clone(), a.clone()]);
-        let snapshot = EngineCore::<MemoryStore>::routing_snapshot(&route);
-        let restored = EngineCore::<MemoryStore>::parse_routing_snapshot(&snapshot)
+        let snapshot = EngineCore::<RedbStore>::routing_snapshot(&route);
+        let restored = EngineCore::<RedbStore>::parse_routing_snapshot(&snapshot)
             .expect("a valid explicit snapshot must remain readable");
         let WriteRouting::Explicit(relays) = restored else {
             panic!("snapshot restored the wrong routing variant")
@@ -502,7 +517,7 @@ mod receipt_allocator_tests {
 mod persistence_stall_replay_tests {
     use super::*;
     use nmp_router::FixtureRoutingFacts;
-    use nmp_store::MemoryStore;
+    use nmp_store::RedbStore;
     use nostr::{Keys, RelayUrl};
 
     #[test]
@@ -510,7 +525,7 @@ mod persistence_stall_replay_tests {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://stalled.example").unwrap();
         let mut core = EngineCore::new_with_fixture_routing_facts(
-            MemoryStore::new(),
+            RedbStore::temporary().expect("temporary Redb store"),
             FixtureRoutingFacts::new(),
             4,
         );
@@ -584,7 +599,7 @@ mod persistence_stall_replay_tests {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://latched.example").unwrap();
         let mut core = EngineCore::new_with_fixture_routing_facts(
-            MemoryStore::new(),
+            RedbStore::temporary().expect("temporary Redb store"),
             FixtureRoutingFacts::new(),
             4,
         );

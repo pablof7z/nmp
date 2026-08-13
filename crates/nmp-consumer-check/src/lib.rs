@@ -369,7 +369,8 @@ mod tests {
     /// nouns are not merely nameable, they are usable.
     #[test]
     fn engine_two_nouns_are_usable_from_nmp_alone() {
-        let engine = Engine::new(EngineConfig::default()).expect("in-memory engine must build");
+        let engine =
+            Engine::new(EngineConfig::default()).expect("temporary Redb engine must build");
 
         let account = engine
             .add_private_key_account(&TEST_SECRET_KEY_BYTES, true)
@@ -455,7 +456,8 @@ mod tests {
             )))
         ));
 
-        let engine = Engine::new(EngineConfig::default()).expect("in-memory engine must build");
+        let engine =
+            Engine::new(EngineConfig::default()).expect("temporary Redb engine must build");
         let identity: PublicKey =
             "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
                 .parse()
