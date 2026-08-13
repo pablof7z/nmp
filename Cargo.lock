@@ -2140,7 +2140,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nmp-document-edit"
+name = "nmp-event-edit"
 version = "0.1.0"
 dependencies = [
  "proptest",
@@ -2214,7 +2214,7 @@ name = "nmp-nip02"
 version = "0.1.0"
 dependencies = [
  "nmp",
- "nmp-document-edit",
+ "nmp-event-edit",
  "nmp-grammar",
  "nostr 0.44.4",
  "tempfile",

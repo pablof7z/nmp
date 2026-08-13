@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use serde::{de::IgnoredAny, Deserialize};
 
-use crate::{DocumentEditPlan, JsonFieldEdit, JsonMissing, Occurrences, PlanError};
+use crate::{EventEditPlan, JsonFieldEdit, JsonMissing, Occurrences, PlanError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JsonSpanPatch {
@@ -49,7 +49,7 @@ impl From<PlanError> for JsonApplyError {
     }
 }
 
-impl DocumentEditPlan {
+impl EventEditPlan {
     pub fn apply_json_object(&self, source: &str) -> Result<JsonEditOutcome, JsonApplyError> {
         apply_json_edit(self.json_edit()?, source)
     }
@@ -418,7 +418,7 @@ mod tests {
     fn unrelated_json_bytes_survive_a_value_edit_exactly() {
         let source =
             r#"{ "dupe\u0064": 1e+09, "target" : false, "duped":-0.0, "nested":{"z":2,"z":3} }"#;
-        let plan = DocumentEditPlan::json_object(
+        let plan = EventEditPlan::json_object(
             JsonFieldEdit::set("target", "true", Occurrences::All, JsonMissing::Insert).unwrap(),
         );
         let outcome = plan.apply_json_object(source).unwrap();
@@ -435,11 +435,11 @@ mod tests {
     #[test]
     fn duplicate_decoded_keys_obey_the_explicit_occurrence_policy() {
         let source = r#"{"x":1,"\u0078":2,"x":3}"#;
-        let plan = DocumentEditPlan::json_object(
+        let plan = EventEditPlan::json_object(
             JsonFieldEdit::set("x", "9", Occurrences::Last, JsonMissing::NoChange).unwrap(),
         );
 
-        let first = DocumentEditPlan::json_object(
+        let first = EventEditPlan::json_object(
             JsonFieldEdit::set("x", "7", Occurrences::First, JsonMissing::NoChange).unwrap(),
         );
         assert_eq!(
@@ -466,7 +466,7 @@ mod tests {
         // lexically distinctive values instead.
         let source = source.replace(":01", ":0.10e1");
         let plan =
-            DocumentEditPlan::json_object(JsonFieldEdit::remove("x", Occurrences::All).unwrap());
+            EventEditPlan::json_object(JsonFieldEdit::remove("x", Occurrences::All).unwrap());
         assert_eq!(
             plan.apply_json_object(&source)
                 .unwrap()
@@ -479,7 +479,7 @@ mod tests {
     #[test]
     fn missing_field_insertion_does_not_reserialize_the_object() {
         let source = r#"{ "a" : 1e2, "a": 3  }"#;
-        let plan = DocumentEditPlan::json_object(
+        let plan = EventEditPlan::json_object(
             JsonFieldEdit::set("new", "[1, 2]", Occurrences::All, JsonMissing::Insert).unwrap(),
         );
         assert_eq!(
@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn no_match_and_no_insert_returns_no_rebuild() {
-        let plan = DocumentEditPlan::json_object(
+        let plan = EventEditPlan::json_object(
             JsonFieldEdit::set("missing", "0", Occurrences::All, JsonMissing::NoChange).unwrap(),
         );
         let outcome = plan.apply_json_object(r#"{"x":1}"#).unwrap();
@@ -505,7 +505,7 @@ mod tests {
     #[test]
     fn selected_value_already_has_exact_bytes_so_no_replacement_is_emitted() {
         let source = r#"{ "target" : 1e+09, "keep":-0.0 }"#;
-        let plan = DocumentEditPlan::json_object(
+        let plan = EventEditPlan::json_object(
             JsonFieldEdit::set("target", "1e+09", Occurrences::All, JsonMissing::NoChange).unwrap(),
         );
         let outcome = plan.apply_json_object(source).unwrap();
@@ -523,7 +523,7 @@ mod tests {
             source.push_str(&format!(r#", "key-{index}":"{}""#, "v".repeat(64)));
         }
         source.push('}');
-        let plan = DocumentEditPlan::json_object(
+        let plan = EventEditPlan::json_object(
             JsonFieldEdit::set(
                 "target",
                 r#""exact""#,

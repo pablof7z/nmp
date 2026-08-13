@@ -1,7 +1,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use nmp_document_edit::{DocumentEditPlan, JsonFieldEdit, JsonMissing, Occurrences};
+use nmp_event_edit::{EventEditPlan, JsonFieldEdit, JsonMissing, Occurrences};
 
 static TRACK: AtomicBool = AtomicBool::new(false);
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
@@ -35,7 +35,7 @@ fn large_exact_json_set_does_not_allocate_a_parallel_document() {
         source.push_str(&format!(r#", "key-{index}":"{}""#, "v".repeat(64)));
     }
     source.push('}');
-    let plan = DocumentEditPlan::json_object(
+    let plan = EventEditPlan::json_object(
         JsonFieldEdit::set(
             "target",
             r#""exact""#,

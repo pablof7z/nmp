@@ -3,41 +3,41 @@ use serde::{de::IgnoredAny, Deserialize, Serialize};
 /// A closed durable envelope. New persisted meanings require a new version.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "version", content = "edit", rename_all = "snake_case")]
-pub enum DocumentEditPlan {
-    V1(DocumentEditV1),
+pub enum EventEditPlan {
+    V1(EventEditV1),
 }
 
-impl DocumentEditPlan {
+impl EventEditPlan {
     pub fn tags(edit: TagEdit) -> Self {
-        Self::V1(DocumentEditV1::Tags(edit))
+        Self::V1(EventEditV1::Tags(edit))
     }
 
     pub fn json_object(edit: JsonFieldEdit) -> Self {
-        Self::V1(DocumentEditV1::JsonObject(edit))
+        Self::V1(EventEditV1::JsonObject(edit))
     }
 
     pub fn partitioned_tags(edit: PartitionedTagEdit) -> Result<Self, PlanError> {
         edit.validate()?;
-        Ok(Self::V1(DocumentEditV1::PartitionedTags(edit)))
+        Ok(Self::V1(EventEditV1::PartitionedTags(edit)))
     }
 
     pub fn tag_edit(&self) -> Result<&TagEdit, PlanError> {
         match self {
-            Self::V1(DocumentEditV1::Tags(edit)) => Ok(edit),
+            Self::V1(EventEditV1::Tags(edit)) => Ok(edit),
             _ => Err(PlanError::DocumentShapeMismatch),
         }
     }
 
     pub fn json_edit(&self) -> Result<&JsonFieldEdit, PlanError> {
         match self {
-            Self::V1(DocumentEditV1::JsonObject(edit)) => Ok(edit),
+            Self::V1(EventEditV1::JsonObject(edit)) => Ok(edit),
             _ => Err(PlanError::DocumentShapeMismatch),
         }
     }
 
     pub fn partitioned_edit(&self) -> Result<&PartitionedTagEdit, PlanError> {
         match self {
-            Self::V1(DocumentEditV1::PartitionedTags(edit)) => Ok(edit),
+            Self::V1(EventEditV1::PartitionedTags(edit)) => Ok(edit),
             _ => Err(PlanError::DocumentShapeMismatch),
         }
     }
@@ -45,7 +45,7 @@ impl DocumentEditPlan {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "document", content = "operation", rename_all = "snake_case")]
-pub enum DocumentEditV1 {
+pub enum EventEditV1 {
     Tags(TagEdit),
     JsonObject(JsonFieldEdit),
     PartitionedTags(PartitionedTagEdit),

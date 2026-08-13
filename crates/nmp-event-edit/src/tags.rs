@@ -1,8 +1,8 @@
 use std::ops::Range;
 
 use crate::{
-    Boundary, DocumentEditPlan, PartitionedTagEdit, PlanError, TagEdit, TagInsertion,
-    TagItemPattern, TagItemSelector, TagRowPattern,
+    Boundary, EventEditPlan, PartitionedTagEdit, PlanError, TagEdit, TagInsertion, TagItemPattern,
+    TagItemSelector, TagRowPattern,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,7 +42,7 @@ impl From<PlanError> for TagApplyError {
     }
 }
 
-impl DocumentEditPlan {
+impl EventEditPlan {
     pub fn apply_tags<R: AsRef<[String]>>(
         &self,
         source: &[R],
@@ -501,7 +501,7 @@ mod tests {
             Partition::Public,
             TagEdit::remove(selector(vec![vec![vec!["p", "target"]]])),
         );
-        let plan = DocumentEditPlan::partitioned_tags(edit).unwrap();
+        let plan = EventEditPlan::partitioned_tags(edit).unwrap();
         let outcome = plan.apply_partitioned_tags(&public, &private).unwrap();
         assert_eq!(
             outcome.public.replacement,
@@ -538,7 +538,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let outcome = DocumentEditPlan::partitioned_tags(edit)
+        let outcome = EventEditPlan::partitioned_tags(edit)
             .unwrap()
             .apply_partitioned_tags(&public, &private)
             .unwrap();
@@ -576,7 +576,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            DocumentEditPlan::tags(before)
+            EventEditPlan::tags(before)
                 .apply_tags(&source)
                 .unwrap()
                 .replacement,
@@ -595,7 +595,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            DocumentEditPlan::tags(after)
+            EventEditPlan::tags(after)
                 .apply_tags(&[row(&["x", "id"]), row(&["anchor"]), row(&["tail"])])
                 .unwrap()
                 .replacement,
@@ -613,7 +613,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            DocumentEditPlan::tags(at_start)
+            EventEditPlan::tags(at_start)
                 .apply_tags(&[row(&["tail"])])
                 .unwrap()
                 .replacement,
@@ -623,7 +623,7 @@ mod tests {
 
     #[test]
     fn plan_round_trips_without_a_runtime_codec() {
-        let plan = DocumentEditPlan::tags(
+        let plan = EventEditPlan::tags(
             TagEdit::ensure_present(
                 selector(vec![vec![vec!["x", "id"]], vec![vec!["legacy", "id"]]]),
                 vec![row(&["x", "id", "current"])],
@@ -632,7 +632,7 @@ mod tests {
             .unwrap(),
         );
         let encoded = serde_json::to_vec(&plan).unwrap();
-        let decoded: DocumentEditPlan = serde_json::from_slice(&encoded).unwrap();
+        let decoded: EventEditPlan = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, plan);
     }
 

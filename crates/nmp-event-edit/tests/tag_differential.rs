@@ -1,5 +1,5 @@
-use nmp_document_edit::{
-    DocumentEditPlan, TagEdit, TagInsertion, TagItemPattern, TagItemSelector, TagRowPattern,
+use nmp_event_edit::{
+    EventEditPlan, TagEdit, TagInsertion, TagItemPattern, TagItemSelector, TagRowPattern,
 };
 use proptest::prelude::*;
 
@@ -34,7 +34,7 @@ proptest! {
             })
             .collect::<Vec<_>>();
 
-        let remove = DocumentEditPlan::tags(TagEdit::remove(selector(&target)));
+        let remove = EventEditPlan::tags(TagEdit::remove(selector(&target)));
         let removed = materialize(&source, remove.apply_tags(&source).unwrap().replacement);
         let reference_removed = source
             .iter()
@@ -46,7 +46,7 @@ proptest! {
             .collect::<Vec<_>>();
         prop_assert_eq!(removed, reference_removed);
 
-        let ensure = DocumentEditPlan::tags(
+        let ensure = EventEditPlan::tags(
             TagEdit::ensure_present(
                 selector(&target),
                 vec![vec!["item".to_string(), target.clone()]],

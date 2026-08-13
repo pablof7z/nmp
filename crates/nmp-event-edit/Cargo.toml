@@ -1,5 +1,5 @@
 [package]
-name = "nmp-document-edit"
+name = "nmp-event-edit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
