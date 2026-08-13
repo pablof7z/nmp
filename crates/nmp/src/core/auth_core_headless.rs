@@ -18,6 +18,7 @@ struct Fixture {
     session: RelaySessionKey,
     handle: RelayHandle,
     sub_id: SubId,
+    atom: ContextualAtom,
 }
 
 impl Fixture {
@@ -42,8 +43,11 @@ impl Fixture {
             10,
         );
         core.attribution.observe_demand([&atom]);
-        core.router
-            .compile(&BTreeSet::from([atom]), &core.routing_facts, core.cap);
+        core.router.compile(
+            &BTreeSet::from([atom.clone()]),
+            &core.routing_facts,
+            core.cap,
+        );
         let sub_id = core.router.plan().reqs[&session][0].sub_id.clone();
         let handle = RelayHandle {
             slot: 7,
@@ -56,6 +60,7 @@ impl Fixture {
             session,
             handle,
             sub_id,
+            atom,
         }
     }
 
@@ -673,16 +678,20 @@ fn exact_success_replays_once_and_only_then_allows_eose_credit() {
     assert_eq!(unsigned.created_at, Timestamp::from(0));
     let (send_token, event) = fixture.sign(sign_token, unsigned);
 
-    let premature = fixture.core.handle(EngineMsg::RelayFrame(
+    let _ = fixture.core.handle(EngineMsg::RelayFrame(
         fixture.handle,
         fixture.session.clone(),
         RelayFrame::from(RelayMessage::eose(SubscriptionId::new(wire_sub_id_string(
             &fixture.sub_id,
         )))),
     ));
-    assert!(!premature
-        .iter()
-        .any(|effect| matches!(effect, Effect::RecordCoverage(..))));
+    assert_eq!(
+        fixture
+            .core
+            .get_coverage(&fixture.atom, &fixture.session.relay)
+            .expect("coverage peek"),
+        None
+    );
 
     fixture.send_accepted(send_token);
     assert!(matches!(
@@ -712,16 +721,18 @@ fn exact_success_replays_once_and_only_then_allows_eose_credit() {
         "duplicate OK is a no-op"
     );
 
-    let credited = fixture.core.handle(EngineMsg::RelayFrame(
+    let _ = fixture.core.handle(EngineMsg::RelayFrame(
         fixture.handle,
         fixture.session.clone(),
         RelayFrame::from(RelayMessage::eose(SubscriptionId::new(wire_sub_id_string(
             &fixture.sub_id,
         )))),
     ));
-    assert!(credited
-        .iter()
-        .any(|effect| matches!(effect, Effect::RecordCoverage(..))));
+    assert!(fixture
+        .core
+        .get_coverage(&fixture.atom, &fixture.session.relay)
+        .expect("coverage peek")
+        .is_some());
 }
 
 #[test]

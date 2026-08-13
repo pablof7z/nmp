@@ -1086,7 +1086,7 @@ fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
     );
 
     let atom = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
-    let stale = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -1094,18 +1094,12 @@ fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
         public_session(&relay0),
         eose_frame(&wire_sub_string(&closed_sub_id)),
     ));
-    assert!(
-        !stale
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "the closed request's late EOSE must credit nothing: {stale:?}"
-    );
     assert_eq!(
         core.get_coverage(&atom, &relay0).expect("coverage peek"),
         None
     );
 
-    let served = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -1113,12 +1107,6 @@ fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
         public_session(&relay0),
         eose_frame(&wire_sub_string(&reopened_sub_id)),
     ));
-    assert!(
-        served
-            .iter()
-            .any(|effect| matches!(effect, Effect::RecordCoverage(..))),
-        "the reopened request's own EOSE must still earn its coverage: {served:?}"
-    );
     assert!(core
         .get_coverage(&atom, &relay0)
         .expect("coverage peek")
