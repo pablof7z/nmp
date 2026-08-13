@@ -2120,6 +2120,43 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiCapabilityAvailability",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "Unsupported",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Available",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "Unavailable",
+            discr: None,
+            fields: [
+                Field {
+                    name: "reason",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
     name: "FfiCommentDecodeError",
     module_path: "nmp_ffi",
     remote: false,
@@ -2623,6 +2660,110 @@ enum Enum {
             docstring: None,
         },
         Variant {
+            name: "InvalidPublicKeyBytes",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A decoded public-key value was not exactly one valid 32-byte x-only\nsecp256k1 public key. The bytes are intentionally absent from errors.",
+            ),
+        },
+        Variant {
+            name: "InvalidPrivateKeyBytes",
+            discr: None,
+            fields: [],
+            docstring: Some(
+                "A decoded private-key value was not exactly one valid 32-byte\nsecp256k1 scalar. The bytes are intentionally absent from errors.",
+            ),
+        },
+        Variant {
+            name: "SessionMalformedPayload",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "SessionUnsupportedVersion",
+            discr: None,
+            fields: [
+                Field {
+                    name: "found",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "SessionUnsupportedProvider",
+            discr: None,
+            fields: [
+                Field {
+                    name: "id",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "SessionUnsupportedProviderVersion",
+            discr: None,
+            fields: [
+                Field {
+                    name: "provider",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+                Field {
+                    name: "found",
+                    type_: UInt16,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "SessionDuplicateAccount",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "SessionCurrentAccountMissing",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "SessionProviderPayloadInvalid",
+            discr: None,
+            fields: [
+                Field {
+                    name: "provider",
+                    type_: String,
+                    default: None,
+                    docstring: None,
+                },
+            ],
+            docstring: None,
+        },
+        Variant {
+            name: "SessionProviderPublicKeyMismatch",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
+            name: "SessionAccountNotFound",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+        Variant {
             name: "InvalidEventId",
             discr: None,
             fields: [
@@ -2676,14 +2817,6 @@ enum Enum {
             ),
         },
         Variant {
-            name: "InvalidSecretKey",
-            discr: None,
-            fields: [],
-            docstring: Some(
-                "`add_account`'s secret key did not parse as a valid nostr key (hex or\nbech32 `nsec`).",
-            ),
-        },
-        Variant {
             name: "InvalidSigner",
             discr: None,
             fields: [
@@ -2720,11 +2853,11 @@ enum Enum {
             ),
         },
         Variant {
-            name: "NoActiveSigner",
+            name: "NoCurrentSigningProvider",
             discr: None,
             fields: [],
             docstring: Some(
-                "The sign-only operation has no active account with a registered\nsigning capability. No operation was accepted.",
+                "The sign-only operation has no current account with a registered\nsigning capability. No operation was accepted.",
             ),
         },
         Variant {
@@ -2739,7 +2872,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "The immutable sign-only request was malformed or named an author\nother than the active account. No signer was invoked.",
+                "The immutable sign-only request was malformed or named an author\nother than the current account. No signer was invoked.",
             ),
         },
         Variant {
@@ -2754,7 +2887,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "`publish` refused the call outright: either NMP could not write\nanything down, or the instruction could not resolve (no active\naccount, a signature that does not verify, an explicit identity\ncontradicting a signed payload's author, a reserved kind, an empty\nexplicit route). Nothing durable exists and there is no queue entry\nto inspect.\n\nEverything else takes CUSTODY and fails in the queue where the app\ncan see it — including a stale replaceable base, which succeeds here\nand arrives as `FfiWriteOutcome::Refused`.",
+                "`publish` refused the call outright: either NMP could not write\nanything down, or the instruction could not resolve (no current\naccount, a signature that does not verify, an explicit identity\ncontradicting a signed payload's author, a reserved kind, an empty\nexplicit route). Nothing durable exists and there is no queue entry\nto inspect.\n\nEverything else takes CUSTODY and fails in the queue where the app\ncan see it — including a stale replaceable base, which succeeds here\nand arrives as `FfiWriteOutcome::Refused`.",
             ),
         },
         Variant {
@@ -3710,7 +3843,7 @@ enum Enum {
             discr: None,
             fields: [],
             docstring: Some(
-                "Whoever is the active account at acceptance time.",
+                "Whoever is the current account at acceptance time.",
             ),
         },
         Variant {
@@ -3725,14 +3858,14 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "This exact key, active or not -- including while fully logged out.\n\n`pubkey` is 64-char HEX and nothing else: the module-wide\n`convert::parse_pubkey` rule every other pubkey input here follows.\nA bech32 `npub` is REFUSED, however well-formed -- bech32 is\noutward-facing decoration an app decodes at its own boundary (with\n`decode_nostr_entity`) at the moment a human pasted it, not an\nencoding the write plane accepts\n(`docs/internals/conventions/bech32-boundary.md`). A malformed\nstring is a typed synchronous\n[`crate::convert::FfiError::InvalidPublicKey`] before any engine\ncall.\n\nA key with no registered signer parks as\n[`FfiSigningState::AwaitingSigner`] (retained, not terminated)\nuntil that capability attaches. Acceptance PINS the resolved key\neither way, so a later `set_active_account` cannot retarget the\nwrite.",
+                "This exact key, current or not -- including while fully logged out.\n\n`pubkey` is 64-char HEX and nothing else: the module-wide\n`convert::parse_pubkey` rule every other pubkey input here follows.\nA bech32 `npub` is REFUSED, however well-formed -- bech32 is\noutward-facing decoration an app decodes at its own boundary (with\n`decode_nostr_entity`) at the moment a human pasted it, not an\nencoding the write plane accepts\n(`docs/internals/conventions/bech32-boundary.md`). A malformed\nstring is a typed synchronous\n[`crate::convert::FfiError::InvalidPublicKey`] before any engine\ncall.\n\nA key with no configured signing provider parks as\n[`FfiSigningState::AwaitingSigner`] (retained, not terminated)\nuntil that account's provider becomes available. Acceptance PINS the resolved key\neither way, so a later current-account change cannot retarget the\nwrite.",
             ),
         },
     ],
     shape: Enum,
     non_exhaustive: false,
     docstring: Some(
-        "The identity one write publishes under (`nmp::Identity` mirror): two\nvariants, mirrored exactly, with no third \"unset\" state on any platform.\n\n[`Active`](FfiIdentity::Active) is a positive instruction (\"whoever is\nthe active account at acceptance\"), not the absence of one -- which is\nwhy this is a closed enum rather than the nullable pubkey string it\nreplaces. On an `Event` payload the identity SELECTS the author (a\nbuilder states none, so there is nothing for it to contradict); on a\n`Signed` payload it may only RESTATE the author already frozen in the\nbytes, and naming anybody else is a consent/author contradiction\nrejected by `publish` ITSELF as\n[`FfiError::PublishRefused`](crate::convert::FfiError::PublishRefused) --\nnothing is taken into custody, so no receipt and no queue entry exist.",
+        "The identity one write publishes under (`nmp::Identity` mirror): two\nvariants, mirrored exactly, with no third \"unset\" state on any platform.\n\n[`Active`](FfiIdentity::Active) is a positive instruction (\"whoever is\nthe current account at acceptance\"), not the absence of one -- which is\nwhy this is a closed enum rather than the nullable pubkey string it\nreplaces. On an `Event` payload the identity SELECTS the author (a\nbuilder states none, so there is nothing for it to contradict); on a\n`Signed` payload it may only RESTATE the author already frozen in the\nbytes, and naming anybody else is a consent/author contradiction\nrejected by `publish` ITSELF as\n[`FfiError::PublishRefused`](crate::convert::FfiError::PublishRefused) --\nnothing is taken into custody, so no receipt and no queue entry exist.",
     ),
 }
 
@@ -5159,6 +5292,24 @@ enum Enum {
 }
 
 enum Enum {
+    name: "FfiSessionProviderKind",
+    module_path: "nmp_ffi",
+    remote: false,
+    discr_type: None,
+    variants: [
+        Variant {
+            name: "LocalKey",
+            discr: None,
+            fields: [],
+            docstring: None,
+        },
+    ],
+    shape: Enum,
+    non_exhaustive: false,
+    docstring: None,
+}
+
+enum Enum {
     name: "FfiSetAlgebra",
     module_path: "nmp_ffi",
     remote: false,
@@ -5323,7 +5474,7 @@ enum Enum {
                 },
             ],
             docstring: Some(
-                "No registered signer answers for `pubkey` (64-char hex) — the exact\nidentity FROZEN at acceptance, never whoever is active now. Re-armed\nonly by attaching a signer for THIS key.\n\n**No clock ever ends this.** A device whose signer is simply not\nplugged in yet is not a device whose write failed; the app's own\ndecision is the only other exit, and it is two calls: cancel the\nwrite, then remove the terminal queue entry it leaves behind.\n\nThis is the state a person has to be told about, and\n[`FfiSigningState::InFlight`] is the one it must never be confused\nwith.",
+                "No configured signing provider answers for `pubkey` (64-char hex) —\nthe exact identity FROZEN at acceptance, never whichever account is\ncurrent now. Re-armed only when THIS account's provider becomes available.\n\n**No clock ever ends this.** A device whose signer is simply not\nplugged in yet is not a device whose write failed; the app's own\ndecision is the only other exit, and it is two calls: cancel the\nwrite, then remove the terminal queue entry it leaves behind.\n\nThis is the state a person has to be told about, and\n[`FfiSigningState::InFlight`] is the one it must never be confused\nwith.",
             ),
         },
         Variant {
@@ -5515,7 +5666,7 @@ enum Enum {
             discr: None,
             fields: [],
             docstring: Some(
-                "No signer answers for the author this write was FROZEN to -- never\nthe mutable active account.",
+                "No signer answers for the author this write was FROZEN to -- never\nthe mutable current account.",
             ),
         },
         Variant {
@@ -6186,7 +6337,7 @@ record Record {
         },
     ],
     docstring: Some(
-        "An UNSIGNED kind:24242 authorization draft. This module never signs --\nthe app does, through whichever signer path it has:\n\n- engine sign-only path: feed `created_at_secs`/`kind`/`tags`/`content`\ninto `FfiSignEventRequest` and call `NmpEngine::sign_event` (the\nauthor is frozen from the ACTIVE ACCOUNT, so `author_pubkey_hex`\npassed to the draft builder must be that account's pubkey); the\nresulting `FfiSignedEvent` enters\n[`FfiBlossomAuthorization::validate_signed_event`];\n- external/native signer path: hand `unsigned_event_json` to the\nsigner, then pass the signed event's canonical JSON to\n[`FfiBlossomAuthorization::validate`].",
+        "An UNSIGNED kind:24242 authorization draft. This module never signs --\nthe app does, through whichever signer path it has:\n\n- engine sign-only path: feed `created_at_secs`/`kind`/`tags`/`content`\ninto `FfiSignEventRequest` and call `NmpEngine::sign_event` (the\nauthor is frozen from the CURRENT ACCOUNT, so `author_pubkey_hex`\npassed to the draft builder must be that account's pubkey); the\nresulting `FfiSignedEvent` enters\n[`FfiBlossomAuthorization::validate_signed_event`];\n- external/native signer path: hand `unsigned_event_json` to the\nsigner, then pass the signed event's canonical JSON to\n[`FfiBlossomAuthorization::validate`].",
     ),
 }
 
@@ -6758,7 +6909,7 @@ record Record {
     remote: false,
     fields: [
         Field {
-            name: "active_pubkey",
+            name: "current_pubkey",
             type_: Optional {
                 inner_type: String,
             },
@@ -8103,6 +8254,39 @@ record Record {
 }
 
 record Record {
+    name: "FfiSessionSnapshot",
+    module_path: "nmp_ffi",
+    remote: false,
+    fields: [
+        Field {
+            name: "accounts",
+            type_: Sequence {
+                inner_type: Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiSessionAccount",
+                    imp: Struct,
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+        Field {
+            name: "current_public_key",
+            type_: Optional {
+                inner_type: Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiPublicKey",
+                    imp: Struct,
+                },
+            },
+            default: None,
+            docstring: None,
+        },
+    ],
+    docstring: None,
+}
+
+record Record {
     name: "FfiSignEventRequest",
     module_path: "nmp_ffi",
     remote: false,
@@ -8612,44 +8796,6 @@ record Record {
     ],
     docstring: Some(
         "Construction config for [`NmpEngine::new`]. Build-time feature selection\ncontrols which fields exist; runtime relay values remain app-owned inputs.",
-    ),
-}
-
-function Function {
-    name: "active_account_demand",
-    module_path: "nmp_ffi",
-    is_async: false,
-    arguments: [],
-    return_type: Some(
-        Record {
-            module_path: "nmp_ffi",
-            name: "FfiDemand",
-        },
-    ),
-    ffi_func: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_func_active_account_demand",
-        is_async: false,
-        arguments: [],
-        return_type: Some(
-            RustBuffer(
-                Some(
-                    ExternalFfiMetadata {
-                        name: "FfiDemand",
-                        module_path: "nmp_ffi",
-                    },
-                ),
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    docstring: Some(
-        "The signed-in account's Simple-groups-list demand (#108,\n`nmp::nip51::active_account_demand` mirror): `kinds:[10009]`,\n`AuthorOutboxes + Public`. Signed-out (no active account) resolves to\nzero atoms through the ordinary reactive-binding empty-resolution path\n-- no special case needed on either side of this boundary.\n\n#858 moved this out of `crate::nip29`: kind:10009 is NIP-51's kind, so\nits demand constructor lives with the rest of NIP-51.",
-    ),
-    throws: None,
-    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_active_account_demand",
-    checksum: Some(
-        58732,
     ),
 }
 
@@ -9392,6 +9538,44 @@ function Function {
 }
 
 function Function {
+    name: "current_account_demand",
+    module_path: "nmp_ffi",
+    is_async: false,
+    arguments: [],
+    return_type: Some(
+        Record {
+            module_path: "nmp_ffi",
+            name: "FfiDemand",
+        },
+    ),
+    ffi_func: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_func_current_account_demand",
+        is_async: false,
+        arguments: [],
+        return_type: Some(
+            RustBuffer(
+                Some(
+                    ExternalFfiMetadata {
+                        name: "FfiDemand",
+                        module_path: "nmp_ffi",
+                    },
+                ),
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    docstring: Some(
+        "The signed-in account's Simple-groups-list demand (#108,\n`nmp::nip51::current_account_demand` mirror): `kinds:[10009]`,\n`AuthorOutboxes + Public`. Signed-out (no current account) resolves to\nzero atoms through the ordinary reactive-binding empty-resolution path\n-- no special case needed on either side of this boundary.\n\n#858 moved this out of `crate::nip29`: kind:10009 is NIP-51's kind, so\nits demand constructor lives with the rest of NIP-51.",
+    ),
+    throws: None,
+    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_current_account_demand",
+    checksum: Some(
+        1291,
+    ),
+}
+
+function Function {
     name: "decode_comment",
     module_path: "nmp_ffi",
     is_async: false,
@@ -9512,36 +9696,6 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_decode_nostr_entity",
     checksum: Some(
         43591,
-    ),
-}
-
-function Function {
-    name: "generate_account_secret_key",
-    module_path: "nmp_ffi",
-    is_async: false,
-    arguments: [],
-    return_type: Some(
-        String,
-    ),
-    ffi_func: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_func_generate_account_secret_key",
-        is_async: false,
-        arguments: [],
-        return_type: Some(
-            RustBuffer(
-                None,
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    docstring: Some(
-        "Generate a fresh local-account secret key via OS RNG (hex-encoded,\n`NmpEngine::add_account`-compatible) -- the one keygen-only FFI door #588\nasks for. This function touches no engine state, installs no signer, and\npersists nothing: a native wrapper composes it with the existing\n`add_account` to give a clean-start client its first identity, inheriting\nthat method's save-with-rollback choreography and checkpoint tracking\nwholesale instead of a second, parallel registration pipeline.",
-    ),
-    throws: None,
-    checksum_fn_name: "uniffi_nmp_ffi_checksum_func_generate_account_secret_key",
-    checksum: Some(
-        6489,
     ),
 }
 
@@ -10157,7 +10311,7 @@ function Function {
         is_object_free_function: false,
     },
     docstring: Some(
-        "Destructively reset a closed persistent NMP store. This removes all\ncanonical engine state at `store_path`, while leaving any separately\nconfigured native account checkpoint untouched. A live engine in this OR\nANY OTHER process using the same canonical path is refused with\n`FfiError::StoreStillOpen` without touching the file. Shut down or drop\nthat engine first. The operation is idempotent when the store does not\nexist.",
+        "Destructively reset a closed persistent NMP store. This removes all\ncanonical engine state at `store_path`. A live engine in this OR\nANY OTHER process using the same canonical path is refused with\n`FfiError::StoreStillOpen` without touching the file. Shut down or drop\nthat engine first. The operation is idempotent when the store does not\nexist.",
     ),
     throws: Some(
         Enum {
@@ -10167,7 +10321,7 @@ function Function {
     ),
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_reset_persistent_store",
     checksum: Some(
-        52986,
+        8205,
     ),
 }
 
@@ -10252,93 +10406,6 @@ function Function {
     checksum_fn_name: "uniffi_nmp_ffi_checksum_func_with_content",
     checksum: Some(
         1307,
-    ),
-}
-
-object Object {
-    name: "FfiAccountRegistration",
-    imp: Struct,
-    module_path: "nmp_ffi",
-    remote: false,
-    constructors: [],
-    methods: [
-        Method {
-            name: "public_key",
-            object_name: "FfiAccountRegistration",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: Some(
-                String,
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_ffiaccountregistration_public_key",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "FfiAccountRegistration",
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    RustBuffer(
-                        None,
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: None,
-            throws: None,
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffiaccountregistration_public_key",
-            checksum: Some(
-                16512,
-            ),
-        },
-    ],
-    uniffi_traits: [],
-    trait_impls: [],
-    ffi_func_clone: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_clone_ffiaccountregistration",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "ptr",
-                type_: RustArcPtr(
-                    "FfiAccountRegistration",
-                ),
-            },
-        ],
-        return_type: Some(
-            RustArcPtr(
-                "FfiAccountRegistration",
-            ),
-        ),
-        has_rust_call_status_arg: true,
-        is_object_free_function: false,
-    },
-    ffi_func_free: FfiFunction {
-        name: "uniffi_nmp_ffi_fn_free_ffiaccountregistration",
-        is_async: false,
-        arguments: [
-            FfiArgument {
-                name: "ptr",
-                type_: RustArcPtr(
-                    "FfiAccountRegistration",
-                ),
-            },
-        ],
-        return_type: None,
-        has_rust_call_status_arg: true,
-        is_object_free_function: true,
-    },
-    ffi_init_callback: None,
-    docstring: Some(
-        "Opaque proof for one exact local-account installation. Dropping this\nobject does not remove the account; removal is explicit and repeatable.",
     ),
 }
 
@@ -12532,7 +12599,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Publish an unsigned draft into the group, as `author`\n(`nmp::nip29::Group::publish` mirror) -- the group's ONE write door\n(#1292).\n\nThe `h` row is appended before signing, the route is the scope's own\nhosts, and `author` is frozen as an exact decoded pubkey rather than\nthe active-account selector (#878). Returns the ORDINARY\n[`NmpReceiptStream`], store-issued receipt id included.\n\nAn app that needs a signed event WITHOUT publishing it asks the engine\nfor exactly that: `NmpEngine::signEvent` creates no write intent,\nreceipt or publication and hands back the signed event.",
+                "Publish an unsigned draft into the group, as `author`\n(`nmp::nip29::Group::publish` mirror) -- the group's ONE write door\n(#1292).\n\nThe `h` row is appended before signing, the route is the scope's own\nhosts, and `author` is frozen as an exact decoded pubkey rather than\nthe current-account selector (#878). Returns the ORDINARY\n[`NmpReceiptStream`], store-issued receipt id included.\n\nAn app that needs a signed event WITHOUT publishing it asks the engine\nfor exactly that: `NmpEngine::signEvent` creates no write intent,\nreceipt or publication and hands back the signed event.",
             ),
             throws: Some(
                 Enum {
@@ -12543,7 +12610,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffigroup_publish",
             checksum: Some(
-                14262,
+                21099,
             ),
         },
         Method {
@@ -13340,6 +13407,274 @@ object Object {
 }
 
 object Object {
+    name: "FfiPrivateKey",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [
+        Constructor {
+            name: "from_bytes",
+            object_name: "FfiPrivateKey",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            arguments: [
+                Argument {
+                    name: "bytes",
+                    type_: Bytes,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_constructor_ffiprivatekey_from_bytes",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "bytes",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiPrivateKey",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_constructor_ffiprivatekey_from_bytes",
+            checksum: Some(
+                45164,
+            ),
+            self_type: Object {
+                module_path: "nmp_ffi",
+                name: "FfiPrivateKey",
+                imp: Struct,
+            },
+        },
+        Constructor {
+            name: "generate",
+            object_name: "FfiPrivateKey",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            arguments: [],
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_constructor_ffiprivatekey_generate",
+                is_async: false,
+                arguments: [],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiPrivateKey",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_constructor_ffiprivatekey_generate",
+            checksum: Some(
+                8299,
+            ),
+            self_type: Object {
+                module_path: "nmp_ffi",
+                name: "FfiPrivateKey",
+                imp: Struct,
+            },
+        },
+    ],
+    methods: [],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffiprivatekey",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiPrivateKey",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiPrivateKey",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffiprivatekey",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiPrivateKey",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "One validated decoded Nostr private key.\n\nThe object intentionally has no byte accessor. Its owned byte buffer is\nwiped when the final native reference is released. No claim is made about\ncopies created by an app before construction or by the FFI transport.",
+    ),
+}
+
+object Object {
+    name: "FfiPublicKey",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [
+        Constructor {
+            name: "from_bytes",
+            object_name: "FfiPublicKey",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            arguments: [
+                Argument {
+                    name: "bytes",
+                    type_: Bytes,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_constructor_ffipublickey_from_bytes",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "bytes",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiPublicKey",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_constructor_ffipublickey_from_bytes",
+            checksum: Some(
+                46145,
+            ),
+            self_type: Object {
+                module_path: "nmp_ffi",
+                name: "FfiPublicKey",
+                imp: Struct,
+            },
+        },
+    ],
+    methods: [
+        Method {
+            name: "bytes",
+            object_name: "FfiPublicKey",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Bytes,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffipublickey_bytes",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiPublicKey",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffipublickey_bytes",
+            checksum: Some(
+                48199,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffipublickey",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiPublicKey",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiPublicKey",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffipublickey",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiPublicKey",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "One validated decoded Nostr public key.",
+    ),
+}
+
+object Object {
     name: "FfiRelayScope",
     imp: Struct,
     module_path: "nmp_ffi",
@@ -13678,6 +14013,315 @@ object Object {
     ffi_init_callback: None,
     docstring: Some(
         "The relays a group lives on -- named once, retained privately inside the\nopaque handle, and never asked for again (`nmp::nip29::RelayScope`\nmirror). `hosts` crosses the boundary as raw strings, unlike the\ndirect-Rust `on`'s `RelayUrl`s: fallibility (an empty set, or a host that\ndoes not parse) is restored HERE, because the boundary widens from one\nhost to a caller-supplied set and a set can be empty where a single host\ncould not be.",
+    ),
+}
+
+object Object {
+    name: "FfiSessionAccount",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [],
+    methods: [
+        Method {
+            name: "provider",
+            object_name: "FfiSessionAccount",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Optional {
+                    inner_type: Enum {
+                        module_path: "nmp_ffi",
+                        name: "FfiSessionProviderKind",
+                    },
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffisessionaccount_provider",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiSessionAccount",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffisessionaccount_provider",
+            checksum: Some(
+                58750,
+            ),
+        },
+        Method {
+            name: "public_key",
+            object_name: "FfiSessionAccount",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiPublicKey",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffisessionaccount_public_key",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiSessionAccount",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiPublicKey",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffisessionaccount_public_key",
+            checksum: Some(
+                6995,
+            ),
+        },
+        Method {
+            name: "signing_availability",
+            object_name: "FfiSessionAccount",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiCapabilityAvailability",
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffisessionaccount_signing_availability",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiSessionAccount",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiCapabilityAvailability",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffisessionaccount_signing_availability",
+            checksum: Some(
+                17015,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffisessionaccount",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiSessionAccount",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiSessionAccount",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffisessionaccount",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiSessionAccount",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: None,
+}
+
+object Object {
+    name: "FfiSessionPayload",
+    imp: Struct,
+    module_path: "nmp_ffi",
+    remote: false,
+    constructors: [
+        Constructor {
+            name: "from_bytes",
+            object_name: "FfiSessionPayload",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            arguments: [
+                Argument {
+                    name: "bytes",
+                    type_: Bytes,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_constructor_ffisessionpayload_from_bytes",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "bytes",
+                        type_: RustBuffer(
+                            None,
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiSessionPayload",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_constructor_ffisessionpayload_from_bytes",
+            checksum: Some(
+                15195,
+            ),
+            self_type: Object {
+                module_path: "nmp_ffi",
+                name: "FfiSessionPayload",
+                imp: Struct,
+            },
+        },
+    ],
+    methods: [
+        Method {
+            name: "bytes",
+            object_name: "FfiSessionPayload",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Bytes,
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_ffisessionpayload_bytes",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "FfiSessionPayload",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustBuffer(
+                        None,
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: None,
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_ffisessionpayload_bytes",
+            checksum: Some(
+                55648,
+            ),
+        },
+    ],
+    uniffi_traits: [],
+    trait_impls: [],
+    ffi_func_clone: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_clone_ffisessionpayload",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiSessionPayload",
+                ),
+            },
+        ],
+        return_type: Some(
+            RustArcPtr(
+                "FfiSessionPayload",
+            ),
+        ),
+        has_rust_call_status_arg: true,
+        is_object_free_function: false,
+    },
+    ffi_func_free: FfiFunction {
+        name: "uniffi_nmp_ffi_fn_free_ffisessionpayload",
+        is_async: false,
+        arguments: [
+            FfiArgument {
+                name: "ptr",
+                type_: RustArcPtr(
+                    "FfiSessionPayload",
+                ),
+            },
+        ],
+        return_type: None,
+        has_rust_call_status_arg: true,
+        is_object_free_function: true,
+    },
+    ffi_init_callback: None,
+    docstring: Some(
+        "Opaque canonical bytes representing one complete engine session.",
     ),
 }
 
@@ -14042,6 +14686,19 @@ object Object {
                     optional: false,
                     default: None,
                 },
+                Argument {
+                    name: "session_payload",
+                    type_: Optional {
+                        inner_type: Object {
+                            module_path: "nmp_ffi",
+                            name: "FfiSessionPayload",
+                            imp: Struct,
+                        },
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
             ],
             ffi_func: FfiFunction {
                 name: "uniffi_nmp_ffi_fn_constructor_nmpengine_new",
@@ -14056,6 +14713,12 @@ object Object {
                                     module_path: "nmp_ffi",
                                 },
                             ),
+                        ),
+                    },
+                    FfiArgument {
+                        name: "session_payload",
+                        type_: RustBuffer(
+                            None,
                         ),
                     },
                 ],
@@ -14076,7 +14739,7 @@ object Object {
             ),
             checksum_fn_name: "uniffi_nmp_ffi_checksum_constructor_nmpengine_new",
             checksum: Some(
-                10342,
+                24722,
             ),
             self_type: Object {
                 module_path: "nmp_ffi",
@@ -14086,114 +14749,6 @@ object Object {
         },
     ],
     methods: [
-        Method {
-            name: "active_account",
-            object_name: "NmpEngine",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [],
-            return_type: Some(
-                Optional {
-                    inner_type: String,
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_active_account",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpEngine",
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    RustBuffer(
-                        None,
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Return the account currently rooting reactive identity and unsigned\nwrites. The secret and signer capability remain engine-owned; native\ncallers receive only the public key needed for presentation.",
-            ),
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_active_account",
-            checksum: Some(
-                50911,
-            ),
-        },
-        Method {
-            name: "add_account",
-            object_name: "NmpEngine",
-            object_module_path: "nmp_ffi",
-            is_async: false,
-            object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "secret_key",
-                    type_: String,
-                    by_ref: false,
-                    optional: false,
-                    default: None,
-                },
-            ],
-            return_type: Some(
-                Object {
-                    module_path: "nmp_ffi",
-                    name: "FfiAccountRegistration",
-                    imp: Struct,
-                },
-            ),
-            ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_add_account",
-                is_async: false,
-                arguments: [
-                    FfiArgument {
-                        name: "ptr",
-                        type_: RustArcPtr(
-                            "NmpEngine",
-                        ),
-                    },
-                    FfiArgument {
-                        name: "secret_key",
-                        type_: RustBuffer(
-                            None,
-                        ),
-                    },
-                ],
-                return_type: Some(
-                    RustArcPtr(
-                        "FfiAccountRegistration",
-                    ),
-                ),
-                has_rust_call_status_arg: true,
-                is_object_free_function: false,
-            },
-            docstring: Some(
-                "Register an account from its secret key (hex or bech32 `nsec`). The\nkey crosses this boundary exactly once, as a value, and lives in the\nengine from this point on (VISION ledger #12; M4 plan §5) -- this\nmethod does NOT make the account active, call\n[`Self::set_active_account`] for that. Returns the opaque exact\nregistration required for stale-safe explicit removal.",
-            ),
-            throws: Some(
-                Enum {
-                    module_path: "nmp_ffi",
-                    name: "FfiError",
-                },
-            ),
-            takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_add_account",
-            checksum: Some(
-                2164,
-            ),
-        },
         Method {
             name: "add_auth_policy",
             object_name: "NmpEngine",
@@ -14271,6 +14826,156 @@ object Object {
             ),
         },
         Method {
+            name: "add_private_key_account",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "private_key",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "FfiPrivateKey",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "make_current",
+                    type_: Boolean,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiSessionAccount",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_add_private_key_account",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "private_key",
+                        type_: RustArcPtr(
+                            "FfiPrivateKey",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "make_current",
+                        type_: Int8,
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiSessionAccount",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_add_private_key_account",
+            checksum: Some(
+                55191,
+            ),
+        },
+        Method {
+            name: "add_public_key_account",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "public_key",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "FfiPublicKey",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+                Argument {
+                    name: "make_current",
+                    type_: Boolean,
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiSessionAccount",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_add_public_key_account",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "public_key",
+                        type_: RustArcPtr(
+                            "FfiPublicKey",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "make_current",
+                        type_: Int8,
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiSessionAccount",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_add_public_key_account",
+            checksum: Some(
+                13713,
+            ),
+        },
+        Method {
             name: "cancel",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -14335,6 +15040,88 @@ object Object {
             ),
         },
         Method {
+            name: "clear_session",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_clear_session",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_clear_session",
+            checksum: Some(
+                22557,
+            ),
+        },
+        Method {
+            name: "export_session",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [],
+            return_type: Some(
+                Object {
+                    module_path: "nmp_ffi",
+                    name: "FfiSessionPayload",
+                    imp: Struct,
+                },
+            ),
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_export_session",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                ],
+                return_type: Some(
+                    RustArcPtr(
+                        "FfiSessionPayload",
+                    ),
+                ),
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_export_session",
+            checksum: Some(
+                52365,
+            ),
+        },
+        Method {
             name: "follow",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
@@ -14394,6 +15181,60 @@ object Object {
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_follow",
             checksum: Some(
                 45378,
+            ),
+        },
+        Method {
+            name: "make_current_account",
+            object_name: "NmpEngine",
+            object_module_path: "nmp_ffi",
+            is_async: false,
+            object_impl: Struct,
+            arguments: [
+                Argument {
+                    name: "account",
+                    type_: Object {
+                        module_path: "nmp_ffi",
+                        name: "FfiSessionAccount",
+                        imp: Struct,
+                    },
+                    by_ref: false,
+                    optional: false,
+                    default: None,
+                },
+            ],
+            return_type: None,
+            ffi_func: FfiFunction {
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_make_current_account",
+                is_async: false,
+                arguments: [
+                    FfiArgument {
+                        name: "ptr",
+                        type_: RustArcPtr(
+                            "NmpEngine",
+                        ),
+                    },
+                    FfiArgument {
+                        name: "account",
+                        type_: RustArcPtr(
+                            "FfiSessionAccount",
+                        ),
+                    },
+                ],
+                return_type: None,
+                has_rust_call_status_arg: true,
+                is_object_free_function: false,
+            },
+            docstring: None,
+            throws: Some(
+                Enum {
+                    module_path: "nmp_ffi",
+                    name: "FfiError",
+                },
+            ),
+            takes_self_by_arc: false,
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_make_current_account",
+            checksum: Some(
+                53180,
             ),
         },
         Method {
@@ -14580,7 +15421,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Observe the active account's relationship to `target` through the\nNMP-owned NIP-02 resource (#680). Awaiting [`NmpFollowStream::next`]\ncosts no NMP-owned OS thread: the relationship snapshot is folded inline\nover the engine's waker-driven async row mailbox. Contact-list\nsemantics and acquisition state stay in Rust and arrive as complete\nself-contained snapshots.",
+                "Observe the current account's relationship to `target` through the\nNMP-owned NIP-02 resource (#680). Awaiting [`NmpFollowStream::next`]\ncosts no NMP-owned OS thread: the relationship snapshot is folded inline\nover the engine's waker-driven async row mailbox. Contact-list\nsemantics and acquisition state stay in Rust and arrive as complete\nself-contained snapshots.",
             ),
             throws: Some(
                 Enum {
@@ -14591,7 +15432,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_observe_following",
             checksum: Some(
-                13924,
+                41307,
             ),
         },
         Method {
@@ -15135,10 +15976,10 @@ object Object {
             object_impl: Struct,
             arguments: [
                 Argument {
-                    name: "registration",
+                    name: "account",
                     type_: Object {
                         module_path: "nmp_ffi",
-                        name: "FfiAccountRegistration",
+                        name: "FfiSessionAccount",
                         imp: Struct,
                     },
                     by_ref: false,
@@ -15160,9 +16001,9 @@ object Object {
                         ),
                     },
                     FfiArgument {
-                        name: "registration",
+                        name: "account",
                         type_: RustArcPtr(
-                            "FfiAccountRegistration",
+                            "FfiSessionAccount",
                         ),
                     },
                 ],
@@ -15172,9 +16013,7 @@ object Object {
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
-            docstring: Some(
-                "Remove only the account installation proven by `registration`.\nRepeated or stale cleanup returns `false`.",
-            ),
+            docstring: None,
             throws: Some(
                 Enum {
                     module_path: "nmp_ffi",
@@ -15184,7 +16023,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_remove_account",
             checksum: Some(
-                30488,
+                2415,
             ),
         },
         Method {
@@ -15298,25 +16137,20 @@ object Object {
             ),
         },
         Method {
-            name: "set_active_account",
+            name: "session",
             object_name: "NmpEngine",
             object_module_path: "nmp_ffi",
             is_async: false,
             object_impl: Struct,
-            arguments: [
-                Argument {
-                    name: "pubkey",
-                    type_: Optional {
-                        inner_type: String,
-                    },
-                    by_ref: false,
-                    optional: false,
-                    default: None,
+            arguments: [],
+            return_type: Some(
+                Record {
+                    module_path: "nmp_ffi",
+                    name: "FfiSessionSnapshot",
                 },
-            ],
-            return_type: None,
+            ),
             ffi_func: FfiFunction {
-                name: "uniffi_nmp_ffi_fn_method_nmpengine_set_active_account",
+                name: "uniffi_nmp_ffi_fn_method_nmpengine_session",
                 is_async: false,
                 arguments: [
                     FfiArgument {
@@ -15325,20 +16159,21 @@ object Object {
                             "NmpEngine",
                         ),
                     },
-                    FfiArgument {
-                        name: "pubkey",
-                        type_: RustBuffer(
-                            None,
-                        ),
-                    },
                 ],
-                return_type: None,
+                return_type: Some(
+                    RustBuffer(
+                        Some(
+                            ExternalFfiMetadata {
+                                name: "FfiSessionSnapshot",
+                                module_path: "nmp_ffi",
+                            },
+                        ),
+                    ),
+                ),
                 has_rust_call_status_arg: true,
                 is_object_free_function: false,
             },
-            docstring: Some(
-                "Re-root every reactive query AND the active signing capability\ntogether onto `pubkey` (`None` -> logged-out / read-only). `pubkey`\nneed not have been added via [`Self::add_account`] -- read-only\nbrowsing of an account this app holds no key for is legal; a write\npublished while active in that state parks on\n`FfiSigningState::AwaitingSigner` until a signer for THAT key\nattaches, never a panic (M4 plan §5).",
-            ),
+            docstring: None,
             throws: Some(
                 Enum {
                     module_path: "nmp_ffi",
@@ -15346,9 +16181,9 @@ object Object {
                 },
             ),
             takes_self_by_arc: false,
-            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_set_active_account",
+            checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_session",
             checksum: Some(
-                55064,
+                40837,
             ),
         },
         Method {
@@ -15440,7 +16275,7 @@ object Object {
                 is_object_free_function: false,
             },
             docstring: Some(
-                "Sign one exact event through the active account without accepting a\nwrite, persisting a row/receipt, planning relays, or publishing. The\nreturned [`NmpSignEventHandle`] delivers the outcome once through its\n`async fn signed()`; [`NmpSignEventHandle::cancel`] cancels only this\nsigner operation.",
+                "Sign one exact event through the current account without accepting a\nwrite, persisting a row/receipt, planning relays, or publishing. The\nreturned [`NmpSignEventHandle`] delivers the outcome once through its\n`async fn signed()`; [`NmpSignEventHandle::cancel`] cancels only this\nsigner operation.",
             ),
             throws: Some(
                 Enum {
@@ -15451,7 +16286,7 @@ object Object {
             takes_self_by_arc: false,
             checksum_fn_name: "uniffi_nmp_ffi_checksum_method_nmpengine_sign_event",
             checksum: Some(
-                26885,
+                63655,
             ),
         },
         Method {
