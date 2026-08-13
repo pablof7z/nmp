@@ -1251,6 +1251,7 @@ fn decode_lane_state(
 }
 
 pub(crate) fn encode_lane(
+    event_id: EventId,
     revision: u64,
     last_ordinal: u64,
     state: &PublishQueueLaneState,
@@ -1261,6 +1262,7 @@ pub(crate) fn encode_lane(
         ));
     }
     let mut encoder = Encoder::new(LANE_MAGIC);
+    encoder.fixed(event_id.as_bytes());
     encoder.u64(revision);
     encoder.u64(last_ordinal);
     encode_lane_state(&mut encoder, state)?;
@@ -1269,8 +1271,9 @@ pub(crate) fn encode_lane(
 
 pub(super) fn decode_lane(
     bytes: &[u8],
-) -> Result<(u64, u64, PublishQueueLaneState), PublishQueueCodecError> {
+) -> Result<(EventId, u64, u64, PublishQueueLaneState), PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, LANE_MAGIC)?;
+    let event_id = decoder.event_id()?;
     let revision = decoder.u64()?;
     let last_ordinal = decoder.u64()?;
     let state = decode_lane_state(&mut decoder)?;
@@ -1291,7 +1294,7 @@ pub(super) fn decode_lane(
             "lane state ordinal disagrees with cursor",
         ));
     }
-    Ok((revision, last_ordinal, state))
+    Ok((event_id, revision, last_ordinal, state))
 }
 
 pub(super) fn encode_deadline(lane_revision: u64, kind: PublishQueueDeadlineKind) -> Vec<u8> {
