@@ -175,6 +175,11 @@ pub struct MemoryStore {
     /// open intent rows. Superseded safety receipts are age/count pruned;
     /// other terminal classes survive until the app removes them.
     publish_queue_receipts: HashMap<u64, PublishQueueReceipt>,
+    /// Ordered projection of only disposable supersession evidence. The
+    /// receipt map remains authoritative; every receipt mutation updates this
+    /// projection in the same `MemoryStore` call so deadline work never scans
+    /// unrelated retained terminal history (#1415).
+    superseded_receipts: BTreeSet<(Timestamp, u64)>,
     /// `PUBLISH_QUEUE_CORRELATIONS` mirror (#591): caller correlation token ->
     /// the receipt id it was journaled under. Removed with its receipt.
     publish_queue_correlations: HashMap<String, u64>,
@@ -515,6 +520,37 @@ impl MemoryStore {
         }
     }
 
+    fn set_receipt_state(&mut self, receipt_id: u64, state: ReceiptState) {
+        let receipt = self
+            .publish_queue_receipts
+            .get_mut(&receipt_id)
+            .expect("receipt state transition requires a retained receipt");
+        if receipt.state == ReceiptState::Superseded {
+            let accepted_at = receipt
+                .accepted_at
+                .expect("superseded receipt must have an acceptance time");
+            assert!(self.superseded_receipts.remove(&(accepted_at, receipt_id)));
+        }
+        receipt.state = state;
+        if state == ReceiptState::Superseded {
+            let accepted_at = receipt
+                .accepted_at
+                .expect("superseded receipt must have an acceptance time");
+            assert!(self.superseded_receipts.insert((accepted_at, receipt_id)));
+        }
+    }
+
+    fn remove_receipt(&mut self, receipt_id: u64) -> Option<PublishQueueReceipt> {
+        let receipt = self.publish_queue_receipts.remove(&receipt_id)?;
+        if receipt.state == ReceiptState::Superseded {
+            let accepted_at = receipt
+                .accepted_at
+                .expect("superseded receipt must have an acceptance time");
+            assert!(self.superseded_receipts.remove(&(accepted_at, receipt_id)));
+        }
+        Some(receipt)
+    }
+
     /// Retire older delivery obligations made useless by a newer winner at
     /// the same NIP-01 address. The wire-handoff boundary is structural:
     /// any retained attempt (or a lane cursor proving one existed) keeps the
@@ -587,13 +623,9 @@ impl MemoryStore {
                 }
             }
             if *retain_safety_receipt {
-                self.publish_queue_receipts
-                    .get_mut(receipt_id)
-                    .expect("open delivery intent must retain its receipt")
-                    .state = ReceiptState::Superseded;
+                self.set_receipt_state(*receipt_id, ReceiptState::Superseded);
             } else {
-                self.publish_queue_receipts
-                    .remove(receipt_id)
+                self.remove_receipt(*receipt_id)
                     .expect("open delivery intent must retain its receipt");
                 self.publish_queue_correlations
                     .retain(|_, journaled| journaled != receipt_id);
@@ -1269,12 +1301,13 @@ impl MemoryStore {
                     transitioned.push(*owner_id);
                 }
             }
-            if let Some(receipt) = self
+            if let Some(receipt_id) = self
                 .publish_queue_receipts
-                .values_mut()
+                .values()
                 .find(|r| r.intent_id == Some(*owner_id))
+                .map(|receipt| receipt.receipt_id)
             {
-                receipt.state = ReceiptState::Signed;
+                self.set_receipt_state(receipt_id, ReceiptState::Signed);
             }
             if is_deletion {
                 if let Some(claims) = self.publish_queue_kind5_claims.remove(owner_id) {
@@ -1988,9 +2021,7 @@ impl EventStore for MemoryStore {
                 &correlation,
             );
             if already_signed {
-                if let Some(receipt) = self.publish_queue_receipts.get_mut(&receipt_id) {
-                    receipt.state = ReceiptState::Signed;
-                }
+                self.set_receipt_state(receipt_id, ReceiptState::Signed);
             }
             return Ok(AcceptOutcome::Duplicate {
                 intent_id,
@@ -2461,10 +2492,7 @@ impl EventStore for MemoryStore {
             }
         }
 
-        self.publish_queue_receipts
-            .get_mut(&receipt_id)
-            .expect("receipt existence checked before compensation")
-            .state = terminal_state;
+        self.set_receipt_state(receipt_id, terminal_state);
 
         Ok(CompensateOutcome::Compensated { restored, revealed })
     }
@@ -2500,6 +2528,44 @@ impl EventStore for MemoryStore {
         Ok(page)
     }
 
+    fn prune_superseded_receipts(&mut self, now: Timestamp) -> Result<Vec<u64>, PersistenceError> {
+        let excess = self
+            .superseded_receipts
+            .len()
+            .saturating_sub(crate::SUPERSEDED_RECEIPT_MAX_COUNT);
+        let candidates = self
+            .superseded_receipts
+            .iter()
+            .enumerate()
+            .take_while(|(index, (accepted_at, _))| {
+                *index < excess || now >= *accepted_at + crate::SUPERSEDED_RECEIPT_MAX_AGE_SECS
+            })
+            .map(|(_, (_, receipt_id))| *receipt_id)
+            .collect::<Vec<_>>();
+        for receipt_id in &candidates {
+            match self.remove_publish_queue_entry(*receipt_id)? {
+                crate::RemoveQueueEntryOutcome::Removed => {}
+                crate::RemoveQueueEntryOutcome::NotFound
+                | crate::RemoveQueueEntryOutcome::StillOpen => {
+                    return Err(PersistenceError::invariant(
+                        "superseded receipt index disagrees with retained receipt",
+                    ));
+                }
+            }
+        }
+        Ok(candidates)
+    }
+
+    fn next_superseded_receipt_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+        if self.superseded_receipts.len() > crate::SUPERSEDED_RECEIPT_MAX_COUNT {
+            return Ok(Some(Timestamp::from(0)));
+        }
+        Ok(self
+            .superseded_receipts
+            .first()
+            .map(|(accepted_at, _)| *accepted_at + crate::SUPERSEDED_RECEIPT_MAX_AGE_SECS))
+    }
+
     fn remove_publish_queue_entry(
         &mut self,
         receipt_id: u64,
@@ -2512,7 +2578,7 @@ impl EventStore for MemoryStore {
                 return Ok(crate::RemoveQueueEntryOutcome::StillOpen);
             }
         }
-        self.publish_queue_receipts.remove(&receipt_id);
+        self.remove_receipt(receipt_id);
         self.publish_queue_correlations
             .retain(|_, journaled| *journaled != receipt_id);
         Ok(crate::RemoveQueueEntryOutcome::Removed)
@@ -3285,9 +3351,7 @@ impl EventStore for MemoryStore {
         // its open work is gone.
         if let Some(record) = self.publish_queue_intents.get(&intent_id) {
             let receipt_id = record.receipt_id;
-            if let Some(receipt) = self.publish_queue_receipts.get_mut(&receipt_id) {
-                receipt.state = ReceiptState::NoDestination;
-            }
+            self.set_receipt_state(receipt_id, ReceiptState::NoDestination);
         }
         self.forget_open_work(intent_id);
         Ok(CloseIntentOutcome::Closed)

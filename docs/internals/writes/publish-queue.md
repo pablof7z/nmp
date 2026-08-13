@@ -75,7 +75,7 @@ The authority for this cut is the repository owner’s wording:
 
 ## Fresh-store cut
 
-The whole Redb schema epoch is version 14. Publish queue has a second,
+The whole Redb schema epoch is version 15. Publish queue has a second,
 explicit codec marker with version 2 in `publish_queue_meta`. A new database
 creates only `publish_queue_*` execution tables. It never opens, drains,
 transforms, dual-writes, or deletes a legacy execution table.
@@ -91,6 +91,15 @@ canonical events, coverage, accepted obligations, receipts, correlations,
 routes, lanes, attempts, details, and deadlines share transactions. Carrying a
 partial compatibility decoder would make that atomic model dishonest.
 
+Schema 15 adds the superseded-safety-receipt cleanup index inside the existing
+`publish_queue_meta` key space. One scalar count and keys ordered by
+`(accepted_at, receipt_id)` change in the same transaction as each receipt
+transition or removal. A runtime deadline peek reads only the count and first
+ordered key; pruning walks only age-due or count-excess superseded keys.
+Unrelated retained terminal receipts are never enumerated for scheduler work.
+This indexes the existing one-hour/newest-500 policy; it does not add broader
+terminal-history retention (#1415; #753 remains open).
+
 ## Physical model
 
 Every ordering-sensitive key is fixed width and big-endian:
@@ -103,6 +112,7 @@ Every ordering-sensitive key is fixed width and big-endian:
 | attempt and attempt detail | `intent:u64 \| relay_id:u32 \| ordinal:u64` |
 | route revision | `intent:u64 \| ordinal:u64` |
 | ordered deadline | `at:u64 \| intent:u64 \| relay_id:u32` |
+| superseded receipt cleanup | `meta-prefix \| accepted_at:u64 \| receipt_id:u64` |
 | deadline cleanup index | `intent:u64 \| at:u64 \| relay_id:u32` |
 | correlation and address suppression | bounded bytes, with binary values |
 | id suppression | raw `event_id:[u8;32] \| pubkey:[u8;32]` |
