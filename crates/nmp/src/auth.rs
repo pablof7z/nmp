@@ -6,16 +6,14 @@
 //! engine consults it — nonblocking, ready-or-pending — every time a relay
 //! challenges one exact protected session.
 //!
-//! These are facade-OWNED values in the `bc8fb97` NIP-11 pattern: the
-//! supported `nmp` API stays self-contained instead of re-exporting
-//! mechanism-crate types. [`AuthPolicyDecision`]/[`AuthPolicyError`] are
-//! small real mirrors (constructible by any caller, including `nmp-ffi`);
+//! [`AuthPolicyDecision`] and [`AuthPolicyError`] are the single semantic
+//! AUTH answer types. Runtime policy evaluation uses them directly.
 //! [`AuthPolicyRequest`], [`AuthPolicyOp`], and [`AuthPolicyPendingSender`]
-//! are strict NEWTYPES over the engine's own operation machinery. The
+//! remain newtypes over runtime request and cancellation machinery. The
 //! pending/cancel linearization (a losing terminal-cancel waits for a
 //! resolver that already owns completion; a queued answer is consumed
-//! before the receiver may be abandoned) is engine-owned and inherited by
-//! DELEGATION — nothing here re-implements a channel, a cancel handshake,
+//! before the receiver may be abandoned) is runtime-owned and inherited by
+//! delegation — nothing here re-implements a channel, a cancel handshake,
 //! or any part of that race's resolution.
 
 use nostr::{PublicKey, RelayUrl};
@@ -102,35 +100,6 @@ impl std::error::Error for AuthPolicyError {}
 /// One policy answer: the app's semantic decision, or a technical failure.
 pub type AuthPolicyResult = Result<AuthPolicyDecision, AuthPolicyError>;
 
-type EnginePolicyResult =
-    Result<crate::runtime::AuthPolicyDecision, crate::runtime::AuthPolicyError>;
-
-fn result_to_engine(result: AuthPolicyResult) -> EnginePolicyResult {
-    match result {
-        Ok(AuthPolicyDecision::Allow) => Ok(crate::runtime::AuthPolicyDecision::Allow),
-        Ok(AuthPolicyDecision::Deny { reason }) => {
-            Ok(crate::runtime::AuthPolicyDecision::Deny { reason })
-        }
-        Err(AuthPolicyError::Unavailable) => Err(crate::runtime::AuthPolicyError::Unavailable),
-        Err(AuthPolicyError::Technical { reason }) => {
-            Err(crate::runtime::AuthPolicyError::Technical { reason })
-        }
-    }
-}
-
-fn result_from_engine(result: EnginePolicyResult) -> AuthPolicyResult {
-    match result {
-        Ok(crate::runtime::AuthPolicyDecision::Allow) => Ok(AuthPolicyDecision::Allow),
-        Ok(crate::runtime::AuthPolicyDecision::Deny { reason }) => {
-            Ok(AuthPolicyDecision::Deny { reason })
-        }
-        Err(crate::runtime::AuthPolicyError::Unavailable) => Err(AuthPolicyError::Unavailable),
-        Err(crate::runtime::AuthPolicyError::Technical { reason }) => {
-            Err(AuthPolicyError::Technical { reason })
-        }
-    }
-}
-
 /// One-shot completion door for a pending [`AuthPolicyOp`]. Cloneable;
 /// exactly one clone's [`Self::resolve`] ever lands — every later call gets
 /// the typed [`AuthPolicyResolveError`] carrying the undelivered result
@@ -147,8 +116,8 @@ impl AuthPolicyPendingSender {
     /// removal, session teardown, or shutdown). Both hand the result back.
     pub fn resolve(&self, result: AuthPolicyResult) -> Result<(), AuthPolicyResolveError> {
         self.inner
-            .resolve(result_to_engine(result))
-            .map_err(AuthPolicyResolveError::from_engine)
+            .resolve(result)
+            .map_err(AuthPolicyResolveError::from_runtime)
     }
 }
 
@@ -163,13 +132,13 @@ pub enum AuthPolicyResolveError {
 }
 
 impl AuthPolicyResolveError {
-    fn from_engine(error: crate::runtime::AuthPolicyResolveError) -> Self {
+    fn from_runtime(error: crate::runtime::AuthPolicyResolveError) -> Self {
         match error {
             crate::runtime::AuthPolicyResolveError::AlreadyResolved(result) => {
-                Self::AlreadyResolved(result_from_engine(result))
+                Self::AlreadyResolved(result)
             }
             crate::runtime::AuthPolicyResolveError::ReceiverDropped(result) => {
-                Self::ReceiverDropped(result_from_engine(result))
+                Self::ReceiverDropped(result)
             }
         }
     }
@@ -192,7 +161,7 @@ impl AuthPolicyOp {
     #[must_use]
     pub fn ready(result: AuthPolicyResult) -> Self {
         Self {
-            inner: crate::runtime::AuthPolicyOp::ready(result_to_engine(result)),
+            inner: crate::runtime::AuthPolicyOp::ready(result),
         }
     }
 
@@ -276,23 +245,18 @@ impl<P: AuthPolicy> crate::runtime::AuthPolicy for EngineAuthPolicyAdapter<P> {
 mod tests {
     use super::*;
 
-    /// The facade decision/error mirrors round-trip through the engine
-    /// vocabulary without loss in either direction.
+    /// #853: runtime policy evaluation uses these same types. If a second
+    /// decision/error family returns, this assignment stops compiling.
     #[test]
-    fn decision_and_error_mirrors_round_trip_exactly() {
-        let cases = [
-            Ok(AuthPolicyDecision::Allow),
-            Ok(AuthPolicyDecision::Deny {
-                reason: "not this relay".to_string(),
-            }),
-            Err(AuthPolicyError::Unavailable),
-            Err(AuthPolicyError::Technical {
-                reason: "keychain locked".to_string(),
-            }),
-        ];
-        for case in cases {
-            assert_eq!(result_from_engine(result_to_engine(case.clone())), case);
-        }
+    fn runtime_uses_the_same_auth_decision_and_error_types() {
+        fn same_type<T>(_: T, _: T) {}
+        let runtime_result = match AuthPolicyOp::allow().into_engine() {
+            crate::runtime::AuthPolicyOp::Ready(result) => result,
+            crate::runtime::AuthPolicyOp::Pending(_) => {
+                panic!("ready constructor must produce a ready runtime op")
+            }
+        };
+        same_type(Ok(AuthPolicyDecision::Allow), runtime_result);
     }
 
     /// The facade sender and the engine op share ONE channel — the newtype
@@ -348,13 +312,10 @@ mod tests {
     #[test]
     fn ready_constructors_delegate_with_exact_results() {
         for (op, expected) in [
-            (
-                AuthPolicyOp::allow(),
-                Ok(crate::runtime::AuthPolicyDecision::Allow),
-            ),
+            (AuthPolicyOp::allow(), Ok(AuthPolicyDecision::Allow)),
             (
                 AuthPolicyOp::deny("nope"),
-                Ok(crate::runtime::AuthPolicyDecision::Deny {
+                Ok(AuthPolicyDecision::Deny {
                     reason: "nope".to_string(),
                 }),
             ),
@@ -362,7 +323,7 @@ mod tests {
                 AuthPolicyOp::ready(Err(AuthPolicyError::Technical {
                     reason: "hsm offline".to_string(),
                 })),
-                Err(crate::runtime::AuthPolicyError::Technical {
+                Err(AuthPolicyError::Technical {
                     reason: "hsm offline".to_string(),
                 }),
             ),
