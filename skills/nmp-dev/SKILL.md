@@ -21,6 +21,10 @@ testing](references/testing/INDEX.md).
 ## Guardrails
 
 - Keep the public model to a live query and a write intent.
+- Extend those nouns for new capabilities. Helpers may add typed values and
+  composable bindings, but must preserve reactive identity and each demand's
+  source, access, cache, and freshness context. No capability-specific
+  lifecycles, public row-projection boilerplate, or app-managed waterfalls.
 - Exclude bad paths by type/API shape; prove exclusion with a falsifier.
 - Apply every standing convention in `AGENTS.md`, including [no hidden runtime
   flags](../../docs/internals/conventions/no-hidden-runtime-feature-flags.md).
