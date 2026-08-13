@@ -4,12 +4,13 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, AuthDenial, AuthDenialSource,
-    CloseIntentOutcome, EventStore, HandoffEvidence, IntentId, IntentSigState, MemoryStore,
-    PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueDeadline,
-    PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
-    PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueTerminalOutcome,
-    PublishQueueTransientCause, RedbStore, RemoveQueueEntryOutcome, VerifiedSignature,
+    sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, AuthDenial,
+    AuthDenialSource, CloseIntentOutcome, EventStore, HandoffEvidence, IntentId, IntentSigState,
+    MemoryStore, PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
+    PublishQueueDeadline, PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane,
+    PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState,
+    PublishQueueTerminalOutcome, PublishQueueTransientCause, RedbStore, RemoveQueueEntryOutcome,
+    VerifiedSignature,
 };
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
@@ -40,13 +41,15 @@ fn signed_and_frozen(keys: &Keys, content: &str, created_at: u64) -> (Event, Eve
 
 fn accept(frozen: Event, keys: &Keys, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
-        frozen,
-        replaceable_base: None,
-        monotonic_stamp: false,
+        payload: AcceptWritePayload::Event {
+            frozen: Box::new(frozen),
+            replaceable_base: None,
+            monotonic_stamp: false,
+            routing: "lane-contract".into(),
+            sig_state: IntentSigState::Pending,
+        },
         expected_pubkey: keys.public_key(),
         signing_identity_ref: "lane-contract".into(),
-        routing: "lane-contract".into(),
-        sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
         correlation: None,
     }
@@ -71,7 +74,9 @@ fn seed(
         } => (intent_id, receipt_id),
         other => panic!("expected inserted intent, got {other:?}"),
     };
-    store.promote_signed(intent_id, evidence(&signed)).unwrap();
+    store
+        .promote_signed(PromotionTarget::Event(intent_id), evidence(&signed))
+        .unwrap();
     store
         .record_route_revision(intent_id, BTreeSet::from([relay.clone()]))
         .unwrap();
@@ -485,7 +490,9 @@ fn equal_time_equal_intent_deadlines_use_canonical_relay_order_on_both_backends(
             .unwrap()
             .journaled_intent_id()
             .unwrap();
-        store.promote_signed(intent, evidence(&signed)).unwrap();
+        store
+            .promote_signed(PromotionTarget::Event(intent), evidence(&signed))
+            .unwrap();
         let relays = BTreeSet::from([
             RelayUrl::parse("wss://z.example").unwrap(),
             RelayUrl::parse("wss://aa.example").unwrap(),
@@ -526,7 +533,9 @@ fn relay_identity_uses_canonical_url_but_preserves_meaningful_path_slashes() {
             .unwrap()
             .journaled_intent_id()
             .unwrap();
-        store.promote_signed(intent, evidence(&signed)).unwrap();
+        store
+            .promote_signed(PromotionTarget::Event(intent), evidence(&signed))
+            .unwrap();
         let root_plain = RelayUrl::parse("wss://same.example").unwrap();
         let root_slash = RelayUrl::parse("wss://same.example/").unwrap();
         assert_eq!(root_plain, root_slash);

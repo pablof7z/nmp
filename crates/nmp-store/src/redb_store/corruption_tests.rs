@@ -84,13 +84,15 @@ fn frozen_from(signed: &Event) -> Event {
 fn accept_of(frozen: Event) -> AcceptWrite {
     let expected_pubkey = frozen.pubkey;
     AcceptWrite {
-        frozen,
-        replaceable_base: None,
-        monotonic_stamp: false,
+        payload: crate::AcceptWritePayload::Event {
+            frozen: Box::new(frozen),
+            replaceable_base: None,
+            monotonic_stamp: false,
+            routing: "auto".to_owned(),
+            sig_state: IntentSigState::Pending,
+        },
         expected_pubkey,
         signing_identity_ref: "local".to_owned(),
-        routing: "auto".to_owned(),
-        sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(1_000),
         correlation: None,
     }
@@ -306,7 +308,7 @@ fn bootstrap_lane_prefix_invariant_is_absent_across_two_reopens() {
             .expect("accept bootstrap fixture");
         let intent = accepted.journaled_intent_id().expect("durable intent");
         store
-            .promote_signed(intent, evidence(&signed))
+            .promote_signed(crate::PromotionTarget::Event(intent), evidence(&signed))
             .expect("promote bootstrap fixture");
         store
             .record_route_revision(
@@ -371,7 +373,7 @@ fn replaceable_retirement_refuses_a_truncated_not_handed_off_attempt_record() {
         let intent_id = accepted.journaled_intent_id().expect("durable intent");
         let receipt_id = accepted.journaled_receipt_id().expect("durable receipt");
         store
-            .promote_signed(intent_id, evidence(&older))
+            .promote_signed(crate::PromotionTarget::Event(intent_id), evidence(&older))
             .expect("promote older write");
         store
             .record_route_revision(intent_id, BTreeSet::from([relay]))
@@ -648,7 +650,10 @@ fn promote_reports_a_corrupt_kind5_claim_record() {
     {
         let mut store = fixture.open();
         assert_typed_refusal("promote_signed", || {
-            store.promote_signed(intent_id, evidence(&deletion))
+            store.promote_signed(
+                crate::PromotionTarget::Event(intent_id),
+                evidence(&deletion),
+            )
         });
     }
     assert_eq!(

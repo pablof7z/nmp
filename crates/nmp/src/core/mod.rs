@@ -95,14 +95,15 @@ use nmp_router::{
 };
 use nmp_signer::SignerError;
 use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, AuthDenial as StoredAuthDenial,
-    AuthDenialSource as StoredAuthDenialSource, CloseIntentOutcome, CompensateOutcome,
-    CoverageInterval, CoverageKey, DurabilityOutcome, EventStore, HandoffEvidence, IntentId,
-    IntentSigState, PersistenceError, PersistenceFault, PromoteOutcome, PublishQueueAttemptHandoff,
-    PublishQueueAttemptOutcome, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
-    PublishQueueLane, PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState,
-    PublishQueueReceipt, PublishQueueTerminalOutcome, PublishQueueTransientCause, ReceiptState,
-    RelayObserved, RemoveQueueEntryOutcome, SigState, VerifiedSignature,
+    sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload,
+    AuthDenial as StoredAuthDenial, AuthDenialSource as StoredAuthDenialSource, CloseIntentOutcome,
+    CompensateOutcome, CoverageInterval, CoverageKey, DurabilityOutcome, EventStore,
+    HandoffEvidence, IntentId, IntentSigState, PersistenceError, PersistenceFault, PromoteOutcome,
+    PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
+    PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
+    PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
+    PublishQueueReceiptPayload, PublishQueueTerminalOutcome, PublishQueueTransientCause,
+    ReceiptState, RelayObserved, RemoveQueueEntryOutcome, SigState, VerifiedSignature,
 };
 use nmp_transport::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,

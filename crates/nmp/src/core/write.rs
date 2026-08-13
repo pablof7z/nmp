@@ -1369,7 +1369,15 @@ impl<S: EventStore> EngineCore<S> {
         self.lane_bootstrap_retries.clear();
 
         for intent in recovered {
-            if intent.frozen.kind == nostr::Kind::Authentication {
+            let Some((frozen, _, routing_snapshot, sig_state)) = intent.event_work() else {
+                // #841 owns runtime orchestration for durable replaceable
+                // operations. Their reference-only journal arm must never
+                // enter the ordinary signer/routing lifecycle without a body.
+                continue;
+            };
+            let frozen = frozen.clone();
+            let routing_snapshot = routing_snapshot.to_owned();
+            if frozen.kind == nostr::Kind::Authentication {
                 let id = ReceiptId(intent.receipt_id);
                 let reason = "recovered kind:22242 ordinary write quarantined from AUTH ownership"
                     .to_string();
@@ -1377,11 +1385,11 @@ impl<S: EventStore> EngineCore<S> {
                     id,
                     QuarantinedWrite {
                         intent_id: intent.intent_id,
-                        frozen: intent.frozen.clone(),
+                        frozen: frozen.clone(),
                     },
                 );
                 self.event_to_receipts
-                    .entry(intent.frozen.id)
+                    .entry(frozen.id)
                     .or_default()
                     .insert(id);
                 effects.push(Effect::EmitReceipt(
@@ -1390,7 +1398,7 @@ impl<S: EventStore> EngineCore<S> {
                 ));
                 continue;
             }
-            let parsed_routing = Self::parse_routing_snapshot(&intent.routing);
+            let parsed_routing = Self::parse_routing_snapshot(&routing_snapshot);
             let routing_valid = parsed_routing.is_some();
             // An unreadable row is retained exactly as written and never
             // resolved (`routing_valid == false` gates every send path). The
@@ -1400,7 +1408,7 @@ impl<S: EventStore> EngineCore<S> {
             // for it.
             let routing = parsed_routing.unwrap_or(WriteRouting::Explicit(Vec::new()));
             let id = ReceiptId(intent.receipt_id);
-            let already_signed = intent.sig_state == IntentSigState::Signed;
+            let already_signed = sig_state == IntentSigState::Signed;
             self.pending.insert(
                 id,
                 PendingWrite {
@@ -1415,11 +1423,11 @@ impl<S: EventStore> EngineCore<S> {
                     persistence_fault: None,
                     accepted_at: intent.accepted_at,
                     signing_pubkey: intent.expected_pubkey,
-                    frozen: intent.frozen.clone(),
+                    frozen: frozen.clone(),
                     already_signed,
                     sign_request_in_flight: false,
                     sign_generation: 0,
-                    event_id: already_signed.then_some(intent.frozen.id),
+                    event_id: already_signed.then_some(frozen.id),
                     pending_relays: BTreeSet::new(),
                     unstarted_relays: BTreeSet::new(),
                     route_blocked_relays: BTreeSet::new(),
@@ -1434,7 +1442,7 @@ impl<S: EventStore> EngineCore<S> {
             recovered_ids.push(id);
 
             self.event_to_receipts
-                .entry(intent.frozen.id)
+                .entry(frozen.id)
                 .or_default()
                 .insert(id);
 
@@ -1479,7 +1487,7 @@ impl<S: EventStore> EngineCore<S> {
             // down gets a lane, and a relay the intent already reached is
             // left completely alone.
             if routing_valid {
-                let resolution = self.resolve_routes(&self.pending[&id].routing, &intent.frozen);
+                let resolution = self.resolve_routes(&self.pending[&id].routing, &frozen);
                 if let Some(error) = resolution.parent_provenance_error {
                     self.record_store_failure(&error);
                 }
@@ -1708,13 +1716,16 @@ impl<S: EventStore> EngineCore<S> {
     pub(super) fn retained_receipt_fact(
         receipt: &nmp_store::PublishQueueReceipt,
     ) -> Option<WriteFact> {
-        match receipt.state {
+        let PublishQueueReceiptPayload::Event { event_id, state } = &receipt.payload else {
+            return None;
+        };
+        match state {
             // Acceptance is not a fact — it is what `publish()` returning
             // `Ok` already said. A receipt that has only been accepted has
             // nothing yet to replay.
             ReceiptState::Accepted => None,
             ReceiptState::Signed => Some(WriteFact::Signing(SigningState::Signed {
-                event_id: receipt.frozen_id,
+                event_id: *event_id,
             })),
             ReceiptState::Compensated => Some(WriteFact::Outcome(WriteOutcome::NotSent(
                 NotSentReason::SignerRefused,
@@ -1724,7 +1735,7 @@ impl<S: EventStore> EngineCore<S> {
             ))),
             ReceiptState::Superseded => Some(WriteFact::Outcome(WriteOutcome::Superseded)),
             ReceiptState::Refused(reason) => {
-                Some(WriteFact::Outcome(WriteOutcome::Refused(reason)))
+                Some(WriteFact::Outcome(WriteOutcome::Refused(*reason)))
             }
             ReceiptState::NoDestination => Some(WriteFact::Outcome(WriteOutcome::NoDestination)),
         }
@@ -1764,6 +1775,15 @@ impl<S: EventStore> EngineCore<S> {
                 return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable)
             }
         };
+        let Some(receipt_state) = receipt.event_state() else {
+            // The store can truthfully reattach this ordinary receipt, but
+            // #841 has not yet installed the runtime projection for semantic
+            // materialization facts. Never reinterpret it as event work.
+            return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable);
+        };
+        let receipt_event_id = receipt
+            .event_id()
+            .expect("event receipt state and event id share one closed arm");
         if self
             .pending
             .get(&id)
@@ -1816,7 +1836,7 @@ impl<S: EventStore> EngineCore<S> {
         };
         let mut replay = Vec::new();
         let retained_status =
-            if receipt.state == ReceiptState::Signed && !self.pending.contains_key(&id) {
+            if receipt_state == ReceiptState::Signed && !self.pending.contains_key(&id) {
                 Some(WriteFact::Outcome(WriteOutcome::Settled))
             } else {
                 Self::retained_receipt_fact(&receipt)
@@ -1832,7 +1852,7 @@ impl<S: EventStore> EngineCore<S> {
         // A reattaching app is told which of the two unsigned states this
         // obligation is in, exactly as the queue projection reports it
         // (#1261): a signer holding the request is not a signer nobody has.
-        if receipt.state == ReceiptState::Accepted
+        if receipt_state == ReceiptState::Accepted
             && self
                 .pending
                 .get(&id)
@@ -2115,7 +2135,7 @@ impl<S: EventStore> EngineCore<S> {
             facts,
             next_cursor,
             end_cursor: Some(cursor),
-            frozen_id: Some(receipt.frozen_id),
+            frozen_id: Some(receipt_event_id),
             isolated_fact_cursors,
         }
     }
@@ -2391,21 +2411,23 @@ impl<S: EventStore> EngineCore<S> {
 
         let (id, intent_id, already_signed, accepted_signed_event, committed, retired_intents) = {
             let accept = AcceptWrite {
-                frozen: frozen.clone(),
-                replaceable_base,
-                monotonic_stamp,
+                payload: AcceptWritePayload::Event {
+                    frozen: Box::new(frozen.clone()),
+                    replaceable_base,
+                    monotonic_stamp,
+                    routing: Self::routing_snapshot(&routing),
+                    // Treat an unsigned acceptance as reattachable signer work.
+                    // If a signer is already present the immediate request below
+                    // promotes it; if not, restart safely re-requests it.
+                    sig_state: match payload {
+                        WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => {
+                            IntentSigState::AwaitingSigner
+                        }
+                        WritePayload::Signed(_) => IntentSigState::Pending,
+                    },
+                },
                 expected_pubkey: signing_pubkey,
                 signing_identity_ref: signing_pubkey.to_hex(),
-                routing: Self::routing_snapshot(&routing),
-                // Treat an unsigned acceptance as reattachable signer work.
-                // If a signer is already present the immediate request below
-                // promotes it; if not, restart safely re-requests it.
-                sig_state: match payload {
-                    WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => {
-                        IntentSigState::AwaitingSigner
-                    }
-                    WritePayload::Signed(_) => IntentSigState::Pending,
-                },
                 accepted_at: self.clock,
                 correlation,
             };
@@ -2693,11 +2715,20 @@ impl<S: EventStore> EngineCore<S> {
         id: ReceiptId,
         receipt: &nmp_store::PublishQueueReceipt,
     ) -> Result<CancelWriteOutcome, CancelWriteError> {
-        match receipt.state {
+        let Some(state) = receipt.event_state() else {
+            return Err(CancelWriteError::PersistenceFailed {
+                receipt_id: id,
+                reason: "replaceable-operation cancellation runtime is not installed".to_string(),
+            });
+        };
+        let event_id = receipt
+            .event_id()
+            .expect("event receipt state and event id share one closed arm");
+        match state {
             ReceiptState::Cancelled => Ok(CancelWriteOutcome::Cancelled),
             ReceiptState::Signed => Err(CancelWriteError::AlreadySigned {
                 receipt_id: id,
-                event_id: receipt.frozen_id,
+                event_id,
             }),
             ReceiptState::Compensated => {
                 Err(CancelWriteError::AlreadyCompensated { receipt_id: id })
@@ -2802,11 +2833,17 @@ impl<S: EventStore> EngineCore<S> {
         let mut entries = Vec::with_capacity(receipts.len());
         for receipt in receipts {
             let id = ReceiptId(receipt.receipt_id);
+            let (event_id, state) = match &receipt.payload {
+                PublishQueueReceiptPayload::Event { event_id, state } => (*event_id, *state),
+                PublishQueueReceiptPayload::ReplaceableOperation { .. } => {
+                    return Err(PersistenceError::invariant(
+                        "event publish-queue index names replaceable-operation receipt",
+                    ));
+                }
+            };
             let pending = self.pending.get(&id);
-            let signing = match receipt.state {
-                ReceiptState::Signed => SigningState::Signed {
-                    event_id: receipt.frozen_id,
-                },
+            let signing = match state {
+                ReceiptState::Signed => SigningState::Signed { event_id },
                 ReceiptState::Compensated => SigningState::Refused {
                     reason: "write compensated".to_string(),
                 },
@@ -2818,7 +2855,7 @@ impl<S: EventStore> EngineCore<S> {
                 // moment the signer answers or reports itself unavailable.
                 _ => Self::signing_park(receipt.expected_pubkey, pending),
             };
-            let outcome = match receipt.state {
+            let outcome = match state {
                 ReceiptState::Cancelled => Some(WriteOutcome::NotSent(NotSentReason::Cancelled)),
                 ReceiptState::Superseded => Some(WriteOutcome::Superseded),
                 ReceiptState::Refused(reason) => Some(WriteOutcome::Refused(reason)),
@@ -2835,9 +2872,7 @@ impl<S: EventStore> EngineCore<S> {
                     // Still open work: no outcome yet.
                     Some(_) => None,
                     // The open-work row is gone and every lane finished.
-                    None => {
-                        (receipt.state == ReceiptState::Signed).then_some(WriteOutcome::Settled)
-                    }
+                    None => (state == ReceiptState::Signed).then_some(WriteOutcome::Settled),
                 },
                 ReceiptState::Compensated => {
                     Some(WriteOutcome::NotSent(NotSentReason::SignerRefused))
@@ -2848,7 +2883,7 @@ impl<S: EventStore> EngineCore<S> {
                 .unwrap_or_default();
             entries.push(PublishQueueEntry {
                 receipt_id: id,
-                event_id: receipt.frozen_id,
+                event_id,
                 pubkey: receipt.expected_pubkey,
                 accepted_at: receipt.accepted_at.unwrap_or_else(|| Timestamp::from(0u64)),
                 signing,
@@ -3158,7 +3193,7 @@ impl<S: EventStore> EngineCore<S> {
                 match self
                     .resolver
                     .store_mut()
-                    .promote_signed(intent_id, verified)
+                    .promote_signed(PromotionTarget::Event(intent_id), verified)
                 {
                     Ok(PromoteOutcome::Promoted { co_signed, .. }) => {
                         signature_promoted = true;
@@ -3182,6 +3217,15 @@ impl<S: EventStore> EngineCore<S> {
                         self.fail_and_compensate(
                             id,
                             "accepted intent was unavailable for signature promotion".to_string(),
+                            effects,
+                        );
+                        return;
+                    }
+                    Ok(PromoteOutcome::MaterializationPromoted { .. })
+                    | Ok(PromoteOutcome::Stale) => {
+                        self.fail_and_compensate(
+                            id,
+                            "event promotion returned a replaceable-operation outcome".to_string(),
                             effects,
                         );
                         return;

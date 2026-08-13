@@ -17,10 +17,12 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, CompensateOutcome, EventCursor, EventStore,
-    GcRetentionSet, InsertOutcome, IntentSigState, LocalOrigin, MemoryStore, PersistenceFault,
-    PromoteOutcome, PublishQueueAttemptOutcome, ReceiptState, RedbStore, RefuseReason,
-    RelayObserved, RemoveQueueEntryOutcome, RetractReason, SigState, VerifiedSignature,
+    sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, CompensateOutcome,
+    EventCursor, EventStore, GcRetentionSet, InsertOutcome, IntentSigState, LocalOrigin,
+    MemoryStore, PersistenceFault, PromoteOutcome, PromotionTarget, PublishQueueAttemptOutcome,
+    PublishQueueIntent, PublishQueueReceipt, PublishQueueReceiptPayload, PublishQueueWork,
+    ReceiptState, RedbStore, RefuseReason, RelayObserved, RemoveQueueEntryOutcome, RetractReason,
+    SigState, StoredEvent, VerifiedSignature,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, EventId, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -31,6 +33,29 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 /// verification succeeding is part of the setup, not the property under test.
 fn evidence(signed: &Event) -> VerifiedSignature {
     VerifiedSignature::verify(signed).expect("fixture events are validly signed")
+}
+
+fn event_intent_work(
+    intent: &PublishQueueIntent,
+) -> (&Event, Option<&StoredEvent>, &str, IntentSigState) {
+    match &intent.work {
+        PublishQueueWork::Event {
+            frozen,
+            displaced,
+            routing,
+            sig_state,
+        } => (frozen, displaced.as_deref(), routing, *sig_state),
+        PublishQueueWork::ReplaceableOperation { .. } => panic!("expected ordinary event work"),
+    }
+}
+
+fn event_receipt(receipt: &PublishQueueReceipt) -> (EventId, &ReceiptState) {
+    match &receipt.payload {
+        PublishQueueReceiptPayload::Event { event_id, state } => (*event_id, state),
+        PublishQueueReceiptPayload::ReplaceableOperation { .. } => {
+            panic!("expected ordinary event receipt")
+        }
+    }
 }
 
 fn keys() -> Keys {
@@ -96,15 +121,26 @@ fn frozen_from_signed(signed: &Event) -> Event {
 /// `.journaled_receipt_id()`.
 fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
-        frozen,
-        replaceable_base: None,
-        monotonic_stamp: false,
+        payload: AcceptWritePayload::Event {
+            frozen: Box::new(frozen),
+            replaceable_base: None,
+            monotonic_stamp: false,
+            routing: "auto".to_string(),
+            sig_state: IntentSigState::Pending,
+        },
         expected_pubkey,
         signing_identity_ref: "local".to_string(),
-        routing: "auto".to_string(),
-        sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
         correlation: None,
+    }
+}
+
+fn set_replaceable_base(write: &mut AcceptWrite, base: Option<EventId>) {
+    match &mut write.payload {
+        AcceptWritePayload::Event {
+            replaceable_base, ..
+        } => *replaceable_base = Some(base),
+        AcceptWritePayload::ReplaceableOperation(_) => panic!("expected ordinary event write"),
     }
 }
 
@@ -128,7 +164,7 @@ fn start_publish_queue_attempt(
     at: u64,
 ) {
     store
-        .promote_signed(intent_id, evidence(&signed))
+        .promote_signed(PromotionTarget::Event(intent_id), evidence(&signed))
         .expect("promote before attempt");
     let relay = RelayUrl::parse(relay).expect("attempt relay");
     store
@@ -190,7 +226,7 @@ fn replaceable_base_precondition_rejects_a_concurrent_winner_atomically() {
 
         let (draft, _) = compose(&k, Kind::ContactList, "my edit", 30);
         let mut guarded = accept(draft, k.public_key(), 30);
-        guarded.replaceable_base = Some(Some(base.id));
+        set_replaceable_base(&mut guarded, Some(base.id));
         assert_eq!(
             do_accept(store, guarded),
             AcceptOutcome::Refused(RefuseReason::ReplaceableBaseChanged {
@@ -216,7 +252,7 @@ fn replaceable_base_precondition_accepts_the_exact_winner_and_none_means_none() 
         let k = keys();
         let (first, _) = compose(&k, Kind::ContactList, "first", 10);
         let mut create = accept(first.clone(), k.public_key(), 10);
-        create.replaceable_base = Some(None);
+        set_replaceable_base(&mut create, None);
         assert!(matches!(
             do_accept(store, create),
             AcceptOutcome::Inserted { .. }
@@ -224,7 +260,7 @@ fn replaceable_base_precondition_accepts_the_exact_winner_and_none_means_none() 
 
         let (second, _) = compose(&k, Kind::ContactList, "second", 20);
         let mut exact = accept(second, k.public_key(), 20);
-        exact.replaceable_base = Some(Some(first.id));
+        set_replaceable_base(&mut exact, Some(first.id));
         assert!(matches!(
             do_accept(store, exact),
             AcceptOutcome::Superseded { .. }
@@ -232,7 +268,7 @@ fn replaceable_base_precondition_accepts_the_exact_winner_and_none_means_none() 
 
         let (third, _) = compose(&k, Kind::ContactList, "third", 30);
         let mut falsely_empty = accept(third, k.public_key(), 30);
-        falsely_empty.replaceable_base = Some(None);
+        set_replaceable_base(&mut falsely_empty, None);
         assert!(matches!(
             do_accept(store, falsely_empty),
             AcceptOutcome::Refused(RefuseReason::ReplaceableBaseChanged {
@@ -249,7 +285,7 @@ fn replaceable_base_precondition_on_regular_event_fails_closed() {
         let k = keys();
         let (note, _) = compose(&k, Kind::TextNote, "not replaceable", 10);
         let mut guarded = accept(note, k.public_key(), 10);
-        guarded.replaceable_base = Some(None);
+        set_replaceable_base(&mut guarded, None);
         assert_eq!(
             do_accept(store, guarded),
             AcceptOutcome::Refused(RefuseReason::ReplaceableBaseOnRegularEvent)
@@ -356,11 +392,11 @@ fn promote_signed_swaps_sig_in_place_zero_id_churn_and_clears_displaced() {
         .iter()
         .find(|r| r.intent_id == intent_b)
         .expect("intent still open");
-    assert!(intent_before.displaced.is_some());
+    assert!(event_intent_work(intent_before).1.is_some());
 
     let real_sig = signed_b.sig;
     let promoted = store
-        .promote_signed(intent_b, evidence(&signed_b))
+        .promote_signed(PromotionTarget::Event(intent_b), evidence(&signed_b))
         .expect("promote_signed persistence");
     match promoted {
         PromoteOutcome::Promoted { row, .. } => {
@@ -389,8 +425,8 @@ fn promote_signed_swaps_sig_in_place_zero_id_churn_and_clears_displaced() {
     let intent_after = after.iter().find(|r| r.intent_id == intent_b).expect(
         "intent still open (not yet delivered — only compensate_write/full-delivery closes it)",
     );
-    assert!(intent_after.displaced.is_none());
-    assert_eq!(intent_after.sig_state, IntentSigState::Signed);
+    assert!(event_intent_work(intent_after).1.is_none());
+    assert_eq!(event_intent_work(intent_after).3, IntentSigState::Signed);
 }
 
 #[test]
@@ -528,7 +564,7 @@ fn pending_row_is_not_gc_evicted_while_intent_open() {
         // Once promoted, it is an ordinary event again — GC-able under the
         // SAME empty claim set.
         store
-            .promote_signed(intent_id, evidence(&signed))
+            .promote_signed(PromotionTarget::Event(intent_id), evidence(&signed))
             .expect("promote_signed persistence");
         let report2 = store.gc(&claims).unwrap();
         assert_eq!(
@@ -634,9 +670,9 @@ fn recover_publish_queue_reconstructs_inflight_after_reopen() {
     let intent = &recovered[0];
     assert_eq!(intent.intent_id, accepted_intent_id);
     assert_eq!(intent.receipt_id, accepted_receipt_id);
-    assert_eq!(intent.frozen.id, frozen_id);
-    assert_eq!(intent.sig_state, IntentSigState::Pending);
-    assert!(intent.displaced.is_none());
+    assert_eq!(event_intent_work(intent).0.id, frozen_id);
+    assert_eq!(event_intent_work(intent).3, IntentSigState::Pending);
+    assert!(event_intent_work(intent).1.is_none());
 
     // The pending row itself is ALREADY live in the store post-reopen —
     // recovery does not re-insert it (plan §2.3: query-visible from the
@@ -716,7 +752,10 @@ fn newer_replaceable_write_retires_offline_work_before_any_attempt() {
         let older_intent = older.journaled_intent_id().unwrap();
         let older_receipt = older.journaled_receipt_id().unwrap();
         store
-            .promote_signed(older_intent, evidence(&older_signed))
+            .promote_signed(
+                PromotionTarget::Event(older_intent),
+                evidence(&older_signed),
+            )
             .unwrap();
         store
             .record_route_revision(older_intent, BTreeSet::from([relay]))
@@ -763,12 +802,8 @@ fn newer_replaceable_write_retires_offline_work_before_any_attempt() {
         let rows = store.query(&Filter::new().id(newer_id)).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(
-            store
-                .reattach_receipt(newer_receipt)
-                .unwrap()
-                .unwrap()
-                .state,
-            ReceiptState::Accepted
+            event_receipt(&store.reattach_receipt(newer_receipt).unwrap().unwrap()).1,
+            &ReceiptState::Accepted
         );
     });
 }
@@ -792,7 +827,10 @@ fn every_nip01_replaceable_class_retires_its_offline_predecessor() {
             let older_intent = older.journaled_intent_id().unwrap();
             let older_receipt = older.journaled_receipt_id().unwrap();
             store
-                .promote_signed(older_intent, evidence(&older_signed))
+                .promote_signed(
+                    PromotionTarget::Event(older_intent),
+                    evidence(&older_signed),
+                )
                 .unwrap();
             store
                 .record_route_revision(older_intent, BTreeSet::from([relay.clone()]))
@@ -826,7 +864,10 @@ fn superseded_unsent_body_and_receipt_are_destroyed_across_redb_reopen() {
         let older_intent = older.journaled_intent_id().unwrap();
         let older_receipt = older.journaled_receipt_id().unwrap();
         store
-            .promote_signed(older_intent, evidence(&older_signed))
+            .promote_signed(
+                PromotionTarget::Event(older_intent),
+                evidence(&older_signed),
+            )
             .unwrap();
         store
             .record_route_revision(older_intent, BTreeSet::from([relay]))
@@ -874,7 +915,10 @@ fn a_newer_replaceable_stops_an_older_started_obligation_but_keeps_bounded_safet
         let older_intent = older.journaled_intent_id().unwrap();
         let older_receipt = older.journaled_receipt_id().unwrap();
         store
-            .promote_signed(older_intent, evidence(&older_signed))
+            .promote_signed(
+                PromotionTarget::Event(older_intent),
+                evidence(&older_signed),
+            )
             .unwrap();
         store
             .record_route_revision(older_intent, BTreeSet::from([relay]))
@@ -908,12 +952,8 @@ fn a_newer_replaceable_stops_an_older_started_obligation_but_keeps_bounded_safet
             other => panic!("expected supersession, got {other:?}"),
         }
         assert_eq!(
-            store
-                .reattach_receipt(older_receipt)
-                .unwrap()
-                .unwrap()
-                .state,
-            ReceiptState::Superseded
+            event_receipt(&store.reattach_receipt(older_receipt).unwrap().unwrap()).1,
+            &ReceiptState::Superseded
         );
         assert!(store.recover_attempts(older_intent).unwrap().is_empty());
         assert!(store
@@ -943,7 +983,10 @@ fn explicit_not_handed_off_evidence_destroys_the_obsolete_receipt_and_correlatio
         let older_intent = older.journaled_intent_id().unwrap();
         let older_receipt = older.journaled_receipt_id().unwrap();
         store
-            .promote_signed(older_intent, evidence(&older_signed))
+            .promote_signed(
+                PromotionTarget::Event(older_intent),
+                evidence(&older_signed),
+            )
             .unwrap();
         store
             .record_route_revision(older_intent, BTreeSet::from([relay]))
@@ -1034,12 +1077,8 @@ fn addressable_writes_with_different_identifiers_do_not_retire_each_other() {
             AcceptOutcome::Inserted { .. }
         ));
         assert_eq!(
-            store
-                .reattach_receipt(first_receipt)
-                .unwrap()
-                .unwrap()
-                .state,
-            ReceiptState::Accepted
+            event_receipt(&store.reattach_receipt(first_receipt).unwrap().unwrap()).1,
+            &ReceiptState::Accepted
         );
         assert_eq!(
             store
@@ -1064,7 +1103,9 @@ fn recover_attempt_order_is_canonical_and_identical_across_backends() {
         let aa_long = RelayUrl::parse("wss://aa.example/x").unwrap();
         let outcome = do_accept(store, accept(frozen, k.public_key(), 109));
         let intent_id = outcome.journaled_intent_id().unwrap();
-        store.promote_signed(intent_id, evidence(&signed)).unwrap();
+        store
+            .promote_signed(PromotionTarget::Event(intent_id), evidence(&signed))
+            .unwrap();
         store
             .record_route_revision(
                 intent_id,
@@ -1324,7 +1365,9 @@ fn corrupt_or_unknown_attempt_rows_are_fallible_not_panics() {
         let mut store = RedbStore::open(&path).unwrap();
         let outcome = do_accept(&mut store, accept(frozen, k.public_key(), 104));
         let intent_id = outcome.journaled_intent_id().unwrap();
-        store.promote_signed(intent_id, evidence(&signed)).unwrap();
+        store
+            .promote_signed(PromotionTarget::Event(intent_id), evidence(&signed))
+            .unwrap();
         store
             .record_route_revision(intent_id, BTreeSet::from([relay.clone()]))
             .unwrap();
@@ -1588,7 +1631,7 @@ fn terminal_receipt_still_reattachable_after_recover() {
         let intent_signed = outcome_a.journaled_intent_id().expect("journaled");
         let receipt_signed_id = outcome_a.journaled_receipt_id().expect("journaled");
         store
-            .promote_signed(intent_signed, evidence(&signed))
+            .promote_signed(PromotionTarget::Event(intent_signed), evidence(&signed))
             .expect("promote persistence");
 
         let outcome_b = do_accept(&mut store, accept(frozen_comp, k.public_key(), 200));
@@ -1626,16 +1669,20 @@ fn terminal_receipt_still_reattachable_after_recover() {
         .expect("receipt lookup must be readable")
         .expect("signed receipt must still be reattachable");
     assert_eq!(receipt_signed.intent_id, Some(intent_signed));
-    assert_eq!(receipt_signed.frozen_id, frozen_signed_id);
-    assert_eq!(receipt_signed.state, ReceiptState::Signed);
+    assert_eq!(
+        event_receipt(&receipt_signed),
+        (frozen_signed_id, &ReceiptState::Signed)
+    );
 
     let receipt_comp = store
         .reattach_receipt(receipt_comp_id)
         .expect("receipt lookup must be readable")
         .expect("compensated receipt must still be reattachable");
     assert_eq!(receipt_comp.intent_id, Some(intent_comp));
-    assert_eq!(receipt_comp.frozen_id, frozen_comp_id);
-    assert_eq!(receipt_comp.state, ReceiptState::Compensated);
+    assert_eq!(
+        event_receipt(&receipt_comp),
+        (frozen_comp_id, &ReceiptState::Compensated)
+    );
 
     assert!(
         store.reattach_receipt(99_999).unwrap().is_none(),
@@ -1655,7 +1702,7 @@ fn terminal_receipt_still_reattachable_after_recover() {
         .expect("receipt lookup must be readable")
         .expect("fresh receipt reattachable on MemoryStore too");
     assert_eq!(receipt_fresh.intent_id, Some(intent_fresh));
-    assert_eq!(receipt_fresh.state, ReceiptState::Accepted);
+    assert_eq!(event_receipt(&receipt_fresh).1, &ReceiptState::Accepted);
 }
 
 /// VISION-ratified receipt contract clarification (team-lead correction,
@@ -1709,8 +1756,10 @@ fn a_refused_write_is_taken_into_custody_as_one_permanently_failed_receipt() {
             .expect("receipt lookup must be readable")
             .expect("refused receipt persists immediately");
         assert_eq!(receipt.intent_id, None, "receipt-only: nothing backs it");
-        assert_eq!(receipt.frozen_id, frozen_id);
-        assert_eq!(receipt.state, ReceiptState::Refused(reason));
+        assert_eq!(
+            event_receipt(&receipt),
+            (frozen_id, &ReceiptState::Refused(reason))
+        );
         receipt_id
     };
 
@@ -1721,13 +1770,13 @@ fn a_refused_write_is_taken_into_custody_as_one_permanently_failed_receipt() {
         .expect("refused receipt still reattachable after reopen");
     // The reason survives the restart WITH BOTH IDS. Reduced to a string an
     // app could only tell the user to redo the edit by hand.
-    match receipt.state {
+    match event_receipt(&receipt).1 {
         ReceiptState::Refused(RefuseReason::ReplaceableBaseChanged {
             expected: got_expected,
             actual: got_actual,
         }) => {
-            assert_eq!(got_expected, expected);
-            assert_eq!(got_actual, actual);
+            assert_eq!(*got_expected, expected);
+            assert_eq!(*got_actual, actual);
         }
         other => panic!("refusal reason did not survive the restart: {other:?}"),
     }
@@ -1745,8 +1794,8 @@ fn a_refused_write_is_taken_into_custody_as_one_permanently_failed_receipt() {
         .expect("refused receipt reattachable on MemoryStore too");
     assert_eq!(mem_receipt.intent_id, None);
     assert_eq!(
-        mem_receipt.state,
-        ReceiptState::Refused(RefuseReason::Tombstoned)
+        event_receipt(&mem_receipt).1,
+        &ReceiptState::Refused(RefuseReason::Tombstoned)
     );
 }
 
@@ -1810,7 +1859,7 @@ fn duplicate_and_stale_intents_are_promotable_and_compensable_via_intent_id() {
         assert!(matches!(outcome2, AcceptOutcome::Duplicate { .. }));
 
         let promoted_dup = store
-            .promote_signed(intent_dup, evidence(&signed_dup))
+            .promote_signed(PromotionTarget::Event(intent_dup), evidence(&signed_dup))
             .expect("promote persistence");
         assert!(
             matches!(promoted_dup, PromoteOutcome::Promoted { .. }),
@@ -1827,7 +1876,7 @@ fn duplicate_and_stale_intents_are_promotable_and_compensable_via_intent_id() {
         assert!(matches!(outcome_stale, AcceptOutcome::Stale { .. }));
 
         let promoted_stale = store
-            .promote_signed(intent_stale, evidence(&signed_old))
+            .promote_signed(PromotionTarget::Event(intent_stale), evidence(&signed_old))
             .expect("promote persistence");
         match promoted_stale {
             PromoteOutcome::Promoted { row, .. } => {
@@ -2170,7 +2219,7 @@ fn pending_kind5_delete_commits_to_permanent_on_promote() {
             .is_empty());
 
         let promoted = store
-            .promote_signed(intent, evidence(&signed_deletion))
+            .promote_signed(PromotionTarget::Event(intent), evidence(&signed_deletion))
             .expect("promote persistence");
         assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
 
@@ -2389,7 +2438,7 @@ fn target_signs_while_hidden() {
 
         // Sign the TARGET while it is hidden by D's still-open claim.
         let promoted_t = store
-            .promote_signed(intent_t, evidence(&signed_t))
+            .promote_signed(PromotionTarget::Event(intent_t), evidence(&signed_t))
             .expect("promote persistence");
         match promoted_t {
             PromoteOutcome::Promoted { row, .. } => {
@@ -2588,7 +2637,7 @@ fn independent_kind5_claims_cancel_then_promote_commit_the_remaining_delete() {
             .is_empty());
 
         let promoted = store
-            .promote_signed(intent_2, evidence(&signed_2))
+            .promote_signed(PromotionTarget::Event(intent_2), evidence(&signed_2))
             .expect("promote persistence");
         assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
         assert!(store
@@ -2648,7 +2697,7 @@ fn independent_kind5_claims_promote_then_cancel_preserve_permanent_delete() {
         let intent_2 = outcome_2.journaled_intent_id().expect("journaled");
 
         let promoted = store
-            .promote_signed(intent_1, evidence(&signed_1))
+            .promote_signed(PromotionTarget::Event(intent_1), evidence(&signed_1))
             .expect("promote persistence");
         assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
 
@@ -2873,7 +2922,7 @@ fn mixed_e_and_a_tag_kind5_promotion_permanently_deletes_both_targets() {
         }
 
         let promoted = store
-            .promote_signed(intent, evidence(&signed_delete))
+            .promote_signed(PromotionTarget::Event(intent), evidence(&signed_delete))
             .expect("promote persistence");
         assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
         assert!(store
@@ -2969,7 +3018,7 @@ fn duplicate_delete_b_promote_then_a_cancel_keeps_b_deletion() {
         // atomically advance A's own routing obligation too (A is a
         // CO-OWNER of the deletion event's own row).
         let promoted_b = store
-            .promote_signed(intent_b, evidence(&signed_deletion))
+            .promote_signed(PromotionTarget::Event(intent_b), evidence(&signed_deletion))
             .expect("promote persistence");
         match promoted_b {
             PromoteOutcome::Promoted { co_signed, .. } => {
@@ -3071,7 +3120,7 @@ fn a_tag_kind5_claim_hides_addressable_winner_then_commits_on_promote() {
         );
 
         let promoted_d = store
-            .promote_signed(intent_d, evidence(&signed_deletion))
+            .promote_signed(PromotionTarget::Event(intent_d), evidence(&signed_deletion))
             .expect("promote persistence");
         assert!(matches!(promoted_d, PromoteOutcome::Promoted { .. }));
         assert!(
@@ -3423,7 +3472,10 @@ fn pending_kind5_cancel_and_promote_both_survive_real_redb_restart() {
     );
 
     let promoted = store
-        .promote_signed(intent_promote, evidence(&signed_promote_delete))
+        .promote_signed(
+            PromotionTarget::Event(intent_promote),
+            evidence(&signed_promote_delete),
+        )
         .expect("post-restart promotion");
     assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
     assert!(store
@@ -3724,7 +3776,7 @@ fn duplicate_b_signs_then_a_cancels_leaves_signed_row_queryable() {
         assert_eq!(signed.id, frozen_id);
 
         let promoted_b = store
-            .promote_signed(intent_b, evidence(&signed))
+            .promote_signed(PromotionTarget::Event(intent_b), evidence(&signed))
             .expect("promote persistence");
         match promoted_b {
             PromoteOutcome::Promoted { co_signed, .. } => {
@@ -3832,7 +3884,7 @@ fn duplicate_of_already_signed_local_row_starts_signed() {
         let intent_a = outcome_a.journaled_intent_id().expect("journaled");
 
         let promoted_a = store
-            .promote_signed(intent_a, evidence(&signed_a))
+            .promote_signed(PromotionTarget::Event(intent_a), evidence(&signed_a))
             .expect("promote persistence");
         assert!(matches!(promoted_a, PromoteOutcome::Promoted { .. }));
 
@@ -3861,7 +3913,7 @@ fn duplicate_of_already_signed_local_row_starts_signed() {
             .reattach_receipt(receipt_c)
             .expect("receipt lookup readable")
             .expect("receipt retained");
-        assert_eq!(receipt.state, ReceiptState::Signed);
+        assert_eq!(event_receipt(&receipt).1, &ReceiptState::Signed);
 
         // C's own compensation/promotion attempts are both correctly
         // refused -- it never had anything pending to begin with.
@@ -3870,7 +3922,7 @@ fn duplicate_of_already_signed_local_row_starts_signed() {
             .expect("compensate persistence");
         assert!(matches!(compensated_c, CompensateOutcome::AlreadySigned));
         let promoted_c = store
-            .promote_signed(intent_c, evidence(&signed_a))
+            .promote_signed(PromotionTarget::Event(intent_c), evidence(&signed_a))
             .expect("promote persistence");
         assert!(matches!(promoted_c, PromoteOutcome::NotFound));
     });
@@ -3926,7 +3978,7 @@ fn duplicate_of_already_signed_relay_row_starts_signed() {
             .reattach_receipt(receipt_d)
             .expect("receipt lookup readable")
             .expect("receipt retained");
-        assert_eq!(receipt.state, ReceiptState::Signed);
+        assert_eq!(event_receipt(&receipt).1, &ReceiptState::Signed);
     });
 }
 
@@ -3994,11 +4046,11 @@ fn relay_redelivery_onto_pending_duplicate_row_adopts_signature_and_fans_out_all
         // BOTH owners' own journals were fanned out to Signed -- neither
         // can be promoted or compensated again.
         let promoted_a = store
-            .promote_signed(intent_a, evidence(&signed_a))
+            .promote_signed(PromotionTarget::Event(intent_a), evidence(&signed_a))
             .expect("promote persistence");
         assert!(matches!(promoted_a, PromoteOutcome::NotFound));
         let promoted_b = store
-            .promote_signed(intent_b, evidence(&signed_a))
+            .promote_signed(PromotionTarget::Event(intent_b), evidence(&signed_a))
             .expect("promote persistence");
         assert!(matches!(promoted_b, PromoteOutcome::NotFound));
         let compensated_a = store
@@ -4052,8 +4104,8 @@ fn obsolete_attempt_body_does_not_survive_restart_as_hidden_duplicate_state() {
     assert!(recovered.iter().any(|r| r.intent_id == intent_c));
     assert!(recovered.iter().any(|r| r.intent_id == intent_d));
     assert_eq!(
-        store.reattach_receipt(receipt_a).unwrap().unwrap().state,
-        ReceiptState::Superseded
+        event_receipt(&store.reattach_receipt(receipt_a).unwrap().unwrap()).1,
+        &ReceiptState::Superseded
     );
 
     // Cancelling C cannot restore A from hidden bytes because none remain.
@@ -4258,8 +4310,8 @@ fn supersession_retires_all_duplicate_coowners_and_retains_only_handoff_evidence
             other => panic!("expected Superseded, got {other:?}"),
         }
         assert_eq!(
-            store.reattach_receipt(receipt_a).unwrap().unwrap().state,
-            ReceiptState::Superseded
+            event_receipt(&store.reattach_receipt(receipt_a).unwrap().unwrap()).1,
+            &ReceiptState::Superseded
         );
         assert!(store.reattach_receipt(receipt_b).unwrap().is_none());
 
@@ -4294,7 +4346,7 @@ fn repeat_promotion_of_an_already_signed_intent_is_a_no_op() {
         let intent = outcome.journaled_intent_id().expect("journaled");
 
         let promoted = store
-            .promote_signed(intent, evidence(&signed))
+            .promote_signed(PromotionTarget::Event(intent), evidence(&signed))
             .expect("promote persistence");
         assert!(matches!(promoted, PromoteOutcome::Promoted { .. }));
 
@@ -4307,7 +4359,7 @@ fn repeat_promotion_of_an_already_signed_intent_is_a_no_op() {
         );
 
         let repeat = store
-            .promote_signed(intent, evidence(&other_signed))
+            .promote_signed(PromotionTarget::Event(intent), evidence(&other_signed))
             .expect("promote persistence");
         assert!(
             matches!(repeat, PromoteOutcome::NotFound),
@@ -4335,8 +4387,8 @@ fn explicit_cancellation_is_a_distinct_durable_receipt_fact_on_both_backends() {
             CompensateOutcome::Compensated { .. }
         ));
         assert_eq!(
-            store.reattach_receipt(receipt).unwrap().unwrap().state,
-            ReceiptState::Cancelled
+            event_receipt(&store.reattach_receipt(receipt).unwrap().unwrap()).1,
+            &ReceiptState::Cancelled
         );
         assert!(matches!(
             store.cancel_write(intent).unwrap(),
@@ -4366,7 +4418,7 @@ fn redb_reopen_replays_cancelled_without_recovering_open_work() {
         .expect("recover delivery")
         .is_empty());
     assert_eq!(
-        store.reattach_receipt(receipt).unwrap().unwrap().state,
-        ReceiptState::Cancelled
+        event_receipt(&store.reattach_receipt(receipt).unwrap().unwrap()).1,
+        &ReceiptState::Cancelled
     );
 }

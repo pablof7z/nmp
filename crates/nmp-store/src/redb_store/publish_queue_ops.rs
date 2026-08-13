@@ -67,22 +67,46 @@ pub(super) fn recover_publish_queue(
         let record = decode_intent(value.value())
             .map_err(|error| codec_error(&format!("intent {}", intent_id.0), error))?;
 
-        let displaced = publish_queue_displaced
-            .get(key.value())
-            .map_err(persist_err)?
-            .map(|guard| decode_displaced(guard.value()))
-            .transpose()
-            .map_err(|error| codec_error("displaced event", error))?;
+        let work = match record.work {
+            super::publish_queue::PublishQueueIntentRecordWork::Event {
+                frozen,
+                routing,
+                sig_state,
+            } => {
+                let displaced = publish_queue_displaced
+                    .get(key.value())
+                    .map_err(persist_err)?
+                    .map(|guard| decode_displaced(guard.value()))
+                    .transpose()
+                    .map_err(|error| codec_error("displaced event", error))?;
+                crate::PublishQueueWork::Event {
+                    frozen,
+                    displaced: displaced.map(Box::new),
+                    routing,
+                    sig_state,
+                }
+            }
+            super::publish_queue::PublishQueueIntentRecordWork::ReplaceableOperation {
+                coordinate,
+                materialization,
+            } => crate::PublishQueueWork::ReplaceableOperation {
+                coordinate,
+                materialization: materialization.map(|current| crate::MaterializationWork {
+                    receipt: crate::MaterializationReceipt {
+                        materialization: current.current,
+                        sig_state: current.sig_state,
+                    },
+                    routing: current.routing,
+                }),
+            },
+        };
 
         out.push(PublishQueueIntent {
             intent_id,
             receipt_id: record.receipt_id,
-            frozen: record.frozen,
+            work,
             expected_pubkey: record.expected_pubkey,
             signing_identity_ref: record.signing_identity_ref,
-            routing: record.routing,
-            sig_state: record.sig_state,
-            displaced,
             accepted_at: record.accepted_at,
         });
     }
@@ -113,10 +137,9 @@ pub(super) fn reattach_receipt(
     Ok(Some(PublishQueueReceipt {
         receipt_id,
         intent_id: record.intent_id,
-        frozen_id: record.frozen_id,
         expected_pubkey: record.expected_pubkey,
         accepted_at: record.accepted_at,
-        state: record.state,
+        payload: record.payload,
     }))
 }
 
@@ -1087,7 +1110,12 @@ pub(super) fn start_lane_attempt(
             .ok_or_else(|| PersistenceError::invariant("attempt intent is not open"))?;
         decode_intent(&encoded).map_err(|error| codec_error("attempt intent", error))?
     };
-    if intent.sig_state != IntentSigState::Signed || intent.frozen != event {
+    let Some((intent_event, sig_state)) = intent.event() else {
+        return Err(PersistenceError::invariant(
+            "operation intent cannot own a delivery lane",
+        ));
+    };
+    if sig_state != IntentSigState::Signed || *intent_event != event {
         return Err(PersistenceError::invariant(
             "attempt bytes are not the intent's promoted signed bytes",
         ));
@@ -1786,10 +1814,12 @@ pub(super) fn accept_refused(
         let receipt_id = alloc_receipt_id_in_txn(&mut publish_queue_meta)?;
         let record = PublishQueueReceiptRecord {
             intent_id: None,
-            frozen_id,
             expected_pubkey,
             accepted_at: None,
-            state: ReceiptState::Refused(reason),
+            payload: crate::PublishQueueReceiptPayload::Event {
+                event_id: frozen_id,
+                state: ReceiptState::Refused(reason),
+            },
             correlation: None,
             terminal_sequence: None,
             terminal_at: None,
@@ -1838,10 +1868,9 @@ pub(super) fn enumerate_publish_queue_receipts(
         out.push(crate::PublishQueueReceipt {
             receipt_id,
             intent_id: record.intent_id,
-            frozen_id: record.frozen_id,
             expected_pubkey: record.expected_pubkey,
             accepted_at: record.accepted_at,
-            state: record.state,
+            payload: record.payload,
         });
     }
     Ok(out)
@@ -1874,10 +1903,9 @@ pub(super) fn publish_queue_receipts_after(
         out.push(crate::PublishQueueReceipt {
             receipt_id,
             intent_id: record.intent_id,
-            frozen_id: record.frozen_id,
             expected_pubkey: record.expected_pubkey,
             accepted_at: record.accepted_at,
-            state: record.state,
+            payload: record.payload,
         });
         if out.len() == usize::from(limit) {
             break;

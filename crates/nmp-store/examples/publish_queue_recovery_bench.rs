@@ -18,8 +18,9 @@ use std::time::Instant;
 
 use nmp_grammar::CorrelationToken;
 use nmp_store::{
-    sentinel_signature, AcceptWrite, EventStore, HandoffEvidence, IntentSigState,
-    PublishQueueAttemptHandoff, PublishQueuePostHandoffState, RedbStore, VerifiedSignature,
+    sentinel_signature, AcceptWrite, AcceptWritePayload, EventStore, HandoffEvidence,
+    IntentSigState, PromotionTarget, PublishQueueAttemptHandoff, PublishQueuePostHandoffState,
+    PublishQueueReceiptPayload, PublishQueueWork, RedbStore, VerifiedSignature,
 };
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 use serde::Serialize;
@@ -155,13 +156,19 @@ fn semantic_snapshot(store: &RedbStore) -> (usize, usize, String) {
     let mut normalized = String::new();
     let mut lanes = 0usize;
     for intent in &intents {
+        let (frozen, sig_state) = match &intent.work {
+            PublishQueueWork::Event {
+                frozen, sig_state, ..
+            } => (frozen, sig_state),
+            PublishQueueWork::ReplaceableOperation { .. } => continue,
+        };
         writeln!(
             normalized,
             "intent:{}:{}:{}:{:?}:{}",
             intent.intent_id.0,
             intent.receipt_id,
-            intent.frozen.id,
-            intent.sig_state,
+            frozen.id,
+            sig_state,
             intent.accepted_at.as_secs()
         )
         .unwrap();
@@ -169,10 +176,14 @@ fn semantic_snapshot(store: &RedbStore) -> (usize, usize, String) {
             .reattach_receipt(intent.receipt_id)
             .expect("receipt lookup")
             .expect("retained receipt");
+        let (event_id, state) = match &receipt.payload {
+            PublishQueueReceiptPayload::Event { event_id, state } => (event_id, state),
+            PublishQueueReceiptPayload::ReplaceableOperation { .. } => continue,
+        };
         writeln!(
             normalized,
             "receipt:{}:{:?}:{:?}:{}",
-            receipt.receipt_id, receipt.intent_id, receipt.state, receipt.frozen_id
+            receipt.receipt_id, receipt.intent_id, state, event_id
         )
         .unwrap();
         let token = format!("delivery-bench-{:08}", intent.intent_id.0 - 1);
@@ -277,13 +288,15 @@ fn populate(path: &Path, intents: usize, relays_per_intent: usize) -> BenchResul
         let signed = signed_event(&keys, intent_index);
         let accepted = store
             .accept_write(AcceptWrite {
-                frozen: frozen_event(&signed),
-                replaceable_base: None,
-                monotonic_stamp: false,
+                payload: AcceptWritePayload::Event {
+                    frozen: Box::new(frozen_event(&signed)),
+                    replaceable_base: None,
+                    monotonic_stamp: false,
+                    routing: "fixed-representative-fixture".into(),
+                    sig_state: IntentSigState::Pending,
+                },
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "delivery-benchmark".into(),
-                routing: "fixed-representative-fixture".into(),
-                sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(2_000_000 + intent_index as u64),
                 correlation: Some(
                     CorrelationToken::try_from(
@@ -295,7 +308,7 @@ fn populate(path: &Path, intents: usize, relays_per_intent: usize) -> BenchResul
             .expect("accept benchmark write");
         let intent_id = accepted.journaled_intent_id().expect("accepted intent");
         store
-            .promote_signed(intent_id, evidence(&signed))
+            .promote_signed(PromotionTarget::Event(intent_id), evidence(&signed))
             .expect("promote benchmark write");
         store
             .record_route_revision(intent_id, (0..relays_per_intent).map(relay).collect())
