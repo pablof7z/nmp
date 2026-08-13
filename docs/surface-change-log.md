@@ -1695,7 +1695,7 @@ entry is validated against the actual PR context by the trusted base workflow.
 - **Superseded path removed:** the inherited `SemanticEditStore`, `SemanticEditReceipt`, `OperationId`, separate semantic metadata/receipt tables, separate accept/rematerialize/promote/recover lifecycle, and per-receipt full materialization bodies are deleted rather than wrapped. Mandatory outer event routing/signature fields are replaced by closed payload arms, so bodyless work cannot enter a signer lane or relay lane by construction.
 - **Human signoff:** issue #1408 owns the durable-store mechanism and PR #1425 is the exact review record. Exact-head CI, independent review, and the merge record remain the approval trail; this entry is not merge authorization.
 
-## 2026-08-13 — Remove destination-address policy and custom DNS ([issue #1429](https://github.com/pablof7z/nmp/issues/1429))
+## 2026-08-13 — Remove destination-address policy and custom DNS ([issue #1429](https://github.com/pablof7z/nmp/issues/1429), [PR #1431](https://github.com/pablof7z/nmp/pull/1431))
 
 - **Failure evidence:** the custom Hickory-backed reqwest resolver and address classifier rejected loopback, private, link-local, unspecified, and `.onion` targets, and required duplicated allowlist/reachability configuration across Rust, UniFFI, Swift, Kotlin, NIP-11, and Blossom. On iOS this replaced the platform resolver and broke a public-hostname NIP-11 request through the supported Swift facade. The behavior was defensive policy rather than a Nostr protocol requirement and made ordinary local development and private-network relays fail before a connection attempt.
 - **Changed projections:** ffi,kotlin,rust,swift
