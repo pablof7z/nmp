@@ -21,7 +21,7 @@ class CorrelationTest {
             NMPEngine(
                 NMPConfig(outboxRouting = OutboxRoutingConfig(indexers = listOf("wss://indexer.example"))),
             ).use { engine ->
-                engine.setActiveAccount(author)
+                engine.session.add(author.testPublicKey(), makeCurrent = true)
                 val token = "kotlin-sdk-correlation-token"
 
                 val first =
@@ -87,7 +87,7 @@ class CorrelationTest {
             NMPEngine(
                 NMPConfig(outboxRouting = OutboxRoutingConfig(indexers = listOf("wss://indexer.example"))),
             ).use { engine ->
-                engine.setActiveAccount(author)
+                engine.session.add(author.testPublicKey(), makeCurrent = true)
                 val token = "kotlin-sdk-reattach-by-correlation"
 
                 val receipt =
@@ -135,7 +135,7 @@ class CorrelationTest {
     fun malformedCorrelationTokenOnPublishThrowsSynchronously() =
         runBlocking {
             NMPEngine(NMPConfig()).use { engine ->
-                engine.setActiveAccount(author)
+                engine.session.add(author.testPublicKey(), makeCurrent = true)
                 val error =
                     org.junit.jupiter.api.Assertions.assertThrows(
                         NMPError.InvalidCorrelationToken::class.java,

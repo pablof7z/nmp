@@ -34,8 +34,9 @@ issues:
 
 This is the design record for the type that replaces `WritePayload::Unsigned`:
 how an app says "here is roughly the event I want" and has NMP fill in what is
-missing — `created_at`, `pubkey`, `id`, `sig` — while the engine chooses the
-active signer or an explicit one. It was settled in the 2026-07-28/29 design
+missing — `created_at`, `pubkey`, `id`, `sig` — while the engine uses the
+current account's provider or an explicit identity's provider. It was settled
+in the 2026-07-28/29 design
 session with Pablo (repository owner); quotes are his, verbatim.
 
 The one-sentence summary: **the builder is a value that demands a kind, can
@@ -55,7 +56,7 @@ rewriting the alternatives and reasoning that led to it.
 is the template path: the engine freezes the body at acceptance and signs it
 ("the key lives in the engine"; signing and publishing are orthogonal stages,
 VISION P). `WriteIntent.identity_override: Option<PublicKey>` (#47) selects
-which key: `None` means the active account, `Some(pk)` is explicit per-write
+which key: `None` means the current account, `Some(pk)` is explicit per-write
 consent.
 
 The gap is that `nostr::UnsignedEvent` **requires** `pubkey` and `created_at`
@@ -64,7 +65,7 @@ The gap is that `nostr::UnsignedEvent` **requires** `pubkey` and `created_at`
 either in: with `identity_override: Some(pk)`, `pk` must EQUAL the draft's
 author or the write fails closed pre-acceptance
 (`crates/nmp/src/core/write.rs:1590-1605`); with `None`, the draft's author
-must equal the current active account (`write.rs:1607-1628`). The doc on
+must equal the current account (`write.rs:1607-1628`). The doc on
 `on_publish` states the invariant this enforces: "the reducer never restamps a
 draft; a mismatch fails closed with no `Accepted`" (`write.rs:1469`).
 
@@ -154,8 +155,9 @@ the frozen body.
 
 What the value-ness rules out is as important as what it enables. The builder
 carries no engine reference, no session, no signer handle. Composing one is
-pure and infallible; everything that can fail — no active account, no
-registered signer, a stale replaceable base — fails at `Engine::publish`'s
+pure and infallible; everything that can fail — no current account, no
+available signing provider, a stale replaceable base — fails at
+`Engine::publish`'s
 acceptance boundary, where #47's machinery already lives. There is exactly one
 publish door, and the builder is an argument to it, not a second lifecycle.
 (#838 deleted `publish_composed` precisely to avoid two write paths; a builder
@@ -254,7 +256,7 @@ today: `comment_intent` (`crates/nmp-nip22/src/intent.rs:23`) takes explicit
 `author: PublicKey` and `created_at: Timestamp` parameters, and its module doc
 records the choice as deliberate — "`author` and `created_at` are explicit
 caller-supplied parameters (this issue's own design decision): no
-active-account query, no wall-clock read, hence zero engine dependency for
+current-account query, no wall-clock read, hence zero engine dependency for
 this whole crate" (`intent.rs:4-6`).
 
 Pablo's ruling, in full:
@@ -270,7 +272,7 @@ Two consequences:
 
 - **`nip22::comment_intent`'s explicit `author`/`created_at` parameters lose
   their justification.** The precise accounting: the *purity* half of the
-  code's own stated rationale — no active-account query, no wall-clock read,
+  code's own stated rationale — no current-account query, no wall-clock read,
   zero engine dependency — survives trivially under a builder, because a
   composer returning an `EventBuilder` still reads no clock and queries no
   account; the ENGINE stamps at acceptance. The only justification that

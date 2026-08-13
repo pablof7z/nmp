@@ -177,7 +177,7 @@ final class NIP22Tests: XCTestCase {
             )
         )
         defer { engine.shutdown() }
-        try engine.setActiveAccount(author)
+        _ = try engine.session.add(publicKey: testPublicKey(author), makeCurrent: true)
 
         let token = "nip22-offline-signer-token"
         let intent = try NMP.commentIntent(
@@ -243,7 +243,7 @@ final class NIP22Tests: XCTestCase {
             )
         )
         defer { engine.shutdown() }
-        try engine.setActiveAccount(author)
+        _ = try engine.session.add(publicKey: testPublicKey(author), makeCurrent: true)
 
         let root = CommentRoot.external(target: .podcastEpisode(guid: "guid-query-path"))
         let demand = try commentThreadDemand(root: root)

@@ -1,33 +1,33 @@
-# Current pubkey, accounts, and signer selection
+# Whole-session accounts and current selection
 
-NMP consumes identity inputs and signer capabilities. It does not own an
-account manager.
+NMP owns one engine session containing unique accounts keyed by decoded public
+key, each account's optional persistable provider, and the current selection.
+The app owns the product policy and presentation around that session.
 
-## The app owns accounts
+## The app owns account product policy
 
 Your app owns:
 
-- which identities exist;
 - labels, ordering, and account-selection UI;
-- import, export, backup, and removal policy;
-- whether an identity is local, remote, hardware-backed, or disposable; and
+- import, backup, removal, and secure storage policy for the opaque whole-session
+  payload;
 - whether logout should preserve or destroy the shared local cache.
 
-NMP needs a current-pubkey value for reactive demand and a way to locate a
-signer when a write needs one.
+NMP owns account membership, current selection, provider reconstruction, and
+the runtime availability used when a write needs signing.
 
-## Current pubkey has two ergonomic roles
+## Current account has two ergonomic roles
 
 ```swift
-try engine.setCurrentPubkey(selectedAccount.pubkey)
+let selected = try engine.session.add(publicKey: publicKey, makeCurrent: true)
 ```
 
 1. `Reactive(CurrentPubkey)` bindings re-root to the new value.
-2. A write with no signer override selects the registered signer for that value.
+2. A write using `Identity::Active` selects that account's signing provider.
 
 Those roles share a default but remain separable.
 
-Changing current pubkey does not:
+Changing the current account does not:
 
 - rewrite literal multi-account demands;
 - isolate or clear cached rows;
@@ -37,7 +37,8 @@ Changing current pubkey does not:
 
 ## Read-only and multi-account demand
 
-A current pubkey may have no signer. Read-only browsing remains valid.
+A current account may be public-key-only. Its signing capability is
+`unsupported`, and read-only browsing remains valid.
 
 An app that watches all of its accounts writes the literal demand it actually
 wants:
@@ -52,61 +53,57 @@ let mentions = NMPFilter(
 That query stays unchanged when the selected/current account changes. App state
 can annotate each row with which local account was tagged.
 
-## Register capabilities, not signer objects on every call
+## Accounts carry optional persistable providers
 
 Ordinary writes should not force the app to pass a signer repeatedly:
 
 ```swift
-try engine.registerSigningCapability(keychainProvider, for: accountPubkey)
-let receipt = try engine.publish(.init(
-    draft: draft,
-    durability: .durable
-))
+let account = try engine.session.add(privateKey: privateKey, makeCurrent: true)
+let receipt = try engine.publish(intent)
 ```
 
-The provider may be local, remote, hardware-backed, or app-defined. NMP asks it
-to sign one exact frozen body when needed.
+The current implementation persists and reconstructs the local-key provider.
+NMP asks the configured provider to sign one exact frozen body when needed and
+validates its result before promotion.
 
-Platform SDKs should ship standard providers backed by Keychain or Android
-Keystore so every app does not hand-roll secure-storage plumbing. Rust persists
-signing obligations and identity references, not raw secrets. The app can still
-supply a custom provider.
+The app exports one opaque session payload and stores it atomically according to
+its platform security policy. Raw provider restoration material does not enter
+the event/delivery store, snapshots, diagnostics, or logs. Additional provider
+implementations must project through the same account/session model.
 
-## Override one write without changing current pubkey
-
-```swift
-let receipt = try engine.publish(.init(
-    draft: episodeDraft,
-    durability: .durable,
-    signer: .identity(podcastIdentity)
-))
-```
+## Override one write without changing the current account
 
 This supports podcast keys, disposable identities, delegates, hardware keys,
-and remote signers. It does not alter reactive queries rooted at current pubkey.
+and remote signers as provider implementations are added. The write names a
+decoded public key through `Identity::Explicit`; it does not alter reactive
+queries rooted at the current account.
 
 NMP resolves and pins the chosen identity at acceptance. A later account switch
 cannot redirect the pending intent.
 
-## Provider absence and reattachment
+## Provider availability and resumption
 
-Once NMP can resolve the expected author identity, absence of a matching signer
-does not block durable acceptance into the canonical store and receipt journal:
+Once NMP can resolve the expected author identity, a configured provider being
+unavailable does not block durable acceptance into the canonical store and
+receipt journal:
 
 ```text
 accepted(intentId)
 awaitingSigner(pubkey)
 ```
 
-The unsigned pending row remains visible to matching queries. Attaching a
-matching provider later resumes the existing obligation:
+The unsigned pending row remains visible to matching queries. When the
+configured provider becomes available, NMP resumes the existing obligation.
+For a local-key account, restoring the whole session or adding that decoded
+private key again reconstructs the provider:
 
 ```swift
-try engine.registerSigningCapability(reconnectedProvider, for: pubkey)
+try engine.session.add(privateKey: privateKey)
 ```
 
-The app does not recreate the intent or mutate the pending row. A provider
-disconnect is capability state, not permission to discard accepted data.
+The app does not recreate the intent or mutate the pending row. Provider
+availability is runtime capability state, not permission to discard accepted
+data.
 
 ## Shared cache trust domain
 
@@ -114,16 +111,12 @@ One engine instance has one canonical cache. Accounts in that engine are not
 separate mutually untrusted users. Validated public rows and locally accepted
 rows remain available to any local query that matches them.
 
-For a device/app used by mutually untrusted people, logout must be explicit:
-
-```swift
-try await engine.reset(.allLocalData)
-```
-
-The destructive operation atomically clears cached events, pending writes,
-receipts, source/access evidence, protocol state, and attached capability
-references according to the reset contract. An ordinary current-pubkey change
-must never pretend to provide that boundary.
+For a device/app used by mutually untrusted people, logout must be explicit.
+`engine.session.clear()` removes accounts, providers, and current selection but
+deliberately preserves cached events, receipts, and accepted write obligations.
+Destroying the shared local trust domain is a separate destructive-store reset,
+performed only after shutting down every engine using that path. An ordinary
+current-account change must never pretend to provide either boundary.
 
 ## AUTH identity is query context
 

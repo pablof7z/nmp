@@ -103,7 +103,7 @@ let receipt = try engine.publish(.init(
 
 The podcast key signs this event without becoming current pubkey. If its
 signing provider is offline, the canonical pending row remains visible and the receipt
-waits for provider reattachment.
+waits for the configured provider to become available.
 
 ## 8. Explicitly non-durable presence signal
 

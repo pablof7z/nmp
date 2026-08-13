@@ -14,7 +14,7 @@ use nmp::mechanism::publish_queue::{AuthDenialSource, RelayState, WriteFact};
 use super::budgets::NEVER;
 use super::{AuthDenialObservation, NmpWorld};
 
-/// One app-owned policy for the active account, with per-relay answers.
+/// One app-owned policy for the current account, with per-relay answers.
 ///
 /// The fixture is deliberately installed through the public facade and sees
 /// the real challenge request. It does not inject an answer into the reducer;
@@ -91,7 +91,7 @@ impl NmpWorld {
             .as_ref()
             .and_then(|name| self.people.get(name))
             .map(nostr::Keys::public_key)
-            .expect("nmp-bdd: an AUTH-policy write has an active account");
+            .expect("nmp-bdd: an AUTH-policy write has an current account");
         if pubkey != expected_pubkey {
             return false;
         }

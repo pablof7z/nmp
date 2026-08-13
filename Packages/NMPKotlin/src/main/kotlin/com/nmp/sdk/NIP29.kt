@@ -181,7 +181,7 @@ class NMPGroup internal constructor(internal val ffi: FfiGroup) {
      *
      * The `h` row is appended before signing, the route is the scope's own
      * hosts, and [authorPubkeyHex] is frozen as an exact decoded hex pubkey
-     * rather than the active-account selector (#878). Returns the ORDINARY
+     * rather than the current-account selector (#878). Returns the ORDINARY
      * [Receipt], store-issued [Receipt.id] included.
      *
      * An app that needs a signed event WITHOUT publishing it asks the engine

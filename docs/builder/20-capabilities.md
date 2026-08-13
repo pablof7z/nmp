@@ -3,18 +3,21 @@
 A capability answers one bounded engine request. It does not become arbitrary
 app code inside routing, demand, persistence, or admission.
 
-## Signer provider
+## Session account and signer provider
 
-The common path registers a provider for an identity and lets current pubkey
-select it by default:
+One whole session owns every account, its optional persistable signer provider,
+and the current selection. A public-key-only account is a valid account whose
+signing capability is `unsupported`; a local-private-key account has the
+`localKey` provider and reports its current operational availability. For
+example, Swift adds and selects a decoded private key in one transition:
 
 ```swift
-try engine.attachSigner(provider, for: pubkey)
-let receipt = try engine.publish(.init(draft: draft, durability: .durable))
+let account = try engine.session.add(privateKey: privateKey, makeCurrent: true)
+let receipt = try engine.publish(intent)
 ```
 
-A per-write identity override selects another registered provider without
-changing current pubkey.
+A per-write explicit identity selects another session account without changing
+the current account.
 
 At acceptance NMP freezes the body, expected pubkey, final id, and chosen
 identity reference. The provider receives exactly that signing request.
@@ -29,9 +32,9 @@ engine's sign-only operation for that case:
 - Swift: `try await engine.signEvent(unsigned)`.
 - Kotlin: `engine.signEvent(unsigned)` from a coroutine.
 
-The unsigned value names the active account explicitly. NMP refuses a missing
-active signer or author mismatch, freezes the exact body, routes only to the
-registered capability, and validates the returned body, author, id, and
+The unsigned value names its author explicitly. NMP requires that author to be
+the current account with an available signing provider, freezes the exact body,
+routes only to that provider, and validates the returned body, author, id, and
 signature. Success returns a signed event value only. It does not create a
 write intent, canonical row, receipt, delivery work, relay plan, or publication.
 
@@ -53,10 +56,12 @@ event. A provider cannot substitute another valid event or return a forged one.
 
 This rule applies equally to local, remote, hardware, and app-defined providers.
 
-## Missing provider is receipt state
+## Provider unavailability is receipt state
 
-Once expected author identity is resolved, temporary provider absence does not
-reject a durable intent. The canonical row remains:
+Once expected author identity is resolved, a configured provider being
+currently unavailable does not reject a durable intent. This is distinct from
+a public-key-only account, for which signing is unsupported. The canonical row
+remains:
 
 ```text
 signature = Pending
@@ -68,8 +73,8 @@ The receipt reports:
 awaitingSigner(pubkey)
 ```
 
-Attaching a matching provider resumes the obligation. The row itself does not
-become `AwaitingSigner`; that is a receipt/capability fact.
+Adding the matching private-key-backed account resumes the obligation. The row
+itself does not become `AwaitingSigner`; that is a receipt/capability fact.
 
 ## Secret material boundary
 
@@ -77,22 +82,17 @@ The durable event/delivery store persists obligations, identity references,
 frozen bodies, validated signatures, and receipt facts. It does not persist raw
 nsecs, bunker credentials, hardware secrets, or bearer tokens.
 
-Platform SDKs provide standard Keychain/Keystore-backed providers. The app owns
-identity import, removal, backup, labels, and login policy and may supply custom
-remote/hardware/memory providers.
+The app persists one opaque `SessionPayload` as a whole and supplies it when it
+constructs the next engine. The payload may contain provider restoration
+material and is sensitive: store it atomically in platform-appropriate secure
+storage, do not parse or partially edit it, and never log it. Session restore
+is all-or-nothing. Provider availability is live runtime state, not persisted
+truth.
 
-For a personal or development app that explicitly accepts plaintext sandbox
-storage, Swift and Kotlin also expose `NMPInsecureFileAccountStore`. Passing it
-to engine construction makes `addAccount` checkpoint the validated key and
-reattach it on the next construction. The checkpoint is separate from the
-canonical event/delivery store, never appears in snapshots or diagnostics, and
-must be cleared before engine shutdown to sign out. Its name is literal: it is
-not Keychain, Keystore, encrypted, hardware-backed, or a substitute for the
-standard secure providers tracked by #47.
-
-A memory-only key may disappear. NMP does not re-author or silently discard its
-accepted intent; the receipt waits for equivalent provider reattachment or
-explicit cancellation/terminal policy.
+Clearing or removing session accounts does not delete cached events, receipts,
+or accepted write obligations. NMP does not re-author or silently discard an
+accepted intent; its receipt waits for a matching provider to become available
+again or for explicit cancellation/terminal policy.
 
 ## Encrypt and decrypt
 

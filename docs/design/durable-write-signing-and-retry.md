@@ -132,7 +132,7 @@ client's exact Nostr event uses the engine's sign-only operation rather than
 fabricating an ephemeral write intent.
 
 The request carries an immutable unsigned NIP-01 body whose author must equal
-the active account. Acceptance freezes that author and body, resolves only the
+the current session account. Acceptance freezes that author and body, resolves only the
 matching registered capability, and admits pending signer work through the
 same finite native-task owner used by other signer requests. The returned event
 is released only after its body, author, computed id, and signature all
@@ -148,14 +148,16 @@ operation supplies governed key custody and exact-result validation only.
 The Rust event/delivery store persists signing obligations, expected pubkeys,
 frozen bodies, and validated signatures. It does not persist raw secret keys.
 
-Platform SDKs should ship standard signer providers backed by platform secure
-storage so ordinary apps do not hand-roll vault plumbing. The app owns which
-identities exist, import/removal/backup UX, and whether to use a custom remote,
-hardware, or memory-only signer.
+The session owns which accounts exist, each account's optional persistable
+provider configuration, and the optional current selection. It exports and
+restores those facts as one opaque sensitive value; the app owns storing that
+value plus identity import/removal/backup UX.
 
-A memory-only disposable key may disappear permanently. Its accepted intent
-then remains `AwaitingSigner` until an equivalent signer is attached or the app
-cancels it; NMP must not silently discard or re-author it.
+Provider availability is operational state, not a second kind of membership.
+A remote, hardware, or callback-backed provider may be unreachable after
+restore while its account remains known. An accepted intent then remains
+`AwaitingSigner` for its frozen public key until that provider becomes
+available or the app cancels it; NMP must not discard or re-author it.
 
 ## 5. Receipt durability
 

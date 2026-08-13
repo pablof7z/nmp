@@ -11,7 +11,7 @@ use nmp::{
     ShortfallFact, SourceStatus, WriteFact,
 };
 
-use crate::demand::active_account_demand;
+use crate::demand::current_account_demand;
 use crate::edit::{
     compose_follow_change, follows, ComposeFollowError, ComposeFollowResult, FollowChange,
 };
@@ -42,7 +42,7 @@ pub enum FollowAvailability {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FollowSnapshot {
-    pub active_pubkey: Option<PublicKey>,
+    pub current_pubkey: Option<PublicKey>,
     pub target: PublicKey,
     pub relationship: FollowRelationship,
     pub availability: FollowAvailability,
@@ -97,10 +97,10 @@ impl Accumulator {
         }
     }
 
-    fn base_for(&self, active: PublicKey) -> Option<&Row> {
+    fn base_for(&self, current: PublicKey) -> Option<&Row> {
         self.rows
             .values()
-            .find(|row| row.pubkey() == active && row.kind() == nostr::Kind::ContactList)
+            .find(|row| row.pubkey() == current && row.kind() == nostr::Kind::ContactList)
     }
 }
 
@@ -109,8 +109,11 @@ impl Accumulator {
 /// failed source makes the whole projection unavailable, and every branch
 /// must have proven something before it reads Ready. No branch's proof ever
 /// stands in for another's.
-fn availability(active: Option<PublicKey>, evidence: &[AcquisitionEvidence]) -> FollowAvailability {
-    if active.is_none() {
+fn availability(
+    current: Option<PublicKey>,
+    evidence: &[AcquisitionEvidence],
+) -> FollowAvailability {
+    if current.is_none() {
         return FollowAvailability::SignedOut;
     }
 
@@ -158,20 +161,21 @@ fn availability(active: Option<PublicKey>, evidence: &[AcquisitionEvidence]) -> 
 }
 
 fn project(
-    active: Option<PublicKey>,
+    current: Option<PublicKey>,
     target: PublicKey,
     accumulator: &Accumulator,
     evidence: &[AcquisitionEvidence],
 ) -> FollowSnapshot {
-    let evidence_availability = availability(active, evidence);
-    let base = active.and_then(|pubkey| accumulator.base_for(pubkey));
-    let availability =
-        if active.is_some() && base.is_none() && evidence_availability == FollowAvailability::Ready
-        {
-            FollowAvailability::NoContactList
-        } else {
-            evidence_availability
-        };
+    let evidence_availability = availability(current, evidence);
+    let base = current.and_then(|pubkey| accumulator.base_for(pubkey));
+    let availability = if current.is_some()
+        && base.is_none()
+        && evidence_availability == FollowAvailability::Ready
+    {
+        FollowAvailability::NoContactList
+    } else {
+        evidence_availability
+    };
     let relationship = match base {
         Some(base) if follows(base, target) => FollowRelationship::Following,
         Some(_) => FollowRelationship::NotFollowing,
@@ -181,7 +185,7 @@ fn project(
         None => FollowRelationship::Unknown,
     };
     FollowSnapshot {
-        active_pubkey: active,
+        current_pubkey: current,
         target,
         relationship,
         availability,
@@ -302,7 +306,7 @@ pub fn observe_following(
 ) -> Result<FollowObservation, nmp::EngineError> {
     let runtime = engine.adapter_runtime()?;
     let subscription =
-        engine.observe_async(nmp::LiveQuery::single(active_account_demand()), None)?;
+        engine.observe_async(nmp::LiveQuery::single(current_account_demand()), None)?;
     let cancel = subscription.cancel_handle();
     let latest = Arc::new(LatestSlot::default());
     let producer = latest.clone();
@@ -310,8 +314,11 @@ pub fn observe_following(
         let mut accumulator = Accumulator::default();
         while let Ok(Some(frame)) = subscription.next().await {
             accumulator.apply(frame.deltas);
-            let active = engine.active_account().ok().flatten();
-            producer.send(project(active, target, &accumulator, &frame.evidence));
+            let current = engine
+                .session()
+                .ok()
+                .and_then(|session| session.current_pubkey);
+            producer.send(project(current, target, &accumulator, &frame.evidence));
         }
         producer.close();
     });
@@ -340,9 +347,13 @@ impl AsyncFollowObservation {
             Some(frame) => {
                 let mut accumulator = self.accumulator.lock().unwrap();
                 accumulator.apply(frame.deltas);
-                let active = self.engine.active_account().ok().flatten();
+                let current = self
+                    .engine
+                    .session()
+                    .ok()
+                    .and_then(|session| session.current_pubkey);
                 Ok(Some(project(
-                    active,
+                    current,
                     self.target,
                     &accumulator,
                     &frame.evidence,
@@ -370,7 +381,7 @@ pub fn observe_following_async(
     target: PublicKey,
 ) -> Result<AsyncFollowObservation, nmp::EngineError> {
     let subscription =
-        engine.observe_async(nmp::LiveQuery::single(active_account_demand()), None)?;
+        engine.observe_async(nmp::LiveQuery::single(current_account_demand()), None)?;
     Ok(AsyncFollowObservation {
         subscription,
         engine,
@@ -502,26 +513,27 @@ fn prepare_set_following_with_timeout(
     let task: FollowActionFuture = Box::new(move |tx: FifoSender<FollowActionStatus>| {
         Box::pin(async move {
             tx.send(FollowActionStatus::Acquiring);
-            let author = match engine.active_account() {
-                Ok(Some(author)) => author,
-                Ok(None) => {
+            let author = match engine.session() {
+                Ok(session) if session.current_pubkey.is_none() => {
                     tx.send(FollowActionStatus::Failed(FollowActionFailure::SignedOut));
                     return;
                 }
+                Ok(session) => session.current_pubkey.expect("checked above"),
                 Err(error) => {
                     tx.send(FollowActionStatus::Failed(engine_failure(error)));
                     return;
                 }
             };
 
-            let subscription =
-                match engine.observe_async(nmp::LiveQuery::single(active_account_demand()), None) {
-                    Ok(subscription) => subscription,
-                    Err(error) => {
-                        tx.send(FollowActionStatus::Failed(engine_failure(error)));
-                        return;
-                    }
-                };
+            let subscription = match engine
+                .observe_async(nmp::LiveQuery::single(current_account_demand()), None)
+            {
+                Ok(subscription) => subscription,
+                Err(error) => {
+                    tx.send(FollowActionStatus::Failed(engine_failure(error)));
+                    return;
+                }
+            };
             let mut accumulator = Accumulator::default();
             let mut last_availability = FollowAvailability::Acquiring;
             let mut remaining_snapshots = MAX_ACQUISITION_SNAPSHOTS;
@@ -537,20 +549,20 @@ fn prepare_set_following_with_timeout(
                 match tokio::time::timeout(timeout, subscription.next()).await {
                     Ok(Ok(Some(frame))) => {
                         accumulator.apply(frame.deltas);
-                        let active = match engine.active_account() {
-                            Ok(active) => active,
+                        let current = match engine.session() {
+                            Ok(session) => session.current_pubkey,
                             Err(error) => {
                                 tx.send(FollowActionStatus::Failed(engine_failure(error)));
                                 return;
                             }
                         };
-                        if active != Some(author) {
+                        if current != Some(author) {
                             tx.send(FollowActionStatus::Failed(
                                 FollowActionFailure::AccountChanged,
                             ));
                             return;
                         }
-                        last_availability = availability(active, &frame.evidence);
+                        last_availability = availability(current, &frame.evidence);
                         if last_availability == FollowAvailability::SourceUnavailable {
                             tx.send(FollowActionStatus::Failed(
                                 FollowActionFailure::SourceUnavailable,
@@ -681,10 +693,7 @@ mod tests {
         let engine = Arc::new(Engine::new(EngineConfig::default()).unwrap());
         let author = Keys::generate();
         engine
-            .add_account(&author.secret_key().to_secret_hex())
-            .unwrap();
-        engine
-            .set_active_account(Some(author.public_key()))
+            .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
             .unwrap();
         let action = set_following_with_timeout(
             engine,

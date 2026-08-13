@@ -9,9 +9,11 @@ final class SigningTests: XCTestCase {
     func testSignEventReturnsExactBodyWithoutPublishingIt() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
-        let registration = try await engine.addAccount(secretKey: secret)
-        XCTAssertEqual(registration.publicKey, author)
-        try engine.setActiveAccount(author)
+        let registration = try engine.session.add(
+            privateKey: testPrivateKey(secret),
+            makeCurrent: true
+        )
+        XCTAssertEqual(registration.publicKey, try testPublicKey(author))
         let request = NMPUnsignedEvent(
             createdAt: 1_723_456_789,
             kind: 27_272,
@@ -38,10 +40,10 @@ final class SigningTests: XCTestCase {
         query.cancel()
     }
 
-    func testSignEventWithoutActiveSignerIsTyped() async throws {
+    func testSignEventWithoutCurrentSigningProviderIsTyped() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
-        try engine.setActiveAccount(author)
+        _ = try engine.session.add(publicKey: testPublicKey(author), makeCurrent: true)
         do {
             _ = try await engine.signEvent(
                 NMPUnsignedEvent(
@@ -53,7 +55,7 @@ final class SigningTests: XCTestCase {
             )
             XCTFail("missing signer must fail")
         } catch {
-            XCTAssertEqual(error as? NMPError, .noActiveSigner)
+            XCTAssertEqual(error as? NMPError, .noCurrentSigningProvider)
         }
     }
 
@@ -65,8 +67,7 @@ final class SigningTests: XCTestCase {
     func testSignEventCancellationTerminatesTheAwait() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
-        _ = try await engine.addAccount(secretKey: secret)
-        try engine.setActiveAccount(author)
+        _ = try engine.session.add(privateKey: testPrivateKey(secret), makeCurrent: true)
 
         let task = Task {
             try await engine.signEvent(

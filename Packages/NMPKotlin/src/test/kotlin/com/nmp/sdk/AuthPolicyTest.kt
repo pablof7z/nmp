@@ -1,14 +1,10 @@
 package com.nmp.sdk
 
-import java.nio.file.FileAlreadyExistsException
-import java.nio.file.Files
-import java.nio.file.Path
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.io.TempDir
 import uniffi.nmp_ffi.FfiAccessContext
 import uniffi.nmp_ffi.FfiAuthDiagnostics
 import uniffi.nmp_ffi.FfiAuthPhase
@@ -17,24 +13,21 @@ import uniffi.nmp_ffi.FfiAuthPolicyOutcome
 import uniffi.nmp_ffi.FfiAuthPolicyRequest
 
 class AuthPolicyTest {
-    @TempDir
-    lateinit var root: Path
-
     private val secret = "0".repeat(63) + "1"
     private val publicKey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
     @Test
-    fun accountRegistrationsAreExactBorrowedAndStaleSafe() {
+    fun accountRemovalIsRepeatedSafeAndAReaddUsesTheSamePublicKeyIdentity() {
         NMPEngine(NMPConfig(maxAuthCapabilities = 1u)).use { engine ->
-            val original = engine.addAccount(secret)
-            assertEquals(publicKey, original.publicKey)
+            val original = engine.session.add(secret.testPrivateKey())
+            assertEquals(publicKey.testPublicKey(), original.publicKey)
             assertThrows(NMPError.AuthCapabilityRegistryFull::class.java) {
-                engine.addAccount("0".repeat(63) + "2")
+                engine.session.add(("0".repeat(63) + "2").testPrivateKey())
             }
-            val replacement = engine.addAccount(secret)
-            assertFalse(engine.removeAccount(original), "a stale proof cannot remove its replacement")
-            assertTrue(engine.removeAccount(replacement))
-            assertFalse(engine.removeAccount(replacement), "repeated borrowed removal is harmless")
+            val replacement = engine.session.add(secret.testPrivateKey())
+            assertEquals(original.publicKey, replacement.publicKey)
+            assertTrue(engine.session.remove(original))
+            assertFalse(engine.session.remove(replacement), "repeated removal is harmless")
         }
     }
 
@@ -45,7 +38,7 @@ class AuthPolicyTest {
             val original = engine.addAuthPolicy(publicKey, policy)
             assertEquals(publicKey, original.publicKey)
             assertThrows(NMPError.AuthCapabilityRegistryFull::class.java) {
-                engine.addAccount(secret)
+                engine.session.add(secret.testPrivateKey())
             }
 
             val replacement = engine.addAuthPolicy(publicKey, policy)
@@ -61,37 +54,11 @@ class AuthPolicyTest {
         assertEquals(0u, config.toFfi().maxAuthCapabilities)
         NMPEngine(config).use { engine ->
             assertThrows(NMPError.AuthCapabilityRegistryFull::class.java) {
-                engine.addAccount(secret)
+                engine.session.add(secret.testPrivateKey())
             }
             assertThrows(NMPError.AuthCapabilityRegistryFull::class.java) {
                 engine.addAuthPolicy(publicKey, RecordingPolicy())
             }
-        }
-    }
-
-    @Test
-    fun failedCheckpointRollsBackExactLiveAccountAndPreservesOriginalError() {
-        val blockingParent = root.resolve("not-a-directory")
-        Files.createFile(blockingParent)
-        val store = NMPInsecureFileAccountStore(blockingParent.resolve("account.nsec"))
-
-        NMPEngine(NMPConfig(maxAuthCapabilities = 1u), store).use { engine ->
-            val persistenceError =
-                assertThrows(FileAlreadyExistsException::class.java) {
-                    engine.addAccount(secret)
-                }
-            assertTrue(
-                persistenceError.suppressed.isEmpty(),
-                "the exact rollback should succeed without obscuring the checkpoint failure",
-            )
-            assertEquals(null, engine.activeAccount())
-
-            Files.delete(blockingParent)
-            Files.createDirectory(blockingParent)
-            val retry = engine.addAccount(secret)
-            assertEquals(publicKey, retry.publicKey)
-            assertTrue(Files.exists(blockingParent.resolve("account.nsec")))
-            assertTrue(engine.removeAccount(retry), "retry proves the failed add leaked no capability")
         }
     }
 
@@ -147,7 +114,7 @@ class AuthPolicyTest {
 
                     override fun onCancelled(request: NMPAuthPolicyRequest) {
                         delivered = request
-                        assertEquals(null, engine.activeAccount())
+                        assertEquals(null, engine.session.current)
                         reentered = true
                     }
                 }

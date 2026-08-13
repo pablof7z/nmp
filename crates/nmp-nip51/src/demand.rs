@@ -1,4 +1,4 @@
-//! The active account's kind:10009 live-query constructor (#108).
+//! The current account's kind:10009 live-query constructor (#108).
 
 use std::collections::BTreeSet;
 
@@ -15,7 +15,7 @@ use nmp_grammar::{Binding, Demand, Filter, IdentityField};
 /// ordinary `Reactive(ActivePubkey)` empty-resolution path (#106) -- no
 /// special case needed here; `crates/nmp/tests/nip51_headless.rs` proves
 /// that signed-out/reroot/reconstruct behavior end to end.
-pub fn active_account_demand() -> Demand {
+pub fn current_account_demand() -> Demand {
     Demand::from_filter(Filter {
         kinds: Some(BTreeSet::from([10009u16])),
         authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
@@ -29,8 +29,8 @@ mod tests {
     use nmp_grammar::SourceAuthority;
 
     #[test]
-    fn active_account_demand_uses_reactive_authors_and_author_outboxes_default() {
-        let demand = active_account_demand();
+    fn current_account_demand_uses_reactive_authors_and_author_outboxes_default() {
+        let demand = current_account_demand();
         assert_eq!(demand.selection.kinds, Some(BTreeSet::from([10009u16])));
         assert_eq!(
             demand.selection.authors,

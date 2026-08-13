@@ -163,7 +163,7 @@ fn a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbo
         sessions,
         BTreeSet::from([group_host.clone()]),
         "a group read must open exactly its pinned host and never the author's own outbox, \
-         even though the outbox is a real, resolvable routing fact for the active identity"
+         even though the outbox is a real, resolvable routing fact for the current identity"
     );
     assert!(
         !sessions.contains(&outbox),

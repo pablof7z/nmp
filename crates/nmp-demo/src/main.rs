@@ -7,7 +7,7 @@
 //!    optional `--nsec`/`--secs`.
 //! 2. Construct `nmp::Engine::new` with the optional NIP-65 assembly and ONLY
 //!    two operator-selected exact sources -- no author route pre-resolved.
-//!    Set the active account to `target` and `observe` the $myFollows
+//!    Set the current account to `target` and `observe` the $myFollows
 //!    `LiveQuery` (kind:1 authored by whoever the target's kind:3 currently
 //!    names, reactively).
 //! 3. The feature-gated NIP-65 facade notices the target -- and, as its
@@ -145,7 +145,13 @@ fn main() {
     );
 
     match &args.nsec {
-        Some(nsec) => match engine.add_account(nsec) {
+        Some(nsec) => match Keys::parse(nsec)
+            .map_err(|error| error.to_string())
+            .and_then(|keys| {
+                engine
+                    .add_private_key_account(&keys.secret_key().to_secret_bytes(), false)
+                    .map_err(|error| error.to_string())
+            }) {
             Ok(account) => println!(
                 "signer: loaded from --nsec ({})",
                 account.public_key().to_hex()
@@ -160,17 +166,11 @@ fn main() {
         }
     }
 
-    // Read-side identity is the TARGET we're viewing. M4 §5 couples the read
-    // root and the active signing capability behind ONE verb
-    // (`set_active_account`) so a real account switch can never leave them
-    // pointing at different accounts -- but browsing a target you hold no
-    // key for is still legal: if `--nsec`'s own pubkey differs from
-    // `target`, the registry simply has no signer registered under
-    // `target`, so any publish attempted while viewing it parks on
-    // `SigningState::AwaitingSigner` rather than silently signing under the
-    // wrong key.
+    // Browsing a target you hold no key for is an ordinary public-key-only
+    // session account. Making it current changes reactive read context, not
+    // which signer an already accepted write may use.
     engine
-        .set_active_account(Some(target))
+        .add_public_key_account(target, true)
         .expect("engine is open just after construction");
 
     let my_follows = build_follow_feed_query();

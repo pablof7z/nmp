@@ -42,7 +42,7 @@ class WriteIntentTest {
      * acceptance", all the way through `toFfi()`. There is no third
      * "unset" state to observe. */
     @Test
-    fun writeIntentDefaultMeansTheActiveAccount() {
+    fun writeIntentDefaultMeansTheCurrentAccount() {
         val intent =
             WriteIntent(
                 payload = builderPayload(),

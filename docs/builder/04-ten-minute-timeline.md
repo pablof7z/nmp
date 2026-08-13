@@ -34,9 +34,8 @@ let engine = try NMPEngine(configuration: .init(
     ])
 ))
 
-try engine.setCurrentPubkey(currentAccount.pubkey)
-try engine.attachSigner(currentAccount.signerProvider,
-                        for: currentAccount.pubkey)
+let privateKey = try NMPPrivateKey(bytes: importedSecretBytes)
+try engine.session.add(privateKey: privateKey, makeCurrent: true)
 ```
 
 Bootstrap relays are operator discovery policy. They are not a list that every
@@ -47,8 +46,11 @@ Your app decides where this long-lived value lives: a plain model object,
 dependency container you already own, or process service. NMP does not provide
 an application container.
 
-The signer is needed only for the write later in this guide. A read-only app
-sets a current pubkey only when a binding uses it and need not attach any signer.
+The private-key-backed account is needed only for the write later in this
+guide. A read-only app adds a decoded public-key-only account with
+`engine.session.add(publicKey:makeCurrent:)` when a binding needs current
+selection; signing is unsupported for that account rather than temporarily
+unavailable.
 
 ## 3. Declare a query value
 
@@ -154,7 +156,8 @@ case .signed(let signature):
 }
 ```
 
-There is no app-maintained optimistic copy. When a signer arrives, the same row
+There is no app-maintained optimistic copy. When the configured provider
+becomes available, the same row
 is promoted because a NIP-01 event id does not include its signature.
 
 The receipt may then report facts such as:

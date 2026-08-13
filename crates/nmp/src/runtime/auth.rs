@@ -981,10 +981,7 @@ pub(super) fn dispatch(
                 bind,
                 move |terminal| {
                     Box::pin(async move {
-                        let op = signer
-                            .lock()
-                            .unwrap_or_else(|poison| poison.into_inner())
-                            .sign(super::encode_unsigned_event(&unsigned));
+                        let op = signer.sign(super::encode_unsigned_event(&unsigned));
                         let result: Option<Result<nostr::Event, SignerError>> = match op {
                             SignerOp::Ready(result) => {
                                 Some(result.and_then(super::decode_signed_event))

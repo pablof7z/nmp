@@ -386,28 +386,6 @@ impl nmp::AuthPolicy for FfiAuthPolicyAdapter {
     }
 }
 
-/// Opaque proof for one exact local-account installation. Dropping this
-/// object does not remove the account; removal is explicit and repeatable.
-#[derive(uniffi::Object)]
-pub struct FfiAccountRegistration {
-    pub(crate) inner: nmp::AccountRegistration,
-}
-
-impl std::fmt::Debug for FfiAccountRegistration {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FfiAccountRegistration")
-            .field("public_key", &self.inner.public_key())
-            .finish_non_exhaustive()
-    }
-}
-
-#[uniffi::export]
-impl FfiAccountRegistration {
-    pub fn public_key(&self) -> String {
-        self.inner.public_key().to_hex()
-    }
-}
-
 /// Opaque proof for one exact AUTH-policy installation. It exposes only the
 /// expected account identity, never the capability instance.
 #[derive(uniffi::Object)]
@@ -535,7 +513,7 @@ mod tests {
 
         fn on_cancelled(&self, request: FfiAuthPolicyRequest) {
             assert_eq!(request.transport_generation, 7);
-            assert_eq!(self.engine.active_account().unwrap(), None);
+            assert_eq!(self.engine.session().unwrap().current_pubkey, None);
             let completion = self
                 .completion
                 .lock()

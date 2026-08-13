@@ -789,7 +789,7 @@ pub enum FfiWritePayload {
 /// variants, mirrored exactly, with no third "unset" state on any platform.
 ///
 /// [`Active`](FfiIdentity::Active) is a positive instruction ("whoever is
-/// the active account at acceptance"), not the absence of one -- which is
+/// the current account at acceptance"), not the absence of one -- which is
 /// why this is a closed enum rather than the nullable pubkey string it
 /// replaces. On an `Event` payload the identity SELECTS the author (a
 /// builder states none, so there is nothing for it to contradict); on a
@@ -800,9 +800,9 @@ pub enum FfiWritePayload {
 /// nothing is taken into custody, so no receipt and no queue entry exist.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiIdentity {
-    /// Whoever is the active account at acceptance time.
+    /// Whoever is the current account at acceptance time.
     Active,
-    /// This exact key, active or not -- including while fully logged out.
+    /// This exact key, current or not -- including while fully logged out.
     ///
     /// `pubkey` is 64-char HEX and nothing else: the module-wide
     /// `convert::parse_pubkey` rule every other pubkey input here follows.
@@ -815,10 +815,10 @@ pub enum FfiIdentity {
     /// [`crate::convert::FfiError::InvalidPublicKey`] before any engine
     /// call.
     ///
-    /// A key with no registered signer parks as
+    /// A key with no configured signing provider parks as
     /// [`FfiSigningState::AwaitingSigner`] (retained, not terminated)
-    /// until that capability attaches. Acceptance PINS the resolved key
-    /// either way, so a later `set_active_account` cannot retarget the
+    /// until that account's provider becomes available. Acceptance PINS the resolved key
+    /// either way, so a later current-account change cannot retarget the
     /// write.
     Explicit { pubkey: String },
 }
@@ -948,7 +948,7 @@ pub enum FfiStalledWriteStage {
     /// No destination could be computed.
     Unroutable,
     /// No signer answers for the author this write was FROZEN to -- never
-    /// the mutable active account.
+    /// the mutable current account.
     Unsignable,
     /// Destinations exist and none of them is working.
     Undeliverable,
@@ -1109,9 +1109,9 @@ pub enum FfiWriteFact {
 /// signature, one author, one answer.
 #[derive(Debug, Clone, PartialEq, Eq, Enum)]
 pub enum FfiSigningState {
-    /// No registered signer answers for `pubkey` (64-char hex) — the exact
-    /// identity FROZEN at acceptance, never whoever is active now. Re-armed
-    /// only by attaching a signer for THIS key.
+    /// No configured signing provider answers for `pubkey` (64-char hex) —
+    /// the exact identity FROZEN at acceptance, never whichever account is
+    /// current now. Re-armed only when THIS account's provider becomes available.
     ///
     /// **No clock ever ends this.** A device whose signer is simply not
     /// plugged in yet is not a device whose write failed; the app's own

@@ -18,10 +18,10 @@ class WriteCancellationTest {
             NMPEngine(
                 NMPConfig(outboxRouting = OutboxRoutingConfig(indexers = listOf("wss://indexer.example"))),
             ).use { engine ->
-                // A read-only active identity deliberately has no signer. The
+                // A public-key-only current account has no signing provider. The
                 // unsigned write therefore remains accepted and cancellable
                 // until the explicit receipt-id transition below.
-                engine.setActiveAccount(author)
+                engine.session.add(author.testPublicKey(), makeCurrent = true)
                 val receipt =
                     engine.publish(
                         WriteIntent(

@@ -48,7 +48,7 @@ final class WriteCancellationTests: XCTestCase {
         // A read-only active identity deliberately has no signer. The
         // unsigned write therefore remains accepted and cancellable until
         // the explicit receipt-id transition below.
-        try engine.setActiveAccount(author)
+        _ = try engine.session.add(publicKey: testPublicKey(author), makeCurrent: true)
         let receipt = try await engine.publish(
             WriteIntent(
                 payload: .event(

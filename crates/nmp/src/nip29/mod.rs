@@ -150,7 +150,7 @@ pub fn on(hosts: impl IntoIterator<Item = RelayUrl>) -> Result<RelayScope, Relay
 impl RelayScope {
     /// Narrow to one group id, keeping the same hosts.
     ///
-    /// Contacts nothing, subscribes to nothing, and needs no active account:
+    /// Contacts nothing, subscribes to nothing, and needs no current account:
     /// a kind:9021 join request into a group you cannot read yet is
     /// expressible. The returned [`Group`] retains this scope's hosts and the
     /// id privately; there is no accessor for either, so a layer that is

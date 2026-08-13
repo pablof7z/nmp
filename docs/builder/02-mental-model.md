@@ -83,7 +83,7 @@ states the weaker retention promise; it is not a silent `void` publish.
 `$currentPubkey` has two ergonomic roles:
 
 1. query bindings may react to it; and
-2. its registered signer is the default for a write.
+2. its configured provider is the default for a write.
 
 Changing it re-roots only demand that references it. Literal multi-account
 queries stay live. An already accepted write keeps the signer identity chosen

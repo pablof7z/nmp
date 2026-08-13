@@ -178,7 +178,7 @@ class NIP22Test {
             NMPEngine(
                 NMPConfig(outboxRouting = OutboxRoutingConfig(indexers = listOf("wss://indexer.example"))),
             ).use { engine ->
-                engine.setActiveAccount(author)
+                engine.session.add(author.testPublicKey(), makeCurrent = true)
 
                 val token = "kotlin-nip22-offline-signer-token"
                 val intent =
@@ -201,7 +201,7 @@ class NIP22Test {
                 assertTrue(reattachment is ReceiptReattachment.Attached)
                 val replay = (reattachment as ReceiptReattachment.Attached).receipt
                 // A reattachment REPLAYS the retained obligation: both parks,
-                // the unattached signer and the unresolved route.
+                // the unavailable signing provider and the unresolved route.
                 val replayFacts = withTimeout(5_000) { replay.status.take(2).toList() }
                 assertEquals(
                     listOf(
@@ -264,7 +264,7 @@ class NIP22Test {
             NMPEngine(
                 NMPConfig(outboxRouting = OutboxRoutingConfig(indexers = listOf("wss://indexer.example"))),
             ).use { engine ->
-                engine.setActiveAccount(author)
+                engine.session.add(author.testPublicKey(), makeCurrent = true)
 
                 val root = CommentRoot.External(Nip73.PodcastEpisode("guid-query-path"))
                 val demand = commentThreadDemand(root)

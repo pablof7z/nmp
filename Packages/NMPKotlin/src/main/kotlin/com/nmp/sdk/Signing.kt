@@ -37,7 +37,7 @@ data class NMPSignedEvent(
     )
 }
 
-/** Sign one exact event through the active signer (#680). The engine returns
+/** Sign one exact event through the current account's signing provider (#680). The engine returns
  * a one-shot [uniffi.nmp_ffi.NmpSignEventHandle] synchronously; awaiting its
  * `signed()` yields the fully-verified event or a typed
  * [FfiSignEventFailure]. There is no `suspendCancellableCoroutine` state

@@ -113,6 +113,9 @@ use crate::relay_information_service::{
     RelayInformationCachePolicy, RelayInformationError, RelayInformationService,
     RelayInformationSnapshot,
 };
+use crate::session::{
+    RestoredSession, SessionAccount, SessionProvider, SessionSnapshot, SigningAvailability,
+};
 use nmp_grammar::WriteIntent;
 
 use diagnostics_channel::{latest_channel, LatestSender};
@@ -893,8 +896,8 @@ mod publish_result_tests {
     #[test]
     fn typed_pre_receipt_failure_is_the_publish_reply() {
         assert_eq!(
-            publish_result(&[Effect::PublishFailed(PublishError::NoActiveAccount)]),
-            Err(PublishError::NoActiveAccount)
+            publish_result(&[Effect::PublishFailed(PublishError::NoCurrentAccount)]),
+            Err(PublishError::NoCurrentAccount)
         );
         // Custody: `WriteAccepted` is the acceptance answer, and it is not a
         // fact on the stream. `publish()` returning the ids IS the acceptance.
@@ -1021,12 +1024,42 @@ enum Cmd {
     /// reply carries the pubkey the engine thread's registry keyed it under,
     /// or a typed error if the capability has no stable identity.
     AddSigner {
-        signer: Box<dyn SigningCapability + Send>,
+        signer: Box<dyn SigningCapability + Send + Sync>,
         reply: Sender<Result<SignerRegistration, AddSignerError>>,
     },
     RemoveSigner {
         registration: SignerRegistration,
         reply: Sender<bool>,
+    },
+    SessionSnapshot {
+        reply: Sender<SessionSnapshot>,
+    },
+    SessionExportSources {
+        reply: Sender<RuntimeSessionExportSources>,
+    },
+    CurrentSessionPubkey {
+        reply: Sender<Option<PublicKey>>,
+    },
+    AddPrivateKeyAccount {
+        signer: nmp_local_signer::LocalKeySigner,
+        make_current: bool,
+        reply: Sender<Result<SessionAccount, AddSignerError>>,
+    },
+    AddPublicKeyAccount {
+        public_key: PublicKey,
+        make_current: bool,
+        reply: Sender<SessionAccount>,
+    },
+    MakeCurrentAccount {
+        public_key: PublicKey,
+        reply: Sender<bool>,
+    },
+    RemoveSessionAccount {
+        public_key: PublicKey,
+        reply: Sender<bool>,
+    },
+    ClearSession {
+        reply: Sender<()>,
     },
     AddAuthPolicy {
         expected_pubkey: PublicKey,
@@ -1039,7 +1072,7 @@ enum Cmd {
     },
     AuthTaskCompleted(auth::AuthTaskCompletion),
     AuthTaskReleased(auth::AuthTaskReleaseToken),
-    /// Sign one exact event through the active account's registered
+    /// Sign one exact event through the current account's registered
     /// capability without entering the write/store/delivery reducer.
     SignEvent {
         unsigned: UnsignedEvent,
@@ -1088,7 +1121,7 @@ pub struct ObservationOwnershipCensus {
 
 /// Every signing capability the engine thread currently holds, keyed by its
 /// own public key. `Effect::RequestSign` resolves the exact pubkey frozen in
-/// the accepted template; mutable active-account state can never redirect
+/// the accepted template; mutable current-account state can never redirect
 /// already-accepted work.
 /// #704: an idempotent cancel action for one outstanding remote-signer write
 /// wait. It wraps the op's `Canceller`; firing it wakes the awaiting async task
@@ -1101,13 +1134,97 @@ struct SignerRegistry {
     pending_writes: RefCell<HashMap<(ReceiptId, u64), PendingWriteCancel>>,
 }
 
+/// The engine thread's single owner for identity-session membership, current
+/// selection, and operational signing-provider availability. Every public session
+/// mutation is one command turn against this value.
+#[derive(Default)]
+struct RuntimeSessionState {
+    signers: SignerRegistry,
+    accounts: HashMap<PublicKey, Option<SessionProvider>>,
+    current_pubkey: Option<PublicKey>,
+}
+
+impl std::ops::Deref for RuntimeSessionState {
+    type Target = SignerRegistry;
+
+    fn deref(&self) -> &Self::Target {
+        &self.signers
+    }
+}
+
+impl std::ops::DerefMut for RuntimeSessionState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.signers
+    }
+}
+
+pub(crate) struct RuntimeSessionExportSources {
+    pub snapshot: SessionSnapshot,
+    pub providers: Vec<(PublicKey, Arc<nmp_local_signer::LocalKeySigner>)>,
+}
+
+impl RuntimeSessionState {
+    fn contains_account(&self, public_key: PublicKey) -> bool {
+        self.accounts.contains_key(&public_key)
+    }
+
+    fn snapshot(&self) -> SessionSnapshot {
+        let mut accounts = self
+            .accounts
+            .iter()
+            .map(|(public_key, provider)| SessionAccount {
+                public_key: *public_key,
+                provider: *provider,
+                signing: match provider {
+                    None => SigningAvailability::Unsupported,
+                    Some(SessionProvider::LocalKey) if self.has_local_provider(*public_key) => {
+                        SigningAvailability::Available
+                    }
+                    Some(SessionProvider::LocalKey) => SigningAvailability::Unavailable {
+                        reason: "configured signing provider is currently unavailable".to_string(),
+                    },
+                },
+            })
+            .collect::<Vec<_>>();
+        accounts.sort_by_key(|account| account.public_key.to_bytes());
+        SessionSnapshot {
+            accounts,
+            current_pubkey: self.current_pubkey,
+        }
+    }
+
+    fn export_sources(&self) -> RuntimeSessionExportSources {
+        let providers = self
+            .accounts
+            .iter()
+            .filter_map(|(public_key, provider)| match provider {
+                Some(SessionProvider::LocalKey) => self
+                    .local_provider(*public_key)
+                    .map(|provider| (*public_key, provider)),
+                None => None,
+            })
+            .collect();
+        RuntimeSessionExportSources {
+            snapshot: self.snapshot(),
+            providers,
+        }
+    }
+
+    fn provider_pubkeys(&self) -> Vec<PublicKey> {
+        self.accounts
+            .iter()
+            .filter_map(|(public_key, provider)| provider.map(|_| *public_key))
+            .collect()
+    }
+}
+
 /// Typed outcome vocabulary for the governed sign-only operation. This is
 /// deliberately separate from write receipts: signing here never accepts a
 /// write intent, mutates canonical storage, creates a delivery lane, or
 /// publishes to a relay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignEventError {
-    NoActiveSigner,
+    NoCurrentSigningProvider,
     InvalidRequest { reason: String },
     SignerUnavailable { reason: String },
     SignerRejected { reason: String },
@@ -1284,7 +1401,9 @@ impl Drop for SignEventFinishedGuard {
 impl std::fmt::Display for SignEventError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoActiveSigner => f.write_str("the active account has no registered signer"),
+            Self::NoCurrentSigningProvider => {
+                f.write_str("the current account has no available signing provider")
+            }
             Self::InvalidRequest { reason } => write!(f, "invalid sign request: {reason}"),
             Self::SignerUnavailable { reason } => write!(f, "signer unavailable: {reason}"),
             Self::SignerRejected { reason } => write!(f, "signer rejected request: {reason}"),
@@ -1411,7 +1530,34 @@ struct RegisteredSigner {
     signer: SharedSigner,
 }
 
-type SharedSigner = Arc<Mutex<Box<dyn SigningCapability + Send>>>;
+#[derive(Clone)]
+enum SharedSigner {
+    Local(Arc<nmp_local_signer::LocalKeySigner>),
+    Shared(Arc<dyn SigningCapability + Send + Sync>),
+}
+
+impl SharedSigner {
+    fn sign(&self, unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent> {
+        match self {
+            Self::Local(signer) => signer.sign(unsigned),
+            Self::Shared(signer) => signer.sign(unsigned),
+        }
+    }
+
+    fn is_available(&self) -> bool {
+        match self {
+            Self::Local(_) => true,
+            Self::Shared(signer) => signer.is_available(),
+        }
+    }
+
+    fn local_provider(&self) -> Option<Arc<nmp_local_signer::LocalKeySigner>> {
+        match self {
+            Self::Local(signer) => Some(Arc::clone(signer)),
+            Self::Shared(_) => None,
+        }
+    }
+}
 
 impl SignerRegistry {
     fn contains(&self, pk: PublicKey) -> bool {
@@ -1462,7 +1608,7 @@ impl SignerRegistry {
         &mut self,
         pk: PublicKey,
         instance: core::AuthCapabilityInstance,
-        signer: Box<dyn SigningCapability + Send>,
+        signer: Box<dyn SigningCapability + Send + Sync>,
     ) -> (SignerRegistration, Option<core::AuthCapabilityInstance>) {
         let identity = Arc::new(());
         let replaced = self
@@ -1472,7 +1618,35 @@ impl SignerRegistry {
                 RegisteredSigner {
                     identity: Arc::clone(&identity),
                     instance,
-                    signer: Arc::new(Mutex::new(signer)),
+                    signer: SharedSigner::Shared(Arc::from(signer)),
+                },
+            )
+            .map(|old| old.instance);
+        (
+            SignerRegistration {
+                public_key: pk,
+                identity,
+                instance,
+            },
+            replaced,
+        )
+    }
+
+    fn add_local(
+        &mut self,
+        pk: PublicKey,
+        instance: core::AuthCapabilityInstance,
+        signer: nmp_local_signer::LocalKeySigner,
+    ) -> (SignerRegistration, Option<core::AuthCapabilityInstance>) {
+        let identity = Arc::new(());
+        let replaced = self
+            .signers
+            .insert(
+                pk,
+                RegisteredSigner {
+                    identity: Arc::clone(&identity),
+                    instance,
+                    signer: SharedSigner::Local(Arc::new(signer)),
                 },
             )
             .map(|old| old.instance);
@@ -1511,29 +1685,44 @@ impl SignerRegistry {
     /// Resolve the signer frozen into this exact accepted template. An
     /// account switch cannot redirect already-accepted work.
     fn sign(&self, unsigned: UnsignedEvent) -> Option<SignerOp<SignerSignedEvent>> {
-        self.signers.get(&unsigned.pubkey).map(|entry| {
-            entry
-                .signer
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .sign(encode_unsigned_event(&unsigned))
-        })
+        self.signers
+            .get(&unsigned.pubkey)
+            .map(|entry| entry.signer.sign(encode_unsigned_event(&unsigned)))
     }
 
     fn auth_snapshot(&self, pk: PublicKey) -> Option<(core::AuthCapabilityInstance, SharedSigner)> {
         self.signers
             .get(&pk)
-            .map(|entry| (entry.instance, Arc::clone(&entry.signer)))
+            .map(|entry| (entry.instance, entry.signer.clone()))
     }
 
     fn is_available(&self, pk: PublicKey) -> bool {
-        self.signers.get(&pk).is_some_and(|entry| {
-            entry
-                .signer
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .is_available()
-        })
+        self.signers
+            .get(&pk)
+            .is_some_and(|entry| entry.signer.is_available())
+    }
+
+    fn has_local_provider(&self, pk: PublicKey) -> bool {
+        self.signers
+            .get(&pk)
+            .is_some_and(|entry| matches!(entry.signer, SharedSigner::Local(_)))
+    }
+
+    fn local_provider(&self, pk: PublicKey) -> Option<Arc<nmp_local_signer::LocalKeySigner>> {
+        self.signers
+            .get(&pk)
+            .and_then(|entry| entry.signer.local_provider())
+    }
+
+    fn remove_key(&mut self, public_key: PublicKey) -> Option<core::AuthCapabilityInstance> {
+        self.signers.remove(&public_key).map(|entry| entry.instance)
+    }
+
+    fn drain_instances(&mut self) -> Vec<(PublicKey, core::AuthCapabilityInstance)> {
+        self.signers
+            .drain()
+            .map(|(public_key, entry)| (public_key, entry.instance))
+            .collect()
     }
 }
 
@@ -1679,7 +1868,7 @@ impl EngineThread {
     /// once, at spawn time). The engine starts with an EMPTY `SignerRegistry`
     /// (zero accounts, read-only) — matching a logged-out launch (M4 §5);
     /// the caller registers accounts afterward via [`Handle::add_signer`] and
-    /// picks one via [`Handle::set_active_account`].
+    /// picks one via [`Handle::set_current_account`].
     pub fn spawn<S>(
         store: S,
         cap: usize,
@@ -1720,6 +1909,7 @@ impl EngineThread {
             pool_config,
             admission,
             RuntimeConfig::default(),
+            RestoredSession::empty(),
         )
     }
 
@@ -1740,6 +1930,7 @@ impl EngineThread {
             pool_config,
             admission,
             runtime_config,
+            RestoredSession::empty(),
         )
     }
 
@@ -1750,6 +1941,7 @@ impl EngineThread {
         mut pool_config: PoolConfig,
         admission: RelayAdmissionPolicy,
         runtime_config: RuntimeConfig,
+        initial_session: RestoredSession,
     ) -> Result<(Self, Handle), EngineThreadError>
     where
         S: EventStore + Send + 'static,
@@ -1852,6 +2044,7 @@ impl EngineThread {
         };
 
         let clock = EngineClock::wired(cmd_tx.clone());
+        let (startup_ready_tx, startup_ready_rx) = mpsc::channel();
         let engine_clock = clock.clone();
         let self_inbox = cmd_tx.clone();
         let engine_pool = pool.clone();
@@ -1872,6 +2065,7 @@ impl EngineThread {
                             routing_facts,
                             cap,
                             admission,
+                            initial_session,
                             EnginePoolRuntime {
                                 pool: engine_pool,
                                 stop: engine_stop,
@@ -1886,6 +2080,7 @@ impl EngineThread {
                                 clock: &engine_clock,
                                 cmd_rx: &cmd_rx,
                                 self_inbox: &self_inbox,
+                                startup_ready: startup_ready_tx,
                             },
                         )
                     })
@@ -1901,6 +2096,16 @@ impl EngineThread {
                     });
                 }
             };
+        if startup_ready_rx.recv().is_err() {
+            drop(pool_stop_tx);
+            pool.shutdown();
+            let _ = engine_join.join();
+            let _ = bridge_join.join();
+            return Err(EngineThreadError::ThreadUnavailable {
+                component: "engine runtime".to_string(),
+                reason: "engine exited before startup recovery completed".to_string(),
+            });
+        }
         drop(pool);
 
         Ok((
@@ -1993,7 +2198,7 @@ mod receipt_delivery_lifecycle_tests {
     use nostr::{Keys, Kind};
 
     fn parked_write(handle: &Handle, keys: &Keys) -> ReceiptStream {
-        handle.set_active_account(Some(keys.public_key()));
+        handle.set_current_account(Some(keys.public_key()));
         handle
             .publish(WriteIntent {
                 payload: WritePayload::Event(nmp_grammar::EventBuilder {
@@ -2115,7 +2320,7 @@ mod reentrant_shutdown_tests {
         handle
             .add_signer(local_signer(&keys))
             .expect("signer registration");
-        handle.set_active_account(Some(keys.public_key()));
+        handle.set_current_account(Some(keys.public_key()));
 
         let (entered_tx, entered_rx) = mpsc::channel();
         let (join_tx, join_rx) = mpsc::channel();
@@ -2153,7 +2358,7 @@ mod reentrant_shutdown_tests {
         handle
             .add_signer(local_signer(&keys))
             .expect("signer registration");
-        handle.set_active_account(Some(keys.public_key()));
+        handle.set_current_account(Some(keys.public_key()));
 
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -2200,7 +2405,7 @@ mod reentrant_shutdown_tests {
         handle
             .add_signer(local_signer(&keys))
             .expect("signer registration");
-        handle.set_active_account(Some(keys.public_key()));
+        handle.set_current_account(Some(keys.public_key()));
 
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -2247,7 +2452,7 @@ mod reentrant_shutdown_tests {
         handle
             .add_signer(local_signer(&keys))
             .expect("signer registration");
-        handle.set_active_account(Some(keys.public_key()));
+        handle.set_current_account(Some(keys.public_key()));
 
         let (other_entered_tx, other_entered_rx) = mpsc::channel();
         let (release_other_tx, release_other_rx) = mpsc::channel();
@@ -4268,6 +4473,7 @@ struct EngineWiring<'a> {
     clock: &'a EngineClock,
     cmd_rx: &'a Receiver<Cmd>,
     self_inbox: &'a Sender<Cmd>,
+    startup_ready: Sender<()>,
 }
 
 const STORE_RECOVERY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
@@ -4365,6 +4571,7 @@ fn engine_loop<S>(
     routing_facts: crate::core::RoutingFactStore,
     cap: usize,
     admission: RelayAdmissionPolicy,
+    initial_session: RestoredSession,
     pool_runtime: EnginePoolRuntime,
     wiring: EngineWiring<'_>,
 ) where
@@ -4374,6 +4581,7 @@ fn engine_loop<S>(
         clock,
         cmd_rx,
         self_inbox,
+        startup_ready,
     } = wiring;
     let EnginePoolRuntime {
         pool,
@@ -4401,14 +4609,32 @@ fn engine_loop<S>(
     let mut history_channels: HashMap<HistorySessionId, LatestSender<HistoryMsg>> = HashMap::new();
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
     let mut next_diag_id: u64 = 0;
-    let mut registry = SignerRegistry::default();
+    let mut auth_instances = auth::AuthCapabilityInstances::default();
+    let mut registry = RuntimeSessionState {
+        current_pubkey: initial_session.current_pubkey,
+        ..RuntimeSessionState::default()
+    };
+    for account in initial_session.accounts {
+        match account.signer {
+            Some(signer) => {
+                let instance = auth_instances
+                    .mint()
+                    .expect("preflighted initial session fits fresh capability instance space");
+                registry
+                    .accounts
+                    .insert(account.public_key, Some(SessionProvider::LocalKey));
+                registry.add_local(account.public_key, instance, signer);
+            }
+            None => {
+                registry.accounts.insert(account.public_key, None);
+            }
+        }
+    }
     let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
     let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
     let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
     #[cfg(feature = "nip65")]
     let nip65 = RefCell::new(crate::nip65::RuntimeAssembly::new(nip65_sources));
-    let mut auth_instances = auth::AuthCapabilityInstances::default();
-    let mut active_pubkey = None;
     let mut next_sign_event_id = 1u64;
     let mut sign_event_cancellations: HashMap<u64, ActiveSignEvent> = HashMap::new();
     let nip11_decisions = RefCell::new(Nip11DecisionState::default());
@@ -4428,6 +4654,22 @@ fn engine_loop<S>(
         nip65: &nip65,
     };
 
+    // The fully decoded session is installed before recovery. In particular,
+    // a recovered parked write observes its provider and current selection on
+    // the very first recovery effect; there is no externally visible empty-
+    // session turn and no post-start restore command.
+    let initial_selection_effects =
+        core.handle(EngineMsg::SetActivePubkey(registry.current_pubkey));
+    dispatch_core_effects(
+        &mut core,
+        initial_selection_effects,
+        &pool,
+        &mut row_channels,
+        &mut history_channels,
+        &mut diag_channels,
+        &registry,
+        dispatch_runtime,
+    );
     // Recovery happens before the first externally-issued command. Give that
     // transition current wall truth before it rebuilds deadline-bearing lane
     // state; this is a cheap assignment, while recovery itself remains the
@@ -4444,6 +4686,24 @@ fn engine_loop<S>(
         &registry,
         dispatch_runtime,
     );
+    // Recovery reconstructs parked obligations before it can observe a live
+    // provider transition. Replay that transition while startup is still
+    // closed so every recovered obligation is re-armed before the constructor
+    // returns.
+    for public_key in registry.provider_pubkeys() {
+        let effects = core.handle(EngineMsg::SignerAttached(public_key));
+        dispatch_core_effects(
+            &mut core,
+            effects,
+            &pool,
+            &mut row_channels,
+            &mut history_channels,
+            &mut diag_channels,
+            &registry,
+            dispatch_runtime,
+        );
+    }
+    let _ = startup_ready.send(());
 
     let mut shutting_down = false;
     let mut store_recovery = StoreRecoveryDriver::default();
@@ -4702,6 +4962,37 @@ fn engine_loop<S>(
                 }
                 Cmd::AddSigner { reply, .. } => {
                     let _ = reply.send(Err(AddSignerError::EngineShuttingDown));
+                }
+                Cmd::AddPrivateKeyAccount { reply, .. } => {
+                    let _ = reply.send(Err(AddSignerError::EngineShuttingDown));
+                }
+                Cmd::SessionSnapshot { reply } => {
+                    let _ = reply.send(registry.snapshot());
+                }
+                Cmd::SessionExportSources { reply } => {
+                    let _ = reply.send(registry.export_sources());
+                }
+                Cmd::CurrentSessionPubkey { reply } => {
+                    let _ = reply.send(registry.current_pubkey);
+                }
+                Cmd::AddPublicKeyAccount {
+                    public_key, reply, ..
+                } => {
+                    let account = SessionAccount {
+                        public_key,
+                        provider: None,
+                        signing: SigningAvailability::Unsupported,
+                    };
+                    let _ = reply.send(account);
+                }
+                Cmd::MakeCurrentAccount { reply, .. } => {
+                    let _ = reply.send(false);
+                }
+                Cmd::RemoveSessionAccount { reply, .. } => {
+                    let _ = reply.send(false);
+                }
+                Cmd::ClearSession { reply } => {
+                    let _ = reply.send(());
                 }
                 Cmd::Subscribe { reply, .. } => {
                     let _ = reply.send(Err(EngineThreadError::EngineShuttingDown));
@@ -5028,6 +5319,181 @@ fn engine_loop<S>(
                     }
                 }
             }
+            Cmd::SessionSnapshot { reply } => {
+                let _ = reply.send(registry.snapshot());
+            }
+            Cmd::SessionExportSources { reply } => {
+                let _ = reply.send(registry.export_sources());
+            }
+            Cmd::CurrentSessionPubkey { reply } => {
+                let _ = reply.send(registry.current_pubkey);
+            }
+            Cmd::AddPrivateKeyAccount {
+                signer,
+                make_current,
+                reply,
+            } => {
+                let public_key = signer
+                    .public_key()
+                    .and_then(|key| PublicKey::from_slice(key.as_bytes()).ok())
+                    .expect("local key signer always has a validated public key");
+                let live = registry.len().saturating_add(auth_policies.borrow().len());
+                if !registry.contains(public_key) && live >= max_auth_capabilities {
+                    let _ = reply.send(Err(AddSignerError::RegistryFull {
+                        limit: max_auth_capabilities,
+                    }));
+                    continue;
+                }
+                let Some(instance) = auth_instances.mint() else {
+                    let _ = reply.send(Err(AddSignerError::CapabilityInstanceExhausted));
+                    continue;
+                };
+                let (_, replaced) = registry.add_local(public_key, instance, signer);
+                registry
+                    .accounts
+                    .insert(public_key, Some(SessionProvider::LocalKey));
+                let mut effects = Vec::new();
+                if let Some(old_instance) = replaced {
+                    auth_tasks.borrow_mut().cancel_capability(
+                        public_key,
+                        core::AuthCapability::Signer,
+                        old_instance,
+                    );
+                    effects.extend(core.handle(EngineMsg::AuthCapabilityInvalidated(
+                        public_key,
+                        core::AuthCapability::Signer,
+                        old_instance,
+                    )));
+                }
+                effects.extend(core.handle(EngineMsg::SignerAttached(public_key)));
+                if make_current {
+                    registry.current_pubkey = Some(public_key);
+                    effects.extend(core.handle(EngineMsg::SetActivePubkey(Some(public_key))));
+                }
+                dispatch_core_effects(
+                    &mut core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &registry,
+                    dispatch_runtime,
+                );
+                let _ = reply.send(Ok(SessionAccount {
+                    public_key,
+                    provider: Some(SessionProvider::LocalKey),
+                    signing: SigningAvailability::Available,
+                }));
+            }
+            Cmd::AddPublicKeyAccount {
+                public_key,
+                make_current,
+                reply,
+            } => {
+                registry.accounts.entry(public_key).or_insert(None);
+                if make_current {
+                    registry.current_pubkey = Some(public_key);
+                    let effects = core.handle(EngineMsg::SetActivePubkey(Some(public_key)));
+                    dispatch_core_effects(
+                        &mut core,
+                        effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                }
+                let _ = reply.send(
+                    registry
+                        .snapshot()
+                        .accounts
+                        .into_iter()
+                        .find(|account| account.public_key == public_key)
+                        .expect("inserted session account"),
+                );
+            }
+            Cmd::MakeCurrentAccount { public_key, reply } => {
+                let found = registry.contains_account(public_key);
+                if found {
+                    registry.current_pubkey = Some(public_key);
+                    let effects = core.handle(EngineMsg::SetActivePubkey(Some(public_key)));
+                    dispatch_core_effects(
+                        &mut core,
+                        effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &registry,
+                        dispatch_runtime,
+                    );
+                }
+                let _ = reply.send(found);
+            }
+            Cmd::RemoveSessionAccount { public_key, reply } => {
+                let existed = registry.accounts.remove(&public_key).is_some();
+                let removed_instance = registry.remove_key(public_key);
+                let mut effects = Vec::new();
+                if let Some(instance) = removed_instance {
+                    auth_tasks.borrow_mut().cancel_capability(
+                        public_key,
+                        core::AuthCapability::Signer,
+                        instance,
+                    );
+                    effects.extend(core.handle(EngineMsg::AuthCapabilityInvalidated(
+                        public_key,
+                        core::AuthCapability::Signer,
+                        instance,
+                    )));
+                }
+                if registry.current_pubkey == Some(public_key) {
+                    registry.current_pubkey = None;
+                    effects.extend(core.handle(EngineMsg::SetActivePubkey(None)));
+                }
+                dispatch_core_effects(
+                    &mut core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &registry,
+                    dispatch_runtime,
+                );
+                let _ = reply.send(existed);
+            }
+            Cmd::ClearSession { reply } => {
+                let removed = registry.drain_instances();
+                registry.accounts.clear();
+                registry.current_pubkey = None;
+                let mut effects = core.handle(EngineMsg::SetActivePubkey(None));
+                for (public_key, instance) in removed {
+                    auth_tasks.borrow_mut().cancel_capability(
+                        public_key,
+                        core::AuthCapability::Signer,
+                        instance,
+                    );
+                    effects.extend(core.handle(EngineMsg::AuthCapabilityInvalidated(
+                        public_key,
+                        core::AuthCapability::Signer,
+                        instance,
+                    )));
+                }
+                dispatch_core_effects(
+                    &mut core,
+                    effects,
+                    &pool,
+                    &mut row_channels,
+                    &mut history_channels,
+                    &mut diag_channels,
+                    &registry,
+                    dispatch_runtime,
+                );
+                let _ = reply.send(());
+            }
             Cmd::RemoveSigner {
                 registration,
                 reply,
@@ -5164,13 +5630,13 @@ fn engine_loop<S>(
                 completion,
                 reply,
             } => {
-                let Some(author) = active_pubkey else {
-                    let _ = reply.send(Err(SignEventError::NoActiveSigner));
+                let Some(author) = registry.current_pubkey else {
+                    let _ = reply.send(Err(SignEventError::NoCurrentSigningProvider));
                     continue;
                 };
                 if unsigned.pubkey != author {
                     let _ = reply.send(Err(SignEventError::InvalidRequest {
-                        reason: "request author does not match the active account".to_string(),
+                        reason: "request author does not match the current account".to_string(),
                     }));
                     continue;
                 }
@@ -5182,7 +5648,7 @@ fn engine_loop<S>(
                     }
                 };
                 let Some(signer_op) = registry.sign(unsigned.clone()) else {
-                    let _ = reply.send(Err(SignEventError::NoActiveSigner));
+                    let _ = reply.send(Err(SignEventError::NoCurrentSigningProvider));
                     continue;
                 };
 
@@ -5687,10 +6153,10 @@ fn engine_loop<S>(
                 row_channels.remove(&id);
             }
             Cmd::Engine(EngineMsg::SetActivePubkey(pk)) => {
-                // P3: active identity is a reactive read input. Accepted
+                // P3: current identity is a reactive read input. Accepted
                 // writes separately pin their exact author at acceptance.
                 let effects = core.handle(EngineMsg::SetActivePubkey(pk));
-                active_pubkey = pk;
+                registry.current_pubkey = pk;
                 dispatch_core_effects(
                     &mut core,
                     effects,
@@ -6264,7 +6730,7 @@ fn dispatch_effect(
             }
         }
         // The signer frozen into this exact accepted template is looked up
-        // by pubkey on every request. A later active-account switch cannot
+        // by pubkey on every request. A later current-account switch cannot
         // redirect outstanding work. No matching registered signer is
         // NOT a terminal signer failure. The accepted pending row and
         // obligation stay alive as `AwaitingCapability`; only an explicit
@@ -6301,9 +6767,17 @@ fn dispatch_effect(
                 }
             },
             None => {
-                let _ = runtime
-                    .self_inbox
-                    .send(Cmd::Engine(EngineMsg::SignerUnavailable(id, generation)));
+                let effects = core.handle(EngineMsg::SignerUnavailable(id, generation));
+                dispatch_core_effects(
+                    core,
+                    effects,
+                    pool,
+                    row_channels,
+                    history_channels,
+                    diag_channels,
+                    registry,
+                    runtime,
+                );
             }
         },
         Effect::RelayAuth(effect) => {
@@ -6744,14 +7218,14 @@ impl DiagnosticsHandle {
 /// vocabulary preserves ledger #2/#3 at the top edge. M4 §5 added signer
 /// registration to close the multi-account gap; M5 added read-only
 /// diagnostics; #464 adds governed sign-only without creating a third
-/// workload noun or bypassing the active-signer boundary:
+/// workload noun or bypassing the current-account signing-provider boundary:
 ///
 /// - `subscribe(LiveQuery) -> (QueryHandle, RowsReceiver)`
 /// - `unsubscribe(QueryHandle)`
 /// - `add_signer(impl SigningCapability) -> Result<SignerRegistration, AddSignerError>`
 /// - `remove_signer(SignerRegistration) -> bool`
 /// - `sign_event(UnsignedEvent) -> SignEventOperation`
-/// - `set_active_account(Option<PublicKey>)`
+/// - `set_current_account(Option<PublicKey>)`
 /// - `publish(WriteIntent) -> Receiver<WriteFact>`
 /// - `observe_diagnostics() -> (DiagnosticsHandle, LatestReceiver<DiagnosticsSnapshot>)`
 /// - `shutdown()`
@@ -6915,6 +7389,94 @@ pub fn relay_information_retention_census(
 }
 
 impl Handle {
+    pub(crate) fn session_snapshot(&self) -> Option<SessionSnapshot> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::SessionSnapshot { reply: reply_tx })
+            .ok()?;
+        reply_rx.recv().ok()
+    }
+
+    pub(crate) fn session_export_sources(&self) -> Option<RuntimeSessionExportSources> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::SessionExportSources { reply: reply_tx })
+            .ok()?;
+        reply_rx.recv().ok()
+    }
+
+    pub(crate) fn current_session_pubkey(&self) -> Option<Option<PublicKey>> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::CurrentSessionPubkey { reply: reply_tx })
+            .ok()?;
+        reply_rx.recv().ok()
+    }
+
+    pub(crate) fn add_private_key_account(
+        &self,
+        signer: nmp_local_signer::LocalKeySigner,
+        make_current: bool,
+    ) -> Result<SessionAccount, AddSignerError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::AddPrivateKeyAccount {
+                signer,
+                make_current,
+                reply: reply_tx,
+            })
+            .map_err(|_| AddSignerError::EngineShuttingDown)?;
+        reply_rx
+            .recv()
+            .unwrap_or(Err(AddSignerError::EngineShuttingDown))
+    }
+
+    pub(crate) fn add_public_key_account(
+        &self,
+        public_key: PublicKey,
+        make_current: bool,
+    ) -> Option<SessionAccount> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::AddPublicKeyAccount {
+                public_key,
+                make_current,
+                reply: reply_tx,
+            })
+            .ok()?;
+        reply_rx.recv().ok()
+    }
+
+    pub(crate) fn make_current_account(&self, public_key: PublicKey) -> Option<bool> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::MakeCurrentAccount {
+                public_key,
+                reply: reply_tx,
+            })
+            .ok()?;
+        reply_rx.recv().ok()
+    }
+
+    pub(crate) fn remove_session_account(&self, public_key: PublicKey) -> Option<bool> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::RemoveSessionAccount {
+                public_key,
+                reply: reply_tx,
+            })
+            .ok()?;
+        reply_rx.recv().ok()
+    }
+
+    pub(crate) fn clear_session(&self) -> Option<()> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::ClearSession { reply: reply_tx })
+            .ok()?;
+        reply_rx.recv().ok()
+    }
+
     /// Acquire NIP-11 once through the engine-owned cache. This may block
     /// the CALLER on HTTP, never the reducer thread. The resolved
     /// advertisement is also fed back into capability decision-making.
@@ -7040,7 +7602,7 @@ impl Handle {
 
     /// Register a signing/crypto capability, keyed by its own `public_key()`
     /// (M4 §5: `SignerRegistry`). Registering a signer does NOT make it
-    /// active — call [`Self::set_active_account`] to actually switch reads
+    /// current — call [`Self::set_current_account`] to actually switch reads
     /// and writes onto it. Blocks briefly (one engine-thread round trip,
     /// same discipline as [`Self::subscribe`]) and returns an opaque scoped
     /// registration. The registration exposes the key and is the only value
@@ -7050,7 +7612,7 @@ impl Handle {
     /// If the engine thread has already shut down.
     pub fn add_signer<Sig>(&self, signer: Sig) -> Result<SignerRegistration, AddSignerError>
     where
-        Sig: SigningCapability + Send + 'static,
+        Sig: SigningCapability + Send + Sync + 'static,
     {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
@@ -7120,7 +7682,7 @@ impl Handle {
             .expect("nmp-engine: engine thread dropped the remove_auth_policy reply")
     }
 
-    /// Ask the currently active registered signer to sign one exact event,
+    /// Ask the current account's registered signing provider to sign one exact event,
     /// without accepting a write or touching the canonical store/delivery state. A
     /// pending remote operation is cancellable through the returned handle and
     /// engine shutdown; #704 removed the admission slot — nothing is refused.
@@ -7169,7 +7731,7 @@ impl Handle {
     /// read-only browsing of an account this app holds no key for is legal. Publishing
     /// resolves the signer pinned by the draft's own author; if none is
     /// registered, the accepted intent remains `AwaitingCapability`.
-    pub fn set_active_account(&self, pk: Option<PublicKey>) {
+    pub fn set_current_account(&self, pk: Option<PublicKey>) {
         let _ = self.inbox.send(Cmd::Engine(EngineMsg::SetActivePubkey(pk)));
     }
 

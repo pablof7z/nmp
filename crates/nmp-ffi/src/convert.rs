@@ -63,6 +63,30 @@ pub enum FfiError {
     InvalidPublicKey {
         got: String,
     },
+    /// A decoded public-key value was not exactly one valid 32-byte x-only
+    /// secp256k1 public key. The bytes are intentionally absent from errors.
+    InvalidPublicKeyBytes,
+    /// A decoded private-key value was not exactly one valid 32-byte
+    /// secp256k1 scalar. The bytes are intentionally absent from errors.
+    InvalidPrivateKeyBytes,
+    SessionMalformedPayload,
+    SessionUnsupportedVersion {
+        found: u16,
+    },
+    SessionUnsupportedProvider {
+        id: String,
+    },
+    SessionUnsupportedProviderVersion {
+        provider: String,
+        found: u16,
+    },
+    SessionDuplicateAccount,
+    SessionCurrentAccountMissing,
+    SessionProviderPayloadInvalid {
+        provider: String,
+    },
+    SessionProviderPublicKeyMismatch,
+    SessionAccountNotFound,
     /// A `FfiBinding::Literal` value in the `ids` field position was not a
     /// valid 32-byte-hex event id.
     InvalidEventId {
@@ -82,9 +106,6 @@ pub enum FfiError {
     InvalidTag {
         got: Vec<String>,
     },
-    /// `add_account`'s secret key did not parse as a valid nostr key (hex or
-    /// bech32 `nsec`).
-    InvalidSecretKey,
     InvalidSigner {
         reason: String,
     },
@@ -94,16 +115,16 @@ pub enum FfiError {
     },
     /// The exact capability-instance namespace was exhausted.
     AuthCapabilityInstanceExhausted,
-    /// The sign-only operation has no active account with a registered
+    /// The sign-only operation has no current account with a registered
     /// signing capability. No operation was accepted.
-    NoActiveSigner,
+    NoCurrentSigningProvider,
     /// The immutable sign-only request was malformed or named an author
-    /// other than the active account. No signer was invoked.
+    /// other than the current account. No signer was invoked.
     InvalidSignRequest {
         reason: String,
     },
     /// `publish` refused the call outright: either NMP could not write
-    /// anything down, or the instruction could not resolve (no active
+    /// anything down, or the instruction could not resolve (no current
     /// account, a signature that does not verify, an explicit identity
     /// contradicting a signed payload's author, a reserved kind, an empty
     /// explicit route). Nothing durable exists and there is no queue entry
@@ -602,7 +623,6 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::ObservationUnavailable { reason } => {
                 Self::ObservationUnavailable { reason }
             }
-            nmp::EngineError::InvalidSecretKey => Self::InvalidSecretKey,
             nmp::EngineError::SignerMissingPublicKey => Self::InvalidSigner {
                 reason: "signer has no public key".to_string(),
             },
@@ -623,6 +643,65 @@ impl From<nmp::EngineError> for FfiError {
             }
             nmp::EngineError::WindowSelectionHasLimit => Self::WindowSelectionHasLimit,
             nmp::EngineError::WindowAggregateResultLimit => Self::WindowAggregateResultLimit,
+        }
+    }
+}
+
+impl From<nmp::SessionMutationError> for FfiError {
+    fn from(error: nmp::SessionMutationError) -> Self {
+        match error {
+            nmp::SessionMutationError::EngineClosed => Self::EngineClosed,
+            nmp::SessionMutationError::InvalidSecretKey => Self::InvalidPrivateKeyBytes,
+            nmp::SessionMutationError::AccountNotFound { .. } => Self::SessionAccountNotFound,
+            nmp::SessionMutationError::CapabilityRegistryFull { limit } => {
+                Self::AuthCapabilityRegistryFull {
+                    limit: limit as u64,
+                }
+            }
+            nmp::SessionMutationError::CapabilityInstanceExhausted => {
+                Self::AuthCapabilityInstanceExhausted
+            }
+        }
+    }
+}
+
+impl From<nmp::SessionRestoreError> for FfiError {
+    fn from(error: nmp::SessionRestoreError) -> Self {
+        match error {
+            nmp::SessionRestoreError::MalformedPayload => Self::SessionMalformedPayload,
+            nmp::SessionRestoreError::UnsupportedVersion { found } => {
+                Self::SessionUnsupportedVersion { found }
+            }
+            nmp::SessionRestoreError::UnsupportedProvider { id } => {
+                Self::SessionUnsupportedProvider { id }
+            }
+            nmp::SessionRestoreError::UnsupportedProviderVersion { provider, found } => {
+                Self::SessionUnsupportedProviderVersion {
+                    provider: format!("{provider:?}"),
+                    found,
+                }
+            }
+            nmp::SessionRestoreError::DuplicateAccount { .. } => Self::SessionDuplicateAccount,
+            nmp::SessionRestoreError::CurrentAccountMissing { .. } => {
+                Self::SessionCurrentAccountMissing
+            }
+            nmp::SessionRestoreError::ProviderPayloadInvalid { provider } => {
+                Self::SessionProviderPayloadInvalid {
+                    provider: format!("{provider:?}"),
+                }
+            }
+            nmp::SessionRestoreError::ProviderPublicKeyMismatch { .. } => {
+                Self::SessionProviderPublicKeyMismatch
+            }
+            nmp::SessionRestoreError::CapabilityRegistryFull { limit } => {
+                Self::AuthCapabilityRegistryFull {
+                    limit: limit as u64,
+                }
+            }
+            nmp::SessionRestoreError::EngineStartFailed { reason } => Self::EngineStartFailed {
+                component: "session restore".to_string(),
+                reason,
+            },
         }
     }
 }
@@ -650,6 +729,29 @@ impl std::fmt::Display for FfiError {
                 write!(f, "not indexable as a filter key: {got:?}")
             }
             Self::InvalidPublicKey { got } => write!(f, "invalid public key hex: {got:?}"),
+            Self::InvalidPublicKeyBytes => f.write_str("invalid decoded public key"),
+            Self::InvalidPrivateKeyBytes => f.write_str("invalid decoded private key"),
+            Self::SessionMalformedPayload => f.write_str("malformed session payload"),
+            Self::SessionUnsupportedVersion { found } => {
+                write!(f, "unsupported session payload version {found}")
+            }
+            Self::SessionUnsupportedProvider { id } => {
+                write!(f, "unsupported session provider {id}")
+            }
+            Self::SessionUnsupportedProviderVersion { provider, found } => {
+                write!(f, "unsupported {provider} provider version {found}")
+            }
+            Self::SessionDuplicateAccount => f.write_str("duplicate session account"),
+            Self::SessionCurrentAccountMissing => {
+                f.write_str("current session account is missing")
+            }
+            Self::SessionProviderPayloadInvalid { provider } => {
+                write!(f, "invalid {provider} provider payload")
+            }
+            Self::SessionProviderPublicKeyMismatch => {
+                f.write_str("session provider public key mismatch")
+            }
+            Self::SessionAccountNotFound => f.write_str("session account does not exist"),
             Self::InvalidEventId { got } => write!(f, "invalid event id hex: {got:?}"),
             Self::InvalidRelayUrl { got } => write!(f, "invalid relay url: {got:?}"),
             #[cfg(feature = "nip65")]
@@ -663,7 +765,6 @@ impl std::fmt::Display for FfiError {
                 "a replaceable edit crosses this boundary only inside the semantic method that \
                  owns its precondition, never as a payload"
             ),
-            Self::InvalidSecretKey => write!(f, "invalid secret key"),
             Self::InvalidSigner { reason } => write!(f, "invalid signer: {reason}"),
             Self::AuthCapabilityRegistryFull { limit } => {
                 write!(f, "AUTH capability registry is full at {limit} entries")
@@ -671,7 +772,9 @@ impl std::fmt::Display for FfiError {
             Self::AuthCapabilityInstanceExhausted => {
                 write!(f, "AUTH capability instance space exhausted")
             }
-            Self::NoActiveSigner => write!(f, "the active account has no registered signer"),
+            Self::NoCurrentSigningProvider => {
+                write!(f, "the current account has no available signing provider")
+            }
             Self::InvalidSignRequest { reason } => {
                 write!(f, "invalid sign request: {reason}")
             }
@@ -935,7 +1038,7 @@ pub fn signed_event_to_ffi(event: SignedEvent) -> FfiSignedEvent {
 
 pub fn sign_event_start_error(error: nmp::SignEventError) -> FfiError {
     match error {
-        nmp::SignEventError::NoActiveSigner => FfiError::NoActiveSigner,
+        nmp::SignEventError::NoCurrentSigningProvider => FfiError::NoCurrentSigningProvider,
         nmp::SignEventError::InvalidRequest { reason } => FfiError::InvalidSignRequest { reason },
         nmp::SignEventError::EngineClosed => FfiError::EngineClosed,
         nmp::SignEventError::SignerUnavailable { reason }
@@ -3632,7 +3735,7 @@ mod tests {
     }
 
     /// `Active` is a positive instruction, not an absence: it crosses as
-    /// `Identity::Active` and means "whoever is the active account at
+    /// `Identity::Active` and means "whoever is the current account at
     /// acceptance", which is a resolution the engine performs rather than a
     /// field it skipped.
     #[test]
@@ -3642,7 +3745,7 @@ mod tests {
         assert_eq!(
             parsed.identity,
             GIdentity::Active,
-            "the default identity must mean the active account, nothing else"
+            "the default identity must mean the current account, nothing else"
         );
     }
 

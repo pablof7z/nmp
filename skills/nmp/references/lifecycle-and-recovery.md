@@ -46,8 +46,8 @@ An in-progress relay reconciliation is connection-local. A replacement connectio
 ## Process restart sequence
 
 1. Recreate the engine over the same persistent store.
-2. Restore signer capability from app-owned secure storage, or explicitly opt into the insecure development store for local keys. NMP ships no remote-signer provider and no secure remote-signer credential vault.
-3. Add/select the intended active account.
+2. Restore the engine from the app-stored opaque whole-session payload. NMP ships no session store or remote-signer provider.
+3. Confirm the intended current account and provider availability.
 4. Recreate current feature demands from app state. NMP restores cached facts but does not invent app queries.
 5. Call `publishQueue()` to see everything still outstanding, reattach by retained id or by correlation token, fold the replayed facts, and decide cancel/remove for parked and refused entries.
 6. Start new UI observers only after the model is ready to own their teardown.
@@ -72,8 +72,8 @@ Treat identity persistence and the NMP event store as different authorities:
 
 1. Stop creating new unsigned writes for the account.
 2. Resolve unsigned obligations for the departing account: `cancel(receiptId:)` each one, then `removePublishQueueEntry(receiptId:)`. That two-call pair is the only way such a write ends.
-3. Clear any separately persisted account credential before engine shutdown when using the insecure file store.
-4. Clear/deactivate the active account.
+3. Remove the account from the session and persist the resulting whole-session payload.
+4. Clear current selection if another account should not become current.
 5. Close remote signer connections and observers.
 6. Shut down the engine if the app session owns it.
 
@@ -86,17 +86,17 @@ Do not delete the canonical store merely to sign out unless the product explicit
 1. Cancel query, diagnostics, content, following, and receipt observers.
 2. Shut down and release every engine using the path.
 3. Call reset for that store path.
-4. Separately clear account/signer persistence if the requested operation is full logout/erase.
+4. Separately clear the app-stored session payload if the requested operation is full logout/erase.
 5. Construct a new engine only after reset completes.
 
-Reset is not a repair loop for a live engine. It erases canonical events, pending writes, receipts, coverage, and evidence, but not a separately configured account checkpoint.
+Reset is not a repair loop for a live engine. It erases canonical events, pending writes, receipts, coverage, and evidence, but not an app-stored session payload.
 
 ## Failure classification
 
 Keep recovery owned by the failing layer:
 
 - query source disconnect: transport reconnects while demand remains live;
-- missing signer: restore/attach the same expected identity; do not re-author;
+- unavailable signer provider: restore the same session and wait for that account's provider; do not re-author;
 - remote signer handoff failure: close that connection attempt and begin a new explicit attempt;
 - durable relay failure: delivery owns attempts/backoff and emits receipt facts;
 - unacked relay handoff: `RelayState::Sent` already means written-but-unacked and is not terminal; let the lane run, never blind resend;

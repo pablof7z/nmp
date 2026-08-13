@@ -93,7 +93,7 @@ Exercise the product-relevant subset:
 - process restart reattaches the same receipt and frozen intent;
 - restart replays the durable `WriteFact` history in finite pages — `RelayWaiting::NotConnected`/`NeedsAuth`/`BackingOff`/`PersistenceStalled`, `Sent`, and terminal relay states — and reports lag as the typed `FactStreamLagged` rather than dropping frames;
 - old remote-signer close cannot detach its replacement;
-- secret/account checkpoint is separate from event-store reset;
+- app-stored whole-session payload is separate from event-store reset;
 - detaching a fact stream leaves the durable write intact, and is distinguishable in test from `cancel` ending the obligation; and
 - Kotlin receipt collection remains drained/bounded by ownership policy and repeated reattachment does not accumulate unnoticed bridges.
 

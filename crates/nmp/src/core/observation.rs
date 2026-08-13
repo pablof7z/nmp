@@ -31,7 +31,7 @@ pub struct ObservationEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolutionCause {
     Initial,
-    ActiveAccountChanged,
+    CurrentAccountChanged,
     DependencyChanged,
 }
 
@@ -1204,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn active_account_and_external_kind3_changes_emit_only_real_resolution_changes() {
+    fn current_account_and_external_kind3_changes_emit_only_real_resolution_changes() {
         let account_a = Keys::generate();
         let account_b = Keys::generate();
         let followed_a = Keys::generate();

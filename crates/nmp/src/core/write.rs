@@ -380,7 +380,7 @@ impl<S: EventStore> EngineCore<S> {
             // A signer request still outstanding is work in progress, not a
             // stall. Only the durable `AwaitingCapability` park -- request
             // answered "no capability", nothing left running -- is stuck, and
-            // it names the FROZEN author rather than whoever is active now.
+            // it names the FROZEN author rather than whichever account is current now.
             if pending.sign_request_in_flight {
                 return None;
             }
@@ -1574,7 +1574,7 @@ impl<S: EventStore> EngineCore<S> {
             // identity-scoped authenticated session (#8 U2); recovery
             // redials exactly the session the lane will publish on. The
             // signing identity was frozen at acceptance, never re-read from
-            // the mutable active account.
+            // the mutable current account.
             let session =
                 RelaySessionKey::new(lane.key.relay.clone(), AccessContext::Nip42(signing_pubkey));
             match lane.state {
@@ -2203,19 +2203,19 @@ impl<S: EventStore> EngineCore<S> {
     ///
     /// Identity resolution (#47): a builder payload carries no author, so
     /// the identity SELECTS one and there is nothing to compare it against
-    /// — `Identity::Active` resolves the CURRENT active account (fail
-    /// closed pre-acceptance when none is active, since nothing is pinned
+    /// — `Identity::Active` resolves the current account (fail
+    /// closed pre-acceptance when none is current, since nothing is pinned
     /// so nothing may park), `Identity::Explicit(pk)` stamps `pk`
-    /// regardless of the active account, including while logged out. A
+    /// regardless of the current account, including while logged out. A
     /// `Signed` payload states its author in its own bytes, so there the
     /// identity may only RESTATE it: `Explicit(pk)` naming that author is a
     /// harmless restatement of consent and naming anybody else fails closed
     /// with no `Accepted`, while `Active` means the event's own author and
-    /// imposes no active-account requirement at all. Acceptance pins the
+    /// imposes no current-account requirement at all. Acceptance pins the
     /// resolved key (`expected_pubkey` /
     /// `signing_identity_ref`), so everything downstream — the frozen body,
     /// `RequestSign`, the `SignerAttached` re-arm, restart replay — targets
-    /// that one identity forever; a later `set_active_account` cannot
+    /// that one identity forever; a later `set_current_account` cannot
     /// retarget it, and an `Explicit` identity with no registered
     /// capability parks durably as `AwaitingCapability` rather than failing
     /// or drifting.
@@ -2351,16 +2351,16 @@ impl<S: EventStore> EngineCore<S> {
             // and the mismatch class #47 fails closed on is unrepresentable
             // here rather than merely refused.
             WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => match identity {
-                // Explicit per-write consent to publish as `pk`. The active
+                // Explicit per-write consent to publish as `pk`. The current
                 // account is irrelevant (even logged out): acceptance pins
                 // `pk` and downstream signing targets it forever.
                 Identity::Explicit(pk) => pk,
-                // Whoever is active at acceptance. An instruction that
+                // Whichever account is current at acceptance. An instruction that
                 // cannot resolve is a refusal, not a parked hope — nothing
                 // is pinned, so nothing may park.
                 Identity::Active => match self.active_pubkey {
                     Some(active) => active,
-                    None => return self.refuse_publish(PublishError::NoActiveAccount),
+                    None => return self.refuse_publish(PublishError::NoCurrentAccount),
                 },
             },
             // Already-signed payloads are verified verbatim and never ask a
@@ -2658,7 +2658,7 @@ impl<S: EventStore> EngineCore<S> {
 
     pub(super) fn on_signer_attached(&mut self, pk: PublicKey) -> Vec<Effect> {
         // Holding this key's signer is what makes its relay list OUR relay
-        // list (#1251): we could have signed it, active or not.
+        // list (#1251): we could have signed it, current or not.
         self.attached_signers.insert(pk);
         let mut effects = Vec::new();
         for (id, pending) in &mut self.pending {

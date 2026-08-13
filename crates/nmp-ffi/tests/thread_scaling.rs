@@ -63,7 +63,8 @@ fn spawn_parked_consumer(stream: Arc<NmpRowStream>) -> tokio::task::JoinHandle<(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn observation_handles_scale_with_zero_native_thread_growth() {
-    let engine = NmpEngine::new(NmpEngineConfig::default()).expect("in-memory engine must build");
+    let engine =
+        NmpEngine::new(NmpEngineConfig::default(), None).expect("in-memory engine must build");
 
     let mut streams: Vec<Arc<NmpRowStream>> = Vec::new();
     let mut consumers: Vec<tokio::task::JoinHandle<()>> = Vec::new();

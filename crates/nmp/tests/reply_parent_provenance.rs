@@ -14,7 +14,6 @@ use nmp::{
     AccessContext, Binding, CacheMode, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery,
     RelayState, RowDelta, SourceAuthority, WriteFact, WriteIntent, WritePayload, WriteRouting,
 };
-use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{EventBuilder as NostrEventBuilder, Keys, Kind, Tag, Timestamp};
 
@@ -126,14 +125,8 @@ async fn verified_parent_provenance_becomes_a_real_lane_while_raw_hint_text_does
 
     let author = Keys::generate();
     engine
-        .set_active_account(Some(author.public_key()))
-        .expect("activate the publishing identity");
-    engine
-        .add_signer(
-            LocalKeySigner::from_secret_bytes(author.secret_key().as_secret_bytes())
-                .expect("fixture secret key is valid"),
-        )
-        .expect("register the local signer");
+        .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
+        .expect("register and select the publishing identity");
 
     let parent_hex = parent.id.to_hex();
     let hinted_url = hinted_relay.url.to_string();

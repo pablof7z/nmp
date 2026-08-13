@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
+use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
     FfiFilter, FfiFrame, FfiIdentity, FfiRowDelta, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
@@ -44,15 +45,15 @@ async fn next_committed(stream: &NmpRowStream) -> Option<FfiFrame> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stalled_consumer_is_bounded_and_does_not_delay_active_consumer_or_engine() {
-    let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine builds");
-    let account = engine
-        .add_account(TEST_SECRET_KEY_HEX.to_string())
-        .expect("key parses");
-    let author = account.public_key();
+    let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine builds");
+    let keys = nostr::Keys::parse(TEST_SECRET_KEY_HEX).unwrap();
     // Make the account active so durable unsigned publishes sign locally and
     // become query-visible rows.
     engine
-        .set_active_account(Some(author.clone()))
+        .add_private_key_account(
+            FfiPrivateKey::from_bytes(keys.secret_key().to_secret_bytes().to_vec()).unwrap(),
+            true,
+        )
         .expect("activate account");
 
     // Two observations of the SAME live query.

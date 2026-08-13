@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use nmp_ffi::convert::FfiRowPullError;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowPull, NmpRowStream};
+use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
     FfiEventBuilder, FfiFilter, FfiFrame, FfiIdentity, FfiRowDelta, FfiWindow, FfiWriteIntent,
     FfiWritePayload, FfiWriteRouting,
@@ -23,12 +24,19 @@ const TEST_SECRET_KEY_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000001";
 
 fn test_engine() -> Arc<NmpEngine> {
-    let engine = NmpEngine::new(NmpEngineConfig::default()).expect("in-memory engine opens");
-    let account = engine
-        .add_account(TEST_SECRET_KEY_HEX.to_string())
-        .expect("test key parses");
+    let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("in-memory engine opens");
     engine
-        .set_active_account(Some(account.public_key()))
+        .add_private_key_account(
+            FfiPrivateKey::from_bytes(
+                nostr::Keys::parse(TEST_SECRET_KEY_HEX)
+                    .unwrap()
+                    .secret_key()
+                    .to_secret_bytes()
+                    .to_vec(),
+            )
+            .unwrap(),
+            true,
+        )
         .expect("test account becomes active");
     engine
 }

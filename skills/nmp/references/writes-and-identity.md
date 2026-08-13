@@ -38,22 +38,22 @@ Recovery has sharp edges:
 - Reattachment returns `Attached`/`NotFound`/`RetainedButUnreadable` and traverses the durable `WriteFact` history in finite pages before streaming onward. Lag is the typed `FactStreamLagged`, not silent loss.
 - Reattach by id, or by the correlation token you persisted before publishing. Between the two doors plus `publishQueue()`, an app that crashed after acceptance can find its outstanding writes again.
 - NIP-22 composes an ordinary `WriteIntent` and uses the generic publish path. NIP-29's `Group::publish` mints its intent privately and returns the same ordinary `ReceiptStream` every other write returns. Neither has a composed carrier or a second publication lifecycle.
-- Restore the signer and active account so accepted unsigned work can resume. Fact-stream closure alone is never delivery success; retain the mixed facts already observed.
+- Restore the whole session so accepted unsigned work can resume when the frozen account's provider is available. Fact-stream closure alone is never delivery success; retain the mixed facts already observed.
 
 Swift `ReceiptStatus.cancel()` stops delivering live frames to that stream and leaves the durable receipt untouched; Kotlin's status `Flow` is a cold pull loop that cancels the underlying stream when the collection scope ends. Both are stream detachment, not write cancellation — `NMPEngine.cancel(receiptId:)` is the door that ends the obligation. The live fact channel is finite and reports `FactStreamLagged` rather than growing without bound.
 
 ## Identity
 
-Adding a local account and activating it are separate operations. Changing the active account re-roots reactive identity bindings and every `Identity::Active` write not yet accepted; acceptance pins the identity so a later switch cannot retarget an accepted write.
+Adding an account and making it current are separate operations. Changing the current account re-roots reactive identity bindings and every `Identity::Active` write not yet accepted; acceptance pins the identity so a later switch cannot retarget an accepted write.
 
-Publishing with `Identity::Active` and no active account is refused *before* acceptance — that is a typed error, not receipt evidence. Publishing under an active key for which no signer is installed is accepted and parks durably as `SigningState::AwaitingSigner { pubkey }`; parking is not failure, and no clock ends it. Ending such a write is the app's decision: `cancel`, then `removePublishQueueEntry`.
+Publishing with `Identity::Active` and no current account is refused *before* acceptance — that is a typed error, not receipt evidence. Publishing under a current key whose configured provider is unavailable, or under a public-key-only account, is accepted and parks durably as `SigningState::AwaitingSigner { pubkey }`; parking is not failure, and no clock ends it. Ending such a write is the app's decision: `cancel`, then `removePublishQueueEntry`.
 
-Direct Rust can register an arbitrary `SigningCapability` through `add_signer`. Swift/Kotlin expose local-key account import, not arbitrary Rust trait implementations.
+The public session API adds local-key-backed or public-key-only accounts, makes one current, removes one whole account, clears the session, and exports one opaque payload. Provider reachability never removes the account. Swift/Kotlin do not accept arbitrary Rust trait implementations.
 
 Governed sign-only is separate from publication. Direct Rust calls `Engine::sign_event(SignEventRequest)` and owns the returned cancellable `SignEventOperation`; Swift calls async `signEvent(NMPUnsignedEvent)` and Kotlin calls the suspending equivalent. NMP freezes the active author before asynchronous work and verifies the exact returned event. Success creates no write intent, pending row, receipt, stored event, route, relay attempt, or publication claim. A direct-Rust asynchronous signer resolves through the opaque `PendingSignerSender` returned by `SignerOp::pending_channel` or `pending_channel_with_cancel`; its internal receiver is not public API.
 
-Swift and Kotlin each ship a genuine secure account store — `NMPKeychainAccountStore` over `SecItem`, and a `java.security.KeyStore`-backed store — alongside the explicitly insecure plaintext file stores. All satisfy the same `NMPLocalAccountCheckpoint` contract, so the engine restores from whichever conformer the app injects. Prefer a platform-vault conformer; reach for the file store only for development. The Kotlin secure store is desktop-JVM `KeyStore`, explicitly not AndroidKeyStore. Clear persisted credentials on sign-out.
+Swift and Kotlin expose the same opaque whole-session payload as Rust. The app stores and restores that single sensitive value; NMP ships neither a platform-vault adapter nor a plaintext credential checkpoint. App-owned transactional storage is tracked in #1398.
 
 ## Reset is destructive
 
-Persistent-store reset removes NMP's canonical events, pending writes, receipts, coverage, and evidence at that path. Shut down and drop all engines using the path first. It does not clear separately configured account/signer persistence; logout flows must treat those as distinct stores.
+Persistent-store reset removes NMP's canonical events, pending writes, receipts, coverage, and evidence at that path. Shut down and drop all engines using the path first. It does not clear an app-stored session payload; logout flows must treat those as distinct authorities.

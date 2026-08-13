@@ -76,8 +76,8 @@ user. Shut down every engine using the path first, then call
 `Engine::reset_persistent_store(path)` in Rust,
 `NMPEngine.resetPersistentStore(at:)` in Swift, or
 `NMPEngine.resetPersistentStore(path)` in Kotlin. The operation destroys the
-canonical store but does not remove a separately configured platform account
-checkpoint.
+canonical store but does not change an opaque session payload the app stores
+separately.
 
 ## Diagnostics delivery
 
