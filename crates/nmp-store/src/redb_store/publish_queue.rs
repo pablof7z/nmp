@@ -48,8 +48,11 @@ pub(super) fn replace_lane_in_txn(
         .map_err(persist_err)?
         .map(|guard| guard.value().to_vec())
         .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
-    let (revision, last_ordinal, current_state) =
+    let (event_id, revision, last_ordinal, current_state) =
         decode_lane(&encoded).map_err(|error| codec_error("lane", error))?;
+    if event_id != key.event_id {
+        return Err(PersistenceError::invariant("stale delivery lane event"));
+    }
     if revision != expected_revision {
         return Err(PersistenceError::invariant("stale delivery lane revision"));
     }
@@ -90,7 +93,7 @@ pub(super) fn replace_lane_in_txn(
         },
         state,
     };
-    let encoded = encode_lane(lane.revision, lane.last_ordinal, &lane.state)
+    let encoded = encode_lane(key.event_id, lane.revision, lane.last_ordinal, &lane.state)
         .map_err(|error| codec_error("lane", error))?;
     lanes
         .insert(&storage_key, encoded.as_slice())

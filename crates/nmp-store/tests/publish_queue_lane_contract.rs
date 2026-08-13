@@ -411,6 +411,42 @@ fn auth_denial_is_a_durable_terminal_lane_fact_and_revision_precedes_idempotence
 }
 
 #[test]
+fn pre_attempt_auth_denial_retains_its_exact_event_after_terminal_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth-denial-exact-event.redb");
+    let (intent, terminal) = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let relay = RelayUrl::parse("wss://auth-denial-restart.example").unwrap();
+        let (intent, _, signed, key, seeded) = seed(&mut store, "auth denial restart", 176, relay);
+        let waiting = store.set_lane_waiting(&key, seeded.revision, true).unwrap();
+        let terminal = store
+            .deny_lane_auth(
+                &key,
+                waiting.revision,
+                AuthDenial {
+                    source: AuthDenialSource::Policy,
+                    reason: "account not permitted".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(terminal.key.event_id, signed.id);
+        assert_eq!(terminal.last_ordinal, 0);
+        assert_eq!(
+            store.close_terminal_intent(intent).unwrap(),
+            CloseIntentOutcome::Closed
+        );
+        (intent, terminal)
+    };
+
+    let store = RedbStore::open(&path).unwrap();
+    assert_eq!(
+        store.recover_publish_queue_lanes(intent).unwrap(),
+        vec![terminal]
+    );
+    assert!(store.recover_attempts(intent).unwrap().is_empty());
+}
+
+#[test]
 fn due_deadlines_are_ordered_bounded_and_close_rejects_nonterminal_lanes() {
     with_store(|store| {
         let empty_keys = Keys::generate();
