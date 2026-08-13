@@ -74,6 +74,7 @@ use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
+use nostr::secp256k1::schnorr::Signature;
 use nostr::{
     filter::MatchEventOptions, Event as SignedEvent, EventBuilder as NostrEventBuilder, EventId,
     PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
@@ -651,39 +652,34 @@ impl ReceiptReplayPage {
     }
 }
 
-/// Whether a canonical row already carries a cryptographically verified
-/// signature. This is explicit because a locally accepted optimistic row has
-/// its final id and event body before its signer answers; its placeholder
-/// signature must never be mistaken for a valid Nostr signature.
+/// The one owner of a canonical row's signature state.
+///
+/// A locally accepted optimistic row has its final id and body before its
+/// signer answers. Keeping state and signature in one closed value makes both
+/// invalid combinations unrepresentable at the public boundary: a pending
+/// row cannot carry a signature, and a signed row cannot omit one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RowSignatureState {
-    /// Locally accepted and query-visible, but still carrying NMP's internal
-    /// placeholder signature while the exact signer is pending.
+pub enum RowSignature {
+    /// Locally accepted and query-visible while the exact signer is pending.
     Pending,
-    /// Carries a signature verified at relay ingest or signer promotion.
-    Signed,
+    /// Carries signature bytes. Rows emitted by NMP reach this arm only after
+    /// relay verification or signer promotion; raw `Row::from_parts` values
+    /// make no validity claim until an app inserts them through a verified
+    /// door.
+    Signed(Signature),
 }
 
-impl RowSignatureState {
-    fn from_store(state: SigState) -> Self {
+impl RowSignature {
+    fn from_store(event: &SignedEvent, state: SigState) -> Self {
         match state {
             SigState::Pending => Self::Pending,
-            SigState::Signed => Self::Signed,
+            SigState::Signed => Self::Signed(event.sig),
         }
     }
 }
 
-pub(super) fn row_signature_state(provenance: &nmp_store::Provenance) -> RowSignatureState {
-    provenance
-        .local
-        .as_ref()
-        .map_or(RowSignatureState::Signed, |local| {
-            RowSignatureState::from_store(local.sig_state)
-        })
-}
-
-/// The canonical row value (#105): the event, its explicit signature state,
-/// and its sorted, deduplicated relay-observation set --
+/// The canonical row value (#105): the unsigned event body, its closed
+/// signature value, and its sorted, deduplicated relay-observation set --
 /// `nmp_store::Provenance::seen`'s keys, projected honestly rather than
 /// mirrored into a second parallel provenance store.
 /// `sources` only ever grows for a given event id (`Provenance::
@@ -691,8 +687,8 @@ pub(super) fn row_signature_state(provenance: &nmp_store::Provenance) -> RowSign
 /// need a "sources shrank" case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    pub event: nostr::Event,
-    pub signature_state: RowSignatureState,
+    pub(crate) body: UnsignedEvent,
+    pub(crate) signature: RowSignature,
     pub sources: BTreeSet<RelayUrl>,
 }
 
@@ -709,6 +705,149 @@ fn first_verified_source<'a>(sources: impl IntoIterator<Item = &'a RelayUrl>) ->
 }
 
 impl Row {
+    /// Construct a row-shaped value without asserting that NMP observed it.
+    ///
+    /// This is the raw composition/preview/import door used by native
+    /// adapters. It does not insert into NMP or claim provenance or signature
+    /// validity. The closed `signature` value still guarantees that pending
+    /// carries no signature and signed always carries one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        id: EventId,
+        pubkey: PublicKey,
+        created_at: Timestamp,
+        kind: nostr::Kind,
+        tags: nostr::Tags,
+        content: String,
+        signature: RowSignature,
+        sources: BTreeSet<RelayUrl>,
+    ) -> Self {
+        Self {
+            body: UnsignedEvent {
+                id: Some(id),
+                pubkey,
+                created_at,
+                kind,
+                tags,
+                content,
+            },
+            signature,
+            sources,
+        }
+    }
+
+    pub(crate) fn from_stored_event(
+        event: nostr::Event,
+        signature_state: SigState,
+        sources: BTreeSet<RelayUrl>,
+    ) -> Self {
+        let signature = RowSignature::from_store(&event, signature_state);
+        Self {
+            body: UnsignedEvent {
+                id: Some(event.id),
+                pubkey: event.pubkey,
+                created_at: event.created_at,
+                kind: event.kind,
+                tags: event.tags,
+                content: event.content,
+            },
+            signature,
+            sources,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_relay_event(event: nostr::Event, sources: BTreeSet<RelayUrl>) -> Self {
+        let signature = RowSignature::Signed(event.sig);
+        Self {
+            body: UnsignedEvent {
+                id: Some(event.id),
+                pubkey: event.pubkey,
+                created_at: event.created_at,
+                kind: event.kind,
+                tags: event.tags,
+                content: event.content,
+            },
+            signature,
+            sources,
+        }
+    }
+
+    /// Final NIP-01 event id, available before signing because signatures are
+    /// not part of the id preimage.
+    pub fn id(&self) -> EventId {
+        self.body
+            .id
+            .expect("a canonical row always carries its frozen event id")
+    }
+
+    pub fn pubkey(&self) -> PublicKey {
+        self.body.pubkey
+    }
+
+    pub fn created_at(&self) -> Timestamp {
+        self.body.created_at
+    }
+
+    pub fn kind(&self) -> nostr::Kind {
+        self.body.kind
+    }
+
+    pub fn tags(&self) -> &nostr::Tags {
+        &self.body.tags
+    }
+
+    pub fn content(&self) -> &str {
+        &self.body.content
+    }
+
+    pub fn signature(&self) -> RowSignature {
+        self.signature
+    }
+
+    pub fn sources(&self) -> &BTreeSet<RelayUrl> {
+        &self.sources
+    }
+
+    /// Reconstruct a complete NIP-01 event value only when signature bytes are
+    /// present. Pending rows return `None`; NMP's internal storage sentinel is
+    /// never exposed through this door. This does not independently verify a
+    /// raw `Row::from_parts` value.
+    pub fn signed_event(&self) -> Option<nostr::Event> {
+        let RowSignature::Signed(signature) = self.signature else {
+            return None;
+        };
+        Some(nostr::Event::new(
+            self.id(),
+            self.body.pubkey,
+            self.body.created_at,
+            self.body.kind,
+            self.body.tags.clone(),
+            self.body.content.clone(),
+            signature,
+        ))
+    }
+
+    /// Rebuild the store's legacy event-shaped representation. Pending rows
+    /// receive the store sentinel only for the duration of an internal reducer
+    /// call; the sentinel is not owned by `Row` and cannot cross its public
+    /// projection.
+    pub(crate) fn event_for_store(&self) -> nostr::Event {
+        let signature = match self.signature {
+            RowSignature::Pending => sentinel_signature(),
+            RowSignature::Signed(signature) => signature,
+        };
+        nostr::Event::new(
+            self.id(),
+            self.body.pubkey,
+            self.body.created_at,
+            self.body.kind,
+            self.body.tags.clone(),
+            self.body.content.clone(),
+            signature,
+        )
+    }
+
     /// The relay hint a reference row to this event carries.
     ///
     /// `sources` is **verified** provenance: NMP observed this exact event at
@@ -733,6 +872,58 @@ impl Row {
     }
 }
 
+#[cfg(test)]
+mod row_signature_tests {
+    use super::*;
+    use nostr::Keys;
+
+    fn signed_event() -> nostr::Event {
+        nostr::EventBuilder::text_note("one signature owner")
+            .sign_with_keys(&Keys::generate())
+            .expect("fixture signs")
+    }
+
+    #[test]
+    fn pending_has_no_signature_or_event_projection() {
+        let event = signed_event();
+        let row = Row::from_parts(
+            event.id,
+            event.pubkey,
+            event.created_at,
+            event.kind,
+            event.tags,
+            event.content,
+            RowSignature::Pending,
+            BTreeSet::new(),
+        );
+
+        assert_eq!(row.signature(), RowSignature::Pending);
+        assert!(row.signed_event().is_none());
+    }
+
+    #[test]
+    fn signed_always_projects_the_exact_supplied_signature() {
+        let event = signed_event();
+        let expected = event.sig;
+        let row = Row::from_parts(
+            event.id,
+            event.pubkey,
+            event.created_at,
+            event.kind,
+            event.tags,
+            event.content,
+            RowSignature::Signed(expected),
+            BTreeSet::new(),
+        );
+
+        assert_eq!(row.signature(), RowSignature::Signed(expected));
+        assert_eq!(
+            row.signed_event().expect("signed row has event").sig,
+            expected
+        );
+    }
+}
+
 /// The canonical row is the ordinary reply/quote/reaction target, so it is
 /// what `EventBuilder::tag` is usually handed.
 ///
@@ -744,15 +935,15 @@ impl Row {
 /// into two dialects.
 impl nmp_grammar::RootScope for Row {
     fn root_rows(&self, options: &nmp_grammar::TagOptions) -> Vec<nostr::Tag> {
-        nmp_grammar::event_root_rows(&self.event, self.verified_hint(), options)
+        nmp_grammar::event_root_rows(&self.event_for_store(), self.verified_hint(), options)
     }
 
     fn parent_rows(&self, options: &nmp_grammar::TagOptions) -> Vec<nostr::Tag> {
-        nmp_grammar::event_parent_rows(&self.event, self.verified_hint(), options)
+        nmp_grammar::event_parent_rows(&self.event_for_store(), self.verified_hint(), options)
     }
 
     fn entity_kind(&self) -> Option<nostr::Kind> {
-        Some(self.event.kind)
+        Some(self.body.kind)
     }
 }
 
@@ -813,18 +1004,17 @@ impl RowDelta {
     /// The event id this delta concerns, regardless of variant.
     pub fn id(&self) -> EventId {
         match self {
-            RowDelta::Added(row) => row.event.id,
-            RowDelta::Updated(row) => row.event.id,
+            RowDelta::Added(row) => row.id(),
+            RowDelta::Updated(row) => row.id(),
             RowDelta::SourcesGrew { id, .. } => *id,
             RowDelta::Removed(id) => *id,
         }
     }
 
-    /// The event payload, if this is an `Added` or complete same-id `Updated`
-    /// delta (`None` for `SourcesGrew`/`Removed`).
-    pub fn event(&self) -> Option<&nostr::Event> {
+    /// The complete row payload for `Added` and `Updated` deltas.
+    pub fn row(&self) -> Option<&Row> {
         match self {
-            RowDelta::Added(row) | RowDelta::Updated(row) => Some(&row.event),
+            RowDelta::Added(row) | RowDelta::Updated(row) => Some(row),
             RowDelta::SourcesGrew { .. } | RowDelta::Removed(_) => None,
         }
     }
@@ -1617,7 +1807,7 @@ struct PendingHistoryLoad {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RememberedRow {
     created_at: u64,
-    signature_state: RowSignatureState,
+    signature_state: RowSignature,
     sources: BTreeSet<RelayUrl>,
 }
 

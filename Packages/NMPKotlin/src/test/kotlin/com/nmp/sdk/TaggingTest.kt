@@ -20,8 +20,7 @@ class TaggingTest {
         kind = kind,
         tags = tags,
         content = "body",
-        sig = "c".repeat(128),
-        signatureState = RowSignatureState.Signed,
+        signature = RowSignature.Signed("c".repeat(128)),
         sources = sources,
     )
 

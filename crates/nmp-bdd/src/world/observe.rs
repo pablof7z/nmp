@@ -80,10 +80,10 @@ impl FeedState {
         for delta in deltas {
             match delta {
                 RowDelta::Added(row) => {
-                    self.rows.insert(row.event.id, row);
+                    self.rows.insert(row.id(), row);
                 }
                 RowDelta::Updated(row) => {
-                    self.rows.insert(row.event.id, row);
+                    self.rows.insert(row.id(), row);
                 }
                 // #105: the event body is unchanged, so this replaces the
                 // row's source set and nothing else -- the "whole value, not
@@ -355,11 +355,11 @@ impl NmpWorld {
 
     pub fn feed_eventually(
         &mut self,
-        pred: impl Fn(&[nostr::Event], &[AcquisitionEvidence]) -> bool,
+        pred: impl Fn(&[&Row], &[AcquisitionEvidence]) -> bool,
     ) -> bool {
         let feed = self.feed.as_mut().expect("nmp-bdd: no feed is open");
         feed.eventually(EVENTUALLY, |f| {
-            let rows: Vec<nostr::Event> = f.rows.values().map(|r| r.event.clone()).collect();
+            let rows: Vec<&Row> = f.rows.values().collect();
             pred(&rows, &f.evidence)
         })
     }
@@ -392,10 +392,10 @@ impl NmpWorld {
         }
     }
 
-    pub fn feed_never(&mut self, pred: impl Fn(&[nostr::Event]) -> bool) -> bool {
+    pub fn feed_never(&mut self, pred: impl Fn(&[&Row]) -> bool) -> bool {
         let feed = self.feed.as_mut().expect("nmp-bdd: no feed is open");
         feed.never(NEVER, |f| {
-            let rows: Vec<nostr::Event> = f.rows.values().map(|r| r.event.clone()).collect();
+            let rows: Vec<&Row> = f.rows.values().collect();
             pred(&rows)
         })
     }

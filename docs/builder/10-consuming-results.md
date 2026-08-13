@@ -32,14 +32,19 @@ Exact wire filters, counters, compiler lanes, and history remain in diagnostics.
 
 ```swift
 struct NMPRow {
-    let event: NMPEvent
-    let provenance: Provenance
-    let signatureState: SignatureState
+    let id: String
+    let pubkey: String
+    let createdAt: UInt64
+    let kind: UInt16
+    let tags: [[String]]
+    let content: String
+    let signature: RowSignature
+    let sources: [String]
 }
 
-enum SignatureState {
-    case pending(intentId: IntentId)
-    case signed
+enum RowSignature {
+    case pending
+    case signed(signature: String)
 }
 ```
 

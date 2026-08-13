@@ -394,8 +394,8 @@ mod tests {
     use crate::core::ShortfallFact;
 
     fn row(keys: &Keys, created_at: u64, content: &str) -> Row {
-        Row {
-            event: UnsignedEvent::new(
+        Row::from_relay_event(
+            UnsignedEvent::new(
                 keys.public_key(),
                 Timestamp::from(created_at),
                 Kind::TextNote,
@@ -404,19 +404,18 @@ mod tests {
             )
             .sign_with_keys(keys)
             .unwrap(),
-            signature_state: crate::core::RowSignatureState::Signed,
-            sources: BTreeSet::new(),
-        }
+            BTreeSet::new(),
+        )
     }
 
     fn apply(rows: &mut BTreeMap<EventId, Row>, deltas: &[RowDelta]) {
         for delta in deltas {
             match delta {
                 RowDelta::Added(row) => {
-                    rows.insert(row.event.id, row.clone());
+                    rows.insert(row.id(), row.clone());
                 }
                 RowDelta::Updated(row) => {
-                    rows.insert(row.event.id, row.clone());
+                    rows.insert(row.id(), row.clone());
                 }
                 RowDelta::SourcesGrew { id, sources } => {
                     rows.get_mut(id).unwrap().sources = sources.clone();
@@ -464,7 +463,7 @@ mod tests {
 
         let keys = Keys::generate();
         let mut expected = row(&keys, 1, "same-event");
-        let id = expected.event.id;
+        let id = expected.id();
         let (tx, rx) = rows_channel();
         send_rows(
             &tx,
@@ -508,11 +507,7 @@ mod tests {
             vec![AcquisitionEvidence::default()],
         );
         let evidence = latest_evidence();
-        send_rows(
-            &tx,
-            vec![RowDelta::Removed(added.event.id)],
-            evidence.clone(),
-        );
+        send_rows(&tx, vec![RowDelta::Removed(added.id())], evidence.clone());
 
         let (deltas, received_evidence, _) = rx.recv().unwrap();
         assert!(deltas.is_empty());
@@ -523,7 +518,7 @@ mod tests {
     fn source_growth_keeps_only_the_latest_complete_source_set() {
         let keys = Keys::generate();
         let initial = row(&keys, 1, "provenance");
-        let id = initial.event.id;
+        let id = initial.id();
         let a = RelayUrl::parse("wss://a.example").unwrap();
         let b = RelayUrl::parse("wss://b.example").unwrap();
         let (tx, rx) = rows_channel();
@@ -564,9 +559,15 @@ mod tests {
     fn slow_observer_never_retains_a_pending_row_after_signature_promotion() {
         let keys = Keys::generate();
         let signed = row(&keys, 1, "promoted while observer is slow");
-        let mut pending = signed.clone();
-        pending.signature_state = crate::core::RowSignatureState::Pending;
-        pending.event.sig = nmp_store::sentinel_signature();
+        let pending = Row::from_stored_event(
+            {
+                let mut event = signed.event_for_store();
+                event.sig = nmp_store::sentinel_signature();
+                event
+            },
+            nmp_store::SigState::Pending,
+            signed.sources.clone(),
+        );
 
         let (tx, rx) = rows_channel();
         send_rows(
@@ -587,8 +588,8 @@ mod tests {
             deltas.as_slice(),
             [RowDelta::Added(row)]
                 if row == &signed
-                    && row.signature_state == crate::core::RowSignatureState::Signed
-                    && row.event.verify().is_ok()
+                    && matches!(row.signature, crate::core::RowSignature::Signed(_))
+                    && row.signed_event().is_some_and(|event| event.verify().is_ok())
         ));
         assert_eq!(evidence, latest_evidence());
     }
@@ -597,7 +598,7 @@ mod tests {
     fn source_growth_after_removal_fails_closed_without_resurrecting_the_row() {
         let keys = Keys::generate();
         let initial = row(&keys, 1, "must-stay-removed");
-        let id = initial.event.id;
+        let id = initial.id();
         let (tx, rx) = rows_channel();
         send_rows(
             &tx,

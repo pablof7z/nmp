@@ -854,7 +854,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     ));
     assert!(effects.iter().any(|effect| matches!(effect,
         Effect::EmitRows(_, rows, _) if rows.iter().any(|delta|
-            matches!(delta, RowDelta::Added(row) if row.event.id == overdelivered.id))
+            matches!(delta, RowDelta::Added(row) if row.id() == overdelivered.id))
     )));
 
     let effects = core.handle(EngineMsg::RelayFrame(
@@ -916,7 +916,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     assert!(
         effects.iter().any(|effect| matches!(effect,
             Effect::EmitRows(_, rows, _) if rows.iter().any(|delta|
-                matches!(delta, RowDelta::Added(row) if row.event.id == boundary.id))
+                matches!(delta, RowDelta::Added(row) if row.id() == boundary.id))
         )),
         "the live-first handoff must deliver a backdated boundary event"
     );
@@ -982,7 +982,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
         ingested.iter().any(|effect| matches!(
             effect,
             Effect::EmitRows(_, rows, _) if rows.iter().any(|delta|
-                matches!(delta, RowDelta::Added(row) if row.event.id == missing.id))
+                matches!(delta, RowDelta::Added(row) if row.id() == missing.id))
         )),
         "missing event is ingested before its backfill settles"
     );

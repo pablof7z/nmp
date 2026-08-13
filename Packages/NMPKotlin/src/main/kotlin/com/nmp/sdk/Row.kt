@@ -8,28 +8,30 @@ package com.nmp.sdk
 import uniffi.nmp_ffi.FfiAcquisitionEvidence
 import uniffi.nmp_ffi.FfiAuthPhase
 import uniffi.nmp_ffi.FfiRow
-import uniffi.nmp_ffi.FfiRowSignatureState
+import uniffi.nmp_ffi.FfiRowSignature
 import uniffi.nmp_ffi.FfiShortfallFact
 import uniffi.nmp_ffi.FfiSourceEvidence
 import uniffi.nmp_ffi.FfiSourceStatus
 
-/** Whether this canonical row already carries a verified Nostr signature. */
-enum class RowSignatureState {
-    Pending,
-    Signed;
+/** The one owner of a row's signature property. NMP-emitted Signed rows have
+ * passed verification; raw app-constructed values make no validity claim. */
+sealed class RowSignature {
+    object Pending : RowSignature()
+
+    data class Signed(val signature: String) : RowSignature()
 
     companion object {
-        fun from(ffi: FfiRowSignatureState): RowSignatureState =
+        fun from(ffi: FfiRowSignature): RowSignature =
             when (ffi) {
-                FfiRowSignatureState.PENDING -> Pending
-                FfiRowSignatureState.SIGNED -> Signed
+                FfiRowSignature.Pending -> Pending
+                is FfiRowSignature.Signed -> Signed(ffi.signature)
             }
     }
 
-    internal fun toFfi(): FfiRowSignatureState =
+    internal fun toFfi(): FfiRowSignature =
         when (this) {
-            Pending -> FfiRowSignatureState.PENDING
-            Signed -> FfiRowSignatureState.SIGNED
+            Pending -> FfiRowSignature.Pending
+            is Signed -> FfiRowSignature.Signed(signature)
         }
 }
 
@@ -42,9 +44,8 @@ data class Row(
     /** Each inner list is one raw tag (`["p", "<hex>", ...]`), verbatim. */
     val tags: List<List<String>>,
     val content: String,
-    val sig: String,
-    /** Pending means sig is NMP's placeholder, not a verified signature. */
-    val signatureState: RowSignatureState,
+    /** Pending carries no signature; Signed necessarily carries one. */
+    val signature: RowSignature,
     /**
      * Sorted, deduplicated relay URLs that have delivered this event id
      * (#105) -- raw tokens, not a formatted/display field either.
@@ -60,8 +61,7 @@ data class Row(
                 kind = ffi.kind,
                 tags = ffi.tags,
                 content = ffi.content,
-                sig = ffi.sig,
-                signatureState = RowSignatureState.from(ffi.signatureState),
+                signature = RowSignature.from(ffi.signature),
                 sources = ffi.sources,
             )
     }

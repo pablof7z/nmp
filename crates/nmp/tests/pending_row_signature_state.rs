@@ -7,9 +7,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use nmp::{
-    Binding, Engine, EngineConfig, Filter, Identity, LiveQuery, RowDelta, RowSignatureState,
-    SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
-    WriteIntent, WritePayload, WriteRouting,
+    Binding, Engine, EngineConfig, Filter, Identity, LiveQuery, RowDelta, RowSignature, SignerOp,
+    SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability, WriteIntent,
+    WritePayload, WriteRouting,
 };
 use nmp_grammar::EventBuilder;
 use nmp_signer::PendingSignerSender;
@@ -117,16 +117,17 @@ fn delayed_signer_promotes_the_same_visible_row_from_pending_to_signed() {
             .recv_timeout(remaining)
             .expect("the query stays open while the signer is pending");
         if let Some(row) = frame.deltas.into_iter().find_map(|delta| match delta {
-            RowDelta::Added(row) if row.event.id == expected_id => Some(row),
+            RowDelta::Added(row) if row.id() == expected_id => Some(row),
             _ => None,
         }) {
             break row;
         }
     };
-    assert_eq!(pending.signature_state, RowSignatureState::Pending);
+    assert_eq!(pending.signature(), RowSignature::Pending);
+    assert_eq!(pending.id(), expected_id);
     assert!(
-        pending.event.verify().is_err(),
-        "the pending sentinel must never masquerade as a valid signature"
+        pending.signed_event().is_none(),
+        "a pending app row must not expose NMP's internal storage sentinel"
     );
 
     completion
@@ -144,8 +145,8 @@ fn delayed_signer_promotes_the_same_visible_row_from_pending_to_signed() {
             .recv_timeout(remaining)
             .expect("the query stays open through signature promotion");
         if let Some(row) = frame.deltas.into_iter().find_map(|delta| match delta {
-            RowDelta::Updated(row) if row.event.id == expected_id => Some(row),
-            RowDelta::Added(row) if row.event.id == expected_id => {
+            RowDelta::Updated(row) if row.id() == expected_id => Some(row),
+            RowDelta::Added(row) if row.id() == expected_id => {
                 panic!("promotion must update the existing row, not add it twice: {row:?}")
             }
             _ => None,
@@ -153,11 +154,11 @@ fn delayed_signer_promotes_the_same_visible_row_from_pending_to_signed() {
             break row;
         }
     };
-    assert_eq!(promoted.signature_state, RowSignatureState::Signed);
-    assert_eq!(promoted.event.id, pending.event.id);
-    assert_ne!(promoted.event.sig, pending.event.sig);
+    assert_eq!(promoted.signature(), RowSignature::Signed(signed.sig));
+    assert_eq!(promoted.id(), pending.id());
     promoted
-        .event
+        .signed_event()
+        .expect("a signed row always carries signature bytes")
         .verify()
         .expect("the promoted row carries the signer's verified signature");
 

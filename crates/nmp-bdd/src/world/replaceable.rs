@@ -328,9 +328,8 @@ impl NmpWorld {
             let latest = feed
                 .rows
                 .values()
-                .map(|row| &row.event)
-                .max_by_key(|event| (event.created_at, event.id))
-                .map(|event| event.id);
+                .max_by_key(|row| (row.created_at(), row.id()))
+                .map(|row| row.id());
             match (latest, expected) {
                 (Some(id), Some(want)) if id == want => return latest,
                 (Some(_), None) => return latest,

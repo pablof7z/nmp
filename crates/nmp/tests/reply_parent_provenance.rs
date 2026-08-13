@@ -34,7 +34,7 @@ fn wait_until_parent_is_canonical(subscription: &nmp::Subscription, parent: nost
             .recv_timeout(remaining)
             .expect("the parent observation stays open");
         if frame.deltas.into_iter().any(|delta| {
-            matches!(delta, RowDelta::Added(row) if row.event.id == parent && !row.sources.is_empty())
+            matches!(delta, RowDelta::Added(row) if row.id() == parent && !row.sources.is_empty())
         }) {
             return;
         }

@@ -102,10 +102,20 @@ fn apply(rows: &mut BTreeMap<nostr::EventId, Event>, batch: &HistoryBatch) {
     for delta in &batch.deltas {
         match delta {
             RowDelta::Added(row) => {
-                assert!(rows.insert(row.event.id, row.event.clone()).is_none());
+                assert!(rows
+                    .insert(
+                        row.id(),
+                        row.signed_event().expect("history rows are signed")
+                    )
+                    .is_none());
             }
             RowDelta::Updated(row) => {
-                assert!(rows.insert(row.event.id, row.event.clone()).is_some());
+                assert!(rows
+                    .insert(
+                        row.id(),
+                        row.signed_event().expect("history rows are signed")
+                    )
+                    .is_some());
             }
             RowDelta::Removed(id) => {
                 assert!(rows.remove(id).is_some());
@@ -118,15 +128,14 @@ fn apply(rows: &mut BTreeMap<nostr::EventId, Event>, batch: &HistoryBatch) {
 fn assert_canonical_snapshot(batch: &HistoryBatch, max_rows: usize) {
     assert!(batch.rows.len() <= max_rows);
     assert!(batch.rows.windows(2).all(|pair| {
-        pair[0].event.created_at > pair[1].event.created_at
-            || (pair[0].event.created_at == pair[1].event.created_at
-                && pair[0].event.id < pair[1].event.id)
+        pair[0].created_at() > pair[1].created_at()
+            || (pair[0].created_at() == pair[1].created_at() && pair[0].id() < pair[1].id())
     }));
     assert_eq!(
         batch
             .rows
             .iter()
-            .map(|row| row.event.id)
+            .map(|row| row.id())
             .collect::<BTreeSet<_>>()
             .len(),
         batch.rows.len()

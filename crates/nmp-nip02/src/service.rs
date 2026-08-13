@@ -6,8 +6,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use nmp::{
-    fifo_channel, AcquisitionEvidence, AsyncFifoReceiver, Engine, Event, EventId, FifoReceiver,
-    FifoRecvError, FifoRecvTimeoutError, FifoSender, ObservationCancel, PublicKey, RowDelta,
+    fifo_channel, AcquisitionEvidence, AsyncFifoReceiver, Engine, EventId, FifoReceiver,
+    FifoRecvError, FifoRecvTimeoutError, FifoSender, ObservationCancel, PublicKey, Row, RowDelta,
     ShortfallFact, SourceStatus, WriteFact,
 };
 
@@ -76,7 +76,7 @@ pub enum FollowActionStatus {
 
 #[derive(Default)]
 struct Accumulator {
-    rows: BTreeMap<EventId, Event>,
+    rows: BTreeMap<EventId, Row>,
 }
 
 impl Accumulator {
@@ -84,10 +84,10 @@ impl Accumulator {
         for delta in deltas {
             match delta {
                 RowDelta::Added(row) => {
-                    self.rows.insert(row.event.id, row.event);
+                    self.rows.insert(row.id(), row);
                 }
                 RowDelta::Updated(row) => {
-                    self.rows.insert(row.event.id, row.event);
+                    self.rows.insert(row.id(), row);
                 }
                 RowDelta::Removed(id) => {
                     self.rows.remove(&id);
@@ -97,10 +97,10 @@ impl Accumulator {
         }
     }
 
-    fn base_for(&self, active: PublicKey) -> Option<&Event> {
+    fn base_for(&self, active: PublicKey) -> Option<&Row> {
         self.rows
             .values()
-            .find(|event| event.pubkey == active && event.kind == nostr::Kind::ContactList)
+            .find(|row| row.pubkey() == active && row.kind() == nostr::Kind::ContactList)
     }
 }
 
@@ -185,7 +185,7 @@ fn project(
         target,
         relationship,
         availability,
-        base_event_id: base.map(|event| event.id),
+        base_event_id: base.map(Row::id),
     }
 }
 

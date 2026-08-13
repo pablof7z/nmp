@@ -263,7 +263,7 @@ struct ConformanceGallery: View {
         kind: 55_555,
         tags: [],
         content: "Unknown kinds retain generic event chrome and readable content.",
-        sig: String(repeating: "aa", count: 64),
+        signature: .signed(signature: String(repeating: "aa", count: 128)),
         sources: []
     )
 }

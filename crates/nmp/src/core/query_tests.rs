@@ -202,8 +202,8 @@ mod affected_handle_invalidation_tests {
                 (
                     event_id,
                     RememberedRow {
-                        created_at: row.event.created_at.as_secs(),
-                        signature_state: row.signature_state,
+                        created_at: row.created_at().as_secs(),
+                        signature_state: row.signature,
                         sources: row.sources,
                     },
                 )
@@ -239,7 +239,7 @@ mod affected_handle_invalidation_tests {
         assert!(effects.iter().any(|effect| match effect {
             Effect::EmitRows(id, deltas, _) if *id == handle => {
                 matches!(deltas.as_slice(), [RowDelta::Added(row)]
-                    if row.event.id == arriving.id)
+                    if row.id() == arriving.id)
             }
             _ => false,
         }));
@@ -288,7 +288,7 @@ mod affected_handle_invalidation_tests {
             Effect::EmitRows(id, deltas, _) if *id == handle => deltas
                 .iter()
                 .any(|delta| matches!(delta, RowDelta::Added(row)
-                    if row.event.id == followed_post.id)),
+                    if row.id() == followed_post.id)),
             _ => false,
         }));
         assert_remembered_rows_match_oracle(&core, handle);
@@ -326,7 +326,7 @@ mod affected_handle_invalidation_tests {
         let pending_id = row_batches(&accepted)[0]
             .iter()
             .find_map(|delta| match delta {
-                RowDelta::Added(row) => Some(row.event.id),
+                RowDelta::Added(row) => Some(row.id()),
                 _ => None,
             })
             .expect("pending row was projected");
@@ -400,7 +400,7 @@ mod affected_handle_invalidation_tests {
         let pending_id = accepted_batches[0]
             .iter()
             .find_map(|delta| match delta {
-                RowDelta::Added(row) => Some(row.event.id),
+                RowDelta::Added(row) => Some(row.id()),
                 _ => None,
             })
             .expect("new pending row is visible");
@@ -424,7 +424,7 @@ mod affected_handle_invalidation_tests {
             .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == pending_id)));
         assert!(batches[0]
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == oldest.id)));
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == oldest.id)));
         assert_remembered_rows_match_oracle(&core, handle);
     }
 
@@ -483,7 +483,7 @@ mod affected_handle_invalidation_tests {
         let pending_id = accepted_batches[0]
             .iter()
             .find_map(|delta| match delta {
-                RowDelta::Added(row) => Some(row.event.id),
+                RowDelta::Added(row) => Some(row.id()),
                 _ => None,
             })
             .expect("new pending winner was added");
@@ -502,7 +502,7 @@ mod affected_handle_invalidation_tests {
         assert_eq!(cancelled_batches.len(), 1);
         assert!(cancelled_batches[0]
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == predecessor.id)));
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == predecessor.id)));
         assert!(cancelled_batches[0]
             .iter()
             .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == pending_id)));
@@ -564,7 +564,7 @@ mod affected_handle_invalidation_tests {
         assert!(matches!(
             row_batches(&cancelled).as_slice(),
             [batch]
-                if matches!(*batch, [RowDelta::Added(row)] if row.event.id == target.id)
+                if matches!(*batch, [RowDelta::Added(row)] if row.id() == target.id)
         ));
         assert_remembered_rows_match_oracle(&core, handle);
     }
@@ -835,8 +835,8 @@ mod affected_handle_invalidation_tests {
         assert!(matches!(
             batches[0],
             [RowDelta::Added(row)]
-                if row.event.id == arriving.id
-                    && row.signature_state == RowSignatureState::Signed
+                if row.id() == arriving.id
+                    && matches!(row.signature, RowSignature::Signed(_))
         ));
 
         // A byte-for-byte duplicate observation is a true no-op: no handle
@@ -926,7 +926,7 @@ mod affected_handle_invalidation_tests {
         assert_eq!(batches.len(), 1);
         assert!(batches[0]
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == newest.id)));
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == newest.id)));
         assert!(batches[0]
             .iter()
             .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == oldest.id)));
@@ -974,7 +974,7 @@ mod affected_handle_invalidation_tests {
         assert_eq!(batches.len(), 1);
         assert!(batches[0]
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == oldest.id)));
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == oldest.id)));
         assert!(batches[0]
             .iter()
             .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == newest.id)));
@@ -1021,7 +1021,7 @@ mod affected_handle_invalidation_tests {
         assert_eq!(batches.len(), 1);
         assert!(batches[0]
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == arriving.id)));
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == arriving.id)));
         assert!(batches[0]
             .iter()
             .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == seeded.id)));
@@ -1090,7 +1090,7 @@ mod affected_handle_invalidation_tests {
             [batch] if matches!(
                 *batch,
                 [RowDelta::Added(row)]
-                    if row.event.id == event.id
+                    if row.id() == event.id
                         && row.sources == BTreeSet::from([first, second])
             )
         ));
@@ -1142,7 +1142,7 @@ mod affected_handle_invalidation_tests {
             .any(|batch| matches!(*batch, [RowDelta::Removed(id)] if *id == old.id)));
         assert!(batches
             .iter()
-            .any(|batch| matches!(*batch, [RowDelta::Added(row)] if row.event.id == new.id)));
+            .any(|batch| matches!(*batch, [RowDelta::Added(row)] if row.id() == new.id)));
     }
 
     #[test]
@@ -1223,7 +1223,7 @@ mod affected_handle_invalidation_tests {
             [batch] if matches!(
                 *batch,
                 [RowDelta::Added(row)]
-                    if row.event.id == event.id
+                    if row.id() == event.id
                         && row.sources == BTreeSet::from([other, pinned])
             )
         ));
@@ -1280,7 +1280,7 @@ mod affected_handle_invalidation_tests {
         assert_eq!(core.projection_store_queries.get(), 1);
         assert!(matches!(
             row_batches(&effects).as_slice(),
-            [batch] if matches!(*batch, [RowDelta::Added(row)] if row.event.id == post.id)
+            [batch] if matches!(*batch, [RowDelta::Added(row)] if row.id() == post.id)
         ));
     }
 
@@ -1322,7 +1322,7 @@ mod affected_handle_invalidation_tests {
         assert_eq!(core.projection_store_queries.get(), 0);
         assert!(matches!(
             row_batches(&effects).as_slice(),
-            [batch] if matches!(*batch, [RowDelta::Added(row)] if row.event.id == second.id)
+            [batch] if matches!(*batch, [RowDelta::Added(row)] if row.id() == second.id)
         ));
     }
 
@@ -1391,10 +1391,10 @@ mod affected_handle_invalidation_tests {
             for delta in row_batches(&effects).into_iter().flatten() {
                 match delta {
                     RowDelta::Added(row) => {
-                        app_rows.insert(row.event.id, row.clone());
+                        app_rows.insert(row.id(), row.clone());
                     }
                     RowDelta::Updated(row) => {
-                        app_rows.insert(row.event.id, row.clone());
+                        app_rows.insert(row.id(), row.clone());
                     }
                     RowDelta::SourcesGrew { id, sources } => {
                         app_rows

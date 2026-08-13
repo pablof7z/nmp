@@ -1126,11 +1126,18 @@ mod tests {
 
     use super::*;
     use crate::publish_queue::{NotSentReason, SigningState, WriteFact, WriteOutcome};
+    use crate::{Row, RowDelta, RowSignature};
     use nostr::Keys;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn engine_with_lane_faults(faults: crate::lane_fault_store::LaneFaults) -> Engine {
-        let store = crate::lane_fault_store::FaultyLaneStore::new(MemoryStore::new(), faults);
+    fn engine_with_store_and_lane_faults<S>(
+        store: S,
+        faults: crate::lane_fault_store::LaneFaults,
+    ) -> Engine
+    where
+        S: nmp_store::EventStore + Send + 'static,
+    {
+        let store = crate::lane_fault_store::FaultyLaneStore::new(store, faults);
         let (engine_thread, handle) = EngineThread::spawn(
             store,
             4,
@@ -1147,6 +1154,10 @@ mod tests {
         }
     }
 
+    fn engine_with_lane_faults(faults: crate::lane_fault_store::LaneFaults) -> Engine {
+        engine_with_store_and_lane_faults(MemoryStore::new(), faults)
+    }
+
     #[test]
     fn persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once() {
         use std::time::Duration;
@@ -1158,7 +1169,10 @@ mod tests {
         let faults = LaneFaults::default();
         faults.fail_reopen_attempts(2);
         let reopen_events = faults.fail_accept_after_commit_once();
-        let engine = engine_with_lane_faults(faults.clone());
+        let persistent_fixture = tempfile::tempdir().expect("persistent store fixture");
+        let store = RedbStore::open(persistent_fixture.path().join("ambiguous-acceptance.redb"))
+            .expect("persistent fault-injection store must open");
+        let engine = engine_with_store_and_lane_faults(store, faults.clone());
 
         let author = Keys::generate();
         engine
@@ -1176,7 +1190,7 @@ mod tests {
         let opening = subscription
             .recv_timeout(Duration::from_secs(5))
             .expect("a new observation receives its opening frame");
-        assert!(opening.deltas.iter().all(|delta| delta.event().is_none()));
+        assert!(opening.deltas.iter().all(|delta| delta.row().is_none()));
         let relay = RelayUrl::parse("wss://recovery.example").unwrap();
         let event = EventBuilder::text_note("ambiguous acceptance")
             .sign_with_keys(&author)
@@ -1215,13 +1229,16 @@ mod tests {
         let recovered_frame = subscription
             .recv_timeout(Duration::from_secs(5))
             .expect("the pre-failure query handle receives reconstructed rows");
+        let recovered_pending = recovered_frame
+            .deltas
+            .iter()
+            .filter_map(RowDelta::row)
+            .find(|row| row.id() == event.id)
+            .expect("the existing query handle receives the committed boundary row");
+        assert_eq!(recovered_pending.signature(), RowSignature::Pending);
         assert!(
-            recovered_frame
-                .deltas
-                .iter()
-                .filter_map(|delta| delta.event())
-                .any(|recovered| recovered.id == event.id),
-            "the existing query handle did not receive the committed boundary event"
+            recovered_pending.signed_event().is_none(),
+            "the ambiguous boundary committed the frozen body, not signature promotion"
         );
 
         assert_eq!(
@@ -1229,14 +1246,67 @@ mod tests {
             Some(author.public_key()),
             "facade identity survives the internal store generation change"
         );
-        let recovered = engine
+        let divergent = EventBuilder::text_note("different signed body")
+            .sign_with_keys(&author)
+            .unwrap();
+        let invalid_signature = divergent.sig;
+        let divergent_retry = engine
+            .publish(WriteIntent {
+                payload: WritePayload::Signed(divergent),
+                routing: WriteRouting::Explicit(vec![relay.clone()]),
+                identity: Identity::Active,
+                correlation: Some(
+                    nmp_grammar::CorrelationToken::try_from("recovery-correlation").unwrap(),
+                ),
+            })
+            .expect("a divergent retry only reattaches the retained receipt");
+
+        let mut invalid = event.clone();
+        invalid.sig = invalid_signature;
+        let invalid_retry = engine
+            .publish(WriteIntent {
+                payload: WritePayload::Signed(invalid),
+                routing: WriteRouting::Explicit(vec![relay.clone()]),
+                identity: Identity::Active,
+                correlation: Some(
+                    nmp_grammar::CorrelationToken::try_from("recovery-correlation").unwrap(),
+                ),
+            })
+            .expect("an invalid retry only reattaches the retained receipt");
+        assert_eq!(invalid_retry.id, divergent_retry.id);
+        assert!(
+            subscription
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "divergent and invalid retries must not promote or replace the pending row"
+        );
+
+        let exact_retry = engine
             .publish(intent())
-            .expect("correlation readback reattaches the committed acceptance");
+            .expect("the exact signed retry reuses and promotes the recovered receipt");
+        assert_eq!(exact_retry.id, divergent_retry.id);
+        let promoted_frame = subscription
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the exact signed retry promotes the recovered row");
+        assert!(
+            promoted_frame
+                .deltas
+                .iter()
+                .filter_map(RowDelta::row)
+                .filter_map(Row::signed_event)
+                .any(|promoted| promoted.id == event.id && promoted.sig == event.sig),
+            "the same recovered row is promoted with the exact supplied signature"
+        );
         let repeated = engine
             .publish(intent())
-            .expect("repeating the same correlation remains idempotent");
-        assert_eq!(recovered.id, repeated.id);
-        assert_eq!(recovered.event_id, repeated.event_id);
+            .expect("repeating the exact correlation remains idempotent");
+        assert_eq!(exact_retry.id, repeated.id);
+        assert_eq!(exact_retry.event_id, repeated.event_id);
+        assert_eq!(
+            engine.publish_queue(None, u8::MAX).unwrap().len(),
+            1,
+            "ambiguous acceptance and every same-correlation retry retain exactly one receipt"
+        );
 
         let later_event = EventBuilder::text_note("accepted after reconstruction")
             .sign_with_keys(&author)
@@ -1500,7 +1570,7 @@ mod tests {
                 found = frame
                     .deltas
                     .iter()
-                    .filter_map(|delta| delta.event())
+                    .filter_map(|delta| delta.row().and_then(|row| row.signed_event()))
                     .any(|received| received.id == expected_id)
                     || found;
                 execution.extend(frame.execution);

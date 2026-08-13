@@ -234,17 +234,17 @@ impl HistoryReceiver {
             .rows
             .iter()
             .cloned()
-            .map(|row| (row.event.id, row))
+            .map(|row| (row.id(), row))
             .collect();
         debug_assert_eq!(current.len(), batch.rows.len());
 
         let mut deltas = Vec::new();
         for row in &batch.rows {
-            match delivered.get(&row.event.id) {
+            match delivered.get(&row.id()) {
                 None => deltas.push(RowDelta::Added(row.clone())),
                 Some(previous) if previous.sources != row.sources => {
                     deltas.push(RowDelta::SourcesGrew {
-                        id: row.event.id,
+                        id: row.id(),
                         sources: row.sources.clone(),
                     });
                 }
@@ -306,8 +306,8 @@ mod history_mailbox_tests {
     use crate::core::{ShortfallFact, WindowLoad};
 
     fn row(keys: &Keys, created_at: u64, content: &str) -> Row {
-        Row {
-            event: UnsignedEvent::new(
+        Row::from_relay_event(
+            UnsignedEvent::new(
                 keys.public_key(),
                 Timestamp::from(created_at),
                 Kind::TextNote,
@@ -316,17 +316,15 @@ mod history_mailbox_tests {
             )
             .sign_with_keys(keys)
             .unwrap(),
-            signature_state: crate::core::RowSignatureState::Signed,
-            sources: BTreeSet::new(),
-        }
+            BTreeSet::new(),
+        )
     }
 
     fn canonical(mut rows: Vec<Row>) -> Vec<Row> {
         rows.sort_by(|a, b| {
-            b.event
-                .created_at
-                .cmp(&a.event.created_at)
-                .then_with(|| a.event.id.cmp(&b.event.id))
+            b.created_at()
+                .cmp(&a.created_at())
+                .then_with(|| a.id().cmp(&b.id()))
         });
         rows
     }
@@ -344,10 +342,10 @@ mod history_mailbox_tests {
         for delta in deltas {
             match delta {
                 RowDelta::Added(row) => {
-                    rows.insert(row.event.id, row.clone());
+                    rows.insert(row.id(), row.clone());
                 }
                 RowDelta::Updated(row) => {
-                    rows.insert(row.event.id, row.clone());
+                    rows.insert(row.id(), row.clone());
                 }
                 RowDelta::SourcesGrew { id, sources } => {
                     rows.get_mut(id).unwrap().sources = sources.clone();
@@ -400,7 +398,7 @@ mod history_mailbox_tests {
             expected
                 .iter()
                 .cloned()
-                .map(|row| (row.event.id, row))
+                .map(|row| (row.id(), row))
                 .collect()
         );
         assert_eq!(rx.delivered.borrow().len(), expected.len());
@@ -465,24 +463,21 @@ mod history_mailbox_tests {
         assert!(latest
             .deltas
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == added.event.id)));
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == added.id())));
         assert!(latest.deltas.iter().any(|delta| matches!(
             delta,
             RowDelta::SourcesGrew { id, sources }
-                if *id == provenance_grew.event.id && *sources == provenance_grew.sources
+                if *id == provenance_grew.id() && *sources == provenance_grew.sources
         )));
         assert!(latest
             .deltas
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == removed.event.id)));
+            .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == removed.id())));
         assert_eq!(latest.deltas.len(), 3);
         apply(&mut delivered, &latest.deltas);
         assert_eq!(
             delivered,
-            latest_rows
-                .into_iter()
-                .map(|row| (row.event.id, row))
-                .collect()
+            latest_rows.into_iter().map(|row| (row.id(), row)).collect()
         );
         assert!(matches!(
             rx.recv_timeout(Duration::from_millis(1)),
@@ -507,7 +502,7 @@ mod history_mailbox_tests {
         let relay = RelayUrl::parse("wss://history-runtime.example").unwrap();
         let events: Vec<_> = (0..3)
             .map(|index| row(&keys, 100 + index, &format!("runtime-{index}")))
-            .map(|row| row.event)
+            .map(|row| row.signed_event().expect("fixture rows are signed"))
             .collect();
         let mut store = MemoryStore::new();
         for event in &events {

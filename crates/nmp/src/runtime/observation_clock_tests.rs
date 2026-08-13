@@ -94,7 +94,7 @@ fn due_deadline_runs_before_a_simultaneously_ready_command() {
         .expect("opening row frame");
     assert!(initial
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event_id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == event_id)));
 
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();

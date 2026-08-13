@@ -329,8 +329,7 @@ final class NMPUITests: XCTestCase {
             kind: kind,
             tags: [],
             content: "content",
-            sig: String(repeating: "ef", count: 64),
-            signatureState: .signed,
+            signature: .signed(signature: String(repeating: "ef", count: 128)),
             sources: []
         )
     }

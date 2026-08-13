@@ -95,8 +95,7 @@ impl RuntimeAssembly {
             .collect::<Vec<_>>();
         let events = rows
             .iter()
-            .filter_map(RowDelta::event)
-            .cloned()
+            .filter_map(|delta| delta.row().and_then(|row| row.signed_event()))
             .collect::<Vec<_>>();
         let updates = self.coordinator.observe_current_delta(removed, events);
         Some(apply_updates(core, updates))
@@ -332,11 +331,10 @@ mod tests {
             .custom_created_at(Timestamp::from(1))
             .sign_with_keys(&keys)
             .expect("relay-list fixture signs");
-        let row = RowDelta::Added(Row {
+        let row = RowDelta::Added(Row::from_relay_event(
             event,
-            signature_state: crate::core::RowSignatureState::Signed,
-            sources: BTreeSet::from([source.clone()]),
-        });
+            BTreeSet::from([source.clone()]),
+        ));
         let mut core = EngineCore::new(MemoryStore::new(), 8);
         let mut assembly = RuntimeAssembly::new([source]);
 
@@ -441,11 +439,10 @@ mod tests {
             .custom_created_at(Timestamp::from(3u64))
             .sign_with_keys(&author)
             .expect("truthful kind:10002 fixture signs");
-        let row = RowDelta::Added(Row {
-            event: relay_list,
-            signature_state: crate::core::RowSignatureState::Signed,
-            sources: BTreeSet::from([source.clone()]),
-        });
+        let row = RowDelta::Added(Row::from_relay_event(
+            relay_list,
+            BTreeSet::from([source.clone()]),
+        ));
         let mut assembly = RuntimeAssembly::new([source]);
         let opened = assembly.sync(&mut core, BTreeSet::from([author.public_key()]));
         let handle = assembly
@@ -600,11 +597,10 @@ mod provenance {
         let mut assembly = RuntimeAssembly::new([source.clone()]);
         let _opened = assembly.sync(core, BTreeSet::from([keys.public_key()]));
         let handle = assembly.handle.expect("the author need opens one query");
-        let row = RowDelta::Added(Row {
-            event: list_event(keys, rows),
-            signature_state: crate::core::RowSignatureState::Signed,
-            sources: BTreeSet::from([source]),
-        });
+        let row = RowDelta::Added(Row::from_relay_event(
+            list_event(keys, rows),
+            BTreeSet::from([source]),
+        ));
         let _effects = assembly
             .consume_rows(core, handle, std::slice::from_ref(&row))
             .expect("the current row belongs to this assembly");

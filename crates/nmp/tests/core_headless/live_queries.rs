@@ -90,7 +90,10 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
     let rows = emitted.expect("ingest must emit rows for the affected handle");
     assert_eq!(rows.len(), 1);
     assert_eq!(
-        rows[0].event().map(|e| e.id),
+        rows[0]
+            .row()
+            .and_then(|row| row.signed_event())
+            .map(|event| event.id),
         Some(b_post.id),
         "the single delta must be an Added(b_post), never a Removed or a re-delivered full set"
     );
@@ -149,7 +152,7 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
                 total_delta_entries += rows.len();
                 distinct_delivered.extend(
                     rows.iter()
-                        .filter_map(RowDelta::event)
+                        .filter_map(|delta| delta.row().and_then(|row| row.signed_event()))
                         .map(|event| event.id),
                 );
             }
@@ -203,10 +206,10 @@ fn apply_deltas(current: &mut BTreeSet<nostr::EventId>, batch: &[RowDelta]) {
     for delta in batch {
         match delta {
             RowDelta::Added(row) => {
-                current.insert(row.event.id);
+                current.insert(row.id());
             }
             RowDelta::Updated(row) => {
-                current.insert(row.event.id);
+                current.insert(row.id());
             }
             RowDelta::Removed(id) => {
                 current.remove(id);
@@ -384,7 +387,7 @@ fn newer_event_evicts_oldest_of_top_n_via_delta() {
     assert!(
         batch
             .iter()
-            .any(|d| matches!(d, RowDelta::Added(row) if row.event.id == newest.id)),
+            .any(|d| matches!(d, RowDelta::Added(row) if row.id() == newest.id)),
         "the newer event must be Added: {batch:?}"
     );
     assert!(
@@ -477,7 +480,7 @@ fn retracting_top_n_member_pulls_in_next_newest() {
     assert!(
         batch
             .iter()
-            .any(|d| matches!(d, RowDelta::Added(row) if row.event.id == first.id)),
+            .any(|d| matches!(d, RowDelta::Added(row) if row.id() == first.id)),
         "the next-newest previously-excluded match must be pulled IN as Added: {batch:?}"
     );
     apply_deltas(&mut current, &batch);
@@ -734,7 +737,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     assert!(
         all_row_deltas(&effects_agnostic)
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id)),
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == event.id)),
         "Agnostic must return a matching cached row regardless of its recorded provenance"
     );
 
@@ -753,7 +756,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     assert!(
         !all_row_deltas(&effects_strict)
             .iter()
-            .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event.id)),
+            .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == event.id)),
         "Strict must exclude a row whose recorded provenance is disjoint from the \
          pinned relay set"
     );
@@ -775,7 +778,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     assert!(
         deltas.iter().any(|delta| matches!(
             delta,
-            RowDelta::Added(row) if row.event.id == event.id && row.sources.contains(&relay_pinned)
+            RowDelta::Added(row) if row.id() == event.id && row.sources.contains(&relay_pinned)
         )),
         "the Strict handle must newly Add the row once its provenance includes the \
          pinned relay: {deltas:?}"

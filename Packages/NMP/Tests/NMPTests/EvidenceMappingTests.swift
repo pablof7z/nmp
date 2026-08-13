@@ -356,8 +356,7 @@ final class EvidenceMappingTests: XCTestCase {
             kind: 1,
             tags: [],
             content: "hi",
-            sig: "sig",
-            signatureState: .signed,
+            signature: .signed(signature: "sig"),
             sources: ["wss://r0.example"]
         )
         _ = accumulator.fold(
@@ -380,14 +379,14 @@ final class EvidenceMappingTests: XCTestCase {
         let evidence = [FfiAcquisitionEvidence(sources: [], shortfall: [])]
         let pending = FfiRow(
             id: "same-id", pubkey: "pk", createdAt: 1, kind: 1, tags: [],
-            content: "body", sig: "placeholder", signatureState: .pending, sources: []
+            content: "body", signature: .pending, sources: []
         )
         _ = accumulator.fold(
             FfiFrame(deltas: [.added(row: pending)], window: nil, evidence: evidence)
         )
         let signed = FfiRow(
             id: "same-id", pubkey: "pk", createdAt: 1, kind: 1, tags: [],
-            content: "body", sig: "verified", signatureState: .signed, sources: []
+            content: "body", signature: .signed(signature: "verified"), sources: []
         )
         let promoted = accumulator.fold(
             FfiFrame(deltas: [.updated(row: signed)], window: nil, evidence: evidence)
@@ -395,8 +394,7 @@ final class EvidenceMappingTests: XCTestCase {
 
         XCTAssertEqual(promoted.rows.count, 1)
         XCTAssertEqual(promoted.rows[0].id, "same-id")
-        XCTAssertEqual(promoted.rows[0].sig, "verified")
-        XCTAssertEqual(promoted.rows[0].signatureState, .signed)
+        XCTAssertEqual(promoted.rows[0].signature, .signed(signature: "verified"))
     }
 
     func testDiagnosticsIntervalIsDistinctFromQueryEvidence() {

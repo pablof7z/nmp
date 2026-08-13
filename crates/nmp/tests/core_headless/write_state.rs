@@ -25,8 +25,8 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
     assert!(all_row_deltas(&effects).iter().any(|delta| matches!(
         delta,
         RowDelta::Added(row)
-            if row.event.id == accepted_id
-                && row.signature_state == nmp::RowSignatureState::Pending
+            if row.id() == accepted_id
+                && row.signature() == nmp::RowSignature::Pending
     )));
     assert!(
         effects
@@ -105,7 +105,7 @@ fn cancellation_never_restores_an_unpublished_replaceable_predecessor() {
     let (newer_receipt, _, _) = find_sign_request(&effects);
     assert!(all_row_deltas(&effects)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == newer_id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == newer_id)));
     assert!(all_row_deltas(&effects)
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == older.id)));
@@ -126,14 +126,14 @@ fn cancellation_never_restores_an_unpublished_replaceable_predecessor() {
         .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == newer_id)));
     assert!(!all_row_deltas(&effects)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == older.id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == older.id)));
     let fresh = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[0],
         &a.public_key().to_hex(),
     )));
     assert!(!all_row_deltas(&fresh)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == older.id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == older.id)));
 }
 
 #[test]
@@ -240,8 +240,8 @@ fn signer_unavailable_keeps_accepted_row_visible() {
     assert!(all_row_deltas(&fresh).iter().any(|delta| matches!(
         delta,
         RowDelta::Added(row)
-            if row.event.id == expected_id
-                && row.signature_state == nmp::RowSignatureState::Pending
+            if row.id() == expected_id
+                && row.signature() == nmp::RowSignature::Pending
     )));
 
     let exact_attach = core.handle(EngineMsg::SignerAttached(a.public_key()));
@@ -256,9 +256,9 @@ fn signer_unavailable_keeps_accepted_row_visible() {
     assert!(all_row_deltas(&promoted).iter().any(|delta| matches!(
         delta,
         RowDelta::Updated(row)
-            if row.event.id == expected_id
-                && row.signature_state == nmp::RowSignatureState::Signed
-                && row.event.verify().is_ok()
+            if row.id() == expected_id
+                && matches!(row.signature(), nmp::RowSignature::Signed(_))
+                && row.signed_event().is_some_and(|event| event.verify().is_ok())
     )));
     for handle in [first_handle, second_handle] {
         let same_id_updates = promoted
@@ -268,7 +268,7 @@ fn signer_unavailable_keeps_accepted_row_visible() {
                 _ => None,
             })
             .flatten()
-            .filter(|delta| matches!(delta, RowDelta::Updated(row) if row.event.id == expected_id))
+            .filter(|delta| matches!(delta, RowDelta::Updated(row) if row.id() == expected_id))
             .count();
         assert_eq!(
             same_id_updates, 1,
@@ -463,7 +463,7 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
     )));
     assert!(all_row_deltas(&fresh)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == signed.id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == signed.id)));
 }
 
 #[test]
@@ -520,7 +520,7 @@ fn cancelling_newest_never_restores_a_destroyed_local_predecessor_chain() {
     let older_cancel = core.handle(EngineMsg::CancelWrite(middle_receipt));
     assert!(!all_row_deltas(&older_cancel).iter().any(|delta| {
         matches!(delta, RowDelta::Removed(id) if *id == newest_id)
-            || matches!(delta, RowDelta::Added(row) if row.event.id == middle_id)
+            || matches!(delta, RowDelta::Added(row) if row.id() == middle_id)
     }));
 
     let newest_cancel = core.handle(EngineMsg::CancelWrite(newest_receipt));
@@ -529,20 +529,20 @@ fn cancelling_newest_never_restores_a_destroyed_local_predecessor_chain() {
         .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == newest_id)));
     assert!(!all_row_deltas(&newest_cancel)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == middle_id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == middle_id)));
     assert!(!all_row_deltas(&newest_cancel)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == base_id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == base_id)));
     let fresh = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[0],
         &a.public_key().to_hex(),
     )));
     assert!(!all_row_deltas(&fresh)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == base_id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == base_id)));
     assert!(!all_row_deltas(&fresh)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == middle_id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == middle_id)));
 }
 
 #[test]
@@ -1072,7 +1072,7 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
     )));
     assert!(all_row_deltas(&fresh)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event_id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == event_id)));
 
     let (outcome, retried) = core.cancel_write(id);
     assert_eq!(
@@ -1128,7 +1128,7 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
     )));
     assert!(all_row_deltas(&fresh)
         .iter()
-        .any(|delta| matches!(delta, RowDelta::Added(row) if row.event.id == event_id)));
+        .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == event_id)));
 
     let (committed, effects) = core.cancel_write(id);
     assert_eq!(

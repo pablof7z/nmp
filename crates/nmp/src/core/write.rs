@@ -2269,7 +2269,27 @@ impl<S: EventStore> EngineCore<S> {
                     // page is both valid and required at the ambiguous commit
                     // boundary (#1362).
                     if page.outcome == ReattachOutcome::Attached {
-                        return vec![Effect::ReplayReceipt(receipt_id, page)];
+                        let mut effects = Vec::new();
+                        // An ambiguous failure can commit acceptance before a
+                        // pre-signed payload reaches `on_signed`. Recovery
+                        // keeps that row honestly Pending, but an exact retry
+                        // carrying the same verified bytes can finish the
+                        // interrupted promotion on this same receipt.
+                        // Divergent, recomposed, or invalid payloads retain
+                        // correlation's normal discard semantics.
+                        if let WritePayload::Signed(event) = &payload {
+                            let resumes_interrupted_promotion =
+                                self.pending.get(&receipt_id).is_some_and(|pending| {
+                                    !pending.already_signed
+                                        && Self::validate_signed_template(&pending.frozen, event)
+                                            .is_ok()
+                                });
+                            if resumes_interrupted_promotion {
+                                self.on_signed(receipt_id, event.clone(), &mut effects);
+                            }
+                        }
+                        effects.push(Effect::ReplayReceipt(receipt_id, page));
+                        return effects;
                     }
                     // Review (#591, PR #604 finding 1): never mask a corrupt
                     // retained identity behind fabricated acceptance.
