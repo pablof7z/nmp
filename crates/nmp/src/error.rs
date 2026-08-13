@@ -83,9 +83,6 @@ pub enum EngineError {
     /// It is also never a worker-pool-busy, task-admission, permit, or
     /// queue-full outcome. The engine-closed case is [`Self::EngineClosed`].
     ObservationUnavailable { reason: String },
-    /// [`Engine::add_account`](crate::Engine::add_account)'s secret key did
-    /// not parse as a valid nostr key (hex or bech32 `nsec`).
-    InvalidSecretKey,
     /// A custom capability did not expose a stable registry identity.
     SignerMissingPublicKey,
     /// The shared account-signer/AUTH-policy capability registry reached its
@@ -170,7 +167,6 @@ impl std::fmt::Display for EngineError {
             Self::ObservationUnavailable { reason } => {
                 write!(f, "observation could not be established: {reason}")
             }
-            Self::InvalidSecretKey => write!(f, "invalid secret key"),
             Self::SignerMissingPublicKey => write!(f, "signer has no public key"),
             Self::AuthCapabilityRegistryFull { limit } => {
                 write!(f, "AUTH capability registry is full at {limit} entries")
@@ -262,6 +258,7 @@ impl EngineError {
         }
     }
 
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(crate) fn from_add_signer_error(error: crate::runtime::AddSignerError) -> Self {
         match error {
             crate::runtime::AddSignerError::MissingPublicKey => Self::SignerMissingPublicKey,
@@ -299,8 +296,8 @@ mod tests {
         // repair.
         for (error, expected) in [
             (
-                crate::core::PublishError::NoActiveAccount,
-                "publishing as the active account requires an active account",
+                crate::core::PublishError::NoCurrentAccount,
+                "publishing with the current-account identity requires a current account",
             ),
             (
                 crate::core::PublishError::SignatureInvalid {

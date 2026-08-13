@@ -157,7 +157,7 @@ pub enum StalledWriteStage {
     Unroutable,
     /// No signer answers for the author this obligation was FROZEN to — the
     /// [`crate::publish_queue::SigningState::AwaitingSigner`] park. Never the
-    /// mutable active account.
+    /// mutable current account.
     Unsignable,
     /// Destinations exist and none of them is working: every relay this
     /// intent still owns a live lane at is unreachable, unstarted, or

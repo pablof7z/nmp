@@ -1,8 +1,6 @@
-// Multi-nsec login + runtime account switch (M5 plan §3 table row 1).
-// Proves SignerRegistry + identity-as-input: `engine.addAccount` /
-// `engine.setActiveAccount` are the only two NMP calls this screen makes.
-// Everything else -- the account list, labels, which row is "active" -- is
-// this app's OWN state (`AppModel.accounts`), not anything NMP tracks.
+// Whole-session account generation, public-key-only browsing, and switching.
+// NMP owns account membership/current selection; labels and presentation stay
+// in the app's own model.
 
 import SwiftUI
 
@@ -10,10 +8,7 @@ struct AccountsView: View {
     let model: AppModel
 
     @State private var newLabel: String = ""
-    @State private var secretKeyInput: String = ""
-    @State private var readOnlyLabel: String = "fiatjaf (read-only)"
-    @State private var readOnlyHex: String =
-        "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
+    @State private var publicKeyOnlyLabel: String = "fiatjaf (public key only)"
     @State private var isAdding = false
 
     var body: some View {
@@ -26,23 +21,23 @@ struct AccountsView: View {
                     }
                     ForEach(model.accounts) { account in
                         Button {
-                            model.setActive(account.id)
+                            model.makeCurrent(account)
                         } label: {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(account.label)
                                         .foregroundStyle(.primary)
-                                    Text(shortHex(account.id))
+                                    Text(shortKey(account.id))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                if account.kind == .readOnly {
-                                    Text("read-only")
+                                if account.kind == .publicKeyOnly {
+                                    Text("public key only")
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                 }
-                                if model.activePubkey == account.id {
+                                if model.currentPubkey == account.id {
                                     Image(systemName: "checkmark.circle.fill")
                                         .foregroundStyle(.green)
                                 }
@@ -51,19 +46,12 @@ struct AccountsView: View {
                     }
                 }
 
-                Section("Add account (nsec or hex secret key)") {
+                Section("Add local account") {
                     TextField("Label", text: $newLabel)
-                    SecureField("nsec1… or 64-char hex", text: $secretKeyInput)
                     Button {
                         isAdding = true
-                        Task {
-                            await model.addKeyedAccount(
-                                secretKey: secretKeyInput,
-                                label: newLabel.isEmpty ? "account" : newLabel
-                            )
-                            isAdding = false
-                            secretKeyInput = ""
-                        }
+                        model.addKeyedAccount(label: newLabel.isEmpty ? "account" : newLabel)
+                        isAdding = false
                     } label: {
                         if isAdding {
                             ProgressView()
@@ -71,17 +59,14 @@ struct AccountsView: View {
                             Text("Add + activate")
                         }
                     }
-                    .disabled(secretKeyInput.isEmpty || isAdding)
+                    .disabled(isAdding)
                 }
 
-                Section("Add read-only (pubkey only, no key)") {
-                    TextField("Label", text: $readOnlyLabel)
-                    TextField("Pubkey hex", text: $readOnlyHex)
-                        .autocorrectionDisabled()
-                    Button("Add + activate") {
-                        model.addReadOnlyAccount(pubkeyHex: readOnlyHex, label: readOnlyLabel)
+                Section("Add public-key-only account") {
+                    TextField("Label", text: $publicKeyOnlyLabel)
+                    Button("Add + select demo account") {
+                        model.addPublicKeyOnlyAccount(label: publicKeyOnlyLabel)
                     }
-                    .disabled(readOnlyHex.isEmpty)
                 }
 
                 if let error = model.lastError {
@@ -94,8 +79,8 @@ struct AccountsView: View {
         }
     }
 
-    private func shortHex(_ hex: String) -> String {
-        guard hex.count > 16 else { return hex }
+    private func shortKey(_ bytes: Data) -> String {
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
         return "\(hex.prefix(8))…\(hex.suffix(8))"
     }
 }

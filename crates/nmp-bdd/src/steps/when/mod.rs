@@ -409,7 +409,7 @@ async fn compose_and_publish_naming_an_npub(
     w.refuse_bech32_identity(&pubkey);
 }
 
-#[when(regex = r#"^I switch the active account to "([0-9a-f]{64})"$"#)]
+#[when(regex = r#"^I make "([0-9a-f]{64})" the current account$"#)]
 async fn switch_active_identity(w: &mut NmpWorld, pubkey: String) {
     w.switch_active_identity(&pubkey).await;
 }
@@ -455,7 +455,7 @@ async fn reconstruct_engine(w: &mut NmpWorld) {
 }
 
 #[when(
-    regex = r#"^I reconstruct the engine from the same durable store with "([0-9a-f]{64})" active$"#
+    regex = r#"^I reconstruct the engine from the same durable store with "([0-9a-f]{64})" current$"#
 )]
 async fn reconstruct_engine_with_active(w: &mut NmpWorld, pubkey: String) {
     w.person(&pubkey);
@@ -470,13 +470,13 @@ async fn reattach_receipt_by_stable_id(w: &mut NmpWorld) {
     );
 }
 
-#[when(regex = r#"^the podcast identity's signer answers$"#)]
+#[when(regex = r#"^the podcast identity's signing provider answers$"#)]
 async fn podcast_signer_answers(w: &mut NmpWorld) {
     let label = w.podcast_identity();
     w.release_signer(&label);
 }
 
-#[when(regex = r#"^the first account's signer answers$"#)]
+#[when(regex = r#"^the first account's signing provider answers$"#)]
 async fn first_accounts_signer_answers(w: &mut NmpWorld) {
     let label = w.first_identity();
     w.release_signer(&label);
@@ -485,7 +485,9 @@ async fn first_accounts_signer_answers(w: &mut NmpWorld) {
 /// A signing capability for exactly that key arriving after the write was
 /// accepted and parked. What the park waits on is a capability for one
 /// pubkey; which transport carries it is not something the write observes.
-#[when(regex = r#"^a NIP-46 signer for "([0-9a-f]{64})" attaches(?: \d+ seconds later)?$"#)]
+#[when(
+    regex = r#"^the NIP-46 signing provider for "([0-9a-f]{64})" becomes available(?: \d+ seconds later)?$"#
+)]
 async fn nip46_signer_attaches(w: &mut NmpWorld, pubkey: String) {
     w.attach_signer_for(&pubkey).await;
 }

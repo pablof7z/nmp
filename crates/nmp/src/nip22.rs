@@ -9,7 +9,7 @@
 //! crate independently and having to keep two owners aligned by convention.
 //!
 //! The crate is engine-free by construction -- [`comment_intent`] takes its
-//! author and timestamp explicitly and never reads an ambient active account --
+//! author and timestamp explicitly and never reads an ambient current account --
 //! so nothing here needs the engine to compose a comment. What it returns is an
 //! ordinary [`crate::WriteIntent`] (#907), published through the same
 //! `Engine::publish` lifecycle as every other write; NIP-22 owns no separate

@@ -18,7 +18,7 @@
 //! - the grammar a `LiveQuery` is built from ([`build_derived_index_query`]);
 //! - the advertised write path ([`build_event_intent`]) -- `EventBuilder`
 //!   plus `Kind`/`Tag`/`Timestamp`, the exact re-exports a prior review
-//!   found missing, and now also the proof that publishing as the active
+//!   found missing, and now also the proof that publishing with the current
 //!   account takes a kind and content and nothing else;
 //! - naming every `DiagnosticsSnapshot` output type, not just some of them
 //!   ([`describe_snapshot`]/[`describe_relay`]/[`describe_coverage_entry`]) --
@@ -42,7 +42,7 @@
 //!   names `nmp` alone.
 //!
 //! The `#[cfg(test)]` module below additionally drives a real `Engine`
-//! end-to-end (construct, `add_account`, `observe`, `publish`,
+//! end-to-end (construct, `add_private_key_account`, `observe`, `publish`,
 //! `observe_diagnostics`, `shutdown`) with no relays configured -- proving
 //! the two nouns are not just nameable but usable.
 
@@ -102,7 +102,7 @@ pub fn build_derived_index_query() -> LiveQuery {
 /// kind and content and NOTHING else: no pubkey, no timestamp, no id. That
 /// is the proof -- a direct-Rust app cannot state an author here even if it
 /// wanted to. Composes the default identity contract
-/// (`Identity::Active`, #47), so this intent signs as the active account;
+/// (`Identity::Active`, #47), so this intent signs as the current account;
 /// the per-write `Identity::Explicit` spelling is likewise reachable from
 /// `nmp` alone for callers that need it.
 pub fn build_event_intent(content: &str) -> WriteIntent {
@@ -117,7 +117,7 @@ pub fn build_event_intent(content: &str) -> WriteIntent {
 }
 
 /// The explicit-identity half of the write path (#47): publishing as a
-/// specific non-active account takes an `Identity` and nothing else -- there
+/// specific non-current account takes an `Identity` and nothing else -- there
 /// is still no pubkey anywhere inside the payload, because a builder has no
 /// field for one.
 pub fn build_event_intent_as(identity: PublicKey, content: &str) -> WriteIntent {
@@ -184,7 +184,7 @@ pub fn describe_evidence(evidence: &AcquisitionEvidence) -> String {
 /// ordinary [`WriteIntent`] (#907), published through the same
 /// `Engine::publish` lifecycle as any other write. Uses an external NIP-73
 /// content id so no NIP-01 core kind is baked into this proof. The vocabulary is
-/// engine-free and still reads no ambient clock or active account -- it no
+/// engine-free and still reads no ambient clock or current account -- it no
 /// longer needs an author or an event time to say so, because the engine
 /// resolves both at acceptance.
 pub fn build_comment_intent(
@@ -221,7 +221,7 @@ pub fn compose_every_retrofitted_family(target: &Event, source: Option<RelayUrl>
     let reaction = nmp::nip25::react(target, source, nmp::nip25::Reaction::Like);
     // NIP-51 kind:10009: the demand that reads it and the tolerant codec that
     // decodes what came back (`nmp::nip51`).
-    let groups_demand: Demand = nmp::nip51::active_account_demand();
+    let groups_demand: Demand = nmp::nip51::current_account_demand();
     let groups: nmp::nip51::SimpleGroupsList =
         nmp::nip51::parse_simple_groups_list_tolerant(target);
     let first_group: Option<&nmp::nip51::SimpleGroupEntry> = groups.items.first();
@@ -352,39 +352,18 @@ pub fn describe_snapshot(snapshot: &DiagnosticsSnapshot) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp::{
-        Engine, EngineConfig, SignEventError, SignEventRequest, SignerError, SignerOp,
-        SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
-    };
+    use nmp::{Engine, EngineConfig};
 
     /// A fixed, valid secp256k1 secret key -- generated once via `openssl
     /// rand -hex 32`. Hardcoded rather than derived from `nostr::Keys`
     /// because this crate has no dependency on `nostr` at all (the whole
     /// point of this crate).
-    const TEST_SECRET_KEY_HEX: &str =
-        "32f6df73ead850b6e13c0649846b7a1d9646d6a0b50c69361981176e817e70f8";
+    const TEST_SECRET_KEY_BYTES: [u8; 32] = [
+        50, 246, 223, 115, 234, 216, 80, 182, 225, 60, 6, 73, 132, 107, 122, 29, 150, 70, 214, 160,
+        181, 12, 105, 54, 25, 129, 23, 110, 129, 126, 112, 248,
+    ];
 
-    struct ExternalAsyncSigner {
-        public_key: PublicKey,
-    }
-
-    impl SigningCapability for ExternalAsyncSigner {
-        fn public_key(&self) -> Option<SignerPublicKey> {
-            Some(SignerPublicKey::new(self.public_key.to_bytes()))
-        }
-
-        fn sign(&self, _unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent> {
-            let (completion, operation) = SignerOp::pending_channel();
-            std::thread::spawn(move || {
-                let _ = completion.resolve(Err(SignerError::Rejected(
-                    "external asynchronous refusal".to_string(),
-                )));
-            });
-            operation
-        }
-    }
-
-    /// Drives `Engine::new`/`add_account`/`observe`/`publish`/
+    /// Drives `Engine::new`/session account operations/`observe`/`publish`/
     /// `observe_diagnostics`/`shutdown` end-to-end from this `nmp`-only
     /// crate, with no relays configured (no network needed) -- the two
     /// nouns are not merely nameable, they are usable.
@@ -393,42 +372,32 @@ mod tests {
         let engine = Engine::new(EngineConfig::default()).expect("in-memory engine must build");
 
         let account = engine
-            .add_account(TEST_SECRET_KEY_HEX)
-            .expect("fixed test secret key must parse");
+            .add_private_key_account(&TEST_SECRET_KEY_BYTES, true)
+            .expect("fixed decoded test secret key must validate");
 
         let subscription = engine
             .observe(build_derived_index_query(), None)
             .expect("engine is open");
         drop(subscription); // explicit early withdraw, exercised via Drop
 
-        // `Identity::Active` names an account, so the intent below cannot
-        // resolve until one is active -- and an instruction that cannot
-        // resolve is a refusal, not a parked hope. Activating is itself part
-        // of the `nmp`-alone surface this test exists to prove.
-        engine
-            .set_active_account(Some(account.public_key()))
-            .expect("engine is open");
-
         let receipts = engine
             .publish(build_event_intent("hello from an nmp-only consumer"))
             .expect("engine is open");
         drop(receipts);
-
-        engine.set_active_account(None).expect("engine is open");
 
         let diagnostics = engine.observe_diagnostics().expect("engine is open");
         if let Some(snapshot) = diagnostics.recv() {
             let _ = describe_snapshot(&snapshot);
         }
 
-        // #8's ratified account model: the registration detaches exactly the
-        // installation it proves, and a second removal is a `false` no-op.
+        // The session account is removed as a whole, and a second removal is
+        // a `false` no-op.
         assert!(engine
             .remove_account(&account)
             .expect("remove_account must be reachable from nmp alone"));
         assert!(!engine
             .remove_account(&account)
-            .expect("stale removal must no-op, not error"));
+            .expect("repeated removal must no-op, not error"));
 
         engine.shutdown();
     }
@@ -507,41 +476,6 @@ mod tests {
         assert!(engine
             .remove_auth_policy(&replacement)
             .expect("exact registration must detach"));
-        engine.shutdown();
-    }
-
-    /// An external crate can implement a genuinely asynchronous signer with
-    /// only its `nmp` dependency: no channel crate appears in this manifest
-    /// or source, and the engine observes the typed result at runtime.
-    #[test]
-    fn external_async_signer_needs_only_nmp() {
-        let engine = Engine::new(EngineConfig::default()).expect("in-memory engine must build");
-        let author: PublicKey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-            .parse()
-            .expect("fixed public key must parse");
-        engine
-            .add_signer(ExternalAsyncSigner { public_key: author })
-            .expect("external signer must register");
-        engine
-            .set_active_account(Some(author))
-            .expect("external signer must become active");
-
-        let result = engine
-            .sign_event(SignEventRequest {
-                created_at: Timestamp::from(42),
-                kind: Kind::Custom(CALLER_CONTENT_KIND),
-                tags: Vec::new(),
-                content: "external asynchronous signing".to_string(),
-            })
-            .expect("sign operation must be accepted")
-            .recv();
-
-        assert_eq!(
-            result,
-            Err(SignEventError::SignerRejected {
-                reason: "external asynchronous refusal".to_string(),
-            })
-        );
         engine.shutdown();
     }
 }

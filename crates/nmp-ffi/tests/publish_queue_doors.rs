@@ -13,6 +13,7 @@
 use std::time::Duration;
 
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig};
+use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
     FfiIdentity, FfiPublishQueueError, FfiRefuseReason, FfiRemoveQueueEntryError, FfiSigningState,
     FfiWriteFact, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
@@ -58,10 +59,13 @@ async fn a_refused_entry_is_enumerable_with_both_ids_and_removal_is_its_only_exi
     let actual = nostr::EventId::from_slice(&[0x22; 32]).unwrap();
     let (receipt_id, frozen_id) = seed_refused_entry(&path, &keys, expected, actual);
 
-    let engine = NmpEngine::new(NmpEngineConfig {
-        store_path: Some(path.to_string_lossy().into_owned()),
-        ..NmpEngineConfig::default()
-    })
+    let engine = NmpEngine::new(
+        NmpEngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..NmpEngineConfig::default()
+        },
+        None,
+    )
     .expect("engine opens over the seeded store");
 
     let entries = engine.publish_queue(None, u8::MAX).expect("engine is open");
@@ -111,7 +115,7 @@ async fn a_refused_entry_is_enumerable_with_both_ids_and_removal_is_its_only_exi
 
 #[test]
 fn removing_a_receipt_that_never_existed_is_an_unknown_receipt() {
-    let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine builds");
+    let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine builds");
     assert!(engine
         .publish_queue_for_event("00".repeat(32), None, u8::MAX)
         .expect("an exact absent event is an empty page")
@@ -139,21 +143,23 @@ fn removing_a_receipt_that_never_existed_is_an_unknown_receipt() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn removing_an_entry_with_open_delivery_work_is_still_active() {
     let keys = nostr::Keys::generate();
-    let engine = NmpEngine::new(NmpEngineConfig {
-        // A destination that exists as an instruction and never as a
-        // connection: the lane is owned, live and nonterminal for the whole
-        // test, which is exactly the state removal must refuse.
-        app_relays: vec!["ws://127.0.0.1:1/".to_string()],
-        allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
-        ..NmpEngineConfig::default()
-    })
+    let engine = NmpEngine::new(
+        NmpEngineConfig {
+            // A destination that exists as an instruction and never as a
+            // connection: the lane is owned, live and nonterminal for the whole
+            // test, which is exactly the state removal must refuse.
+            app_relays: vec!["ws://127.0.0.1:1/".to_string()],
+            allowed_local_relay_hosts: vec!["127.0.0.1".to_string()],
+            ..NmpEngineConfig::default()
+        },
+        None,
+    )
     .expect("engine builds");
-    let pubkey = engine
-        .add_account(keys.secret_key().to_secret_hex())
-        .expect("account registers")
-        .public_key();
     engine
-        .set_active_account(Some(pubkey))
+        .add_private_key_account(
+            FfiPrivateKey::from_bytes(keys.secret_key().to_secret_bytes().to_vec()).unwrap(),
+            true,
+        )
         .expect("account activates");
 
     let receipt = engine

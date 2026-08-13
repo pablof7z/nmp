@@ -125,17 +125,17 @@ final class RowAccumulator: @unchecked Sendable {
     private var byId: [String: Row] = [:]
 
     func fold(_ frame: FfiFrame) -> RowBatch {
-        if let window = frame.window {
+        if let contents = frame.window {
             // #485: an authoritative bounded snapshot -- replace, never fold.
             // `frame.deltas` is empty by contract for windowed frames (rows
             // never cross the FFI twice).
-            let rows = window.rows.map(Row.init)
+            let rows = contents.rows.map(Row.init)
             order = rows.map(\.id)
             byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
             return RowBatch(
                 rows: rows,
                 evidence: frame.evidence.map(AcquisitionEvidence.init),
-                load: WindowLoad(window.load)
+                load: WindowLoad(contents.load)
             )
         }
         for delta in frame.deltas {

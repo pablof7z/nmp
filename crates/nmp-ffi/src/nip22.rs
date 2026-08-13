@@ -480,16 +480,22 @@ mod tests {
             Some(correlation.clone()),
         )
         .unwrap();
-        let engine = crate::facade::NmpEngine::new(crate::facade::NmpEngineConfig {
-            outbox_routing: Some(crate::facade::FfiOutboxRoutingConfig {
-                indexers: vec!["wss://indexer.example".to_string()],
-            }),
-            ..crate::facade::NmpEngineConfig::default()
-        })
+        let engine = crate::facade::NmpEngine::new(
+            crate::facade::NmpEngineConfig {
+                outbox_routing: Some(crate::facade::FfiOutboxRoutingConfig {
+                    indexers: vec!["wss://indexer.example".to_string()],
+                }),
+                ..crate::facade::NmpEngineConfig::default()
+            },
+            None,
+        )
         .expect("engine must build with the provider required by the Auto intent");
         let author = nostr::Keys::generate().public_key();
         engine
-            .set_active_account(Some(author.to_hex()))
+            .add_public_key_account(
+                crate::session::FfiPublicKey::from_bytes(author.to_bytes().to_vec()).unwrap(),
+                true,
+            )
             .expect("the comment publishes as whoever is active");
 
         let receipt = engine

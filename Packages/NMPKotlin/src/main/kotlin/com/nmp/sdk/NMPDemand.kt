@@ -50,7 +50,7 @@ sealed class NMPSourceAuthority {
 /** `nmp_grammar::AccessContext` mirror. Closed vocabulary: an unauthenticated
  * [Public] connection, or NIP-42 authentication against one stable expected
  * public key (hex). The [Nip42] identity is frozen in the demand; changing the
- * active account never redirects it (#8). Modelled as a sealed class rather
+ * current account never redirects it (#8). Modelled as a sealed class rather
  * than an enum so the authenticated variant can carry its expected key. */
 sealed class NMPAccessContext {
     object Public : NMPAccessContext()

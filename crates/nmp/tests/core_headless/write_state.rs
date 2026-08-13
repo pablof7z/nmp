@@ -281,7 +281,7 @@ fn signer_unavailable_keeps_accepted_row_visible() {
 
 /// #47 falsifier (a) at the reducer level: an explicit
 /// `Identity::Explicit(B)` on a builder is accepted and
-/// signer-requested AS B while A stays the active account -- and a plain
+/// signer-requested AS B while A stays the current account -- and a plain
 /// default publish immediately after still roots on A, proving naming B
 /// changed exactly one write and not the engine's identity root.
 #[test]
@@ -291,7 +291,7 @@ fn an_explicit_identity_selects_a_secondary_author_and_pins_it_through_signing()
     let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
 
-    let as_b = draft(47, "published as b while a is active");
+    let as_b = draft(47, "published as b while a is current");
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(as_b),
         routing: WriteRouting::Auto,
@@ -303,7 +303,7 @@ fn an_explicit_identity_selects_a_secondary_author_and_pins_it_through_signing()
     assert_eq!(
         template.pubkey,
         b.public_key(),
-        "the sign request must target the override identity, not the active account"
+        "the sign request must target the override identity, not the current account"
     );
     let signed = template.sign_with_keys(&b).unwrap();
     let expected_id = signed.id;
@@ -330,26 +330,26 @@ fn an_explicit_identity_selects_a_secondary_author_and_pins_it_through_signing()
 }
 
 /// #47 falsifier (b), restated for a payload that cannot state an author.
-/// The "draft author disagrees with the active account" refusal is gone --
+/// The "draft author disagrees with the current account" refusal is gone --
 /// not weakened, DELETED, because a builder has no author field for the
-/// active account to disagree with. What survives is the half that is still
+/// current account to disagree with. What survives is the half that is still
 /// a refusal: `Active` names an account, and an instruction that cannot
 /// resolve is a refusal, not a parked hope.
 #[test]
-fn a_builder_publishes_as_the_active_account_and_refuses_when_there_is_none() {
+fn a_builder_publishes_as_the_current_account_and_refuses_when_there_is_none() {
     let a = Keys::generate();
     let mut core = new_core(FixtureRoutingFacts::new());
     activate(&mut core, &a);
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Event(draft(1, "as whoever is active")),
+        payload: WritePayload::Event(draft(1, "as whoever is current")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
         correlation: None,
     }));
     assert!(
         matches!(effects.first(), Some(Effect::WriteAccepted(..))),
-        "a kind and content, published as the active account, is the whole story"
+        "a kind and content, published as the current account, is the whole story"
     );
     let (_, _, template) = find_sign_request(&effects);
     assert_eq!(
@@ -368,7 +368,7 @@ fn a_builder_publishes_as_the_active_account_and_refuses_when_there_is_none() {
     assert!(
         matches!(
             effects.as_slice(),
-            [Effect::PublishFailed(PublishError::NoActiveAccount)]
+            [Effect::PublishFailed(PublishError::NoCurrentAccount)]
         ),
         "nothing is pinned, so nothing may park -- got {effects:?}"
     );
@@ -391,7 +391,7 @@ fn identity_selects_on_a_builder_and_may_only_restate_on_a_signed_event() {
     activate(&mut core, &a);
 
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Event(draft(1, "as b, while a is active")),
+        payload: WritePayload::Event(draft(1, "as b, while a is current")),
         routing: WriteRouting::Auto,
         identity: Identity::Explicit(b.public_key()),
         correlation: None,

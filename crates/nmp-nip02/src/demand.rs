@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 
 use nmp_grammar::{Binding, Demand, Filter, IdentityField};
 
-/// The active account's NIP-02 contact list through the ordinary reactive
+/// The current account's NIP-02 contact list through the ordinary reactive
 /// live-query path. Logged out resolves to zero atoms; account changes
 /// reroot this same demand without a component-managed subscription graph.
-pub fn active_account_demand() -> Demand {
+pub fn current_account_demand() -> Demand {
     Demand::from_filter(Filter {
         kinds: Some(BTreeSet::from([3u16])),
         authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
@@ -19,8 +19,8 @@ mod tests {
     use nmp_grammar::SourceAuthority;
 
     #[test]
-    fn contact_list_uses_active_account_author_outboxes() {
-        let demand = active_account_demand();
+    fn contact_list_uses_current_account_author_outboxes() {
+        let demand = current_account_demand();
         assert_eq!(demand.selection.kinds, Some(BTreeSet::from([3])));
         assert_eq!(
             demand.selection.authors,

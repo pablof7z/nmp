@@ -4,20 +4,6 @@
 
 import NMPFFI
 
-/// Opaque proof of one exact local-account signer installation.
-///
-/// The public key is presentation and activation data. Removal still requires
-/// this object, so a stale cleanup cannot remove a same-key replacement.
-public final class NMPAccountRegistration: @unchecked Sendable {
-    public let publicKey: String
-    let ffi: FfiAccountRegistration
-
-    init(ffi: FfiAccountRegistration) {
-        self.ffi = ffi
-        publicKey = ffi.publicKey()
-    }
-}
-
 /// Every immutable fact supplied to app-owned NIP-42 authorization policy.
 public struct NMPAuthPolicyRequest: Sendable, Hashable {
     public let expectedPublicKey: String

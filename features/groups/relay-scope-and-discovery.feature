@@ -55,7 +55,7 @@ Feature: A group can live on more than one relay at once
   # nmp:id=GROUPS-RELAYSCOPE-004
   # nmp:status=built
   # nmp:evidence=rust:nmp::an_unsigned_group_write_freezes_the_exact_author
-  # nmp:falsifier=Resolve a group write's author from whichever account is active when the publish door accepts the intent, rather than from the exact `PublicKey` the app passed to `Group::publish`; switching the active account between composing and acceptance would then change who the event is signed by.
+  # nmp:falsifier=Resolve a group write's author from whichever account is current when the publish door accepts the intent, rather than from the exact `PublicKey` the app passed to `Group::publish`; changing the current account between composing and acceptance would then change who the event is signed by.
   @nip29
   Scenario: An unsigned group write freezes the exact author the app named
     Given a group narrowed from that relay scope
@@ -125,8 +125,8 @@ Feature: A group can live on more than one relay at once
   # nmp:evidence=rust:nmp::the_active_pubkey_stays_reactive_through_lowering
   # nmp:falsifier=Flatten `Binding::Reactive(IdentityField::ActivePubkey)` to a literal pubkey at the moment a predicate is lowered; a discovery query built before an account switch would then keep answering for the account that was active when it was built, rather than the one active now.
   @nip29
-  Scenario: A discovery predicate built from the active account stays reactive after lowering
-    Given a group-discovery predicate asking which groups name the active account as a member
+  Scenario: A discovery predicate built from the current account stays reactive after lowering
+    Given a group-discovery predicate asking which groups name the current account as a member
     When the scope lowers that predicate at one host
     Then the lowered query still asks for whichever account is active, not a frozen pubkey
 

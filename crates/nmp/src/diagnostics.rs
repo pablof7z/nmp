@@ -249,7 +249,7 @@ pub enum StalledWriteStage {
     /// No destination could be computed.
     Unroutable,
     /// No signer answers for the author this write was FROZEN to — never
-    /// the mutable active account.
+    /// the mutable current account.
     Unsignable,
     /// Destinations exist and none of them is working.
     Undeliverable,

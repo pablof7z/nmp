@@ -6,7 +6,7 @@
 //! for a reader who cares which key signed, so its vocabulary is hex, not
 //! "Alice". Every such hex string is an ordinary fixture-person label
 //! ([`super::NmpWorld::person`]), so a scenario that says
-//! `"2bd8...6e90" is the active account` and later `the published event is
+//! `"2bd8...6e90" is the current account` and later `the published event is
 //! authored by "2bd8...6e90"` is talking about one keypair throughout,
 //! exactly the way `Alice` does elsewhere.
 //!
@@ -123,22 +123,22 @@ impl NmpWorld {
         self.active_person = Some(label.to_string());
     }
 
-    /// `Given "<hex>" is the active account`.
+    /// `Given "<hex>" is the current account`.
     pub async fn activate_identity(&mut self, label: &str) {
         self.person(label);
         self.active_person = Some(label.to_string());
         if self.started {
             let keys = self.person(label);
-            self.handle().set_active_account(Some(keys.public_key()));
+            self.handle().set_current_account(Some(keys.public_key()));
         }
     }
 
-    /// `Given no account is active` -- stated before anything starts, so the
+    /// `Given no account is current` -- stated before anything starts, so the
     /// engine comes up logged out exactly as a real launch does.
     pub fn no_account_is_active(&mut self) {
         assert!(
             !self.started,
-            "nmp-bdd: state whether an account is active before anything runs"
+            "nmp-bdd: state whether an account is current before anything runs"
         );
         self.active_person = None;
     }
@@ -155,7 +155,7 @@ impl NmpWorld {
     pub fn current_identity(&self) -> String {
         self.active_person
             .clone()
-            .expect("nmp-bdd: no account is active for this step to refer back to")
+            .expect("nmp-bdd: no account is current for this step to refer back to")
     }
 
     /// `Given the user pasted the npub form of "<hex>" into the identity
@@ -233,7 +233,7 @@ impl NmpWorld {
     /// Which registered identity a publish resolved to -- the key
     /// `Explicit` named, or whoever was active when `Active` was accepted.
     /// Recorded at publish time precisely because `Active` stops meaning
-    /// "whoever is active" the instant the write is accepted.
+    /// "whoever is current" the instant the write is accepted.
     fn label_of(&self, identity: Identity) -> Option<String> {
         match identity {
             Identity::Active => self.active_person.clone(),
@@ -264,11 +264,11 @@ impl NmpWorld {
         self.identity_refusal = Some(refusal);
     }
 
-    /// `When I switch the active account to "<hex>"`.
+    /// `When I switch the current account to "<hex>"`.
     pub async fn switch_active_identity(&mut self, label: &str) {
         self.ensure_started().await;
         let keys = self.person(label);
-        self.handle().set_active_account(Some(keys.public_key()));
+        self.handle().set_current_account(Some(keys.public_key()));
         self.active_person = Some(label.to_string());
     }
 
@@ -452,7 +452,7 @@ impl NmpWorld {
         !self.await_admitted_at(relay, NEVER, |_| true)
     }
 
-    /// `Then "<hex>" is still the active account`.
+    /// `Then "<hex>" is still the current account`.
     pub fn active_identity_is(&mut self, label: &str) -> bool {
         self.active_person.as_deref() == Some(label)
     }
@@ -479,7 +479,7 @@ impl NmpWorld {
         self.identity_receipt_mut(text).refusal.is_some()
     }
 
-    /// The label of whoever is active right now, for a restart step that
+    /// The label of whoever is current right now, for a restart step that
     /// says nothing about who should be active on the far side.
     pub fn active_identity_label(&self) -> Option<String> {
         self.active_person.clone()

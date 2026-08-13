@@ -67,7 +67,10 @@ fn delayed_signer_promotes_the_same_visible_row_from_pending_to_signed() {
     let (started_tx, started_rx) = mpsc::channel();
     let engine = Engine::new(EngineConfig::default()).expect("the in-memory engine starts");
     engine
-        .add_signer(HeldSigner {
+        .add_public_key_account(pubkey, false)
+        .expect("the session account exists");
+    engine
+        .install_test_signing_capability(HeldSigner {
             pubkey,
             started: started_tx,
         })

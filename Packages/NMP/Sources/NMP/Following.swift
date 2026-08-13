@@ -40,20 +40,20 @@ public enum NMPFollowAvailability: Sendable, Hashable {
 }
 
 public struct NMPFollowingSnapshot: Sendable, Hashable {
-    public let activePubkey: String?
+    public let currentPubkey: String?
     public let target: String
     public let relationship: NMPFollowRelationship
     public let availability: NMPFollowAvailability
     public let baseEventID: String?
 
     public init(
-        activePubkey: String?,
+        currentPubkey: String?,
         target: String,
         relationship: NMPFollowRelationship,
         availability: NMPFollowAvailability,
         baseEventID: String?
     ) {
-        self.activePubkey = activePubkey
+        self.currentPubkey = currentPubkey
         self.target = target
         self.relationship = relationship
         self.availability = availability
@@ -62,7 +62,7 @@ public struct NMPFollowingSnapshot: Sendable, Hashable {
 
     init(_ ffi: FfiFollowSnapshot) {
         self.init(
-            activePubkey: ffi.activePubkey,
+            currentPubkey: ffi.currentPubkey,
             target: ffi.target,
             relationship: NMPFollowRelationship(ffi.relationship),
             availability: NMPFollowAvailability(ffi.availability),
@@ -72,7 +72,7 @@ public struct NMPFollowingSnapshot: Sendable, Hashable {
 
     public static func initial(target: String) -> Self {
         Self(
-            activePubkey: nil,
+            currentPubkey: nil,
             target: target,
             relationship: .unknown,
             availability: .acquiring,
@@ -202,7 +202,7 @@ public struct NMPFollowAction: AsyncSequence, Sendable {
 }
 
 extension NMPEngine {
-    /// Observe whether the active account follows `target`. This is NMP's
+    /// Observe whether the current account follows `target`. This is NMP's
     /// protocol projection, not an app-maintained boolean.
     public func observeFollowing(_ target: String) throws -> NMPFollowingObservation {
         try NMPFollowingObservation(engine: ffi, target: target)

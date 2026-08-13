@@ -23,7 +23,7 @@ idiom this module now BUILDS (it was PLANNED-shape only until this PR).
 import com.nmp.sdk.*
 
 NMPEngine(NMPConfig(appRelays = listOf("wss://purplepag.es"))).use { nmp ->
-    nmp.setActiveAccount(pubkey)
+    nmp.session.add(NMPPublicKey(decodedPublicKeyBytes), makeCurrent = true)
     val rows: Flow<RowBatch> = nmp.observe(followFeed)
     // caller applies stateIn(scope, WhileSubscribed()) for a hot, shared,
     // latest-value read -- this SDK never invents its own observer type.
@@ -57,20 +57,27 @@ Its relay views accept caller-owned `NmpRelayInformationState`, query-scoped
 `Painter`; they own no engine, HTTP, cache, polling, timer, or image loader.
 See `docs/builder/36-relay-ui.md`.
 
-For explicit personal/development autologin without Keystore, the JVM SDK also
-ships a deliberately plaintext file provider:
+An app stores one complete opaque session value rather than separately storing
+each account and signing provider:
 
 ```kotlin
-val accountStore = NMPInsecureFileAccountStore(appSupport.resolve("local-account.nsec"))
-NMPEngine(config, accountStore).use { nmp ->
-    val restoredPubkey = nmp.activeAccount()
+val payload = NMPEngine(config).use { nmp ->
+    nmp.session.add(NMPPrivateKey(decodedPrivateKeyBytes), makeCurrent = true)
+    nmp.session.add(NMPPublicKey(otherDecodedPublicKeyBytes))
+    nmp.session.export()
+}
+
+NMPEngine(config, sessionPayload = payload).use { restored ->
+    val current = restored.session.current
+    val accounts = restored.session.accounts
 }
 ```
 
-With that provider configured, a successful `addAccount` is checkpointed and
-the next engine construction restores and activates it. Sign-out calls
-`clearPersistedAccount()` before closing the credential-owning engine. This is
-not encrypted, Keystore-backed, or a secure production-vault claim.
+The payload is sensitive and deliberately opaque: the app stores or passes its
+bytes as a whole but never interprets provider restoration material. Durable,
+transactional app-owned storage is a separate concern; clearing the session
+removes its accounts and current selection without resetting NMP's event or
+write store.
 
 The same package also exposes pure content parsing and exact, engine-free
 reference locators:

@@ -309,7 +309,7 @@ impl NmpWorld {
     ///
     /// A refusal is recorded rather than raised: `publish()` returning `Err`
     /// IS the observable several scenarios assert on (an empty explicit
-    /// route, no active account), and there is no receipt id to remember for
+    /// route, no current account), and there is no receipt id to remember for
     /// one -- nothing was taken into custody.
     pub(super) fn publish_intent(&mut self, intent: WriteIntent) {
         self.last_publish_was_auto = matches!(intent.routing, WriteRouting::Auto);
@@ -339,7 +339,7 @@ impl NmpWorld {
         self.handle()
             .add_signer(self.counting_signer(&keys))
             .expect("BDD local signer always exposes its public key");
-        self.handle().set_active_account(Some(keys.public_key()));
+        self.handle().set_current_account(Some(keys.public_key()));
         self.active_person = Some(person.to_string());
     }
 
@@ -368,7 +368,7 @@ impl NmpWorld {
         self.handle()
             .add_signer(self.counting_signer(&keys))
             .expect("BDD local signer always exposes its public key");
-        self.handle().set_active_account(Some(keys.public_key()));
+        self.handle().set_current_account(Some(keys.public_key()));
         self.active_person = Some(name);
     }
 

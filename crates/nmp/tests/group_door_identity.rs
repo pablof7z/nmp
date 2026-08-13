@@ -22,7 +22,6 @@ use nmp::nip29;
 use nmp::{
     Engine, EngineConfig, EventBuilder, Filter, RelayState, RelayWaiting, SigningState, WriteFact,
 };
-use nmp_local_signer::LocalKeySigner;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{Keys, Kind, PublicKey, RelayUrl};
 
@@ -46,14 +45,8 @@ fn bare_engine() -> Engine {
 fn engine_with_signer_for(keys: &Keys) -> Engine {
     let engine = bare_engine();
     engine
-        .add_account(&keys.secret_key().to_secret_hex())
-        .expect("the account registers");
-    engine
-        .add_signer(
-            LocalKeySigner::from_secret_bytes(keys.secret_key().as_secret_bytes())
-                .expect("fixture keys are valid secp256k1 scalars"),
-        )
-        .expect("a local signer registers");
+        .add_private_key_account(&keys.secret_key().to_secret_bytes(), false)
+        .expect("the account and local provider register");
     engine
 }
 

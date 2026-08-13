@@ -34,8 +34,8 @@ final class NIP51Tests: XCTestCase {
         XCTAssertEqual(NMP.parseSimpleGroupsListTolerant(fabricatedRow(kind: 10009)), list)
     }
 
-    func testActiveAccountDemandTargetsKind10009() {
-        let demand = NMP.activeAccountDemand()
+    func testCurrentAccountDemandTargetsKind10009() {
+        let demand = NMP.currentAccountDemand()
         XCTAssertEqual(demand.selection.kinds, [10009])
     }
 

@@ -37,6 +37,10 @@ Feature: A replaceable edit says which version it replaces, and is checked again
 
   # ---- the precondition --------------------------------------------------
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-001
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-store::replaceable_base_precondition_accepts_the_exact_winner_and_none_means_none
+  # nmp:falsifier=Refuse an edit whose expected base is the exact stored winner, or retain that winner as current after acceptance; the store transaction proof fails.
   Scenario: An edit naming the stored version replaces it
     Given my device clock reads "2026-07-29T12:00:10Z"
     When I publish a replacement contact list naming "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe" as the version it replaces
@@ -44,6 +48,11 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And the replacement is the stored winner
     And "wss://hub.example" received the replacement
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-002
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-store::replaceable_base_precondition_rejects_a_concurrent_winner_atomically
+  # nmp:evidence=rust:nmp::stale_replaceable_edit_is_refused_into_custody_keeping_both_event_ids
+  # nmp:falsifier=Overwrite a winner that changed after the app read it or lose either competing event id; the atomic store or receipt proof fails.
   Scenario: A concurrent edit that moved the winner is refused, not overwritten
     # The headline. Two devices editing the same list is the ordinary case,
     # not the exotic one, and the wrong outcome here is not an error -- it is
@@ -57,6 +66,10 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And nothing was journaled and no event id was allocated
     And "wss://hub.example" received nothing
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-003
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-store::replaceable_base_precondition_rejects_a_concurrent_winner_atomically
+  # nmp:falsifier=Validate the base before the acceptance transaction instead of against its current row; a concurrent replacement is overwritten rather than refused.
   Scenario: The check is against the row at acceptance, not the row the app read
     # What "atomically at acceptance" buys. The app's read was correct when
     # it happened; the winner moved afterwards, while the write was in
@@ -71,6 +84,10 @@ Feature: A replaceable edit says which version it replaces, and is checked again
 
   # ---- the stamp ---------------------------------------------------------
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-004
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::a_restamped_replaceable_edit_reports_its_post_restamp_id
+  # nmp:falsifier=Derive the replacement timestamp from the app's stale copy rather than the accepted stored winner; the returned post-restamp id no longer reflects the monotonic store stamp.
   Scenario: A replacement is stamped against the stored version, not the stale copy the app holds
     # The case the whole design turns on. The app was holding the 12:00:00
     # version, the store holds a 12:00:30 one, and the app's own clock reads
@@ -89,6 +106,10 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And the replacement's created_at is greater than "fb04dcb6970e4c3d1873de51fd5a50d7bb46b3383113602665c350ec40b5f990"'s
     And the replacement is the stored winner
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-005
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::a_restamped_replaceable_edit_reports_its_post_restamp_id
+  # nmp:falsifier=Use a behind wall clock without advancing past the stored winner; the replacement id is not derived from winner timestamp plus one.
   Scenario: A clock behind the stored version cannot produce a losing replacement
     # The same rule with no conflict in it, so the stamp is the only thing
     # under test. A device whose clock is wrong still edits its own contact
@@ -100,6 +121,10 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And the replacement's created_at is "2026-07-29T12:00:01Z"
     And the replacement is the stored winner
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-006
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-store::replaceable_base_precondition_accepts_the_exact_winner_and_none_means_none
+  # nmp:falsifier=Restamp an already-newer replacement merely because it is replaceable; the accepted event no longer preserves the caller's winning timestamp.
   Scenario: A clock ahead of the stored version is used as it stands
     # The other branch of the same max. NMP is not rewriting time, it is
     # refusing to go backwards; when the clock is already ahead there is
@@ -109,6 +134,10 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     Then the write is accepted
     And the replacement's created_at is "2026-07-29T12:05:00Z"
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-007
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-grammar::a_kind_alone_is_a_complete_builder
+  # nmp:falsifier=Restamp an explicitly stated created_at; the write grammar no longer preserves every caller-owned builder field.
   Scenario: An app that states its own created_at keeps it, even when that loses
     # A foot-gun deliberately left loaded. A builder can provide anything and
     # that does not stop being true here, so a caller-stated timestamp is
@@ -124,6 +153,10 @@ Feature: A replaceable edit says which version it replaces, and is checked again
 
   # ---- somebody else's version -------------------------------------------
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-008
+  # nmp:status=built
+  # nmp:evidence=rust:nmp-store::replaceable_base_precondition_rejects_a_concurrent_winner_atomically
+  # nmp:falsifier=Compare the expected base outside the resolved write-author coordinate; an event from another author can authorize mutation of the current account's row.
   Scenario: Editing a replaceable event somebody else authored fails the precondition
     # No dedicated wrong-author error, and none is wanted. The precondition
     # is checked at MY coordinate, where Carol's contact list is not and
@@ -138,13 +171,18 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And my own contact list is still "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe"
     And "wss://hub.example" received nothing
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-009
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::an_explicit_identity_publishes_as_a_secondary_without_moving_the_current_account
+  # nmp:evidence=rust:nmp-store::replaceable_base_precondition_accepts_the_exact_winner_and_none_means_none
+  # nmp:falsifier=Resolve the replaceable coordinate from session selection instead of the write's frozen author; an explicit secondary identity mutates the wrong account's winner.
   Scenario: The coordinate follows the identity the write publishes as
     # Which coordinate gets checked is decided by the same identity
     # resolution that decides the author -- so a write naming the podcast
     # identity is checked against the PODCAST identity's contact list, not
-    # against the active account's. If the coordinate came from anywhere
+    # against the current account's. If the coordinate came from anywhere
     # else, publishing as one identity could CAS against another's row.
-    Given my podcast identity "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd" is registered with a working signer
+    Given my podcast identity "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd" has an available signing provider
     And that identity's contact list "fb04dcb6970e4c3d1873de51fd5a50d7bb46b3383113602665c350ec40b5f990" created at "2026-07-29T12:00:30Z" is its stored winner
     And my device clock reads "2026-07-29T12:00:40Z"
     When I publish a replacement contact list naming identity "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd" and "fb04dcb6970e4c3d1873de51fd5a50d7bb46b3383113602665c350ec40b5f990" as the version it replaces

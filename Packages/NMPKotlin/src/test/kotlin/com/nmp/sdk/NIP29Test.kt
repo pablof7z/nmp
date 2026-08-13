@@ -218,7 +218,7 @@ class NIP29Test {
                     "a group write must carry the store-issued receipt id like any other write"
                 }
                 val first = status.status.first()
-                // The composed author has no registered signer, so the first
+                // The composed author has no signing provider, so the first
                 // fact is the park itself -- acceptance is the publish call
                 // returning, never a stream item.
                 check(

@@ -39,7 +39,7 @@ async fn published_event_authored_by(w: &mut NmpWorld, pubkey: String) {
     );
 }
 
-/// The two-publishes form: a scenario that resolved "whoever is active"
+/// The two-publishes form: a scenario that resolved "whoever is current"
 /// twice names each write by what it said.
 #[then(regex = r#"^"([^"]+)" is authored by "([0-9a-f]{64})"$"#)]
 async fn named_write_authored_by(w: &mut NmpWorld, text: String, pubkey: String) {
@@ -75,8 +75,8 @@ async fn signed_by_the_podcast_signer(w: &mut NmpWorld) {
     );
 }
 
-#[then(regex = r#"^"([0-9a-f]{64})" is still the active account$"#)]
-async fn still_the_active_account(w: &mut NmpWorld, pubkey: String) {
+#[then(regex = r#"^"([0-9a-f]{64})" is still the current account$"#)]
+async fn still_the_current_account(w: &mut NmpWorld, pubkey: String) {
     assert!(
         w.active_identity_is(&pubkey),
         "publishing as one identity must not re-root the engine onto it"
@@ -150,7 +150,7 @@ async fn refused_for_having_no_identity(w: &mut NmpWorld) {
         .write_refusal_reason(None)
         .expect("a refused publish carries the error it refused with");
     assert!(
-        reason.contains("active account"),
+        reason.contains("current account"),
         "the refusal must say WHICH instruction could not resolve; it said {reason:?}"
     );
 }
@@ -236,7 +236,7 @@ async fn write_is_never_refused(w: &mut NmpWorld) {
     );
 }
 
-#[then(regex = r#"^the write is signed by that signer$"#)]
+#[then(regex = r#"^the write is signed by that provider$"#)]
 async fn write_is_signed_by_that_signer(w: &mut NmpWorld) {
     assert!(
         w.write_was_signed(None),

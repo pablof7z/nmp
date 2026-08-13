@@ -29,7 +29,7 @@
 //! raw `created_at`/`kind`/`tags`/`content` tokens that feed straight into
 //! the engine's governed sign-only operation
 //! (`NmpEngine::sign_event(FfiSignEventRequest, ...)`, whose author is
-//! frozen from the active account -- so the draft's `author_pubkey_hex`
+//! frozen from the current account -- so the draft's `author_pubkey_hex`
 //! must be that account for the engine path). The signed result
 //! ([`crate::types::FfiSignedEvent`]) then enters
 //! [`FfiBlossomAuthorization::validate_signed_event`]; a raw event JSON
@@ -382,7 +382,7 @@ fn parse_auth_blob_sha256(hex: &str) -> Result<Sha256Hash, FfiBlossomAuthError> 
 ///
 /// - engine sign-only path: feed `created_at_secs`/`kind`/`tags`/`content`
 ///   into `FfiSignEventRequest` and call `NmpEngine::sign_event` (the
-///   author is frozen from the ACTIVE ACCOUNT, so `author_pubkey_hex`
+///   author is frozen from the CURRENT ACCOUNT, so `author_pubkey_hex`
 ///   passed to the draft builder must be that account's pubkey); the
 ///   resulting `FfiSignedEvent` enters
 ///   [`FfiBlossomAuthorization::validate_signed_event`];

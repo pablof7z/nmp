@@ -42,8 +42,8 @@ class NIP51Test {
     }
 
     @Test
-    fun activeAccountDemandTargetsKind10009() {
-        val demand = activeAccountDemand()
+    fun currentAccountDemandTargetsKind10009() {
+        val demand = currentAccountDemand()
         assertEquals(listOf<UShort>(10009u), demand.selection.kinds)
     }
 

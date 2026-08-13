@@ -103,7 +103,7 @@ sealed class NMPBinding {
     data class Literal(val values: Set<String>) : NMPBinding()
 
     /** Re-resolves reactively whenever the named identity field changes
-     * (e.g. the active account). */
+     * (e.g. the current account). */
     data class Reactive(val field: NMPIdentityField) : NMPBinding()
 
     /** Projects `inner`'s matching rows through `project` (e.g. "authors of

@@ -7,6 +7,7 @@ Depend on the `nmp` crate and construct `Engine::new(EngineConfig)`. The consume
 ```text
 reset_persistent_store
 new
+new_with_session
 observe
 publish
 cancel
@@ -14,13 +15,14 @@ publish_queue
 remove_publish_queue_entry
 reattach_receipt
 reattach_by_correlation
-add_account
+session
+export_session
+add_private_key_account
+add_public_key_account
+make_current_account
 remove_account
-add_signer
-remove_signer
+clear_session
 sign_event
-set_active_account
-active_account
 add_auth_policy
 remove_auth_policy
 observe_diagnostics
@@ -32,7 +34,7 @@ shutdown
 
 `EngineConfig` has no worker/task capacity field: #704 removed application-configurable task admission and all saturation outcomes. Observer/action/signer work runs as async tasks on one shared engine-owned runtime; private physical bounds backpressure rather than refusing ordinary operations. `EngineError::EngineStartFailed { component, reason }` is returned when the engine itself cannot be built (the OS refused an engine-owned thread, or the relay budget was unrepresentable) and is never raised by an ordinary operation once the engine exists — but it is not the only construction failure: `Engine::new` also reports `StoreOpenFailed`, `StoreAlreadyOpen`, and `InvalidRelayUrl`. `AuthCapabilityRegistryFull { limit }` is a real capacity refusal, bounded by the app-set `max_auth_capabilities`; what does not exist is a worker/task ceiling.
 
-`Engine::sign_event(SignEventRequest)` freezes the active author and returns a cancellable `SignEventOperation`; `recv` yields one fully verified event or a typed `SignEventError`. It never accepts or publishes a write. Asynchronous `SigningCapability` implementations create pending work with `SignerOp::pending_channel` or `pending_channel_with_cancel` and resolve the returned opaque `PendingSignerSender`; consumers do not receive or decompose NMP's internal channel.
+`Engine::sign_event(SignEventRequest)` freezes the current session author and returns a cancellable `SignEventOperation`; `recv` yields one fully verified event or a typed `SignEventError`. It never accepts or publishes a write. The production session surface currently installs local-key providers; provider families may implement asynchronous capability work internally without exposing NMP's channels to consumers.
 
 `Engine::relay_information(relay, policy)` is an async one-shot returning `RelayInformationSnapshot` or `RelayInformationRequestError`. `UseCache` returns an unexpired last-good representation; `Refresh` requests a generation-guarded single flight. Inspect `RelayInformationRequestError::Acquisition` without collapsing `ServiceClosed`, `CredentialedRelayUrl`, `Http`, `ResponseTooLarge`, or `InvalidDocument`. A stale-on-error success has `freshness: Stale` and `last_error`; `advertises_nip` is document evidence, not behavioral proof.
 

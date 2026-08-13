@@ -2,6 +2,74 @@
 
 use crate::op::SignerOp;
 use crate::value::{SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent};
+use zeroize::Zeroize;
+
+/// Opaque, versioned material required to reconstruct a persistable signer.
+///
+/// The provider identifier is public metadata. `payload` is always redacted
+/// from formatting and wiped when the descriptor is dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SigningProviderId(&'static str);
+
+impl SigningProviderId {
+    #[must_use]
+    pub const fn new(value: &'static str) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+pub struct SigningProviderDescriptor {
+    provider: SigningProviderId,
+    version: u16,
+    payload: Vec<u8>,
+}
+
+impl SigningProviderDescriptor {
+    #[must_use]
+    pub fn new(provider: SigningProviderId, version: u16, payload: Vec<u8>) -> Self {
+        Self {
+            provider,
+            version,
+            payload,
+        }
+    }
+
+    #[must_use]
+    pub fn provider(&self) -> SigningProviderId {
+        self.provider
+    }
+
+    #[must_use]
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+impl std::fmt::Debug for SigningProviderDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SigningProviderDescriptor")
+            .field("provider", &self.provider)
+            .field("version", &self.version)
+            .field("payload", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for SigningProviderDescriptor {
+    fn drop(&mut self) {
+        self.payload.zeroize();
+    }
+}
 
 /// Signing capability. `sign` may complete synchronously or later
 /// (`SignerOp::Pending`) — the caller polls it on the engine's recv loop.
@@ -15,6 +83,12 @@ pub trait SigningCapability {
     /// never permission to select a different identity.
     fn is_available(&self) -> bool {
         true
+    }
+    /// Return a transient reconstruction descriptor when this provider can
+    /// participate in whole-session persistence. Runtime availability is not
+    /// part of the descriptor.
+    fn persistence_descriptor(&self) -> Option<SigningProviderDescriptor> {
+        None
     }
     fn sign(&self, unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent>;
 }

@@ -17,6 +17,30 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     guard condition() else { throw ProbeError.message(message) }
 }
 
+/// Decode this command-line tool's existing hex fixtures at its human/file
+/// input boundary. NMP itself receives only validated decoded key bytes.
+func decodedHex(_ value: String) throws -> Data {
+    guard value.count.isMultiple(of: 2) else {
+        throw ProbeError.message("hex key has odd length")
+    }
+    var bytes: [UInt8] = []
+    bytes.reserveCapacity(value.count / 2)
+    var index = value.startIndex
+    while index < value.endIndex {
+        let next = value.index(index, offsetBy: 2)
+        guard let byte = UInt8(value[index..<next], radix: 16) else {
+            throw ProbeError.message("key is not valid hex")
+        }
+        bytes.append(byte)
+        index = next
+    }
+    return Data(bytes)
+}
+
+func hex(_ data: Data) -> String {
+    data.map { String(format: "%02x", $0) }.joined()
+}
+
 func withTimeout<T: Sendable>(
     seconds: UInt64,
     operation: @escaping @Sendable () async throws -> T

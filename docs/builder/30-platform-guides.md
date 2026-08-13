@@ -10,7 +10,8 @@ For basic code shapes, see [One semantic API, native platform shapes](06-first-a
 - demand identity and printed binding expansion;
 - canonical rows and pending/signed identity;
 - cache, acquisition, and shortfall evidence;
-- signer default, override, pinning, and reattachment;
+- current-account provider selection, override, pinning, and availability
+  resumption;
 - protocol-module final unsigned bytes and context provenance;
 - durability/receipt facts, including non-durable policy abandonment;
 - diagnostics facts and configured limits; and
@@ -33,12 +34,13 @@ Swift uses `AsyncSequence`, ARC, and optional `@Observable` conveniences. A
 view/model's existing task supplies scope. NMP does not add an environment
 container or scene-phase coordinator.
 
-The standard Keychain-backed signer provider remains tracked work. The app owns
-identity policy and may attach remote/hardware/custom providers. For explicit
-personal/development opt-in, `NMPInsecureFileAccountStore(fileURL:)` provides
-plaintext app-sandbox autologin without placing secret material in the Rust
-event/delivery store; pass it to `NMPEngine` and call
-`clearPersistedAccount()` before destroying the live signer on sign-out.
+The standard Keychain-backed persistence integration remains tracked work. The
+current local-key provider lives in the one whole session. The app exports its
+opaque `NMPSessionPayload`, stores that sensitive value atomically using its
+platform security policy, and supplies the whole value at the next engine
+construction. It never parses or partially updates the payload. Remote and
+hardware provider implementations remain future work rather than app-attached
+runtime categories.
 
 Query and diagnostics bridges buffer newest state. Receipt facts remain
 reattachable rather than relying on an unbounded `AsyncStream` backlog.
@@ -62,14 +64,10 @@ observation, scoped pre-connect failure and recovery, structured cancellation,
 app-private fresh-process cache reopen, deterministic close, wrong-ABI refusal,
 and the declared 64-collector latency/thread/CPU/native-heap bounds.
 
-The supported Android product must still include a standard Keystore-backed
-provider and prove process-death receipt/signer reattachment. Newest-state
-observation is bounded/conflated while receipt history remains recoverable.
-
-The current JVM projection also exposes `NMPInsecureFileAccountStore(Path)` for
-explicit plaintext sandbox persistence. It provides the same restore/clear
-semantics as Swift and the same warning: it is not Keystore or a secure Android
-production provider.
+The supported Android product must still include standard Keystore-backed
+storage for the opaque whole-session payload and prove process-death session
+restore plus receipt/provider resumption. Newest-state observation is
+bounded/conflated while receipt history remains recoverable.
 
 Android configuration lifecycle, Compose capstone, Keystore, NIP-55 execution,
 and physical-arm64 qualification remain open work (#833–#836).

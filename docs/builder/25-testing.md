@@ -72,7 +72,7 @@ Rejected(relayB, reason)
 Useful app tests include:
 
 - the pending row renders immediately after durable `Accepted`;
-- signer absence is presented without hiding or rolling back the row;
+- provider unavailability is presented without hiding or rolling back the row;
 - one relay ACK is not displayed as universal convergence;
 - an at-most-once `OutcomeUnknown` is not offered a blind retry button;
 - detaching the UI does not imply cancellation; and
@@ -142,7 +142,7 @@ prove:
 - failed acceptance exposes no pending row or `Accepted` receipt;
 - successful acceptance restores the frozen body, pending row, receipt, signer
   identity, routing state, and displaced candidates together;
-- signer detachment and reattachment resume the same obligation;
+- provider availability transitions resume the same obligation;
 - signature promotion preserves exact body, author, id, and valid signature;
 - cancellation, deletion, expiry, and replaceable supersession cannot strand an
   open intent;

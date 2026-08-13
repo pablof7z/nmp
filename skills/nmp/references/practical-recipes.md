@@ -4,11 +4,11 @@ Use these as starting shapes, then verify exact declarations for the selected pl
 
 ## Account-aware home feed
 
-Goal: one live feed whose author set follows the active account.
+Goal: one live feed whose author set follows the current account.
 
 1. Construct one engine at the application/service boundary, with a persistent `storePath` when restart cache and receipts matter. On Apple platforms use durable Application Support storage, not a purgeable Caches location.
-2. The reactive feed may open signed out and reroot when `setActiveAccount` changes. Restore/select the account first only when the product should avoid a signed-out intermediate state.
-3. Build a filter for the content kinds with authors bound through the active-account/follows graph supplied by the selected tier. If locally accepted posts should appear even when the user does not follow themselves, union the active pubkey into the author binding. If the ergonomic facade does not project the required graph, stop and report the gap; do not query a contact list in the app and manually reopen a second author subscription.
+2. The reactive feed may open signed out and reroot when `engine.session.makeCurrent(account)` changes selection. Restore/select the account first only when the product should avoid a signed-out intermediate state.
+3. Build a filter for the content kinds with authors bound through the current-account/follows graph supplied by the selected tier. If locally accepted posts should appear even when the user does not follow themselves, union the reactive current pubkey into the author binding. If the ergonomic facade does not project the required graph, stop and report the gap; do not query a contact list in the app and manually reopen a second author subscription.
 4. Observe once at the feature-model boundary. Swift owns one eager `NMPQuery`; Kotlin collects one cold flow and shares it with `stateIn` or `shareIn` if several consumers need it.
 5. Replace the model's canonical input with every delivered native `RowBatch`. Apply ranking, mute policy, deduped UI sections, and pagination windows downstream.
 6. Render cache rows immediately. Describe evidence per planned source: connecting, reconciled-through, disconnected, shortfall. Never convert it to global `synced`.
@@ -196,4 +196,3 @@ Goal: render immediately while keeping work and UI bounded.
 - Keep application sorting/windowing downstream from the full native snapshot.
 - Do not keep overlapping pagination observations forever. When expanding a time window, overlap long enough to avoid a visual hole, dedupe by event id, then cancel the superseded observation.
 - Treat `LocalLimit` or another shortfall as evidence that NMP could not cover the complete demand under current limits, not as an empty or complete result.
-

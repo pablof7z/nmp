@@ -87,7 +87,7 @@ active absorbed key is gone. This avoids paying the relay to rerun a broad
 query merely because another screen element appeared.
 
 `Router::compile` still performs a whole-demand replan when the world actually
-invalidates routing -- for example an active-account reroot, route-directory
+invalidates routing -- for example a current-account reroot, route-directory
 change, or relay-budget change. Those transitions may genuinely move existing
 demand between sessions. Their old and new plans are compared by exact
 `(session, sub-id, limited)` coverage assignment, and only affected

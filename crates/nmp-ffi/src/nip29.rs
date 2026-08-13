@@ -211,7 +211,7 @@ impl FfiGroup {
     ///
     /// The `h` row is appended before signing, the route is the scope's own
     /// hosts, and `author` is frozen as an exact decoded pubkey rather than
-    /// the active-account selector (#878). Returns the ORDINARY
+    /// the current-account selector (#878). Returns the ORDINARY
     /// [`NmpReceiptStream`], store-issued receipt id included.
     ///
     /// An app that needs a signed event WITHOUT publishing it asks the engine
@@ -939,7 +939,7 @@ mod tests {
     #[test]
     fn a_composed_predicate_observes_the_records_over_every_host() {
         let engine =
-            NmpEngine::new(crate::facade::NmpEngineConfig::default()).expect("engine builds");
+            NmpEngine::new(crate::facade::NmpEngineConfig::default(), None).expect("engine builds");
         let scope = FfiRelayScope::on(vec![host(1), host(2)]).expect("two hosts parse");
         let member = member_list_includes(FfiBinding::Reactive {
             field: FfiIdentityField::ActivePubkey,
@@ -976,7 +976,7 @@ mod tests {
     #[test]
     fn an_empty_record_selection_is_a_typed_refusal_at_the_boundary() {
         let engine =
-            NmpEngine::new(crate::facade::NmpEngineConfig::default()).expect("engine builds");
+            NmpEngine::new(crate::facade::NmpEngineConfig::default(), None).expect("engine builds");
         let scope = FfiRelayScope::on(vec![host(1)]).expect("one host parses");
         match scope
             .group("photographers".to_string())
@@ -1101,7 +1101,7 @@ mod tests {
     #[test]
     fn every_named_group_operation_reaches_the_one_publish_door() {
         let engine =
-            NmpEngine::new(crate::facade::NmpEngineConfig::default()).expect("engine builds");
+            NmpEngine::new(crate::facade::NmpEngineConfig::default(), None).expect("engine builds");
         let author = nostr::Keys::generate().public_key().to_hex();
         let subject = nostr::Keys::generate().public_key().to_hex();
         let scope = FfiRelayScope::on(vec![host(1), host(2)]).expect("two hosts parse");
@@ -1187,7 +1187,7 @@ mod tests {
     #[test]
     fn a_several_group_write_crosses_the_boundary_and_reaches_the_one_publish_door() {
         let engine =
-            NmpEngine::new(crate::facade::NmpEngineConfig::default()).expect("engine builds");
+            NmpEngine::new(crate::facade::NmpEngineConfig::default(), None).expect("engine builds");
         let scope = FfiRelayScope::on(vec![host(1), host(2)]).expect("two hosts parse");
         let rooms = scope
             .groups(vec!["darkroom".to_string(), "photographers".to_string()])
@@ -1276,7 +1276,7 @@ mod tests {
     #[test]
     fn a_caller_supplied_context_never_reaches_the_door() {
         let engine =
-            NmpEngine::new(crate::facade::NmpEngineConfig::default()).expect("engine builds");
+            NmpEngine::new(crate::facade::NmpEngineConfig::default(), None).expect("engine builds");
         let author = nostr::Keys::generate().public_key().to_hex();
         let scope = FfiRelayScope::on(vec![host(1)]).expect("one host parses");
         let group = scope.group("photographers".to_string());
@@ -1344,7 +1344,7 @@ mod tests {
     #[test]
     fn delete_event_rejects_a_malformed_event_id() {
         let engine =
-            NmpEngine::new(crate::facade::NmpEngineConfig::default()).expect("engine builds");
+            NmpEngine::new(crate::facade::NmpEngineConfig::default(), None).expect("engine builds");
         let author = nostr::Keys::generate().public_key().to_hex();
         let scope = FfiRelayScope::on(vec![host(1)]).expect("one host parses");
         let group = scope.group("photographers".to_string());

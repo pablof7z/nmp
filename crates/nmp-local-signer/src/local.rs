@@ -6,7 +6,7 @@ use bech32::primitives::decode::CheckedHrpstring;
 use bech32::Bech32;
 use nmp_signer::{
     CryptoCapability, SignerError, SignerOp, SignerPublicKey, SignerSignedEvent,
-    SignerUnsignedEvent, SigningCapability,
+    SignerUnsignedEvent, SigningCapability, SigningProviderDescriptor, SigningProviderId,
 };
 use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
 use nostr::{Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -49,6 +49,8 @@ pub struct LocalKeySigner {
     public_key: PublicKey,
     secret: CanonicalSecret,
 }
+
+pub const LOCAL_KEY_PROVIDER_ID: SigningProviderId = SigningProviderId::new("local-key");
 
 impl LocalKeySigner {
     /// Copy a caller-owned 32-byte scalar into this signer's canonical
@@ -133,6 +135,14 @@ impl fmt::Debug for LocalKeySigner {
 impl SigningCapability for LocalKeySigner {
     fn public_key(&self) -> Option<SignerPublicKey> {
         Some(SignerPublicKey::new(self.public_key.to_bytes()))
+    }
+
+    fn persistence_descriptor(&self) -> Option<SigningProviderDescriptor> {
+        Some(SigningProviderDescriptor::new(
+            LOCAL_KEY_PROVIDER_ID,
+            1,
+            self.secret.as_bytes().to_vec(),
+        ))
     }
 
     /// Signs synchronously — the local key never blocks on I/O, so this

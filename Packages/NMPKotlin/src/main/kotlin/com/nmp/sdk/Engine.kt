@@ -11,7 +11,6 @@ import uniffi.nmp_ffi.NmpEngineConfig
 // nmp-native:if nip65
 import uniffi.nmp_ffi.FfiOutboxRoutingConfig
 // nmp-native:endif
-import uniffi.nmp_ffi.generateAccountSecretKey as ffiGenerateAccountSecretKey
 import uniffi.nmp_ffi.resetPersistentStore as ffiResetPersistentStore
 
 // nmp-native:if nip65
@@ -86,18 +85,11 @@ data class NMPConfig(
 }
 
 /** The engine object a dev constructs exactly once. Holds zero app-lifecycle
- * concepts -- no scene-phase hook, no required provider/environment
- * wrapper. `NMPEngine(NMPConfig(...))` is the entire adoption cost.
- *
- * [localAccountStore] accepts ANY conforming [NMPLocalAccountCheckpoint] --
- * a platform-vault provider, an app-custom store, or
- * [NMPInsecureFileAccountStore] -- and, when configured, restores the
- * account it holds on construction: its [NMPLocalAccountCheckpoint.loadSecretKey]
- * drives the restore and the restored account becomes active before the
- * constructor returns. */
+ * concepts -- no scene-phase hook and no required environment wrapper.
+ * `NMPEngine(NMPConfig(...))` is the entire adoption cost. */
 class NMPEngine(
     config: NMPConfig,
-    private val localAccountStore: NMPLocalAccountCheckpoint? = null,
+    sessionPayload: NMPSessionPayload? = null,
 ) : AutoCloseable {
     companion object {
         /** Destructively remove one unowned persistent NMP store. A live engine
@@ -106,132 +98,16 @@ class NMPEngine(
          * [shutdown] or [close] first. The refusal is a cross-process exclusive
          * ownership lock (#489), not a process-local guard: constructing a
          * second [NMPEngine] over a live store path throws
-         * [NMPError.StoreAlreadyOpen]. A separate local-account checkpoint is
-         * not touched. */
+         * [NMPError.StoreAlreadyOpen]. */
         fun resetPersistentStore(storePath: String) =
             nmpRethrowing { ffiResetPersistentStore(storePath) }
     }
 
-    internal val ffi: NmpEngine = nmpRethrowing { NmpEngine(config.toFfi()) }
+    internal val ffi: NmpEngine =
+        nmpRethrowing { NmpEngine(config.toFfi(), sessionPayload?.ffi) }
 
-    /** Guards [checkpointedPubkey] -- the identity currently persisted in
-     * [localAccountStore]'s checkpoint file, `null` when no checkpoint is
-     * known to exist -- and [restoredRegistration], the exact
-     * [NMPAccountRegistration] created on the init-restore path, when the
-     * checkpoint still holds exactly that installation (#589). Tracked so
-     * [removeAccount] can clear the checkpoint for exactly the removed
-     * identity (#529): without this, a removed account would silently
-     * resurrect from the checkpoint on the next engine construction. Also
-     * consulted by [detachPersistedAccount] to recover the exact restored
-     * registration to detach. */
-    private val checkpointLock = Any()
-    private var checkpointedPubkey: String? = null
-    private var restoredRegistration: NMPAccountRegistration? = null
-
-    init {
-        try {
-            localAccountStore?.loadSecretKey()?.let { secretKey ->
-                val ffiRegistration = nmpRethrowing { ffi.addAccount(secretKey) }
-                val registration = NMPAccountRegistration(ffiRegistration)
-                nmpRethrowing { ffi.setActiveAccount(registration.publicKey) }
-                synchronized(checkpointLock) {
-                    checkpointedPubkey = registration.publicKey
-                    restoredRegistration = registration
-                }
-            }
-        } catch (error: Throwable) {
-            ffi.shutdown()
-            throw error
-        }
-    }
-
-    // MARK: - Identity (P3; multi-account)
-
-    /** Generate and register a brand-new local account (#588) -- the
-     * NMP-owned door for a clean-start client that has no existing secret
-     * material to hand in. Composes one keygen-only FFI call with the
-     * existing [addAccount], so it inherits that method's save-with-rollback
-     * choreography and checkpoint tracking wholesale rather than a second,
-     * parallel registration pipeline. Mirrors [addAccount]'s own "does not
-     * activate" semantics -- call [setActiveAccount] for that. */
-    fun generateAccount(): NMPAccountRegistration = addAccount(ffiGenerateAccountSecretKey())
-
-    /** Register an account from its secret key (hex or bech32 `nsec`). The
-     * key crosses this boundary exactly once and lives engine-side from
-     * this point on. When an [NMPLocalAccountCheckpoint] was explicitly
-     * configured, NMP also checkpoints it for restart restoration. Returns
-     * an opaque exact-registration proof whose [NMPAccountRegistration.publicKey]
-     * identifies the account. Does NOT make the account active -- call
-     * [setActiveAccount] for that. */
-    fun addAccount(secretKey: String): NMPAccountRegistration {
-        val ffiRegistration = nmpRethrowing { ffi.addAccount(secretKey) }
-        try {
-            localAccountStore?.saveSecretKey(secretKey)
-        } catch (persistenceError: Throwable) {
-            try {
-                if (!nmpRethrowing { ffi.removeAccount(ffiRegistration) }) {
-                    persistenceError.addSuppressed(
-                        IllegalStateException("exact account rollback was already stale"),
-                    )
-                }
-            } catch (rollbackError: Throwable) {
-                persistenceError.addSuppressed(rollbackError)
-            }
-            throw persistenceError
-        }
-        if (localAccountStore != null) {
-            synchronized(checkpointLock) {
-                checkpointedPubkey = ffiRegistration.publicKey()
-                // This account -- not whatever the init-restore path
-                // installed -- now owns the checkpoint; a later
-                // `detachPersistedAccount()` must not fire against a
-                // registration the checkpoint no longer (solely) reflects.
-                restoredRegistration = null
-            }
-        }
-        return NMPAccountRegistration(ffiRegistration)
-    }
-
-    /** Remove only the installation proven by [registration]. The proof
-     * remains reusable. When the removal succeeds and [registration] proves
-     * the identity currently held by the configured
-     * [NMPLocalAccountCheckpoint] checkpoint, NMP also deletes that
-     * checkpoint (#529) -- a removed account never resurrects on the next
-     * engine construction. A stale proof (`false` return) or a proof for a
-     * different identity leaves the checkpoint untouched. */
-    fun removeAccount(registration: NMPAccountRegistration): Boolean {
-        val removed = nmpRethrowing { ffi.removeAccount(registration.ffi) }
-        if (removed) {
-            synchronized(checkpointLock) {
-                if (checkpointedPubkey == registration.publicKey) {
-                    localAccountStore?.clear()
-                    checkpointedPubkey = null
-                    restoredRegistration = null
-                }
-            }
-        }
-        return removed
-    }
-
-    /** Detach exactly the local account this engine restored from its
-     * configured checkpoint at construction (#589). Delegates to
-     * [removeAccount], inheriting its checkpoint-clear behavior verbatim.
-     *
-     * Returns `false` -- and removes nothing -- when there is no exact
-     * restored registration left to detach: no account was restored at
-     * construction, a previous [detachPersistedAccount] or [removeAccount]
-     * call already spent it, a later [addAccount] has since overwritten the
-     * checkpoint with a different installation, or [clearPersistedAccount]
-     * was called directly (it also spends the tracked restored registration
-     * -- after that call the live restored signer can only be removed by
-     * shutting down the engine, never by a later [detachPersistedAccount]
-     * call). */
-    fun detachPersistedAccount(): Boolean {
-        val registration = synchronized(checkpointLock) {
-            restoredRegistration?.takeIf { checkpointedPubkey == it.publicKey }
-        } ?: return false
-        return removeAccount(registration)
-    }
+    /** The complete set of known accounts and its current reactive selection. */
+    val session: NMPSession = NMPSession(ffi)
 
     /** Install one AUTH policy bound to [publicKey], returning its exact removal proof. */
     fun addAuthPolicy(
@@ -246,26 +122,10 @@ class NMPEngine(
     fun removeAuthPolicy(registration: NMPAuthPolicyRegistration): Boolean =
         nmpRethrowing { ffi.removeAuthPolicy(registration.ffi) }
 
-    /** Re-root every reactive query AND the active signing capability
-     * together onto `pubkey` (`null` -> logged-out / read-only browsing). */
-    fun setActiveAccount(pubkey: String?) = nmpRethrowing { ffi.setActiveAccount(pubkey) }
-
-    /** The Rust-owned account currently rooting reactive identity and writes. */
-    fun activeAccount(): String? = nmpRethrowing { ffi.activeAccount() }
-
-    /** Sign one exact event through the active signer without accepting or
+    /** Sign one exact event through the current account's provider without accepting or
      * publishing a write. */
     suspend fun signEvent(event: NMPUnsignedEvent): NMPSignedEvent =
         com.nmp.sdk.signEvent(ffi, event)
-
-    /** Remove the plaintext checkpoint. The live signer remains until close. */
-    fun clearPersistedAccount() {
-        synchronized(checkpointLock) {
-            localAccountStore?.clear()
-            checkpointedPubkey = null
-            restoredRegistration = null
-        }
-    }
 
     // MARK: - Read noun
 
@@ -335,7 +195,7 @@ class NMPEngine(
     // nmp-native:if nip02
     // MARK: - NIP-02 (following)
 
-    /** Observe whether the active account follows [target] through the
+    /** Observe whether the current account follows [target] through the
      * NMP-owned NIP-02 resource. This is NMP's protocol projection, not an
      * app-maintained boolean. See `Following.kt`'s own doc for the
      * conflation/teardown discipline. */

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpReceiptStream};
+use nmp_ffi::session::{FfiPrivateKey, FfiPublicKey};
 use nmp_ffi::types::{
     FfiIdentity, FfiReceiptReattachment, FfiRelayState, FfiSigningState, FfiWriteFact,
     FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
@@ -43,13 +44,16 @@ async fn next_status(stream: &Arc<NmpReceiptStream>) -> Option<FfiWriteFact> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn receipt_detached_before_terminal_reattaches_full_durable_prefix_from_the_store() {
-    let engine = NmpEngine::new(NmpEngineConfig::default()).expect("engine builds");
+    let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine builds");
     let keys = nostr::Keys::generate();
     engine
-        .set_active_account(Some(keys.public_key().to_hex()))
+        .add_public_key_account(
+            FfiPublicKey::from_bytes(keys.public_key().to_bytes().to_vec()).unwrap(),
+            true,
+        )
         .expect("activate account");
 
-    // A durable write. With no signer capability attached yet it parks in a
+    // A durable write. With no signing provider configured yet it parks in a
     // retained `Signing { AwaitingSigner }` steady state.
     let receipt = engine
         .publish(FfiWriteIntent {
@@ -76,7 +80,7 @@ async fn receipt_detached_before_terminal_reattaches_full_durable_prefix_from_th
     //
     // (#1237: acceptance is `publish` returning Ok, not a stream item, so the
     // park itself is now the first fact. The fact that must accrue AFTER the
-    // detach is therefore the signature, driven by attaching the signer below.)
+    // detach is therefore the signature, driven by configuring the provider below.)
     let parked = FfiWriteFact::Signing {
         state: FfiSigningState::AwaitingSigner {
             pubkey: keys.public_key().to_hex(),
@@ -85,11 +89,15 @@ async fn receipt_detached_before_terminal_reattaches_full_durable_prefix_from_th
     assert_eq!(next_status(&receipt).await, Some(parked.clone()));
     drop(receipt);
 
-    // Advance the write past the detach point: the signer arrives, so the
+    // Advance the write past the detach point: the account's provider becomes
+    // available, so the
     // `Signed` fact accrues while NO consumer is attached.
     engine
-        .add_account(keys.secret_key().to_secret_hex())
-        .expect("register the signer for the frozen identity");
+        .add_private_key_account(
+            FfiPrivateKey::from_bytes(keys.secret_key().to_secret_bytes().to_vec()).unwrap(),
+            false,
+        )
+        .expect("configure the provider for the frozen account");
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Reattach through a FRESH stream. It replays the durable prefix from the
@@ -258,10 +266,13 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
         receipt_id
     };
 
-    let engine = NmpEngine::new(NmpEngineConfig {
-        store_path: Some(path.to_string_lossy().into_owned()),
-        ..NmpEngineConfig::default()
-    })
+    let engine = NmpEngine::new(
+        NmpEngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..NmpEngineConfig::default()
+        },
+        None,
+    )
     .expect("open engine over seeded receipt");
     let stream = match engine
         .reattach_receipt(receipt_id)

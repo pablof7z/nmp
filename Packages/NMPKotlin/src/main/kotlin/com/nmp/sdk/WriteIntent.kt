@@ -98,7 +98,7 @@ sealed class WriteRouting {
  * event NMP stamps, freezes and signs itself. The kind is the one thing it
  * cannot invent, so the kind is the one thing it demands; the account it
  * publishes as comes from the write's identity (see
- * [NMPEngine.setActiveAccount] and [WriteIntent.identity]), never
+ * [NMPSession.makeCurrent] and [WriteIntent.identity]), never
  * from the payload, and [Event.createdAt] is stamped at acceptance unless
  * you state one -- state one and it is kept exactly.
  *
@@ -160,7 +160,7 @@ sealed class WritePayload {
 
 /** The identity one write publishes under (`FfiIdentity` mirror). Exactly
  * two words, and neither of them is an absence: [Active] is a positive
- * instruction ("whoever is the active account when this is accepted"),
+ * instruction ("whoever is the current account when this is accepted"),
  * which is why there is no third "unset" state here or anywhere else.
  *
  * On a [WritePayload.Event] payload the identity SELECTS the author -- a
@@ -177,10 +177,10 @@ sealed class WritePayload {
  * synchronously from `publish`): bech32 is how something is shown to a
  * person or received from one, so an app that took an npub from a paste box
  * decodes it there -- with `decodeNostrEntity` -- and hands NMP a key.
- * Naming a pubkey with no registered signer is NOT an error: the write
- * parks as [SigningState.AwaitingSigner] until that capability attaches.
+ * Naming a pubkey with no signing provider is NOT an error: the write
+ * parks as [SigningState.AwaitingSigner] until that capability becomes available.
  * Acceptance pins the resolved key either way, so a later
- * [NMPEngine.setActiveAccount] cannot retarget the write. */
+ * [NMPSession.makeCurrent] cannot retarget the write. */
 sealed class Identity {
     object Active : Identity()
 
@@ -207,8 +207,8 @@ sealed class Identity {
  * majority of writes publish as the logged-in account, and saying so costs
  * nothing. [SigningState.AwaitingSigner.pubkey] (#47 Unit B) is the
  * exact frozen identity parked -- the key [Identity.Explicit] named, else
- * the account active at publish time -- never the (possibly different)
- * currently active account. */
+ * the account current at publish time -- never the (possibly different)
+ * currently selected account. */
 data class WriteIntent(
     val payload: WritePayload,
     val routing: WriteRouting,
@@ -251,12 +251,12 @@ data class WriteIntent(
 /** The signing state of the WHOLE write -- one signature, one author, one
  * answer. */
 sealed class SigningState {
-    /** No registered signer answers for [pubkey] (64-char hex) -- the exact
-     * identity FROZEN at acceptance, never whoever is active now. Re-armed
-     * only by attaching a signer for THIS key, and re-emitted verbatim on
+    /** No signing provider answers for [pubkey] (64-char hex) -- the exact
+     * identity FROZEN at acceptance, never whoever is current now. Re-armed
+     * only when the signing provider for THIS key becomes available, and re-emitted verbatim on
      * restart replay.
      *
-     * **No clock ever ends this.** A device whose signer is simply not
+     * **No clock ever ends this.** A provider that is simply not
      * plugged in yet is not a device whose write failed; the app's own
      * decision is the only other exit, and it is two calls: cancel the
      * write, then remove the terminal queue entry it leaves behind.

@@ -139,8 +139,8 @@ enum class StalledWriteStage {
     /** No destination could be computed. */
     UNROUTABLE,
 
-    /** No signer answers for the author this write was FROZEN to -- never
-     * the mutable active account. */
+    /** No signing provider answers for the author this write was FROZEN to -- never
+     * the mutable current account. */
     UNSIGNABLE,
 
     /** Destinations exist and none of them is working. */

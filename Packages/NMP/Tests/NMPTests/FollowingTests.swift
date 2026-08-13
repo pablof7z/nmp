@@ -13,7 +13,7 @@ final class FollowingTests: XCTestCase {
             return XCTFail("NMP must project the signed-out state without relay I/O")
         }
 
-        XCTAssertNil(snapshot.activePubkey)
+        XCTAssertNil(snapshot.currentPubkey)
         XCTAssertEqual(snapshot.target, Self.target)
         XCTAssertEqual(snapshot.relationship, .unknown)
         XCTAssertEqual(snapshot.availability, .signedOut)

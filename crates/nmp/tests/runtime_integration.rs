@@ -424,7 +424,7 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     handle
         .add_signer(local_signer(&a))
         .expect("local signer has a public key");
-    handle.set_active_account(Some(a.public_key()));
+    handle.set_current_account(Some(a.public_key()));
 
     // $myFollows shape: kind:1 authored by whoever `a`'s kind:3 contact
     // list (#p-projected) currently names -- identical shape to M1's own
@@ -1500,7 +1500,7 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "remove_publish_queue_entry",
         "remove_signer",
         "request_rows",
-        "set_active_account",
+        "set_current_account",
         "shutdown",
         "sign_event",
         "sign_event_with_completion",
@@ -1555,7 +1555,7 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
         ),
     )
     .expect("test engine thread construction");
-    handle.set_active_account(Some(keys.public_key()));
+    handle.set_current_account(Some(keys.public_key()));
     let tracked = handle
         .publish(WriteIntent {
             payload: WritePayload::Event(nmp_grammar::EventBuilder {
@@ -1642,7 +1642,7 @@ fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery()
         ),
     )
     .expect("test engine thread construction");
-    handle.set_active_account(Some(keys.public_key()));
+    handle.set_current_account(Some(keys.public_key()));
 
     let original = handle
         .publish(WriteIntent {

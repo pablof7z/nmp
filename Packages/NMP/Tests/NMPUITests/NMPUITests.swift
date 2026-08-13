@@ -289,7 +289,7 @@ final class NMPUITests: XCTestCase {
 
     func testFollowButtonBodyAcceptsOnlyProjectedStateAndATap() {
         let snapshot = NMPFollowingSnapshot(
-            activePubkey: String(repeating: "01", count: 32),
+            currentPubkey: String(repeating: "01", count: 32),
             target: String(repeating: "02", count: 32),
             relationship: .following,
             availability: .ready,

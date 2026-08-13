@@ -34,11 +34,8 @@ fn engine_over(path: &std::path::Path, keys: &Keys) -> Engine {
     })
     .expect("engine opens over the store");
     engine
-        .add_account(&keys.secret_key().to_secret_hex())
-        .expect("register the signing capability");
-    engine
-        .set_active_account(Some(keys.public_key()))
-        .expect("select the account");
+        .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
+        .expect("register the provider and select its account");
     engine
 }
 

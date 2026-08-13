@@ -1,21 +1,12 @@
 package com.nmp.sdk
 
 import java.util.concurrent.atomic.AtomicBoolean
-import uniffi.nmp_ffi.FfiAccountRegistration
 import uniffi.nmp_ffi.FfiAuthPolicyCallback
 import uniffi.nmp_ffi.FfiAuthPolicyCompletion
 import uniffi.nmp_ffi.FfiAuthPolicyCompletionException
 import uniffi.nmp_ffi.FfiAuthPolicyOutcome
 import uniffi.nmp_ffi.FfiAuthPolicyRegistration
 import uniffi.nmp_ffi.FfiAuthPolicyRequest
-
-/** Opaque proof for one exact local-account installation. */
-class NMPAccountRegistration internal constructor(
-    internal val ffi: FfiAccountRegistration,
-) {
-    /** The installed account's hex public key. The capability instance stays opaque. */
-    val publicKey: String = ffi.publicKey()
-}
 
 /** Opaque proof for one exact AUTH-policy installation. */
 class NMPAuthPolicyRegistration internal constructor(

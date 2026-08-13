@@ -188,23 +188,24 @@ publish(draft)                    // signer for currentPubkey
 publish(draft, as: identityRef)   // explicit override
 ```
 
-NMP resolves the default signer registered for `$currentPubkey`. An override is
-for podcast identities, disposable keys, delegated identities, and similar
-cases. The selected author/signer identity is frozen at `Accepted`; later
-changes to `$currentPubkey` cannot redirect an outstanding intent.
+NMP resolves the configured provider for `$currentPubkey`. An override is for
+podcast identities, delegated identities, and similar cases. The selected
+author identity is frozen at `Accepted`; later changes to `$currentPubkey`
+cannot redirect an outstanding intent.
 
 When the signer is unavailable, the durable intent becomes
-`AwaitingSigner(pubkey)` and remains pending until a matching signer is attached
-or the app explicitly cancels it. NMP persists the obligation, not raw secret
-material. Platform SDKs should provide standard secure signer providers backed
-by platform facilities; apps own identity import/removal/backup UX and may
-supply custom remote or hardware providers.
+`AwaitingSigner(pubkey)` and remains pending until that account's provider is
+available or the app explicitly cancels it. Account membership and provider
+configuration survive provider unavailability; a disconnected remote signer
+is still the same known account. NMP's event store persists the obligation,
+not raw secret material. Whole-session export is a separate sensitive value
+whose storage, import/removal, and backup UX belong to the app.
 
 ### 3.3 Durable delivery and retry ownership
 
 A durable intent remains live until explicit cancellation, a terminal
 signer/protocol failure, protocol expiry, or the required per-relay outcomes are
-recorded. Temporary signer, network, relay, or AUTH unavailability never
+recorded. Signer, network, relay, or AUTH unavailability never
 silently closes it.
 
 There is one retry owner per domain:
