@@ -179,7 +179,7 @@ class NIP22Test {
     fun offlineSignerDurableAcceptanceAndCorrelationReattachment() =
         runBlocking {
             NMPEngine(
-                NMPConfig(nip65 = NIP65Config(indexerRelays = listOf("wss://indexer.example"))),
+                NMPConfig(outboxRouting = OutboxRoutingConfig(indexers = listOf("wss://indexer.example"))),
             ).use { engine ->
                 engine.setActiveAccount(author)
 
@@ -265,7 +265,7 @@ class NIP22Test {
     fun durableAcceptanceMakesOneCanonicalPendingCommentVisibleThroughTheQueryPath() =
         runBlocking {
             NMPEngine(
-                NMPConfig(nip65 = NIP65Config(indexerRelays = listOf("wss://indexer.example"))),
+                NMPConfig(outboxRouting = OutboxRoutingConfig(indexers = listOf("wss://indexer.example"))),
             ).use { engine ->
                 engine.setActiveAccount(author)
 

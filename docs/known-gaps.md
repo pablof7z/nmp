@@ -577,11 +577,16 @@ about current code:
   capstone starts through `Engine::new` with only an indexer, independently
   witnesses Alice-scoped kind:10002 acquisition before any content-relay
   contact, then witnesses the discovered kind:1 request and public row without
-  using the indexer as a content fallback (#1077). Native apps select `nip65`
-  in the same manifest as every other family and supply app-owned indexers
-  through `NIP65Config`; the generated FFI/Swift/Kotlin surface and native
-  library come from that exact Cargo selection. A controlled-relay FFI
-  capstone proves cold kind:10002 discovery reaches the learned outbox.
+  using the indexer as a content fallback (#1077). Native apps add the
+  outbox-routing capability in the same manifest as every other family and
+  supply app-owned `indexers` through `OutboxRoutingConfig`; the generated
+  FFI/Swift/Kotlin surface and native library come from that exact Cargo
+  selection. Controlled prepared Swift and Kotlin products each start cold
+  against an exact three-relay topology: the configured indexer receives the
+  author-scoped kind:10002 query, the learned outbox alone receives the write,
+  and the undeclared relay records no contact. Feature-off products contain no
+  outbox-routing config or automatic-routing case, and a selected config with
+  an empty indexer list is a typed construction refusal.
   **Remaining gap:** the
   explicit kind:10002 bootstrap-publication helper is still direct-Rust only
   (#764); native apps must not hand-roll that separate operation.

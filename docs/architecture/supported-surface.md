@@ -16,13 +16,15 @@ matching Swift/Kotlin wrappers are materialized. `native/features.toml` is the
 machine-readable surface catalog. The build tool contains no protocol-family
 branches and NMP publishes no per-family or per-combination binary matrix.
 
-Build selection and runtime authority remain separate. Selecting `nip65`
-exposes `NIP65Config`/`FfiNip65Config`; a nonempty app-owned indexer list
-enables automatic author-route discovery, and an empty list is refused. A
-selected build may construct an explicit-routing-only engine by omitting that
-runtime provider, but any `Auto` write then receives a typed pre-acceptance
-refusal with no durable residue. A build that does not select `nip65` has no
-`Auto` routing case at all. NMP supplies no hidden indexer relay.
+Build selection and runtime authority remain separate. Adding the app-facing
+outbox-routing capability exposes `OutboxRoutingConfig` and its
+`FfiOutboxRoutingConfig` projection. A nonempty app-owned `indexers` list
+enables automatic author-route discovery; an empty list is a typed construction
+refusal. A selected build may construct an explicit-routing-only engine by
+omitting `outboxRouting`, but any `Auto` write then receives a typed
+pre-acceptance refusal with no durable residue. A build that does not select
+outbox routing has no `Auto` routing case at all. NMP supplies no hidden
+indexer relay.
 
 NIP-22 comment composition is projected, but it does not become an Engine
 capability. `nmp-nip22` owns the kind:1111/NIP-73 schema and returns the

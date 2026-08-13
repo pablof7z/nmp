@@ -63,8 +63,8 @@ enum class RetryCause {
  * at the door with `NMPError`.
  *
  * nmp-native:if nip65
- * [Auto] asks the selected NIP-65 assembly to discover author-write and
- * recipient-read routes. An engine constructed without NIP-65 runtime
+ * [Auto] asks the selected outbox-routing capability to discover author-write
+ * and recipient-read routes. An engine constructed without outbox-routing
  * indexers refuses it before durable acceptance.
  * nmp-native:endif */
 sealed class WriteRouting {

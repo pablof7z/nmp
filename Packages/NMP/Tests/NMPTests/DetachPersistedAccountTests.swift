@@ -173,7 +173,7 @@ final class DetachPersistedAccountTests: XCTestCase {
         let database = fixture.root.appendingPathComponent("nmp.redb")
         let config = NMPConfig(
             storePath: database.path,
-            nip65: NIP65Config(indexerRelays: ["wss://indexer.example"])
+            outboxRouting: OutboxRoutingConfig(indexers: ["wss://indexer.example"])
         )
         let cachedKind: UInt16 = 30_333
 
