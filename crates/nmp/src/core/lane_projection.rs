@@ -163,6 +163,39 @@ impl<S: EventStore> EngineCore<S> {
         }
     }
 
+    /// Rebuild one semantic owner's volatile projection from the exact lanes
+    /// installed by the atomic current-generation transition.
+    ///
+    /// Unlike ordinary lane bootstrap, this must not reconcile the current
+    /// E2 lane state against retained E1 attempt history. The predecessor
+    /// attempts are valid historical evidence, while the current event id is
+    /// the fence that decides which physical lanes may run now.
+    pub(super) fn recover_semantic_generation_lanes(
+        &mut self,
+        intent_id: IntentId,
+        event_id: EventId,
+    ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
+        let lanes = match self.resolver.store().recover_publish_queue_lanes(intent_id) {
+            Ok(lanes) => lanes,
+            Err(error) => {
+                self.lane_projection_unprovable = true;
+                return Err(error);
+            }
+        };
+        if lanes.iter().any(|lane| lane.key.event_id != event_id) {
+            self.lane_projection_unprovable = true;
+            return Err(PersistenceError::invariant(
+                "semantic lane recovery found a non-current event generation",
+            ));
+        }
+        if let Some(id) = self.intent_receipts.get(&intent_id).copied() {
+            self.replace_lane_projection(id, &lanes);
+        } else {
+            self.lane_projection_unprovable = true;
+        }
+        Ok(lanes)
+    }
+
     /// Record (or re-arm) the retryable gap left by a failed bootstrap.
     ///
     /// The conservative retention taken at the failure is only safe because

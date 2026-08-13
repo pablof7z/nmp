@@ -1698,7 +1698,8 @@ impl<S: EventStore> EngineCore<S> {
                 if let Some(pending) = self.pending.get_mut(&id) {
                     pending.durable_routes = durable_relays.clone();
                 }
-                match self.bootstrap_projected_lanes(intent_id, Some(&durable_relays)) {
+                let event_id = self.pending[&id].frozen.id;
+                match self.recover_semantic_generation_lanes(intent_id, event_id) {
                     Ok(lanes) => {
                         self.open_bootstrapped_lanes(id, signing_pubkey, lanes, &mut effects)
                     }
@@ -4478,13 +4479,11 @@ impl<S: EventStore> EngineCore<S> {
         if !projection_missing || durable_routes.is_empty() {
             return;
         }
-        match self.bootstrap_projected_lanes(intent_id, Some(&durable_routes)) {
+        let event_id = self.pending[&id].frozen.id;
+        match self.recover_semantic_generation_lanes(intent_id, event_id) {
             Ok(lanes) => self.open_fresh_lanes(id, signing_pubkey, lanes, effects),
-            Err(_) => {
-                // This is the only read that can prove which successor lanes
-                // exist, so retain workers conservatively until the ordinary
-                // bootstrap retry closes the gap.
-                self.lane_relay_index_degraded = true;
+            Err(error) => {
+                self.record_store_failure(&error);
             }
         }
     }

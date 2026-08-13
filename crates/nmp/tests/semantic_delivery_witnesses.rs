@@ -58,7 +58,10 @@ fn contact_list(keys: &Keys, at: u64, content: &str, people: &[PublicKey]) -> no
         .expect("fixture contact list signs")
 }
 
-fn pinned_contact_lists(relay: &ScriptedRelay, author: PublicKey) -> LiveQuery {
+fn pinned_contact_lists(
+    relays: impl IntoIterator<Item = nostr::RelayUrl>,
+    author: PublicKey,
+) -> LiveQuery {
     LiveQuery::single(
         Demand::new(
             Filter {
@@ -66,7 +69,7 @@ fn pinned_contact_lists(relay: &ScriptedRelay, author: PublicKey) -> LiveQuery {
                 authors: Some(nmp::Binding::Literal(BTreeSet::from([author.to_hex()]))),
                 ..Filter::default()
             },
-            SourceAuthority::Pinned(BTreeSet::from([relay.url.clone()])),
+            SourceAuthority::Pinned(relays.into_iter().collect()),
             AccessContext::Public,
         )
         .expect("one pinned source is valid"),
@@ -193,7 +196,10 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
         .add_replaceable_materializer([6; 16], [7; 16], AddPeople)
         .expect("semantic capability registers");
     let subscription = engine
-        .observe(pinned_contact_lists(&relay_two, author.public_key()), None)
+        .observe(
+            pinned_contact_lists([relay_two.url.clone()], author.public_key()),
+            None,
+        )
         .expect("contact list observation opens");
     let mut rows = BTreeMap::new();
     let base_row = wait_for_row(&subscription, &mut rows, |row| row.id() == base.id);
@@ -373,7 +379,10 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
         .add_replaceable_materializer([16; 16], [17; 16], AddPeople)
         .expect("semantic capability registers");
     let subscription = engine
-        .observe(pinned_contact_lists(&source, author.public_key()), None)
+        .observe(
+            pinned_contact_lists([source.url.clone()], author.public_key()),
+            None,
+        )
         .expect("contact list observation opens");
     let mut rows = BTreeMap::new();
     let base_row = wait_for_row(&subscription, &mut rows, |row| row.id() == base.id);
@@ -485,4 +494,115 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
     relay_b.shutdown();
     source.shutdown();
     indexer.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn source_session_replacement_wakes_every_signed_successor_destination() {
+    let relay_one = ScriptedRelay::start(&RelayConfig::default()).await;
+    let mut relay_two = ScriptedRelay::start(&RelayConfig::default()).await;
+    let relay_two_url = relay_two.url.clone();
+    let relay_two_port = relay_two.port();
+
+    let author = Keys::generate();
+    let alice = Keys::generate().public_key();
+    let initial_time = Timestamp::now().as_secs().saturating_sub(20);
+    let base = contact_list(&author, initial_time, "base", &[]);
+    relay_one.seed_signed_event(&base).await;
+
+    let engine = Engine::new(EngineConfig::default()).expect("engine opens");
+    engine
+        .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
+        .expect("local author account registers");
+    let materializer = engine
+        .add_replaceable_materializer([26; 16], [27; 16], AddPeople)
+        .expect("semantic capability registers");
+    let source_relays = [relay_one.url.clone(), relay_two_url.clone()];
+    let subscription = engine
+        .observe(
+            pinned_contact_lists(source_relays.clone(), author.public_key()),
+            None,
+        )
+        .expect("the two-relay source observation opens");
+    let mut rows = BTreeMap::new();
+    let base_row = wait_for_row(&subscription, &mut rows, |row| row.id() == base.id);
+
+    let receipt = engine
+        .publish(WriteIntent {
+            payload: materializer
+                .operation(
+                    &base_row,
+                    &base_row,
+                    ReplaceableSourcePolicy::Continuing,
+                    alice.to_bytes().to_vec(),
+                )
+                .expect("the body-complete operation composes"),
+            routing: WriteRouting::Explicit(source_relays.to_vec()),
+            identity: Identity::Active,
+            correlation: None,
+        })
+        .expect("the operation enters custody");
+    let e1 = wait_for_row(&subscription, &mut rows, |row| row.id() == receipt.event_id);
+    let relays = BTreeSet::from([relay_one.url.clone(), relay_two.url.clone()]);
+    for relay in [&relay_one, &relay_two] {
+        assert!(
+            relay
+                .wait_wire_event_id_count(&e1.id().to_hex(), 1, SETTLE)
+                .await,
+            "the first complete generation reaches {}",
+            relay.url
+        );
+    }
+    assert_no_settled_fact(&wait_for_generation_relay_facts(
+        &receipt.statuses,
+        e1.id(),
+        &relays,
+    ));
+
+    let newer = contact_list(&author, initial_time + 5, "relay-two", &[]);
+    relay_two.disconnect().await;
+    relay_two = ScriptedRelay::start_on_port(
+        relay_two_port,
+        &RelayConfig {
+            query_delay: Some(Duration::from_millis(250)),
+            ..RelayConfig::default()
+        },
+    )
+    .await;
+    assert_eq!(relay_two.url, relay_two_url);
+    relay_two.seed_signed_event(&newer).await;
+    let e2 = wait_for_row(&subscription, &mut rows, |row| {
+        row.id() != e1.id()
+            && row.content() == "relay-two"
+            && matches!(row.signature(), RowSignature::Signed(_))
+    });
+
+    for relay in [&relay_one, &relay_two] {
+        assert!(
+            relay
+                .wait_wire_event_id_count(&e2.id().to_hex(), 1, SETTLE)
+                .await,
+            "the signed E2 successor reaches {}; wire={:?}; queue={:?}",
+            relay.url,
+            relay.wire_record(),
+            engine.publish_queue(None, u8::MAX)
+        );
+        relay
+            .wait_wire_quiet(Duration::from_millis(250), SETTLE)
+            .await;
+        assert_eq!(
+            relay
+                .wire_record()
+                .event_ids
+                .iter()
+                .filter(|candidate| *candidate == &e2.id().to_hex())
+                .count(),
+            1,
+            "E2 is published exactly once to {}",
+            relay.url
+        );
+    }
+
+    engine.shutdown();
+    relay_one.shutdown();
+    relay_two.shutdown();
 }
