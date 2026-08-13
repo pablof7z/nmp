@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # #916: local and CI builds must select one exact compiler, Cargo, Clippy, and
-# rustfmt. A floating nightly or a root/surface/version mismatch fails closed.
+# rustfmt. A floating nightly or a root/version-oracle mismatch fails closed.
 
 set -euo pipefail
 
@@ -8,7 +8,7 @@ SCRIPT_PATH=${BASH_SOURCE[0]}
 SCRIPT_DIR=${SCRIPT_PATH%/*}
 [[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
 source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
-require_commands cargo grep rustc rustup sed || exit 2
+require_commands cargo rustc rustup sed || exit 2
 
 if [[ -n ${1:-} ]]; then
   [[ $# -eq 1 ]] || {
@@ -22,7 +22,6 @@ else
 fi
 
 TOOLCHAIN_FILE="$ROOT/rust-toolchain.toml"
-SURFACE_ENV="$ROOT/tools/surface-toolchain.env"
 VERSION_ENV="$ROOT/tools/rust-toolchain-versions.env"
 
 fail() {
@@ -30,7 +29,7 @@ fail() {
   exit 1
 }
 
-for required_file in "$TOOLCHAIN_FILE" "$SURFACE_ENV" "$VERSION_ENV"; do
+for required_file in "$TOOLCHAIN_FILE" "$VERSION_ENV"; do
   [[ -f "$required_file" ]] ||
     fail "missing ${required_file#"$ROOT/"}"
 done
@@ -57,20 +56,16 @@ components=$(
 [[ $components == *'"clippy"'* ]] ||
   fail "rust-toolchain.toml must install clippy"
 
-surface_channel=$(
-  sed -nE 's/^SURFACE_RUST_TOOLCHAIN=([^[:space:]]+)$/\1/p' "$SURFACE_ENV"
-)
-[[ -n $surface_channel && $surface_channel != *$'\n'* ]] ||
-  fail "tools/surface-toolchain.env must declare one SURFACE_RUST_TOOLCHAIN"
-[[ $channel == "$surface_channel" ]] ||
-  fail "root pin $channel does not match surface pin $surface_channel"
-
 # shellcheck disable=SC1090
 source "$VERSION_ENV"
+: "${RUST_TOOLCHAIN:?missing RUST_TOOLCHAIN in $VERSION_ENV}"
 : "${RUSTC_VERSION:?missing RUSTC_VERSION in $VERSION_ENV}"
 : "${CARGO_VERSION:?missing CARGO_VERSION in $VERSION_ENV}"
 : "${CLIPPY_VERSION:?missing CLIPPY_VERSION in $VERSION_ENV}"
 : "${RUSTFMT_VERSION:?missing RUSTFMT_VERSION in $VERSION_ENV}"
+
+[[ $channel == "$RUST_TOOLCHAIN" ]] ||
+  fail "root pin $channel does not match version-oracle pin $RUST_TOOLCHAIN"
 
 pushd "$ROOT" >/dev/null
 active_line=$(rustup show active-toolchain)

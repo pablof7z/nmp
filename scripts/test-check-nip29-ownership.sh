@@ -358,8 +358,8 @@ expect_red "retired C7 q-reply composer" \
 restore_all
 
 taint Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt 'FfiGroupReplyParent'
-expect_red "superseded native surface" \
-  "superseded NIP-29 native surface reappeared" \
+expect_red "superseded native API" \
+  "superseded NIP-29 native API reappeared" \
   "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt"
 restore_all
 
