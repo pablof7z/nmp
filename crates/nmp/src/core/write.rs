@@ -2721,7 +2721,7 @@ impl<S: EventStore> EngineCore<S> {
         identity: Identity,
         correlation: Option<nmp_grammar::CorrelationToken>,
     ) -> Vec<Effect> {
-        let (instance, original_source, supplied_current, operation_bytes) =
+        let (instance, original_source, supplied_current, declared_source_policy, operation_bytes) =
             operation.into_registered_parts();
         let Some(registration) = self.replaceable_materializers.get(&instance) else {
             return self.refuse_publish(PublishError::ReplaceableOperationRefused {
@@ -2846,10 +2846,26 @@ impl<S: EventStore> EngineCore<S> {
             *blake3::hash(&[b"nmp-exact-source-v1".as_slice(), &registration.program].concat())
                 .as_bytes(),
         );
-        let source_access = AccessContextId(
-            *blake3::hash(&[b"nmp-public-source-v1".as_slice(), &registration.format].concat())
-                .as_bytes(),
-        );
+        let source_access = match &declared_source_policy {
+            nmp_grammar::ReplaceableSourcePolicy::Continuing
+            | nmp_grammar::ReplaceableSourcePolicy::Finite {
+                access: AccessContext::Public,
+                ..
+            } => AccessContextId(
+                *blake3::hash(&[b"nmp-public-source-v1".as_slice(), &registration.format].concat())
+                    .as_bytes(),
+            ),
+            nmp_grammar::ReplaceableSourcePolicy::Finite {
+                access: AccessContext::Nip42(pubkey),
+                ..
+            } => {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(b"nmp-source-access-v1");
+                hasher.update(&[1]);
+                hasher.update(pubkey.as_bytes());
+                AccessContextId(*hasher.finalize().as_bytes())
+            }
+        };
         let source = snapshot
             .as_ref()
             .map(|snapshot| snapshot.current.source_revision.evidence().clone())
@@ -2959,6 +2975,37 @@ impl<S: EventStore> EngineCore<S> {
             .as_ref()
             .map(|snapshot| snapshot.operations.iter().map(|op| op.intent_id).collect())
             .unwrap_or_default();
+        let source_policy = match declared_source_policy {
+            nmp_grammar::ReplaceableSourcePolicy::Continuing => {
+                nmp_store::SemanticSourcePolicy::Continuing
+            }
+            nmp_grammar::ReplaceableSourcePolicy::Finite { relays, access } => {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(b"nmp-finite-source-round-v1");
+                hasher.update(&coordinate.kind.as_u16().to_be_bytes());
+                hasher.update(coordinate.public_key.as_bytes());
+                hasher.update(&(coordinate.identifier.len() as u64).to_be_bytes());
+                hasher.update(coordinate.identifier.as_bytes());
+                hasher.update(source_plan.0.as_slice());
+                hasher.update(source_access.0.as_slice());
+                for relay in &relays {
+                    let relay = relay.as_str().as_bytes();
+                    hasher.update(&(relay.len() as u64).to_be_bytes());
+                    hasher.update(relay);
+                }
+                let sources = relays
+                    .into_iter()
+                    .map(|relay| nmp_store::SemanticSource::new(relay, access))
+                    .collect();
+                nmp_store::SemanticSourcePolicy::Finite(
+                    nmp_store::FiniteSemanticSourceRound::new(
+                        nmp_store::SourceRoundId(*hasher.finalize().as_bytes()),
+                        sources,
+                    )
+                    .expect("registered operation rejects an empty finite source set"),
+                )
+            }
+        };
         let accept = AcceptWrite {
             payload: AcceptWritePayload::ReplaceableOperation(Box::new(SemanticAccept {
                 coordinate: coordinate.clone(),
@@ -2969,7 +3016,7 @@ impl<S: EventStore> EngineCore<S> {
                 expected_current_materialization: expected_materialization,
                 starting_source,
                 source,
-                source_policy: nmp_store::SemanticSourcePolicy::Continuing,
+                source_policy,
                 source_event: Some(source_event),
                 plan,
                 materialized: Some(MaterializationCandidate {

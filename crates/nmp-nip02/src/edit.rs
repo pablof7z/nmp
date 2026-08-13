@@ -1,7 +1,7 @@
 use nmp::{
     Engine, EventBuilder, Identity, RegisteredReplaceableMaterializer, ReplaceableMaterializer,
-    ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, Row, WriteIntent,
-    WritePayload, WriteRouting,
+    ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, ReplaceableSourcePolicy, Row,
+    WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_event_edit::{
     EventEditPlan, TagEdit, TagInsertion, TagItemPattern, TagItemSelector, TagRowPattern,
@@ -80,6 +80,7 @@ impl FollowWrites {
             .operation(
                 original_source,
                 current,
+                ReplaceableSourcePolicy::Continuing,
                 encode_follow_operation(target, change),
             )
             .map_err(|_| ComposeFollowError::InvalidOperation)?;

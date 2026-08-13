@@ -557,6 +557,123 @@ mod semantic_successor_tests {
     }
 
     #[test]
+    fn finite_source_policy_recovers_exact_pending_members_and_cannot_be_mixed() {
+        let author = Keys::generate();
+        let person = Keys::generate().public_key();
+        let source_relay = RelayUrl::parse("wss://semantic-source.example").unwrap();
+        let relay_a = RelayUrl::parse("wss://finite-a.example").unwrap();
+        let relay_b = RelayUrl::parse("wss://finite-b.example").unwrap();
+        let base = source(&author, 1, "base", &[]);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("finite-source-policy.redb");
+        let mut store = RedbStore::open(&path).unwrap();
+        store
+            .insert(
+                base.clone(),
+                RelayObserved::new(source_relay, Timestamp::from(1)),
+            )
+            .unwrap();
+        let mut core = EngineCore::new(store, 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        let instance = [5; 16];
+        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
+            instance,
+            program: [6; 16],
+            format: [7; 16],
+            materializer: Arc::new(AddPeople),
+        });
+        let original = UnsignedEvent::from(base.clone());
+        let finite_relays = BTreeSet::from([relay_a.clone(), relay_b.clone()]);
+        let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
+            instance,
+            original.clone(),
+            original.clone(),
+            nmp_grammar::ReplaceableSourcePolicy::Finite {
+                relays: finite_relays.clone(),
+                access: AccessContext::Public,
+            },
+            person.to_bytes().to_vec(),
+        )
+        .unwrap();
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(payload),
+            routing: WriteRouting::Explicit(vec![relay_a.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        let current_id = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::WriteAccepted(_, event_id) => Some(*event_id),
+                _ => None,
+            })
+            .expect("finite operation enters custody");
+        let coordinate = Coordinate {
+            kind: Kind::ContactList,
+            public_key: author.public_key(),
+            identifier: String::new(),
+        };
+        drop(core);
+
+        let reopened = RedbStore::open(&path).unwrap();
+        let recovered = reopened
+            .replaceable_operation_snapshot(&coordinate)
+            .unwrap()
+            .unwrap();
+        let nmp_store::SemanticSourcePolicy::Finite(round) = recovered.source_policy else {
+            panic!("finite declaration recovered as continuing");
+        };
+        assert_eq!(
+            round.sources,
+            finite_relays
+                .into_iter()
+                .map(|relay| {
+                    (
+                        nmp_store::SemanticSource::new(relay, AccessContext::Public),
+                        nmp_store::SemanticSourceMemberState::Pending,
+                    )
+                })
+                .collect(),
+            "the durable round must contain exactly the declared relay/access members"
+        );
+
+        let mut core = EngineCore::new(reopened, 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
+            instance,
+            program: [6; 16],
+            format: [7; 16],
+            materializer: Arc::new(AddPeople),
+        });
+        let current = core
+            .resolver
+            .store()
+            .query(&nostr::Filter::new().id(current_id))
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mixed = nmp_grammar::ReplaceableOperation::from_registered_parts(
+            instance,
+            original,
+            UnsignedEvent::from(current.event),
+            nmp_grammar::ReplaceableSourcePolicy::Continuing,
+            Keys::generate().public_key().to_bytes().to_vec(),
+        )
+        .unwrap();
+        let refused = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(mixed),
+            routing: WriteRouting::Explicit(vec![relay_b]),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        assert!(refused.iter().any(|effect| matches!(
+            effect,
+            Effect::PublishFailed(PublishError::ReplaceableOperationRefused { reason })
+                if reason.contains("IncompatibleSourcePolicy")
+        )));
+    }
+
+    #[test]
     fn newer_relay_sources_install_complete_successors_without_new_receipts() {
         let author = Keys::generate();
         let alice = Keys::generate().public_key();
@@ -603,6 +720,7 @@ mod semantic_successor_tests {
                 instance,
                 original.clone(),
                 current.clone(),
+                nmp_grammar::ReplaceableSourcePolicy::Continuing,
                 person.to_bytes().to_vec(),
             )
             .unwrap();
@@ -850,6 +968,7 @@ mod semantic_successor_tests {
             instance,
             original,
             UnsignedEvent::from(first_successor.event.clone()),
+            nmp_grammar::ReplaceableSourcePolicy::Continuing,
             erin.to_bytes().to_vec(),
         )
         .unwrap();

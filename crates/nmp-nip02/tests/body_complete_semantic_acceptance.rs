@@ -294,7 +294,12 @@ fn invalidated_registration_and_materializer_refusal_leave_no_custody() {
         .add_replaceable_materializer(*b"refuse-program00", *b"refuse-format-v1", AlwaysRefuse)
         .expect("refusing implementation registers");
     let payload = refusing
-        .operation(&original, &original, vec![1])
+        .operation(
+            &original,
+            &original,
+            nmp::ReplaceableSourcePolicy::Continuing,
+            vec![1],
+        )
         .expect("registration-bound payload composes");
     let refusal = match engine.publish(WriteIntent {
         payload,
