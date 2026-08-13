@@ -246,8 +246,9 @@ fn presence_renewals_leave_exactly_one_open_obligation() {
         "{RENEWALS} renewals at one address must leave one open obligation, not {}",
         open.len()
     );
+    let (frozen, _, _, _) = open[0].event_work().expect("ordinary event work");
     assert_eq!(
-        open[0].frozen.content, "online 199",
+        frozen.content, "online 199",
         "the surviving obligation is the newest renewal"
     );
 }

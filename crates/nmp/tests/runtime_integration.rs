@@ -1737,21 +1737,23 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
         let mut store = RedbStore::open(&path).unwrap();
         let outcome = store
             .accept_write(AcceptWrite {
-                frozen: nostr::Event::new(
-                    id,
-                    unsigned.pubkey,
-                    unsigned.created_at,
-                    unsigned.kind,
-                    unsigned.tags,
-                    unsigned.content,
-                    sentinel_signature(),
-                ),
-                replaceable_base: None,
-                monotonic_stamp: false,
+                payload: nmp_store::AcceptWritePayload::Event {
+                    frozen: Box::new(nostr::Event::new(
+                        id,
+                        unsigned.pubkey,
+                        unsigned.created_at,
+                        unsigned.kind,
+                        unsigned.tags,
+                        unsigned.content,
+                        sentinel_signature(),
+                    )),
+                    replaceable_base: None,
+                    monotonic_stamp: false,
+                    routing: "auto".into(),
+                    sig_state: IntentSigState::AwaitingSigner,
+                },
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
-                routing: "auto".into(),
-                sig_state: IntentSigState::AwaitingSigner,
                 accepted_at: Timestamp::now(),
                 correlation: None,
             })
