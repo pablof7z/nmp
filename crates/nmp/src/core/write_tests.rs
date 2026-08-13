@@ -762,8 +762,42 @@ mod semantic_successor_tests {
         core.handle(EngineMsg::SignerCompleted(
             e1_owner,
             e1_generation,
-            Ok(e1_signed),
+            Ok(e1_signed.clone()),
         ));
+        for (slot, destination) in [&destination_a, &destination_b].into_iter().enumerate() {
+            let session = RelaySessionKey::new(
+                destination.clone(),
+                AccessContext::Nip42(author.public_key()),
+            );
+            let handle = TransportRelayHandle {
+                slot: u32::try_from(slot).unwrap(),
+                generation: 1,
+            };
+            core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+            let released = core.handle(EngineMsg::AuthProbeReleased(handle, session.clone()));
+            let correlation = released
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::PublishEvent(candidate, event, correlation)
+                        if candidate == &session && event.id == e1_signed.id =>
+                    {
+                        Some(*correlation)
+                    }
+                    _ => None,
+                })
+                .expect("E1 starts on every destination");
+            core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written));
+            core.handle(EngineMsg::RelayFrame(
+                handle,
+                session.clone(),
+                RelayFrame::from(nostr::RelayMessage::ok(e1_signed.id, true, "saved")),
+            ));
+            core.handle(EngineMsg::RelayDisconnected(
+                handle,
+                session,
+                DisconnectReason::Closed,
+            ));
+        }
         let stale_generation = 9;
         let stale_unsigned = current.clone();
         let stale_signed = stale_unsigned.sign_with_keys(&author).unwrap();
