@@ -1,78 +1,45 @@
 # Testing review checklist
 
-Use this checklist for behavioral changes, test additions, scenario edits, and acceptance-harness work.
+Use only relevant sections.
 
-## Behavioral memory
+## Meaning
 
-- [ ] Did the user introduce a correction, contextual distinction, counterexample, forbidden consequence, or durability rule?
-- [ ] Is that nuance preserved in the canonical feature corpus?
-- [ ] Does the feature live under the behavioral domain rather than the edited crate?
-- [ ] Was wrong text corrected in place instead of contradicted by a new appendix or feature?
-- [ ] Do contrastive scenarios show both what changes and what must remain unchanged?
-- [ ] Does each scenario have one clear promise?
-- [ ] Is the prose free of unnecessary private Rust/table/helper vocabulary?
+- [ ] User corrections and contrasts are in the owning feature/`Rule`.
+- [ ] One scenario states one product promise in public/Nostr vocabulary.
+- [ ] Status and metadata are exact; unfinished work links one open issue.
+- [ ] Requested behavior runs normally, without an unrequested runtime gate.
 
-## Metadata and status
+## Evidence
 
-- [ ] Is `nmp:id` unique and stable?
-- [ ] Is status exactly `built`, `specified`, or `known-violation`?
-- [ ] Does every `built` scenario have evidence and a falsifier?
-- [ ] Does every `specified` scenario name the exact gap and issue?
-- [ ] Does every `known-violation` scenario link the repair issue?
-- [ ] Is every `@acceptance` scenario `built`?
-- [ ] Are evidence locators greppable and current?
+- [ ] Proof sits with the narrowest stable contract owner.
+- [ ] The named defect or disabled mechanism turns it red.
+- [ ] Broad spaces use property/model proof; facade/platform capstones add a
+      distinct consequence.
+- [ ] Locators resolve to enabled required-lane tests.
 
-## Evidence quality
+## Fixtures
 
-- [ ] Is the proof located with the narrowest stable contract that owns the guarantee?
-- [ ] Does the proof distinguish the scenario from its contrasting cases?
-- [ ] Did the test fail before the fix or under the stated mechanism-disable falsifier?
-- [ ] Could the named defect still exist while the test stays green?
-- [ ] Is a broad state space handled by property/model testing rather than manual examples?
-- [ ] Is there a facade capstone where the cross-component public consequence matters?
-- [ ] Are platform/native proofs present when the contract crosses FFI or platform lifecycle?
+- [ ] Setup stages causes, not the derived result.
+- [ ] Public claims use facade output or an independent witness, not private
+      state.
+- [ ] Build, identity, environment, time, ports, and processes are controlled
+      and cleaned up.
 
-## Fixture truthfulness
+## Context and distribution
 
-- [ ] Does setup stage real inputs rather than the derived result?
-- [ ] For discovery, is the route absent initially and learned from the intended protocol fact?
-- [ ] For durability, is state destroyed and reopened rather than merely read from the database?
-- [ ] For network effects, is there an independent relay/provider witness where practical?
-- [ ] Does the test avoid using a private handle to drive or observe a public facade claim?
-- [ ] Are exact binary/build, identity, environment, and fixture ownership controlled?
+- [ ] Demand, identity, source/role, access, request, evidence, bounds, lifecycle,
+      and write phase are distinguished where relevant.
+- [ ] Rows, selection, contact, EOSE, shortfall, and completion are not conflated.
+- [ ] Relevant restart, crash, reorder, duplicate, reconnect, ambiguity, and
+      stale-response schedules are covered.
+- [ ] Randomized failures are replayable and secret-scrubbed.
 
-## Routing and evidence context
+## Architecture and completion
 
-- [ ] Are literal, reactive, and derived demand distinguished?
-- [ ] Are explicit and default/frozen identities distinguished?
-- [ ] Are source provenance and relay roles explicit?
-- [ ] Are account, AUTH, session/capability epoch, filter/range, and limit scopes considered?
-- [ ] Is one source's EOSE kept separate from global completion?
-- [ ] Are empty rows kept separate from unknown, unavailable, limited, or shortfall states?
-- [ ] Are caller limits kept separate from engine-imposed caps?
-- [ ] Are selected sources kept separate from actual contacts and outcomes?
-
-## Distributed behavior
-
-- [ ] Is the claim classified as safety, liveness, durability, isolation, truthfulness, boundedness, or idempotence?
-- [ ] Are relevant crash points, reordering, duplication, reconnect, and stale-response schedules tested?
-- [ ] Is retry behavior safe under ACK ambiguity?
-- [ ] Are waits bounded by observable conditions rather than arbitrary sleeps?
-- [ ] Are randomized schedules replayable by seed and operation log?
-- [ ] Are failure artifacts retained and secrets scrubbed?
-- [ ] Does teardown prove no process, thread, port, file, or environment leakage?
-
-## Test architecture
-
-- [ ] Is requested behavior exercised on the normal runtime path, with no unrequested environment, config, rollout, experimental, or opt-in gate leaving it dormant?
-- [ ] Is the feature corpus acting as behavioral memory rather than a duplicate project plan?
-- [ ] Is GitHub still the owner of temporary implementation work?
-- [ ] Are mechanism tests kept in their owning crates?
-- [ ] Does the acceptance layer primarily depend on `nmp`, `nmp-test-support`, and external witnesses?
-- [ ] Are direct mechanism dependencies narrowly justified rather than used to bypass the facade?
-- [ ] Has redundant shell/Cucumber/Rust evidence been removed after equivalent coverage is proven?
-- [ ] Does CI expose acceptance, fault/persistence, parity/native, and live-probe roles clearly?
-
-## Final question
-
-- [ ] Would a future agent reading only the feature rule, scenarios, and evidence pointers understand the exact nuance the user established and know how to avoid reintroducing the wrong behavior?
+- [ ] Feature meaning, issue work, design rationale, and executable proof remain
+      separate owners.
+- [ ] Tests use existing owners; redundant harnesses/evidence are removed.
+- [ ] Required focused, crate, facade, fault, parity/native, and repository checks
+      pass; unrun live/platform proof is stated.
+- [ ] A future agent can recover the exact distinction and falsifier from the
+      feature metadata without reading chat.
