@@ -25,7 +25,7 @@ use super::publish_queue::{
 
 pub(crate) type PublishQueueRelayId = u32;
 
-pub(super) const PUBLISH_QUEUE_CODEC_VERSION: u64 = 3;
+pub(super) const PUBLISH_QUEUE_CODEC_VERSION: u64 = 4;
 pub(super) const PUBLISH_QUEUE_CODEC_VERSION_KEY: &[u8] = b"codec_version";
 pub(super) const NEXT_INTENT_ID_KEY: &[u8] = b"next_intent_id";
 pub(super) const NEXT_RECEIPT_ID_KEY: &[u8] = b"next_receipt_id";

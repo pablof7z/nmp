@@ -637,22 +637,6 @@ impl RedbStore {
             route_revision_range_rows: AtomicU64::new(0),
             #[cfg(test)]
             unstaged_lane_bootstraps: AtomicU64::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
-            semantic_coordinate_point_reads: AtomicU64::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
-            semantic_operation_bodies_examined: AtomicU64::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
-            semantic_operation_bodies_written: AtomicU64::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
-            semantic_operation_bodies_removed: AtomicU64::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
-            semantic_materializations_written: AtomicU64::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
-            semantic_materializations_removed: AtomicU64::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
-            semantic_commits: AtomicU64::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
-            semantic_recovery_rows: AtomicU64::new(0),
         };
         super::publish_queue_ops::maintain_terminal_receipts(&mut store).map_err(|error| {
             RedbStoreOpenError::Database(redb::Error::Corrupted(format!(
