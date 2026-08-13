@@ -148,13 +148,17 @@ Feature: Publishing tells the truth, per relay
     # nmp:id=WRITES-STORE-RECOVERY-002
     # nmp:status=built
     # nmp:evidence=rust:nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once
-    # nmp:falsifier=Repeat the uncertain acceptance without correlation readback; the retained publish queue contains two receipts instead of one.
+    # nmp:falsifier=Expose the interrupted pre-signed acceptance as Signed, create a second receipt on exact retry, or let divergent or invalid bytes promote it; the recovered row lies or durable identity splits.
     @ledger-9 @ledger-15
     Scenario: An uncertain acceptance is resolved from durable identity
       Given a write has an app-owned correlation token
       And its acceptance transaction reports an uncertain storage failure
       When the same Engine reconstructs its durable state
       Then NMP reads the correlation token back before repeating acceptance
+      And the committed body remains pending without signature bytes
+      When the exact valid signed event is retried with that correlation token
+      Then that same receipt and row are promoted to signed
+      And divergent or invalid retry bytes cannot promote the row
       And exactly one durable receipt owns the write
 
     # nmp:id=WRITES-STORE-RECOVERY-003
