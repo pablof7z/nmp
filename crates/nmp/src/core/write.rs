@@ -4081,11 +4081,17 @@ impl<S: EventStore> EngineCore<S> {
         let mut signature_promoted = false;
         {
             let intent_id = pending.intent_id;
+            let promotion_target = match &pending.target {
+                PendingWriteTarget::Event => PromotionTarget::Event(intent_id),
+                PendingWriteTarget::ReplaceableOperation(target) => {
+                    PromotionTarget::ReplaceableMaterialization(target.clone())
+                }
+            };
             if !pending.already_signed {
                 match self
                     .resolver
                     .store_mut()
-                    .promote_signed(PromotionTarget::Event(intent_id), verified)
+                    .promote_signed(promotion_target, verified)
                 {
                     Ok(PromoteOutcome::Promoted { co_signed, .. }) => {
                         signature_promoted = true;
@@ -4113,13 +4119,30 @@ impl<S: EventStore> EngineCore<S> {
                         );
                         return;
                     }
-                    Ok(PromoteOutcome::MaterializationPromoted { .. })
-                    | Ok(PromoteOutcome::Stale) => {
-                        self.fail_and_compensate(
-                            id,
-                            "event promotion returned a replaceable-operation outcome".to_string(),
-                            effects,
-                        );
+                    Ok(PromoteOutcome::MaterializationPromoted { members, .. }) => {
+                        signature_promoted = true;
+                        // A semantic materialization has one physical signer
+                        // request but every contributing operation owns the
+                        // resulting evidence. The store promoted all member
+                        // journals atomically; advance their in-memory
+                        // projections without invoking promotion again.
+                        for member in members {
+                            if let Some((receipt_id, member_pending)) = self
+                                .pending
+                                .iter_mut()
+                                .find(|(_, candidate)| candidate.intent_id == member)
+                            {
+                                member_pending.already_signed = true;
+                                if *receipt_id != id {
+                                    co_receipts.push(*receipt_id);
+                                }
+                            }
+                        }
+                    }
+                    Ok(PromoteOutcome::Stale) => {
+                        // The callback names a generation that lost its CAS
+                        // race. It is historical evidence only: never fail,
+                        // compensate, or otherwise settle the successor.
                         return;
                     }
                     Err(err) => {
@@ -4140,8 +4163,25 @@ impl<S: EventStore> EngineCore<S> {
             }
         }
 
-        for co_receipt in co_receipts {
-            self.on_signed(co_receipt, event.clone(), effects);
+        let semantic_promotion = matches!(
+            self.pending.get(&id).map(|pending| &pending.target),
+            Some(PendingWriteTarget::ReplaceableOperation(_))
+        );
+        if semantic_promotion {
+            for co_receipt in &co_receipts {
+                if let Some(pending) = self.pending.get_mut(co_receipt) {
+                    pending.event_id = Some(event.id);
+                    pending.frozen = event.clone();
+                }
+                effects.push(Effect::EmitReceipt(
+                    *co_receipt,
+                    WriteFact::Signing(SigningState::Signed { event_id: event.id }),
+                ));
+            }
+        } else {
+            for co_receipt in co_receipts {
+                self.on_signed(co_receipt, event.clone(), effects);
+            }
         }
 
         if let Some(pending) = self.pending.get_mut(&id) {
