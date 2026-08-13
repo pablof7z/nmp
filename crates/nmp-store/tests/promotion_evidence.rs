@@ -15,8 +15,9 @@
 //! nothing is mutated at all.
 
 use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, EventStore, InsertOutcome, IntentSigState,
-    MemoryStore, PersistenceFault, PromoteOutcome, ReceiptState, RedbStore, RefuseReason,
+    sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, EventStore, InsertOutcome,
+    IntentSigState, MemoryStore, PersistenceFault, PromoteOutcome, PromotionTarget,
+    PublishQueueReceiptPayload, PublishQueueWork, ReceiptState, RedbStore, RefuseReason,
     RelayObserved, SigState, VerifiedSignature,
 };
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -57,13 +58,15 @@ fn evidence(signed: &Event) -> VerifiedSignature {
 
 fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
-        frozen,
-        replaceable_base: None,
-        monotonic_stamp: false,
+        payload: AcceptWritePayload::Event {
+            frozen,
+            replaceable_base: None,
+            monotonic_stamp: false,
+            routing: "auto".to_string(),
+            sig_state: IntentSigState::Pending,
+        },
         expected_pubkey,
         signing_identity_ref: "local".to_string(),
-        routing: "auto".to_string(),
-        sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
         correlation: None,
     }
@@ -99,7 +102,7 @@ fn a_valid_signature_from_another_intent_is_refused() {
             .expect("B journals a receipt");
 
         let error = store
-            .promote_signed(intent_b, evidence(&signed_a))
+            .promote_signed(PromotionTarget::Event(intent_b), evidence(&signed_a))
             .expect_err("a signature over another intent's event must be refused");
         assert_eq!(error.fault(), PersistenceFault::Invariant);
 
@@ -114,13 +117,18 @@ fn a_valid_signature_from_another_intent_is_refused() {
             rows[0].provenance.local.as_ref().unwrap().sig_state,
             SigState::Pending
         );
-        assert_eq!(
-            store
-                .reattach_receipt(receipt_b)
-                .expect("receipt readable")
-                .expect("receipt retained")
-                .state,
-            ReceiptState::Accepted,
+        let receipt = store
+            .reattach_receipt(receipt_b)
+            .expect("receipt readable")
+            .expect("receipt retained");
+        assert!(
+            matches!(
+                receipt.payload,
+                PublishQueueReceiptPayload::Event {
+                    state: ReceiptState::Accepted,
+                    ..
+                }
+            ),
             "a refused promotion does not advance the receipt"
         );
         // `MemoryStore::recover_publish_queue` is empty by construction
@@ -128,11 +136,22 @@ fn a_valid_signature_from_another_intent_is_refused() {
         // wherever there is a journal to read.
         for record in store.recover_publish_queue().expect("recover") {
             if record.intent_id == intent_b {
-                assert_eq!(record.sig_state, IntentSigState::Pending);
-                assert!(
-                    record.displaced.is_none(),
-                    "a refused promotion drops no recovery state"
-                );
+                match record.work {
+                    PublishQueueWork::Event {
+                        sig_state,
+                        displaced,
+                        ..
+                    } => {
+                        assert_eq!(sig_state, IntentSigState::Pending);
+                        assert!(
+                            displaced.is_none(),
+                            "a refused promotion drops no recovery state"
+                        );
+                    }
+                    PublishQueueWork::ReplaceableOperation { .. } => {
+                        panic!("expected ordinary event recovery work")
+                    }
+                }
             }
         }
     });
@@ -209,7 +228,10 @@ fn a_foreign_signature_cannot_commit_a_pending_kind5_to_permanent_tombstones() {
         .expect("deletion journals an intent");
 
         let error = store
-            .promote_signed(deletion_intent, evidence(&unrelated_signed))
+            .promote_signed(
+                PromotionTarget::Event(deletion_intent),
+                evidence(&unrelated_signed),
+            )
             .expect_err("a foreign signature must not commit the deletion");
         assert_eq!(error.fault(), PersistenceFault::Invariant);
 
@@ -236,7 +258,10 @@ fn a_foreign_signature_cannot_commit_a_pending_kind5_to_permanent_tombstones() {
         assert!(
             matches!(
                 store
-                    .promote_signed(deletion_intent, evidence(&signed_deletion))
+                    .promote_signed(
+                        PromotionTarget::Event(deletion_intent),
+                        evidence(&signed_deletion)
+                    )
                     .expect("promote persistence"),
                 PromoteOutcome::Promoted { .. }
             ),

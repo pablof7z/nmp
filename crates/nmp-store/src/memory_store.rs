@@ -3,9 +3,9 @@
 //! (`nmp-store/tests/store_contract.rs`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(test)]
 use std::sync::atomic::AtomicU64;
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(test)]
 use std::sync::atomic::Ordering;
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use std::sync::Mutex;
@@ -19,24 +19,22 @@ use crate::coverage::{
     coverage_key, merge_interval, shrink_after_eviction, window_erase, GcVictimIndex,
 };
 use crate::semantic_edit::{
-    plan_accept, plan_rematerialize, promote_current, recovered, validate_active_receipts,
-    validate_resource_state, OperationId, SemanticAccept, SemanticEditReceipt, SemanticEditStore,
-    SemanticPromotion, SemanticPromotionOutcome, SemanticRematerialize, SemanticResourceState,
-    SemanticStoreError,
+    plan_accept, plan_rematerialize, recovered, validate_resource_state, SemanticAccept,
+    SemanticInstallOutcome, SemanticRematerialize, SemanticResourceState,
 };
 #[cfg(any(test, feature = "bench-instrumentation"))]
 use crate::SemanticStoreCounters;
 use crate::{
-    handoff_may_have_occurred, AcceptOutcome, AcceptWrite, AuthDenial, CloseIntentOutcome,
-    CompensateOutcome, CoverageInterval, CoverageKey, EventStore, GcReport, GcRetentionSet,
-    InsertOutcome, IntentId, IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome,
-    Provenance, PublishQueueAttempt, PublishQueueAttemptDetails, PublishQueueAttemptHandoff,
-    PublishQueueAttemptOutcome, PublishQueueAttemptTransient, PublishQueueDeadline,
-    PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueIntent, PublishQueueLane,
-    PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
-    PublishQueueRouteRevision, PublishQueueTerminalOutcome, PublishQueueTransientCause,
-    ReceiptState, RefuseReason, RelayObserved, RetiredIntent, RetractReason, SigState, StoredEvent,
-    VerifiedSignature,
+    handoff_may_have_occurred, AcceptOutcome, AcceptWrite, AcceptWritePayload, AuthDenial,
+    CloseIntentOutcome, CompensateOutcome, CoverageInterval, CoverageKey, EventStore, GcReport,
+    GcRetentionSet, InsertOutcome, IntentId, IntentSigState, LocalOrigin, PersistenceError,
+    PromoteOutcome, PromotionTarget, Provenance, PublishQueueAttempt, PublishQueueAttemptDetails,
+    PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueAttemptTransient,
+    PublishQueueDeadline, PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueIntent,
+    PublishQueueLane, PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState,
+    PublishQueueReceipt, PublishQueueRouteRevision, PublishQueueTerminalOutcome,
+    PublishQueueTransientCause, ReceiptState, RefuseReason, RelayObserved, RetiredIntent,
+    RetractReason, SigState, StoredEvent, VerifiedSignature,
 };
 
 /// One `PUBLISH_QUEUE_INTENTS` row (M3 publish-queue unit, crashsafe-accepted-2-3-
@@ -56,12 +54,43 @@ use crate::{
 #[derive(Debug, Clone)]
 struct PublishQueueIntentRecord {
     receipt_id: u64,
-    frozen: Event,
+    work: PublishQueueIntentRecordWork,
     expected_pubkey: PublicKey,
     signing_identity_ref: String,
-    routing: String,
-    sig_state: IntentSigState,
     accepted_at: Timestamp,
+}
+
+#[derive(Debug, Clone)]
+enum PublishQueueIntentRecordWork {
+    Event {
+        frozen: Event,
+        routing: String,
+        sig_state: IntentSigState,
+    },
+    ReplaceableOperation {
+        coordinate: nostr::nips::nip01::Coordinate,
+        materialization: Option<crate::MaterializationWork>,
+    },
+}
+
+impl PublishQueueIntentRecord {
+    fn event(&self) -> Option<(&Event, IntentSigState)> {
+        match &self.work {
+            PublishQueueIntentRecordWork::Event {
+                frozen, sig_state, ..
+            } => Some((frozen, *sig_state)),
+            PublishQueueIntentRecordWork::ReplaceableOperation { .. } => None,
+        }
+    }
+
+    fn event_mut(&mut self) -> Option<(&mut Event, &mut IntentSigState)> {
+        match &mut self.work {
+            PublishQueueIntentRecordWork::Event {
+                frozen, sig_state, ..
+            } => Some((frozen, sig_state)),
+            PublishQueueIntentRecordWork::ReplaceableOperation { .. } => None,
+        }
+    }
 }
 
 /// A single provisional kind:5 suppression claim (architecture review
@@ -212,11 +241,6 @@ pub struct MemoryStore {
     /// inactive, so delayed signatures can never match a recreated body.
     semantic_materialization_high_water:
         BTreeMap<nostr::nips::nip01::Coordinate, crate::MaterializationId>,
-    /// Independent, retention-owned operation receipts. Resolved operation
-    /// bodies can disappear from `semantic_resources` without erasing these.
-    semantic_receipts: BTreeMap<OperationId, SemanticEditReceipt>,
-    /// Monotonic semantic-operation id; never inferred from open resources.
-    next_semantic_operation_id: u64,
     #[cfg(any(test, feature = "bench-instrumentation"))]
     semantic_counters: Mutex<SemanticStoreCounters>,
     /// Every still-open kind:5 intent's OWN suppression claims (see
@@ -492,11 +516,13 @@ impl MemoryStore {
             intent_id,
             PublishQueueIntentRecord {
                 receipt_id,
-                frozen,
+                work: PublishQueueIntentRecordWork::Event {
+                    frozen,
+                    routing,
+                    sig_state,
+                },
                 expected_pubkey,
                 signing_identity_ref,
-                routing,
-                sig_state,
                 accepted_at,
             },
         );
@@ -534,10 +560,12 @@ impl MemoryStore {
             PublishQueueReceipt {
                 receipt_id,
                 intent_id: Some(intent_id),
-                frozen_id,
+                payload: crate::PublishQueueReceiptPayload::Event {
+                    event_id: frozen_id,
+                    state: ReceiptState::Accepted,
+                },
                 expected_pubkey,
                 accepted_at: Some(accepted_at),
-                state: ReceiptState::Accepted,
             },
         );
         // #591: journal the caller's correlation token alongside the
@@ -556,7 +584,11 @@ impl MemoryStore {
             .publish_queue_receipts
             .get_mut(&receipt_id)
             .expect("receipt state transition requires a retained receipt");
-        receipt.state = state;
+        let crate::PublishQueueReceiptPayload::Event { state: current, .. } = &mut receipt.payload
+        else {
+            panic!("operation receipt cannot take an ordinary delivery state")
+        };
+        *current = state;
     }
 
     fn remove_receipt(&mut self, receipt_id: u64) -> Option<PublishQueueReceipt> {
@@ -578,6 +610,560 @@ impl MemoryStore {
                 .expect("terminal receipt byte accounting underflow");
         }
         Some(receipt)
+    }
+
+    fn semantic_receipt_state(
+        update: &crate::semantic_edit::SemanticReceiptUpdate,
+        materialization: Option<&crate::MaterializationWork>,
+    ) -> crate::ReplaceableOperationReceiptState {
+        match &update.resolution {
+            crate::OperationResolution::Contributing => {
+                crate::ReplaceableOperationReceiptState::Contributing {
+                    current: update.current.and_then(|current| {
+                        materialization
+                            .filter(|work| work.receipt.materialization == current)
+                            .map(|work| work.receipt)
+                    }),
+                }
+            }
+            crate::OperationResolution::Resolved => {
+                crate::ReplaceableOperationReceiptState::Resolved
+            }
+            crate::OperationResolution::Cancelled => {
+                crate::ReplaceableOperationReceiptState::Cancelled
+            }
+            crate::OperationResolution::Refused(reason) => {
+                crate::ReplaceableOperationReceiptState::Refused(reason.clone())
+            }
+        }
+    }
+
+    fn apply_semantic_plan(
+        &mut self,
+        coordinate: nostr::nips::nip01::Coordinate,
+        intent_id: Option<IntentId>,
+        receipt_id: Option<u64>,
+        expected_pubkey: PublicKey,
+        signing_identity_ref: Option<String>,
+        accepted_at: Option<Timestamp>,
+        correlation: Option<nmp_grammar::CorrelationToken>,
+        plan: crate::semantic_edit::SemanticTransitionPlan,
+    ) -> Result<SemanticInstallOutcome, PersistenceError> {
+        let new_intent_id = intent_id;
+        let candidate_work = plan.candidate.as_ref().and_then(|candidate| {
+            plan.next
+                .as_ref()
+                .and_then(|next| next.generation.as_ref())
+                .map(|generation| crate::MaterializationWork {
+                    receipt: crate::MaterializationReceipt {
+                        materialization: generation.materialization,
+                        sig_state: candidate.sig_state.intent_sig_state(),
+                    },
+                    routing: candidate.routing.clone(),
+                })
+        });
+        let candidate_event = plan.candidate.as_ref().map(|candidate| {
+            let unsigned = &candidate.event;
+            Event::new(
+                unsigned
+                    .id
+                    .expect("semantic planner validated candidate id"),
+                unsigned.pubkey,
+                unsigned.created_at,
+                unsigned.kind,
+                unsigned.tags.clone(),
+                unsigned.content.clone(),
+                crate::sentinel_signature(),
+            )
+        });
+
+        // Validate every existing member journal and receipt before mutating
+        // canonical state. MemoryStore cannot roll back a partial mutation.
+        let mut existing = BTreeMap::new();
+        for update in &plan.receipt_updates {
+            if Some(update.intent_id) == new_intent_id {
+                continue;
+            }
+            let record = self
+                .publish_queue_intents
+                .get(&update.intent_id)
+                .ok_or_else(|| PersistenceError::invariant("semantic member journal missing"))?;
+            let (journal_coordinate, prior) = match &record.work {
+                PublishQueueIntentRecordWork::ReplaceableOperation {
+                    coordinate,
+                    materialization,
+                } => (coordinate, materialization.clone()),
+                PublishQueueIntentRecordWork::Event { .. } => {
+                    return Err(PersistenceError::invariant(
+                        "semantic member has ordinary event journal",
+                    ))
+                }
+            };
+            if journal_coordinate != &coordinate {
+                return Err(PersistenceError::invariant(
+                    "semantic member has different coordinate",
+                ));
+            }
+            let receipt = self
+                .publish_queue_receipts
+                .get(&record.receipt_id)
+                .ok_or_else(|| PersistenceError::invariant("semantic member receipt missing"))?;
+            if receipt.intent_id != Some(update.intent_id)
+                || !matches!(
+                    &receipt.payload,
+                    crate::PublishQueueReceiptPayload::ReplaceableOperation {
+                        coordinate: receipt_coordinate,
+                        ..
+                    } if receipt_coordinate == &coordinate
+                )
+            {
+                return Err(PersistenceError::invariant(
+                    "semantic member receipt does not match journal",
+                ));
+            }
+            existing.insert(update.intent_id, (record.receipt_id, prior));
+        }
+
+        let address =
+            address_key_for_coordinate(&coordinate).expect("semantic planner validates coordinate");
+        let current_winner = self.addr_index.get(&address).copied();
+        if let Some(event) = &candidate_event {
+            let replacing = plan
+                .removed_generation
+                .as_ref()
+                .map(|old| old.materialization.event_id);
+            if self.by_id.contains_key(&event.id) && replacing != Some(event.id) {
+                return Ok(SemanticInstallOutcome::Refused(
+                    crate::SemanticRefusal::MaterializationEventIdCollision,
+                ));
+            }
+            if self.tombstone_refuses(event) {
+                return Ok(SemanticInstallOutcome::Refused(
+                    crate::SemanticRefusal::MaterializationTombstoned,
+                ));
+            }
+        }
+        let predecessor = if let Some(old) = &plan.removed_generation {
+            if current_winner != Some(old.materialization.event_id) {
+                return Ok(SemanticInstallOutcome::Stale);
+            }
+            let row = self
+                .by_id
+                .get(&old.materialization.event_id)
+                .ok_or_else(|| {
+                    PersistenceError::invariant("current materialization has no canonical body")
+                })?;
+            if row
+                .provenance
+                .local
+                .as_ref()
+                .is_none_or(|local| local.owners != old.members)
+            {
+                return Err(PersistenceError::invariant(
+                    "materialization owner membership diverged",
+                ));
+            }
+            Some(old.materialization.event_id)
+        } else if plan.candidate.is_some()
+            && plan
+                .previous
+                .as_ref()
+                .and_then(|previous| previous.generation.as_ref())
+                .is_none()
+        {
+            let source = plan
+                .next
+                .as_ref()
+                .expect("candidate has next resource")
+                .source_revision
+                .evidence()
+                .qualified;
+            match (source, current_winner) {
+                (crate::QualifiedSource::Absent, None) => None,
+                (
+                    crate::QualifiedSource::Event {
+                        event_id,
+                        created_at,
+                    },
+                    Some(actual),
+                ) if event_id == actual
+                    && self
+                        .by_id
+                        .get(&actual)
+                        .is_some_and(|row| row.event.created_at == created_at) =>
+                {
+                    Some(actual)
+                }
+                _ => return Ok(SemanticInstallOutcome::Stale),
+            }
+        } else {
+            None
+        };
+
+        if let Some(event_id) = predecessor {
+            if plan.removed_generation.is_some() || plan.candidate.is_some() {
+                let removed = self
+                    .by_id
+                    .remove(&event_id)
+                    .expect("address index points to canonical source row");
+                self.addr_index.remove(&address);
+                self.unindex_expiration(&removed);
+                self.unindex_event(&removed);
+            }
+        }
+
+        if let (Some(event), Some(generation)) = (
+            candidate_event.as_ref(),
+            plan.next.as_ref().and_then(|next| next.generation.as_ref()),
+        ) {
+            let stored = StoredEvent {
+                event: event.clone(),
+                provenance: Provenance::local_origin(LocalOrigin {
+                    owners: generation.members.clone(),
+                    sig_state: SigState::Pending,
+                }),
+            };
+            self.index_expiration(&stored);
+            self.index_event(&stored);
+            self.by_id.insert(event.id, stored);
+            self.addr_index.insert(
+                address_key_for(&event).expect("semantic candidate is replaceable/addressable"),
+                event.id,
+            );
+        }
+
+        match &plan.next {
+            Some(next) => {
+                self.semantic_resources
+                    .insert(coordinate.clone(), next.clone());
+            }
+            None => {
+                self.semantic_resources.remove(&coordinate);
+            }
+        }
+        if let Some(high_water) = plan.materialization_high_water {
+            self.semantic_materialization_high_water
+                .insert(coordinate.clone(), high_water);
+        }
+
+        for update in &plan.receipt_updates {
+            let Some((existing_receipt_id, prior)) = existing.get(&update.intent_id) else {
+                continue;
+            };
+            let chosen = candidate_work
+                .as_ref()
+                .filter(|work| update.current == Some(work.receipt.materialization))
+                .cloned()
+                .or_else(|| {
+                    prior
+                        .clone()
+                        .filter(|work| update.current == Some(work.receipt.materialization))
+                });
+            let state = Self::semantic_receipt_state(update, chosen.as_ref());
+            self.publish_queue_receipts
+                .get_mut(existing_receipt_id)
+                .expect("semantic member receipt preflighted")
+                .payload = crate::PublishQueueReceiptPayload::ReplaceableOperation {
+                coordinate: coordinate.clone(),
+                state,
+            };
+            if matches!(update.resolution, crate::OperationResolution::Contributing) {
+                let record = self
+                    .publish_queue_intents
+                    .get_mut(&update.intent_id)
+                    .expect("semantic member journal preflighted");
+                record.work = PublishQueueIntentRecordWork::ReplaceableOperation {
+                    coordinate: coordinate.clone(),
+                    materialization: chosen,
+                };
+            } else {
+                self.publish_queue_intents.remove(&update.intent_id);
+            }
+        }
+
+        if let (Some(intent_id), Some(receipt_id), Some(signing_identity_ref), Some(accepted_at)) =
+            (intent_id, receipt_id, signing_identity_ref, accepted_at)
+        {
+            let current = plan
+                .receipt_updates
+                .iter()
+                .find(|update| update.intent_id == intent_id)
+                .and_then(|update| update.current);
+            self.publish_queue_intents.insert(
+                intent_id,
+                PublishQueueIntentRecord {
+                    receipt_id,
+                    work: PublishQueueIntentRecordWork::ReplaceableOperation {
+                        coordinate: coordinate.clone(),
+                        materialization: candidate_work
+                            .clone()
+                            .filter(|work| current == Some(work.receipt.materialization)),
+                    },
+                    expected_pubkey,
+                    signing_identity_ref,
+                    accepted_at,
+                },
+            );
+            let update = plan
+                .receipt_updates
+                .iter()
+                .find(|update| update.intent_id == intent_id)
+                .expect("accept planner emits new operation receipt");
+            self.publish_queue_receipts.insert(
+                receipt_id,
+                PublishQueueReceipt {
+                    receipt_id,
+                    intent_id: Some(intent_id),
+                    expected_pubkey,
+                    accepted_at: Some(accepted_at),
+                    payload: crate::PublishQueueReceiptPayload::ReplaceableOperation {
+                        coordinate: coordinate.clone(),
+                        state: Self::semantic_receipt_state(update, candidate_work.as_ref()),
+                    },
+                },
+            );
+            if let Some(correlation) = correlation {
+                self.publish_queue_correlations
+                    .insert(correlation.as_ref().to_owned(), receipt_id);
+            }
+        }
+
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        {
+            let mut counters = self.semantic_counters.lock().expect("semantic counters");
+            counters.coordinate_point_reads += 1;
+            counters.operation_bodies_examined += plan
+                .previous
+                .as_ref()
+                .map_or(0, |state| state.operations.len() as u64);
+            counters.operation_bodies_written += plan
+                .next
+                .as_ref()
+                .map_or(0, |state| state.operations.len() as u64);
+            counters.operation_bodies_removed += plan
+                .previous
+                .as_ref()
+                .map_or(0, |state| state.operations.len() as u64);
+            counters.canonical_bodies_written += u64::from(plan.candidate.is_some());
+            counters.commits += 1;
+        }
+
+        let result = match plan.next {
+            None => SemanticInstallOutcome::Resolved,
+            Some(next) => {
+                let current = next.current();
+                if plan.candidate.is_some() {
+                    SemanticInstallOutcome::Installed {
+                        current,
+                        predecessor,
+                    }
+                } else {
+                    SemanticInstallOutcome::Waiting(current)
+                }
+            }
+        };
+        Ok(result)
+    }
+
+    fn accept_replaceable_operation(
+        &mut self,
+        expected_pubkey: PublicKey,
+        signing_identity_ref: String,
+        accepted_at: Timestamp,
+        correlation: Option<nmp_grammar::CorrelationToken>,
+        accept: SemanticAccept,
+    ) -> Result<AcceptOutcome, PersistenceError> {
+        if expected_pubkey != accept.coordinate.public_key {
+            return Ok(AcceptOutcome::ReplaceableOperationRefused(
+                crate::SemanticRefusal::InvalidCoordinate,
+            ));
+        }
+        let coordinate = accept.coordinate.clone();
+        let candidate_intent = IntentId(
+            self.next_intent_id
+                .checked_add(1)
+                .ok_or_else(|| PersistenceError::invariant("intent id exhausted"))?,
+        );
+        let candidate_receipt = self
+            .next_receipt_id
+            .checked_add(1)
+            .filter(|id| *id < (1u64 << 63))
+            .ok_or_else(|| PersistenceError::invariant("durable receipt id namespace exhausted"))?;
+        let plan = match plan_accept(
+            self.semantic_resources.get(&coordinate).cloned(),
+            self.semantic_materialization_high_water
+                .get(&coordinate)
+                .copied(),
+            candidate_intent,
+            accepted_at,
+            accept,
+        ) {
+            Ok(plan) => plan,
+            Err(refusal) => return Ok(AcceptOutcome::ReplaceableOperationRefused(refusal)),
+        };
+        let current = plan
+            .next
+            .as_ref()
+            .expect("accept planner retains new operation")
+            .current();
+        let installed = self.apply_semantic_plan(
+            coordinate,
+            Some(candidate_intent),
+            Some(candidate_receipt),
+            expected_pubkey,
+            Some(signing_identity_ref),
+            Some(accepted_at),
+            correlation,
+            plan,
+        )?;
+        if let SemanticInstallOutcome::Refused(refusal) = installed {
+            return Ok(AcceptOutcome::ReplaceableOperationRefused(refusal));
+        }
+        if matches!(installed, SemanticInstallOutcome::Stale) {
+            return Ok(AcceptOutcome::ReplaceableOperationRefused(
+                crate::SemanticRefusal::InvalidSourceRevision,
+            ));
+        }
+        self.next_intent_id = candidate_intent.0;
+        self.next_receipt_id = candidate_receipt;
+        Ok(AcceptOutcome::ReplaceableOperation {
+            intent_id: candidate_intent,
+            receipt_id: candidate_receipt,
+            current,
+        })
+    }
+
+    fn promote_replaceable_materialization(
+        &mut self,
+        coordinate: nostr::nips::nip01::Coordinate,
+        expected_source_revision: crate::SourceRevision,
+        expected_program_digest: crate::SemanticProgramDigest,
+        expected_materialization: crate::MaterializationId,
+        expected_event_id: EventId,
+        verified: VerifiedSignature,
+    ) -> Result<PromoteOutcome, PersistenceError> {
+        if verified.event_id() != expected_event_id {
+            return Err(PersistenceError::invariant(format!(
+                "promotion evidence verifies {} but materialization expects {expected_event_id}",
+                verified.event_id()
+            )));
+        }
+        let Some(resource) = self.semantic_resources.get(&coordinate) else {
+            return Ok(PromoteOutcome::Stale);
+        };
+        let Some(generation) = resource.generation.clone() else {
+            return Ok(PromoteOutcome::Stale);
+        };
+        if resource.source_revision != expected_source_revision
+            || crate::semantic_edit::semantic_program_digest(&resource.operations)
+                != expected_program_digest
+            || generation.materialization.materialization_id != expected_materialization
+            || generation.materialization.event_id != expected_event_id
+            || generation.source_revision != expected_source_revision
+            || generation.program_digest != expected_program_digest
+        {
+            return Ok(PromoteOutcome::Stale);
+        }
+        let address = address_key_for_coordinate(&coordinate)
+            .expect("persisted semantic coordinate is valid");
+        if self.addr_index.get(&address) != Some(&expected_event_id) {
+            return Ok(PromoteOutcome::Stale);
+        }
+        let row = self.by_id.get(&expected_event_id).ok_or_else(|| {
+            PersistenceError::invariant("current materialization canonical row is missing")
+        })?;
+        let Some(local) = row.provenance.local.as_ref() else {
+            return Err(PersistenceError::invariant(
+                "current materialization canonical row is not local",
+            ));
+        };
+        if local.owners != generation.members || local.sig_state == SigState::Signed {
+            return Ok(PromoteOutcome::Stale);
+        }
+        if row.event.sig != crate::sentinel_signature() {
+            return Err(PersistenceError::invariant(
+                "pending materialization carries a non-sentinel signature",
+            ));
+        }
+
+        let mut evidence = Vec::with_capacity(generation.members.len());
+        for member in &generation.members {
+            let intent = self.publish_queue_intents.get(member).ok_or_else(|| {
+                PersistenceError::invariant("materialization member journal is missing")
+            })?;
+            let work = match &intent.work {
+                PublishQueueIntentRecordWork::ReplaceableOperation {
+                    coordinate: journal_coordinate,
+                    materialization: Some(work),
+                } if journal_coordinate == &coordinate
+                    && work.receipt.materialization.materialization_id
+                        == expected_materialization
+                    && work.receipt.materialization.event_id == expected_event_id
+                    && work.receipt.sig_state != IntentSigState::Signed =>
+                {
+                    work.clone()
+                }
+                _ => return Ok(PromoteOutcome::Stale),
+            };
+            let receipt = self
+                .publish_queue_receipts
+                .get(&intent.receipt_id)
+                .ok_or_else(|| PersistenceError::invariant("materialization receipt is missing"))?;
+            if receipt.intent_id != Some(*member)
+                || receipt.expected_pubkey != intent.expected_pubkey
+                || receipt.accepted_at != Some(intent.accepted_at)
+                || !matches!(
+                    &receipt.payload,
+                    crate::PublishQueueReceiptPayload::ReplaceableOperation {
+                        coordinate: receipt_coordinate,
+                        state: crate::ReplaceableOperationReceiptState::Contributing {
+                            current: Some(current),
+                        },
+                    } if receipt_coordinate == &coordinate
+                        && current.materialization.materialization_id == expected_materialization
+                        && current.materialization.event_id == expected_event_id
+                        && current.sig_state != IntentSigState::Signed
+                )
+            {
+                return Ok(PromoteOutcome::Stale);
+            }
+            evidence.push((*member, intent.receipt_id, work));
+        }
+
+        let row = self
+            .by_id
+            .get_mut(&expected_event_id)
+            .expect("materialization canonical row preflighted");
+        row.event.sig = verified.signature();
+        row.provenance
+            .local
+            .as_mut()
+            .expect("materialization local provenance preflighted")
+            .sig_state = SigState::Signed;
+        let promoted = row.clone();
+        for (member, receipt_id, mut work) in evidence {
+            work.receipt.sig_state = IntentSigState::Signed;
+            self.publish_queue_intents
+                .get_mut(&member)
+                .expect("materialization journal preflighted")
+                .work = PublishQueueIntentRecordWork::ReplaceableOperation {
+                coordinate: coordinate.clone(),
+                materialization: Some(work.clone()),
+            };
+            self.publish_queue_receipts
+                .get_mut(&receipt_id)
+                .expect("materialization receipt preflighted")
+                .payload = crate::PublishQueueReceiptPayload::ReplaceableOperation {
+                coordinate: coordinate.clone(),
+                state: crate::ReplaceableOperationReceiptState::Contributing {
+                    current: Some(work.receipt),
+                },
+            };
+        }
+        Ok(PromoteOutcome::MaterializationPromoted {
+            row: Box::new(promoted),
+            members: generation.members.iter().copied().collect(),
+        })
     }
 
     fn terminal_receipt_logical_bytes(
@@ -602,10 +1188,9 @@ impl MemoryStore {
             .cloned();
         let record = PublishQueueReceiptRecord {
             intent_id: receipt.intent_id,
-            frozen_id: receipt.frozen_id,
             expected_pubkey: receipt.expected_pubkey,
             accepted_at: receipt.accepted_at,
-            state: receipt.state,
+            payload: receipt.payload.clone(),
             correlation: correlation.clone(),
             terminal_sequence: Some(terminal_sequence),
             terminal_at: Some(terminal_at),
@@ -1484,9 +2069,12 @@ impl MemoryStore {
         for owner_id in owners {
             self.publish_queue_displaced.remove(owner_id);
             if let Some(record) = self.publish_queue_intents.get_mut(owner_id) {
-                if record.sig_state != IntentSigState::Signed {
-                    record.sig_state = IntentSigState::Signed;
-                    record.frozen = canonical_event.clone();
+                if let Some((frozen, sig_state)) = record.event_mut() {
+                    if *sig_state == IntentSigState::Signed {
+                        continue;
+                    }
+                    *sig_state = IntentSigState::Signed;
+                    *frozen = canonical_event.clone();
                     transitioned.push(*owner_id);
                 }
             }
@@ -2008,16 +2596,31 @@ impl EventStore for MemoryStore {
 
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
         let AcceptWrite {
-            mut frozen,
-            replaceable_base,
-            monotonic_stamp,
+            payload,
             expected_pubkey,
             signing_identity_ref,
-            routing,
-            sig_state,
             accepted_at,
             correlation,
         } = accept;
+        if let AcceptWritePayload::ReplaceableOperation(operation) = payload {
+            return self.accept_replaceable_operation(
+                expected_pubkey,
+                signing_identity_ref,
+                accepted_at,
+                correlation,
+                operation,
+            );
+        }
+        let AcceptWritePayload::Event {
+            mut frozen,
+            replaceable_base,
+            monotonic_stamp,
+            routing,
+            sig_state,
+        } = payload
+        else {
+            unreachable!("replaceable operation returned above")
+        };
 
         // Refused at the door FIRST, same as `insert`: never journaled,
         // nothing to recover, and (R7 correction) neither an `IntentId`
@@ -2352,15 +2955,80 @@ impl EventStore for MemoryStore {
         Ok(outcome)
     }
 
+    fn replaceable_operation_snapshot(
+        &self,
+        coordinate: &nostr::nips::nip01::Coordinate,
+    ) -> Result<Option<crate::RecoveredSemanticResource>, PersistenceError> {
+        self.semantic_resources
+            .get(coordinate)
+            .cloned()
+            .map(|state| {
+                validate_resource_state(&state)?;
+                Ok(recovered(state))
+            })
+            .transpose()
+    }
+
+    fn install_replaceable_materialization(
+        &mut self,
+        rematerialize: SemanticRematerialize,
+    ) -> Result<SemanticInstallOutcome, PersistenceError> {
+        let coordinate = rematerialize.coordinate.clone();
+        let Some(previous) = self.semantic_resources.get(&coordinate).cloned() else {
+            return Ok(SemanticInstallOutcome::Stale);
+        };
+        if previous.last_materialization_id
+            != self
+                .semantic_materialization_high_water
+                .get(&coordinate)
+                .copied()
+        {
+            return Err(PersistenceError::invariant(
+                "semantic materialization high-water diverged from resource",
+            ));
+        }
+        let plan = match plan_rematerialize(previous, rematerialize) {
+            Ok(plan) => plan,
+            Err(crate::SemanticRefusal::InvalidSourceRevision) => {
+                return Ok(SemanticInstallOutcome::Stale)
+            }
+            Err(refusal) => return Ok(SemanticInstallOutcome::Refused(refusal)),
+        };
+        let author = coordinate.public_key;
+        self.apply_semantic_plan(coordinate, None, None, author, None, None, None, plan)
+    }
+
     fn promote_signed(
         &mut self,
-        intent_id: IntentId,
+        target: PromotionTarget,
         verified: VerifiedSignature,
     ) -> Result<PromoteOutcome, PersistenceError> {
+        let intent_id = match target {
+            PromotionTarget::Event(intent_id) => intent_id,
+            PromotionTarget::ReplaceableMaterialization {
+                coordinate,
+                expected_source_revision,
+                expected_program_digest,
+                expected_materialization,
+                expected_event_id,
+            } => {
+                return self.promote_replaceable_materialization(
+                    coordinate,
+                    expected_source_revision,
+                    expected_program_digest,
+                    expected_materialization,
+                    expected_event_id,
+                    verified,
+                )
+            }
+        };
         let Some(intent_record) = self.publish_queue_intents.get(&intent_id) else {
             return Ok(PromoteOutcome::NotFound);
         };
-        let frozen_id = intent_record.frozen.id;
+        let Some((journaled_event, journaled_sig_state)) = intent_record.event() else {
+            return Ok(PromoteOutcome::NotFound);
+        };
+        let frozen_id = journaled_event.id;
         // Intent binding (#768). `VerifiedSignature` proves one
         // `Event::verify` succeeded; it does NOT prove the event it
         // covered is the one THIS intent froze. Everything below is
@@ -2379,7 +3047,7 @@ impl EventStore for MemoryStore {
         // trait doc already promised "already-promoted returns NotFound";
         // this enforces it. Load-bearing for `AtMostOnce`: a second
         // silent transition here could let the caller re-publish.
-        if intent_record.sig_state == IntentSigState::Signed {
+        if journaled_sig_state == IntentSigState::Signed {
             return Ok(PromoteOutcome::NotFound);
         }
         let sig = verified.signature();
@@ -2485,7 +3153,9 @@ impl EventStore for MemoryStore {
                 .publish_queue_intents
                 .get(&intent_id)
                 .expect("looked up at the top of this call")
-                .frozen
+                .event()
+                .expect("event promotion target was checked above")
+                .0
                 .clone();
             event.sig = sig;
             (
@@ -2536,7 +3206,10 @@ impl EventStore for MemoryStore {
         };
         // Pre-signature only (retraction doc §4.2's "Promotion
         // correction"): once `promote_signed` has run, this door refuses.
-        if intent_record.sig_state == IntentSigState::Signed {
+        let Some((journaled_event, journaled_sig_state)) = intent_record.event() else {
+            return Ok(CompensateOutcome::NotFound);
+        };
+        if journaled_sig_state == IntentSigState::Signed {
             return Ok(CompensateOutcome::AlreadySigned);
         }
         let receipt_id = intent_record.receipt_id;
@@ -2545,7 +3218,7 @@ impl EventStore for MemoryStore {
                 "missing delivery receipt {receipt_id}"
             )));
         }
-        let frozen_id = intent_record.frozen.id;
+        let frozen_id = journaled_event.id;
 
         let live = self.by_id.get(&frozen_id).is_some_and(|se| {
             se.provenance
@@ -3233,7 +3906,12 @@ impl EventStore for MemoryStore {
             .publish_queue_intents
             .get(&key.intent_id)
             .ok_or_else(|| PersistenceError::invariant("attempt intent is not open"))?;
-        if intent.sig_state != IntentSigState::Signed || intent.frozen != event {
+        let Some((intent_event, sig_state)) = intent.event() else {
+            return Err(PersistenceError::invariant(
+                "operation intent cannot own a delivery lane",
+            ));
+        };
+        if sig_state != IntentSigState::Signed || *intent_event != event {
             return Err(PersistenceError::invariant(
                 "attempt bytes are not the intent's promoted signed bytes",
             ));
@@ -3569,254 +4247,17 @@ impl EventStore for MemoryStore {
             PublishQueueReceipt {
                 receipt_id,
                 intent_id: None,
-                frozen_id,
+                payload: crate::PublishQueueReceiptPayload::Event {
+                    event_id: frozen_id,
+                    state: ReceiptState::Refused(reason),
+                },
                 expected_pubkey,
                 accepted_at: None,
-                state: ReceiptState::Refused(reason),
             },
         );
         self.mark_terminal_receipt(receipt_id, crate::terminal_retention::wall_clock_now())?;
         self.maintain_terminal_receipts()?;
         Ok(receipt_id)
-    }
-}
-
-impl SemanticEditStore for MemoryStore {
-    fn accept_semantic_edit(
-        &mut self,
-        accept: SemanticAccept,
-    ) -> Result<(SemanticEditReceipt, crate::SemanticCurrentState), SemanticStoreError> {
-        let coordinate = accept.coordinate.clone();
-        let previous = self.semantic_resources.get(&coordinate).cloned();
-        let receipts = previous
-            .as_ref()
-            .map(|state| {
-                state
-                    .operations
-                    .iter()
-                    .map(|operation| {
-                        self.semantic_receipts
-                            .get(&operation.operation_id)
-                            .cloned()
-                            .ok_or(SemanticStoreError::UnknownOperation(operation.operation_id))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let operation_id = OperationId(
-            self.next_semantic_operation_id
-                .checked_add(1)
-                .ok_or(SemanticStoreError::OperationIdExhausted)?,
-        );
-        let materialization_high_water = self
-            .semantic_materialization_high_water
-            .get(&coordinate)
-            .copied();
-        let plan = plan_accept(
-            previous,
-            &receipts,
-            materialization_high_water,
-            operation_id,
-            accept,
-        )?;
-        let next = plan
-            .next
-            .as_ref()
-            .expect("accept planner creates a resource");
-        let current = next.current()?;
-        let receipt = plan
-            .receipt_updates
-            .iter()
-            .find(|receipt| receipt.operation_id == operation_id)
-            .cloned()
-            .expect("accept planner creates the new operation receipt");
-        #[cfg(any(test, feature = "bench-instrumentation"))]
-        let materialization_written = u64::from(
-            plan.next
-                .as_ref()
-                .is_some_and(|state| state.generation.is_some()),
-        );
-        #[cfg(any(test, feature = "bench-instrumentation"))]
-        let materialization_removed = u64::from(
-            plan.previous
-                .as_ref()
-                .is_some_and(|state| state.generation.is_some()),
-        );
-        self.next_semantic_operation_id = operation_id.0;
-        self.semantic_resources.insert(
-            coordinate,
-            plan.next.expect("accept planner creates a resource"),
-        );
-        if let Some(high_water) = plan.materialization_high_water {
-            self.semantic_materialization_high_water
-                .insert(receipt.coordinate.clone(), high_water);
-        }
-        for receipt in plan.receipt_updates {
-            self.semantic_receipts.insert(receipt.operation_id, receipt);
-        }
-        #[cfg(any(test, feature = "bench-instrumentation"))]
-        {
-            let mut counters = self.semantic_counters.lock().expect("semantic counters");
-            counters.coordinate_point_reads += 1;
-            counters.operation_bodies_examined += plan.operation_bodies_examined;
-            counters.operation_bodies_written += plan.operation_bodies_written;
-            counters.operation_bodies_removed += plan.operation_bodies_removed;
-            counters.materializations_written += materialization_written;
-            counters.materializations_removed += materialization_removed;
-            counters.commits += 1;
-        }
-        Ok((receipt, current))
-    }
-
-    fn rematerialize_semantic_edit(
-        &mut self,
-        rematerialize: SemanticRematerialize,
-    ) -> Result<Option<crate::SemanticCurrentState>, SemanticStoreError> {
-        let coordinate = rematerialize.coordinate.clone();
-        let previous = self
-            .semantic_resources
-            .get(&coordinate)
-            .cloned()
-            .ok_or(SemanticStoreError::CurrentMaterializationChanged)?;
-        let receipts = previous
-            .operations
-            .iter()
-            .map(|operation| {
-                self.semantic_receipts
-                    .get(&operation.operation_id)
-                    .cloned()
-                    .ok_or(SemanticStoreError::UnknownOperation(operation.operation_id))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let plan = plan_rematerialize(previous, rematerialize, &receipts)?;
-        let current = plan
-            .next
-            .as_ref()
-            .map(crate::semantic_edit::SemanticResourceState::current)
-            .transpose()?;
-        #[cfg(any(test, feature = "bench-instrumentation"))]
-        let materialization_written = u64::from(
-            plan.next
-                .as_ref()
-                .is_some_and(|state| state.generation.is_some()),
-        );
-        #[cfg(any(test, feature = "bench-instrumentation"))]
-        let materialization_removed = u64::from(
-            plan.previous
-                .as_ref()
-                .is_some_and(|state| state.generation.is_some()),
-        );
-        match plan.next {
-            Some(next) => {
-                self.semantic_resources.insert(coordinate.clone(), next);
-            }
-            None => {
-                self.semantic_resources.remove(&coordinate);
-            }
-        }
-        if let Some(high_water) = plan.materialization_high_water {
-            self.semantic_materialization_high_water
-                .insert(coordinate.clone(), high_water);
-        }
-        for receipt in plan.receipt_updates {
-            self.semantic_receipts.insert(receipt.operation_id, receipt);
-        }
-        #[cfg(any(test, feature = "bench-instrumentation"))]
-        {
-            let mut counters = self.semantic_counters.lock().expect("semantic counters");
-            counters.coordinate_point_reads += 1;
-            counters.operation_bodies_examined += plan.operation_bodies_examined;
-            counters.operation_bodies_written += plan.operation_bodies_written;
-            counters.operation_bodies_removed += plan.operation_bodies_removed;
-            counters.materializations_written += materialization_written;
-            counters.materializations_removed += materialization_removed;
-            counters.commits += 1;
-        }
-        Ok(current)
-    }
-
-    fn promote_semantic_materialization(
-        &mut self,
-        promotion: SemanticPromotion,
-    ) -> Result<SemanticPromotionOutcome, SemanticStoreError> {
-        let Some(current) = self.semantic_resources.get(&promotion.coordinate).cloned() else {
-            #[cfg(any(test, feature = "bench-instrumentation"))]
-            {
-                self.semantic_counters
-                    .lock()
-                    .expect("semantic counters")
-                    .coordinate_point_reads += 1;
-            }
-            return Ok(SemanticPromotionOutcome::Stale);
-        };
-        let (outcome, next) = promote_current(current, &promotion)?;
-        #[cfg(any(test, feature = "bench-instrumentation"))]
-        {
-            let mut counters = self.semantic_counters.lock().expect("semantic counters");
-            counters.coordinate_point_reads += 1;
-            if next.is_some() {
-                counters.materializations_written += 1;
-                counters.materializations_removed += 1;
-                counters.commits += 1;
-            }
-        }
-        if let Some(next) = next {
-            self.semantic_resources.insert(promotion.coordinate, next);
-        }
-        Ok(outcome)
-    }
-
-    fn recover_semantic_resources(
-        &self,
-    ) -> Result<Vec<crate::RecoveredSemanticResource>, SemanticStoreError> {
-        let states = self
-            .semantic_resources
-            .values()
-            .map(|state| {
-                validate_resource_state(state)?;
-                let receipts = state
-                    .operations
-                    .iter()
-                    .map(|operation| {
-                        self.semantic_receipts
-                            .get(&operation.operation_id)
-                            .cloned()
-                            .ok_or(SemanticStoreError::UnknownOperation(operation.operation_id))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                validate_active_receipts(state, &receipts)?;
-                recovered(state.clone())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        #[cfg(any(test, feature = "bench-instrumentation"))]
-        {
-            let mut counters = self.semantic_counters.lock().expect("semantic counters");
-            counters.recovery_rows += states.len() as u64;
-            counters.operation_bodies_examined += states
-                .iter()
-                .map(|resource| resource.operations.len() as u64)
-                .sum::<u64>();
-        }
-        Ok(states)
-    }
-
-    fn semantic_receipt(
-        &self,
-        operation_id: OperationId,
-    ) -> Result<Option<SemanticEditReceipt>, SemanticStoreError> {
-        Ok(self.semantic_receipts.get(&operation_id).cloned())
-    }
-
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    fn semantic_store_counters(&self) -> SemanticStoreCounters {
-        *self.semantic_counters.lock().expect("semantic counters")
-    }
-
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    fn reset_semantic_store_counters(&self) {
-        *self.semantic_counters.lock().expect("semantic counters") =
-            SemanticStoreCounters::default();
     }
 }
 
@@ -3852,19 +4293,23 @@ mod lane_atomicity_tests {
         let mut store = MemoryStore::new();
         let accepted = store
             .accept_write(AcceptWrite {
-                frozen,
-                replaceable_base: None,
-                monotonic_stamp: false,
+                payload: crate::AcceptWritePayload::Event {
+                    frozen,
+                    replaceable_base: None,
+                    monotonic_stamp: false,
+                    routing: "atomic".into(),
+                    sig_state: IntentSigState::Pending,
+                },
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "atomic".into(),
-                routing: "atomic".into(),
-                sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(900u64),
                 correlation: None,
             })
             .unwrap();
         let intent = accepted.journaled_intent_id().unwrap();
-        store.promote_signed(intent, evidence(&signed)).unwrap();
+        store
+            .promote_signed(crate::PromotionTarget::Event(intent), evidence(&signed))
+            .unwrap();
         store
             .record_route_revision(intent, BTreeSet::from([relay.clone()]))
             .unwrap();

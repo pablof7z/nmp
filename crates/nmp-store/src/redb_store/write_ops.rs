@@ -268,16 +268,32 @@ pub(super) fn accept_write(
     accept: AcceptWrite,
 ) -> Result<AcceptOutcome, PersistenceError> {
     let AcceptWrite {
-        mut frozen,
-        replaceable_base,
-        monotonic_stamp,
+        payload,
         expected_pubkey,
         signing_identity_ref,
-        routing,
-        mut sig_state,
         accepted_at,
         correlation,
     } = accept;
+    if let crate::AcceptWritePayload::ReplaceableOperation(operation) = payload {
+        return super::semantic_edit_ops::accept(
+            store,
+            expected_pubkey,
+            signing_identity_ref,
+            accepted_at,
+            correlation,
+            operation,
+        );
+    }
+    let crate::AcceptWritePayload::Event {
+        mut frozen,
+        replaceable_base,
+        monotonic_stamp,
+        routing,
+        mut sig_state,
+    } = payload
+    else {
+        unreachable!("replaceable operation returned above")
+    };
     // Overridden inside the `Duplicate` branch when the existing row
     // is ALREADY signed (codex-nova ruling) — the shared R7 journal
     // write below uses these instead of the hardcoded `Accepted`/
@@ -671,11 +687,13 @@ pub(super) fn accept_write(
             let key = intent_key(intent_id);
             let intent_record = PublishQueueIntentRecord {
                 receipt_id,
-                frozen: frozen.clone(),
+                work: super::publish_queue::PublishQueueIntentRecordWork::Event {
+                    frozen: frozen.clone(),
+                    routing: routing.clone(),
+                    sig_state,
+                },
                 expected_pubkey,
                 signing_identity_ref,
-                routing,
-                sig_state,
                 accepted_at,
             };
             let encoded_intent =
@@ -701,10 +719,12 @@ pub(super) fn accept_write(
             // to `Signed` (codex-nova ruling).
             let receipt_record = PublishQueueReceiptRecord {
                 intent_id: Some(intent_id),
-                frozen_id: frozen.id,
                 expected_pubkey,
                 accepted_at: Some(accepted_at),
-                state: receipt_state,
+                payload: crate::PublishQueueReceiptPayload::Event {
+                    event_id: frozen.id,
+                    state: receipt_state,
+                },
                 correlation: correlation.as_ref().map(|token| token.as_ref().to_owned()),
                 terminal_sequence: None,
                 terminal_at: None,
@@ -771,6 +791,9 @@ pub(super) fn promote_signed(
             Some(intent_bytes) => {
                 let intent_record = decode_intent(&intent_bytes)
                     .map_err(|error| codec_error(&format!("intent {}", intent_id.0), error))?;
+                let Some((frozen_event, intent_sig_state)) = intent_record.event() else {
+                    return Ok(PromoteOutcome::NotFound);
+                };
                 // Intent binding (#768). `VerifiedSignature` proves one
                 // `Event::verify` succeeded; it does NOT prove the event
                 // it covered is the one THIS intent froze. Everything
@@ -778,12 +801,12 @@ pub(super) fn promote_signed(
                 // most of all — so the match runs before this
                 // transaction touches a single table, and the
                 // `GovernedWrite` is abandoned rather than committed.
-                if verified.event_id() != intent_record.frozen.id {
+                if verified.event_id() != frozen_event.id {
                     return Err(PersistenceError::invariant(format!(
                         "promotion evidence verifies event {} but intent {} froze event {}",
                         verified.event_id(),
                         intent_id.0,
-                        intent_record.frozen.id,
+                        frozen_event.id,
                     )));
                 }
                 // No-second-transition guard (codex-nova finding): a
@@ -793,10 +816,10 @@ pub(super) fn promote_signed(
                 // "already-promoted returns NotFound"; this enforces
                 // it. Load-bearing for `AtMostOnce`: a second silent
                 // transition here could let the caller re-publish.
-                if intent_record.sig_state == IntentSigState::Signed {
+                if intent_sig_state == IntentSigState::Signed {
                     return Ok(PromoteOutcome::NotFound);
                 }
-                let frozen_event = intent_record.frozen;
+                let frozen_event = frozen_event.clone();
                 let frozen_id = frozen_event.id;
 
                 // Architecture review correction (load-bearing): is
@@ -1022,12 +1045,15 @@ pub(super) fn compensate_write_with_state(
             Some(intent_bytes) => {
                 let intent_record = decode_intent(&intent_bytes)
                     .map_err(|error| codec_error(&format!("intent {}", intent_id.0), error))?;
-                if intent_record.sig_state == IntentSigState::Signed {
+                let Some((frozen_event, intent_sig_state)) = intent_record.event() else {
+                    return Ok(CompensateOutcome::NotFound);
+                };
+                if intent_sig_state == IntentSigState::Signed {
                     // Pre-signature only (retraction doc §4.2's
                     // "Promotion correction").
                     CompensateOutcome::AlreadySigned
                 } else {
-                    let frozen_event = intent_record.frozen.clone();
+                    let frozen_event = frozen_event.clone();
                     let frozen_id = frozen_event.id;
                     let live = ingest.canonical.load_by_id(&frozen_id)?;
                     let is_live = live.as_ref().is_some_and(|(_event_key, stored)| {

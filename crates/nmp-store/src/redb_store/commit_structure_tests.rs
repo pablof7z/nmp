@@ -15,6 +15,7 @@ const PRODUCTION_TRANSACTION_FILES: &[&str] = &[
     "ingest_txn.rs",
     "event_ops.rs",
     "publish_queue_ops.rs",
+    "semantic_edit_ops.rs",
     "write_ops.rs",
     "store.rs",
 ];

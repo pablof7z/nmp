@@ -14,9 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 use nmp_store::{
-    coverage_key, sentinel_signature, AcceptWrite, CoverageInterval, EventCursor, EventStore,
-    GcRetentionSet, InsertOutcome, IntentSigState, MemoryStore, Provenance, RedbStore,
-    RefuseReason, RelayObserved, RetractReason, StoredEvent,
+    coverage_key, sentinel_signature, AcceptWrite, AcceptWritePayload, CoverageInterval,
+    EventCursor, EventStore, GcRetentionSet, InsertOutcome, IntentSigState, MemoryStore,
+    Provenance, RedbStore, RefuseReason, RelayObserved, RetractReason, StoredEvent,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -1901,13 +1901,15 @@ fn coverage_is_bit_identical_across_all_retractions_and_only_gc_lowers_it() {
         );
         let accepted = store
             .accept_write(AcceptWrite {
-                frozen: frozen_pending,
-                replaceable_base: None,
-                monotonic_stamp: false,
+                payload: AcceptWritePayload::Event {
+                    frozen: frozen_pending,
+                    replaceable_base: None,
+                    monotonic_stamp: false,
+                    routing: "coverage-proof".into(),
+                    sig_state: IntentSigState::Pending,
+                },
                 expected_pubkey: k.public_key(),
                 signing_identity_ref: "coverage-proof".into(),
-                routing: "coverage-proof".into(),
-                sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(220u64),
                 correlation: None,
             })
@@ -2077,13 +2079,15 @@ fn a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_b
         );
         store
             .accept_write(AcceptWrite {
-                frozen,
-                replaceable_base: None,
-                monotonic_stamp: false,
+                payload: AcceptWritePayload::Event {
+                    frozen,
+                    replaceable_base: None,
+                    monotonic_stamp: false,
+                    routing: "optimistic-1182".into(),
+                    sig_state: IntentSigState::Pending,
+                },
                 expected_pubkey: k.public_key(),
                 signing_identity_ref: "optimistic-1182".into(),
-                routing: "optimistic-1182".into(),
-                sig_state: IntentSigState::Pending,
                 accepted_at: Timestamp::from(500u64),
                 correlation: None,
             })

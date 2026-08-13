@@ -211,12 +211,18 @@ fn update_publish_queue_receipt<T: GovernedIngestTxn>(
         })?;
     let mut record = decode_receipt(&encoded)
         .map_err(|error| codec_error(&format!("receipt {receipt_id}"), error))?;
-    if record.state == ReceiptState::Superseded || state == ReceiptState::Superseded {
+    let crate::PublishQueueReceiptPayload::Event { state: current, .. } = &mut record.payload
+    else {
+        return Err(PersistenceError::invariant(
+            "operation receipt cannot take an ordinary delivery state",
+        ));
+    };
+    if *current == ReceiptState::Superseded || state == ReceiptState::Superseded {
         return Err(PersistenceError::invariant(
             "governed ingest cannot transition superseded receipt evidence",
         ));
     }
-    record.state = state;
+    *current = state;
     txn.publish_queue_put(
         GovernedPublishQueueMap::Receipts,
         &key,
@@ -282,9 +288,12 @@ pub(super) fn fan_out_signed_in_txn<T: GovernedIngestTxn>(
         if let Some(owner_intent) = owner_intent {
             let mut owner_record = decode_intent(&owner_intent)
                 .map_err(|error| codec_error(&format!("intent {}", owner_id.0), error))?;
-            if owner_record.sig_state != IntentSigState::Signed {
-                owner_record.sig_state = IntentSigState::Signed;
-                owner_record.frozen = canonical_event.clone();
+            if let Some((frozen, sig_state)) = owner_record.event_mut() {
+                if *sig_state == IntentSigState::Signed {
+                    continue;
+                }
+                *sig_state = IntentSigState::Signed;
+                *frozen = canonical_event.clone();
                 let encoded_owner =
                     encode_intent(&owner_record).map_err(|error| codec_error("intent", error))?;
                 txn.publish_queue_put(

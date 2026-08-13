@@ -147,6 +147,10 @@ impl Encoder {
         self.bytes.push(value);
     }
 
+    fn u16(&mut self, value: u16) {
+        self.bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
     fn u32(&mut self, value: u32) {
         self.bytes.extend_from_slice(&value.to_be_bytes());
     }
@@ -249,6 +253,12 @@ impl<'a> Decoder<'a> {
 
     fn u8(&mut self) -> Result<u8, PublishQueueCodecError> {
         Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16, PublishQueueCodecError> {
+        Ok(u16::from_be_bytes(
+            self.take(2)?.try_into().expect("length checked"),
+        ))
     }
 
     fn u32(&mut self) -> Result<u32, PublishQueueCodecError> {
@@ -568,15 +578,45 @@ pub(super) fn encode_intent(
 ) -> Result<Vec<u8>, PublishQueueCodecError> {
     let mut encoder = Encoder::new(INTENT_MAGIC);
     encoder.u64(record.receipt_id);
-    encoder.event(&record.frozen)?;
+    match &record.work {
+        super::publish_queue::PublishQueueIntentRecordWork::Event {
+            frozen,
+            routing,
+            sig_state,
+        } => {
+            encoder.u8(0);
+            encoder.event(frozen)?;
+            encoder.text(routing, MAX_TEXT_BYTES, "routing strategy")?;
+            encode_sig_state(&mut encoder, *sig_state);
+        }
+        super::publish_queue::PublishQueueIntentRecordWork::ReplaceableOperation {
+            coordinate,
+            materialization,
+        } => {
+            encoder.u8(1);
+            encode_coordinate(&mut encoder, coordinate)?;
+            match materialization {
+                None => encoder.u8(0),
+                Some(materialization) => {
+                    encoder.u8(1);
+                    encoder.u64(materialization.current.materialization_id.0);
+                    encoder.fixed(materialization.current.event_id.as_bytes());
+                    encoder.text(
+                        &materialization.routing,
+                        MAX_TEXT_BYTES,
+                        "materialization routing strategy",
+                    )?;
+                    encode_sig_state(&mut encoder, materialization.sig_state);
+                }
+            }
+        }
+    }
     encoder.fixed(record.expected_pubkey.as_bytes());
     encoder.text(
         &record.signing_identity_ref,
         MAX_TEXT_BYTES,
         "signing identity reference",
     )?;
-    encoder.text(&record.routing, MAX_TEXT_BYTES, "routing strategy")?;
-    encode_sig_state(&mut encoder, record.sig_state);
     encoder.u64(record.accepted_at.as_secs());
     Ok(encoder.finish())
 }
@@ -586,22 +626,91 @@ pub(super) fn decode_intent(
 ) -> Result<PublishQueueIntentRecord, PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, INTENT_MAGIC)?;
     let receipt_id = decoder.u64()?;
-    let frozen = decoder.event()?;
+    let work = match decoder.u8()? {
+        0 => {
+            let frozen = decoder.event()?;
+            let routing = decoder.text(MAX_TEXT_BYTES, "routing strategy")?;
+            let sig_state = decode_sig_state(&mut decoder)?;
+            super::publish_queue::PublishQueueIntentRecordWork::Event {
+                frozen,
+                routing,
+                sig_state,
+            }
+        }
+        1 => {
+            let coordinate = decode_coordinate(&mut decoder)?;
+            let materialization = match decoder.u8()? {
+                0 => None,
+                1 => Some(super::publish_queue::PublishQueueMaterializationRecord {
+                    current: crate::MaterializationRef {
+                        materialization_id: crate::MaterializationId(decoder.u64()?),
+                        event_id: decoder.event_id()?,
+                    },
+                    routing: decoder.text(MAX_TEXT_BYTES, "materialization routing strategy")?,
+                    sig_state: decode_sig_state(&mut decoder)?,
+                }),
+                other => {
+                    return Err(PublishQueueCodecError::InvalidTag(
+                        "optional materialization",
+                        other,
+                    ))
+                }
+            };
+            super::publish_queue::PublishQueueIntentRecordWork::ReplaceableOperation {
+                coordinate,
+                materialization,
+            }
+        }
+        other => return Err(PublishQueueCodecError::InvalidTag("intent work", other)),
+    };
     let expected_pubkey = decoder.public_key()?;
     let signing_identity_ref = decoder.text(MAX_TEXT_BYTES, "signing identity reference")?;
-    let routing = decoder.text(MAX_TEXT_BYTES, "routing strategy")?;
-    let sig_state = decode_sig_state(&mut decoder)?;
     let accepted_at = Timestamp::from(decoder.u64()?);
     decoder.finish()?;
     Ok(PublishQueueIntentRecord {
         receipt_id,
-        frozen,
+        work,
         expected_pubkey,
         signing_identity_ref,
-        routing,
-        sig_state,
         accepted_at,
     })
+}
+
+fn encode_coordinate(
+    encoder: &mut Encoder,
+    coordinate: &nostr::nips::nip01::Coordinate,
+) -> Result<(), PublishQueueCodecError> {
+    if crate::address_key::address_key_for_coordinate(coordinate).is_none() {
+        return Err(PublishQueueCodecError::InvalidValue(
+            "operation coordinate is not replaceable/addressable",
+        ));
+    }
+    encoder.u16(coordinate.kind.as_u16());
+    encoder.fixed(coordinate.public_key.as_bytes());
+    encoder.text(
+        &coordinate.identifier,
+        crate::semantic_edit::MAX_COORDINATE_IDENTIFIER_BYTES,
+        "operation coordinate identifier",
+    )
+}
+
+fn decode_coordinate(
+    decoder: &mut Decoder<'_>,
+) -> Result<nostr::nips::nip01::Coordinate, PublishQueueCodecError> {
+    let coordinate = nostr::nips::nip01::Coordinate {
+        kind: nostr::Kind::from(decoder.u16()?),
+        public_key: decoder.public_key()?,
+        identifier: decoder.text(
+            crate::semantic_edit::MAX_COORDINATE_IDENTIFIER_BYTES,
+            "operation coordinate identifier",
+        )?,
+    };
+    if crate::address_key::address_key_for_coordinate(&coordinate).is_none() {
+        return Err(PublishQueueCodecError::InvalidValue(
+            "operation coordinate is not replaceable/addressable",
+        ));
+    }
+    Ok(coordinate)
 }
 
 fn encode_optional_event_id(encoder: &mut Encoder, value: Option<EventId>) {
@@ -694,7 +803,6 @@ pub(crate) fn encode_receipt(record: &PublishQueueReceiptRecord) -> Vec<u8> {
             encoder.u64(intent_id.0);
         }
     }
-    encoder.fixed(record.frozen_id.as_bytes());
     encoder.fixed(record.expected_pubkey.as_bytes());
     match record.accepted_at {
         None => encoder.u8(0),
@@ -703,7 +811,40 @@ pub(crate) fn encode_receipt(record: &PublishQueueReceiptRecord) -> Vec<u8> {
             encoder.u64(accepted_at.as_secs());
         }
     }
-    encode_receipt_state(&mut encoder, record.state);
+    match &record.payload {
+        crate::PublishQueueReceiptPayload::Event { event_id, state } => {
+            encoder.u8(0);
+            encoder.fixed(event_id.as_bytes());
+            encode_receipt_state(&mut encoder, *state);
+        }
+        crate::PublishQueueReceiptPayload::ReplaceableOperation { coordinate, state } => {
+            encoder.u8(1);
+            encode_coordinate(&mut encoder, coordinate)
+                .expect("validated operation receipt coordinate");
+            match state {
+                crate::ReplaceableOperationReceiptState::Contributing { current } => {
+                    encoder.u8(0);
+                    match current {
+                        None => encoder.u8(0),
+                        Some(current) => {
+                            encoder.u8(1);
+                            encoder.u64(current.materialization.materialization_id.0);
+                            encoder.fixed(current.materialization.event_id.as_bytes());
+                            encode_sig_state(&mut encoder, current.sig_state);
+                        }
+                    }
+                }
+                crate::ReplaceableOperationReceiptState::Resolved => encoder.u8(1),
+                crate::ReplaceableOperationReceiptState::Cancelled => encoder.u8(2),
+                crate::ReplaceableOperationReceiptState::Refused(reason) => {
+                    encoder.u8(3);
+                    encoder
+                        .text(reason, MAX_TEXT_BYTES, "operation refusal")
+                        .expect("bounded operation refusal");
+                }
+            }
+        }
+    }
     encoder
         .optional_text(
             record.correlation.as_deref(),
@@ -737,7 +878,6 @@ pub(crate) fn decode_receipt(
         1 => Some(IntentId(decoder.u64()?)),
         other => return Err(PublishQueueCodecError::InvalidTag("receipt intent", other)),
     };
-    let frozen_id = decoder.event_id()?;
     let expected_pubkey = decoder.public_key()?;
     let accepted_at = match decoder.u8()? {
         0 => None,
@@ -749,7 +889,49 @@ pub(crate) fn decode_receipt(
             ))
         }
     };
-    let state = decode_receipt_state(&mut decoder)?;
+    let payload = match decoder.u8()? {
+        0 => crate::PublishQueueReceiptPayload::Event {
+            event_id: decoder.event_id()?,
+            state: decode_receipt_state(&mut decoder)?,
+        },
+        1 => {
+            let coordinate = decode_coordinate(&mut decoder)?;
+            let state = match decoder.u8()? {
+                0 => {
+                    let current = match decoder.u8()? {
+                        0 => None,
+                        1 => Some(crate::MaterializationReceipt {
+                            materialization: crate::MaterializationRef {
+                                materialization_id: crate::MaterializationId(decoder.u64()?),
+                                event_id: decoder.event_id()?,
+                            },
+                            sig_state: decode_sig_state(&mut decoder)?,
+                        }),
+                        other => {
+                            return Err(PublishQueueCodecError::InvalidTag(
+                                "optional receipt materialization",
+                                other,
+                            ))
+                        }
+                    };
+                    crate::ReplaceableOperationReceiptState::Contributing { current }
+                }
+                1 => crate::ReplaceableOperationReceiptState::Resolved,
+                2 => crate::ReplaceableOperationReceiptState::Cancelled,
+                3 => crate::ReplaceableOperationReceiptState::Refused(
+                    decoder.text(MAX_TEXT_BYTES, "operation refusal")?,
+                ),
+                other => {
+                    return Err(PublishQueueCodecError::InvalidTag(
+                        "operation receipt state",
+                        other,
+                    ))
+                }
+            };
+            crate::PublishQueueReceiptPayload::ReplaceableOperation { coordinate, state }
+        }
+        other => return Err(PublishQueueCodecError::InvalidTag("receipt payload", other)),
+    };
     let correlation = decoder.optional_text(MAX_TEXT_BYTES, "correlation token")?;
     let (terminal_sequence, terminal_at, terminal_bytes) = match decoder.u8()? {
         0 => (None, None, None),
@@ -768,10 +950,9 @@ pub(crate) fn decode_receipt(
     decoder.finish()?;
     Ok(PublishQueueReceiptRecord {
         intent_id,
-        frozen_id,
         expected_pubkey,
         accepted_at,
-        state,
+        payload,
         correlation,
         terminal_sequence,
         terminal_at,

@@ -256,7 +256,8 @@ impl EventStore for ControlledFailureStore {
         intent_id: IntentId,
         verified: nmp_store::VerifiedSignature,
     ) -> Result<PromoteOutcome, PersistenceError> {
-        self.inner.promote_signed(intent_id, verified)
+        self.inner
+            .promote_signed(crate::PromotionTarget::Event(intent_id), verified)
     }
 
     fn compensate_write(

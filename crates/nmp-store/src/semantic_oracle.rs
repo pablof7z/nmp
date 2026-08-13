@@ -257,13 +257,15 @@ fn accept_correlated(
     correlation: Option<&str>,
 ) -> AcceptWrite {
     AcceptWrite {
-        frozen,
-        replaceable_base: None,
-        monotonic_stamp: false,
+        payload: crate::AcceptWritePayload::Event {
+            frozen,
+            replaceable_base: None,
+            monotonic_stamp: false,
+            routing: "semantic-oracle-route".into(),
+            sig_state: IntentSigState::Pending,
+        },
         expected_pubkey: keys.public_key(),
         signing_identity_ref: "semantic-oracle-key".into(),
-        routing: "semantic-oracle-route".into(),
-        sig_state: IntentSigState::Pending,
         accepted_at: Timestamp::from(accepted_at),
         correlation: correlation.map(|token| CorrelationToken::try_from(token).unwrap()),
     }
@@ -443,12 +445,9 @@ fn normalized_recovery_state(store: &dyn EventStore, context: &OracleContext) ->
             json!({
                 "intent_id": intent.intent_id.0,
                 "receipt_id": intent.receipt_id,
-                "frozen_json": intent.frozen.as_json(),
+                "work": format!("{:?}", intent.work),
                 "expected_pubkey": intent.expected_pubkey.to_hex(),
                 "signing_identity_ref": intent.signing_identity_ref,
-                "routing": intent.routing,
-                "sig_state": format!("{:?}", intent.sig_state),
-                "displaced": intent.displaced.as_ref().map(canonical_row),
                 "accepted_at": intent.accepted_at.as_secs(),
             })
         })
@@ -503,9 +502,7 @@ pub(crate) fn recovered_semantic_digest(store: &dyn EventStore) -> String {
             json!({
                 "intent_id": intent.intent_id.0,
                 "receipt_id": intent.receipt_id,
-                "frozen_json": intent.frozen.as_json(),
-                "sig_state": format!("{:?}", intent.sig_state),
-                "displaced": intent.displaced.as_ref().map(canonical_row),
+                "work": format!("{:?}", intent.work),
                 "receipt": format!("{:?}", store.reattach_receipt(intent.receipt_id).expect("crash-oracle receipt")),
                 "routes": format!("{:?}", store.recover_route_revisions(intent.intent_id).expect("crash-oracle routes")),
                 "attempts": format!("{:?}", store.recover_attempts(intent.intent_id).expect("crash-oracle attempts")),
@@ -858,7 +855,10 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
 
     harness
         .store()
-        .promote_signed(publish_intent, evidence(&signed))
+        .promote_signed(
+            crate::PromotionTarget::Event(publish_intent),
+            evidence(&signed),
+        )
         .unwrap();
     record(
         &mut harness,
@@ -991,7 +991,10 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
     );
     harness
         .store()
-        .promote_signed(edge_intent, evidence(&fixture.edge_signed))
+        .promote_signed(
+            crate::PromotionTarget::Event(edge_intent),
+            evidence(&fixture.edge_signed),
+        )
         .unwrap();
     harness
         .store()

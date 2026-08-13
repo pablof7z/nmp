@@ -311,8 +311,8 @@ fn a_refused_receipt_needs_no_recovery_write_on_reopen() {
         .unwrap()
         .expect("retained refused receipt");
     assert_eq!(
-        receipt.state,
-        ReceiptState::Refused(crate::RefuseReason::Tombstoned)
+        receipt.event_state(),
+        Some(ReceiptState::Refused(crate::RefuseReason::Tombstoned))
     );
 }
 
@@ -386,20 +386,22 @@ fn accepted_signed(
     );
     let outcome = store
         .accept_write(AcceptWrite {
-            frozen,
-            replaceable_base: None,
-            monotonic_stamp: false,
+            payload: crate::AcceptWritePayload::Event {
+                frozen,
+                replaceable_base: None,
+                monotonic_stamp: false,
+                routing: "range-proof".into(),
+                sig_state: IntentSigState::Pending,
+            },
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "range-proof".into(),
-            routing: "range-proof".into(),
-            sig_state: IntentSigState::Pending,
             accepted_at: Timestamp::from(created_at),
             correlation: None,
         })
         .expect("accept fixture intent");
     let intent = outcome.journaled_intent_id().expect("intent id");
     store
-        .promote_signed(intent, evidence(&signed))
+        .promote_signed(crate::PromotionTarget::Event(intent), evidence(&signed))
         .expect("promote fixture intent");
     (intent, signed)
 }
@@ -1221,13 +1223,15 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
     );
     let accepted = store
         .accept_write(AcceptWrite {
-            frozen,
-            replaceable_base: None,
-            monotonic_stamp: false,
+            payload: crate::AcceptWritePayload::Event {
+                frozen,
+                replaceable_base: None,
+                monotonic_stamp: false,
+                routing: "integrity".into(),
+                sig_state: IntentSigState::Pending,
+            },
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "integrity".into(),
-            routing: "integrity".into(),
-            sig_state: IntentSigState::Pending,
             accepted_at: Timestamp::from(80u64),
             correlation: None,
         })
