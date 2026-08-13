@@ -5,20 +5,68 @@
 //! or insert the result they are meant to prove.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use nmp::{
     AccessContext, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReceiptReattachment,
     RelayState, ReplaceableMaterializer, ReplaceableMaterializerOperation,
-    ReplaceableMaterializerRefusal, ReplaceableSourcePolicy, Row, RowDelta, RowSignature,
-    SigningState, SourceAuthority, WriteFact, WriteIntent, WriteOutcome, WriteRouting,
+    ReplaceableMaterializerRefusal, ReplaceableSourcePolicy, Row, RowDelta, RowSignature, SignerOp,
+    SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability, SigningState,
+    SourceAuthority, WriteFact, WriteIntent, WriteOutcome, WriteRouting,
 };
+use nmp_signer::PendingSignerSender;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{EventBuilder, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 const SETTLE: Duration = Duration::from_secs(30);
 
 struct AddPeople;
+
+struct HeldSigner {
+    pubkey: PublicKey,
+    started: mpsc::Sender<(SignerUnsignedEvent, PendingSignerSender<SignerSignedEvent>)>,
+}
+
+impl SigningCapability for HeldSigner {
+    fn public_key(&self) -> Option<SignerPublicKey> {
+        Some(SignerPublicKey::new(self.pubkey.to_bytes()))
+    }
+
+    fn sign(&self, unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent> {
+        let (sender, operation) = SignerOp::pending_channel();
+        self.started
+            .send((unsigned, sender))
+            .expect("the test owns the signer request receiver");
+        operation
+    }
+}
+
+fn to_nostr_unsigned(unsigned: SignerUnsignedEvent) -> UnsignedEvent {
+    let (public_key, created_at, kind, tags, content) = unsigned.into_parts();
+    UnsignedEvent::new(
+        PublicKey::from_slice(public_key.as_bytes()).expect("engine supplied a public key"),
+        Timestamp::from(created_at),
+        Kind::from(kind),
+        tags.into_iter()
+            .map(Tag::parse)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("engine supplied valid tags"),
+        content,
+    )
+}
+
+fn to_signer_event(event: nostr::Event) -> SignerSignedEvent {
+    SignerSignedEvent::new(
+        event.id.to_bytes(),
+        SignerPublicKey::new(event.pubkey.to_bytes()),
+        event.created_at.as_secs(),
+        event.kind.as_u16(),
+        event.tags.into_iter().map(|tag| tag.to_vec()).collect(),
+        event.content,
+        event.sig.serialize(),
+    )
+}
 
 impl ReplaceableMaterializer for AddPeople {
     fn materialize(
@@ -603,6 +651,191 @@ async fn source_session_replacement_wakes_every_signed_successor_destination() {
     }
 
     engine.shutdown();
+    relay_one.shutdown();
+    relay_two.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relay_source_successors_resume_current_delivery_and_remain_continuing_after_restart() {
+    let relay_one = ScriptedRelay::start(&RelayConfig::default()).await;
+    let mut relay_two = ScriptedRelay::start(&RelayConfig::default()).await;
+    let relay_two_url = relay_two.url.clone();
+    let relay_two_port = relay_two.port();
+    let author = Keys::generate();
+    let alice = Keys::generate().public_key();
+    let initial_time = Timestamp::now().as_secs().saturating_sub(20);
+    let base = contact_list(&author, initial_time, "base", &[]);
+    relay_one.seed_signed_event(&base).await;
+
+    let directory = tempfile::tempdir().expect("persistent fixture directory");
+    let store_path = directory.path().join("semantic-successor-restart.redb");
+    let config = || EngineConfig {
+        store_path: Some(store_path.to_string_lossy().into_owned()),
+        ..EngineConfig::default()
+    };
+    let (first_signer_tx, first_signer_rx) = mpsc::channel();
+    let engine = Engine::new(config()).expect("persistent engine opens");
+    engine
+        .add_public_key_account(author.public_key(), true)
+        .expect("author account registers");
+    engine
+        .install_test_signing_capability(HeldSigner {
+            pubkey: author.public_key(),
+            started: first_signer_tx,
+        })
+        .expect("held signer registers");
+    let materializer = engine
+        .add_replaceable_materializer([36; 16], [37; 16], AddPeople)
+        .expect("semantic capability registers");
+    let source_relays = [relay_one.url.clone(), relay_two_url.clone()];
+    let subscription = engine
+        .observe(
+            pinned_contact_lists(source_relays.clone(), author.public_key()),
+            None,
+        )
+        .expect("two-relay source observation opens");
+    let mut rows = BTreeMap::new();
+    let base_row = wait_for_row(&subscription, &mut rows, |row| row.id() == base.id);
+    let receipt = engine
+        .publish(WriteIntent {
+            payload: materializer
+                .operation(
+                    &base_row,
+                    &base_row,
+                    ReplaceableSourcePolicy::Continuing,
+                    alice.to_bytes().to_vec(),
+                )
+                .expect("body-complete operation composes"),
+            routing: WriteRouting::Explicit(source_relays.to_vec()),
+            identity: Identity::Active,
+            correlation: None,
+        })
+        .expect("operation enters custody");
+    let (e1_unsigned, e1_completion) = first_signer_rx
+        .recv_timeout(SETTLE)
+        .expect("E1 reaches the held signer");
+    let e1 = to_nostr_unsigned(e1_unsigned)
+        .sign_with_keys(&author)
+        .expect("E1 signs");
+    e1_completion
+        .resolve(Ok(to_signer_event(e1.clone())))
+        .expect("E1 completion remains live");
+    assert!(
+        relay_one
+            .wait_wire_event_id_count(&e1.id.to_hex(), 1, SETTLE)
+            .await,
+        "relay one receives E1"
+    );
+
+    let newer = contact_list(&author, initial_time + 5, "relay-two", &[]);
+    relay_two.disconnect().await;
+    relay_two = ScriptedRelay::start_on_port(relay_two_port, &RelayConfig::default()).await;
+    assert_eq!(relay_two.url, relay_two_url);
+    relay_two.seed_signed_event(&newer).await;
+    let (e2_unsigned_before, _cancelled_completion) = first_signer_rx
+        .recv_timeout(SETTLE)
+        .expect("relay source successor E2 reaches the held signer");
+    let expected_e2 = to_nostr_unsigned(e2_unsigned_before.clone());
+    assert_ne!(expected_e2.id, Some(e1.id));
+    let e1_counts = [
+        relay_one
+            .wire_record()
+            .event_ids
+            .iter()
+            .filter(|id| *id == &e1.id.to_hex())
+            .count(),
+        relay_two
+            .wire_record()
+            .event_ids
+            .iter()
+            .filter(|id| *id == &e1.id.to_hex())
+            .count(),
+    ];
+
+    let receipt_id = receipt.id;
+    let session = engine.export_session().expect("session exports");
+    drop(subscription);
+    engine.shutdown();
+
+    let (restarted_signer_tx, restarted_signer_rx) = mpsc::channel();
+    let restarted = Engine::new_with_session(config(), session).expect("engine restarts");
+    restarted
+        .add_replaceable_materializer([36; 16], [37; 16], AddPeople)
+        .expect("semantic capability reattaches");
+    restarted
+        .install_test_signing_capability(HeldSigner {
+            pubkey: author.public_key(),
+            started: restarted_signer_tx,
+        })
+        .expect("signer reattaches");
+    let statuses = attached_statuses(
+        restarted
+            .reattach_receipt(receipt_id)
+            .expect("receipt reattaches"),
+    );
+    let (e2_unsigned_after, e2_completion) = restarted_signer_rx
+        .recv_timeout(SETTLE)
+        .expect("restart requests the exact current E2");
+    let e2_after = to_nostr_unsigned(e2_unsigned_after);
+    assert_eq!(e2_after.id, expected_e2.id, "restart resumes exact E2");
+    let e2 = e2_after.sign_with_keys(&author).expect("E2 signs");
+    e2_completion
+        .resolve(Ok(to_signer_event(e2.clone())))
+        .expect("E2 completion remains live");
+    let expected_relays = BTreeSet::from([relay_one.url.clone(), relay_two.url.clone()]);
+    for relay in [&relay_one, &relay_two] {
+        assert!(
+            relay
+                .wait_wire_event_id_count(&e2.id.to_hex(), 1, SETTLE)
+                .await,
+            "restart publishes exact E2 to {}; wire={:?}; queue={:?}",
+            relay.url,
+            relay.wire_record(),
+            restarted.publish_queue(None, u8::MAX)
+        );
+        relay
+            .wait_wire_quiet(Duration::from_millis(250), SETTLE)
+            .await;
+        assert_eq!(
+            relay
+                .wire_record()
+                .event_ids
+                .iter()
+                .filter(|id| *id == &e2.id.to_hex())
+                .count(),
+            1,
+            "E2 publishes exactly once to {}",
+            relay.url
+        );
+    }
+    let e2_facts = wait_for_generation_relay_facts(&statuses, e2.id, &expected_relays);
+    assert!(e2_facts.iter().any(|fact| matches!(
+        fact,
+        WriteFact::Relay { event_id, .. } if *event_id == e1.id
+    )));
+    assert_no_settled_fact(&e2_facts);
+    for (relay, prior_e1_count) in [(&relay_one, e1_counts[0]), (&relay_two, e1_counts[1])] {
+        assert_eq!(
+            relay
+                .wire_record()
+                .event_ids
+                .iter()
+                .filter(|id| *id == &e1.id.to_hex())
+                .count(),
+            prior_e1_count,
+            "restart never retransmits E1 to {}",
+            relay.url
+        );
+    }
+
+    let queue = restarted
+        .publish_queue(None, u8::MAX)
+        .expect("continuing receipt remains inspectable");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].event_id, e2.id);
+    assert!(queue[0].outcome.is_none());
+
+    restarted.shutdown();
     relay_one.shutdown();
     relay_two.shutdown();
 }
