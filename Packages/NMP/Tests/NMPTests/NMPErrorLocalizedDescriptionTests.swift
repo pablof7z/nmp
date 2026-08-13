@@ -92,6 +92,10 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
                 #"Invalid correlation token "sentinel-token": sentinel-correlation"#
             ),
             (.invalidNip73(reason: "sentinel-id"), "Invalid NIP-73 external content id: sentinel-id"),
+            (
+                .replaceableOperationHasNoWireForm,
+                "A registered replaceable operation has no standalone FFI payload"
+            ),
         ]
 
         for (error, expected) in cases {
@@ -99,6 +103,13 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
             XCTAssertEqual(error.localizedDescription, expected, "\(error)")
             XCTAssertFalse(error.localizedDescription.contains("NMP.NMPError error"))
         }
+    }
+
+    func testReplaceableOperationWireRefusalMapsToThePublicErrorOwner() {
+        XCTAssertEqual(
+            NMPError(.ReplaceableOperationHasNoWireForm),
+            .replaceableOperationHasNoWireForm
+        )
     }
 
     func testEveryRelayInformationKindKeepsItsNestedEvidence() {
