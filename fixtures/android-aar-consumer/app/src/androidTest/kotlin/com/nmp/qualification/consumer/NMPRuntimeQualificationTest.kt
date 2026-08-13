@@ -68,20 +68,35 @@ class NMPRuntimeQualificationTest {
 
         lateinit var engine: NMPEngine
         lateinit var online: RowBatch
+        var collector: Job? = null
+        val matchingBatches = Channel<RowBatch>(1)
         val coldNanos =
-            measureNanoTime {
-                engine = NMPEngine(config(store))
-                online =
-                    withTimeout(COLD_LIVE_LIMIT_MS) {
-                        engine.observe(demand(successRelay)).first { batch ->
-                            batch.rows.any { it.content == CONTROLLED_EVENT_CONTENT } &&
-                                batch.sources().any { sameRelay(it.relay, successRelay) }
+            try {
+                measureNanoTime {
+                    engine = NMPEngine(config(store))
+                    collector =
+                        launch(Dispatchers.Default) {
+                            engine.observe(demand(successRelay)).collect { batch ->
+                                if (batch.rows.any { it.content == CONTROLLED_EVENT_CONTENT } &&
+                                    batch.sources().any { sameRelay(it.relay, successRelay) }
+                                ) {
+                                    matchingBatches.trySend(batch)
+                                }
+                            }
                         }
-                    }
+                    online = withTimeout(COLD_LIVE_LIMIT_MS) { matchingBatches.receive() }
+                }
+            } finally {
+                withTimeout(COLLECTOR_CANCEL_LIMIT_MS) { collector?.cancelAndJoin() }
             }
         val coldMs = coldNanos / 1_000_000
         assertTrue("cold live first row took ${coldMs}ms", coldMs <= COLD_LIVE_LIMIT_MS)
         assertTrue(online.rows.any { it.content == CONTROLLED_EVENT_CONTENT })
+        // Cancellation withdraws demand synchronously from the Kotlin Flow,
+        // while the engine-owned transport writes CLOSE on its worker. Keep
+        // the engine alive for one bounded flush window; the host relay
+        // transcript independently requires the exact CLOSE for this run.
+        delay(WIRE_WITHDRAWAL_FLUSH_MS)
         engine.close()
         engine.close()
         assertEngineClosedFromKotlin(engine)
@@ -352,6 +367,8 @@ class NMPRuntimeQualificationTest {
         const val TAG = "NMPQualification"
         const val CONTROLLED_EVENT_CONTENT = "nmp-android-controlled-relay"
         const val COLD_LIVE_LIMIT_MS = 3_000L
+        const val COLLECTOR_CANCEL_LIMIT_MS = 5_000L
+        const val WIRE_WITHDRAWAL_FLUSH_MS = 500L
         const val CACHE_SAMPLES = 50
         const val CACHE_P95_LIMIT_MS = 100.0
         const val COLLECTOR_COUNT = 64
