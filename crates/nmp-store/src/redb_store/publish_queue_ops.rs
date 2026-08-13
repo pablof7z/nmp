@@ -290,6 +290,12 @@ pub(super) fn record_route_revision(
             relays,
         }
     };
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if store.fail_route_revision_writes {
+        return Err(PersistenceError::invariant(
+            "injected route revision failure",
+        ));
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::RouteRevisionBeforeCommit);
     commit_prepared(write_txn, revision)

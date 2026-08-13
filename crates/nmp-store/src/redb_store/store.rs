@@ -102,6 +102,10 @@ pub struct RedbStore {
     /// production build carries or can mutate this set.
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) failed_lane_start_relays: BTreeSet<RelayUrl>,
+    /// Fixed construction-time refusal for route-revision rollback tests. No
+    /// production build carries or can mutate this setting.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(super) fail_route_revision_writes: bool,
     /// Application-level write transactions performed by `open`; the
     /// healthy v6 reopen falsifier asserts this stays zero.
     #[cfg(test)]
@@ -254,6 +258,17 @@ impl RedbStore {
     ) -> Result<Self, RedbStoreOpenError> {
         let mut store = Self::temporary()?;
         store.failed_lane_start_relays = failed_relays.into_iter().collect();
+        Ok(store)
+    }
+
+    /// Open a persistent Redb store whose route-revision writes refuse at the
+    /// existing pre-commit boundary.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn open_with_route_revision_write_failure(
+        path: impl AsRef<Path>,
+    ) -> Result<Self, RedbStoreOpenError> {
+        let mut store = Self::open(path)?;
+        store.fail_route_revision_writes = true;
         Ok(store)
     }
 
@@ -687,6 +702,8 @@ impl RedbStore {
             publish_queue_relays: Mutex::new(PublishQueueRelayCache::default()),
             #[cfg(any(test, feature = "test-instrumentation"))]
             failed_lane_start_relays: BTreeSet::new(),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            fail_route_revision_writes: false,
             #[cfg(test)]
             open_write_transactions: _open_write_transactions,
             #[cfg(test)]

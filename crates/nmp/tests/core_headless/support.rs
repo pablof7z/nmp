@@ -454,7 +454,6 @@ impl EventStore for FailOnceCompensationStore {
 struct RedbFailStartStore {
     inner: RedbStore,
     failed_relays: BTreeSet<RelayUrl>,
-    fail_route_revisions: bool,
 }
 
 impl RedbFailStartStore {
@@ -462,15 +461,6 @@ impl RedbFailStartStore {
         Self {
             inner: RedbStore::open(path).expect("open redb failure fixture"),
             failed_relays: failed_relays.into_iter().collect(),
-            fail_route_revisions: false,
-        }
-    }
-
-    fn open_with_route_failure(path: &std::path::Path) -> Self {
-        Self {
-            inner: RedbStore::open(path).expect("open redb route-failure fixture"),
-            failed_relays: BTreeSet::new(),
-            fail_route_revisions: true,
         }
     }
 }
@@ -575,11 +565,6 @@ impl EventStore for RedbFailStartStore {
         intent_id: nmp_store::IntentId,
         relays: BTreeSet<RelayUrl>,
     ) -> Result<PublishQueueRouteRevision, PersistenceError> {
-        if self.fail_route_revisions {
-            return Err(PersistenceError::invariant(
-                "injected route revision failure",
-            ));
-        }
         self.inner.record_route_revision(intent_id, relays)
     }
     fn recover_route_revisions(
