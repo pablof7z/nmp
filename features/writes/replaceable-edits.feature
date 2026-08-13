@@ -46,7 +46,6 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:status=built
   # nmp:evidence=rust:nmp-nip02::alice_then_bob_keep_two_receipts_and_one_complete_pending_event
   # nmp:falsifier=Accept the operation without committing its complete pending row; the public Engine capstone cannot observe the acceptance event id as the current Pending live-query value before returning custody.
-  # nmp:issue=#1432
   Scenario: An accepted capability operation already has one complete replacement event
     Given I am disconnected from every relay
     When a configured capability adds Alice to my contact list
@@ -59,7 +58,6 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:status=built
   # nmp:evidence=rust:nmp-nip02::invalidated_registration_and_materializer_refusal_leave_no_custody
   # nmp:falsifier=Accept an operation from a replaced registration or retain anything after synchronous materializer refusal; the queue is no longer empty and the signed source is no longer the sole canonical row.
-  # nmp:issue=#1432
   Scenario: An unavailable capability refuses the operation before custody
     Given the capability required by the operation is not configured
     When I try to add Alice to my contact list through that capability
@@ -74,7 +72,6 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:evidence=rust:nmp-nip02::alice_then_bob_keep_two_receipts_and_one_complete_pending_event
   # nmp:evidence=rust:nmp-nip02::semantic_operations_compose_in_order_and_preserve_unowned_fields
   # nmp:falsifier=Rewrite or decrypt content while applying the public follow operation; the exact opaque source content no longer survives both materialization and durable restart.
-  # nmp:issue=#1432
   Scenario: A public tag-only edit preserves opaque encrypted content without crypto
     Given my stored contact list contains opaque encrypted content
     And no decryption capability is available
@@ -104,7 +101,6 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:evidence=rust:nmp-nip02::alice_then_bob_keep_two_receipts_and_one_complete_pending_event
   # nmp:evidence=rust:nmp-store::body_complete_receipt_keeps_accepted_id_while_current_advances_across_reopen
   # nmp:falsifier=Create one receipt per shared event or rewrite Alice's acceptance id when Bob becomes current; the capstone loses two stable receipt identities or the store reopen proof observes the wrong accepted-to-current pair.
-  # nmp:issue=#1432
   Scenario: Several offline operations keep their receipts while sharing one complete current event
     Given I am disconnected from every relay
     When a configured capability adds Alice to my contact list
