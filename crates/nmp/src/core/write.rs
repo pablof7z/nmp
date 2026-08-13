@@ -1942,7 +1942,7 @@ impl<S: EventStore> EngineCore<S> {
                     nmp_store::ReplaceableOperationReceiptState::Contributing {
                         current: Some(current),
                     },
-            } => Some((coordinate.clone(), *accepted, current.clone())),
+            } => Some((coordinate.clone(), *accepted, *current)),
             _ => None,
         };
         let receipt_state = semantic
