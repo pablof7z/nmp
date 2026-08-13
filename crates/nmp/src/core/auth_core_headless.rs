@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 use nmp_router::FixtureRoutingFacts;
-use nmp_store::MemoryStore;
+use nmp_store::RedbStore;
 use nmp_transport::{DisconnectReason, RelayFrame, RelayHandle};
 use nostr::{EventBuilder, EventId, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp};
 
@@ -13,7 +13,7 @@ const POLICY: AuthCapabilityInstance = AuthCapabilityInstance(41);
 const SIGNER: AuthCapabilityInstance = AuthCapabilityInstance(42);
 
 struct Fixture {
-    core: EngineCore<MemoryStore>,
+    core: EngineCore<RedbStore>,
     keys: Keys,
     session: RelaySessionKey,
     handle: RelayHandle,
@@ -36,8 +36,11 @@ impl Fixture {
             routing_evidence: BTreeSet::new(),
         };
         let directory = FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [relay]);
-        let mut core =
-            EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), directory, 10);
+        let mut core = EngineCore::new_with_fixture_routing_facts(
+            RedbStore::temporary().expect("temporary Redb store"),
+            directory,
+            10,
+        );
         core.attribution.observe_demand([&atom]);
         core.router
             .compile(&BTreeSet::from([atom]), &core.routing_facts, core.cap);
@@ -464,7 +467,7 @@ fn auth_denial_isolated_by_exact_identity_leaves_same_url_peer_live() {
         slot: 21,
         generation: 1,
     };
-    let mut core = EngineCore::new(MemoryStore::new(), 10);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
     core.handle(EngineMsg::RelayConnected(
         alice_handle,
         alice_session.clone(),
@@ -575,7 +578,7 @@ fn one_auth_denied_lane_does_not_stop_other_lanes_on_the_same_receipt() {
         .custom_created_at(Timestamp::from(30))
         .sign_with_keys(&keys)
         .unwrap();
-    let mut core = EngineCore::new(MemoryStore::new(), 10);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
     core.handle(EngineMsg::RelayConnected(
         denied_handle,
         denied_session.clone(),
@@ -1310,9 +1313,7 @@ fn auth_required_closed_revokes_ready_and_restricted_closed_is_denied() {
         .contains_key(&fixture.session));
     assert!(matches!(auth_phase(&fixture), AuthSessionPhase::Denied));
     assert_eq!(
-        EngineCore::<MemoryStore>::auth_source_status(
-            &fixture.core.auth_sessions[&fixture.session]
-        ),
+        EngineCore::<RedbStore>::auth_source_status(&fixture.core.auth_sessions[&fixture.session]),
         SourceStatus::AuthDenied
     );
 

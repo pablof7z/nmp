@@ -8,11 +8,15 @@ use nmp::mechanism::core::{EngineCore, EngineMsg};
 use nmp_grammar::ContextualAtom;
 use nmp_grammar::LiveQuery;
 use nmp_router::FixtureRoutingFacts;
-use nmp_store::MemoryStore;
+use nmp_store::RedbStore;
 use nostr::{Keys, RelayUrl};
 
-fn new_core(dir: FixtureRoutingFacts) -> EngineCore<MemoryStore> {
-    EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), dir, 10)
+fn new_core(dir: FixtureRoutingFacts) -> EngineCore<RedbStore> {
+    EngineCore::new_with_fixture_routing_facts(
+        RedbStore::temporary().expect("temporary Redb store"),
+        dir,
+        10,
+    )
 }
 
 fn kind_10009_atoms(atoms: &std::collections::BTreeSet<ContextualAtom>) -> usize {

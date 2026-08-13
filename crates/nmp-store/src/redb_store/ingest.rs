@@ -25,7 +25,7 @@ pub(super) fn insert_with_tables<T: GovernedIngestTxn>(
             // Dedup-by-id FIRST: merge provenance, no index churn. Goes
             // through `Provenance::merge_observation` (not a re-derived
             // copy) so the persisted backend can never diverge from
-            // `MemoryStore`'s merge semantics.
+            // `RedbStore`'s merge semantics.
             let mut local = tables.load_local(event_key)?;
             let grew = tables.merge_observation(event_key, &from.relay, from.at)?;
             // Architecture review requirement (issue #2 P0 correction,

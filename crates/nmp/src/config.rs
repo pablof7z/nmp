@@ -14,8 +14,8 @@ use crate::error::EngineError;
 /// Construction config for [`Engine::new`](crate::Engine::new).
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
-    /// `None` -> in-memory store (nothing survives a restart). `Some(path)`
-    /// -> a persistent on-disk store opened at that path, so the same file
+    /// `None` -> an engine-owned temporary Redb store (nothing survives this
+    /// engine's lifetime). `Some(path)` -> a persistent Redb store opened at that path, so the same file
     /// reopened across restarts makes THIS replica's already-ingested rows
     /// readable cold, offline. This is local availability, not a claim of
     /// global completeness -- a query snapshot only proves what this store

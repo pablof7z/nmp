@@ -31,7 +31,7 @@
 //! separate deployment concern.
 //!
 //! Everything below `Engine` -- `EngineThread`, `Handle`,
-//! `RedbStore`/`MemoryStore`, `PoolConfig`, `LocalKeySigner` -- is no longer
+//! `RedbStore`, `PoolConfig`, `LocalKeySigner` -- is no longer
 //! an app contract (#52's "internal or explicitly unstable"). Two things
 //! stay behind the `unstable-mechanism` cargo feature, off by default and
 //! `#[doc(hidden)]` where applicable -- enabling either is a greppable,

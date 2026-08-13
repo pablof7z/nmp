@@ -7,10 +7,10 @@ use std::sync::{
 use nmp_grammar::ContextualAtom;
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CompensateOutcome, CompensationReason, CoverageInterval,
-    CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome, MemoryStore,
+    CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome,
     PersistenceError, PromoteOutcome, PublishQueueAttempt, PublishQueueIntent, PublishQueueReceipt,
-    PublishQueueRouteRevision, RefuseReason, RelayObserved, RemoveQueueEntryOutcome, RetractReason,
-    StoredEvent,
+    PublishQueueRouteRevision, RedbStore, RefuseReason, RelayObserved, RemoveQueueEntryOutcome,
+    RetractReason, StoredEvent,
 };
 use nostr::{Event, EventId, PublicKey, RelayUrl, Timestamp};
 
@@ -28,12 +28,12 @@ impl CoverageReadCounter {
 }
 
 pub(super) struct CountingCoverageStore {
-    inner: MemoryStore,
+    inner: RedbStore,
     reads: CoverageReadCounter,
 }
 
 impl CountingCoverageStore {
-    pub(super) fn new(inner: MemoryStore, reads: CoverageReadCounter) -> Self {
+    pub(super) fn new(inner: RedbStore, reads: CoverageReadCounter) -> Self {
         Self { inner, reads }
     }
 }

@@ -49,7 +49,7 @@ const TEST_SECRET_KEY_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000001";
 
 fn engine() -> Arc<NmpEngine> {
-    NmpEngine::new(NmpEngineConfig::default(), None).expect("in-memory engine must build")
+    NmpEngine::new(NmpEngineConfig::default(), None).expect("temporary Redb engine must build")
 }
 
 fn note_query() -> FfiFilter {

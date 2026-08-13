@@ -500,7 +500,7 @@ mod tests {
     use super::*;
     use nmp_grammar::{AccessContext, SourceAuthority};
     use nmp_router::{DemandKey, SubId, WireReq};
-    use nmp_store::MemoryStore;
+    use nmp_store::RedbStore;
     use nostr::Keys;
 
     fn atom() -> ContextualAtom {
@@ -543,7 +543,7 @@ mod tests {
             &BTreeSet::from([atom.clone()]),
             &plan,
             AcquisitionEvidenceContext {
-                store: &MemoryStore::new(),
+                store: &RedbStore::temporary().expect("temporary Redb store"),
                 connected: &BTreeSet::new(),
                 auth_status: &BTreeMap::new(),
                 ever_connected: &BTreeSet::new(),
@@ -554,7 +554,7 @@ mod tests {
                 acquisition: EvidenceAcquisition::Live,
             },
         )
-        .expect("MemoryStore coverage never fails");
+        .expect("ordinary temporary-store fixture records coverage");
 
         assert_eq!(evidence.sources.len(), 1);
         assert_eq!(evidence.sources[0].relay, relay);
@@ -579,7 +579,7 @@ mod tests {
             &BTreeSet::from([atom.clone()]),
             &plan,
             AcquisitionEvidenceContext {
-                store: &MemoryStore::new(),
+                store: &RedbStore::temporary().expect("temporary Redb store"),
                 connected: &BTreeSet::new(),
                 auth_status: &BTreeMap::new(),
                 ever_connected: &BTreeSet::new(),
@@ -590,7 +590,7 @@ mod tests {
                 acquisition: EvidenceAcquisition::Live,
             },
         )
-        .expect("MemoryStore coverage never fails");
+        .expect("ordinary temporary-store fixture records coverage");
 
         assert!(evidence.sources.is_empty());
         assert_eq!(
@@ -624,7 +624,7 @@ mod tests {
             &BTreeSet::from([atom]),
             &plan,
             AcquisitionEvidenceContext {
-                store: &MemoryStore::new(),
+                store: &RedbStore::temporary().expect("temporary Redb store"),
                 connected: &BTreeSet::new(),
                 auth_status: &BTreeMap::new(),
                 ever_connected: &BTreeSet::new(),
@@ -635,7 +635,7 @@ mod tests {
                 acquisition: EvidenceAcquisition::Live,
             },
         )
-        .expect("MemoryStore coverage never fails");
+        .expect("ordinary temporary-store fixture records coverage");
 
         assert_eq!(evidence.sources.len(), 1);
         assert_eq!(evidence.sources[0].relay, relay);
@@ -685,7 +685,7 @@ mod tests {
                 &BTreeSet::from([atom.clone()]),
                 &plan,
                 AcquisitionEvidenceContext {
-                    store: &MemoryStore::new(),
+                    store: &RedbStore::temporary().expect("temporary Redb store"),
                     connected: &connected,
                     auth_status: &BTreeMap::from([(session.clone(), status)]),
                     ever_connected: &connected,
@@ -696,7 +696,7 @@ mod tests {
                     acquisition: EvidenceAcquisition::Live,
                 },
             )
-            .expect("MemoryStore coverage never fails");
+            .expect("ordinary temporary-store fixture records coverage");
             assert_eq!(evidence.sources[0].status, status);
         }
 
@@ -704,7 +704,7 @@ mod tests {
             &BTreeSet::from([atom]),
             &plan,
             AcquisitionEvidenceContext {
-                store: &MemoryStore::new(),
+                store: &RedbStore::temporary().expect("temporary Redb store"),
                 connected: &connected,
                 auth_status: &BTreeMap::new(),
                 ever_connected: &connected,
@@ -715,7 +715,7 @@ mod tests {
                 acquisition: EvidenceAcquisition::Live,
             },
         )
-        .expect("MemoryStore coverage never fails");
+        .expect("ordinary temporary-store fixture records coverage");
         assert_eq!(
             waiting.sources[0].status,
             SourceStatus::AwaitingAuth {
@@ -748,7 +748,7 @@ mod tests {
             &BTreeSet::from([atom]),
             &plan,
             AcquisitionEvidenceContext {
-                store: &MemoryStore::new(),
+                store: &RedbStore::temporary().expect("temporary Redb store"),
                 connected: &BTreeSet::new(),
                 auth_status: &BTreeMap::new(),
                 ever_connected: &BTreeSet::new(),

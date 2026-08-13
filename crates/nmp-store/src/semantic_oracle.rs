@@ -1,11 +1,12 @@
-//! Backend-independent semantic qualification for event and publishing state.
+//! Redb semantic and reconstruction qualification for event and publishing
+//! state.
 //!
 //! The oracle deliberately observes only `EventStore` semantics. It never
-//! reads physical tables, keys, row counts, or backend file bytes. A durable
-//! harness additionally closes and reopens Redb after every successful
-//! operation, proving that each checkpoint's complete normalized state and
-//! digest survive recovery. Future backend candidates plug into the same
-//! trace before they can be considered for production.
+//! reads physical tables, keys, row counts, or backend file bytes. The harness
+//! closes and reopens Redb after every successful operation,
+//! proving that each checkpoint's complete normalized state and digest
+//! survive recovery without relying on another store implementation as an
+//! oracle.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -13,12 +14,14 @@ use std::path::PathBuf;
 use nmp_grammar::{
     AccessContext, ConcreteFilter, ContextualAtom, CorrelationToken, SourceAuthority,
 };
+use nostr::secp256k1::rand::{rngs::StdRng, SeedableRng};
+use nostr::secp256k1::SECP256K1;
 use nostr::{Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
 use serde_json::{json, Value};
 
 use crate::{
     coverage_key, sentinel_signature, AcceptOutcome, AcceptWrite, CoverageInterval, EventStore,
-    GcRetentionSet, HandoffEvidence, InsertOutcome, IntentId, IntentSigState, MemoryStore,
+    GcRetentionSet, HandoffEvidence, InsertOutcome, IntentId, IntentSigState,
     PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueLaneKey,
     PublishQueuePostHandoffState, PublishQueueTransientCause, RedbStore, RefuseReason,
     RelayObserved, StoredEvent, VerifiedSignature,
@@ -41,8 +44,174 @@ const MAX_COVERAGE_SECRET: &str =
 struct Checkpoint {
     operation: &'static str,
     digest: String,
-    normalized: String,
 }
+
+const EXPECTED_SEMANTIC_TRACE: &[(&str, &str)] = &[
+    (
+        "insert",
+        "fd241c1baae2aea9b17741437ace8950a54b8ce0b652a4d380fae6f108256eb8",
+    ),
+    (
+        "duplicate provenance",
+        "99b45d4b3a2f261ba52c57747fb2bf73cadecf6eac57e3bd0250ea0e20a158ef",
+    ),
+    (
+        "replaceable first winner",
+        "92559cce2e47f3084556520eb178929e2da4004d830ad36d6a7742c759fd0898",
+    ),
+    (
+        "replaceable conflict",
+        "ec4308ac1e7a7ac8089c917c1d9136b6fc1e205778eaa8ecca87d67f5af689d1",
+    ),
+    (
+        "addressable first winner",
+        "184bad00039a92a167e98966e94527f65b138a7bcc2ea9aed0a7738440028673",
+    ),
+    (
+        "addressable conflict",
+        "e626e169ed4688c42584c6ffd615762a95d0a9c6efd871c7a4400a145f92e8fe",
+    ),
+    (
+        "deletion target",
+        "0cffd48a9735b399175d63d87cdc3ecb589435e02534cd365722988d220167bc",
+    ),
+    (
+        "deletion",
+        "938b2c4f81e5a705b3f72819d513621fce3aeb4c6f00cb3165c3a4eca9c395bf",
+    ),
+    (
+        "deletion before target",
+        "8c1e60610701b9154c770bdfdcac636a2dbd476afaa508b86feb4ecfa77be803",
+    ),
+    (
+        "tombstoned target refused",
+        "8c1e60610701b9154c770bdfdcac636a2dbd476afaa508b86feb4ecfa77be803",
+    ),
+    (
+        "expiry indexed",
+        "6896f26942cd0ccf4f32d92c91d335817ee14ecd6bc9906f99c903a1f29cdbbf",
+    ),
+    (
+        "expiry applied",
+        "8c1e60610701b9154c770bdfdcac636a2dbd476afaa508b86feb4ecfa77be803",
+    ),
+    (
+        "coverage fact persisted",
+        "2227110dbaaa94204bfb012fee25cc195cfd71bee7ff7ee6d34465e6324c1ea1",
+    ),
+    (
+        "coverage recorded after facts",
+        "c27cc51971097f4e22f0aa9885d5af6227642ccf2da373229fd023df8e4cd435",
+    ),
+    (
+        "coverage-safe gc",
+        "735f8a01db9cf0bebd6ef1c39aaa0bde2d9b5369808b92dd38b0236ee346e3f2",
+    ),
+    (
+        "maximum coverage fact and claim persisted",
+        "fd71bf955a74aad0e955f17fa9fde3fc24cb931842e28149284de0f32efe2c28",
+    ),
+    (
+        "maximum coverage removed with fact",
+        "735f8a01db9cf0bebd6ef1c39aaa0bde2d9b5369808b92dd38b0236ee346e3f2",
+    ),
+    (
+        "pending write accepted",
+        "7a024f5fadd783b8297ed70138e2fcb804f7049b4f4b191c96800b336c82b10c",
+    ),
+    (
+        "pending write signed",
+        "3f140f194dce4cc4441b0562f16e587e1c24b7a9f1a1c87989dfac60bef1b334",
+    ),
+    (
+        "cancellable write accepted",
+        "1f5ed67fba8eecc286a5d915208a64c2e6d9e5a644f5d0df44599793dd6bc648",
+    ),
+    (
+        "write cancelled",
+        "81cde1baf671e8ec1d5d533affc1de0645548bb8b1b9bac9e6c075a545b4629b",
+    ),
+    (
+        "replaceable delivery accepted",
+        "66fb86e9eb23f5f1c999382438354167cabe991c6ee2f2c2fba445c6e096c96f",
+    ),
+    (
+        "replaceable delivery superseded",
+        "c2712ae7bd641ef189c0d15faca7d42e34d6ba7474ffea1ef74889721af3f008",
+    ),
+    (
+        "superseding delivery compensated",
+        "3fdb3a8574e529666cc20d757093622d696cd23781bee9c8c994569258a9eddb",
+    ),
+    (
+        "correlated multi-relay delivery accepted",
+        "20fd05a6452e7626335755f2d81f58a6dd749b68149c187dfdaae084fa279852",
+    ),
+    (
+        "correlated multi-relay lanes durable",
+        "b92c08443288e4400d433a48cd29ad4ce8e4a996dbfcf9357db7c73cbdb4cd27",
+    ),
+    (
+        "ambiguous handoff became outcome unknown",
+        "17125a230ec9f7a835e21ac2efbee9d79cd2bd17e872cb2aaee9c88621abe588",
+    ),
+    (
+        "delivery attempt gave up",
+        "cbbbdf1399a4c88064fe144c1113c9f8b0ba5757d87be481173347c5f3c9b685",
+    ),
+    (
+        "in-flight delivery interrupted",
+        "24c677c32389426223907c19e3c60b22e880113889db84987e3a91d49d38c505",
+    ),
+    (
+        "retry ended in relay rejection",
+        "ad3da84dba425e027bf8efcf9cc0f85f1f564067f25c8c99de8dcb83e70637fb",
+    ),
+    (
+        "multi-relay terminal obligation closed",
+        "ad3da84dba425e027bf8efcf9cc0f85f1f564067f25c8c99de8dcb83e70637fb",
+    ),
+    (
+        "publication route durable",
+        "489c326e0ec1d771c63333f12518ffa9e85b58dc9b3f4fdde223a0472b52f7d8",
+    ),
+    (
+        "publication lanes bootstrapped",
+        "fccb7686f4956649c75a8fec913048d07402ac349b6c5edfffd8df03275094bb",
+    ),
+    (
+        "publication lane eligible",
+        "df882359ad6351a3b948465e3be68068926c689c47ce4485cb2810fa14515052",
+    ),
+    (
+        "publication attempt started",
+        "d6e152aad831f2ecd1a843e4d16468dc91434773f423ca192930f6465e6a3a29",
+    ),
+    (
+        "publication retry scheduled",
+        "2e9feb051c0845a1718d8dd7d473404ff5c940bed448ed6528d80ddf38d8c11e",
+    ),
+    (
+        "publication retry eligible",
+        "b423a4642f6d185f69b3e0b896eb84ec165413a600297a0104ed3838a0c2c732",
+    ),
+    (
+        "publication retry started",
+        "6d234a1774d13ae57db5788dcdef31d8942abc514d68f71eaf873583b0bbb850",
+    ),
+    (
+        "publication handed off",
+        "cd3b5e6d5f0be9c2d0184aef2a508432c7c2e45d28e05c6340972d32a6b25c91",
+    ),
+    (
+        "publication receipt acked",
+        "238b4f60f00d021e25a2f94faa2431656e812d2d4549adeade9d63d56a29acd6",
+    ),
+    (
+        "publication obligation closed",
+        "238b4f60f00d021e25a2f94faa2431656e812d2d4549adeade9d63d56a29acd6",
+    ),
+];
 
 #[derive(Default)]
 struct OracleContext {
@@ -111,32 +280,24 @@ impl TraceFixture {
     }
 }
 
-enum Harness {
-    Memory(Box<MemoryStore>),
-    Redb {
-        path: PathBuf,
-        store: Option<Box<RedbStore>>,
-    },
+struct Harness {
+    path: PathBuf,
+    store: Option<Box<RedbStore>>,
 }
 
 impl Harness {
-    fn memory() -> Self {
-        Self::Memory(Box::new(MemoryStore::new()))
-    }
-
     fn redb(path: PathBuf) -> Self {
         let store = RedbStore::open(&path).expect("open oracle Redb store");
-        Self::Redb {
+        Self {
             path,
             store: Some(Box::new(store)),
         }
     }
 
     fn store(&mut self) -> &mut dyn EventStore {
-        match self {
-            Self::Memory(store) => store.as_mut(),
-            Self::Redb { store, .. } => store.as_deref_mut().expect("Redb harness store is open"),
-        }
+        self.store
+            .as_deref_mut()
+            .expect("Redb harness store is open")
     }
 
     fn checkpoint(
@@ -148,32 +309,29 @@ impl Harness {
     ) -> Checkpoint {
         let before = normalized_state(self.store(), context, alice, primary_relay);
 
-        if let Self::Redb { path, store } = self {
-            let recovery_before = normalized_recovery_state(
-                store.as_deref().expect("Redb harness store is open"),
-                context,
-            );
-            drop(store.take());
-            *store = Some(Box::new(
-                RedbStore::open(path).expect("reopen oracle Redb store"),
-            ));
-            let reopened = store.as_deref().expect("reopened Redb harness store");
-            let after = normalized_state(reopened, context, alice, primary_relay);
-            assert_eq!(
-                after, before,
-                "semantic state changed across reopen after {operation}"
-            );
-            assert_eq!(
-                normalized_recovery_state(reopened, context),
-                recovery_before,
-                "recovery state changed across reopen after {operation}"
-            );
-        }
+        let recovery_before = normalized_recovery_state(
+            self.store.as_deref().expect("Redb harness store is open"),
+            context,
+        );
+        drop(self.store.take());
+        self.store = Some(Box::new(
+            RedbStore::open(&self.path).expect("reopen oracle Redb store"),
+        ));
+        let reopened = self.store.as_deref().expect("reopened Redb harness store");
+        let after = normalized_state(reopened, context, alice, primary_relay);
+        assert_eq!(
+            after, before,
+            "semantic state changed across reopen after {operation}"
+        );
+        assert_eq!(
+            normalized_recovery_state(reopened, context),
+            recovery_before,
+            "recovery state changed across reopen after {operation}"
+        );
 
         Checkpoint {
             operation,
             digest: blake3::hash(before.as_bytes()).to_hex().to_string(),
-            normalized: before,
         }
     }
 }
@@ -190,42 +348,53 @@ fn observed(relay: &RelayUrl, at: u64) -> RelayObserved {
     RelayObserved::new(relay.clone(), Timestamp::from(at))
 }
 
+fn sign(builder: EventBuilder, keys: &Keys) -> Event {
+    let mut rng = StdRng::seed_from_u64(0x1427);
+    builder
+        .build(keys.public_key())
+        .sign_with_ctx(SECP256K1, &mut rng, keys)
+        .expect("sign deterministic oracle event")
+}
+
 fn regular(keys: &Keys, content: &str, created_at: u64) -> Event {
-    EventBuilder::new(Kind::TextNote, content)
-        .custom_created_at(Timestamp::from(created_at))
-        .sign_with_keys(keys)
-        .expect("sign oracle event")
+    sign(
+        EventBuilder::new(Kind::TextNote, content).custom_created_at(Timestamp::from(created_at)),
+        keys,
+    )
 }
 
 fn replaceable(keys: &Keys, content: &str, created_at: u64) -> Event {
-    EventBuilder::new(Kind::Metadata, content)
-        .custom_created_at(Timestamp::from(created_at))
-        .sign_with_keys(keys)
-        .expect("sign oracle replaceable event")
+    sign(
+        EventBuilder::new(Kind::Metadata, content).custom_created_at(Timestamp::from(created_at)),
+        keys,
+    )
 }
 
 fn addressable(keys: &Keys, identifier: &str, content: &str, created_at: u64) -> Event {
-    EventBuilder::new(Kind::from(30_003u16), content)
-        .tag(Tag::identifier(identifier))
-        .custom_created_at(Timestamp::from(created_at))
-        .sign_with_keys(keys)
-        .expect("sign oracle addressable event")
+    sign(
+        EventBuilder::new(Kind::from(30_003u16), content)
+            .tag(Tag::identifier(identifier))
+            .custom_created_at(Timestamp::from(created_at)),
+        keys,
+    )
 }
 
 fn deletion(keys: &Keys, target: nostr::EventId, created_at: u64) -> Event {
-    EventBuilder::new(Kind::EventDeletion, "")
-        .tag(Tag::event(target))
-        .custom_created_at(Timestamp::from(created_at))
-        .sign_with_keys(keys)
-        .expect("sign oracle deletion")
+    sign(
+        EventBuilder::new(Kind::EventDeletion, "")
+            .tag(Tag::event(target))
+            .custom_created_at(Timestamp::from(created_at)),
+        keys,
+    )
 }
 
 fn expiring(keys: &Keys, content: &str, created_at: u64, expiration: u64) -> Event {
-    EventBuilder::new(Kind::TextNote, content)
-        .tag(Tag::expiration(Timestamp::from(expiration)))
-        .custom_created_at(Timestamp::from(created_at))
-        .sign_with_keys(keys)
-        .expect("sign oracle expiring event")
+    sign(
+        EventBuilder::new(Kind::TextNote, content)
+            .tag(Tag::expiration(Timestamp::from(expiration)))
+            .custom_created_at(Timestamp::from(created_at)),
+        keys,
+    )
 }
 
 fn signed_and_frozen(keys: &Keys, content: &str, created_at: u64) -> (Event, Event) {
@@ -1372,32 +1541,21 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
 }
 
 #[test]
-fn full_semantic_trace_matches_memory_and_redb_after_every_operation_and_reopen() {
+fn full_semantic_trace_survives_redb_reopen_after_every_operation() {
     let fixture = TraceFixture::new(
         &keys(ALICE_SECRET),
         &keys(BOB_SECRET),
         &keys(COVERAGE_SECRET),
         &keys(MAX_COVERAGE_SECRET),
     );
-    let expected = run_trace(Harness::memory(), &fixture);
     let dir = tempfile::tempdir().expect("oracle tempdir");
-    let actual = run_trace(
+    let checkpoints = run_trace(
         Harness::redb(dir.path().join("semantic-oracle.redb")),
         &fixture,
     );
-
-    assert_eq!(actual.len(), expected.len());
-    for (expected, actual) in expected.iter().zip(&actual) {
-        assert_eq!(actual.operation, expected.operation);
-        assert_eq!(
-            actual.normalized, expected.normalized,
-            "normalized semantic mismatch after {}",
-            actual.operation
-        );
-        assert_eq!(
-            actual.digest, expected.digest,
-            "digest mismatch after {}",
-            actual.operation
-        );
-    }
+    let actual = checkpoints
+        .iter()
+        .map(|checkpoint| (checkpoint.operation, checkpoint.digest.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, EXPECTED_SEMANTIC_TRACE);
 }

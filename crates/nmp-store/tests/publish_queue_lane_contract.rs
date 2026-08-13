@@ -6,11 +6,10 @@ use std::path::Path;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, AuthDenial,
     AuthDenialSource, CloseIntentOutcome, EventStore, HandoffEvidence, IntentId, IntentSigState,
-    MemoryStore, PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
-    PublishQueueDeadline, PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane,
-    PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState,
-    PublishQueueTerminalOutcome, PublishQueueTransientCause, RedbStore, RemoveQueueEntryOutcome,
-    VerifiedSignature,
+    PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueDeadline,
+    PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
+    PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueTerminalOutcome,
+    PublishQueueTransientCause, RedbStore, RemoveQueueEntryOutcome, VerifiedSignature,
 };
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
@@ -91,18 +90,14 @@ fn seed(
     (intent_id, receipt_id, signed, key, lane)
 }
 
-fn for_each_backend(mut body: impl FnMut(&mut dyn EventStore)) {
-    let mut memory = MemoryStore::new();
-    body(&mut memory);
-
-    let dir = tempfile::tempdir().unwrap();
-    let mut redb = RedbStore::open(dir.path().join("store.redb")).unwrap();
-    body(&mut redb);
+fn with_store(body: impl FnOnce(&mut dyn EventStore)) {
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    body(&mut store);
 }
 
 #[test]
 fn retained_terminal_receipt_keeps_full_history_until_whole_eviction() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let relay = RelayUrl::parse("wss://lane-lifecycle.example").unwrap();
         let (intent, receipt, signed, key, seeded) = seed(store, "lane lifecycle", 100, relay);
 
@@ -297,7 +292,7 @@ fn retained_terminal_receipt_keeps_full_history_until_whole_eviction() {
 
 #[test]
 fn suspended_attempt_is_atomic_deadline_free_and_resumes_with_the_next_ordinal() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let relay = RelayUrl::parse("wss://waiting-auth.example").unwrap();
         let (intent, _, signed, key, _) = seed(store, "waiting auth", 150, relay);
         store
@@ -346,7 +341,7 @@ fn suspended_attempt_is_atomic_deadline_free_and_resumes_with_the_next_ordinal()
 
 #[test]
 fn auth_denial_is_a_durable_terminal_lane_fact_and_revision_precedes_idempotence() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let relay = RelayUrl::parse("wss://auth-denial.example").unwrap();
         let (intent, _, _, key, seeded) = seed(store, "auth denial", 175, relay);
         let waiting = store.set_lane_waiting(&key, seeded.revision, true).unwrap();
@@ -391,7 +386,7 @@ fn auth_denial_is_a_durable_terminal_lane_fact_and_revision_precedes_idempotence
 
 #[test]
 fn due_deadlines_are_ordered_bounded_and_close_rejects_nonterminal_lanes() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let empty_keys = Keys::generate();
         let (_, empty_frozen) = signed_and_frozen(&empty_keys, "no routes", 190);
         let empty_intent = store
@@ -481,8 +476,8 @@ fn deadline_scale_read_returns_only_the_ordered_limit() {
 }
 
 #[test]
-fn equal_time_equal_intent_deadlines_use_canonical_relay_order_on_both_backends() {
-    for_each_backend(|store| {
+fn equal_time_equal_intent_deadlines_use_canonical_relay_order() {
+    with_store(|store| {
         let keys = Keys::generate();
         let (signed, frozen) = signed_and_frozen(&keys, "same-time", 640);
         let intent = store
@@ -525,7 +520,7 @@ fn equal_time_equal_intent_deadlines_use_canonical_relay_order_on_both_backends(
 
 #[test]
 fn relay_identity_uses_canonical_url_but_preserves_meaningful_path_slashes() {
-    for_each_backend(|store| {
+    with_store(|store| {
         let keys = Keys::generate();
         let (signed, frozen) = signed_and_frozen(&keys, "canonical-relay", 710);
         let intent = store

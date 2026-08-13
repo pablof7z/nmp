@@ -14,12 +14,16 @@ use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, RelaySessionKey};
 use nmp_resolver::testkit::{kind1, kind3};
 use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
-use nmp_store::MemoryStore;
+use nmp_store::RedbStore;
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{EventBuilder, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp};
 
-fn new_core(dir: FixtureRoutingFacts) -> EngineCore<MemoryStore> {
-    EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), dir, 10)
+fn new_core(dir: FixtureRoutingFacts) -> EngineCore<RedbStore> {
+    EngineCore::new_with_fixture_routing_facts(
+        RedbStore::temporary().expect("temporary Redb store"),
+        dir,
+        10,
+    )
 }
 
 fn literal_query(kinds: &[u16], author_hex: &str) -> LiveQuery {
@@ -30,7 +34,7 @@ fn literal_query(kinds: &[u16], author_hex: &str) -> LiveQuery {
     })
 }
 
-fn connect(core: &mut EngineCore<MemoryStore>, slot: u32, url: &RelayUrl) -> Vec<Effect> {
+fn connect(core: &mut EngineCore<RedbStore>, slot: u32, url: &RelayUrl) -> Vec<Effect> {
     core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot,

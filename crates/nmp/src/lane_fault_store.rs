@@ -174,8 +174,8 @@ impl LaneFaults {
 }
 
 /// A delegating store whose lane-bootstrap and route-revision reads can be
-/// made to fail and then healed. Generic over the backend so the same double
-/// covers the in-memory live path and the redb restart path.
+/// made to fail and then healed. Generic over its delegate so the same narrow
+/// double covers temporary and reopened Redb fixtures.
 pub(crate) struct FaultyLaneStore<S> {
     inner: S,
     faults: LaneFaults,

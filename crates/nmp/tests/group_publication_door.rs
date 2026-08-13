@@ -77,7 +77,7 @@ fn engine_reading_lists_from(indexer: &ScriptedRelay, keys: &Keys) -> Engine {
         indexer_relays: vec![indexer.url.to_string()],
         ..EngineConfig::default()
     })
-    .expect("an in-memory engine builds");
+    .expect("a temporary Redb engine builds");
     engine
         .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
         .expect("the account and local provider register");
@@ -91,7 +91,7 @@ fn bare_engine() -> Engine {
     Engine::new(EngineConfig {
         ..EngineConfig::default()
     })
-    .expect("an in-memory engine builds")
+    .expect("a temporary Redb engine builds")
 }
 
 /// A live engine with a real local signer for `keys`, and no indexer/outbox
@@ -101,7 +101,7 @@ fn engine_with_signer(keys: &Keys) -> Engine {
     let engine = Engine::new(EngineConfig {
         ..EngineConfig::default()
     })
-    .expect("an in-memory engine builds");
+    .expect("a temporary Redb engine builds");
     engine
         .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
         .expect("the account and local provider register");
@@ -132,7 +132,7 @@ fn engine_with_failing_signer(keys: &Keys) -> Engine {
     let engine = Engine::new(EngineConfig {
         ..EngineConfig::default()
     })
-    .expect("an in-memory engine builds");
+    .expect("a temporary Redb engine builds");
     engine
         .add_public_key_account(keys.public_key(), true)
         .expect("the account becomes current");

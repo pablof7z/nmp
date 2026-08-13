@@ -18,7 +18,7 @@ fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
         (evidence_a.clone(), evidence_b.clone()),
         (evidence_b.clone(), evidence_a.clone()),
     ] {
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let with_evidence = |evidence: RoutingEvidence| {
             let mut atom = bounded_atom(&relay, "shared-selection");
             atom.routing_evidence.insert(evidence);
@@ -97,7 +97,7 @@ fn second_outbox_hint_opens_only_the_missing_relay_for_both_owner_close_orders()
     };
 
     for close_first_owner in [true, false] {
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let mut first = routeless_outbox_atom(author);
         first.routing_evidence.insert(first_evidence.clone());
         let mut second = routeless_outbox_atom(author);
@@ -189,7 +189,7 @@ fn preflush_hint_owner_churn_combines_pending_and_incumbent_assignment_truth() {
     };
 
     for depart_a_before_flush in [true, false] {
-        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let mut a = routeless_outbox_atom(author);
         a.routing_evidence.insert(evidence_a.clone());
         let mut b = routeless_outbox_atom(author);

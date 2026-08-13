@@ -72,11 +72,9 @@ pub(crate) fn address_key_for_coordinate(coord: &Coordinate) -> Option<AddressKe
 }
 
 impl AddressKey {
-    /// A canonical, unambiguous string encoding used ONLY as `RedbStore`'s
-    /// `addr_index` table key. `MemoryStore` keys directly off the enum via
-    /// `Hash`/`Eq` and never calls this — it exists purely because `redb`
-    /// table keys need a byte-encodable type, and `&str`/`String` (already
-    /// `Key`/`Value` in `redb`) is the simplest fit for one.
+    /// A canonical, unambiguous string encoding used as `RedbStore`'s
+    /// `addr_index` table key. Redb table keys need a byte-encodable type, and
+    /// `&str`/`String` (already `Key`/`Value` in `redb`) is the simplest fit.
     ///
     /// `\0` (NUL) separates fields: valid pubkey-hex/kind-decimal segments
     /// never contain NUL, so those two segments can never collide across
@@ -100,9 +98,9 @@ impl AddressKey {
 
 /// True iff `candidate` wins over `current` for the same
 /// replaceable/addressable address: newest `created_at` wins; on a
-/// `created_at` tie, the lexicographically-smallest id wins. Shared by both
-/// `MemoryStore` and `RedbStore` so supersession semantics can never diverge
-/// between the oracle and the persistent backend.
+/// `created_at` tie, the lexicographically-smallest id wins. Shared by every
+/// Redb mutation path so relay ingestion and accepted local writes cannot
+/// diverge.
 pub(crate) fn candidate_wins(candidate: &Event, current: &Event) -> bool {
     match candidate.created_at.cmp(&current.created_at) {
         Ordering::Greater => true,

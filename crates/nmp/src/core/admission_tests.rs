@@ -6,7 +6,7 @@ use nmp_grammar::{
     IndexedTagName, Selector,
 };
 use nmp_router::DemandKey;
-use nmp_store::{coverage_key, CoverageInterval, MemoryStore, RelayObserved};
+use nmp_store::{coverage_key, CoverageInterval, RedbStore, RelayObserved};
 use nostr::{EventBuilder, Keys, Kind};
 use std::borrow::Cow;
 
@@ -142,8 +142,8 @@ fn profile_atom(relay: &RelayUrl, author: PublicKey) -> ContextualAtom {
     }
 }
 
-fn seeded_profiles(relay: &RelayUrl, authors: &[&Keys]) -> MemoryStore {
-    let mut store = MemoryStore::new();
+fn seeded_profiles(relay: &RelayUrl, authors: &[&Keys]) -> RedbStore {
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     for (index, author) in authors.iter().enumerate() {
         let observed_at = 10 + index as u64;
         store
@@ -230,7 +230,7 @@ fn fresh_max_age_is_coverage_satisfied_alone_and_never_borrows_live_placement() 
     let session = RelaySessionKey::public(relay.clone());
     let value = "fresh-owner";
     let atom = query_atom(&relay, value);
-    let mut store = MemoryStore::new();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .record_coverage(&[(
             atom,

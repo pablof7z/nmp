@@ -44,11 +44,10 @@ alias for either retired execution-side spelling (`outbox_*`, then
 
 The general app door is `Engine::publish_queue(after, limit)`. `after` is an
 exclusive stable receipt-id cursor and `limit` is a `u8`, so one call returns
-at most 255 retained entries. This is enforced at `EventStore`: every backend
-must implement the bounded range door directly. Redb starts at the cursor's
-big-endian receipt key and stops at the limit; MemoryStore retains only the
-smallest requested ids while scanning its unordered map. There is no trait
-fallback that enumerates the full retained queue and truncates it afterward.
+at most 255 retained entries. This is enforced at `EventStore`: Redb implements
+the bounded range door directly, starts at the cursor's big-endian receipt key,
+and stops at the limit. There is no trait fallback that enumerates the full
+retained queue and truncates it afterward.
 
 `Engine::publish_queue_for_event(event_id, after, limit)` answers the narrower
 question a `LiveQuery` row creates: which still-active write obligations own
@@ -204,9 +203,9 @@ completeness does not.
 
 ## Semantic and crash qualification
 
-The backend-independent oracle compares MemoryStore and RedbStore after every
-operation. Redb is closed and reopened at each checkpoint, and both normalized
-state and its BLAKE3 digest must remain exact. The trace covers acceptance,
+The semantic trace checks independently spelled outcomes after every operation.
+Redb is closed and reopened at each checkpoint, and both normalized state and
+its BLAKE3 digest must remain exact. The trace covers acceptance,
 signing, cancellation, failure compensation, replaceable supersession,
 correlation lookup, a three-relay route, retry, interruption and resume,
 `OutcomeUnknown`, `GaveUp`, relay rejection, ACK, and terminal close. It

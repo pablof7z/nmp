@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use nmp_resolver::testkit::accept_write_of;
 use nmp_resolver::Engine;
-use nmp_store::{AcceptOutcome, CompensateOutcome, EventStore, MemoryStore, RelayObserved};
+use nmp_store::{AcceptOutcome, CompensateOutcome, EventStore, RedbStore, RelayObserved};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag, Timestamp};
 
 fn relay(name: &str) -> RelayUrl {
@@ -28,7 +28,7 @@ fn inserted_row_carries_every_same_batch_source_and_later_growth_carries_only_ne
     let second = relay("second");
     let third = relay("third");
     let fourth = relay("fourth");
-    let mut engine = Engine::new(MemoryStore::new());
+    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
 
     let inserted = engine
         .ingest_observed_detailed(vec![
@@ -75,7 +75,7 @@ fn same_batch_insert_then_delete_reports_only_the_durable_deletion_row() {
         .sign_with_keys(&keys)
         .unwrap();
     let source = relay("delete");
-    let mut engine = Engine::new(MemoryStore::new());
+    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
 
     let ingest = engine
         .ingest_observed_detailed(vec![
@@ -103,7 +103,7 @@ fn same_batch_supersession_chain_collapses_to_old_removed_and_final_winner_inser
     let middle = event(&keys, Kind::from(10_000u16), "middle", 20);
     let winner = event(&keys, Kind::from(10_000u16), "winner", 30);
     let source = relay("replaceable");
-    let mut engine = Engine::new(MemoryStore::new());
+    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
     engine
         .ingest_observed_detailed(vec![(old.clone(), observed(source.clone(), 11))])
         .unwrap();
@@ -134,7 +134,7 @@ fn local_supersession_and_compensation_carry_exact_inverse_row_changes() {
     let predecessor = event(&keys, Kind::from(10_000u16), "old", 10);
     let winner = event(&keys, Kind::from(10_000u16), "new", 20);
     let source = relay("valid-predecessor");
-    let mut engine = Engine::new(MemoryStore::new());
+    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
     engine
         .ingest_observed_detailed(vec![(predecessor.clone(), observed(source.clone(), 11))])
         .unwrap();
@@ -179,7 +179,7 @@ fn a_retired_pending_predecessor_is_removed_and_never_restored() {
     let keys = Keys::generate();
     let predecessor = event(&keys, Kind::from(10_000u16), "old", 10);
     let winner = event(&keys, Kind::from(10_000u16), "new", 20);
-    let mut engine = Engine::new(MemoryStore::new());
+    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
     engine
         .accept_local(accept_write_of(predecessor.clone(), 11))
         .unwrap();
@@ -218,7 +218,7 @@ fn local_kind5_compensation_carries_exact_revealed_target() {
         .custom_created_at(Timestamp::from(20u64))
         .sign_with_keys(&keys)
         .unwrap();
-    let mut engine = Engine::new(MemoryStore::new());
+    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
     engine
         .accept_local(accept_write_of(target.clone(), 11))
         .unwrap();
@@ -254,7 +254,7 @@ fn expiry_retraction_carries_the_exact_removed_row() {
         .sign_with_keys(&keys)
         .unwrap();
     let source = relay("expiry");
-    let mut engine = Engine::new(MemoryStore::new());
+    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
     engine
         .ingest_observed_detailed(vec![(expiring.clone(), observed(source, 51))])
         .unwrap();
@@ -274,7 +274,7 @@ fn expiry_retraction_carries_the_exact_removed_row() {
 #[test]
 fn local_duplicate_stale_and_refused_outcomes_carry_no_phantom_row_changes() {
     let keys = Keys::generate();
-    let mut engine = Engine::new(MemoryStore::new());
+    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
 
     let ordinary = event(&keys, Kind::TextNote, "ordinary", 10);
     engine

@@ -54,8 +54,11 @@ fn publish_signed<S: EventStore>(
 #[test]
 fn an_unroutable_write_parks_on_an_open_empty_destination_set_and_is_listed() {
     let author = Keys::generate();
-    let mut core =
-        EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), empty_directory(), 10);
+    let mut core = EngineCore::new_with_fixture_routing_facts(
+        RedbStore::temporary().expect("temporary Redb store"),
+        empty_directory(),
+        10,
+    );
     activate(&mut core, &author);
 
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
@@ -118,8 +121,11 @@ fn an_unroutable_write_parks_on_an_open_empty_destination_set_and_is_listed() {
 fn an_unsignable_write_names_the_frozen_author_across_an_account_switch() {
     let author = Keys::generate();
     let someone_else = Keys::generate();
-    let mut core =
-        EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), empty_directory(), 10);
+    let mut core = EngineCore::new_with_fixture_routing_facts(
+        RedbStore::temporary().expect("temporary Redb store"),
+        empty_directory(),
+        10,
+    );
     activate(&mut core, &author);
 
     let accepted = core.handle(EngineMsg::Publish(WriteIntent {
@@ -164,7 +170,7 @@ fn a_routed_write_is_undeliverable_only_while_no_destination_is_connected() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://non-existent.example").unwrap();
     let mut core = EngineCore::new_with_fixture_routing_facts(
-        MemoryStore::new(),
+        RedbStore::temporary().expect("temporary Redb store"),
         directory_knowing(&author, &relay),
         10,
     );
@@ -222,8 +228,11 @@ fn a_routed_write_is_undeliverable_only_while_no_destination_is_connected() {
 fn the_detail_window_is_bounded_while_the_census_stays_exact() {
     const PARKED: u64 = 200;
     let author = Keys::generate();
-    let mut core =
-        EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), empty_directory(), 10);
+    let mut core = EngineCore::new_with_fixture_routing_facts(
+        RedbStore::temporary().expect("temporary Redb store"),
+        empty_directory(),
+        10,
+    );
     activate(&mut core, &author);
 
     for i in 0..PARKED {
@@ -276,8 +285,11 @@ fn the_detail_window_is_bounded_while_the_census_stays_exact() {
 #[test]
 fn two_receipts_for_the_same_bytes_get_distinct_descriptors() {
     let author = Keys::generate();
-    let mut core =
-        EngineCore::new_with_fixture_routing_facts(MemoryStore::new(), empty_directory(), 10);
+    let mut core = EngineCore::new_with_fixture_routing_facts(
+        RedbStore::temporary().expect("temporary Redb store"),
+        empty_directory(),
+        10,
+    );
     activate(&mut core, &author);
 
     for _ in 0..2 {
@@ -370,7 +382,7 @@ fn reading_the_list_changes_no_scheduler_state() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://non-existent.example").unwrap();
     let mut core = EngineCore::new_with_fixture_routing_facts(
-        MemoryStore::new(),
+        RedbStore::temporary().expect("temporary Redb store"),
         directory_knowing(&author, &relay),
         10,
     );

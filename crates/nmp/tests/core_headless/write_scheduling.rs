@@ -461,7 +461,7 @@ fn parked_auth_write_is_redriven_across_reconnect_not_wedged() {
     let relay = RelayUrl::parse("wss://auth-reconnect.example").unwrap();
     let session = signer_session(&relay, author.public_key());
 
-    let mut core = EngineCore::new(MemoryStore::new(), 10);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
     let (_receipt, event, _) = publish_explicit(&mut core, &author, [relay.clone()]);
 
     // First generation: connect, release the bounded AUTH-discovery probe,
