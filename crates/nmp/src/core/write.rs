@@ -737,14 +737,10 @@ impl<S: EventStore> EngineCore<S> {
             return effects;
         };
 
-        let Some((intent_id, ordinal)) = target.lane else {
+        let Some((key, ordinal)) = target.lane else {
             return effects;
         };
-
-        let key = PublishQueueLaneKey {
-            intent_id,
-            relay: target.session.relay.clone(),
-        };
+        let intent_id = key.intent_id;
         let Ok(Some(lane)) = self
             .resolver
             .store()
@@ -865,9 +861,12 @@ impl<S: EventStore> EngineCore<S> {
     /// `attempt_correlations` is bounded by `MAX_GLOBAL_ATTEMPTS`, so this is
     /// a scan of at most 32 entries and never a store read.
     fn handoff_is_outstanding(&self, intent_id: IntentId, ordinal: u64) -> bool {
-        self.attempt_correlations
-            .values()
-            .any(|target| target.lane == Some((intent_id, ordinal)))
+        self.attempt_correlations.values().any(|target| {
+            target
+                .lane
+                .as_ref()
+                .is_some_and(|(key, current)| key.intent_id == intent_id && *current == ordinal)
+        })
     }
 
     /// Give back the relay slot held by an attempt whose handoff can never
@@ -1088,7 +1087,7 @@ impl<S: EventStore> EngineCore<S> {
                 AttemptCorrelationTarget {
                     receipt: id,
                     session: session.clone(),
-                    lane: Some((lane.key.intent_id, attempt.ordinal)),
+                    lane: Some((lane.key.clone(), attempt.ordinal)),
                 },
             );
             effects.push(Effect::PublishEvent(session, event, correlation));
@@ -4937,6 +4936,7 @@ impl<S: EventStore> EngineCore<S> {
             let relay = &session.relay;
             let key = PublishQueueLaneKey {
                 intent_id,
+                event_id,
                 relay: relay.clone(),
             };
             let lane = self

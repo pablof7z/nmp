@@ -417,15 +417,15 @@ pub(super) fn bootstrap_publish_queue_lanes(
         let intents = write_txn
             .open_table(PUBLISH_QUEUE_INTENTS)
             .map_err(persist_err)?;
-        if intents
+        let intent_bytes = intents
             .get(&intent_key(intent_id))
             .map_err(persist_err)?
-            .is_none()
-        {
-            return Err(PersistenceError::invariant(
-                "lane bootstrap intent is not open",
-            ));
-        }
+            .map(|value| value.value().to_vec())
+            .ok_or_else(|| PersistenceError::invariant("lane bootstrap intent is not open"))?;
+        let event_id = decode_intent(&intent_bytes)
+            .map_err(|error| codec_error("lane bootstrap intent", error))?
+            .current_event_id()
+            .ok_or_else(|| PersistenceError::invariant("lane bootstrap has no current event"))?;
         let route_revisions = write_txn
             .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
             .map_err(persist_err)?;
@@ -552,7 +552,11 @@ pub(super) fn bootstrap_publish_queue_lanes(
         }
         for relay_id in &relay_ids {
             let relay = store.publish_queue_relay(*relay_id)?;
-            let key = PublishQueueLaneKey { intent_id, relay };
+            let key = PublishQueueLaneKey {
+                intent_id,
+                event_id,
+                relay,
+            };
             let storage_key = lane_key(intent_id, *relay_id);
             let lane_attempts: Vec<_> = attempts
                 .iter()
@@ -680,7 +684,11 @@ pub(super) fn bootstrap_publish_queue_lanes(
                 decode_lane(value.value()).map_err(|error| codec_error("lane", error))?;
             recovered.push(PublishQueueLane {
                 version: 1,
-                key: PublishQueueLaneKey { intent_id, relay },
+                key: PublishQueueLaneKey {
+                    intent_id,
+                    event_id,
+                    relay,
+                },
                 revision,
                 last_ordinal,
                 state,
@@ -710,6 +718,18 @@ pub(super) fn recover_publish_queue_lanes(
     let lanes = read_txn
         .open_table(PUBLISH_QUEUE_LANES)
         .map_err(persist_err)?;
+    let intents = read_txn
+        .open_table(PUBLISH_QUEUE_INTENTS)
+        .map_err(persist_err)?;
+    let intent = intents
+        .get(&intent_key(intent_id))
+        .map_err(persist_err)?
+        .map(|value| value.value().to_vec())
+        .ok_or_else(|| PersistenceError::invariant("lane recovery intent is not open"))?;
+    let event_id = decode_intent(&intent)
+        .map_err(|error| codec_error("lane recovery intent", error))?
+        .current_event_id()
+        .ok_or_else(|| PersistenceError::invariant("lane recovery has no current event"))?;
     let (lower, upper) = lane_range(intent_id);
     let mut recovered = Vec::new();
     for row in lanes
@@ -730,6 +750,7 @@ pub(super) fn recover_publish_queue_lanes(
             version: 1,
             key: PublishQueueLaneKey {
                 intent_id,
+                event_id,
                 relay: store.publish_queue_relay(relay_id)?,
             },
             revision,
@@ -766,6 +787,9 @@ pub(super) fn due_publish_queue_deadlines(
     let lanes = read_txn
         .open_table(PUBLISH_QUEUE_LANES)
         .map_err(persist_err)?;
+    let intents = read_txn
+        .open_table(PUBLISH_QUEUE_INTENTS)
+        .map_err(persist_err)?;
     let (lower, upper) = deadline_due_range(now);
     let mut recovered = Vec::new();
     for row in deadlines
@@ -800,10 +824,20 @@ pub(super) fn due_publish_queue_deadlines(
         let (revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
         let relay = store.publish_queue_relay(relay_id)?;
+        let intent = intents
+            .get(&intent_key(intent_id))
+            .map_err(persist_err)?
+            .map(|value| value.value().to_vec())
+            .ok_or_else(|| PersistenceError::invariant("deadline intent is not open"))?;
+        let event_id = decode_intent(&intent)
+            .map_err(|error| codec_error("deadline intent", error))?
+            .current_event_id()
+            .ok_or_else(|| PersistenceError::invariant("deadline intent has no current event"))?;
         let lane = PublishQueueLane {
             version: 1,
             key: PublishQueueLaneKey {
                 intent_id,
+                event_id,
                 relay: relay.clone(),
             },
             revision,
@@ -812,7 +846,11 @@ pub(super) fn due_publish_queue_deadlines(
         };
         let deadline = PublishQueueDeadline {
             at,
-            key: PublishQueueLaneKey { intent_id, relay },
+            key: PublishQueueLaneKey {
+                intent_id,
+                event_id,
+                relay,
+            },
             lane_revision,
             kind,
         };
@@ -841,6 +879,9 @@ pub(super) fn next_publish_queue_deadline(
     }
     let lanes = read_txn
         .open_table(PUBLISH_QUEUE_LANES)
+        .map_err(persist_err)?;
+    let intents = read_txn
+        .open_table(PUBLISH_QUEUE_INTENTS)
         .map_err(persist_err)?;
     let mut rows = deadlines.iter().map_err(persist_err)?;
     let Some(row) = rows.next() else {
@@ -871,10 +912,20 @@ pub(super) fn next_publish_queue_deadline(
     let (revision, last_ordinal, state) =
         decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
     let relay = store.publish_queue_relay(relay_id)?;
+    let intent = intents
+        .get(&intent_key(intent_id))
+        .map_err(persist_err)?
+        .map(|value| value.value().to_vec())
+        .ok_or_else(|| PersistenceError::invariant("deadline intent is not open"))?;
+    let event_id = decode_intent(&intent)
+        .map_err(|error| codec_error("deadline intent", error))?
+        .current_event_id()
+        .ok_or_else(|| PersistenceError::invariant("deadline intent has no current event"))?;
     let lane = PublishQueueLane {
         version: 1,
         key: PublishQueueLaneKey {
             intent_id,
+            event_id,
             relay: relay.clone(),
         },
         revision,
@@ -883,7 +934,11 @@ pub(super) fn next_publish_queue_deadline(
     };
     let deadline = PublishQueueDeadline {
         at,
-        key: PublishQueueLaneKey { intent_id, relay },
+        key: PublishQueueLaneKey {
+            intent_id,
+            event_id,
+            relay,
+        },
         lane_revision,
         kind,
     };

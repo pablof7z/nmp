@@ -6,12 +6,13 @@ use std::path::Path;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, AuthDenial,
     AuthDenialSource, CloseIntentOutcome, EventStore, HandoffEvidence, IntentId, IntentSigState,
-    PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueDeadline,
-    PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
-    PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueTerminalOutcome,
-    PublishQueueTransientCause, RedbStore, RemoveQueueEntryOutcome, VerifiedSignature,
+    PersistenceFault, PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
+    PublishQueueDeadline, PublishQueueDeadlineKind,
+    PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey, PublishQueueLaneState,
+    PublishQueuePostHandoffState, PublishQueueTerminalOutcome, PublishQueueTransientCause,
+    RedbStore, RemoveQueueEntryOutcome, VerifiedSignature,
 };
-use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
+use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 /// The verified, intent-bound evidence `promote_signed` takes (#768). Every
@@ -85,7 +86,11 @@ fn seed(
     assert_eq!(lane.revision, 1);
     assert_eq!(lane.last_ordinal, 0);
     assert_eq!(lane.state, PublishQueueLaneState::WaitingConnection);
-    let key = PublishQueueLaneKey { intent_id, relay };
+    let key = PublishQueueLaneKey {
+        intent_id,
+        event_id: signed.id,
+        relay,
+    };
     assert_eq!(lane.key, key);
     (intent_id, receipt_id, signed, key, lane)
 }
@@ -93,6 +98,27 @@ fn seed(
 fn with_store(body: impl FnOnce(&mut dyn EventStore)) {
     let mut store = RedbStore::temporary().expect("temporary Redb store");
     body(&mut store);
+}
+
+#[test]
+fn a_predecessor_event_key_cannot_advance_the_current_lane() {
+    with_store(|store| {
+        let relay = RelayUrl::parse("wss://exact-generation.example").unwrap();
+        let (_, _, signed, current, lane) = seed(store, "exact-generation", 81, relay);
+        let mut predecessor = current.clone();
+        predecessor.event_id = EventId::from_byte_array([0x55; 32]);
+        assert_ne!(predecessor.event_id, signed.id);
+
+        let error = store
+            .set_lane_eligible(&predecessor, lane.revision, Timestamp::from(82))
+            .expect_err("a predecessor event must not mutate the current lane");
+        assert_eq!(error.fault(), PersistenceFault::Invariant);
+
+        let advanced = store
+            .set_lane_eligible(&current, lane.revision, Timestamp::from(82))
+            .expect("the exact current event advances its lane");
+        assert_eq!(advanced.key.event_id, signed.id);
+    });
 }
 
 #[test]
@@ -555,6 +581,7 @@ fn relay_identity_uses_canonical_url_but_preserves_meaningful_path_slashes() {
             .set_lane_transient(
                 &PublishQueueLaneKey {
                     intent_id: intent,
+                    event_id: signed.id,
                     relay: root_slash,
                 },
                 root.revision,
