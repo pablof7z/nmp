@@ -596,6 +596,7 @@ mod semantic_successor_tests {
         let original = UnsignedEvent::from(base.clone());
         let mut current = original.clone();
         let mut receipts = Vec::new();
+        let mut e1_sign_request = None;
         for (person, destination) in [(alice, destination_a.clone()), (bob, destination_b.clone())]
         {
             let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
@@ -619,6 +620,12 @@ mod semantic_successor_tests {
                 })
                 .unwrap();
             receipts.push(receipt);
+            e1_sign_request = effects.iter().find_map(|effect| match effect {
+                Effect::RequestSign(receipt, generation, unsigned) => {
+                    Some((*receipt, *generation, unsigned.clone()))
+                }
+                _ => None,
+            });
             current = UnsignedEvent::from(
                 core.resolver
                     .store()
@@ -631,6 +638,14 @@ mod semantic_successor_tests {
         }
 
         let first_local_id = current.id.unwrap();
+        let (e1_owner, e1_generation, e1_unsigned) =
+            e1_sign_request.expect("current E1 requests one signature");
+        let e1_signed = e1_unsigned.sign_with_keys(&author).unwrap();
+        core.handle(EngineMsg::SignerCompleted(
+            e1_owner,
+            e1_generation,
+            Ok(e1_signed),
+        ));
         let stale_generation = 9;
         let stale_unsigned = current.clone();
         let stale_signed = stale_unsigned.sign_with_keys(&author).unwrap();
@@ -785,6 +800,49 @@ mod semantic_successor_tests {
                 .id,
             first_successor.event.id,
             "a delayed E1 signature cannot promote or replace E2"
+        );
+        let (first_successor_owner, first_successor_generation, first_successor_unsigned) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::RequestSign(receipt, generation, unsigned)
+                    if unsigned.id == Some(first_successor.event.id) =>
+                {
+                    Some((*receipt, *generation, unsigned.clone()))
+                }
+                _ => None,
+            })
+            .expect("relay-source successor requests one signature");
+        let first_successor_signed = first_successor_unsigned.sign_with_keys(&author).unwrap();
+        let first_successor_signed_effects = core.handle(EngineMsg::SignerCompleted(
+            first_successor_owner,
+            first_successor_generation,
+            Ok(first_successor_signed),
+        ));
+        let expected_first_successor_sessions = BTreeSet::from([
+            RelaySessionKey::new(
+                destination_a.clone(),
+                AccessContext::Nip42(author.public_key()),
+            ),
+            RelaySessionKey::new(
+                destination_b.clone(),
+                AccessContext::Nip42(author.public_key()),
+            ),
+        ]);
+        assert_eq!(
+            first_successor_signed_effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::EnsureWriteRelay(session) => Some(session.clone()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>(),
+            expected_first_successor_sessions,
+            "#1470: signing the relay-source successor must reacquire every persisted E2 lane"
+        );
+        assert_eq!(
+            core.relay_worker_requirements().unwrap().writes,
+            expected_first_successor_sessions,
+            "#1470: predecessor retirement must not erase current E2 worker ownership"
         );
 
         let erin = Keys::generate().public_key();
