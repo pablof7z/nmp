@@ -3,6 +3,88 @@
 use super::*;
 
 #[test]
+fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
+    let relay = RelayUrl::parse("wss://evidence-owner.example").unwrap();
+    let evidence_a = RoutingEvidence {
+        relay: RelayUrl::parse("wss://evidence-a.example").unwrap(),
+        origin: nmp_grammar::RoutingEvidenceKind::Hint,
+    };
+    let evidence_b = RoutingEvidence {
+        relay: RelayUrl::parse("wss://evidence-b.example").unwrap(),
+        origin: nmp_grammar::RoutingEvidenceKind::SourceProvenance,
+    };
+
+    for (first, survivor) in [
+        (evidence_a.clone(), evidence_b.clone()),
+        (evidence_b.clone(), evidence_a.clone()),
+    ] {
+        let mut core = EngineCore::new(MemoryStore::new(), 20);
+        let with_evidence = |evidence: RoutingEvidence| {
+            let mut atom = bounded_atom(&relay, "shared-selection");
+            atom.routing_evidence.insert(evidence);
+            atom
+        };
+        let first_atom = with_evidence(first.clone());
+        let survivor_atom = with_evidence(survivor.clone());
+        let key = nmp_router::DemandKey::for_atom(&first_atom);
+
+        core.retain_wire_atom_owner(&first_atom);
+        let opened = flush(&mut core);
+        assert_eq!(
+            wire_ops(&opened)
+                .into_iter()
+                .filter(|op| matches!(op, WireOp::Req(_, _)))
+                .count(),
+            1
+        );
+        let immutable_request = core.router.plan().reqs.values().next().unwrap()[0].clone();
+
+        core.retain_wire_atom_owner(&survivor_atom);
+        assert!(core.pending_wire_atoms.is_empty());
+        assert_eq!(
+            core.wire_owner_counts[&key].0.routing_evidence,
+            BTreeSet::from([first, survivor.clone()])
+        );
+        assert_eq!(
+            core.router.plan().reqs.values().next().unwrap()[0],
+            immutable_request
+        );
+
+        assert!(core.release_wire_atom_owner(&first_atom).is_none());
+        assert!(core.pending_wire_atoms.is_empty());
+        assert_eq!(
+            core.wire_owner_counts[&key].0.routing_evidence,
+            BTreeSet::from([survivor.clone()])
+        );
+        assert_eq!(
+            core.router.plan().reqs.values().next().unwrap()[0],
+            immutable_request
+        );
+        assert_eq!(
+            core.wire_demand().iter().next().unwrap().routing_evidence,
+            BTreeSet::from([survivor])
+        );
+
+        let final_atom = core
+            .release_wire_atom_owner(&survivor_atom)
+            .expect("the final exact owner retires the shared selection");
+        let mut closed = Vec::new();
+        core.withdraw_wire_demand(vec![final_atom], &mut closed);
+        assert_eq!(
+            wire_ops(&closed)
+                .into_iter()
+                .filter(|op| matches!(op, WireOp::Close(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            core.bench_ownership_census(),
+            CoreOwnershipCensus::default()
+        );
+    }
+}
+
+#[test]
 fn second_outbox_hint_opens_only_the_missing_relay_for_both_owner_close_orders() {
     let author = Keys::generate().public_key();
     let first_evidence = RoutingEvidence {
