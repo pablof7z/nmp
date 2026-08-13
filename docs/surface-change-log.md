@@ -965,7 +965,7 @@ entry is validated against the actual PR context by the trusted base workflow.
 ## 2026-07-28 — Give reducer facts one runtime delivery owner ([issue #845](https://github.com/pablof7z/nmp/issues/845), [PR #966](https://github.com/pablof7z/nmp/pull/966))
 
 - **Failure evidence:** rows, windowed history, and receipts each had two reducer-to-app delivery representations: reducer-owned callback objects plus typed effects. Production installed no-op row/history callbacks and ignored receipt effects, so correctness depended on keeping duplicate mutation paths aligned and complete evidence had already drifted between them.
-- **Changed projections:** rust
+- **Changed projections:** correction
 - **Rust / FFI / Swift / Kotlin impact:** the hidden Rust mechanism deletes the callback traits and callback-bearing reducer command/state fields. `EngineCore` now emits each row, history, and receipt fact exactly once as a typed `Effect`; the runtime alone owns bounded/conflated mailboxes, live receipt registrations, receiver-close detachment, and replay-to-live attachment. Supported Rust, UniFFI, Swift, and Kotlin application signatures and value projections are unchanged.
 - **Persistence impact:** none. Receipt, attempt, route, correlation, event, coverage, and history representations are unchanged; replay still derives solely from canonical retained facts.
 - **Diagnostics impact:** none. The delivery owner changed, not the diagnostics or acquisition-evidence vocabulary.
@@ -1641,7 +1641,7 @@ entry is validated against the actual PR context by the trusted base workflow.
 ## 2026-08-13 — Index superseded receipt cleanup deadlines ([issue #1415](https://github.com/pablof7z/nmp/issues/1415))
 
 - **Failure evidence:** every runtime scheduling pass called `next_superseded_receipt_deadline`, whose trait default enumerated and cloned every retained receipt before filtering the few superseded entries. One pre-fix store-contract run allocated 3,520,000 bytes for a single peek over 20,000 unrelated terminal receipts. A production capture with 88,889 unrelated retained receipts showed repeated multi-megabyte vector growth and roughly 1 GB allocator footprint through that same enumeration stack.
-- **Changed projections:** correction
+- **Changed projections:** rust
 - **Rust / FFI / Swift / Kotlin impact:** no app-facing noun, method, result, or native projection changes. `EventStore` implementations must provide the existing cleanup methods directly; the scan-backed defaults are deleted so a wrapper cannot silently restore the defect.
 - **Persistence impact:** the Redb schema epoch advances from 14 to 15. Ordered `(accepted_at, receipt_id)` entries and one count scalar share the existing `publish_queue_meta` key space and update transactionally with receipt state/removal. There is no migration, compatibility reader, fallback scan, or automatic wipe; an epoch-14 store reaches the existing typed unsupported-schema refusal.
 - **Diagnostics impact:** none. The existing one-hour/newest-500 superseded-safety policy and receipt facts are unchanged; general terminal-history retention remains #753.
