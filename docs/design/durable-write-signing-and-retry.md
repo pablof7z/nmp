@@ -58,7 +58,11 @@ transaction. Its event body, intent, waiting lanes, attempt rows, route
 revisions, and deadlines are removed. Work proved never handed off leaves no
 receipt or correlation identity. Work that may have crossed the local
 transport handoff retains only terminal `Superseded` safety evidence, which is
-destroyed after one hour and globally capped to the newest 500 entries.
+retained as one ordinary terminal closure. It competes in the same store-owned
+oldest-first history as acknowledgements, refusals, cancellations, and
+no-destination outcomes; there is no supersession-specific retention class.
+While retained, its complete safety evidence remains available. Whole-closure
+eviction is bounded privately by age, count, and logical encoded bytes.
 
 An offline or AUTH-blocked lane with attempt ordinal zero is still unattempted:
 route resolution alone is not evidence that bytes reached a relay, so its

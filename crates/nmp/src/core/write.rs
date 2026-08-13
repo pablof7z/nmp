@@ -2571,14 +2571,6 @@ impl<S: EventStore> EngineCore<S> {
             self.apply_committed_mutation(committed, &mut effects);
         }
 
-        if let Err(error) = self
-            .resolver
-            .store_mut()
-            .prune_superseded_receipts(self.clock)
-        {
-            self.degrade_store(error, &mut effects);
-        }
-
         match payload {
             WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => {
                 if already_signed {

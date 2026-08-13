@@ -2,8 +2,9 @@ use super::publish_queue_codec::{
     codec_error, deadline_by_intent_key, deadline_key, decode_addr_claimants, decode_claimants,
     decode_lane, decode_meta_u64, decode_receipt, encode_addr_claimants, encode_claimants,
     encode_deadline, encode_lane, encode_meta_u64, encode_receipt, lane_key, receipt_key,
-    superseded_receipt_key, PublishQueueRelayId, NEXT_INTENT_ID_KEY, NEXT_RECEIPT_ID_KEY,
-    SUPERSEDED_RECEIPT_COUNT_KEY,
+    terminal_receipt_key, PublishQueueRelayId, LAST_TERMINAL_AT_KEY, NEXT_INTENT_ID_KEY,
+    NEXT_RECEIPT_ID_KEY, NEXT_TERMINAL_SEQUENCE_KEY, TERMINAL_RECEIPT_BYTES_KEY,
+    TERMINAL_RECEIPT_COUNT_KEY,
 };
 use super::schema::persist_err;
 use super::{
@@ -180,14 +181,18 @@ pub(super) fn alloc_counter_in_txn(
 /// `ReceiptState` all already derive `Serialize`/`Deserialize`, so this
 /// mirrors `crate::PublishQueueReceipt` field-for-field with no re-encoding.
 #[derive(Debug, Serialize, Deserialize)]
-pub(super) struct PublishQueueReceiptRecord {
+pub(crate) struct PublishQueueReceiptRecord {
     /// `None` for a refused-at-acceptance receipt-only record — see
     /// `crate::PublishQueueReceipt::intent_id`'s doc.
-    pub(super) intent_id: Option<IntentId>,
-    pub(super) frozen_id: EventId,
-    pub(super) expected_pubkey: PublicKey,
-    pub(super) accepted_at: Option<Timestamp>,
-    pub(super) state: ReceiptState,
+    pub(crate) intent_id: Option<IntentId>,
+    pub(crate) frozen_id: EventId,
+    pub(crate) expected_pubkey: PublicKey,
+    pub(crate) accepted_at: Option<Timestamp>,
+    pub(crate) state: ReceiptState,
+    pub(crate) correlation: Option<String>,
+    pub(crate) terminal_sequence: Option<u64>,
+    pub(crate) terminal_at: Option<Timestamp>,
+    pub(crate) terminal_bytes: Option<u64>,
 }
 
 /// Update `PUBLISH_QUEUE_RECEIPTS[receipt_id]`'s `state` in place. Absence or corrupt
@@ -195,7 +200,6 @@ pub(super) struct PublishQueueReceiptRecord {
 /// cancellation fabricate a terminal fact that was never retained.
 pub(super) fn update_publish_queue_receipt(
     publish_queue_receipts: &mut redb::Table<'_, &'static [u8; 8], &'static [u8]>,
-    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
     receipt_id: u64,
     state: ReceiptState,
 ) -> Result<(), PersistenceError> {
@@ -210,7 +214,6 @@ pub(super) fn update_publish_queue_receipt(
         })?;
     let mut record = decode_receipt(&encoded)
         .map_err(|error| codec_error(&format!("receipt {receipt_id}"), error))?;
-    update_superseded_receipt_index(publish_queue_meta, receipt_id, &record, state)?;
     record.state = state;
     let encoded = encode_receipt(&record);
     publish_queue_receipts
@@ -219,84 +222,172 @@ pub(super) fn update_publish_queue_receipt(
     Ok(())
 }
 
-pub(super) fn remove_superseded_receipt_index(
+pub(super) fn mark_terminal_receipt(
+    publish_queue_receipts: &mut redb::Table<'_, &'static [u8; 8], &'static [u8]>,
+    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    receipt_id: u64,
+    observed_at: Timestamp,
+    exclusive_evidence_bytes: u64,
+) -> Result<(), PersistenceError> {
+    let receipt_storage_key = receipt_key(receipt_id);
+    let existing = publish_queue_receipts
+        .get(&receipt_storage_key)
+        .map_err(persist_err)?
+        .map(|guard| guard.value().to_vec())
+        .ok_or_else(|| PersistenceError::invariant("terminal receipt is missing"))?;
+    let mut record = decode_receipt(&existing)
+        .map_err(|error| codec_error(&format!("receipt {receipt_id}"), error))?;
+    if record.terminal_sequence.is_some()
+        || record.terminal_at.is_some()
+        || record.terminal_bytes.is_some()
+    {
+        if record.terminal_sequence.is_some()
+            && record.terminal_at.is_some()
+            && record.terminal_bytes.is_some()
+        {
+            return Ok(());
+        }
+        return Err(PersistenceError::invariant(
+            "terminal receipt metadata is partial",
+        ));
+    }
+
+    let sequence = alloc_counter_in_txn(publish_queue_meta, NEXT_TERMINAL_SEQUENCE_KEY)?;
+    let last_terminal_at = read_meta_u64(
+        publish_queue_meta,
+        LAST_TERMINAL_AT_KEY,
+        "last terminal time",
+    )?
+    .unwrap_or(0);
+    let terminal_at = Timestamp::from(observed_at.as_secs().max(last_terminal_at));
+    record.terminal_sequence = Some(sequence);
+    record.terminal_at = Some(terminal_at);
+    record.terminal_bytes = Some(0);
+    let receipt_bytes = u64::try_from(receipt_storage_key.len() + encode_receipt(&record).len())
+        .map_err(|_| PersistenceError::invariant("terminal receipt size exceeds u64"))?;
+    let index_key = terminal_receipt_key(sequence, receipt_id);
+    let index_bytes = u64::try_from(index_key.len())
+        .map_err(|_| PersistenceError::invariant("terminal receipt index size exceeds u64"))?;
+    let correlation_bytes = record
+        .correlation
+        .as_ref()
+        .map(|token| u64::try_from(token.len() + 8))
+        .transpose()
+        .map_err(|_| PersistenceError::invariant("correlation size exceeds u64"))?
+        .unwrap_or(0);
+    let terminal_bytes = exclusive_evidence_bytes
+        .checked_add(receipt_bytes)
+        .and_then(|bytes| bytes.checked_add(index_bytes))
+        .and_then(|bytes| bytes.checked_add(correlation_bytes))
+        .ok_or_else(|| PersistenceError::invariant("terminal receipt bytes overflow"))?;
+    record.terminal_bytes = Some(terminal_bytes);
+    let encoded = encode_receipt(&record);
+    publish_queue_receipts
+        .insert(&receipt_storage_key, encoded.as_slice())
+        .map_err(persist_err)?;
+
+    let empty: &[u8] = &[];
+    if publish_queue_meta
+        .insert(index_key.as_slice(), empty)
+        .map_err(persist_err)?
+        .is_some()
+    {
+        return Err(PersistenceError::invariant(
+            "terminal receipt already exists in its ordered index",
+        ));
+    }
+    write_meta_u64(
+        publish_queue_meta,
+        LAST_TERMINAL_AT_KEY,
+        terminal_at.as_secs(),
+    )?;
+    change_meta_u64(
+        publish_queue_meta,
+        TERMINAL_RECEIPT_COUNT_KEY,
+        "terminal receipt count",
+        1,
+    )?;
+    change_meta_u64(
+        publish_queue_meta,
+        TERMINAL_RECEIPT_BYTES_KEY,
+        "terminal receipt bytes",
+        i128::from(terminal_bytes),
+    )
+}
+
+pub(super) fn remove_terminal_receipt_index(
     publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
     receipt_id: u64,
     record: &PublishQueueReceiptRecord,
 ) -> Result<(), PersistenceError> {
-    if record.state != ReceiptState::Superseded {
+    let (Some(sequence), Some(_terminal_at), Some(terminal_bytes)) = (
+        record.terminal_sequence,
+        record.terminal_at,
+        record.terminal_bytes,
+    ) else {
         return Ok(());
-    }
-    let accepted_at = record
-        .accepted_at
-        .ok_or_else(|| PersistenceError::invariant("superseded receipt has no acceptance time"))?;
-    let key = superseded_receipt_key(accepted_at, receipt_id);
+    };
+    let key = terminal_receipt_key(sequence, receipt_id);
     if publish_queue_meta
         .remove(key.as_slice())
         .map_err(persist_err)?
         .is_none()
     {
         return Err(PersistenceError::invariant(
-            "superseded receipt is absent from its ordered index",
+            "terminal receipt is absent from its ordered index",
         ));
     }
-    change_superseded_receipt_count(publish_queue_meta, -1)
+    change_meta_u64(
+        publish_queue_meta,
+        TERMINAL_RECEIPT_COUNT_KEY,
+        "terminal receipt count",
+        -1,
+    )?;
+    change_meta_u64(
+        publish_queue_meta,
+        TERMINAL_RECEIPT_BYTES_KEY,
+        "terminal receipt bytes",
+        -i128::from(terminal_bytes),
+    )
 }
 
-fn update_superseded_receipt_index(
-    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
-    receipt_id: u64,
-    record: &PublishQueueReceiptRecord,
-    state: ReceiptState,
-) -> Result<(), PersistenceError> {
-    match (
-        record.state == ReceiptState::Superseded,
-        state == ReceiptState::Superseded,
-    ) {
-        (false, true) => {
-            let accepted_at = record.accepted_at.ok_or_else(|| {
-                PersistenceError::invariant("superseded receipt has no acceptance time")
-            })?;
-            let key = superseded_receipt_key(accepted_at, receipt_id);
-            let empty: &[u8] = &[];
-            if publish_queue_meta
-                .insert(key.as_slice(), empty)
-                .map_err(persist_err)?
-                .is_some()
-            {
-                return Err(PersistenceError::invariant(
-                    "superseded receipt already exists in its ordered index",
-                ));
-            }
-            change_superseded_receipt_count(publish_queue_meta, 1)
-        }
-        (true, false) => remove_superseded_receipt_index(publish_queue_meta, receipt_id, record),
-        _ => Ok(()),
-    }
-}
-
-fn change_superseded_receipt_count(
-    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
-    delta: i8,
-) -> Result<(), PersistenceError> {
-    let current = publish_queue_meta
-        .get(SUPERSEDED_RECEIPT_COUNT_KEY)
-        .map_err(persist_err)?
-        .map(|guard| decode_meta_u64(guard.value(), "superseded receipt count"))
-        .transpose()
-        .map_err(|error| codec_error("superseded receipt count", error))?
-        .unwrap_or(0);
-    let next = match delta {
-        1 => current.checked_add(1),
-        -1 => current.checked_sub(1),
-        _ => None,
-    }
-    .ok_or_else(|| PersistenceError::invariant("superseded receipt count overflow"))?;
-    let encoded = encode_meta_u64(next);
+pub(super) fn read_meta_u64(
+    publish_queue_meta: &redb::Table<'_, &'static [u8], &'static [u8]>,
+    key: &[u8],
+    name: &'static str,
+) -> Result<Option<u64>, PersistenceError> {
     publish_queue_meta
-        .insert(SUPERSEDED_RECEIPT_COUNT_KEY, encoded.as_slice())
+        .get(key)
+        .map_err(persist_err)?
+        .map(|guard| decode_meta_u64(guard.value(), name))
+        .transpose()
+        .map_err(|error| codec_error(name, error))
+}
+
+fn write_meta_u64(
+    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    key: &[u8],
+    value: u64,
+) -> Result<(), PersistenceError> {
+    let encoded = encode_meta_u64(value);
+    publish_queue_meta
+        .insert(key, encoded.as_slice())
         .map_err(persist_err)?;
     Ok(())
+}
+
+fn change_meta_u64(
+    publish_queue_meta: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
+    key: &[u8],
+    name: &'static str,
+    delta: i128,
+) -> Result<(), PersistenceError> {
+    let current = i128::from(read_meta_u64(publish_queue_meta, key, name)?.unwrap_or(0));
+    let next = current
+        .checked_add(delta)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| PersistenceError::invariant(format!("{name} overflow")))?;
+    write_meta_u64(publish_queue_meta, key, next)
 }
 
 /// One provisional kind:5 suppression claim, as persisted in

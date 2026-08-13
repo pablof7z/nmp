@@ -961,12 +961,6 @@ impl EventStore for BranchReadFailureStore {
     ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
         self.inner.publish_queue_receipts_after(after, limit)
     }
-    fn prune_superseded_receipts(&mut self, now: Timestamp) -> Result<Vec<u64>, PersistenceError> {
-        self.inner.prune_superseded_receipts(now)
-    }
-    fn next_superseded_receipt_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        self.inner.next_superseded_receipt_deadline()
-    }
     fn remove_publish_queue_entry(
         &mut self,
         receipt_id: u64,

@@ -69,8 +69,12 @@ order precedes facts already consumed from another relay. Continuation state is
 bounded by relay fan-out, not retry history. After a full page, one caught-up
 check is required before the sink atomically joins live work, closing the
 replay-to-live race. The replay cursor bounds each delivery page, not the
-store's total retained attempt history: retention/GC for that durable history
-remains open under #46 and must not be confused with retry-concurrency limits.
+store's total retained attempt history. The store separately bounds whole
+terminal closures by one private global oldest-first policy over age, count,
+and logical encoded bytes. It does not compact facts: every retained page
+remains complete, then the receipt and its exclusively-owned history disappear
+atomically. Open work is never eligible. Broader #46 limit categories remain
+distinct from both this retention boundary and retry-concurrency limits.
 Every live receipt observer also owns a private registration identity. Closing
 or dropping its consumer FIFO sends an exact detach command and removes that
 registration from the pending write immediately; pruning cannot depend on a
