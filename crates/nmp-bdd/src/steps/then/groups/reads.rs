@@ -203,9 +203,9 @@ async fn every_group_read_uses_observe(w: &mut NmpWorld) {
 #[then(regex = r#"^the query shows only "([^"]+)"$"#)]
 async fn query_shows_only(w: &mut NmpWorld, text: String) {
     let wanted = text.clone();
-    let shown = w.feed_eventually(move |rows, _| rows.iter().any(|e| e.content == wanted));
+    let shown = w.feed_eventually(move |rows, _| rows.iter().any(|row| row.content() == wanted));
     assert!(shown, "expected the query to show {text:?}");
-    let others = w.feed_never(move |rows| rows.iter().any(|e| e.content != text));
+    let others = w.feed_never(move |rows| rows.iter().any(|row| row.content() != text));
     assert!(
         others,
         "the `#h` scoping separates two groups on one host; another group's row appeared"
