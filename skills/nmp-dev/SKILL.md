@@ -21,7 +21,7 @@ For read-only explanation or review, inspect the same authorities but do not cre
 
 - Keep the app-facing model to a live query and a write intent. Diagnostics are proof over those nouns, not a third command surface.
 - Prefer a type or API shape that excludes the bad path plus a falsifier that proves the exclusion. Prose and review memory are not structural mechanisms.
-- Apply the standing conventions before surface work: remove replaced spellings in the same change, keep Bech32 at human boundaries, and do not invent protocol categories or repository jargon.
+- Apply the standing conventions before surface work: remove replaced spellings in the same change, keep Bech32 at human boundaries, do not invent protocol categories or repository jargon, and ship requested behavior active on the normal runtime path without an unrequested runtime feature gate. Read [`no-hidden-runtime-feature-flags.md`](../../docs/internals/conventions/no-hidden-runtime-feature-flags.md) before proposing a flag, environment switch, config boolean, rollout toggle, experimental mode, or opt-in for requested behavior.
 - Run the Noun, Reachability, Bool-Lifecycle, and Destructive-API gates by eye. Run cross-SDK parity and falsifier-honesty mechanically when the affected surface requires them.
 - Fix governed behavior end to end across the Rust facade, persistence or diagnostics, FFI, Swift, Kotlin, docs, and falsifiers. Do not preserve a compatibility path.
 - Keep `README.md`, `docs/known-gaps.md`, and `docs/bug-class-ledger.md` truthful. Change a gap or ledger status only when the claimed implementation and proof actually changed.
