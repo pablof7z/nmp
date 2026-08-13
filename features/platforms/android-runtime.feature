@@ -9,6 +9,7 @@ Feature: A core-only Android product runs as an ordinary application
     # nmp:id=PLATFORMS-ANDROID-RUNTIME-001
     # nmp:status=built
     # nmp:evidence=live:android-emulator::android-emulator
+    # nmp:evidence=rust:nmp::withdrawing_last_demand_flushes_close_before_worker_retirement
     # nmp:evidence=rust:nmp-test-support::matching_req_receives_valid_event_eose_and_close
     # nmp:falsifier=Remove the emulator ABI library or bypass com.nmp.sdk; construction or the facade boundary gate must fail before any runtime-success claim.
     Scenario: A clean Android app observes and withdraws controlled relay data

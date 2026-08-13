@@ -15,7 +15,7 @@
 
 #[cfg(feature = "bench-instrumentation")]
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1092,17 +1092,20 @@ impl Pool {
             .cloned()
             .map(RelaySessionKey::public)
             .collect();
-        self.close_unrequired_sessions(&required)
+        self.close_unrequired_sessions(&required, BTreeMap::new())
     }
 
     /// Release every live physical session absent from the exact caller-owned
-    /// session set.
+    /// session set. Caller-supplied final connection-scoped text frames are
+    /// flushed on their exact current generations before retirement;
+    /// transport never interprets the text.
     pub fn close_unrequired_sessions(
         &self,
         required: &BTreeSet<RelaySessionKey>,
+        frames: BTreeMap<RelaySessionKey, Vec<String>>,
     ) -> Vec<PoolEvent> {
         match self.inner.lock() {
-            Ok(mut guard) => guard.close_unrequired_sessions(required),
+            Ok(mut guard) => guard.close_unrequired_sessions(required, frames),
             Err(_) => Vec::new(),
         }
     }
