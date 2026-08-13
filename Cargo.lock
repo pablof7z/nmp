@@ -1819,7 +1819,6 @@ dependencies = [
  "nmp-asset",
  "nmp-blossom",
  "nmp-content",
- "nmp-executor",
  "nmp-grammar",
  "nmp-local-signer",
  "nmp-nip18",
@@ -1935,10 +1934,6 @@ dependencies = [
  "serde",
  "serde_json",
 ]
-
-[[package]]
-name = "nmp-executor"
-version = "0.1.0"
 
 [[package]]
 name = "nmp-ffi"
@@ -2173,7 +2168,6 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "mio",
- "nmp-executor",
  "nmp-grammar",
  "nmp-test-support",
  "nostr 0.44.4",

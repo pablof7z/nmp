@@ -39,7 +39,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp/src/diagnostics.rs`
 - Source: `crates/nmp/src/runtime/mod.rs`
 - Source: `crates/nmp/src/relay_information_service.rs`
-- Source: `crates/nmp-executor/src/lib.rs`
+- Source: `crates/nmp-transport/src/thread_census.rs`
 - Source: `crates/nmp-nip02/src/lib.rs`
 - Source: `crates/nmp-nip02/src/service.rs`
 - Source: `crates/nmp-nip22/src/lib.rs`
