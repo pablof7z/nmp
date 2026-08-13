@@ -146,6 +146,7 @@ impl<S: EventStore> EngineCore<S> {
             self.emit_write_fact(
                 id,
                 WriteFact::Relay {
+                    event_id: lane.key.event_id,
                     relay: session.relay.clone(),
                     state: RelayState::Waiting(RelayWaiting::NeedsAuth),
                 },
@@ -360,6 +361,7 @@ impl<S: EventStore> EngineCore<S> {
                     self.emit_write_fact(
                         id,
                         WriteFact::Relay {
+                            event_id: lane.key.event_id,
                             relay: lane.key.relay.clone(),
                             state: RelayState::AuthFailed {
                                 pubkey,

@@ -45,7 +45,7 @@ impl ReceiptResult {
         let mut relays = BTreeMap::new();
         for fact in facts {
             match fact {
-                WriteFact::Relay { relay, state } => {
+                WriteFact::Relay { relay, state, .. } => {
                     relays.insert(relay, state);
                 }
                 WriteFact::Outcome(outcome) => return Ok(Self { outcome, relays }),
