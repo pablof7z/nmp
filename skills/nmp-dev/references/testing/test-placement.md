@@ -1,50 +1,54 @@
 # Test placement
 
-Place proof with the narrowest stable contract owner, not the edited crate.
-Feature files follow behavioral domains; tests follow ownership and proof type.
+Put a test in the smallest stable component responsible for the behavior, not
+automatically in the crate being edited. Organize feature files by user
+behavior. Organize executable tests by the component and kind of proof they
+need.
 
 ## Decision table
 
-| Claim | Place |
+| What the test proves | Where it belongs |
 |---|---|
-| Local value, parser, codec, transition | Owning-crate unit/table test |
-| Broad invariant or operation sequence | Owning-crate property/model/differential test |
-| One crate plus real collaborators | That crate's integration tests |
-| Combined Rust product promise | `crates/nmp/tests/` through `nmp` |
-| Readable cross-layer capstone | Canonical feature plus `@acceptance` when justified |
-| FFI/platform behavior | Shared parity plus native Swift/Kotlin tests |
-| Public provider/network compatibility | Opt-in live probe |
+| One value, parser, codec, or state transition | Unit or table test in the responsible crate |
+| A rule across many inputs or operation orders | Property, model, or differential test in the responsible crate |
+| One crate working with real collaborators | That crate's integration tests |
+| A complete promise of the public Rust API | `crates/nmp/tests/` through `nmp` |
+| A readable example across several layers | Canonical feature plus `@acceptance`, when the example adds understanding |
+| FFI or native-platform behavior | Shared parity tests plus native Swift and Kotlin tests |
+| Compatibility with a public provider or network | Opt-in live check |
 
-Do not enumerate broad state spaces in Gherkin or use public infrastructure as
-the sole correctness proof.
+Do not list every possible input combination in Gherkin or use public
+infrastructure as the sole correctness proof.
 
 ## Fixture boundary
 
-Setup may provide stores, clocks, scripted relays, identities, network policy,
-faults, and sanctioned test constructors. It must not perform the behavior or
-inspect private state as proof.
+Setup may provide stores, clocks, scripted relays, identities, network rules,
+injected failures, and test-only constructors approved by the owning crate. It
+must not perform the behavior being tested or use private state as proof.
 
 For discovery, seed the protocol fact and observe contacts/results. Do not
 insert or inspect the resolved route directly.
 
-## Structural proof and capstone
+## Internal proof and public example
 
-For important public behavior, use both when each proves something distinct:
+Important public behavior may need two tests when each proves something
+different:
 
-1. mechanism-level property/model/integration proof;
-2. one facade-level consequence.
+1. an internal property, model, or integration test that covers the rule; and
+2. one test through the public API that proves the result an app sees.
 
-Neither substitutes for the other. Avoid permanent Rust, shell, and Cucumber
-copies of the same path.
+Neither replaces the other. Do not keep Rust, shell, and Cucumber copies of the
+same path when they prove nothing different.
 
 ## Avoid
 
 - Test placement based only on the changed crate.
 - Feature files mirroring crate structure.
-- Cucumber for every invariant.
-- One lucky end-to-end schedule as structural proof.
-- Private table assertions for a facade promise.
-- New test crates when an owning integration target suffices.
+- Cucumber for every rule that must hold across many cases.
+- One lucky end-to-end operation order as proof of a general rule.
+- Private table assertions for a public API promise.
+- New test crates when an existing integration target can prove the behavior.
 
-Before adding a target, state the contract no existing owner can prove and why
-the target behaves as a consumer rather than a privileged bypass.
+Before adding a test target, state what behavior no existing target can prove.
+Show that the new target uses the same public path as an app instead of reaching
+through an internal shortcut.

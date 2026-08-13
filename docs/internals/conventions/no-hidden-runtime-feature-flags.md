@@ -30,5 +30,5 @@ Allowed:
 - staged rollout, kill switch, or optional behavior explicitly required by the
   user or owning product/design decision.
 
-Never invent a gate to hedge risk, preserve old behavior, ease merging, or skip
-caller/test updates.
+Never invent a gate because a change feels risky, to preserve old behavior, to
+make merging easier, or to avoid updating callers and tests.

@@ -18,35 +18,60 @@ router.
 For behavior, tests, or user corrections, start with [NMP
 testing](references/testing/INDEX.md).
 
+## Communicate plainly
+
+- Lead with the concrete behavior and its consequence. Add exact symbols, test
+  names, and repository terms only after the explanation.
+- Use the words the user used when they are accurate. Define a necessary NMP or
+  Nostr term the first time it appears.
+- Do not compress several rules into one list of abstract nouns. Use separate
+  sentences or questions so each rule can be understood and challenged.
+- Do not make a narrow observation sound reusable by giving it a broad name.
+  State where it applies and where it does not.
+
 ## Guardrails
 
 - Keep the public model to a live query and a write intent.
-- Extend those nouns for new capabilities. Helpers may add typed values and
-  composable bindings, but must preserve reactive identity and each demand's
-  source, access, cache, and freshness context. No capability-specific
-  lifecycles, public row-projection boilerplate, or app-managed waterfalls.
-- Exclude bad paths by type/API shape; prove exclusion with a falsifier.
+- Add read capabilities through `LiveQuery` and write capabilities through
+  `WriteIntent`. Helpers may return typed values or help build those requests.
+- When one live request produces another, NMP must remember that relationship
+  and update the produced request when its input changes. Keep the identity,
+  source, access rules, cache rules, cached results, and freshness of each
+  request separate. Do not reuse any of them for a different request.
+- Do not make apps manage internal rows or combine several observations to get
+  one capability. Do not create a separate observation or receipt lifecycle
+  for one capability.
+- Make invalid use impossible through the API. Add a test that fails if that
+  protection is removed.
 - Apply every standing convention in `AGENTS.md`, including [no hidden runtime
   flags](../../docs/internals/conventions/no-hidden-runtime-feature-flags.md).
 - Run all six architecture gates in proportion to the diff.
-- Change Rust, persistence, diagnostics, FFI, Swift, Kotlin, docs, and proofs
-  together when their contract changes. Add no compatibility path.
+- When behavior shared across layers changes, update every affected layer in
+  the same change: Rust, storage, diagnostics, FFI, Swift, Kotlin, docs, tests,
+  validation scripts, and evidence metadata. Do not keep the old path for
+  compatibility.
 - Keep `README.md`, `docs/known-gaps.md`, and the bug-class ledger truthful.
 
 ## Execute
 
-1. Name the narrowest contract owner and the failing claim.
-2. Prove red before implementation, or disable the claimed mechanism to prove
-   an already-correct path would fail without it.
-3. Stage causes, not derived answers.
-4. Implement the structural fix; update every governed caller and projection.
-5. Run the focused falsifier, touched-crate tests, and relevant facade, restart,
-   fault, parity, native, and repository checks.
+1. State what behavior is wrong and identify the smallest part of NMP
+   responsible for it.
+2. Before changing code, show a test that fails. If the behavior already works
+   and only proof is missing, temporarily remove its protection and confirm the
+   new test catches the break.
+3. In test setup, provide the inputs that should produce the result. Do not
+   insert the result itself.
+4. Fix the shared source of the problem. Update every affected caller and
+   platform layer in the same change.
+5. Run the test that demonstrates the bug, tests for changed crates, and any
+   public-API, restart, fault, parity, native, or repository checks the claim
+   depends on.
 6. Verify the running path for runtime claims. Compilation is not execution.
 
 ## Finish
 
 - Review the diff against the issue and six gates.
-- Report exact proof and unrun live/platform checks.
+- Report the commands run, what they proved, and any live or platform checks
+  not run.
 - Close completed issues. Otherwise post branch, worktree, blocker, and next
   step on the issue or PR.

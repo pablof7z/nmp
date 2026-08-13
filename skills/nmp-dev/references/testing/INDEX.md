@@ -1,24 +1,29 @@
 # NMP testing
 
-Use four owners:
+Put each kind of information in one place:
 
-- feature files: behavioral meaning;
-- tests: executable proof;
-- GitHub issues: temporary work;
-- design docs and the bug-class ledger: mechanism and class-level rationale.
+- Feature files describe behavior.
+- Tests prove that behavior.
+- GitHub issues track unfinished work.
+- Design docs and the bug-class ledger explain why the architecture exists and
+  which classes of bugs it prevents.
 
-Do not duplicate one owner's content in another. Current BDD syntax, status,
-and runner rules live in [`docs/bdd/000-bdd-approach.md`](../../../../docs/bdd/000-bdd-approach.md).
+Do not copy the same rule into several places. Current BDD syntax, status, and
+runner rules live in
+[`docs/bdd/000-bdd-approach.md`](../../../../docs/bdd/000-bdd-approach.md).
 
 ## User corrections
 
-Treat behavioral nuance as a specification change:
+When a user correction changes the meaning of a behavior:
 
 1. Find the owning feature and `Rule`.
-2. Correct wrong text; add the smallest contrast that preserves the new axis.
+2. Fix inaccurate text. Add one contrasting example that shows when the result
+   should differ.
 3. Set truthful status.
-4. Add evidence at the narrowest contract owner.
-5. Prove the named defect or removed mechanism makes that evidence fail.
+4. Put executable proof in the smallest component responsible for the
+   behavior.
+5. Deliberately reintroduce the named bug or remove its protection. Confirm the
+   linked evidence fails.
 6. Link unfinished work to an issue.
 
 Never leave the correction only in chat, a PR, or a test name.
@@ -27,18 +32,22 @@ Never leave the correction only in chat, a PR, or a test name.
 
 | Need | Read |
 |---|---|
-| Scenario meaning, metadata, corrections | [`behavior-specification.md`](behavior-specification.md) |
-| Status, evidence, falsifiers | [`evidence-and-traceability.md`](evidence-and-traceability.md) |
-| Test owner or layer | [`test-placement.md`](test-placement.md) |
-| Routing, acquisition, identity, source context | [`routing-and-context.md`](routing-and-context.md) |
+| Feature meaning, metadata, or corrections | [`behavior-specification.md`](behavior-specification.md) |
+| Status, test links, or deliberate-break checks | [`evidence-and-traceability.md`](evidence-and-traceability.md) |
+| Where a test belongs | [`test-placement.md`](test-placement.md) |
+| Routing, identity, source, or request context | [`routing-and-context.md`](routing-and-context.md) |
 | Restart, faults, timing, ambiguity | [`distributed-systems.md`](distributed-systems.md) |
 | Final review | [`review-checklist.md`](review-checklist.md) |
 
 ## Done
 
 - Feature meaning and status are accurate.
-- Evidence is at the correct owner and fails under its falsifier.
-- Fixtures do not inject the result.
-- Relevant context, restart, failure, and platform dimensions are covered.
-- Evidence locators resolve and pass.
+- Executable proof sits with the component responsible for the behavior and
+  fails when the named bug is reintroduced.
+- Test setup provides inputs instead of inserting the expected result.
+- Tests cover every request context, restart, failure, and platform condition
+  needed by the claim.
+- Every evidence locator resolves to a real check in its required CI job.
+- All required checks pass. A live check supplements repeatable evidence; it
+  does not replace it.
 - Remaining work has one issue.
