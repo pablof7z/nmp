@@ -98,6 +98,10 @@ pub struct RedbStore {
     /// only prevents reparsing a canonical URL for every row that references
     /// the same four-byte surrogate.
     publish_queue_relays: Mutex<PublishQueueRelayCache>,
+    /// Fixed construction-time failures for lane-start rollback tests. No
+    /// production build carries or can mutate this set.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(super) failed_lane_start_relays: BTreeSet<RelayUrl>,
     /// Application-level write transactions performed by `open`; the
     /// healthy v6 reopen falsifier asserts this stays zero.
     #[cfg(test)]
@@ -239,6 +243,17 @@ impl RedbStore {
             .map_err(|source| RedbStoreOpenError::TemporaryDirectoryFailed { source })?;
         let mut store = Self::open(directory.path().join("nmp.redb"))?;
         store.temporary_directory = Some(directory);
+        Ok(store)
+    }
+
+    /// Open a real temporary Redb store whose named lane starts fail at the
+    /// existing pre-commit boundary.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn temporary_with_failed_lane_starts(
+        failed_relays: impl IntoIterator<Item = RelayUrl>,
+    ) -> Result<Self, RedbStoreOpenError> {
+        let mut store = Self::temporary()?;
+        store.failed_lane_start_relays = failed_relays.into_iter().collect();
         Ok(store)
     }
 
@@ -670,6 +685,8 @@ impl RedbStore {
             _ownership: ownership,
             temporary_directory: None,
             publish_queue_relays: Mutex::new(PublishQueueRelayCache::default()),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            failed_lane_start_relays: BTreeSet::new(),
             #[cfg(test)]
             open_write_transactions: _open_write_transactions,
             #[cfg(test)]

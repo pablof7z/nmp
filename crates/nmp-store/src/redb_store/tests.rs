@@ -424,6 +424,45 @@ fn accepted_signed(
     (intent, signed)
 }
 
+#[test]
+fn configured_lane_start_failure_rolls_back_the_precommit_transaction() {
+    let keys = nostr::Keys::generate();
+    let relay = RelayUrl::parse("wss://blocked-lane-start.example").unwrap();
+    let mut store = RedbStore::temporary_with_failed_lane_starts([relay.clone()])
+        .expect("temporary Redb failure fixture");
+    let (intent, signed) = accepted_signed(&mut store, &keys, "blocked", 1_000);
+    store
+        .record_route_revision(intent, BTreeSet::from([relay]))
+        .unwrap();
+    let lane = store
+        .bootstrap_publish_queue_lanes(intent)
+        .unwrap()
+        .remove(0);
+    let eligible = store
+        .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(1_001u64))
+        .unwrap();
+
+    let error = store
+        .start_lane_attempt(
+            &eligible.key,
+            eligible.revision,
+            signed,
+            Timestamp::from(1_002u64),
+        )
+        .expect_err("configured relay must fail before commit");
+    assert_eq!(
+        error.to_string(),
+        "durable-store persistence failure: injected attempt start failure"
+    );
+    assert_eq!(
+        store.recover_publish_queue_lanes(intent).unwrap(),
+        vec![eligible],
+        "the lane cursor remains eligible"
+    );
+    assert!(store.recover_attempts(intent).unwrap().is_empty());
+    assert!(store.recover_attempt_details(intent).unwrap().is_empty());
+}
+
 /// Issue #87's measurable bound: 128 unrelated intents must add zero
 /// visited rows to target-intent attempt or route-revision recovery.
 /// Relay URLs deliberately share textual prefixes, and intent 1 coexists
