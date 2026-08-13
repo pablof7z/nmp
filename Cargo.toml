@@ -10,7 +10,6 @@ members = [
     "crates/nmp-resolver",
     "crates/nmp-router",
     "crates/nmp-transport",
-    "crates/nmp-executor",
     # Dependency-free signer/crypto values, traits, errors, and completion.
     "crates/nmp-signer",
     # Explicit in-process local-key provider used by `nmp::Engine::add_account`.
@@ -97,7 +96,6 @@ nmp-store = { path = "crates/nmp-store" }
 nmp-resolver = { path = "crates/nmp-resolver" }
 nmp-router = { path = "crates/nmp-router" }
 nmp-transport = { path = "crates/nmp-transport" }
-nmp-executor = { path = "crates/nmp-executor" }
 nmp-signer = { path = "crates/nmp-signer" }
 nmp-local-signer = { path = "crates/nmp-local-signer" }
 nmp = { path = "crates/nmp" }

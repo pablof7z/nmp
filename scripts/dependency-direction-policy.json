@@ -13,7 +13,7 @@
       ]
     },
     "generic-mechanism": {
-      "description": "Protocol-neutral store, resolver, router, transport, executor, and signer mechanisms.",
+      "description": "Protocol-neutral store, resolver, router, transport, and signer mechanisms.",
       "may_reach": [
         "generic-value",
         "generic-mechanism"
@@ -78,7 +78,6 @@
       "nmp-resolver": "generic-mechanism",
       "nmp-router": "generic-mechanism",
       "nmp-transport": "generic-mechanism",
-      "nmp-executor": "generic-mechanism",
       "nmp-signer": "generic-mechanism",
       "nmp-local-signer": "signer-provider",
       "nmp-content": "pure-extension",

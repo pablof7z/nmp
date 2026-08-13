@@ -10,8 +10,8 @@
 > app-visible native-task capacity surface (`max_native_tasks`/`maxNativeTasks`,
 > `native_task_census`/`FfiNativeTaskCensus`, `await_native_tasks_idle`, and the
 > `ExecutorSaturated`/`executorSaturated` refusal) has been **removed**.
-> `nmp-executor` now retains only a proof-oriented thread counter; it owns no
-> executor, reservation, or admission pool. Logical adapter work runs on one
+> The `nmp-executor` package is deleted (#1452). Process-wide thread counters
+> live in `nmp-transport::thread_census`. Logical adapter work runs on one
 > shared async runtime, NIP-11 uses a private eight-flight network/body bound,
 > and NIP-46 uses finite backpressured transport queues without per-session
 > executors. The text below is the historical #442/#446 record, not current
