@@ -114,7 +114,6 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:evidence=rust:nmp::newer_relay_sources_install_complete_successors_without_new_receipts
   # nmp:evidence=rust:nmp-store::qualified_source_and_complete_successor_survive_redb_reopen
   # nmp:falsifier=Install the newer relay source as the visible winner before replaying Alice and Bob; the live query exposes the raw source or loses a local operation instead of moving directly between complete local generations.
-  # nmp:issue=#1433
   Scenario: A newer relay version is combined with every active local operation
     Given Alice and Bob were added to my contact list while offline
     And a relay later supplies a newer contact list containing Carol
@@ -130,7 +129,6 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:evidence=rust:nmp::newer_relay_sources_install_complete_successors_without_new_receipts
   # nmp:evidence=rust:nmp-store::semantic_source_and_effective_successor_are_one_crash_atomic_transition
   # nmp:falsifier=Commit the qualified relay source, successor row, or receipt updates separately; process death recovers a mixed source/effective generation or a partially advanced receipt set.
-  # nmp:issue=#1433
   Scenario: Source and successor recover as one durable state
     Given active contact-list operations have one complete current replacement over B0
     And a relay supplies newer source B5
