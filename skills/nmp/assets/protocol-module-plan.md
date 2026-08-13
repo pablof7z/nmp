@@ -41,7 +41,7 @@
 
 ## Projection
 
-| Tier | Public semantic surface | Ownership/teardown | Current or target |
+| Tier | Public semantic API | Ownership/teardown | Current or target |
 |---|---|---|---|
 | Rust | | | |
 | FFI | | | |
@@ -50,7 +50,7 @@
 
 ## Governance and falsifiers
 
-- Supported-surface/doc changes:
+- Doc changes:
 - Persistence/diagnostics impact:
 - Collision/unowned-schema proof:
 - Unforgeable-authority proof:

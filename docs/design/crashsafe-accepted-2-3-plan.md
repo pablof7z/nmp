@@ -641,8 +641,8 @@ logic.
 - **The single `Event::verify` for caller-supplied `Signed` payloads ultimately
   lives at THIS frame's acceptance boundary** — `on_publish`'s `Signed` arm
   verifies *before* `accept_write`/journal (U3). That is #52-Q2's "deeper-correct"
-  home: every entry point (facade, FFI, `nmp-demo`, direct `Handle` embedders,
-  in-crate tests) inherits it, and it composes with U3's existing obligation to
+  home: every entry point (facade, FFI, direct `Handle` embedders, in-crate
+  tests) inherits it, and it composes with U3's existing obligation to
   validate signer *results* before `promote_signed` — one acceptance boundary,
   two verify sites (caller-supplied at accept; signer-result at promote), zero
   path that reaches the wire unverified.

@@ -31,5 +31,4 @@ Validation commands:
 cargo test -p nmp-store --features bench-instrumentation
 cargo clippy -p nmp-store --features bench-instrumentation --all-targets -- -D warnings
 scripts/check-sdk-parity.sh
-scripts/check-falsifier-honesty.sh origin/master HEAD
 ```

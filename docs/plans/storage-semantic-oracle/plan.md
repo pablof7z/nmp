@@ -50,7 +50,7 @@ Only after this PR lands: qualify Fjall through the complete semantic path with 
 - The Noun Gate remains satisfied because the oracle is test/qualification infrastructure, not a new app-facing noun.
 - The destructive and lifecycle gates are unchanged; the harness exercises existing typed operations rather than adding bypasses.
 - Redb remains the only production baseline, and no candidate backend becomes reachable in production.
-- Per-crate tests, architecture gates, and falsifier-honesty checks will run before publication.
+- Per-crate tests and architecture gates will run before publication.
 
 ## Possible Rule Or ADR Loosening
 

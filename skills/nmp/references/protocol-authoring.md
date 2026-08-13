@@ -54,7 +54,7 @@ Do not add a callback registry that chooses routing, admission, signer, ordering
 5. Preserve core receipt facts. Map only module-owned composition failures.
 6. Never mutate a signed event, access signer secrets, write store indexes, open transport, or create an optimistic row lane.
 
-Two governed shapes exist, and the choice is about what the door must retain.
+Two shapes exist, and the choice is about what the door must retain.
 
 When the steps resolve entirely to an ordinary public `WriteIntent` that needs
 nothing retained, return that noun directly. Do not add a take-once wrapper or a
@@ -76,11 +76,11 @@ notification policy remain app-owned.
 A consumer-facing semantic change is not complete at the Rust implementation alone.
 
 1. Add the narrow direct-Rust API in the facade or opt-in protocol crate.
-2. Decide whether it changes supported surface under repository governance.
+2. Decide whether it changes the supported API.
 3. Project closed records/enums and semantic operations through FFI. Protocol-owned composition either returns the ordinary public `WriteIntent` for generic `publish` (NIP-22), or owns the publish step and returns the ordinary `ReceiptStream` (NIP-29). Preserve immutable staged composition either way. If contextual authority is not safely representable, fix the one write noun so the authority is non-forgeable and payload-bound; do not create an opaque parallel intent, take-once lifecycle, raw routing escape hatch, callback, or mutable mechanism object.
 4. Wrap generated types in idiomatic Swift and Kotlin ownership shapes.
 5. Preserve semantic parity while allowing native lifecycle syntax to differ.
-6. Update supported-surface docs, known gaps, and the surface change log when required.
+6. Update known gaps and affected docs when required.
 7. Rebuild generated bindings and compile consumers from a clean-clone shape.
 
 Choose and document one native shape: protocol-owned immutable composition into
@@ -118,6 +118,6 @@ Stop and redesign if a proposal includes:
 - early signing followed by tag mutation;
 - a module registry that performs startup work;
 - hidden polling/retry beside engine ownership; or
-- compatibility aliases retaining an unsafe path after the governed replacement lands.
+- compatibility aliases retaining an unsafe path after the replacement lands.
 
-Use the [protocol-module plan asset](../assets/protocol-module-plan.md) before implementation and the [feature review asset](../assets/feature-review.md) for the completed surface review.
+Use the [protocol-module plan asset](../assets/protocol-module-plan.md) before implementation and the [feature review asset](../assets/feature-review.md) for the completed review.

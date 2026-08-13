@@ -63,7 +63,7 @@
 
 ## Projection
 
-| Tier | Public semantic surface | Ownership/teardown | Current or target |
+| Tier | Public semantic API | Ownership/teardown | Current or target |
 |---|---|---|---|
 | Rust | `publish_relay_list_bootstrap` | tracked receipt; app drains it | current |
 | FFI | none | must not expose raw exact routes | explicit gap |
@@ -72,8 +72,7 @@
 
 ## Governance and falsifiers
 
-- Supported-surface/doc changes: README protocol-module inventory, known gaps,
-  supported-surface statement, surface change log if the facade snapshot moves.
+- Doc changes: README protocol-module inventory and known gaps.
 - Persistence/diagnostics impact: one new durable route-snapshot variant; no
   directory/store mutation API and no synthetic observation fact.
 - Collision/unowned-schema proof: workspace audit enrolls the exclusive

@@ -30,8 +30,8 @@ repository today?
 - Rust/FFI/Swift/Kotlin expose an idempotent destructive reset for a closed
   persistent store without changing the opaque session payload the app stores
   separately.
-- The canonical `nmp` facade and the one UniFFI native library have pinned
-  reproducible surface snapshots with an append-only governance gate.
+- The canonical `nmp` facade and the one UniFFI native library expose a stable
+  public API.
 - The Swift falsifier app runs against public relays as a normal SwiftUI app.
 - A desktop-JVM Kotlin package proves cold `Flow` observation and cancellation.
 - The Rust `nmp` CLI initializes `.nmp.toml` and prepares one exact cached
@@ -41,9 +41,9 @@ repository today?
 
 | Contract area | Current gap | Queue |
 |---|---|---|
-| Canonical Rust product facade | facade, FFI, demo, direct-vs-FFI parity, surface snapshots, and append-only governance are built; v2 remains provisional while the broader promoted contracts below are open | [#52](https://github.com/pablof7z/nmp/issues/52) |
+| Canonical Rust product facade | facade and FFI are built; v2 remains provisional while the broader promoted contracts below are open | [#52](https://github.com/pablof7z/nmp/issues/52) |
 | Durable acceptance and pending row | crash-atomic acceptance/promotion/cancellation are built; runtime restart recovery, receipt reattachment, and durable attempt resumption remain | [#2](https://github.com/pablof7z/nmp/issues/2), [#3](https://github.com/pablof7z/nmp/issues/3) |
-| Signer lifecycle | frozen-pubkey selection, governed sign-only, and whole-session local-provider restoration are built; NIP-55 execution, additional provider implementations, platform secure storage integration, and permanent signer diagnostics remain | [#47](https://github.com/pablof7z/nmp/issues/47), [#51](https://github.com/pablof7z/nmp/issues/51) |
+| Signer lifecycle | frozen-pubkey selection, sign-only, and whole-session local-provider restoration are built; NIP-55 execution, additional provider implementations, platform secure storage integration, and permanent signer diagnostics remain | [#47](https://github.com/pablof7z/nmp/issues/47), [#51](https://github.com/pablof7z/nmp/issues/51) |
 | Query descriptor/evidence | full `Demand` identity and scoped `AcquisitionEvidence` are built across Rust/FFI/Swift/Kotlin; live handles report their current active plan, while coverage-satisfied `MaxAge` handles retain only the compact opening source facts and watermarks that justified suppression; broader permanent diagnostics remain | [#49](https://github.com/pablof7z/nmp/issues/49), [#714](https://github.com/pablof7z/nmp/issues/714) |
 | Protocol modules | exact module ownership and immutable contextual publication are designed, not shipped; NIP-51 kind 10009 composition into NIP-29 remains queued | [#45](https://github.com/pablof7z/nmp/issues/45), [#63](https://github.com/pablof7z/nmp/issues/63) |
 | Bounded delivery | end-to-end queue, observer, ingress, and explicit-shortfall proof remains | [#46](https://github.com/pablof7z/nmp/issues/46) |
@@ -55,7 +55,7 @@ The umbrella ordering and design-signoff trail live in
 
 ## Important current/target differences
 
-| Concept | Current repository surface | Provisional North Star |
+| Concept | Current repository API | Provisional North Star |
 |---|---|---|
 | Query identity | `Demand(selection, source authority, access context, cache, freshness)` | same semantic descriptor; public spelling remains provisional |
 | Nested derived query | `Derived(inner: Demand)` across Rust/FFI/Swift/Kotlin | explicit inner demand with independent source/access/cache/freshness policy |
@@ -76,8 +76,6 @@ active wire work, not a hypothetical replan of that suppressed handle.
 
 - [apps/Falsifier](https://github.com/pablof7z/nmp/tree/master/apps/Falsifier) is the iOS library-vs-framework
   falsifier and permanent diagnostics screen.
-- [crates/nmp-demo](https://github.com/pablof7z/nmp/tree/master/crates/nmp-demo) exercises the current direct-Rust
-  path.
 - [Packages/NMP](https://github.com/pablof7z/nmp/tree/master/Packages/NMP) is the Swift package.
 - [Packages/NMPKotlin](https://github.com/pablof7z/nmp/tree/master/Packages/NMPKotlin) is the desktop-JVM Flow
   projection.
@@ -89,4 +87,4 @@ return to the [ten-minute embedding](04-ten-minute-timeline.md).
 
 ---
 
-<sub>[Index](README.md) · Related: [Known gaps](../known-gaps.md) · [Glossary](glossary.md) · [Governed provisional API](33-versioning.md)</sub>
+<sub>[Index](README.md) · Related: [Known gaps](../known-gaps.md) · [Glossary](glossary.md) · [Provisional API](33-versioning.md)</sub>

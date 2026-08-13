@@ -1,7 +1,7 @@
 # Protocol modules and contextual composition
 
 - **Status:** TARGET CONTRACT - opt-in module packaging and contextual
-  publication are not yet implemented as one governed cross-platform surface.
+  publication are not yet implemented as one cross-platform API.
 - **Owns:** the content-agnostic core boundary, protocol schema ownership,
   derived helpers, immutable draft composition, and contextual routing.
 

@@ -69,10 +69,6 @@ gate changed together, because the gate pins the test's name literally.
 
 **What was deliberately NOT touched, and why:**
 
-- `docs/surface-change-log.md` — append-only history. Its #838 entry
-  (`docs/surface-change-log.md:912`) says "NIP-29 permits foreign event
-  kinds" and stays verbatim; history records what was written, including its
-  mistakes.
 - Roughly 85 uses of "foreign callback" / "foreign language" / "foreign
   thread" across the FFI layer — standard, correct FFI vocabulary describing
   the host-language side of the boundary. Not this defect; deleting those
@@ -89,7 +85,7 @@ ownership gate `grep -qF`'d the test name
 word could no longer be fixed in one file — the test and the gate had to move
 in the same change or the build broke. That is the mildest version of the
 mechanism; left longer, the term would have reached exported symbols, platform
-bindings, and the governed surface snapshots, each one another site the fix
+bindings, and snapshots, each one another site the fix
 must touch atomically.
 
 So: **terminology defects get more expensive the longer they live.** The

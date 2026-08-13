@@ -33,7 +33,7 @@
 //!   barrier, no sleep.
 //!
 //! Everything here is reachable only through `nmp::mechanism`, which is
-//! `#[doc(hidden)]`: none of it is an app contract or a governed surface item.
+//! `#[doc(hidden)]`: none of it is an app contract.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;

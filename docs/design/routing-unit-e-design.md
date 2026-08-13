@@ -112,9 +112,9 @@ impl RouteClass {
 **Visibility / where they live:** `pub` associated fns *in `nmp-ownership`*
 (the only crate that can name the variants). `nmp-router` reads them for the
 default label; `nmp-mod-*` crates call them inside their `claims()` tables.
-`Manual`/`Imported` constructors are `#[cfg(feature = "tooling")]` — a new
-`tooling` feature on `nmp-ownership`, enabled by `nmp-demo`/diagnostics, **not**
-by `nmp-ffi` (the app SDK). The *variants* always exist in the sealed enum; only
+`Manual`/`Imported` constructors are `#[cfg(feature = "tooling")]` — a tooling
+feature enabled by in-workspace diagnostics, **not** by `nmp-ffi` (the app SDK).
+The *variants* always exist in the sealed enum; only
 their *constructors* are feature-gated, so the SDK build simply has no way to
 mint them (`manual_imported_absent_from_sdk_build`, Unit F).
 
