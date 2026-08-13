@@ -10,9 +10,13 @@
 //! Hard break, no compatibility alias: every caller in the workspace moved
 //! to `nmp_grammar::{WriteIntent, ...}` in the same change.
 
+use std::collections::BTreeSet;
+
 use nostr::{
     Event as SignedEvent, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent,
 };
+
+use crate::AccessContext;
 
 /// Everything an app must say to publish an event, and everything it MAY
 /// say. The kind is the one thing NMP cannot invent, so the kind is the one
@@ -168,12 +172,26 @@ const MAX_REPLACEABLE_OPERATION_BYTES: usize = 64 * 1024;
 /// registration handle from the engine and asks that handle to mint the
 /// payload; `publish()` rejects an unknown registration instance before
 /// custody. Capability helpers therefore cannot state replay-program ids,
-/// source authority, contributor membership, or a candidate body themselves.
+/// contributor membership, or a candidate body themselves. They do declare
+/// the closed continuing/finite source policy that the engine will own.
 pub struct ReplaceableOperation {
     registration_instance: [u8; 16],
     original_source: UnsignedEvent,
     current: UnsignedEvent,
+    source_policy: ReplaceableSourcePolicy,
     operation: Vec<u8>,
+}
+
+/// How long a replayable operation continues accepting newer source events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplaceableSourcePolicy {
+    /// Keep reconciling newer qualified sources; this policy is nonterminal.
+    Continuing,
+    /// Reconcile only while the exact declared relay round remains open.
+    Finite {
+        relays: BTreeSet<RelayUrl>,
+        access: AccessContext,
+    },
 }
 
 impl ReplaceableOperation {
@@ -189,6 +207,7 @@ impl ReplaceableOperation {
         registration_instance: [u8; 16],
         original_source: UnsignedEvent,
         current: UnsignedEvent,
+        source_policy: ReplaceableSourcePolicy,
         operation: Vec<u8>,
     ) -> Result<Self, ReplaceableOperationError> {
         original_source
@@ -209,10 +228,17 @@ impl ReplaceableOperation {
         if operation.len() > MAX_REPLACEABLE_OPERATION_BYTES {
             return Err(ReplaceableOperationError::OperationTooLarge);
         }
+        if matches!(
+            source_policy,
+            ReplaceableSourcePolicy::Finite { ref relays, .. } if relays.is_empty()
+        ) {
+            return Err(ReplaceableOperationError::FiniteSourcesEmpty);
+        }
         Ok(Self {
             registration_instance,
             original_source,
             current,
+            source_policy,
             operation,
         })
     }
@@ -220,11 +246,20 @@ impl ReplaceableOperation {
     /// Mechanism-only decomposition at the generic engine boundary. No
     /// supported facade or protocol helper exposes this method.
     #[doc(hidden)]
-    pub fn into_registered_parts(self) -> ([u8; 16], UnsignedEvent, UnsignedEvent, Vec<u8>) {
+    pub fn into_registered_parts(
+        self,
+    ) -> (
+        [u8; 16],
+        UnsignedEvent,
+        UnsignedEvent,
+        ReplaceableSourcePolicy,
+        Vec<u8>,
+    ) {
         (
             self.registration_instance,
             self.original_source,
             self.current,
+            self.source_policy,
             self.operation,
         )
     }
@@ -235,6 +270,7 @@ pub enum ReplaceableOperationError {
     OriginalSourceInvalid,
     CurrentInvalid,
     CoordinateChanged,
+    FiniteSourcesEmpty,
     OperationEmpty,
     OperationTooLarge,
 }
@@ -245,6 +281,9 @@ impl std::fmt::Display for ReplaceableOperationError {
             Self::OriginalSourceInvalid => "replaceable operation original source is invalid",
             Self::CurrentInvalid => "replaceable operation current event is invalid",
             Self::CoordinateChanged => "replaceable operation source coordinate changed",
+            Self::FiniteSourcesEmpty => {
+                "finite replaceable source policy requires at least one relay"
+            }
             Self::OperationEmpty => "replaceable operation must not be empty",
             Self::OperationTooLarge => "replaceable operation exceeds the 65536-byte bound",
         })
@@ -621,5 +660,27 @@ mod tests {
 
         let token = CorrelationToken::try_from("client-generated-uuid").unwrap();
         assert_eq!(token.as_ref() as &str, "client-generated-uuid");
+    }
+
+    #[test]
+    fn finite_replaceable_source_policy_requires_a_relay() {
+        let keys = nostr::Keys::generate();
+        let source = nostr::EventBuilder::new(Kind::ContactList, "")
+            .custom_created_at(Timestamp::from(1))
+            .sign_with_keys(&keys)
+            .unwrap();
+        assert!(matches!(
+            ReplaceableOperation::from_registered_parts(
+                [1; 16],
+                UnsignedEvent::from(source.clone()),
+                UnsignedEvent::from(source),
+                ReplaceableSourcePolicy::Finite {
+                    relays: BTreeSet::new(),
+                    access: AccessContext::Public,
+                },
+                vec![1],
+            ),
+            Err(ReplaceableOperationError::FiniteSourcesEmpty)
+        ));
     }
 }
