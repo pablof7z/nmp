@@ -128,8 +128,8 @@ assemble_consumer() {
 }
 
 install_consumer() {
-    local app_apk="$consumer/app/build/outputs/apk/debug/app-debug.apk"
-    local test_apk="$consumer/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+    local app_apk="$consumer/app/build/outputs/apk/release/app-release.apk"
+    local test_apk="$consumer/app/build/outputs/apk/androidTest/release/app-release-androidTest.apk"
     adb install -r "$app_apk"
     adb install -r "$test_apk"
 }
@@ -138,15 +138,15 @@ start_relay success "$success_port" 0
 success_relay_pid=$started_relay_pid
 start_relay recovery "$recovery_port" 2
 
-assemble_consumer :app:clean :app:assembleDebug :app:assembleDebugAndroidTest
-assemble_consumer :app:dependencies --configuration debugRuntimeClasspath \
+assemble_consumer :app:clean :app:assembleRelease :app:assembleReleaseAndroidTest
+assemble_consumer :app:dependencies --configuration releaseRuntimeClasspath \
     > "$artifacts/resolved-dependencies.txt"
 grep -q 'com.nmp:nmp-android:0.0.0' "$artifacts/resolved-dependencies.txt"
 install_consumer
-app_apk="$consumer/app/build/outputs/apk/debug/app-debug.apk"
-test_apk="$consumer/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+app_apk="$consumer/app/build/outputs/apk/release/app-release.apk"
+test_apk="$consumer/app/build/outputs/apk/androidTest/release/app-release-androidTest.apk"
 cp "$app_apk" \
-    "$artifacts/nmp-runtime-qualification-debug.apk"
+    "$artifacts/nmp-runtime-qualification-release.apk"
 cp "$test_apk" \
     "$artifacts/nmp-runtime-qualification-androidTest.apk"
 aar_native_sha=$(unzip -p "$aar" jni/x86_64/libnmp_ffi.so | shasum -a 256 | awk '{print $1}')
@@ -224,7 +224,7 @@ active_repository="$missing_repository"
 assemble_consumer \
     -PnmpQualificationCoordinate="com.nmp:nmp-android:$missing_version" \
     -PnmpExpectNativeLoad=false \
-    :app:clean :app:assembleDebug :app:assembleDebugAndroidTest
+    :app:clean :app:assembleRelease :app:assembleReleaseAndroidTest
 install_consumer
 run_test missingEmulatorAbiFailsAtNativeConstruction "$artifacts/missing-abi.txt"
 adb logcat -d -s NMPQualification:I '*:S' >> "$artifacts/qualification-logcat.txt"
