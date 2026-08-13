@@ -1182,7 +1182,7 @@ mod tests {
                 .recv_timeout(remaining)
                 .expect("the canonical-row observation stays open");
             if let Some(row) = frame.deltas.into_iter().find_map(|delta| match delta {
-                crate::RowDelta::Added(row) if row.event.id == event_id => Some(row),
+                crate::RowDelta::Added(row) if row.id() == event_id => Some(row),
                 _ => None,
             }) {
                 return row;
@@ -1405,14 +1405,12 @@ mod tests {
             let frozen_event_id = receipt.event_id;
             drop(receipt.statuses);
             let row_before = receive_added_row(&before_observation, frozen_event_id);
-            assert_eq!(row_before.event.id, frozen_event_id);
-            assert_eq!(row_before.event.pubkey, public_key);
-            assert_eq!(row_before.event.kind, Kind::TextNote);
-            assert_eq!(row_before.event.content, "accepted before session mutation");
-            assert_eq!(
-                row_before.signature_state,
-                crate::RowSignatureState::Pending
-            );
+            assert_eq!(row_before.id(), frozen_event_id);
+            assert_eq!(row_before.pubkey(), public_key);
+            assert_eq!(row_before.kind(), Kind::TextNote);
+            assert_eq!(row_before.content(), "accepted before session mutation");
+            assert_eq!(row_before.signature(), RowSignature::Pending);
+            assert_eq!(row_before.signed_event(), None);
             drop(before_observation);
             let before = engine
                 .publish_queue_for_event(frozen_event_id, None, 1)
@@ -1436,14 +1434,15 @@ mod tests {
                 .observe(query(), None)
                 .expect("fresh author-and-kind-scoped observation opens");
             let row_after = receive_added_row(&after_observation, frozen_event_id);
-            assert_eq!(row_after.event.id, frozen_event_id);
-            assert_eq!(row_after.event.pubkey, public_key);
-            assert_eq!(row_after.event.kind, Kind::TextNote);
-            assert_eq!(row_after.event.content, "accepted before session mutation");
-            assert_eq!(row_after.signature_state, crate::RowSignatureState::Pending);
+            assert_eq!(row_after.id(), frozen_event_id);
+            assert_eq!(row_after.pubkey(), public_key);
+            assert_eq!(row_after.kind(), Kind::TextNote);
+            assert_eq!(row_after.content(), "accepted before session mutation");
+            assert_eq!(row_after.signature(), RowSignature::Pending);
+            assert_eq!(row_after.signed_event(), None);
             assert_eq!(
-                row_after.event, row_before.event,
-                "session mutation must preserve the exact canonical event body"
+                row_after, row_before,
+                "session mutation must preserve the exact canonical row"
             );
             drop(after_observation);
             let ReceiptReattachment::Attached { id, .. } = engine
