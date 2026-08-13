@@ -105,7 +105,8 @@ use nmp_store::{
     PublishQueueReceiptPayload, PublishQueueTerminalOutcome, PublishQueueTransientCause,
     QualifiedSource, ReceiptState, RelayObserved, RemoveQueueEntryOutcome,
     ReplaceableMaterializationTarget, ReplayFormatId, ReplayProgramId, SemanticAccept,
-    SemanticPlan, SigState, SourceEvidence as SemanticSourceEvidence, SourcePlanId, StartingSource,
+    SemanticPlan, SemanticRematerialize, SemanticSourceInstall, SigState,
+    SourceEvidence as SemanticSourceEvidence, SourcePlanId, StartingSource,
     StartingSourceRequirement, VerifiedSignature,
 };
 use nmp_transport::{

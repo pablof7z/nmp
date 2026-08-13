@@ -13,7 +13,7 @@ use nmp_grammar::{
 };
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CompensateOutcome, EventStore, InsertOutcome, PersistenceError,
-    RelayObserved, SigState, StoredEvent,
+    RelayObserved, SemanticInstallOutcome, SemanticSourceInstall, SigState, StoredEvent,
 };
 use nostr::filter::MatchEventOptions;
 use nostr::RelayUrl;
@@ -82,6 +82,12 @@ pub struct CommittedMutationResult {
 /// outcome plus its exact post-commit live-query consequences.
 pub struct LocalAcceptResult {
     pub outcome: AcceptOutcome,
+    pub committed: CommittedMutationResult,
+}
+
+/// Full result of an atomic semantic-successor installation.
+pub struct SemanticInstallResult {
+    pub outcome: SemanticInstallOutcome,
     pub committed: CommittedMutationResult,
 }
 
@@ -1141,6 +1147,55 @@ impl<S: EventStore> Engine<S> {
         let delta = self.react(inserted_events, removed_rows)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         Ok(LocalAcceptResult {
+            outcome,
+            committed: CommittedMutationResult {
+                delta,
+                affected_handles,
+                row_changes,
+            },
+        })
+    }
+
+    /// Install one already-composed semantic successor and project the exact
+    /// predecessor/successor pair returned by the store's CAS transaction.
+    pub fn install_replaceable_source_materialization(
+        &mut self,
+        install: SemanticSourceInstall,
+    ) -> Result<SemanticInstallResult, PersistenceError> {
+        let before_shapes = self.projection_shapes();
+        let outcome = self
+            .store
+            .install_replaceable_source_materialization(install)?;
+        let (inserted_rows, removed_rows) = match &outcome {
+            SemanticInstallOutcome::Installed {
+                installed,
+                predecessor,
+                ..
+            } => (
+                vec![(**installed).clone()],
+                predecessor
+                    .iter()
+                    .map(|row| row.event.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            SemanticInstallOutcome::Waiting(_)
+            | SemanticInstallOutcome::Resolved
+            | SemanticInstallOutcome::Stale
+            | SemanticInstallOutcome::Refused(_) => (Vec::new(), Vec::new()),
+        };
+        let inserted_events = inserted_rows
+            .iter()
+            .map(|row| row.event.clone())
+            .collect::<Vec<_>>();
+        let changed_events = inserted_events
+            .iter()
+            .chain(removed_rows.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let row_changes = committed_row_changes(inserted_rows, removed_rows.clone());
+        let delta = self.react(inserted_events, removed_rows)?;
+        let affected_handles = self.affected_handles(&before_shapes, &changed_events);
+        Ok(SemanticInstallResult {
             outcome,
             committed: CommittedMutationResult {
                 delta,

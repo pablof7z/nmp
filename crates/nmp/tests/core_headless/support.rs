@@ -349,6 +349,13 @@ impl EventStore for FailOnceCompensationStore {
         self.inner
             .install_replaceable_materialization(rematerialize)
     }
+    fn install_replaceable_source_materialization(
+        &mut self,
+        install: nmp_store::SemanticSourceInstall,
+    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
+        self.inner
+            .install_replaceable_source_materialization(install)
+    }
     fn promote_signed(
         &mut self,
         target: nmp_store::PromotionTarget,
@@ -521,6 +528,13 @@ impl EventStore for SharedFailStartStore {
         self.inner
             .install_replaceable_materialization(rematerialize)
     }
+    fn install_replaceable_source_materialization(
+        &mut self,
+        install: nmp_store::SemanticSourceInstall,
+    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
+        self.inner
+            .install_replaceable_source_materialization(install)
+    }
     fn promote_signed(
         &mut self,
         target: nmp_store::PromotionTarget,
@@ -680,6 +694,13 @@ impl EventStore for RedbFailStartStore {
     ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
         self.inner
             .install_replaceable_materialization(rematerialize)
+    }
+    fn install_replaceable_source_materialization(
+        &mut self,
+        install: nmp_store::SemanticSourceInstall,
+    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
+        self.inner
+            .install_replaceable_source_materialization(install)
     }
     fn promote_signed(
         &mut self,

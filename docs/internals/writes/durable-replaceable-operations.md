@@ -33,11 +33,13 @@ issues:
 This document explains a target behavior. It is written for someone who knows
 Nostr deeply but does not know NMP's internal architecture.
 
-Most of the target behavior in this document is **not built**. NMP today has
-durable publication of one complete event and exact-base guarded replacement
-of one complete replaceable event. It does not yet retain a semantic operation
-and automatically replay that operation over a newer event from another
-device.
+Most of the target behavior in this document is **not built**. NMP now accepts
+configured semantic operations only after producing a complete optimistic
+event, retains their ordered operation meaning under ordinary receipts, and
+atomically replays active operations over each newer verified relay source.
+That source and its complete successor commit together, so a live query never
+exposes the raw source between complete local generations. Generation-qualified
+signing and relay publication remain owned by #1434.
 
 That distinction matters when reading this document:
 
