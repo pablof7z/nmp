@@ -1411,24 +1411,65 @@ fn boot_catches_up_past_due_expiry() {
 /// none) -- the same "grep-guard" idiom the plan itself names.
 #[test]
 fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/runtime/mod.rs"))
-        .expect("read runtime/mod.rs");
+    let runtime_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime");
+    let mut pending_directories = vec![runtime_dir.clone()];
+    let mut runtime_sources = Vec::new();
+    while let Some(directory) = pending_directories.pop() {
+        for entry in std::fs::read_dir(&directory).expect("read runtime source directory") {
+            let path = entry.expect("read runtime source entry").path();
+            if path.is_dir() {
+                pending_directories.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let source = std::fs::read_to_string(&path).expect("read runtime Rust source");
+                runtime_sources.push((path, source));
+            }
+        }
+    }
+    runtime_sources.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
 
-    let impl_block_start = src
-        .find("impl Handle {")
-        .expect("Handle must have an impl block");
-    let handle_impl = &src[impl_block_start..];
-    let impl_block_end = handle_impl
-        .find("\n}\n")
-        .expect("Handle's impl block must close");
-    let handle_impl = &handle_impl[..impl_block_end];
+    let handle_impl_owners: Vec<_> = runtime_sources
+        .iter()
+        .filter_map(|(path, source)| {
+            let count = source.match_indices("impl Handle {").count();
+            (count != 0).then(|| {
+                (
+                    path.strip_prefix(&runtime_dir)
+                        .expect("runtime source stays below runtime directory")
+                        .to_string_lossy()
+                        .into_owned(),
+                    count,
+                )
+            })
+        })
+        .collect();
+    assert_eq!(
+        handle_impl_owners,
+        vec![
+            ("mod.rs".to_owned(), 1),
+            ("receipt_stream.rs".to_owned(), 1)
+        ],
+        "Handle must have exactly one impl in each reviewed owner and none elsewhere"
+    );
 
     let mut methods: Vec<&str> = Vec::new();
-    for line in handle_impl.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("pub fn ") {
-            let name = rest.split(['(', '<']).next().unwrap_or_default();
-            methods.push(name);
+    for (_, src) in runtime_sources
+        .iter()
+        .filter(|(_, source)| source.contains("impl Handle {"))
+    {
+        let impl_block_start = src
+            .find("impl Handle {")
+            .expect("each Handle owner must have an impl block");
+        let handle_impl = &src[impl_block_start..];
+        let impl_block_end = handle_impl
+            .find("\n}\n")
+            .expect("Handle's impl block must close");
+        let handle_impl = &handle_impl[..impl_block_end];
+        for line in handle_impl.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("pub fn ") {
+                let name = rest.split(['(', '<']).next().unwrap_or_default();
+                methods.push(name);
+            }
         }
     }
     methods.sort_unstable();
@@ -1469,8 +1510,9 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
     // Scan CODE lines only (skip `///`/`//` doc/comment prose, which is
     // free to describe the absence of these things in words) for the actual
     // structural violations: a `relays:` parameter or an open-REQ method.
-    let code_lines: Vec<&str> = src
-        .lines()
+    let code_lines: Vec<&str> = runtime_sources
+        .iter()
+        .flat_map(|(_, source)| source.lines())
         .map(str::trim)
         .filter(|l| !l.starts_with("//"))
         .collect();
