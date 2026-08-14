@@ -942,26 +942,16 @@ fn failed_persistent_store_open_releases_reset_guard() {
 ///
 /// The epoch fixture is a nonempty store whose marker this build cannot
 /// read, so `found` is `None` — "not this epoch", not "no data". The
-/// table is one this schema never writes. Retired table names are not
-/// recorded here: that list would be knowledge of layouts this
+/// store-owned fixture retains every physical table detail. Retired table
+/// names are not recorded here: that list would be knowledge of layouts this
 /// repository does not keep.
 #[test]
 fn superseded_epoch_and_damaged_bytes_are_different_typed_open_refusals() {
-    use redb::{Database, TableDefinition};
-
     let fixture = tempfile::tempdir().expect("temporary directory");
 
     let superseded = fixture.path().join("superseded-epoch.redb");
-    {
-        let database = Database::create(&superseded).expect("epoch fixture must create");
-        let write = database.begin_write().expect("epoch fixture must begin");
-        write
-            .open_table(TableDefinition::<u64, &[u8]>::new(
-                "a-table-this-schema-never-writes",
-            ))
-            .expect("epoch fixture must open a table this schema never writes");
-        write.commit().expect("epoch fixture must commit");
-    }
+    nmp_store::testing::create_nonempty_markerless_store(&superseded)
+        .expect("epoch fixture must create");
     let error = Engine::new(EngineConfig {
         store_path: Some(superseded.to_string_lossy().into_owned()),
         ..EngineConfig::default()
