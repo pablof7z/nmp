@@ -10,8 +10,6 @@ use nmp_store::{coverage_key, CoverageInterval, RedbStore, RelayObserved};
 use nostr::{EventBuilder, Keys, Kind};
 use std::borrow::Cow;
 
-use super::history_load_failure_tests::{ControlledFailureStore, StoreFailureControl};
-
 fn query(relay: &RelayUrl, value: &str, freshness: Freshness) -> LiveQuery {
     let mut demand = Demand::from_filter(Filter {
         kinds: Some(BTreeSet::from([0u16])),
