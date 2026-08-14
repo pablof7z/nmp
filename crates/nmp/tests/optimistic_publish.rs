@@ -71,18 +71,23 @@ fn engine() -> Engine {
     .expect("a temporary Redb engine builds")
 }
 
-/// A real loopback URL with nothing listening on it: the port is bound just
-/// long enough to learn a free number, then released. A host that cannot be
-/// reached is the point -- no ACK can arrive to rescue a projection that
-/// wrongly waits for one.
-fn unreachable_host() -> RelayUrl {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback bind for a free port");
-    let port = listener
-        .local_addr()
-        .expect("a bound listener has an address")
-        .port();
-    drop(listener);
-    RelayUrl::parse(&format!("ws://127.0.0.1:{port}")).expect("a well-formed loopback relay url")
+/// Two distinct loopback URLs with nothing listening on either one. Keep both
+/// listeners bound until both ports have been selected so the operating system
+/// cannot immediately recycle the first port for the second host.
+fn two_unreachable_hosts() -> (RelayUrl, RelayUrl) {
+    let listener_a = TcpListener::bind("127.0.0.1:0").expect("first loopback free port");
+    let listener_b = TcpListener::bind("127.0.0.1:0").expect("second loopback free port");
+    let url = |listener: &TcpListener| {
+        let port = listener
+            .local_addr()
+            .expect("a bound listener has an address")
+            .port();
+        RelayUrl::parse(&format!("ws://127.0.0.1:{port}"))
+            .expect("a well-formed loopback relay url")
+    };
+    let hosts = (url(&listener_a), url(&listener_b));
+    drop((listener_a, listener_b));
+    hosts
 }
 
 fn port_of(url: &RelayUrl) -> u16 {
@@ -243,8 +248,7 @@ fn drain_until(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_publish_to_two_unreachable_hosts_appears_at_once_reporting_zero_relays() {
     let me = Keys::generate();
-    let host_a = unreachable_host();
-    let host_b = unreachable_host();
+    let (host_a, host_b) = two_unreachable_hosts();
     assert_ne!(host_a, host_b, "two distinct unreachable hosts");
 
     let engine = engine();
@@ -323,8 +327,7 @@ async fn an_accepting_host_enters_provenance_a_rejecting_one_never_does_and_the_
     let me = Keys::generate();
     // Two ports nothing is listening on YET -- the hosts are started on these
     // exact ports further down.
-    let accepting_url = unreachable_host();
-    let rejecting_url = unreachable_host();
+    let (accepting_url, rejecting_url) = two_unreachable_hosts();
 
     let engine = engine();
     let group = nip29::on([accepting_url.clone(), rejecting_url.clone()])
@@ -465,8 +468,7 @@ async fn an_accepting_host_enters_provenance_a_rejecting_one_never_does_and_the_
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn optimistic_publication_is_general_and_owes_nothing_to_nip29() {
     let me = Keys::generate();
-    let host_a = unreachable_host();
-    let host_b = unreachable_host();
+    let (host_a, host_b) = two_unreachable_hosts();
     let hosts = [host_a.clone(), host_b.clone()];
 
     let engine = engine();
