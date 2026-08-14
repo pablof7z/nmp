@@ -11,10 +11,8 @@
 //! slot for the life of the process — which is what wedged a production
 //! publish lane behind one entry while the backlog grew monotonically.
 
-use nmp_store::{EventStore, PersistenceFault, RedbStore};
+use nmp_store::{EventStore, RedbStore};
 use nostr::{Keys, Kind, RelayUrl, Timestamp};
-
-use crate::lane_fault_store::{FaultyLaneStore, LaneFaults};
 
 use super::*;
 
@@ -107,12 +105,9 @@ fn a_handoff_that_can_never_arrive_must_not_starve_its_relay() {
         slot: 3,
         generation: 1,
     };
-    let faults = LaneFaults::default();
     let mut core = EngineCore::new(
-        FaultyLaneStore::new(
-            RedbStore::temporary().expect("temporary Redb store"),
-            faults.clone(),
-        ),
+        RedbStore::temporary_with_failed_lane_handoff()
+            .expect("temporary Redb handoff-failure fixture"),
         10,
     );
 
@@ -122,10 +117,10 @@ fn a_handoff_that_can_never_arrive_must_not_starve_its_relay() {
     let correlation = publish_correlation(&released, &session)
         .expect("the first eligible lane starts one attempt");
 
-    // The one-shot result arrives and the store refuses exactly this
-    // transition. The refusal heals immediately -- the store is fine from the
-    // next call on -- but the correlation is already gone.
-    faults.fail_handoff_once(PersistenceFault::Io);
+    // The one-shot result arrives and real Redb refuses exactly this
+    // transition before commit. The construction arm is consumed immediately
+    // -- the store is fine from the next call on -- but the correlation is
+    // already gone.
     core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written));
 
     assert!(
@@ -207,13 +202,7 @@ fn a_live_in_flight_attempt_still_holds_its_relays_only_slot() {
         slot: 4,
         generation: 1,
     };
-    let mut core = EngineCore::new(
-        FaultyLaneStore::new(
-            RedbStore::temporary().expect("temporary Redb store"),
-            LaneFaults::default(),
-        ),
-        10,
-    );
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
 
     core.handle(EngineMsg::RelayConnected(handle, session.clone()));
     let (receipt_a, signed_a, _) = publish_narrow(&mut core, &author, &relay, 910);
