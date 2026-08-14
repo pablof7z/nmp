@@ -943,265 +943,6 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
 // full-scan behavior whenever the index cannot be proven complete. The
 // falsifiers below exercise both the narrow path and the degraded fallback.
 
-/// Instrumented double for finding E5: counts `recover_publish_queue_lanes` calls
-/// through a caller-shared counter (so a test can inspect it after the
-/// store has been moved into `EngineCore`), and can be configured to fail
-/// `bootstrap_publish_queue_lanes` exactly once to exercise the degraded-mode
-/// safety valve.
-struct WakeLaneProbeStore {
-    inner: RedbStore,
-    recover_publish_queue_lanes_calls: Rc<Cell<u64>>,
-    fail_next_bootstrap: bool,
-}
-
-impl WakeLaneProbeStore {
-    fn with_failing_bootstrap(recover_publish_queue_lanes_calls: Rc<Cell<u64>>) -> Self {
-        Self {
-            inner: RedbStore::temporary().expect("temporary Redb store"),
-            recover_publish_queue_lanes_calls,
-            fail_next_bootstrap: true,
-        }
-    }
-}
-
-impl EventStore for WakeLaneProbeStore {
-    fn compensate_write_with_state(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-        reason: CompensationReason,
-    ) -> Result<CompensateOutcome, PersistenceError> {
-        self.inner.compensate_write_with_state(intent_id, reason)
-    }
-    fn insert(
-        &mut self,
-        event: nostr::Event,
-        from: RelayObserved,
-    ) -> Result<InsertOutcome, PersistenceError> {
-        self.inner.insert(event, from)
-    }
-    fn query(&self, filter: &nostr::Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
-        self.inner.query(filter)
-    }
-    fn remove(
-        &mut self,
-        id: nostr::EventId,
-        reason: RetractReason,
-    ) -> Result<Option<StoredEvent>, PersistenceError> {
-        self.inner.remove(id, reason)
-    }
-    fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
-        self.inner.expire_due(now)
-    }
-    fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        self.inner.next_expiration()
-    }
-    fn record_coverage(
-        &mut self,
-        claims: &[(nmp_grammar::ContextualAtom, RelayUrl, CoverageInterval)],
-    ) -> Result<(), PersistenceError> {
-        self.inner.record_coverage(claims)
-    }
-    fn get_coverage(
-        &self,
-        key: CoverageKey,
-        relay: &RelayUrl,
-    ) -> Result<Option<CoverageInterval>, PersistenceError> {
-        self.inner.get_coverage(key, relay)
-    }
-    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
-        self.inner.gc(claims)
-    }
-    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
-        self.inner.accept_write(accept)
-    }
-    fn replaceable_operation_snapshot(
-        &self,
-        coordinate: &nostr::nips::nip01::Coordinate,
-    ) -> Result<Option<nmp_store::RecoveredSemanticResource>, PersistenceError> {
-        self.inner.replaceable_operation_snapshot(coordinate)
-    }
-    fn install_replaceable_materialization(
-        &mut self,
-        rematerialize: nmp_store::SemanticRematerialize,
-    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
-        self.inner
-            .install_replaceable_materialization(rematerialize)
-    }
-    fn install_replaceable_source_materialization(
-        &mut self,
-        install: nmp_store::SemanticSourceInstall,
-    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
-        self.inner
-            .install_replaceable_source_materialization(install)
-    }
-    fn promote_signed(
-        &mut self,
-        target: nmp_store::PromotionTarget,
-        verified: nmp_store::VerifiedSignature,
-    ) -> Result<PromoteOutcome, PersistenceError> {
-        self.inner.promote_signed(target, verified)
-    }
-    fn compensate_write(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-    ) -> Result<CompensateOutcome, PersistenceError> {
-        self.inner.compensate_write(intent_id)
-    }
-    fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
-        self.inner.recover_publish_queue()
-    }
-    fn reattach_receipt(
-        &self,
-        receipt_id: u64,
-    ) -> Result<Option<PublishQueueReceipt>, PersistenceError> {
-        self.inner.reattach_receipt(receipt_id)
-    }
-    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
-        self.inner.lookup_correlation(token)
-    }
-    fn record_route_revision(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-        relays: BTreeSet<RelayUrl>,
-    ) -> Result<PublishQueueRouteRevision, PersistenceError> {
-        self.inner.record_route_revision(intent_id, relays)
-    }
-    fn recover_route_revisions(
-        &self,
-        intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError> {
-        self.inner.recover_route_revisions(intent_id)
-    }
-    fn recover_attempts(
-        &self,
-        intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
-        self.inner.recover_attempts(intent_id)
-    }
-    fn bootstrap_publish_queue_lanes(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<nmp_store::PublishQueueLane>, PersistenceError> {
-        if self.fail_next_bootstrap {
-            self.fail_next_bootstrap = false;
-            return Err(PersistenceError::invariant(
-                "injected bootstrap failure".to_string(),
-            ));
-        }
-        self.inner.bootstrap_publish_queue_lanes(intent_id)
-    }
-    fn recover_publish_queue_lanes(
-        &self,
-        intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<nmp_store::PublishQueueLane>, PersistenceError> {
-        let before = self.inner.publish_queue_lane_recovery_reads();
-        let result = self.inner.recover_publish_queue_lanes(intent_id);
-        let observed = self
-            .inner
-            .publish_queue_lane_recovery_reads()
-            .saturating_sub(before);
-        self.recover_publish_queue_lanes_calls
-            .set(self.recover_publish_queue_lanes_calls.get() + observed);
-        result
-    }
-    fn due_publish_queue_deadlines(
-        &self,
-        now: Timestamp,
-        limit: usize,
-    ) -> Result<Vec<nmp_store::PublishQueueDeadline>, PersistenceError> {
-        self.inner.due_publish_queue_deadlines(now, limit)
-    }
-    fn next_publish_queue_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        self.inner.next_publish_queue_deadline()
-    }
-    fn set_lane_waiting(
-        &mut self,
-        key: &nmp_store::PublishQueueLaneKey,
-        revision: u64,
-        auth: bool,
-    ) -> Result<nmp_store::PublishQueueLane, PersistenceError> {
-        self.inner.set_lane_waiting(key, revision, auth)
-    }
-    fn set_lane_eligible(
-        &mut self,
-        key: &nmp_store::PublishQueueLaneKey,
-        revision: u64,
-        since: Timestamp,
-    ) -> Result<nmp_store::PublishQueueLane, PersistenceError> {
-        self.inner.set_lane_eligible(key, revision, since)
-    }
-    fn set_lane_transient(
-        &mut self,
-        key: &nmp_store::PublishQueueLaneKey,
-        revision: u64,
-        ordinal: u64,
-        eligible_at: Timestamp,
-        cause: nmp_store::PublishQueueTransientCause,
-        raw_reason: Option<String>,
-    ) -> Result<nmp_store::PublishQueueLane, PersistenceError> {
-        self.inner
-            .set_lane_transient(key, revision, ordinal, eligible_at, cause, raw_reason)
-    }
-    fn suspend_lane_attempt(
-        &mut self,
-        key: &nmp_store::PublishQueueLaneKey,
-        revision: u64,
-        ordinal: u64,
-        at: Timestamp,
-        cause: nmp_store::PublishQueueTransientCause,
-        raw_reason: Option<String>,
-        auth: bool,
-    ) -> Result<nmp_store::PublishQueueLane, PersistenceError> {
-        self.inner
-            .suspend_lane_attempt(key, revision, ordinal, at, cause, raw_reason, auth)
-    }
-    fn start_lane_attempt(
-        &mut self,
-        key: &nmp_store::PublishQueueLaneKey,
-        revision: u64,
-        event: nostr::Event,
-        started_at: Timestamp,
-    ) -> Result<(PublishQueueAttempt, nmp_store::PublishQueueLane), PersistenceError> {
-        self.inner
-            .start_lane_attempt(key, revision, event, started_at)
-    }
-    fn record_lane_handoff(
-        &mut self,
-        key: &nmp_store::PublishQueueLaneKey,
-        revision: u64,
-        ordinal: u64,
-        detail: nmp_store::PublishQueueAttemptHandoff,
-        next: nmp_store::PublishQueuePostHandoffState,
-    ) -> Result<nmp_store::PublishQueueLane, PersistenceError> {
-        self.inner
-            .record_lane_handoff(key, revision, ordinal, detail, next)
-    }
-    fn finish_lane_attempt(
-        &mut self,
-        key: &nmp_store::PublishQueueLaneKey,
-        revision: u64,
-        ordinal: u64,
-        outcome: PublishQueueAttemptOutcome,
-        finished_at: Timestamp,
-    ) -> Result<nmp_store::PublishQueueLane, PersistenceError> {
-        self.inner
-            .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
-    }
-    fn recover_attempt_details(
-        &self,
-        intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<nmp_store::PublishQueueAttemptDetails>, PersistenceError> {
-        self.inner.recover_attempt_details(intent_id)
-    }
-    fn close_terminal_intent(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-    ) -> Result<nmp_store::CloseIntentOutcome, PersistenceError> {
-        self.inner.close_terminal_intent(intent_id)
-    }
-    delegate_publish_queue_door!(inner);
-}
-
 /// A large durable backlog can contain obligations that own no physical lane
 /// at all (for example, writes still waiting for a signer). Scheduling one
 /// healthy routed write must read only that write's lane state, not perform
@@ -1499,9 +1240,9 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
         .map(|i| RelayUrl::parse(&format!("wss://unproven-creation-{i}.example.com")).unwrap())
         .collect();
 
-    let calls = Rc::new(Cell::new(0u64));
     let mut core = EngineCore::new(
-        WakeLaneProbeStore::with_failing_bootstrap(calls.clone()),
+        RedbStore::temporary_with_failed_lane_bootstrap()
+            .expect("temporary Redb lane-bootstrap failure fixture"),
         10,
     );
     activate(&mut core, &author);
@@ -1630,9 +1371,9 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://wake-degraded.example.com").unwrap();
 
-    let calls = Rc::new(Cell::new(0u64));
     let mut core = EngineCore::new(
-        WakeLaneProbeStore::with_failing_bootstrap(calls.clone()),
+        RedbStore::temporary_with_failed_lane_bootstrap()
+            .expect("temporary Redb lane-bootstrap failure fixture"),
         10,
     );
     activate(&mut core, &author);
@@ -1659,7 +1400,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     );
 
     // Intent #2: an ordinary write to the SAME relay accepted right after --
-    // `fail_next_bootstrap` is one-shot, so this one bootstraps normally and
+    // The construction arm is one-shot, so this one bootstraps normally and
     // the index DOES learn its lane.
     let accepted2 = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(201, "degraded 2")),
@@ -1689,7 +1430,7 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     ));
     // Same #8 U4 shift as `wake_relay_lanes_only_rereads_...`: the wake that
     // publishes is the bounded AUTH-discovery release, not connect itself.
-    calls.set(0);
+    core.reset_publish_queue_lane_recovery_reads();
     let effects = core.handle(EngineMsg::AuthProbeReleased(
         RelayHandle {
             slot: 0,
@@ -1707,13 +1448,14 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
         "a degraded index must never cost a missed wakeup, got {effects:?}"
     );
 
-    // Quantitative proof the FULL scan ran, not the narrow index: 2 pending
-    // intents this event; the degraded wake reads both directly (2) plus
+    // #1537's concrete Redb-door count proves the FULL scan ran, not the
+    // narrow index: 2 pending intents this event; the degraded wake reads
+    // both directly (2) plus
     // `schedule_ready`'s own unchanged full scan (2) = 4. The non-degraded
     // composition here would have been 1 (index has exactly 1 receipt for
     // this relay) + 2 (schedule_ready) = 3.
     assert_eq!(
-        calls.get(),
+        core.publish_queue_lane_recovery_reads(),
         4,
         "expected the full-scan composition (2 wake + 2 schedule_ready), \
          proving the degraded flag drove this wake rather than the (here \
