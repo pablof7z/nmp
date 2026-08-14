@@ -60,9 +60,9 @@ NMP may restore canonical rows, provenance, source evidence, durable write lanes
 
 | Reattachment result | Meaning | App response |
 |---|---|---|
-| Attached | retained facts are readable | resume observation and fold facts |
-| Not found | no retained receipt at that id | show unknown/not retained; do not claim failure or success |
-| Retained but unreadable | retained state exists but cannot be decoded/read | surface recovery failure and preserve evidence for diagnosis |
+| Attached | retained facts are readable; carries the resolved receipt id and a replay cursor that is `None` once caught up to live work | resume observation and fold facts. When you reattached by correlation token, record the returned id — it is the only place you can learn it |
+| Not found | no retained receipt at that id or token | show unknown/not retained; do not claim failure or success |
+| Retained but unreadable | retained state exists but the durable receipt or attempt evidence cannot be decoded | surface recovery failure and preserve evidence for diagnosis. The obligation is untouched and nothing published, so never re-author on this |
 
 A refusal before acceptance yields a typed error and no id at all, so every id you hold names a write actually in custody. Fact-stream closure is not an ACK. Reattachment traverses the durable `WriteFact` history in finite pages before streaming onward, and lag is the typed `FactStreamLagged` rather than silent loss. `RelayWaiting::BackingOff` is the engine-owned scheduler's evidence, not a same-obligation retry door — app-controlled retry is the one thing on this list that genuinely does not exist. Enumeration (`publishQueue`), write cancellation (`cancel`), and live-stream detachment (Swift `ReceiptStatus.cancel()`, Kotlin collection-scope teardown) all do.
 
@@ -102,7 +102,7 @@ Keep recovery owned by the failing layer:
 - remote signer handoff failure: close that connection attempt and begin a new explicit attempt;
 - durable relay failure: delivery owns attempts/backoff and emits receipt facts;
 - unacked relay handoff: `RelayState::Sent` already means written-but-unacked and is not terminal; let the lane run, never blind resend;
-- replaceable conflict: `RefuseReason::ReplaceableBaseChanged { expected, actual }` keeps both ids so the app can refetch `actual`, reapply and resubmit without troubling the user;
+- replaceable conflict: `RefuseReason::ReplaceableBaseChanged { expected, actual }` keeps both ids so the app can refetch `actual`, reapply and resubmit without troubling the user. Both are optional — `actual: None` means nothing holds that coordinate now, so compose from empty rather than treating the absence as a failure. Nothing was stored or journaled and no ids were allocated;
 - engine-start or observation infra failure (`EngineStartFailed` at construction, `ObservationUnavailable` for ordinary or windowed initial canonical-projection setup): preserve the owning boundary and retry only as a new bounded attempt; relay connection failure remains acquisition evidence and no operation is refused for worker/task capacity;
 - unsupported store schema epoch: `StoreUnsupportedSchema` at construction is the one failure whose recovery genuinely is a fresh store, and it is still the app's call — close every owner, then reset deliberately, having told the person the publish queue does not survive it;
 - store reset: explicit destructive user/maintenance operation, never automatic fallback.

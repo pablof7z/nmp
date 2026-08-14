@@ -136,8 +136,9 @@ both the scope and the group.
 `nmp-nipc7` independently owns pure kind:9 chat, and its replies emit `e`, not
 `q` — a kind:9 must not become a NIP-22 comment, because NIP-29 clients fetch
 only kind 9. It composes schema only: no mentions, no notification `p` rows, no
-NIP-29 `h`, no routing, and no content. Feed the result to `FfiGroup::publish`
-when the message belongs to a group.
+NIP-29 `h`, no routing, and no content. When the message belongs to a group,
+hand the composed draft to `Group::publish` (`FfiGroup::publish` /
+`NMPGroup.publish` natively), which is what supplies the `h` row and the hosts.
 
 ## The one tagging door
 
@@ -146,9 +147,10 @@ one door per protocol crate. Rust exposes each composer under its own facade
 module (`nmp::nipc7::chat`/`chat_reply`, `nmp::nip18::repost`,
 `nmp::nip25::react`, `nmp::reply_to`); every one of them returns an
 `EventBuilder`, names no author and reads no clock. FFI and both wrappers
-project them as free functions returning a `WritePayload`, each taking the
-`Row` the app already holds — never a relationship, marker, relay hint or
-author, which are what the door fills from the row's own `sources`:
+project them as free functions returning a `WritePayload`. Each target-taking
+one takes the `Row` the app already holds and nothing else — never a
+relationship, marker, relay hint or author, which the door fills from the row's
+own `sources`:
 
 - `chat()` — top-level NIP-C7 kind:9.
 - `chatReply(to:)` in Swift, `chatReply(target)` in Kotlin — kind:9 with the `e` row.
