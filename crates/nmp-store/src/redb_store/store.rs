@@ -261,6 +261,18 @@ impl RedbStore {
         Ok(store)
     }
 
+    /// Open a persistent Redb store whose named lane starts fail at the
+    /// existing pre-commit boundary.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn open_with_failed_lane_starts(
+        path: impl AsRef<Path>,
+        failed_relays: impl IntoIterator<Item = RelayUrl>,
+    ) -> Result<Self, RedbStoreOpenError> {
+        let mut store = Self::open(path)?;
+        store.failed_lane_start_relays = failed_relays.into_iter().collect();
+        Ok(store)
+    }
+
     /// Open a persistent Redb store whose route-revision writes refuse at the
     /// existing pre-commit boundary.
     #[cfg(any(test, feature = "test-instrumentation"))]
