@@ -234,7 +234,7 @@ fn transient_invariant_bootstrap_failure_leaves_no_pinned_worker_behind() {
 }
 
 #[test]
-fn failed_auth_denial_commit_emits_no_terminal_receipt_fact() {
+fn oversized_auth_denial_reason_emits_no_terminal_receipt_fact() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://auth-denial-commit.example.com").unwrap();
     let session = session_for(&relay, &author);
@@ -242,15 +242,7 @@ fn failed_auth_denial_commit_emits_no_terminal_receipt_fact() {
         slot: 8,
         generation: 1,
     };
-    let faults = LaneFaults::default();
-    faults.fail_auth_denial(PersistenceFault::Invariant);
-    let mut core = EngineCore::new(
-        FaultyLaneStore::new(
-            RedbStore::temporary().expect("temporary Redb store"),
-            faults,
-        ),
-        10,
-    );
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
     core.handle(EngineMsg::RelayConnected(handle, session.clone()));
     let (receipt, _, parked) =
         publish_narrow(&mut core, &author, std::slice::from_ref(&relay), 705);
@@ -283,7 +275,7 @@ fn failed_auth_denial_commit_emits_no_terminal_receipt_fact() {
         token,
         Some(instance),
         AuthPolicyOutcome::Deny {
-            reason: "account not permitted".into(),
+            reason: "x".repeat(4_097),
         },
     ));
     assert!(
@@ -291,7 +283,7 @@ fn failed_auth_denial_commit_emits_no_terminal_receipt_fact() {
             effect,
             Effect::EmitReceipt(id, WriteFact::Relay { state: RelayState::AuthFailed { .. }, .. }) if *id == receipt
         )),
-        "a terminal receipt fact must not precede its failed commit: {denied:?}"
+        "a terminal receipt fact must not precede its refused durable transition: {denied:?}"
     );
     let intent = core.pending[&receipt].intent_id;
     assert_eq!(
