@@ -2,8 +2,11 @@
 //!
 //! Transport is the lowest crate that both the pool and the engine can share
 //! without a cycle. These counters exist so tests can prove observations do
-//! not create threads and shutdown leaves no orphans. They are not an
-//! executor, reservation, or admission surface.
+//! not create threads and shutdown joins engine-owned workers. Detached calls
+//! into registered application/capability code are counted too, but shutdown
+//! does not join them; they leave the live gauge only when that foreign work
+//! returns. The counters are not an executor, reservation, or admission
+//! surface.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
