@@ -1037,14 +1037,20 @@ pub(super) fn promote_signed(
     write.commit_prepared(outcome)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CompensationReason {
+    Failure,
+    ExplicitCancellation,
+}
+
 pub(super) fn compensate_write_with_state(
     store: &mut RedbStore,
     intent_id: IntentId,
-    reason: crate::CompensationReason,
+    reason: CompensationReason,
 ) -> Result<CompensateOutcome, PersistenceError> {
     let terminal_state = match reason {
-        crate::CompensationReason::Failure => ReceiptState::Compensated,
-        crate::CompensationReason::ExplicitCancellation => ReceiptState::Cancelled,
+        CompensationReason::Failure => ReceiptState::Compensated,
+        CompensationReason::ExplicitCancellation => ReceiptState::Cancelled,
     };
     let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|ingest, _write_txn| {

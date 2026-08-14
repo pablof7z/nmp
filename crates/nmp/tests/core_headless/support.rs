@@ -27,8 +27,8 @@ use nmp_grammar::{
 };
 use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
 use nmp_store::{
-    AcceptWrite, CoverageInterval, DurabilityOutcome, EventStore, PersistenceFault,
-    PublishQueueAttemptOutcome, RedbStore, RelayObserved,
+    AcceptWrite, CoverageInterval, DurabilityOutcome, PersistenceFault, PublishQueueAttemptOutcome,
+    RedbStore, RelayObserved,
 };
 use nmp_transport::{DisconnectReason, HandoffResult, RelayFrame, RelayHandle};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};

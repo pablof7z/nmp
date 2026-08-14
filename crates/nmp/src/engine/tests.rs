@@ -1364,8 +1364,6 @@ fn from_parts_cannot_bypass_guard_and_spawn_failure_releases_store() {
 
 #[test]
 fn sign_event_returns_exact_verified_event_without_store_or_publish_queue_residue() {
-    use nmp_store::EventStore;
-
     let fixture = tempfile::tempdir().expect("temporary directory");
     let path = fixture.path().join("sign-only.redb");
     let engine = Engine::new(EngineConfig {

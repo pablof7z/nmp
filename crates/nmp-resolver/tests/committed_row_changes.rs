@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use nmp_resolver::testkit::accept_write_of;
 use nmp_resolver::Engine;
-use nmp_store::{AcceptOutcome, CompensateOutcome, EventStore, RedbStore, RelayObserved};
+use nmp_store::{AcceptOutcome, CompensateOutcome, RedbStore, RelayObserved};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag, Timestamp};
 
 fn relay(name: &str) -> RelayUrl {
