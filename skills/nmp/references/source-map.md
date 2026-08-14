@@ -15,6 +15,8 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `docs/internals/conventions/no-backwards-compatibility.md`
 - Source: `docs/internals/conventions/schema-epoch-discard.md`
 - Source: `docs/design/durable-write-signing-and-retry.md`
+- Source: `docs/builder/15-editing-replaceable.md`
+- Source: `docs/internals/writes/payload-and-replaceable-edits.md`
 - Source: `docs/builder/08-packaging.md`
 - Source: `docs/builder/19-offline-sync.md`
 - Source: `docs/builder/22-diagnostics.md`
