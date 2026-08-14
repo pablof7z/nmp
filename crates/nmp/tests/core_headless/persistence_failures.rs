@@ -1,4 +1,5 @@
 use super::*;
+use nmp_store::testing;
 
 // ---- fallible persistence doors and recovery indexing ------------------
 //
@@ -12,7 +13,6 @@ use super::*;
 pub(super) struct FailIngestStore {
     inner: RedbStore,
     fail_insert: bool,
-    fail_coverage: bool,
     fail_query: Rc<Cell<bool>>,
     /// #763's two peeks and the deadline read whose error the caller used to
     /// erase. Sticky (not one-shot) because these model a store that has
@@ -20,7 +20,6 @@ pub(super) struct FailIngestStore {
     /// falsifiers below need to heal them explicitly to prove the engine
     /// comes back.
     fail_peeks: Rc<Cell<bool>>,
-    coverage_batch_sizes: Rc<RefCell<Vec<usize>>>,
 }
 
 impl FailIngestStore {
@@ -28,21 +27,8 @@ impl FailIngestStore {
         Self {
             inner: RedbStore::temporary().expect("temporary Redb store"),
             fail_insert: true,
-            fail_coverage: false,
             fail_query: Rc::new(Cell::new(false)),
             fail_peeks: Rc::new(Cell::new(false)),
-            coverage_batch_sizes: Rc::new(RefCell::new(Vec::new())),
-        }
-    }
-
-    fn coverage_armed(coverage_batch_sizes: Rc<RefCell<Vec<usize>>>) -> Self {
-        Self {
-            inner: RedbStore::temporary().expect("temporary Redb store"),
-            fail_insert: false,
-            fail_coverage: true,
-            fail_query: Rc::new(Cell::new(false)),
-            fail_peeks: Rc::new(Cell::new(false)),
-            coverage_batch_sizes,
         }
     }
 
@@ -50,10 +36,8 @@ impl FailIngestStore {
         Self {
             inner: RedbStore::temporary().expect("temporary Redb store"),
             fail_insert: false,
-            fail_coverage: false,
             fail_query,
             fail_peeks: Rc::new(Cell::new(false)),
-            coverage_batch_sizes: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -63,10 +47,8 @@ impl FailIngestStore {
         Self {
             inner: RedbStore::temporary().expect("temporary Redb store"),
             fail_insert: false,
-            fail_coverage: false,
             fail_query: Rc::new(Cell::new(false)),
             fail_peeks,
-            coverage_batch_sizes: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -133,14 +115,6 @@ impl EventStore for FailIngestStore {
         &mut self,
         claims: &[(nmp_grammar::ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
-        self.coverage_batch_sizes.borrow_mut().push(claims.len());
-        if self.fail_coverage {
-            self.fail_coverage = false;
-            return Err(PersistenceError::new(
-                PersistenceFault::Io,
-                "injected request-level coverage failure",
-            ));
-        }
         self.inner.record_coverage(claims)
     }
     fn get_coverage(
@@ -811,8 +785,8 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
 }
 
 /// #816's request-atomic coverage falsifier. Two narrow atoms coalesced into
-/// one wire request cross the store boundary as one batch; an injected
-/// failure leaves neither claim visible. A
+/// one wire request cross the real Redb boundary as one batch; a corrupt
+/// existing row refuses the merge and leaves the other claim absent. A
 /// separate request that was already in flight remains eligible and commits
 /// normally afterward, proving the failure is not a process-wide latch.
 #[test]
@@ -822,12 +796,27 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
     let healthy = Keys::generate();
     let failed_relay = RelayUrl::parse("wss://failed-coverage.example.com").unwrap();
     let healthy_relay = RelayUrl::parse("wss://healthy-coverage.example.com").unwrap();
+    let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
+    let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
     let dir = FixtureRoutingFacts::new()
         .with_outbound_routes(a.public_key(), [failed_relay.clone()])
         .with_outbound_routes(b.public_key(), [failed_relay.clone()])
         .with_outbound_routes(healthy.public_key(), [healthy_relay.clone()]);
-    let batch_sizes = Rc::new(RefCell::new(Vec::new()));
-    let store = FailIngestStore::coverage_armed(batch_sizes.clone());
+    let tempdir = tempfile::tempdir().expect("coverage fixture tempdir");
+    let path = tempdir.path().join("coverage-write-corruption.redb");
+    {
+        let mut store = RedbStore::open(&path).expect("create persistent Redb fixture");
+        store
+            .record_coverage(&[(
+                atom_a.clone(),
+                failed_relay.clone(),
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
+            )])
+            .expect("seed exact coverage row");
+    }
+    testing::corrupt_coverage(&path, nmp_store::coverage_key(&atom_a), &failed_relay)
+        .expect("store-owned coverage corruption");
+    let store = RedbStore::open(&path).expect("reopen Redb fixture");
     let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
 
     let _ = core.handle(EngineMsg::Subscribe(literal_query(
@@ -863,9 +852,12 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         })
         .expect("failed relay replays its coalesced request");
     assert_eq!(
-        failed_request.coverage_claims.len(),
-        2,
-        "the one request must carry both narrow coverage atoms"
+        failed_request.coverage_claims,
+        BTreeSet::from([
+            nmp_store::coverage_key(&atom_a),
+            nmp_store::coverage_key(&atom_b),
+        ]),
+        "the one request must carry exactly both narrow coverage atoms"
     );
 
     let healthy_connect = connect(&mut core, 1, &healthy_relay);
@@ -897,12 +889,18 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         public_session(&failed_relay),
         eose_frame(&wire_sub_string(&failed_request.sub_id)),
     ));
-    let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
-    let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
+    let corrupt_error = core
+        .get_coverage(&atom_a, &failed_relay)
+        .expect_err("the corrupt coverage row must remain unreadable");
     assert_eq!(
-        core.get_coverage(&atom_a, &failed_relay)
-            .expect("coverage peek"),
-        None
+        corrupt_error.fault(),
+        PersistenceFault::Invariant,
+        "stored-row decoding is an invariant failure"
+    );
+    assert!(
+        corrupt_error.message().contains("decode coverage row"),
+        "unexpected coverage refusal: {}",
+        corrupt_error.message()
     );
     assert_eq!(
         core.get_coverage(&atom_b, &failed_relay)
@@ -923,11 +921,6 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         .get_coverage(&healthy_atom, &healthy_relay)
         .expect("coverage peek")
         .is_some());
-    assert_eq!(
-        batch_sizes.borrow().as_slice(),
-        &[2, 1],
-        "one store call per completed request, never one call per atom"
-    );
 }
 
 // ---- epic #507 finding E5: wake_relay_lanes lane-relay index -----------
