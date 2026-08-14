@@ -98,7 +98,7 @@ class SkillValidationTests(unittest.TestCase):
         )
         self.assert_rejected(self.run_validator(), "declared source escapes repository root")
 
-    def test_mismatched_verified_revisions_are_rejected(self) -> None:
+    def test_unavailable_verified_revision_is_rejected(self) -> None:
         skill_text = (self.skill / "SKILL.md").read_text(encoding="utf-8")
         revision = re.search(r"Verified-Revision: `([0-9a-f]{40})`", skill_text)
         self.assertIsNotNone(revision)
@@ -107,7 +107,7 @@ class SkillValidationTests(unittest.TestCase):
             revision.group(1),
             "0000000000000000000000000000000000000000",
         )
-        self.assert_rejected(self.run_validator(), "Verified-Revision pins do not match")
+        self.assert_rejected(self.run_validator(), "verified revision is unavailable")
 
     def test_missing_official_validator_is_fatal(self) -> None:
         empty_home = self.root / "empty-home"
