@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, CompensateOutcome, CompensationReason, CoverageInterval,
+    testing, AcceptOutcome, AcceptWrite, CompensateOutcome, CompensationReason, CoverageInterval,
     CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome,
     PersistenceError, PromoteOutcome, PublishQueueAttempt, PublishQueueIntent, PublishQueueReceipt,
     PublishQueueRouteRevision, RedbStore, RefuseReason, RelayObserved, RemoveQueueEntryOutcome,
@@ -16,10 +16,7 @@ use super::*;
 
 #[derive(Debug)]
 enum StoreFailure {
-    Query {
-        message: String,
-        block: Option<BlockedRead>,
-    },
+    Query(String),
     NewestBefore(String),
     Coverage {
         message: String,
@@ -28,53 +25,12 @@ enum StoreFailure {
     CoverageWrite(String),
 }
 
-#[derive(Debug)]
-struct BlockedRead {
-    entered: mpsc::SyncSender<()>,
-    release: Arc<(Mutex<bool>, Condvar)>,
-}
-
-struct BlockedReadControl {
-    entered: mpsc::Receiver<()>,
-    release: Arc<(Mutex<bool>, Condvar)>,
-}
-
-impl BlockedReadControl {
-    fn wait_until_entered(&self) {
-        self.entered
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("runtime must reach the controlled store read");
-    }
-
-    fn release(&self) {
-        let (released, wake) = &*self.release;
-        *released.lock().unwrap() = true;
-        wake.notify_all();
-    }
-}
-
 #[derive(Clone, Default)]
 pub(super) struct StoreFailureControl(Arc<Mutex<Option<StoreFailure>>>);
 
 impl StoreFailureControl {
     fn fail_query(&self, message: &str) {
-        *self.0.lock().unwrap() = Some(StoreFailure::Query {
-            message: message.to_owned(),
-            block: None,
-        });
-    }
-
-    fn block_then_fail_query(&self, message: &str) -> BlockedReadControl {
-        let (entered_tx, entered) = mpsc::sync_channel(0);
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        *self.0.lock().unwrap() = Some(StoreFailure::Query {
-            message: message.to_owned(),
-            block: Some(BlockedRead {
-                entered: entered_tx,
-                release: Arc::clone(&release),
-            }),
-        });
-        BlockedReadControl { entered, release }
+        *self.0.lock().unwrap() = Some(StoreFailure::Query(message.to_owned()));
     }
 
     fn fail_newest_before(&self, message: &str) {
@@ -106,22 +62,10 @@ impl StoreFailureControl {
 
     fn take_query_failure(&self) -> Option<PersistenceError> {
         let mut failure = self.0.lock().unwrap();
-        if matches!(failure.as_ref(), Some(StoreFailure::Query { .. })) {
-            let Some(StoreFailure::Query { message, block }) = failure.take() else {
+        if matches!(failure.as_ref(), Some(StoreFailure::Query(_))) {
+            let Some(StoreFailure::Query(message)) = failure.take() else {
                 unreachable!()
             };
-            drop(failure);
-            if let Some(block) = block {
-                block
-                    .entered
-                    .send(())
-                    .expect("controlled read witness remains alive");
-                let (released, wake) = &*block.release;
-                let mut released = released.lock().unwrap();
-                while !*released {
-                    released = wake.wait(released).unwrap();
-                }
-            }
             Some(PersistenceError::invariant(message))
         } else {
             None
@@ -355,16 +299,37 @@ impl EventStore for ControlledFailureStore {
     }
 }
 
+fn canonical_corruption(kind: u16, filename: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let directory = tempfile::tempdir().expect("canonical corruption directory");
+    let path = directory.path().join(filename);
+    let corrupt_id = {
+        let keys = Keys::generate();
+        let corrupt = event(&keys, kind, 1_000);
+        let corrupt_id = corrupt.id;
+        let mut store = RedbStore::open(&path).expect("create persistent Redb fixture");
+        store
+            .insert(
+                corrupt,
+                RelayObserved::new(
+                    RelayUrl::parse("wss://canonical-corruption.example").unwrap(),
+                    Timestamp::from(1_001u64),
+                ),
+            )
+            .expect("seed canonical event");
+        corrupt_id
+    };
+    testing::corrupt_canonical_event(&path, corrupt_id)
+        .expect("store-owned canonical-event corruption");
+    (directory, path)
+}
+
 #[test]
 fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
-    let control = StoreFailureControl::default();
-    let store = ControlledFailureStore::new(
-        RedbStore::temporary().expect("temporary Redb store"),
-        control.clone(),
-    );
+    let (_directory, path) = canonical_corruption(1, "observation-open-corruption.redb");
+    let store = RedbStore::open(&path).expect("reopen corrupted Redb fixture");
     let (engine, handle) =
         crate::runtime::EngineThread::spawn(store, 4, nmp_transport::PoolConfig::default())
-            .expect("runtime starts before injected canonical-store read failures");
+            .expect("runtime starts over targeted canonical corruption");
     assert_eq!(
         handle.observation_ownership_census(),
         crate::runtime::ObservationOwnershipCensus::default()
@@ -374,20 +339,23 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
         kinds: Some(BTreeSet::from([1])),
         ..Filter::default()
     });
-    control.fail_query("canonical ordinary projection failed");
     assert!(matches!(
-        handle.subscribe(ordinary.clone()),
+        handle.subscribe(ordinary),
         Err(crate::runtime::EngineThreadError::ObservationUnavailable { reason })
-            if reason.contains("canonical ordinary projection failed")
+            if reason.contains("decode canonical event view")
     ));
     assert_eq!(
         handle.observation_ownership_census(),
         crate::runtime::ObservationOwnershipCensus::default(),
         "post-handle ordinary projection refusal must roll back every owner"
     );
-    let (ordinary_handle, ordinary_rows) = handle
-        .subscribe(ordinary)
-        .expect("a healthy ordinary open proves the engine thread survived");
+    let healthy = LiveQuery::from_filter(Filter {
+        kinds: Some(BTreeSet::from([2])),
+        ..Filter::default()
+    });
+    let (ordinary_handle, ordinary_rows) = handle.subscribe(healthy.clone()).expect(
+        "a disjoint healthy ordinary filter proves corruption is targeted and runtime survived",
+    );
     ordinary_rows
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("healthy empty ordinary query still receives its initial frame");
@@ -399,17 +367,16 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
 
     let history = HistoryQuery::new(
         LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([2])),
+            kinds: Some(BTreeSet::from([1])),
             ..Filter::default()
         }),
         1,
         2,
     );
-    control.fail_query("canonical history projection failed");
     assert!(matches!(
-        handle.subscribe_history(history.clone()),
+        handle.subscribe_history(history),
         Err(crate::runtime::EngineThreadError::ObservationUnavailable { reason })
-            if reason.contains("canonical history projection failed")
+            if reason.contains("decode canonical event view")
     ));
     assert_eq!(
         handle.observation_ownership_census(),
@@ -417,8 +384,8 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
         "post-handle history projection refusal must roll back every owner"
     );
     let (history_handle, history_rows) = handle
-        .subscribe_history(history)
-        .expect("a healthy history open proves the engine thread survived");
+        .subscribe_history(HistoryQuery::new(healthy, 1, 2))
+        .expect("the same disjoint filter remains usable through history");
     history_rows
         .recv_timeout(std::time::Duration::from_secs(1))
         .expect("healthy empty history query still receives its initial frame");
@@ -431,19 +398,18 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
     let derived = LiveQuery::from_filter(Filter {
         authors: Some(Binding::Derived(Box::new(Derived {
             inner: nmp_grammar::Demand::from_filter(Filter {
-                kinds: Some(BTreeSet::from([3])),
+                kinds: Some(BTreeSet::from([1])),
                 ..Filter::default()
             }),
             project: Selector::Tag("p".to_owned()),
         }))),
-        kinds: Some(BTreeSet::from([1])),
+        kinds: Some(BTreeSet::from([4])),
         ..Filter::default()
     });
-    control.fail_query("derived resolver construction failed");
     assert!(matches!(
         handle.subscribe(derived.clone()),
         Err(crate::runtime::EngineThreadError::ObservationUnavailable { reason })
-            if reason.contains("derived resolver construction failed")
+            if reason.contains("decode canonical event view")
     ));
     assert_eq!(
         handle.observation_ownership_census(),
@@ -451,11 +417,10 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
         "pre-handle ordinary refusal must discard partial resolver nodes"
     );
 
-    control.fail_query("derived history construction failed");
     assert!(matches!(
         handle.subscribe_history(HistoryQuery::new(derived, 1, 2)),
         Err(crate::runtime::EngineThreadError::ObservationUnavailable { reason })
-            if reason.contains("derived history construction failed")
+            if reason.contains("decode canonical event view")
     ));
     assert_eq!(
         handle.observation_ownership_census(),
@@ -758,17 +723,12 @@ fn each_refused_open_arm_consumes_a_pending_drop_into_one_same_call_wire_close()
 #[test]
 fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() {
     {
-        let control = StoreFailureControl::default();
-        let blocked = control.block_then_fail_query("ordinary refusal won the shutdown race");
-        let (engine, handle) = crate::runtime::EngineThread::spawn(
-            ControlledFailureStore::new(
-                RedbStore::temporary().expect("temporary Redb store"),
-                control,
-            ),
-            4,
-            nmp_transport::PoolConfig::default(),
-        )
-        .unwrap();
+        let (_directory, path) = canonical_corruption(1, "ordinary-shutdown-race-corruption.redb");
+        let (store, blocked) = RedbStore::open_with_ordered_event_read_pause(&path)
+            .expect("reopen corrupted Redb fixture with one ordered-read pause");
+        let (engine, handle) =
+            crate::runtime::EngineThread::spawn(store, 4, nmp_transport::PoolConfig::default())
+                .unwrap();
         let caller_handle = handle.clone();
         let caller = std::thread::spawn(move || {
             caller_handle.subscribe(LiveQuery::from_filter(Filter {
@@ -782,23 +742,18 @@ fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() 
         assert!(matches!(
             caller.join().expect("ordinary caller must not panic"),
             Err(crate::runtime::EngineThreadError::ObservationUnavailable { reason })
-                if reason.contains("ordinary refusal won the shutdown race")
+                if reason.contains("decode canonical event view")
         ));
         engine.join();
     }
 
     {
-        let control = StoreFailureControl::default();
-        let blocked = control.block_then_fail_query("history refusal won the shutdown race");
-        let (engine, handle) = crate::runtime::EngineThread::spawn(
-            ControlledFailureStore::new(
-                RedbStore::temporary().expect("temporary Redb store"),
-                control,
-            ),
-            4,
-            nmp_transport::PoolConfig::default(),
-        )
-        .unwrap();
+        let (_directory, path) = canonical_corruption(2, "history-shutdown-race-corruption.redb");
+        let (store, blocked) = RedbStore::open_with_ordered_event_read_pause(&path)
+            .expect("reopen corrupted Redb fixture with one ordered-read pause");
+        let (engine, handle) =
+            crate::runtime::EngineThread::spawn(store, 4, nmp_transport::PoolConfig::default())
+                .unwrap();
         let caller_handle = handle.clone();
         let caller = std::thread::spawn(move || {
             caller_handle.subscribe_history(HistoryQuery::new(
@@ -816,7 +771,7 @@ fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() 
         assert!(matches!(
             caller.join().expect("history caller must not panic"),
             Err(crate::runtime::EngineThreadError::ObservationUnavailable { reason })
-                if reason.contains("history refusal won the shutdown race")
+                if reason.contains("decode canonical event view")
         ));
         engine.join();
     }

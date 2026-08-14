@@ -114,6 +114,11 @@ pub struct RedbStore {
     /// pre-commit boundary. No production build carries this setting.
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fail_next_lane_attempt_finish: bool,
+    /// One construction-armed pause consumed before the shared ordered event
+    /// read. The pause controls scheduling only; Redb still supplies every
+    /// row and every error.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    ordered_event_read_pause: Mutex<Option<OrderedEventReadPauseGate>>,
     /// Application-level write transactions performed by `open`; the
     /// healthy v6 reopen falsifier asserts this stays zero.
     #[cfg(test)]
@@ -161,6 +166,37 @@ pub struct RedbStore {
 struct PublishQueueRelayCache {
     by_id: HashMap<PublishQueueRelayId, RelayUrl>,
     by_url: HashMap<RelayUrl, PublishQueueRelayId>,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+struct OrderedEventReadPauseGate {
+    entered: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+/// Test-only witness for one construction-armed ordered event-read pause.
+///
+/// This can wait for and release the real Redb read. It cannot choose or
+/// manufacture the read's result.
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub struct OrderedEventReadPause {
+    entered: std::sync::mpsc::Receiver<()>,
+    release: std::sync::mpsc::SyncSender<()>,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+impl OrderedEventReadPause {
+    pub fn wait_until_entered(&self) {
+        self.entered
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("runtime must reach the ordered event read");
+    }
+
+    pub fn release(self) {
+        self.release
+            .send(())
+            .expect("ordered event read remains paused");
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,6 +344,22 @@ impl RedbStore {
         let mut store = Self::open(path)?;
         store.fail_route_revision_writes = true;
         Ok(store)
+    }
+
+    /// Open a persistent Redb store whose first ordered event read pauses
+    /// until the returned witness releases it.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn open_with_ordered_event_read_pause(
+        path: impl AsRef<Path>,
+    ) -> Result<(Self, OrderedEventReadPause), RedbStoreOpenError> {
+        let (entered_tx, entered) = std::sync::mpsc::sync_channel(0);
+        let (release, release_rx) = std::sync::mpsc::sync_channel(0);
+        let mut store = Self::open(path)?;
+        store.ordered_event_read_pause = Mutex::new(Some(OrderedEventReadPauseGate {
+            entered: entered_tx,
+            release: release_rx,
+        }));
+        Ok((store, OrderedEventReadPause { entered, release }))
     }
 
     pub(super) fn database(&self) -> Result<&Database, PersistenceError> {
@@ -746,6 +798,8 @@ impl RedbStore {
             fail_next_compensation_with_state: false,
             #[cfg(any(test, feature = "test-instrumentation"))]
             fail_next_lane_attempt_finish: false,
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            ordered_event_read_pause: Mutex::new(None),
             #[cfg(test)]
             open_write_transactions: _open_write_transactions,
             #[cfg(test)]
@@ -1089,6 +1143,22 @@ impl RedbStore {
         limit: Option<usize>,
         pinned: Option<&BTreeSet<RelayUrl>>,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        if let Some(pause) = self
+            .ordered_event_read_pause
+            .lock()
+            .expect("ordered event-read pause lock")
+            .take()
+        {
+            pause
+                .entered
+                .send(())
+                .expect("ordered event-read witness remains alive");
+            pause
+                .release
+                .recv()
+                .expect("ordered event-read witness releases the pause");
+        }
         let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
         let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
         let relay_ids = read_txn.open_table(RELAY_IDS).map_err(persist_err)?;

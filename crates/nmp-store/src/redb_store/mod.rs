@@ -132,6 +132,8 @@ mod mutation;
 mod store;
 #[cfg(test)]
 pub(crate) use store::with_required_database_init_test_hook;
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub use store::OrderedEventReadPause;
 #[cfg(test)]
 use store::RedbCrashPoint;
 pub use store::RedbStore;
