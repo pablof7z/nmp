@@ -3039,11 +3039,31 @@ impl<S: EventStore> EngineCore<S> {
             .as_ref()
             .map(|snapshot| snapshot.operations.iter().map(|op| op.intent_id).collect())
             .unwrap_or_default();
-        let source_policy = match declared_source_policy {
-            nmp_grammar::ReplaceableSourcePolicy::Continuing => {
+        let source_policy = match (snapshot.as_ref(), declared_source_policy) {
+            (Some(snapshot), nmp_grammar::ReplaceableSourcePolicy::Continuing)
+                if matches!(
+                    snapshot.source_policy,
+                    nmp_store::SemanticSourcePolicy::Continuing
+                ) =>
+            {
+                snapshot.source_policy.clone()
+            }
+            (Some(snapshot), nmp_grammar::ReplaceableSourcePolicy::Finite { relays, access })
+                if matches!(&snapshot.source_policy, nmp_store::SemanticSourcePolicy::Finite(round)
+                if round.sources.keys().cloned().collect::<BTreeSet<_>>()
+                    == relays.iter().cloned().map(|relay| nmp_store::SemanticSource::new(relay, access)).collect()) =>
+            {
+                snapshot.source_policy.clone()
+            }
+            (Some(_), _) => {
+                return self.refuse_publish(PublishError::ReplaceableOperationRefused {
+                    reason: nmp_store::SemanticRefusal::IncompatibleSourcePolicy.to_string(),
+                });
+            }
+            (None, nmp_grammar::ReplaceableSourcePolicy::Continuing) => {
                 nmp_store::SemanticSourcePolicy::Continuing
             }
-            nmp_grammar::ReplaceableSourcePolicy::Finite { relays, access } => {
+            (None, nmp_grammar::ReplaceableSourcePolicy::Finite { relays, access }) => {
                 let mut hasher = blake3::Hasher::new();
                 hasher.update(b"nmp-finite-source-round-v1");
                 hasher.update(&coordinate.kind.as_u16().to_be_bytes());

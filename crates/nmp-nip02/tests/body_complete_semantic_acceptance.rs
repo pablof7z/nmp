@@ -129,7 +129,7 @@ fn alice_then_bob_keep_two_receipts_and_one_complete_pending_event() {
     let first = engine
         .publish(intent(
             writes
-                .compose(&original, &original, alice, FollowChange::Follow)
+                .compose(&original, alice, FollowChange::Follow)
                 .expect("Alice operation is body-complete"),
         ))
         .expect("Alice enters ordinary custody");
@@ -138,7 +138,7 @@ fn alice_then_bob_keep_two_receipts_and_one_complete_pending_event() {
     let second = engine
         .publish(intent(
             writes
-                .compose(&original, &alice_row, bob, FollowChange::Follow)
+                .compose(&alice_row, bob, FollowChange::Follow)
                 .expect("Bob operation is body-complete over current pending state"),
         ))
         .expect("Bob gets a second ordinary receipt");
@@ -276,7 +276,7 @@ fn invalidated_registration_and_materializer_refusal_leave_no_custody() {
     let stale = register_follow_writes(&engine).expect("first registration installs");
     let stale_intent = intent(
         stale
-            .compose(&original, &original, alice, FollowChange::Follow)
+            .compose(&original, alice, FollowChange::Follow)
             .expect("old handle composes before replacement"),
     );
     let _replacement = register_follow_writes(&engine).expect("replacement installs");
@@ -294,12 +294,7 @@ fn invalidated_registration_and_materializer_refusal_leave_no_custody() {
         .add_replaceable_materializer(*b"refuse-program00", *b"refuse-format-v1", AlwaysRefuse)
         .expect("refusing implementation registers");
     let payload = refusing
-        .operation(
-            &original,
-            &original,
-            nmp::ReplaceableSourcePolicy::Continuing,
-            vec![1],
-        )
+        .operation(&original, nmp::ReplaceableSourcePolicy::Continuing, vec![1])
         .expect("registration-bound payload composes");
     let refusal = match engine.publish(WriteIntent {
         payload,

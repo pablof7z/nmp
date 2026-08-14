@@ -687,7 +687,7 @@ mod semantic_successor_tests {
         };
         drop(core);
 
-        let reopened = RedbStore::open(&path).unwrap();
+        let mut reopened = RedbStore::open(&path).unwrap();
         let recovered = reopened
             .replaceable_operation_snapshot(&coordinate)
             .unwrap()
@@ -696,17 +696,33 @@ mod semantic_successor_tests {
             panic!("finite declaration recovered as continuing");
         };
         assert_eq!(
-            round.sources,
+            round.sources.clone(),
             finite_relays
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|relay| {
                     (
                         nmp_store::SemanticSource::new(relay, AccessContext::Public),
                         nmp_store::SemanticSourceMemberState::Pending,
                     )
                 })
-                .collect(),
+                .collect::<BTreeMap<_, _>>(),
             "the durable round must contain exactly the declared relay/access members"
+        );
+        let opened = nmp_store::SemanticSourceRequest {
+            round: round.id,
+            source: nmp_store::SemanticSource::new(relay_a.clone(), AccessContext::Public),
+            transport_generation: 1,
+            request_revision: 1,
+        };
+        assert_eq!(
+            reopened
+                .advance_replaceable_source_round(
+                    &coordinate,
+                    nmp_store::SemanticSourceRoundFact::RequestOpened(opened.clone()),
+                )
+                .unwrap(),
+            nmp_store::SemanticSourceRoundOutcome::Advanced
         );
 
         let mut core = EngineCore::new(reopened, 10);
@@ -724,9 +740,41 @@ mod semantic_successor_tests {
             .unwrap()
             .pop()
             .unwrap();
+        let current_unsigned = UnsignedEvent::from(current.event);
+        let same_finite = nmp_grammar::ReplaceableOperation::from_registered_parts(
+            instance,
+            current_unsigned.clone(),
+            current_unsigned,
+            nmp_grammar::ReplaceableSourcePolicy::Finite {
+                relays: finite_relays,
+                access: AccessContext::Public,
+            },
+            Keys::generate().public_key().to_bytes().to_vec(),
+        )
+        .unwrap();
+        let accepted_again = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(same_finite),
+            routing: WriteRouting::Explicit(vec![relay_b.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        let current_id = accepted_again
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::WriteAccepted(_, event_id) => Some(*event_id),
+                _ => None,
+            })
+            .expect("the same finite declaration reuses the advanced durable round");
+        let current = core
+            .resolver
+            .store()
+            .query(&nostr::Filter::new().id(current_id))
+            .unwrap()
+            .pop()
+            .unwrap();
         let mixed = nmp_grammar::ReplaceableOperation::from_registered_parts(
             instance,
-            original,
+            UnsignedEvent::from(current.event.clone()),
             UnsignedEvent::from(current.event),
             nmp_grammar::ReplaceableSourcePolicy::Continuing,
             Keys::generate().public_key().to_bytes().to_vec(),
