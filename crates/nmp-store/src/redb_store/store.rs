@@ -106,6 +106,14 @@ pub struct RedbStore {
     /// production build carries or can mutate this setting.
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fail_route_revision_writes: bool,
+    /// One construction-armed compensation refusal consumed at the existing
+    /// pre-commit boundary. No production build carries this setting.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(super) fail_next_compensation_with_state: bool,
+    /// One construction-armed attempt-finish refusal consumed at the existing
+    /// pre-commit boundary. No production build carries this setting.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(super) fail_next_lane_attempt_finish: bool,
     /// Application-level write transactions performed by `open`; the
     /// healthy v6 reopen falsifier asserts this stays zero.
     #[cfg(test)]
@@ -258,6 +266,24 @@ impl RedbStore {
     ) -> Result<Self, RedbStoreOpenError> {
         let mut store = Self::temporary()?;
         store.failed_lane_start_relays = failed_relays.into_iter().collect();
+        Ok(store)
+    }
+
+    /// Open a real temporary Redb store whose next compensation refuses at
+    /// the existing pre-commit boundary.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn temporary_with_failed_compensation_with_state() -> Result<Self, RedbStoreOpenError> {
+        let mut store = Self::temporary()?;
+        store.fail_next_compensation_with_state = true;
+        Ok(store)
+    }
+
+    /// Open a real temporary Redb store whose next lane-attempt finish refuses
+    /// at the existing pre-commit boundary.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn temporary_with_failed_lane_attempt_finish() -> Result<Self, RedbStoreOpenError> {
+        let mut store = Self::temporary()?;
+        store.fail_next_lane_attempt_finish = true;
         Ok(store)
     }
 
@@ -716,6 +742,10 @@ impl RedbStore {
             failed_lane_start_relays: BTreeSet::new(),
             #[cfg(any(test, feature = "test-instrumentation"))]
             fail_route_revision_writes: false,
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            fail_next_compensation_with_state: false,
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            fail_next_lane_attempt_finish: false,
             #[cfg(test)]
             open_write_transactions: _open_write_transactions,
             #[cfg(test)]

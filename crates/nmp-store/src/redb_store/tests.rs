@@ -424,6 +424,45 @@ fn accepted_signed(
     (intent, signed)
 }
 
+fn accepted_pending(
+    store: &mut RedbStore,
+    keys: &nostr::Keys,
+    content: &str,
+    created_at: u64,
+) -> (IntentId, Event) {
+    use nostr::EventBuilder;
+
+    let signed = EventBuilder::new(Kind::TextNote, content)
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(keys)
+        .expect("sign fixture event");
+    let frozen = Event::new(
+        signed.id,
+        signed.pubkey,
+        signed.created_at,
+        signed.kind,
+        signed.tags.clone(),
+        signed.content.clone(),
+        crate::sentinel_signature(),
+    );
+    let outcome = store
+        .accept_write(AcceptWrite {
+            payload: crate::AcceptWritePayload::Event {
+                frozen: Box::new(frozen),
+                replaceable_base: None,
+                monotonic_stamp: false,
+                routing: "compensation-proof".into(),
+                sig_state: IntentSigState::Pending,
+            },
+            expected_pubkey: keys.public_key(),
+            signing_identity_ref: "compensation-proof".into(),
+            accepted_at: Timestamp::from(created_at),
+            correlation: None,
+        })
+        .expect("accept fixture intent");
+    (outcome.journaled_intent_id().expect("intent id"), signed)
+}
+
 #[test]
 fn configured_lane_start_failure_rolls_back_the_precommit_transaction() {
     let keys = nostr::Keys::generate();
@@ -461,6 +500,112 @@ fn configured_lane_start_failure_rolls_back_the_precommit_transaction() {
     );
     assert!(store.recover_attempts(intent).unwrap().is_empty());
     assert!(store.recover_attempt_details(intent).unwrap().is_empty());
+}
+
+#[test]
+fn configured_compensation_failure_rolls_back_and_is_consumed_once() {
+    let keys = nostr::Keys::generate();
+    let mut store = RedbStore::temporary_with_failed_compensation_with_state()
+        .expect("temporary Redb compensation-failure fixture");
+    let (intent, event) = accepted_pending(&mut store, &keys, "compensate once", 1_000);
+    let before = store.recover_publish_queue().unwrap();
+
+    let error = store
+        .compensate_write_with_state(intent, crate::CompensationReason::Failure)
+        .expect_err("construction-armed compensation must fail before commit");
+    assert_eq!(
+        error.to_string(),
+        "durable-store persistence failure: injected compensation failure"
+    );
+    assert_eq!(store.recover_publish_queue().unwrap(), before);
+    assert_eq!(
+        store.query(&Filter::new().id(event.id)).unwrap().len(),
+        1,
+        "the refused transaction leaves the optimistic row live"
+    );
+
+    assert!(matches!(
+        store
+            .compensate_write_with_state(intent, crate::CompensationReason::Failure)
+            .expect("the same store retries after consuming the one-shot refusal"),
+        CompensateOutcome::Compensated { .. }
+    ));
+    assert!(store.recover_publish_queue().unwrap().is_empty());
+    assert!(store.query(&Filter::new().id(event.id)).unwrap().is_empty());
+}
+
+#[test]
+fn configured_lane_attempt_finish_failure_rolls_back_and_is_consumed_once() {
+    let keys = nostr::Keys::generate();
+    let relay = RelayUrl::parse("wss://blocked-lane-finish.example").unwrap();
+    let mut store = RedbStore::temporary_with_failed_lane_attempt_finish()
+        .expect("temporary Redb lane-finish failure fixture");
+    let (intent, signed) = accepted_signed(&mut store, &keys, "finish once", 1_000);
+    store
+        .record_route_revision(intent, BTreeSet::from([relay]))
+        .unwrap();
+    let lane = store
+        .bootstrap_publish_queue_lanes(intent)
+        .unwrap()
+        .remove(0);
+    let eligible = store
+        .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(1_001u64))
+        .unwrap();
+    let (attempt, in_flight) = store
+        .start_lane_attempt(
+            &eligible.key,
+            eligible.revision,
+            signed,
+            Timestamp::from(1_002u64),
+        )
+        .unwrap();
+
+    let error = store
+        .finish_lane_attempt(
+            &in_flight.key,
+            in_flight.revision,
+            attempt.ordinal,
+            PublishQueueAttemptOutcome::Acked,
+            Timestamp::from(1_003u64),
+        )
+        .expect_err("construction-armed lane finish must fail before commit");
+    assert_eq!(
+        error.to_string(),
+        "durable-store persistence failure: injected attempt finish failure"
+    );
+    assert_eq!(
+        store.recover_publish_queue_lanes(intent).unwrap(),
+        vec![in_flight.clone()]
+    );
+    assert_eq!(
+        store.recover_attempts(intent).unwrap(),
+        vec![attempt.clone()]
+    );
+    assert_eq!(
+        store.recover_attempt_details(intent).unwrap()[0].terminal,
+        None
+    );
+
+    let terminal = store
+        .finish_lane_attempt(
+            &in_flight.key,
+            in_flight.revision,
+            attempt.ordinal,
+            PublishQueueAttemptOutcome::Acked,
+            Timestamp::from(1_003u64),
+        )
+        .expect("the same store retries after consuming the one-shot refusal");
+    assert!(matches!(
+        terminal.state,
+        PublishQueueLaneState::Terminal {
+            ordinal: 1,
+            outcome: PublishQueueTerminalOutcome::Acked,
+        }
+    ));
+    assert_eq!(
+        store.recover_attempt_details(intent).unwrap()[0].terminal,
+        Some(PublishQueueAttemptOutcome::Acked)
+    );
 }
 
 #[test]
