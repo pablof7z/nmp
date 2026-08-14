@@ -12,8 +12,10 @@ observe
 publish
 cancel
 publish_queue
+publish_queue_for_event
 remove_publish_queue_entry
 reattach_receipt
+receipt_result
 reattach_by_correlation
 session
 export_session

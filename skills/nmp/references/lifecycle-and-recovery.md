@@ -10,7 +10,7 @@
 | Parsed content document | content feature owner | plain value; nothing to close | parsing is pure; any live reference is an ordinary query the app owns |
 | Receipt fact stream | delivery/activity owner | Swift `ReceiptStatus.cancel()`; Kotlin end the collection scope | detaches the live stream only; the durable write is untouched |
 | Durable write obligation | engine, from acceptance | `cancel` before signing, then `removePublishQueueEntry` | the only termination path for a write parked on a missing signer |
-| Durable receipt id or correlation token | app durable state | explicit retention policy | either one recovers a write; `publishQueue()` finds the rest |
+| Durable receipt id or correlation token | app durable state | explicit retention policy | either one recovers a write; paging `publishQueue` finds the rest |
 
 ## Construction and observation failures
 
@@ -24,11 +24,13 @@ Handle each failure at the operation that owns it. Engine construction is the th
 4. Record the component/reason without secrets.
 5. Respect each public ownership shape: query/NIP-02 observation returns no handle on error, while `set_following` always returns a `FollowAction` and reports any genuine terminal failure through its status.
 
-Direct Rust `Engine::new` can return `EngineError::EngineStartFailed`, and also `StoreOpenFailed`, `StoreAlreadyOpen`, or `InvalidRelayUrl`. An `observe` call additionally refuses `WindowInitialExceedsMax`, `WindowSelectionHasLimit`, `WindowAggregateResultLimit`, the four `LiveQueryError` construction refusals, and `EngineClosed`; `AuthCapabilityRegistryFull { limit }` is an application-configured ceiling. An ordinary or windowed `Engine::observe` can return `EngineError::ObservationUnavailable` only for initial canonical-projection setup failure after store degradation; relay opens do not feed this error. `set_following` returns `FollowAction`, not `Result`; it has no capacity or thread refusal, and a genuine terminal failure reads from `FollowAction::recv` as `FollowActionStatus::Failed` with a `FollowActionFailure` variant.
+Direct Rust `Engine::new` can return `EngineError::InvalidRelayUrl`, `StoreOpenFailed`, `StoreAlreadyOpen`, `StoreUnsupportedSchema { path, expected, found }`, or `EngineStartFailed`. The two store refusals are opposites and must not be handled together: `StoreOpenFailed` is a positive claim that discarding the store is *not* the recovery (damaged current-epoch bytes, a refused lock, an unresolvable path), while `StoreUnsupportedSchema` is the one refusal a fresh store does fix. Nothing is migrated, adopted, drained, or reset on either, and no partial engine escapes. Taking the discard costs the publish queue permanently — accepted-but-unpublished writes, receipts, correlation tokens, route revisions, attempt evidence — so it stays a separate deliberate act through `reset_persistent_store`, never an automatic retry. `found` is `None` when the store carries no marker this build can read, which means "not this epoch", never "no data".
+
+`Engine::observe` refuses `WindowInitialExceedsMax { initial, max }`, `WindowSelectionHasLimit`, `WindowAggregateResultLimit`, `ObservationUnavailable`, and `EngineClosed`. Two families that look adjacent belong elsewhere. The four `LiveQueryError` refusals — `EmptyUnion`, `AggregateResultLimitZero`, `NestedAggregateResultLimit`, `TooManyQueryBranches { requested, maximum }` — are raised by `LiveQuery::union` at declaration time, before an observation, handle, mailbox, graph claim, or wire request can exist; an over-cap declaration installs nothing rather than a subset. `AuthCapabilityRegistryFull { limit }` (the app-configured `max_auth_capabilities` ceiling) and `AuthCapabilityInstanceExhausted` come from capability registration such as `add_auth_policy`, not from observing. An ordinary or windowed `Engine::observe` returns `ObservationUnavailable` only for initial canonical-projection setup failure after store degradation; relay opens do not feed this error, and it is never a worker-pool-busy, task-admission, permit, or queue-full outcome. `set_following` returns `FollowAction`, not `Result`; it has no capacity or thread refusal, and a genuine terminal failure reads from `FollowAction::recv` as `FollowActionStatus::Failed` with a `FollowActionFailure` variant.
 
 Kotlin normalizes synchronous raw exceptions through `nmpRethrowing`.
 
-`Ok` from `publish` *is* acceptance; there is no bridge established before it and no capacity or thread refusal on the path. NIP-22 composes an ordinary `WriteIntent` and follows the generic path. NIP-29's `Group::publish` mints its intent privately and returns the same ordinary receipt stream. Neither has a composed carrier or a second lifecycle. Persist the receipt id promptly, but process loss before that is recoverable: mint a `correlation` token, persist it before publishing, and reattach by token — or enumerate with `publishQueue()`.
+`Ok` from `publish` *is* acceptance; there is no bridge established before it and no capacity or thread refusal on the path. NIP-22 composes an ordinary `WriteIntent` and follows the generic path. NIP-29's `Group::publish` mints its intent privately and returns the same ordinary receipt stream. Neither has a composed carrier or a second lifecycle. Persist the receipt id promptly, but process loss before that is recoverable: mint a `correlation` token, persist it before publishing, and reattach by token — or page `publishQueue` to find it again.
 
 ## Background, disconnect, and resume
 
@@ -49,7 +51,7 @@ An in-progress relay reconciliation is connection-local. A replacement connectio
 2. Restore the engine from the app-stored opaque whole-session payload. NMP ships no session store or remote-signer provider.
 3. Confirm the intended current account and provider availability.
 4. Recreate current feature demands from app state. NMP restores cached facts but does not invent app queries.
-5. Call `publishQueue()` to see everything still outstanding, reattach by retained id or by correlation token, fold the replayed facts, and decide cancel/remove for parked and refused entries.
+5. Page `publishQueue` to see what is still outstanding — it is a bounded inspection taking a row limit and a receipt-id cursor, so enumerating everything means walking the pages, and it never blocks or waits for settlement. Reattach by retained id or by correlation token, fold the replayed facts, and decide cancel/remove for parked and refused entries.
 6. Start new UI observers only after the model is ready to own their teardown.
 
 NMP may restore canonical rows, provenance, source evidence, durable write lanes, and retained receipt facts. It does not restore UI navigation, ordering, moderation state, query-handle ownership, or secret material from the event/delivery store.
@@ -89,7 +91,7 @@ Do not delete the canonical store merely to sign out unless the product explicit
 4. Separately clear the app-stored session payload if the requested operation is full logout/erase.
 5. Construct a new engine only after reset completes.
 
-Reset is not a repair loop for a live engine. It erases canonical events, pending writes, receipts, coverage, and evidence, but not an app-stored session payload.
+Reset is not a repair loop for a live engine, and it says so rather than half-working: a path any engine in this or another process still owns is refused with `StoreStillOpen`, and a removal that fails is `StoreResetFailed`. It erases canonical events, pending writes, receipts, coverage, and evidence, but not an app-stored session payload.
 
 ## Failure classification
 
@@ -102,6 +104,7 @@ Keep recovery owned by the failing layer:
 - unacked relay handoff: `RelayState::Sent` already means written-but-unacked and is not terminal; let the lane run, never blind resend;
 - replaceable conflict: `RefuseReason::ReplaceableBaseChanged { expected, actual }` keeps both ids so the app can refetch `actual`, reapply and resubmit without troubling the user;
 - engine-start or observation infra failure (`EngineStartFailed` at construction, `ObservationUnavailable` for ordinary or windowed initial canonical-projection setup): preserve the owning boundary and retry only as a new bounded attempt; relay connection failure remains acquisition evidence and no operation is refused for worker/task capacity;
+- unsupported store schema epoch: `StoreUnsupportedSchema` at construction is the one failure whose recovery genuinely is a fresh store, and it is still the app's call — close every owner, then reset deliberately, having told the person the publish queue does not survive it;
 - store reset: explicit destructive user/maintenance operation, never automatic fallback.
 
 ## Teardown proof
