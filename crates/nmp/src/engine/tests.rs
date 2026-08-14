@@ -2435,6 +2435,116 @@ fn blocked_initial_materializer_does_not_block_engine_work_or_shutdown() {
 }
 
 #[test]
+fn blocked_initial_materializer_replays_a_retry_token_claimed_while_in_flight() {
+    let engine = Arc::new(Engine::new(EngineConfig::default()).expect("engine must build"));
+    let author = Keys::generate();
+    engine
+        .add_private_key_account(&private_key_bytes(&author), true)
+        .expect("author is available");
+    let base_event = nostr::EventBuilder::new(Kind::ContactList, "base")
+        .custom_created_at(Timestamp::from(1))
+        .sign_with_keys(&author)
+        .expect("base is signed");
+    let destination = RelayUrl::parse("wss://correlation-race.example").unwrap();
+    engine
+        .publish(WriteIntent {
+            payload: WritePayload::Signed(base_event.clone()),
+            routing: WriteRouting::Explicit(vec![destination.clone()]),
+            identity: Identity::Explicit(author.public_key()),
+            correlation: None,
+        })
+        .expect("the source enters ordinary NMP custody");
+    let queue_len_before = engine
+        .publish_queue(None, u8::MAX)
+        .expect("baseline queue remains readable")
+        .len();
+    let base = Row::from_relay_event(base_event, BTreeSet::new());
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (exited_tx, exited_rx) = mpsc::channel();
+    let registration = engine
+        .add_replaceable_materializer(
+            [13; 16],
+            [14; 16],
+            FirstCallBlockingPeopleMaterializer {
+                calls: Arc::clone(&calls),
+                first_entered: entered_tx,
+                first_release: Mutex::new(release_rx),
+                first_exited: exited_tx,
+            },
+        )
+        .expect("materializer registers");
+    let token = nmp_grammar::CorrelationToken::try_from("blocked-operation-correlation").unwrap();
+    let mut delayed_intent = replaceable_contact_intent(
+        &registration,
+        &base,
+        Keys::generate().public_key(),
+        destination.clone(),
+    );
+    delayed_intent.correlation = Some(token.clone());
+    let delayed_engine = Arc::clone(&engine);
+    let delayed = std::thread::spawn(move || {
+        delayed_engine
+            .publish(delayed_intent)
+            .map(|receipt| receipt.id)
+    });
+    assert_eq!(
+        entered_rx.recv_timeout(std::time::Duration::from_secs(5)),
+        Ok(1),
+        "the first publish remains outside custody at the barrier"
+    );
+
+    let ordinary = nostr::EventBuilder::new(Kind::Custom(9999), "token claimant")
+        .custom_created_at(Timestamp::from(2))
+        .sign_with_keys(&author)
+        .expect("ordinary event is signed");
+    let claimed = engine
+        .publish(WriteIntent {
+            payload: WritePayload::Signed(ordinary.clone()),
+            routing: WriteRouting::Explicit(vec![destination]),
+            identity: Identity::Explicit(author.public_key()),
+            correlation: Some(token),
+        })
+        .expect("the retry token is claimed while the capability is blocked");
+
+    release_tx
+        .send(())
+        .expect("the delayed capability is released");
+    exited_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the delayed capability exits");
+    let replayed_id = delayed
+        .join()
+        .expect("delayed publisher exits")
+        .expect("delayed publisher reattaches the claimed token");
+    assert_eq!(
+        replayed_id, claimed.id,
+        "both callers receive the one receipt owned by the retry token"
+    );
+    let queue = engine
+        .publish_queue(None, u8::MAX)
+        .expect("queue remains readable");
+    assert_eq!(
+        queue.len(),
+        queue_len_before + 1,
+        "one retry token creates one additional obligation"
+    );
+    let claimed_entry = queue
+        .iter()
+        .find(|entry| entry.receipt_id == claimed.id)
+        .expect("the claimed receipt remains in the queue");
+    assert_eq!(claimed_entry.event_id, ordinary.id);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "correlation replay does not invoke the capability again"
+    );
+    engine.shutdown();
+}
+
+#[test]
 fn stale_initial_materializer_completion_retries_against_durable_truth() {
     let engine = Arc::new(Engine::new(EngineConfig::default()).expect("engine must build"));
     let author = Keys::generate();

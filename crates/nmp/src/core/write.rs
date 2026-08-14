@@ -2809,6 +2809,70 @@ impl EngineCore {
         }
     }
 
+    // A repeated durable correlation is a finite replay of the existing
+    // obligation, not a second write. Keep that replay distinct from a new
+    // live fact so runtime can prime only this publisher's fresh mailbox
+    // before it joins live delivery. An `Accepted` receipt has no replay fact
+    // by design: the successful return is its acceptance fact, so an empty
+    // attached page is valid at the ambiguous commit boundary (#1362).
+    //
+    // Only an exact pre-signed retry may finish an interrupted promotion.
+    // Divergent, recomposed, invalid, and capability-produced payloads retain
+    // correlation's normal discard semantics.
+    fn replay_correlated_publish(
+        &mut self,
+        token: &nmp_grammar::CorrelationToken,
+        signed: Option<&SignedEvent>,
+    ) -> Result<Option<Vec<Effect>>, PublishError> {
+        let Some(existing_receipt_id) =
+            self.store
+                .lookup_correlation(token.as_ref())
+                .map_err(|error| PublishError::PersistenceFailed {
+                    reason: error.to_string(),
+                })?
+        else {
+            return Ok(None);
+        };
+
+        let receipt_id = ReceiptId(existing_receipt_id);
+        let page = self.reattach_receipt(receipt_id);
+        if page.outcome == ReattachOutcome::Attached {
+            let mut effects = Vec::new();
+            // An ambiguous failure can commit acceptance before a pre-signed
+            // payload reaches `on_signed`. Recovery keeps that row honestly
+            // Pending, but an exact retry carrying the same verified bytes
+            // can finish the interrupted promotion on this same receipt.
+            if let Some(event) = signed {
+                let resumes_interrupted_promotion =
+                    self.pending.get(&receipt_id).is_some_and(|pending| {
+                        !pending.already_signed
+                            && Self::validate_signed_template(&pending.frozen, event).is_ok()
+                    });
+                if resumes_interrupted_promotion {
+                    self.on_signed(receipt_id, event.clone(), &mut effects);
+                }
+            }
+            effects.push(Effect::ReplayReceipt(receipt_id, page));
+            return Ok(Some(effects));
+        }
+
+        // Never mask a corrupt retained identity behind fabricated
+        // acceptance.
+        let status = match page.outcome {
+            ReattachOutcome::Attached => unreachable!("handled above"),
+            ReattachOutcome::NotFound => PublishError::PersistenceFailed {
+                reason: "correlation token resolved to a receipt id the store can no longer find"
+                    .to_string(),
+            },
+            ReattachOutcome::RetainedButUnreadable => PublishError::PersistenceFailed {
+                reason: "correlation token resolved to a retained but unreadable receipt"
+                    .to_string(),
+            },
+        };
+        debug_assert!(page.facts.is_empty());
+        Err(status)
+    }
+
     pub(crate) fn prepare_publish(&mut self, intent: WriteIntent) -> PublishPreparation {
         let WriteIntent {
             payload,
@@ -2836,70 +2900,19 @@ impl EngineCore {
         // as a body comparison (a legitimately re-composed draft with a
         // fresh `created_at` is the exact scenario the token exists for).
         // The lookup runs inside this single-threaded reducer step, before
-        // any store mutation for THIS call -- TOCTOU-free by construction
-        // (no concurrent `&mut self` call can be interleaved).
+        // any store mutation for THIS call. A body-complete operation repeats
+        // this same door after its detached capability call because other
+        // reducer commands can advance while that call is in flight.
         if let Some(token) = &correlation {
-            match self.store.lookup_correlation(token.as_ref()) {
-                Ok(Some(existing_receipt_id)) => {
-                    let receipt_id = ReceiptId(existing_receipt_id);
-                    let page = self.reattach_receipt(receipt_id);
-                    // A repeated durable correlation is a finite replay of
-                    // the existing obligation, not a second write. Keep that
-                    // replay distinct from a new live fact so runtime can
-                    // prime only this publisher's fresh mailbox before it
-                    // joins live delivery. A receipt still in `Accepted` has
-                    // no replay fact by design: the successful return from
-                    // this call is its acceptance fact, so an empty attached
-                    // page is both valid and required at the ambiguous commit
-                    // boundary (#1362).
-                    if page.outcome == ReattachOutcome::Attached {
-                        let mut effects = Vec::new();
-                        // An ambiguous failure can commit acceptance before a
-                        // pre-signed payload reaches `on_signed`. Recovery
-                        // keeps that row honestly Pending, but an exact retry
-                        // carrying the same verified bytes can finish the
-                        // interrupted promotion on this same receipt.
-                        // Divergent, recomposed, or invalid payloads retain
-                        // correlation's normal discard semantics.
-                        if let WritePayload::Signed(event) = &payload {
-                            let resumes_interrupted_promotion =
-                                self.pending.get(&receipt_id).is_some_and(|pending| {
-                                    !pending.already_signed
-                                        && Self::validate_signed_template(&pending.frozen, event)
-                                            .is_ok()
-                                });
-                            if resumes_interrupted_promotion {
-                                self.on_signed(receipt_id, event.clone(), &mut effects);
-                            }
-                        }
-                        effects.push(Effect::ReplayReceipt(receipt_id, page));
-                        return PublishPreparation::Complete(effects);
-                    }
-                    // Review (#591, PR #604 finding 1): never mask a corrupt
-                    // retained identity behind fabricated acceptance.
-                    let status = match page.outcome {
-                        ReattachOutcome::Attached => unreachable!("handled above"),
-                        ReattachOutcome::NotFound => PublishError::PersistenceFailed {
-                            reason:
-                                "correlation token resolved to a receipt id the store can no longer find"
-                                    .to_string(),
-                        },
-                        ReattachOutcome::RetainedButUnreadable => PublishError::PersistenceFailed {
-                            reason: "correlation token resolved to a retained but unreadable receipt"
-                                .to_string(),
-                        },
-                    };
-                    debug_assert!(page.facts.is_empty());
-                    let _ = page;
-                    return PublishPreparation::Complete(self.refuse_publish(status));
-                }
+            let signed = match &payload {
+                WritePayload::Signed(event) => Some(event),
+                _ => None,
+            };
+            match self.replay_correlated_publish(token, signed) {
+                Ok(Some(effects)) => return PublishPreparation::Complete(effects),
                 Ok(None) => {}
-                Err(err) => {
-                    return PublishPreparation::Complete(self.refuse_publish(
-                        PublishError::PersistenceFailed {
-                            reason: err.to_string(),
-                        },
-                    ))
+                Err(error) => {
+                    return PublishPreparation::Complete(self.refuse_publish(error));
                 }
             }
         }
