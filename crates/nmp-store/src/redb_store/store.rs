@@ -114,6 +114,10 @@ pub struct RedbStore {
     /// pre-commit boundary. No production build carries this setting.
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fail_next_lane_attempt_finish: bool,
+    /// One construction-armed handoff refusal consumed at the existing
+    /// pre-commit boundary. No production build carries this setting.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(super) fail_next_lane_handoff: bool,
     /// One construction-armed event acceptance refusal consumed immediately
     /// before commit. The real prepared Redb transaction is dropped and the
     /// real database handle is closed before the typed I/O error is returned.
@@ -336,6 +340,15 @@ impl RedbStore {
     pub fn temporary_with_failed_lane_attempt_finish() -> Result<Self, RedbStoreOpenError> {
         let mut store = Self::temporary()?;
         store.fail_next_lane_attempt_finish = true;
+        Ok(store)
+    }
+
+    /// Open a real temporary Redb store whose next lane handoff refuses at
+    /// the existing pre-commit boundary.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn temporary_with_failed_lane_handoff() -> Result<Self, RedbStoreOpenError> {
+        let mut store = Self::temporary()?;
+        store.fail_next_lane_handoff = true;
         Ok(store)
     }
 
@@ -853,6 +866,8 @@ impl RedbStore {
             fail_next_compensation_with_state: false,
             #[cfg(any(test, feature = "test-instrumentation"))]
             fail_next_lane_attempt_finish: false,
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            fail_next_lane_handoff: false,
             #[cfg(any(test, feature = "test-instrumentation"))]
             fail_next_accept_write_before_commit: false,
             #[cfg(any(test, feature = "test-instrumentation"))]
