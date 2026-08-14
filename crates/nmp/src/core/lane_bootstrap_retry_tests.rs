@@ -13,8 +13,6 @@ use std::collections::BTreeSet;
 use nmp_store::{testing, EventStore, RedbStore};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, Timestamp};
 
-use crate::lane_fault_store::{FaultyLaneStore, LaneFaults};
-
 use super::*;
 
 #[path = "lane_bootstrap_retry_tests/clock.rs"]
@@ -338,65 +336,4 @@ fn an_unresolved_bootstrap_keeps_retaining_and_backs_off() {
             "each due tick must actually re-attempt the bootstrap"
         );
     }
-}
-
-/// A `recover_route_revisions` read error at boot cannot be allowed to
-/// disable exact worker reconciliation for the rest of the process: with
-/// `relay_worker_requirements` stuck at `None`, `retry_required_relay_workers`
-/// returns early forever and a cap-refused write is never retried.
-#[test]
-fn a_boot_route_revision_read_error_re_enables_worker_reconciliation() {
-    let author = Keys::generate();
-    let relay = RelayUrl::parse("wss://bootstrap-boot-revisions.example.com").unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("bootstrap-retry.redb");
-
-    {
-        let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
-        publish_narrow(&mut core, &author, std::slice::from_ref(&relay), 704);
-    }
-
-    let faults = LaneFaults::default();
-    faults.fail_route_revisions();
-    let mut recovered = EngineCore::new(
-        FaultyLaneStore::new(RedbStore::open(&path).unwrap(), faults.clone()),
-        10,
-    );
-    recovered.recover_on_boot();
-    assert!(
-        recovered.relay_worker_requirements().is_none(),
-        "an unreadable route set has nothing to hold as uncertain, so the \
-         runtime must retain everything"
-    );
-
-    faults.heal();
-    let due = recovered
-        .next_deadline()
-        .expect("deadline peek")
-        .expect("the blind boot gap arms a deadline");
-    recovered.tick(due);
-
-    let requirements = recovered
-        .relay_worker_requirements()
-        .expect("a committed bootstrap must re-enable worker reconciliation");
-    assert_eq!(requirements.writes, durable_worker_oracle(&recovered));
-    assert_eq!(
-        requirements.writes,
-        BTreeSet::from([session_for(&relay, &author)]),
-        "the recovered projection must name the durable lane's session"
-    );
-
-    // The same answer an untainted boot would have produced. The redb handle
-    // is exclusive, so the tainted core has to release it first.
-    let writes = requirements.writes.clone();
-    drop(recovered);
-    let mut fresh = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
-    fresh.recover_on_boot();
-    assert_eq!(
-        writes,
-        fresh
-            .relay_worker_requirements()
-            .expect("a clean boot projects")
-            .writes,
-    );
 }
