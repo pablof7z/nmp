@@ -164,9 +164,9 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And both receipts expose signing and relay evidence naming E2
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-019
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#1512
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::relay_source_successors_resume_current_delivery_and_remain_continuing_after_restart
+  # nmp:falsifier=Treat a relay replay of terminal E2 as a new semantic source after restart; it supersedes signed E3 before E3 reaches every existing destination.
   Scenario: Destination completion does not close a continuing semantic operation
     Given every destination for the current semantic generation is terminal
     When its deliberately continuing source policy remains active
