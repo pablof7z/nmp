@@ -106,8 +106,10 @@ pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
     self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg,
     HistoryAdvanceError, HistoryQuery, HistorySessionId, LocalSendRefusal, Nip77Frame,
-    ObservationEvidence, ObservationId, ObservationOpen, PublishError, ReattachOutcome, ReceiptId,
-    RequestAttemptId, RequestHandoffOutcome, RowDelta,
+    ObservationEvidence, ObservationId, ObservationOpen, PublishError, PublishPreparation,
+    ReattachOutcome, ReceiptId, ReplaceableMaterializationCall,
+    ReplaceableMaterializationContinuation, ReplaceableMaterializationOutcome, RequestAttemptId,
+    RequestHandoffOutcome, RowDelta,
 };
 #[cfg(test)]
 use crate::core::{HistoryBatch, Row};
@@ -248,6 +250,10 @@ enum Cmd {
         /// The whole acceptance answer: the receipt id the store issued and
         /// the event id it froze, decided together and reported together.
         reply: Sender<Result<(ReceiptId, EventId), PublishError>>,
+    },
+    ReplaceableMaterializationCompleted {
+        id: u64,
+        outcome: ReplaceableMaterializationOutcome,
     },
     ReattachReceipt {
         id: ReceiptId,
@@ -596,6 +602,32 @@ struct SignEventRegistration {
 
 struct ActiveSignEvent {
     terminal: Arc<SignEventTerminal>,
+}
+
+struct PendingInitialPublication {
+    continuation: ReplaceableMaterializationContinuation,
+    sender: FifoSender<WriteFact>,
+    registration: ReceiptDeliveryRegistration,
+    reply: Sender<Result<(ReceiptId, EventId), PublishError>>,
+}
+
+fn spawn_replaceable_materialization(
+    inbox: Sender<Cmd>,
+    id: u64,
+    call: ReplaceableMaterializationCall,
+) -> Result<(), String> {
+    thread::Builder::new()
+        .name("nmp-replaceable-materializer".to_string())
+        .spawn(move || {
+            nmp_transport::thread_census::run_counted_thread(move || {
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call.execute()))
+                        .unwrap_or(ReplaceableMaterializationOutcome::Panicked);
+                let _ = inbox.send(Cmd::ReplaceableMaterializationCompleted { id, outcome });
+            });
+        })
+        .map(drop)
+        .map_err(|error| error.to_string())
 }
 
 /// #704: run one foreign sign-event `completion` closure on a FRESH dedicated
@@ -2799,6 +2831,8 @@ fn engine_loop(
     let nip65 = RefCell::new(crate::nip65::RuntimeAssembly::new(nip65_sources));
     let mut next_sign_event_id = 1u64;
     let mut sign_event_cancellations: HashMap<u64, ActiveSignEvent> = HashMap::new();
+    let mut next_replaceable_materialization_id = 1u64;
+    let mut pending_initial_publications: HashMap<u64, PendingInitialPublication> = HashMap::new();
     let nip11_decisions = RefCell::new(Nip11DecisionState::default());
     let wire_admission = RefCell::new(WireAdmissionState::default());
     let diagnostics_delivery = RefCell::new(DiagnosticsDeliveryState::default());
@@ -3171,6 +3205,7 @@ fn engine_loop(
                 Cmd::PublishTracked { reply, .. } => {
                     let _ = reply.send(Err(PublishError::EngineShuttingDown));
                 }
+                Cmd::ReplaceableMaterializationCompleted { .. } => {}
                 Cmd::PublishQueueEntries { reply, .. } => {
                     let _ = reply.send(Err(PublishQueueReadError::EngineClosed));
                 }
@@ -3308,6 +3343,9 @@ fn engine_loop(
         match cmd {
             Cmd::Shutdown => {
                 shutting_down = true;
+                for (_, pending) in pending_initial_publications.drain() {
+                    let _ = pending.reply.send(Err(PublishError::EngineShuttingDown));
+                }
                 auth_tasks.borrow_mut().shutdown();
                 registry.cancel_all_pending_writes();
                 for active in sign_event_cancellations.values() {
@@ -4066,50 +4104,92 @@ fn engine_loop(
                 sender,
                 registration,
                 reply,
-            } => {
-                let mut publish_effects = core.handle(EngineMsg::Publish(intent));
-                let result = publish_result(&publish_effects);
-                let replay = take_publish_replay(&mut publish_effects);
-                if let Ok((id, _)) = result {
-                    if let Some((replay_id, page)) = replay {
-                        debug_assert_eq!(replay_id, id);
-                        let (_, next_cursor) = deliver_receipt_replay_page(
-                            &core,
-                            &mut receipt_deliveries.borrow_mut(),
-                            id,
-                            sender,
-                            registration.clone(),
-                            page,
-                        );
-                        debug_assert!(
-                            next_cursor.is_none(),
-                            "correlation publish replay is calculated as one complete page"
-                        );
-                    } else {
-                        receipt_deliveries.borrow_mut().register(
-                            id,
-                            registration.clone(),
-                            sender,
-                            ReceiptReplayCursor::new(id),
-                        );
-                    }
-                }
-                let accepted = result.as_ref().ok().map(|(id, _)| *id);
-                if reply.send(result).is_err() {
-                    if let Some(id) = accepted {
-                        receipt_deliveries.borrow_mut().detach(id, &registration);
-                    }
-                }
-                dispatch_core_effects(
+            } => match core.prepare_publish(intent) {
+                PublishPreparation::Complete(publish_effects) => complete_tracked_publish(
                     &mut core,
                     publish_effects,
+                    sender,
+                    registration,
+                    reply,
                     &pool,
                     &mut row_channels,
                     &mut history_channels,
                     &mut diag_channels,
                     &registry,
                     dispatch_runtime,
-                );
+                ),
+                PublishPreparation::Materialize(prepared) => {
+                    let id = next_replaceable_materialization_id;
+                    next_replaceable_materialization_id =
+                        next_replaceable_materialization_id.wrapping_add(1).max(1);
+                    let core::PreparedReplaceableMaterialization { call, continuation } = *prepared;
+                    pending_initial_publications.insert(
+                        id,
+                        PendingInitialPublication {
+                            continuation,
+                            sender,
+                            registration,
+                            reply,
+                        },
+                    );
+                    if let Err(reason) =
+                        spawn_replaceable_materialization(self_inbox.clone(), id, call)
+                    {
+                        let _ = self_inbox.send(Cmd::ReplaceableMaterializationCompleted {
+                            id,
+                            outcome: ReplaceableMaterializationOutcome::ThreadUnavailable(reason),
+                        });
+                    }
+                }
+            },
+            Cmd::ReplaceableMaterializationCompleted { id, outcome } => {
+                let Some(pending) = pending_initial_publications.remove(&id) else {
+                    continue;
+                };
+                let PendingInitialPublication {
+                    continuation,
+                    sender,
+                    registration,
+                    reply,
+                } = pending;
+                match core.complete_body_complete_replaceable_operation(continuation, outcome) {
+                    PublishPreparation::Complete(publish_effects) => complete_tracked_publish(
+                        &mut core,
+                        publish_effects,
+                        sender,
+                        registration,
+                        reply,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &registry,
+                        dispatch_runtime,
+                    ),
+                    PublishPreparation::Materialize(prepared) => {
+                        let core::PreparedReplaceableMaterialization { call, continuation } =
+                            *prepared;
+                        pending_initial_publications.insert(
+                            id,
+                            PendingInitialPublication {
+                                continuation,
+                                sender,
+                                registration,
+                                reply,
+                            },
+                        );
+                        if let Err(reason) =
+                            spawn_replaceable_materialization(self_inbox.clone(), id, call)
+                        {
+                            let _ = self_inbox.send(Cmd::ReplaceableMaterializationCompleted {
+                                id,
+                                outcome: ReplaceableMaterializationOutcome::ThreadUnavailable(
+                                    reason,
+                                ),
+                            });
+                        }
+                    }
+                }
             }
             Cmd::Subscribe { query, reply } => {
                 let (id, seed, mut effects) = match core.open_observation(query, command_wall_now) {
@@ -4383,6 +4463,9 @@ fn engine_loop(
 
     auth_tasks.borrow_mut().shutdown();
     registry.cancel_all_pending_writes();
+    for (_, pending) in pending_initial_publications.drain() {
+        let _ = pending.reply.send(Err(PublishError::EngineShuttingDown));
+    }
     for (_, active) in sign_event_cancellations.drain() {
         active.terminal.cancel();
     }
@@ -4398,6 +4481,67 @@ fn engine_loop(
     relay_information.close();
     drop(pool_stop_tx);
     pool.shutdown();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_tracked_publish(
+    core: &mut EngineCore,
+    mut publish_effects: Vec<Effect>,
+    sender: FifoSender<WriteFact>,
+    registration: ReceiptDeliveryRegistration,
+    reply: Sender<Result<(ReceiptId, EventId), PublishError>>,
+    pool: &Pool,
+    row_channels: &mut HashMap<ObservationId, RowsSender>,
+    history_channels: &mut HashMap<HistorySessionId, LatestSender<HistoryMsg>>,
+    diag_channels: &mut HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
+    registry: &SignerRegistry,
+    runtime: DispatchRuntime<'_>,
+) {
+    let result = publish_result(&publish_effects);
+    let replay = take_publish_replay(&mut publish_effects);
+    if let Ok((id, _)) = result {
+        if let Some((replay_id, page)) = replay {
+            debug_assert_eq!(replay_id, id);
+            let (_, next_cursor) = deliver_receipt_replay_page(
+                core,
+                &mut runtime.receipt_deliveries.borrow_mut(),
+                id,
+                sender,
+                registration.clone(),
+                page,
+            );
+            debug_assert!(
+                next_cursor.is_none(),
+                "correlation publish replay is calculated as one complete page"
+            );
+        } else {
+            runtime.receipt_deliveries.borrow_mut().register(
+                id,
+                registration.clone(),
+                sender,
+                ReceiptReplayCursor::new(id),
+            );
+        }
+    }
+    let accepted = result.as_ref().ok().map(|(id, _)| *id);
+    if reply.send(result).is_err() {
+        if let Some(id) = accepted {
+            runtime
+                .receipt_deliveries
+                .borrow_mut()
+                .detach(id, &registration);
+        }
+    }
+    dispatch_core_effects(
+        core,
+        publish_effects,
+        pool,
+        row_channels,
+        history_channels,
+        diag_channels,
+        registry,
+        runtime,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

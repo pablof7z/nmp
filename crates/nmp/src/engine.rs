@@ -11,15 +11,17 @@
 //! ## The serialized lifecycle gate
 //!
 //! `inner` holds `Some(Inner)` while the engine is open, `None` once
-//! [`Engine::shutdown`] has run. Every verb takes the SAME mutex, checks
-//! that state, and either runs its `Handle` call while still holding the
-//! lock or returns [`EngineError::EngineClosed`] immediately -- it never
-//! reaches a raw `Handle` call that could race the engine thread's own exit
-//! and panic through `Handle`'s internal `.expect(...)`s. `shutdown` takes
-//! the same lock to `Option::take` it, so a verb call and a `shutdown` call
-//! can never interleave: one strictly precedes the other. `Engine`'s `Drop`
-//! calls `shutdown` too, so a dropped-without-`shutdown` `Engine` still
-//! tears down `EngineThread` cleanly rather than detaching it.
+//! [`Engine::shutdown`] has run. Ordinary verbs take the SAME mutex, check
+//! that state, and run their short `Handle` call while still holding the
+//! lock. Publication is the deliberate exception: it clones the open handle
+//! under the lock, then releases the lock while pre-custody capability code
+//! may be preparing a complete event. Shutdown can therefore take and join
+//! the engine while that preparation remains blocked. The raw publication
+//! handle maps a closed command or reply channel to
+//! [`EngineError::EngineClosed`], so the race is typed rather than a panic or
+//! a fabricated receipt. `Engine`'s `Drop` calls `shutdown` too, so a
+//! dropped-without-`shutdown` `Engine` still tears down `EngineThread`
+//! cleanly rather than detaching it.
 
 mod observation;
 mod publication;
@@ -575,10 +577,11 @@ impl Engine {
     }
 
     /// Stop the engine. Idempotent: a second call (or a call racing another
-    /// thread's call) finds `inner` already `None` and no-ops. Every verb
-    /// above shares this same lock, so no call that starts after this one
-    /// completes can ever reach the raw `Handle`/`EngineThread` again --
-    /// see this module's doc.
+    /// thread's call) finds `inner` already `None` and no-ops. No call that
+    /// starts after this one completes can reach the raw
+    /// `Handle`/`EngineThread`; a publication that cloned its handle earlier
+    /// either already entered custody or receives `EngineClosed` while the
+    /// shutdown drain joins the engine -- see this module's doc.
     pub fn shutdown(&self) {
         let inner = self
             .inner
