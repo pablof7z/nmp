@@ -23,6 +23,7 @@
 
 mod observation;
 mod relay_information;
+mod session;
 
 pub use relay_information::RelayInformationRequestError;
 
@@ -44,7 +45,6 @@ use crate::subscription::{Subscription, Window};
 #[cfg(test)]
 use nmp_grammar::LiveQuery;
 use nmp_grammar::WriteIntent;
-use nmp_signer::SigningCapability;
 use nmp_store::{RedbStore, RedbStoreOpenError, RedbStoreResetError};
 use nmp_transport::PoolConfig;
 use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
@@ -153,23 +153,6 @@ fn cancel_write_error_from_engine(
     }
 }
 
-fn session_mutation_from_add_signer(
-    error: crate::runtime::AddSignerError,
-) -> crate::SessionMutationError {
-    match error {
-        crate::runtime::AddSignerError::RegistryFull { limit } => {
-            crate::SessionMutationError::CapabilityRegistryFull { limit }
-        }
-        crate::runtime::AddSignerError::CapabilityInstanceExhausted => {
-            crate::SessionMutationError::CapabilityInstanceExhausted
-        }
-        crate::runtime::AddSignerError::EngineShuttingDown
-        | crate::runtime::AddSignerError::MissingPublicKey => {
-            crate::SessionMutationError::EngineClosed
-        }
-    }
-}
-
 impl std::fmt::Display for CancelWriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -265,18 +248,6 @@ impl Engine {
         Ok(crate::RegisteredReplaceableMaterializer { instance })
     }
 
-    #[cfg(test)]
-    fn install_test_local_provider(
-        &self,
-        secret_key: &str,
-    ) -> Result<crate::SessionAccount, crate::SessionMutationError> {
-        let signer = nmp_local_signer::LocalKeySigner::parse(secret_key)
-            .map_err(|_| crate::SessionMutationError::InvalidSecretKey)?;
-        self.with_handle(|handle| handle.add_private_key_account(signer, false))
-            .map_err(|_| crate::SessionMutationError::EngineClosed)?
-            .map_err(session_mutation_from_add_signer)
-    }
-
     #[cfg(any(test, feature = "test-instrumentation"))]
     #[doc(hidden)]
     pub fn install_test_signing_capability<Sig>(
@@ -290,26 +261,6 @@ impl Engine {
             .map_err(EngineError::from_add_signer_error)
     }
 
-    #[cfg(test)]
-    fn select_test_account(&self, public_key: Option<PublicKey>) -> Result<(), EngineError> {
-        match public_key {
-            Some(public_key) => {
-                self.add_public_key_account(public_key, false)
-                    .map_err(|_| EngineError::EngineClosed)?;
-                self.make_current_account(public_key)
-                    .map_err(|_| EngineError::EngineClosed)
-            }
-            None => {
-                self.with_handle(|handle| handle.set_current_account(None))?;
-                Ok(())
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn test_current_public_key(&self) -> Result<Option<PublicKey>, EngineError> {
-        Ok(self.session()?.current_pubkey)
-    }
     /// Destructively remove one closed persistent engine store.
     ///
     /// This clears NMP's canonical events, pending writes, receipts,
@@ -747,100 +698,6 @@ impl Engine {
             .map_err(|_| CancelWriteError::EngineClosed)?
             .map(cancel_write_outcome_from_engine)
             .map_err(cancel_write_error_from_engine)
-    }
-
-    pub fn new_with_session(
-        config: EngineConfig,
-        payload: crate::SessionPayload,
-    ) -> Result<Self, crate::SessionRestoreError> {
-        let restored = crate::session::decode(&payload)?;
-        let provider_count = restored.provider_count();
-        if provider_count > config.max_auth_capabilities {
-            return Err(crate::SessionRestoreError::CapabilityRegistryFull {
-                limit: config.max_auth_capabilities,
-            });
-        }
-        Self::new_with_initial_session(config, restored).map_err(|error| {
-            crate::SessionRestoreError::EngineStartFailed {
-                reason: error.to_string(),
-            }
-        })
-    }
-
-    pub fn session(&self) -> Result<crate::SessionSnapshot, EngineError> {
-        self.with_handle(|handle| handle.session_snapshot())?
-            .ok_or(EngineError::EngineClosed)
-    }
-
-    pub fn export_session(&self) -> Result<crate::SessionPayload, EngineError> {
-        // The reducer returns only cloned provider owners and metadata. Secret
-        // descriptor callbacks then run here, after the reducer command and
-        // after the facade lifecycle lock have both been released.
-        let handle = self.with_handle(Clone::clone)?;
-        let export = handle
-            .session_export_sources()
-            .ok_or(EngineError::EngineClosed)?;
-        let descriptors = export
-            .providers
-            .into_iter()
-            .filter_map(|(public_key, provider)| {
-                provider
-                    .persistence_descriptor()
-                    .map(|descriptor| (public_key, descriptor))
-            })
-            .collect();
-        Ok(crate::session::encode(&export.snapshot, descriptors))
-    }
-
-    pub fn add_private_key_account(
-        &self,
-        secret_key: &[u8; 32],
-        make_current: bool,
-    ) -> Result<crate::SessionAccount, crate::SessionMutationError> {
-        let signer = nmp_local_signer::LocalKeySigner::from_secret_bytes(secret_key)
-            .map_err(|_| crate::SessionMutationError::InvalidSecretKey)?;
-        let result = self
-            .with_handle(|handle| handle.add_private_key_account(signer, make_current))
-            .map_err(|_| crate::SessionMutationError::EngineClosed)?;
-        result.map_err(session_mutation_from_add_signer)
-    }
-
-    pub fn add_public_key_account(
-        &self,
-        public_key: PublicKey,
-        make_current: bool,
-    ) -> Result<crate::SessionAccount, crate::SessionMutationError> {
-        self.with_handle(|handle| handle.add_public_key_account(public_key, make_current))
-            .map_err(|_| crate::SessionMutationError::EngineClosed)?
-            .ok_or(crate::SessionMutationError::EngineClosed)
-    }
-
-    pub fn make_current_account(
-        &self,
-        public_key: PublicKey,
-    ) -> Result<(), crate::SessionMutationError> {
-        let found = self
-            .with_handle(|handle| handle.make_current_account(public_key))
-            .map_err(|_| crate::SessionMutationError::EngineClosed)?
-            .ok_or(crate::SessionMutationError::EngineClosed)?;
-        found
-            .then_some(())
-            .ok_or(crate::SessionMutationError::AccountNotFound { public_key })
-    }
-
-    pub fn remove_account(
-        &self,
-        account: &crate::SessionAccount,
-    ) -> Result<bool, crate::SessionMutationError> {
-        self.with_handle(|handle| handle.remove_session_account(account.public_key))
-            .map_err(|_| crate::SessionMutationError::EngineClosed)?
-            .ok_or(crate::SessionMutationError::EngineClosed)
-    }
-
-    pub fn clear_session(&self) -> Result<(), crate::SessionMutationError> {
-        self.with_handle(|handle| handle.clear_session())
-            .map_err(|_| crate::SessionMutationError::EngineClosed)?
-            .ok_or(crate::SessionMutationError::EngineClosed)
     }
 
     /// Install the NIP-42 authorization policy for one exact account
