@@ -163,12 +163,12 @@ operations, and protocol authority. Enabling NIP-29 may add group operations and
 group-host context. It must not pull a preferred timeline into core or own a
 foreign NIP-68 photo schema merely because a group can publish one.
 
-Dependencies do not transfer ownership. For example, an NIP-29 package may
-depend on NIP-51 to compose typed kind `10009` Simple groups into remembered
-NIP-29 group/host references. NIP-51 still exclusively owns the `10009` codec,
-because it is the crate that defines and parses it and NIP-29 consumes its typed
-output rather than re-parsing the wire. That dependency direction *is* the
-ownership fact; nothing is declared or registered to establish it.
+Protocol ownership and package placement are different. NIP-51 defines kind
+`10009`; `nmp-nip29` exposes its tolerant Simple-groups decode beside the
+remembered-host product behavior that consumes it. The result remains plain
+observational data and the app still selects the exact host/group fields passed
+to a relay scope. Nothing is declared or registered to establish that product
+placement.
 
 The composition root links the facade and each enabled module. That is the whole
 mechanism. There is no registration list, no claim vocabulary, and no engine

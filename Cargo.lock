@@ -1825,7 +1825,6 @@ dependencies = [
  "nmp-nip22",
  "nmp-nip25",
  "nmp-nip29",
- "nmp-nip51",
  "nmp-nip65",
  "nmp-nipc7",
  "nmp-resolver",
@@ -2029,14 +2028,6 @@ dependencies = [
 
 [[package]]
 name = "nmp-nip29"
-version = "0.1.0"
-dependencies = [
- "nmp-grammar",
- "nostr 0.44.4",
-]
-
-[[package]]
-name = "nmp-nip51"
 version = "0.1.0"
 dependencies = [
  "nmp-grammar",

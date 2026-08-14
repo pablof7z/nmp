@@ -1,15 +1,16 @@
-// NIP-51 Simple groups: tolerant, observational parsing (#863).
-// Mirrors NIP51.swift.
+// NIP-51 Simple groups, exposed with the NIP-29 product capability:
+// tolerant, observational parsing (#863/#1551).
+// Mirrors NIP29SimpleGroups.swift.
 //
 // A [Row] handed to this file may have been constructed by the app itself --
 // any kind, any signature, no sources. So the parser is deliberately
 // tolerant and its result is deliberately plain data. There is no
 // observation-qualified wrapper, projection-error family, or frame proof
-// here, and `scripts/check-nip51-no-derived-authority.sh` fails the build if
+// here, and `scripts/check-nip29-group-list-ownership.sh` fails the build if
 // one is reintroduced.
 //
 // Reading kind:10009 stays the ordinary demand/observation noun
-// (`currentAccountDemand()`, below). Browsing a NIP-29 group still takes an
+// (`currentAccountGroupListDemand()`, below). Browsing a NIP-29 group still takes an
 // explicit, caller-supplied relay set -- see `NMPRelayScope.on`.
 //
 // [SimpleGroupsList] is also the ONE native shape a decoded kind:10009 list
@@ -22,7 +23,7 @@ package com.nmp.sdk
 import uniffi.nmp_ffi.FfiRow
 import uniffi.nmp_ffi.FfiSimpleGroupEntry
 import uniffi.nmp_ffi.FfiSimpleGroupsList
-import uniffi.nmp_ffi.currentAccountDemand as ffiCurrentAccountDemand
+import uniffi.nmp_ffi.currentAccountGroupListDemand as ffiCurrentAccountGroupListDemand
 import uniffi.nmp_ffi.parseSimpleGroupsListTolerant as ffiParseSimpleGroupsListTolerant
 
 /** One tolerantly parsed Simple-groups entry -- group id, host relay,
@@ -72,9 +73,9 @@ data class SimpleGroupsList(
  * resolves to zero rows through the ordinary reactive-binding empty-
  * resolution path -- no special case needed on the caller's side.
  *
- * #858 moved this out of NIP29.kt: kind:10009 is NIP-51's kind, so its
- * demand constructor lives with the rest of NIP-51. */
-fun currentAccountDemand(): NMPDemand = NMPDemand.from(ffiCurrentAccountDemand())
+ * #1551 places this NIP-51-defined list with the NIP-29 product capability
+ * that consumes it, without changing which NIP defines kind:10009. */
+fun currentAccountGroupListDemand(): NMPDemand = NMPDemand.from(ffiCurrentAccountGroupListDemand())
 
 /** Tolerantly parse Simple-groups-shaped public items from an untrusted
  * [row] (#863). Infallible and kind-agnostic: malformed individual items are

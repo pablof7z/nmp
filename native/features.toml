@@ -202,24 +202,17 @@ kotlin_sources = [
 key = "nip29"
 capability = "groups"
 cargo_feature = "nip29"
-ffi_sources = ["crates/nmp-ffi/src/nip29.rs"]
+ffi_sources = [
+  "crates/nmp-ffi/src/nip29.rs",
+  "crates/nmp-ffi/src/nip29_simple_groups.rs",
+]
 swift_sources = [
   { path = "Packages/NMP/Sources/NMP/NIP29.swift", target = "NMP", destination = "NIP29.swift" },
+  { path = "Packages/NMP/Sources/NMP/NIP29SimpleGroups.swift", target = "NMP", destination = "NIP29SimpleGroups.swift" },
 ]
 kotlin_sources = [
   { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt", destination = "com/nmp/sdk/NIP29.kt" },
-]
-
-[[features]]
-key = "nip51"
-capability = "lists"
-cargo_feature = "nip51"
-ffi_sources = ["crates/nmp-ffi/src/nip51.rs"]
-swift_sources = [
-  { path = "Packages/NMP/Sources/NMP/NIP51.swift", target = "NMP", destination = "NIP51.swift" },
-]
-kotlin_sources = [
-  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP51.kt", destination = "com/nmp/sdk/NIP51.kt" },
+  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29SimpleGroups.kt", destination = "com/nmp/sdk/NIP29SimpleGroups.kt" },
 ]
 
 [[features]]

@@ -1,5 +1,5 @@
-//! NIP-51 Simple groups: tolerant, observational parsing at the FFI
-//! boundary (#863).
+//! NIP-51 Simple groups, exposed with the NIP-29 product capability:
+//! tolerant, observational parsing at the FFI boundary (#863/#1551).
 //!
 //! An [`FfiRow`] crossing this boundary is CALLER-CONSTRUCTIBLE -- a native
 //! app can invent every field, including `kind`, `sig`, and `sources`. So
@@ -8,11 +8,11 @@
 //! the API itself, and [`FfiSimpleGroupsList`] documents it in the type.
 //!
 //! Deliberately absent, and mechanically kept absent by
-//! `scripts/check-nip51-no-derived-authority.sh`: any observation-qualified
+//! `scripts/check-nip29-group-list-ownership.sh`: any observation-qualified
 //! `Observed*` wrapper, projection-error family, frame-proof projector, or
-//! other protocol-specific witness. NIP-51 reading stays the ordinary
-//! `LiveQuery`/`FfiDemand` noun ([`current_account_demand`]), and a future
-//! destructive NIP-51 mutation must bind its exact observed base privately
+//! other protocol-specific witness. Group-list reading stays the ordinary
+//! `LiveQuery`/`FfiDemand` noun ([`current_account_group_list_demand`]), and a future
+//! destructive group-list mutation must bind its exact observed base privately
 //! inside that semantic operation while building the ordinary opaque write
 //! intent -- never by exporting a reusable authority noun here.
 //!
@@ -29,7 +29,7 @@ use nostr::RelayUrl;
 use crate::convert::demand_to_ffi;
 use crate::types::{FfiDemand, FfiRow, FfiSimpleGroupEntry, FfiSimpleGroupsList};
 
-fn simple_group_entry_to_ffi(entry: &nmp::nip51::SimpleGroupEntry) -> FfiSimpleGroupEntry {
+fn simple_group_entry_to_ffi(entry: &nmp::nip29::SimpleGroupEntry) -> FfiSimpleGroupEntry {
     FfiSimpleGroupEntry {
         group_id: entry.group_id.clone(),
         host_relay: entry.host_relay.to_string(),
@@ -37,7 +37,7 @@ fn simple_group_entry_to_ffi(entry: &nmp::nip51::SimpleGroupEntry) -> FfiSimpleG
     }
 }
 
-fn simple_groups_list_to_ffi(list: &nmp::nip51::SimpleGroupsList) -> FfiSimpleGroupsList {
+fn simple_groups_list_to_ffi(list: &nmp::nip29::SimpleGroupsList) -> FfiSimpleGroupsList {
     FfiSimpleGroupsList {
         items: list.items.iter().map(simple_group_entry_to_ffi).collect(),
         relays_in_use: list.relays_in_use.iter().map(RelayUrl::to_string).collect(),
@@ -48,16 +48,16 @@ fn simple_groups_list_to_ffi(list: &nmp::nip51::SimpleGroupsList) -> FfiSimpleGr
 }
 
 /// The signed-in account's Simple-groups-list demand (#108,
-/// `nmp::nip51::current_account_demand` mirror): `kinds:[10009]`,
+/// `nmp::nip29::current_account_group_list_demand` mirror): `kinds:[10009]`,
 /// `AuthorOutboxes + Public`. Signed-out (no current account) resolves to
 /// zero atoms through the ordinary reactive-binding empty-resolution path
 /// -- no special case needed on either side of this boundary.
 ///
-/// #858 moved this out of `crate::nip29`: kind:10009 is NIP-51's kind, so
-/// its demand constructor lives with the rest of NIP-51.
+/// #1551 places this NIP-51-defined list with the NIP-29 product capability
+/// that consumes it, without changing which NIP defines kind:10009.
 #[uniffi::export]
-pub fn current_account_demand() -> FfiDemand {
-    demand_to_ffi(nmp::nip51::current_account_demand())
+pub fn current_account_group_list_demand() -> FfiDemand {
+    demand_to_ffi(nmp::nip29::current_account_group_list_demand())
 }
 
 /// Tolerantly parse Simple-groups-shaped public items out of a raw native
@@ -72,7 +72,7 @@ pub fn current_account_demand() -> FfiDemand {
 #[uniffi::export]
 pub fn parse_simple_groups_list_tolerant(row: FfiRow) -> FfiSimpleGroupsList {
     simple_groups_list_to_ffi(
-        &nmp::nip51::parse_simple_groups_list_from_raw_tags_tolerant(
+        &nmp::nip29::parse_simple_groups_list_from_raw_tags_tolerant(
             row.tags.iter().map(|tag| tag.as_slice()),
             &row.content,
         ),
@@ -131,8 +131,8 @@ mod tests {
     }
 
     #[test]
-    fn current_account_demand_projects_the_reactive_authors_binding() {
-        let demand = current_account_demand();
+    fn current_account_group_list_demand_projects_the_reactive_authors_binding() {
+        let demand = current_account_group_list_demand();
         assert_eq!(demand.selection.kinds, Some(vec![10009]));
     }
 
@@ -143,7 +143,7 @@ mod tests {
     /// `FfiRelayScope`/`FfiGroup` projection):
     /// the SELECTED entry's `host_relay` AND `group_id` both feed NIP-29's
     /// host-pinned constructors directly, field for field, with no
-    /// intermediate NIP-29-owned copy of the NIP-51 value in between.
+    /// intermediate NIP-29 group-reference copy of the NIP-51 value in between.
     #[test]
     #[cfg(feature = "nip29")]
     fn nip29_browsing_still_demands_an_explicitly_supplied_host() {
@@ -167,7 +167,7 @@ mod tests {
 
         assert_eq!(
             selected.group_id, "group-a",
-            "the NIP-51-owned group id remains caller data; NIP-29 does not \
+            "the NIP-29-owned group id remains caller data; NIP-29 does not \
              turn it into a fixed content catalog"
         );
     }

@@ -46,9 +46,6 @@
     "crates/nmp-parity": {
       "grandfathered": true
     },
-    "crates/nmp-nip51": {
-      "grandfathered": true
-    },
     "crates/nmp-nip02": {
       "grandfathered": true
     },
