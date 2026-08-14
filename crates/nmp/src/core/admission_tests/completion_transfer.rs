@@ -1,6 +1,7 @@
 //! completion transfer admission proofs.
 
 use super::*;
+use nmp_store::testing;
 
 #[test]
 #[ignore = "known violation #1341: split physical requests do not yet aggregate one wide logical coverage proof"]
@@ -157,12 +158,22 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
         };
         let incumbent_claim = coverage_key(&incumbent);
         let added_claim = coverage_key(&added);
-        let control = StoreFailureControl::default();
+        let directory = tempfile::tempdir().expect("coverage corruption directory");
+        let path = directory.path().join("pending-transfer-cancel.redb");
+        {
+            let mut store = RedbStore::open(&path).expect("create persistent Redb fixture");
+            store
+                .record_coverage(&[(
+                    added.clone(),
+                    relay.clone(),
+                    CoverageInterval::new(Timestamp::from(0), Timestamp::from(99)),
+                )])
+                .expect("seed exact coverage row");
+        }
+        testing::corrupt_coverage(&path, added_claim, &relay)
+            .expect("store-owned coverage corruption");
         let mut core = EngineCore::new(
-            ControlledFailureStore::new(
-                RedbStore::temporary().expect("temporary Redb store"),
-                control.clone(),
-            ),
+            RedbStore::open(&path).expect("reopen corrupted Redb fixture"),
             20,
         );
         core.attribution.observe_atom(&incumbent);
@@ -193,7 +204,6 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
                 },
             },
         );
-        control.fail_coverage_write("leave one exact transfer pending");
         core.apply_request_metadata_updates(
             &[nmp_router::RequestMetadataUpdate {
                 session: session.clone(),
