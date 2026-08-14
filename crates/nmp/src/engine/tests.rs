@@ -58,10 +58,13 @@ impl crate::ReplaceableMaterializer for FirstCallBlockingPeopleMaterializer {
                 .unwrap_or_else(|poison| poison.into_inner())
                 .recv()
                 .expect("the test releases the first capability call");
-            let _ = self.first_exited.send(());
         }
 
-        add_people(current, operations)
+        let result = add_people(current, operations);
+        if call == 1 && result.is_ok() {
+            let _ = self.first_exited.send(());
+        }
+        result
     }
 }
 
@@ -2322,11 +2325,16 @@ fn blocked_initial_materializer_does_not_block_engine_work_or_shutdown() {
         )
         .expect("materializer registers");
     let destination = RelayUrl::parse("wss://blocked-operation.example").unwrap();
-    let intent = replaceable_contact_intent(
+    let token = "blocked-initial-materializer-shutdown".to_string();
+    let mut intent = replaceable_contact_intent(
         &registration,
         &base,
         Keys::generate().public_key(),
         destination.clone(),
+    );
+    intent.correlation = Some(
+        nmp_grammar::CorrelationToken::try_from(token.as_str())
+            .expect("the shutdown fixture token is valid"),
     );
     let (publish_done_tx, publish_done_rx) = mpsc::channel();
     let publisher_engine = Arc::clone(&engine);
@@ -2342,29 +2350,71 @@ fn blocked_initial_materializer_does_not_block_engine_work_or_shutdown() {
         "the first capability call reaches the deterministic barrier"
     );
 
-    let observation = engine
-        .observe(probe_query(), None)
-        .expect("a blocked capability does not block observation setup");
-    observation
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("the observation receives its opening frame");
     let ordinary = nostr::EventBuilder::new(Kind::Custom(9999), "ordinary while blocked")
         .custom_created_at(Timestamp::from(2))
         .sign_with_keys(&author)
         .expect("ordinary event is signed");
-    let ordinary_receipt = engine
-        .publish(WriteIntent {
-            payload: WritePayload::Signed(ordinary.clone()),
-            routing: WriteRouting::Explicit(vec![destination]),
-            identity: Identity::Explicit(author.public_key()),
-            correlation: None,
-        })
-        .expect("ordinary publication enters custody while capability is blocked");
-    assert_eq!(
-        receive_added_row(&observation, ordinary.id).id(),
-        ordinary.id,
-        "ordinary canonical work still advances"
-    );
+    let ordinary_id = ordinary.id;
+    let (ordinary_done_tx, ordinary_done_rx) = mpsc::channel();
+    let ordinary_engine = Arc::clone(&engine);
+    let ordinary_destination = destination.clone();
+    let ordinary_author = author.public_key();
+    let ordinary_worker = std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let observation = ordinary_engine
+                .observe(probe_query(), None)
+                .map_err(|error| format!("ordinary observation setup failed: {error:?}"))?;
+            observation
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|error| format!("ordinary opening frame failed: {error:?}"))?;
+            let receipt = ordinary_engine
+                .publish(WriteIntent {
+                    payload: WritePayload::Signed(ordinary),
+                    routing: WriteRouting::Explicit(vec![ordinary_destination]),
+                    identity: Identity::Explicit(ordinary_author),
+                    correlation: None,
+                })
+                .map_err(|error| format!("ordinary publication failed: {error:?}"))?;
+            let observed = receive_added_row(&observation, ordinary_id);
+            if observed.id() != ordinary_id {
+                return Err(format!(
+                    "ordinary observation returned {}, expected {ordinary_id}",
+                    observed.id()
+                ));
+            }
+            Ok(receipt.id)
+        }));
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(_) => Err("ordinary observe/publish worker panicked".to_string()),
+        };
+        let _ = ordinary_done_tx.send(outcome);
+    });
+    let ordinary_result = ordinary_done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    let ordinary_receipt_id = match ordinary_result {
+        Ok(Ok(receipt_id)) => {
+            ordinary_worker
+                .join()
+                .expect("the completed ordinary worker joins cleanly");
+            receipt_id
+        }
+        failure => {
+            let _ = release_tx.send(());
+            let _ = exited_rx.recv_timeout(std::time::Duration::from_secs(5));
+            let _ = ordinary_done_rx.recv_timeout(std::time::Duration::from_secs(5));
+            ordinary_worker
+                .join()
+                .expect("the released ordinary worker joins during cleanup");
+            let _ = publish_done_rx.recv_timeout(std::time::Duration::from_secs(5));
+            publisher
+                .join()
+                .expect("the released capability publisher joins during cleanup");
+            engine.shutdown();
+            panic!(
+                "ordinary observation/publication did not complete while capability work was blocked: {failure:?}"
+            );
+        }
+    };
 
     let (shutdown_done_tx, shutdown_done_rx) = mpsc::channel();
     let shutdown_engine = Arc::clone(&engine);
@@ -2394,9 +2444,6 @@ fn blocked_initial_materializer_does_not_block_engine_work_or_shutdown() {
         .expect("the detached capability thread exits after release");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    let ordinary_receipt_id = ordinary_receipt.id;
-    drop(ordinary_receipt);
-    drop(observation);
     drop(engine);
     let reopened = Engine::new(config).expect("the exact persistent store reopens");
     let queue = reopened
@@ -2410,7 +2457,7 @@ fn blocked_initial_materializer_does_not_block_engine_work_or_shutdown() {
     assert_eq!(queue[0].receipt_id, ordinary_receipt_id);
     assert_eq!(
         reopened
-            .publish_queue_for_event(ordinary.id, None, u8::MAX)
+            .publish_queue_for_event(ordinary_id, None, u8::MAX)
             .expect("ordinary event lookup")
             .len(),
         1
@@ -2431,6 +2478,12 @@ fn blocked_initial_materializer_does_not_block_engine_work_or_shutdown() {
         opening.deltas.iter().all(|delta| delta.row().is_none()),
         "the blocked operation left no optimistic row across reopen"
     );
+    assert!(matches!(
+        reopened
+            .reattach_by_correlation(token)
+            .expect("the reopened correlation lookup remains readable"),
+        ReceiptReattachment::NotFound
+    ));
     reopened.shutdown();
 }
 
@@ -2685,13 +2738,19 @@ fn initial_materializer_failures_leave_no_acceptance_residue() {
         let registration = engine
             .add_replaceable_materializer([slot; 16], [slot + 1; 16], failure)
             .expect("materializer registers");
+        let token = format!("initial-materializer-failure-{slot}");
+        let mut intent = replaceable_contact_intent(
+            &registration,
+            &base,
+            Keys::generate().public_key(),
+            RelayUrl::parse("wss://initial-refusal.example").unwrap(),
+        );
+        intent.correlation = Some(
+            nmp_grammar::CorrelationToken::try_from(token.as_str())
+                .expect("the failure fixture token is valid"),
+        );
         let error = engine
-            .publish(replaceable_contact_intent(
-                &registration,
-                &base,
-                Keys::generate().public_key(),
-                RelayUrl::parse("wss://initial-refusal.example").unwrap(),
-            ))
+            .publish(intent)
             .err()
             .expect("failure mode refuses publication");
         assert!(
@@ -2721,6 +2780,12 @@ fn initial_materializer_failures_leave_no_acceptance_residue() {
             opening.deltas.iter().all(|delta| delta.row().is_none()),
             "{failure:?} must create no optimistic row"
         );
+        assert!(matches!(
+            engine
+                .reattach_by_correlation(token)
+                .expect("the correlation lookup remains readable"),
+            ReceiptReattachment::NotFound
+        ));
         engine.shutdown();
     }
 }
@@ -2754,11 +2819,16 @@ fn replacing_registration_while_initial_materializer_is_blocked_refuses_without_
             },
         )
         .expect("first materializer registers");
-    let intent = replaceable_contact_intent(
+    let token = "replaced-initial-materializer".to_string();
+    let mut intent = replaceable_contact_intent(
         &registration,
         &base,
         Keys::generate().public_key(),
         RelayUrl::parse("wss://registration-replacement.example").unwrap(),
+    );
+    intent.correlation = Some(
+        nmp_grammar::CorrelationToken::try_from(token.as_str())
+            .expect("the replacement fixture token is valid"),
     );
     let publisher_engine = Arc::clone(&engine);
     let publisher = std::thread::spawn(move || publisher_engine.publish(intent).err());
@@ -2792,6 +2862,12 @@ fn replacing_registration_while_initial_materializer_is_blocked_refuses_without_
             .is_empty(),
         "registration replacement leaves no receipt or dependent durable work"
     );
+    assert!(matches!(
+        engine
+            .reattach_by_correlation(token)
+            .expect("the correlation lookup remains readable"),
+        ReceiptReattachment::NotFound
+    ));
     engine.shutdown();
 }
 

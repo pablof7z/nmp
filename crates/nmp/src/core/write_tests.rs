@@ -1594,13 +1594,17 @@ mod semantic_successor_tests {
             person.to_bytes().to_vec(),
         )
         .unwrap();
+        let token = "initial-materializer-spawn-refusal";
         let prepared = match core.prepare_publish(WriteIntent {
             payload: WritePayload::ReplaceableOperation(operation),
             routing: WriteRouting::Explicit(vec![
                 RelayUrl::parse("wss://spawn-refusal.example").unwrap()
             ]),
             identity: Identity::Active,
-            correlation: None,
+            correlation: Some(
+                nmp_grammar::CorrelationToken::try_from(token)
+                    .expect("the spawn-refusal fixture token is valid"),
+            ),
         }) {
             PublishPreparation::Materialize(prepared) => prepared,
             PublishPreparation::Complete(effects) => {
@@ -1627,6 +1631,9 @@ mod semantic_successor_tests {
             .publish_queue_entries(None, u8::MAX)
             .unwrap()
             .is_empty());
+        let (reattachment, resolved_id) = core.reattach_by_correlation(token.to_string());
+        assert_eq!(reattachment.outcome, ReattachOutcome::NotFound);
+        assert_eq!(resolved_id, None);
         let coordinate = Coordinate {
             kind: Kind::ContactList,
             public_key: author.public_key(),
