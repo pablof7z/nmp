@@ -503,6 +503,58 @@ fn configured_lane_start_failure_rolls_back_the_precommit_transaction() {
 }
 
 #[test]
+fn configured_query_newest_before_failure_is_consumed_once() {
+    let keys = nostr::Keys::generate();
+    let relay = RelayUrl::parse("wss://query-newest-before-failure.example").unwrap();
+    let events: Vec<_> = (100..103)
+        .map(|created_at| {
+            nostr::EventBuilder::new(Kind::TextNote, format!("row-{created_at}"))
+                .custom_created_at(Timestamp::from(created_at))
+                .sign_with_keys(&keys)
+                .unwrap()
+        })
+        .collect();
+    let before = EventCursor::new(events[2].created_at, events[2].id);
+    let expected = [events[1].id, events[0].id];
+    let mut store = RedbStore::temporary_with_failed_query_newest_before()
+        .expect("temporary Redb query-newest-before failure fixture");
+    store
+        .insert_batch(
+            events
+                .into_iter()
+                .map(|event| {
+                    (
+                        event,
+                        RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+
+    let filter = Filter::new().kind(Kind::TextNote);
+    assert!(store
+        .query_newest_before(&filter, before, 0)
+        .expect("a zero-limit no-op cannot consume the construction arm")
+        .is_empty());
+    let error = store
+        .query_newest_before(&filter, before, 2)
+        .expect_err("construction-armed bounded read must refuse once");
+    assert_eq!(
+        error.to_string(),
+        "durable-store persistence failure: injected query-newest-before failure"
+    );
+
+    let rows = store
+        .query_newest_before(&filter, before, 2)
+        .expect("the same store retries after consuming the one-shot refusal");
+    assert_eq!(
+        rows.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
 fn configured_compensation_failure_rolls_back_and_is_consumed_once() {
     let keys = nostr::Keys::generate();
     let mut store = RedbStore::temporary_with_failed_compensation_with_state()
