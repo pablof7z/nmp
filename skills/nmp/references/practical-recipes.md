@@ -185,7 +185,7 @@ Show two sections:
 
 Correlate by relay where the two public projections provide one, then compare the semantic demand with diagnostics' wire-filter JSON. There is no public stable query/filter identifier joining one `SourceEvidence` row to one exact diagnostic filter, and Swift's filter encoder is internal. Useful questions are: Was a source planned? Does the observed wire shape match the demand? Did events arrive? Is coverage present? Was a local cap reported?
 
-Do not display `100% synced`, infer zero from missing coverage, or promise native fields for Rust-only store degradation/rejection counters. Reserved AUTH vocabulary is not proof that the engine currently populates an AUTH lifecycle.
+Do not display `100% synced`, infer zero from missing coverage, or promise native fields for Rust-only store degradation/rejection counters. `SourceStatus.awaitingAuth`/`authDenied`, `AuthPhase`, and `DiagnosticsSnapshot.authSessions` are live, populated states for `AccessContext::Nip42` demands, not reserved vocabulary awaiting a future implementation — a relay-debug sheet can render them today.
 
 ## Cache-first bounded list
 
