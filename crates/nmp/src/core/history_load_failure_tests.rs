@@ -445,18 +445,15 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
 /// that is later abandoned.
 #[test]
 fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
-    let control = StoreFailureControl::default();
+    let (_directory, path) = canonical_corruption(3, "union-later-branch-corruption.redb");
     let mut core = EngineCore::new(
-        ControlledFailureStore::new(
-            RedbStore::temporary().expect("temporary Redb store"),
-            control.clone(),
-        ),
+        RedbStore::open(&path).expect("reopen corrupted Redb fixture"),
         20,
     );
     let baseline = core.observation_ownership_census();
 
     // The first branch resolves without touching the store; the second must
-    // read it to resolve its `Derived` inner query, so the injected failure
+    // read it to resolve its `Derived` inner query, so the corrupt kind-3 row
     // can only strike the LATER branch. Canonical branch order sorts on the
     // selection first, and 1 < 2.
     let first = nmp_grammar::Demand::from_filter(Filter {
@@ -492,22 +489,21 @@ fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
          has nothing to roll back"
     );
 
-    control.fail_query("second branch graph construction failed");
-    let effects = match core.open_observation(query, Timestamp::from(0u64)) {
+    let (reason, effects) = match core.open_observation(query, Timestamp::from(0u64)) {
         ObservationOpen::Refused { reason, effects } => {
             assert!(
-                reason.contains("second branch graph construction failed"),
+                reason.contains("decode canonical event view"),
                 "unexpected refusal: {reason}"
             );
-            effects
+            (reason, effects)
         }
-        ObservationOpen::Opened { .. } => panic!("injected resolution failure was ignored"),
+        ObservationOpen::Opened { .. } => panic!("corrupt later-branch row was ignored"),
     };
 
-    assert_only_refusal_diagnostic(
-        &effects,
-        "durable-store persistence failure: second branch graph construction failed",
-    );
+    let store_error = reason
+        .strip_prefix("canonical query resolution failed: ")
+        .expect("branch construction refusal names its store error");
+    assert_only_refusal_diagnostic(&effects, store_error);
     assert_eq!(
         core.observation_ownership_census(),
         baseline,
@@ -578,11 +574,9 @@ fn opening_freshness_refusal_leaves_no_candidate_request_target_index() {
 /// exactly once.
 #[test]
 fn resolver_refusal_carries_the_pending_drop_delta_exactly_once() {
-    let control = StoreFailureControl::default();
-    let mut resolver = ResolverEngine::new(ControlledFailureStore::new(
-        RedbStore::temporary().expect("temporary Redb store"),
-        control.clone(),
-    ));
+    let (_directory, path) = canonical_corruption(3, "pending-drop-corruption.redb");
+    let mut resolver =
+        ResolverEngine::new(RedbStore::open(&path).expect("reopen corrupted Redb fixture"));
     let first = nmp_grammar::Demand::from_filter(Filter {
         kinds: Some(BTreeSet::from([1])),
         ..Filter::default()
@@ -604,15 +598,12 @@ fn resolver_refusal_carries_the_pending_drop_delta_exactly_once() {
         }))),
         ..Filter::default()
     });
-    control.fail_query("failed after draining pending drops");
     let delta = match resolver.subscribe(failing) {
         SubscribeOutcome::Refused { error, delta } => {
-            assert!(error
-                .to_string()
-                .contains("failed after draining pending drops"));
+            assert!(error.to_string().contains("decode canonical event view"));
             delta
         }
-        SubscribeOutcome::Opened { .. } => panic!("injected graph failure was ignored"),
+        SubscribeOutcome::Opened { .. } => panic!("corrupt derived-query row was ignored"),
     };
     assert_eq!(delta.ops.len(), 1);
     assert!(matches!(
@@ -628,13 +619,12 @@ fn resolver_refusal_carries_the_pending_drop_delta_exactly_once() {
 #[test]
 fn each_refused_open_arm_consumes_a_pending_drop_into_one_same_call_wire_close() {
     for graph_refusal in [true, false] {
-        let control = StoreFailureControl::default();
+        let corrupt_kind = if graph_refusal { 3 } else { 2 };
+        let (_directory, path) =
+            canonical_corruption(corrupt_kind, "refused-open-withdrawal-corruption.redb");
         let relay = RelayUrl::parse("wss://refused-open-withdrawal.example").unwrap();
         let mut core = EngineCore::new(
-            ControlledFailureStore::new(
-                RedbStore::temporary().expect("temporary Redb store"),
-                control.clone(),
-            ),
+            RedbStore::open(&path).expect("reopen corrupted Redb fixture"),
             4,
         );
         let mut first = nmp_grammar::Demand::from_filter(Filter {
@@ -688,18 +678,16 @@ fn each_refused_open_arm_consumes_a_pending_drop_into_one_same_call_wire_close()
             })
         };
         let refusal = if graph_refusal { "graph" } else { "projection" };
-        control.fail_query(&format!(
-            "{refusal} refused after draining pending wire owner"
-        ));
         let effects = match core.open_observation(LiveQuery::single(failing), Timestamp::from(0u64))
         {
             ObservationOpen::Refused { reason, effects } => {
-                assert!(reason.contains(&format!(
-                    "{refusal} refused after draining pending wire owner"
-                )));
+                assert!(
+                    reason.contains("decode canonical event view"),
+                    "unexpected {refusal} refusal: {reason}"
+                );
                 effects
             }
-            ObservationOpen::Opened { .. } => panic!("injected {refusal} failure was ignored"),
+            ObservationOpen::Opened { .. } => panic!("corrupt {refusal} row was ignored"),
         };
         let closes: Vec<_> = effects
             .iter()
