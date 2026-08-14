@@ -462,10 +462,11 @@ impl Engine {
     /// (Unit A0), same as every other entry point.
     #[cfg(feature = "unstable-mechanism")]
     #[doc(hidden)]
-    pub fn from_parts<S>(store: S, cap: usize, pool_config: PoolConfig) -> Result<Self, EngineError>
-    where
-        S: nmp_store::EventStore + Send + 'static,
-    {
+    pub fn from_parts(
+        store: RedbStore,
+        cap: usize,
+        pool_config: PoolConfig,
+    ) -> Result<Self, EngineError> {
         let (engine_thread, handle) =
             EngineThread::spawn(store, cap, pool_config).map_err(EngineError::from_start_error)?;
         Ok(Self {
@@ -480,15 +481,12 @@ impl Engine {
     /// in-workspace falsifiers such as the scripted BDD harness.
     #[cfg(feature = "unstable-mechanism")]
     #[doc(hidden)]
-    pub fn from_parts_with_fixture_routing_facts<S>(
-        store: S,
+    pub fn from_parts_with_fixture_routing_facts(
+        store: RedbStore,
         facts: nmp_router::FixtureRoutingFacts,
         cap: usize,
         pool_config: PoolConfig,
-    ) -> Result<Self, EngineError>
-    where
-        S: nmp_store::EventStore + Send + 'static,
-    {
+    ) -> Result<Self, EngineError> {
         let (engine_thread, handle) =
             EngineThread::spawn_with_fixture_routing_facts(store, facts, cap, pool_config)
                 .map_err(EngineError::from_start_error)?;
@@ -507,16 +505,13 @@ impl Engine {
     /// [`Self::new`] and [`EngineConfig`].
     #[cfg(all(feature = "unstable-mechanism", feature = "nip65"))]
     #[doc(hidden)]
-    pub fn from_parts_with_fixture_routing_facts_and_nip65_sources<S>(
-        store: S,
+    pub fn from_parts_with_fixture_routing_facts_and_nip65_sources(
+        store: RedbStore,
         facts: nmp_router::FixtureRoutingFacts,
         nip65_sources: Vec<RelayUrl>,
         cap: usize,
         pool_config: PoolConfig,
-    ) -> Result<Self, EngineError>
-    where
-        S: nmp_store::EventStore + Send + 'static,
-    {
+    ) -> Result<Self, EngineError> {
         let runtime_config = RuntimeConfig {
             max_auth_capabilities: crate::runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
             max_publish_attempts: crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS,
