@@ -266,12 +266,12 @@ impl EngineCore {
     /// truth came from it, without replacing this reducer or any public
     /// Engine-owned handle. The failed mutation is never retried here.
     pub(crate) fn recover_store_after_failure(&mut self) -> Result<Vec<Effect>, PersistenceError> {
-        self.resolver.store_mut().reopen_after_failure()?;
+        self.store.reopen_after_failure()?;
 
         // An I/O error may have committed even though redb returned `Err`.
         // Recompute every store-derived binding before projecting rows, then
         // rebuild the durable write plane from stable receipt/intent keys.
-        let resolver_delta = self.resolver.rebuild_after_store_reopen()?;
+        let resolver_delta = self.resolver.rebuild_after_store_reopen(&self.store)?;
         self.consume_resolver_delta(resolver_delta);
 
         self.quarantined_auth_receipts.clear();
@@ -781,8 +781,7 @@ impl EngineCore {
         };
         let intent_id = key.intent_id;
         let Ok(Some(lane)) = self
-            .resolver
-            .store()
+            .store
             .recover_publish_queue_lanes(intent_id)
             .map(|lanes| lanes.into_iter().find(|lane| lane.key == key))
         else {
@@ -876,8 +875,7 @@ impl EngineCore {
         for (id, pending) in &self.pending {
             if self.lane_relay_index_degraded || !pending.lane_projection.uncertain.is_empty() {
                 lanes.extend(
-                    self.resolver
-                        .store()
+                    self.store
                         .recover_publish_queue_lanes(pending.intent_id)?
                         .into_iter()
                         .map(|lane| (*id, lane)),
@@ -1194,7 +1192,7 @@ impl EngineCore {
             let Some(intent_id) = self.pending.get(&id).map(|pending| pending.intent_id) else {
                 continue;
             };
-            match self.resolver.store().recover_publish_queue_lanes(intent_id) {
+            match self.store.recover_publish_queue_lanes(intent_id) {
                 Ok(recovered) => lanes.extend(
                     recovered
                         .into_iter()
@@ -1262,8 +1260,7 @@ impl EngineCore {
             }
             let retry_detail = (!auth_only && lane.last_ordinal > 0)
                 .then(|| {
-                    self.resolver
-                        .store()
+                    self.store
                         .recover_attempt_details(lane.key.intent_id)
                         .ok()?
                         .into_iter()
@@ -1304,8 +1301,7 @@ impl EngineCore {
         let mut effects = Vec::new();
         loop {
             let due = match self
-                .resolver
-                .store()
+                .store
                 .due_publish_queue_deadlines(now, DEADLINE_READ_BATCH)
             {
                 Ok(due) => due,
@@ -1320,8 +1316,7 @@ impl EngineCore {
             for deadline in due {
                 let id = self.receipt_for_intent(deadline.key.intent_id);
                 let lane = self
-                    .resolver
-                    .store()
+                    .store
                     .recover_publish_queue_lanes(deadline.key.intent_id)
                     .ok()
                     .and_then(|lanes| {
@@ -1390,7 +1385,7 @@ impl EngineCore {
         // `pending`/`lane_relay_index_degraded` in the untrustworthy state
         // they must be in for a set that was never rebuilt. The one-shot
         // #122 degradation is the whole visible outcome.
-        let recovered = match self.resolver.store().recover_publish_queue() {
+        let recovered = match self.store.recover_publish_queue() {
             Ok(recovered) => recovered,
             Err(error) => {
                 self.lane_relay_index_degraded = true;
@@ -1423,11 +1418,7 @@ impl EngineCore {
                 materialization: Some(materialization),
             } = &intent.work
             {
-                let snapshot = match self
-                    .resolver
-                    .store()
-                    .replaceable_operation_snapshot(coordinate)
-                {
+                let snapshot = match self.store.replaceable_operation_snapshot(coordinate) {
                     Ok(Some(snapshot)) => snapshot,
                     Ok(None) => continue,
                     Err(error) => {
@@ -1444,7 +1435,7 @@ impl EngineCore {
                 if generation.materialization != materialization.receipt.materialization {
                     continue;
                 }
-                let row = match self.resolver.store().query(
+                let row = match self.store.query(
                     &nostr::Filter::new().id(materialization.receipt.materialization.event_id),
                 ) {
                     Ok(rows) => rows.into_iter().next(),
@@ -1589,11 +1580,7 @@ impl EngineCore {
                 continue;
             }
 
-            let revisions = match self
-                .resolver
-                .store()
-                .recover_route_revisions(intent.intent_id)
-            {
+            let revisions = match self.store.recover_route_revisions(intent.intent_id) {
                 Ok(revisions) => revisions,
                 Err(error) => {
                     // This intent may already own real persisted lanes from
@@ -1687,7 +1674,7 @@ impl EngineCore {
             // successor reaches `on_signed` with an empty durable route set,
             // mistakes every persisted route for a new addition, and tries
             // to bootstrap current lanes against predecessor attempt history.
-            let revisions = match self.resolver.store().recover_route_revisions(intent_id) {
+            let revisions = match self.store.recover_route_revisions(intent_id) {
                 Ok(revisions) => revisions,
                 Err(error) => {
                     self.record_store_failure(&error);
@@ -1952,7 +1939,7 @@ impl EngineCore {
         if self.quarantined_auth_receipts.contains_key(&id) {
             return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable);
         }
-        let receipt = match self.resolver.store().reattach_receipt(id.0) {
+        let receipt = match self.store.reattach_receipt(id.0) {
             Ok(Some(receipt)) => receipt,
             Ok(None) => return ReceiptReplayPage::unavailable(ReattachOutcome::NotFound),
             Err(_) => {
@@ -1989,11 +1976,7 @@ impl EngineCore {
             .or_else(|| receipt.event_id())
             .expect("active receipt carries a current event id");
         let evidence_intent = if let Some((coordinate, _, _)) = &semantic {
-            match self
-                .resolver
-                .store()
-                .replaceable_operation_snapshot(coordinate)
-            {
+            match self.store.replaceable_operation_snapshot(coordinate) {
                 Ok(Some(snapshot)) => snapshot
                     .current
                     .generation
@@ -2020,7 +2003,7 @@ impl EngineCore {
         }
         let (attempts, details, lanes) = match evidence_intent {
             Some(intent_id) => {
-                let attempts = match self.resolver.store().recover_attempts(intent_id) {
+                let attempts = match self.store.recover_attempts(intent_id) {
                     Ok(attempts) => attempts,
                     Err(_) => {
                         return ReceiptReplayPage::unavailable(
@@ -2028,7 +2011,7 @@ impl EngineCore {
                         )
                     }
                 };
-                let details = match self.resolver.store().recover_attempt_details(intent_id) {
+                let details = match self.store.recover_attempt_details(intent_id) {
                     Ok(details) => details,
                     Err(_) => {
                         return ReceiptReplayPage::unavailable(
@@ -2036,7 +2019,7 @@ impl EngineCore {
                         )
                     }
                 };
-                let lanes = match self.resolver.store().recover_publish_queue_lanes(intent_id) {
+                let lanes = match self.store.recover_publish_queue_lanes(intent_id) {
                     Ok(lanes) => lanes,
                     Err(_) => {
                         return ReceiptReplayPage::unavailable(
@@ -2044,12 +2027,7 @@ impl EngineCore {
                         )
                     }
                 };
-                if self
-                    .resolver
-                    .store()
-                    .recover_route_revisions(intent_id)
-                    .is_err()
-                {
+                if self.store.recover_route_revisions(intent_id).is_err() {
                     return ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable);
                 }
                 (attempts, details, lanes)
@@ -2398,8 +2376,7 @@ impl EngineCore {
     pub(crate) fn receipt_is_live(&self, id: ReceiptId) -> bool {
         self.pending.contains_key(&id)
             || self
-                .resolver
-                .store()
+                .store
                 .reattach_receipt(id.0)
                 .ok()
                 .flatten()
@@ -2439,7 +2416,7 @@ impl EngineCore {
         cursor: Option<ReceiptReplayCursor>,
         limit: usize,
     ) -> (ReceiptReplayPage, Option<ReceiptId>) {
-        match self.resolver.store().lookup_correlation(&token) {
+        match self.store.lookup_correlation(&token) {
             Ok(Some(receipt_id)) => {
                 let id = ReceiptId(receipt_id);
                 (self.reattach_receipt_page(id, cursor, limit), Some(id))
@@ -2477,11 +2454,7 @@ impl EngineCore {
             public_key: source.pubkey,
             identifier: source.tags.identifier().unwrap_or("").to_owned(),
         };
-        let snapshot = match self
-            .resolver
-            .store()
-            .replaceable_operation_snapshot(&coordinate)
-        {
+        let snapshot = match self.store.replaceable_operation_snapshot(&coordinate) {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => return false,
             Err(error) => {
@@ -2505,7 +2478,7 @@ impl EngineCore {
         }
         if let Some(generation) = snapshot.current.generation.as_ref() {
             for member in &generation.members {
-                let attempts = match self.resolver.store().recover_attempts(*member) {
+                let attempts = match self.store.recover_attempts(*member) {
                     Ok(attempts) => attempts,
                     Err(error) => {
                         self.degrade_store(error, effects);
@@ -2692,7 +2665,7 @@ impl EngineCore {
         };
         let installed = match self
             .resolver
-            .install_replaceable_source_materialization(install)
+            .install_replaceable_source_materialization(&mut self.store, install)
         {
             Ok(installed) => installed,
             Err(error) => {
@@ -2826,11 +2799,7 @@ impl EngineCore {
             public_key: original_source.pubkey,
             identifier: original_source.tags.identifier().unwrap_or("").to_owned(),
         };
-        let snapshot = match self
-            .resolver
-            .store()
-            .replaceable_operation_snapshot(&coordinate)
-        {
+        let snapshot = match self.store.replaceable_operation_snapshot(&coordinate) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 return self.refuse_publish(PublishError::PersistenceFailed {
@@ -2979,8 +2948,7 @@ impl EngineCore {
             .as_ref()
             .and_then(|snapshot| snapshot.source.clone())
             .or_else(|| {
-                self.resolver
-                    .store()
+                self.store
                     .query(&nostr::Filter::new().id(source_event_id))
                     .ok()
                     .and_then(|rows| {
@@ -3096,16 +3064,17 @@ impl EngineCore {
             accepted_at: self.clock,
             correlation,
         };
-        let LocalAcceptResult { outcome, committed } = match self.resolver.accept_local(accept) {
-            Ok(result) => result,
-            Err(error) => {
-                let mut effects = self.refuse_publish(PublishError::PersistenceFailed {
-                    reason: error.to_string(),
-                });
-                self.degrade_store(error, &mut effects);
-                return effects;
-            }
-        };
+        let LocalAcceptResult { outcome, committed } =
+            match self.resolver.accept_local(&mut self.store, accept) {
+                Ok(result) => result,
+                Err(error) => {
+                    let mut effects = self.refuse_publish(PublishError::PersistenceFailed {
+                        reason: error.to_string(),
+                    });
+                    self.degrade_store(error, &mut effects);
+                    return effects;
+                }
+            };
         let (intent_id, receipt_id, current, installed) = match outcome {
             AcceptOutcome::ReplaceableOperation {
                 intent_id,
@@ -3297,7 +3266,7 @@ impl EngineCore {
         // any store mutation for THIS call -- TOCTOU-free by construction
         // (no concurrent `&mut self` call can be interleaved).
         if let Some(token) = &correlation {
-            match self.resolver.store().lookup_correlation(token.as_ref()) {
+            match self.store.lookup_correlation(token.as_ref()) {
                 Ok(Some(existing_receipt_id)) => {
                     let receipt_id = ReceiptId(existing_receipt_id);
                     let page = self.reattach_receipt(receipt_id);
@@ -3469,19 +3438,19 @@ impl EngineCore {
                 accepted_at: self.clock,
                 correlation,
             };
-            let LocalAcceptResult { outcome, committed } = match self.resolver.accept_local(accept)
-            {
-                Ok(value) => value,
-                // Rule 1: recording anything at all needs the disk that just
-                // refused. There is no queue entry to fail into.
-                Err(err) => {
-                    let mut effects = self.refuse_publish(PublishError::PersistenceFailed {
-                        reason: err.to_string(),
-                    });
-                    self.degrade_store(err, &mut effects);
-                    return effects;
-                }
-            };
+            let LocalAcceptResult { outcome, committed } =
+                match self.resolver.accept_local(&mut self.store, accept) {
+                    Ok(value) => value,
+                    // Rule 1: recording anything at all needs the disk that just
+                    // refused. There is no queue entry to fail into.
+                    Err(err) => {
+                        let mut effects = self.refuse_publish(PublishError::PersistenceFailed {
+                            reason: err.to_string(),
+                        });
+                        self.degrade_store(err, &mut effects);
+                        return effects;
+                    }
+                };
             let Some(intent_id) = outcome.journaled_intent_id() else {
                 let AcceptOutcome::Refused(reason) = outcome else {
                     unreachable!("only Refused omits journal ids")
@@ -3496,11 +3465,7 @@ impl EngineCore {
                 // both event ids, which is what lets an app fetch what is
                 // actually there, reapply the user's change and resubmit
                 // without ever troubling them.
-                return match self.resolver.store_mut().accept_refused(
-                    frozen.id,
-                    signing_pubkey,
-                    reason,
-                ) {
+                return match self.store.accept_refused(frozen.id, signing_pubkey, reason) {
                     Ok(receipt_id) => {
                         let id = ReceiptId(receipt_id);
                         vec![
@@ -3847,8 +3812,7 @@ impl EngineCore {
         limit: u8,
     ) -> Result<Vec<PublishQueueEntry>, PersistenceError> {
         let receipts = self
-            .resolver
-            .store()
+            .store
             .publish_queue_receipts_after(after.map(|id| id.0), limit)?;
         validate_publish_queue_page(
             after.map(|id| id.0),
@@ -3876,15 +3840,12 @@ impl EngineCore {
             .filter(|id| after.is_none_or(|after| *id > after))
             .take(usize::from(limit))
             .map(|id| {
-                self.resolver
-                    .store()
-                    .reattach_receipt(id.0)?
-                    .ok_or_else(|| {
-                        PersistenceError::invariant(format!(
-                            "active event index names missing receipt {}",
-                            id.0
-                        ))
-                    })
+                self.store.reattach_receipt(id.0)?.ok_or_else(|| {
+                    PersistenceError::invariant(format!(
+                        "active event index names missing receipt {}",
+                        id.0
+                    ))
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.project_publish_queue_entries(receipts)
@@ -4015,11 +3976,7 @@ impl EngineCore {
     }
 
     fn relay_states_for(&self, pending: &PendingWrite) -> Vec<(RelayUrl, RelayState)> {
-        let Ok(lanes) = self
-            .resolver
-            .store()
-            .recover_publish_queue_lanes(pending.intent_id)
-        else {
+        let Ok(lanes) = self.store.recover_publish_queue_lanes(pending.intent_id) else {
             return Vec::new();
         };
         lanes
@@ -4090,7 +4047,7 @@ impl EngineCore {
         if self.pending.contains_key(&id) {
             return Err(RemoveQueueEntryError::StillActive { receipt_id: id });
         }
-        match self.resolver.store_mut().remove_publish_queue_entry(id.0) {
+        match self.store.remove_publish_queue_entry(id.0) {
             Ok(RemoveQueueEntryOutcome::Removed) => Ok(()),
             Ok(RemoveQueueEntryOutcome::NotFound) => {
                 Err(RemoveQueueEntryError::UnknownReceipt { receipt_id: id })
@@ -4112,17 +4069,14 @@ impl EngineCore {
         let mut effects = Vec::new();
         let Some(pending) = self.pending.remove(&id) else {
             if let Some(quarantined) = self.quarantined_auth_receipts.get(&id).cloned() {
-                match self
-                    .resolver
-                    .store_mut()
-                    .cancel_write(quarantined.intent_id)
-                {
+                match self.store.cancel_write(quarantined.intent_id) {
                     Ok(outcome @ CompensateOutcome::Compensated { .. }) => {
                         let event_id = quarantined.frozen.id;
-                        match self
-                            .resolver
-                            .react_to_compensation(quarantined.frozen, &outcome)
-                        {
+                        match self.resolver.react_to_compensation(
+                            &self.store,
+                            quarantined.frozen,
+                            &outcome,
+                        ) {
                             Ok(committed) => self.apply_committed_mutation(committed, &mut effects),
                             Err(error) => self.degrade_store(error, &mut effects),
                         }
@@ -4161,7 +4115,7 @@ impl EngineCore {
                     }
                 }
             }
-            let retained = match self.resolver.store().reattach_receipt(id.0) {
+            let retained = match self.store.reattach_receipt(id.0) {
                 Ok(Some(receipt)) => receipt,
                 Ok(None) => {
                     return (
@@ -4200,12 +4154,13 @@ impl EngineCore {
 
         {
             let intent_id = pending.intent_id;
-            match self.resolver.store_mut().cancel_write(intent_id) {
+            match self.store.cancel_write(intent_id) {
                 Ok(outcome @ CompensateOutcome::Compensated { .. }) => {
-                    match self
-                        .resolver
-                        .react_to_compensation(pending.frozen.clone(), &outcome)
-                    {
+                    match self.resolver.react_to_compensation(
+                        &self.store,
+                        pending.frozen.clone(),
+                        &outcome,
+                    ) {
                         Ok(committed) => self.apply_committed_mutation(committed, &mut effects),
                         Err(error) => self.degrade_store(error, &mut effects),
                     }
@@ -4222,7 +4177,7 @@ impl EngineCore {
                     );
                 }
                 Ok(CompensateOutcome::NotFound) => {
-                    let result = match self.resolver.store().reattach_receipt(id.0) {
+                    let result = match self.store.reattach_receipt(id.0) {
                         Ok(Some(receipt)) => Self::retained_cancel_result(id, &receipt),
                         Ok(None) => {
                             self.pending.insert(id, pending);
@@ -4311,11 +4266,7 @@ impl EngineCore {
                 }
             };
             if !pending.already_signed {
-                match self
-                    .resolver
-                    .store_mut()
-                    .promote_signed(promotion_target, verified)
-                {
+                match self.store.promote_signed(promotion_target, verified) {
                     Ok(PromoteOutcome::Promoted { co_signed, .. }) => {
                         signature_promoted = true;
                         // The store atomically promotes every exact-duplicate
@@ -4377,7 +4328,10 @@ impl EngineCore {
         }
 
         if signature_promoted {
-            match self.resolver.react_to_signature_promotion(event.id) {
+            match self
+                .resolver
+                .react_to_signature_promotion(&self.store, event.id)
+            {
                 Ok(committed) => self.apply_committed_mutation(committed, effects),
                 // The store promotion is already committed. Preserve it and
                 // degrade the projection rather than compensating a validly
@@ -4708,15 +4662,16 @@ impl EngineCore {
 
         {
             let intent_id = pending.intent_id;
-            match self.resolver.store_mut().compensate_write(intent_id) {
+            match self.store.compensate_write(intent_id) {
                 Ok(outcome @ CompensateOutcome::Compensated { .. }) => {
                     // The store compensation already committed; reacting only
                     // re-reads to recompute the graph. A read failure here
                     // (issue #122) degrades to read-only rather than panics.
-                    match self
-                        .resolver
-                        .react_to_compensation(pending.frozen.clone(), &outcome)
-                    {
+                    match self.resolver.react_to_compensation(
+                        &self.store,
+                        pending.frozen.clone(),
+                        &outcome,
+                    ) {
                         Ok(committed) => {
                             self.apply_committed_mutation(committed, effects);
                         }
@@ -4859,11 +4814,7 @@ impl EngineCore {
         //    widely replicated parent from turning one reply into unbounded
         //    fan-out while leaving the future best-source policy to #1378.
         if let Some(parent_id) = reply_parent_event_id(event) {
-            match self
-                .resolver
-                .store()
-                .query(&nostr::Filter::new().id(parent_id))
-            {
+            match self.store.query(&nostr::Filter::new().id(parent_id)) {
                 Ok(rows) => {
                     if let Some(relay) = rows
                         .into_iter()
@@ -5278,11 +5229,7 @@ impl EngineCore {
                     //
                     // The RECEIPT is retained and reattachable either way,
                     // so the app can still read back what happened and why.
-                    let closed = self
-                        .resolver
-                        .store_mut()
-                        .close_unroutable_intent(intent_id)
-                        .is_ok();
+                    let closed = self.store.close_unroutable_intent(intent_id).is_ok();
                     self.emit_write_fact(
                         id,
                         WriteFact::Outcome(WriteOutcome::NoDestination),
@@ -5430,8 +5377,7 @@ impl EngineCore {
                 relay: relay.clone(),
             };
             let lane = self
-                .resolver
-                .store()
+                .store
                 .recover_publish_queue_lanes(intent_id)
                 .ok()
                 .and_then(|lanes| lanes.into_iter().find(|lane| lane.key == key));

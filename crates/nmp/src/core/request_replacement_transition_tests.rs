@@ -275,8 +275,7 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
     assert!(wire_ops(&late).is_empty());
     assert!(fixture
         .core
-        .resolver
-        .store()
+        .store
         .get_coverage(second_claim, &fixture.relay)
         .unwrap()
         .is_none());

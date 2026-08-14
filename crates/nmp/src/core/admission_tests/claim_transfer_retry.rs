@@ -93,10 +93,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
         .iter()
         .any(|effect| matches!(effect, Effect::EmitObservationEvidence(..))));
     assert_eq!(
-        core.resolver
-            .store()
-            .get_coverage(added_claim, &relay)
-            .unwrap(),
+        core.store.get_coverage(added_claim, &relay).unwrap(),
         Some(old),
         "failure cannot mutate durable coverage or publish freshness"
     );
@@ -121,10 +118,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
         .iter()
         .any(|effect| matches!(effect, Effect::EmitObservationEvidence(..))));
     assert_eq!(
-        core.resolver
-            .store()
-            .get_coverage(added_claim, &relay)
-            .unwrap(),
+        core.store.get_coverage(added_claim, &relay).unwrap(),
         Some(CoverageInterval::new(
             Timestamp::from(0),
             Timestamp::from(200)
@@ -271,10 +265,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
     core.tick(Timestamp::from(300u64));
     assert_eq!(core.request_claim_transfer_attempts.get(), 1);
     assert_eq!(
-        core.resolver
-            .store()
-            .get_coverage(added_claim, &relay)
-            .unwrap(),
+        core.store.get_coverage(added_claim, &relay).unwrap(),
         Some(CoverageInterval::new(
             Timestamp::from(100),
             Timestamp::from(250)

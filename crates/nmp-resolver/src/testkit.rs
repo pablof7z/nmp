@@ -19,6 +19,7 @@ use crate::engine::{Engine, GraphSnapshot, HandleId, Metrics, QueryHandle, Subsc
 /// The scripted "fake relay" harness: `Engine` plus the
 /// pass-through calls the contract tests drive.
 pub struct Harness {
+    store: RedbStore,
     engine: Engine,
 }
 
@@ -31,18 +32,19 @@ impl Default for Harness {
 impl Harness {
     pub fn new() -> Self {
         Self {
-            engine: Engine::new(RedbStore::temporary().expect("temporary Redb store")),
+            store: RedbStore::temporary().expect("temporary Redb store"),
+            engine: Engine::new(),
         }
     }
 
     pub fn set_active(&mut self, pk: Option<nostr::PublicKey>) -> DemandDelta {
         self.engine
-            .set_active_pubkey(pk)
+            .set_active_pubkey(&self.store, pk)
             .expect("temporary Redb query persistence")
     }
 
     pub fn subscribe(&mut self, q: nmp_grammar::Demand) -> (QueryHandle, DemandDelta) {
-        match self.engine.subscribe(q) {
+        match self.engine.subscribe(&self.store, q) {
             SubscribeOutcome::Opened { handle, delta } => (handle, delta),
             SubscribeOutcome::Refused { error, .. } => {
                 panic!("temporary Redb query persistence: {error}")
@@ -70,7 +72,7 @@ impl Harness {
     /// engine react (M1 plan §3.3 — the real path).
     pub fn deliver(&mut self, events: Vec<nostr::Event>) -> DemandDelta {
         self.engine
-            .ingest(events)
+            .ingest(&mut self.store, events)
             .expect("temporary Redb ingest persistence")
     }
 
@@ -84,7 +86,7 @@ impl Harness {
     pub fn accept(&mut self, accept: AcceptWrite) -> (AcceptOutcome, DemandDelta) {
         let accepted = self
             .engine
-            .accept_local(accept)
+            .accept_local(&mut self.store, accept)
             .expect("temporary Redb accept_write persistence");
         (accepted.outcome, accepted.committed.delta)
     }

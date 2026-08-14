@@ -229,11 +229,7 @@ fn departing_shape_remains_owned_through_atomic_eose_persistence() {
     );
     for claim in &request.coverage_claims {
         assert!(
-            core.resolver
-                .store()
-                .get_coverage(*claim, &relay)
-                .unwrap()
-                .is_some(),
+            core.store.get_coverage(*claim, &relay).unwrap().is_some(),
             "both coalesced claims commit even though one active owner departed"
         );
     }

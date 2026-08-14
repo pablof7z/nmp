@@ -34,8 +34,7 @@ fn waiting_connection_attempt_is_anchored_to_connect_time_without_maintenance() 
         |effect| matches!(effect, Effect::PublishEvent(candidate, _, _) if candidate == &session)
     ));
     let attempts = core
-        .resolver
-        .store()
+        .store
         .recover_attempt_details(intent)
         .expect("attempt-detail recovery");
     assert_eq!(attempts.len(), 1);
