@@ -89,6 +89,8 @@ pub use coverage_claims::coverage_claim_atoms;
 pub use persistent_store_lifetime::{RedbStoreOpenError, RedbStoreResetError};
 #[cfg(any(test, feature = "test-instrumentation"))]
 pub use redb_store::testing;
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub use redb_store::OrderedEventReadPause;
 pub use redb_store::RedbStore;
 #[cfg(feature = "bench-instrumentation")]
 pub use redb_store::{
