@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -12,6 +13,54 @@ import unittest
 SKILL_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VALIDATOR = Path("scripts/validate_skill.py")
+
+sys.path.insert(0, str(SKILL_DIR / "scripts"))
+from validate_skill import official_validator  # noqa: E402
+
+# Whether this workstation/agent has the official skill-creator packaging
+# validator installed (~/.codex/skills/.system/skill-creator). #1310 keeps
+# that check separate from the CI-run currency check for exactly this
+# reason: it is not available in CI, so tests that depend on it are skipped
+# rather than failed when it is absent, here and in CI alike.
+OFFICIAL_VALIDATOR_AVAILABLE = official_validator() is not None
+
+
+def _create_orphan_commit(repo: Path) -> str:
+    """Create a commit object that exists in `repo`'s object database but is
+    unreachable from any ref, for the pin-ancestry rejection test. Writing a
+    loose, content-addressed, unreferenced object is safe: it changes no ref
+    and is ordinary `git gc` litter."""
+    env = dict(os.environ)
+    env.update(
+        GIT_AUTHOR_NAME="nmp skill test fixture",
+        GIT_AUTHOR_EMAIL="nmp-skill-test-fixture@example.invalid",
+        GIT_COMMITTER_NAME="nmp skill test fixture",
+        GIT_COMMITTER_EMAIL="nmp-skill-test-fixture@example.invalid",
+    )
+    empty_tree = subprocess.run(
+        ["git", "-C", str(repo), "mktree"],
+        input="",
+        text=True,
+        capture_output=True,
+        check=True,
+        env=env,
+    ).stdout.strip()
+    commit = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "commit-tree",
+            empty_tree,
+            "-m",
+            "nmp skill test fixture: unreachable from HEAD",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        env=env,
+    ).stdout.strip()
+    return commit
 
 
 class SkillValidationTests(unittest.TestCase):
@@ -38,7 +87,7 @@ class SkillValidationTests(unittest.TestCase):
             str(REPO_ROOT),
         ]
         if not use_official:
-            command.append("--test-skip-official")
+            command.append("--skip-official")
         command.extend(extra)
         return subprocess.run(
             command,
@@ -58,7 +107,15 @@ class SkillValidationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(message, result.stderr)
 
-    def test_canonical_package_passes_bundled_and_official_validation(self) -> None:
+    def test_canonical_package_passes_bundled_validation(self) -> None:
+        result = self.run_validator()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(
+        OFFICIAL_VALIDATOR_AVAILABLE,
+        "official skill-creator validator not installed on this workstation",
+    )
+    def test_canonical_package_passes_official_validation_when_available(self) -> None:
         result = self.run_validator(use_official=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -98,7 +155,7 @@ class SkillValidationTests(unittest.TestCase):
         )
         self.assert_rejected(self.run_validator(), "declared source escapes repository root")
 
-    def test_mismatched_verified_revisions_are_rejected(self) -> None:
+    def test_unavailable_verified_revision_is_rejected(self) -> None:
         skill_text = (self.skill / "SKILL.md").read_text(encoding="utf-8")
         revision = re.search(r"Verified-Revision: `([0-9a-f]{40})`", skill_text)
         self.assertIsNotNone(revision)
@@ -107,7 +164,15 @@ class SkillValidationTests(unittest.TestCase):
             revision.group(1),
             "0000000000000000000000000000000000000000",
         )
-        self.assert_rejected(self.run_validator(), "Verified-Revision pins do not match")
+        self.assert_rejected(self.run_validator(), "verified revision is unavailable")
+
+    def test_pin_not_ancestor_of_head_is_rejected(self) -> None:
+        orphan = _create_orphan_commit(REPO_ROOT)
+        skill_text = (self.skill / "SKILL.md").read_text(encoding="utf-8")
+        revision = re.search(r"Verified-Revision: `([0-9a-f]{40})`", skill_text)
+        self.assertIsNotNone(revision)
+        self.replace("SKILL.md", revision.group(1), orphan)
+        self.assert_rejected(self.run_validator(), "verified revision is not an ancestor of HEAD")
 
     def test_missing_official_validator_is_fatal(self) -> None:
         empty_home = self.root / "empty-home"
@@ -120,7 +185,7 @@ class SkillValidationTests(unittest.TestCase):
         result = self.run_validator(env=env, use_official=True)
         self.assert_rejected(result, "official skill-creator quick_validate.py not found")
 
-    def test_explicit_test_bypass_allows_missing_official_validator(self) -> None:
+    def test_skip_official_allows_missing_official_validator(self) -> None:
         empty_home = self.root / "empty-home"
         empty_codex = self.root / "empty-codex"
         empty_home.mkdir()
@@ -130,7 +195,7 @@ class SkillValidationTests(unittest.TestCase):
         env["CODEX_HOME"] = str(empty_codex)
         result = self.run_validator(env=env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("explicitly bypassed for tests", result.stderr)
+        self.assertIn("official skill-creator validation skipped", result.stderr)
 
     def test_missing_default_prompt_is_rejected(self) -> None:
         path = self.skill / "agents/openai.yaml"
