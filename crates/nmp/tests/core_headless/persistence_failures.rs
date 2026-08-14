@@ -2,161 +2,6 @@ use super::*;
 use nmp_store::testing;
 
 // ---- fallible persistence doors and recovery indexing ------------------
-//
-// A fault-injecting `EventStore` retained only for coverage peeks that cannot
-// yet be expressed by the concrete Redb fixture. Relay-observation I/O and
-// durable-row corruption use Redb's real lifecycle below.
-pub(super) struct FailIngestStore {
-    inner: RedbStore,
-    /// #763's coverage peeks. Sticky (not one-shot) because these model a
-    /// store that has gone away rather than a single failed operation, and
-    /// because the falsifiers below need to heal them explicitly to prove the
-    /// engine comes back.
-    fail_peeks: Rc<Cell<bool>>,
-}
-
-impl FailIngestStore {
-    /// Healthy in every door except #763's coverage peek, which refuses while
-    /// `fail_peeks` is set.
-    fn peek_armed(fail_peeks: Rc<Cell<bool>>) -> Self {
-        Self {
-            inner: RedbStore::temporary().expect("temporary Redb store"),
-            fail_peeks,
-        }
-    }
-
-    /// The classification a real backend read failure carries: an
-    /// environmental condition, never `Invariant` (which would name this
-    /// crate misusing its own database).
-    fn peek_failure(&self) -> Option<PersistenceError> {
-        self.fail_peeks
-            .get()
-            .then(|| PersistenceError::new(PersistenceFault::Io, "injected store read failure"))
-    }
-}
-
-impl EventStore for FailIngestStore {
-    fn compensate_write_with_state(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-        reason: CompensationReason,
-    ) -> Result<CompensateOutcome, PersistenceError> {
-        self.inner.compensate_write_with_state(intent_id, reason)
-    }
-    fn insert(
-        &mut self,
-        event: nostr::Event,
-        from: RelayObserved,
-    ) -> Result<InsertOutcome, PersistenceError> {
-        self.inner.insert(event, from)
-    }
-    fn query(&self, filter: &nostr::Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
-        self.inner.query(filter)
-    }
-    fn remove(
-        &mut self,
-        id: nostr::EventId,
-        reason: RetractReason,
-    ) -> Result<Option<StoredEvent>, PersistenceError> {
-        self.inner.remove(id, reason)
-    }
-    fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
-        self.inner.expire_due(now)
-    }
-    fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        self.inner.next_expiration()
-    }
-    fn record_coverage(
-        &mut self,
-        claims: &[(nmp_grammar::ContextualAtom, RelayUrl, CoverageInterval)],
-    ) -> Result<(), PersistenceError> {
-        self.inner.record_coverage(claims)
-    }
-    fn get_coverage(
-        &self,
-        key: CoverageKey,
-        relay: &RelayUrl,
-    ) -> Result<Option<CoverageInterval>, PersistenceError> {
-        match self.peek_failure() {
-            Some(error) => Err(error),
-            None => self.inner.get_coverage(key, relay),
-        }
-    }
-    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
-        self.inner.gc(claims)
-    }
-    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
-        self.inner.accept_write(accept)
-    }
-    fn replaceable_operation_snapshot(
-        &self,
-        coordinate: &nostr::nips::nip01::Coordinate,
-    ) -> Result<Option<nmp_store::RecoveredSemanticResource>, PersistenceError> {
-        self.inner.replaceable_operation_snapshot(coordinate)
-    }
-    fn install_replaceable_materialization(
-        &mut self,
-        rematerialize: nmp_store::SemanticRematerialize,
-    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
-        self.inner
-            .install_replaceable_materialization(rematerialize)
-    }
-    fn install_replaceable_source_materialization(
-        &mut self,
-        install: nmp_store::SemanticSourceInstall,
-    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
-        self.inner
-            .install_replaceable_source_materialization(install)
-    }
-    fn promote_signed(
-        &mut self,
-        target: nmp_store::PromotionTarget,
-        verified: nmp_store::VerifiedSignature,
-    ) -> Result<PromoteOutcome, PersistenceError> {
-        self.inner.promote_signed(target, verified)
-    }
-    fn compensate_write(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-    ) -> Result<CompensateOutcome, PersistenceError> {
-        self.inner.compensate_write(intent_id)
-    }
-    fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
-        self.inner.recover_publish_queue()
-    }
-    fn reattach_receipt(
-        &self,
-        receipt_id: u64,
-    ) -> Result<Option<PublishQueueReceipt>, PersistenceError> {
-        self.inner.reattach_receipt(receipt_id)
-    }
-    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
-        self.inner.lookup_correlation(token)
-    }
-    fn record_route_revision(
-        &mut self,
-        intent_id: nmp_store::IntentId,
-        relays: BTreeSet<RelayUrl>,
-    ) -> Result<PublishQueueRouteRevision, PersistenceError> {
-        self.inner.record_route_revision(intent_id, relays)
-    }
-    fn recover_route_revisions(
-        &self,
-        intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError> {
-        self.inner.recover_route_revisions(intent_id)
-    }
-    fn recover_attempts(
-        &self,
-        intent_id: nmp_store::IntentId,
-    ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
-        self.inner.recover_attempts(intent_id)
-    }
-    fn next_publish_queue_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        self.inner.next_publish_queue_deadline()
-    }
-    delegate_publish_queue_door!(inner);
-}
 
 pub(super) fn recover_after_observation_io(core: &mut EngineCore<RedbStore>) -> Vec<Effect> {
     let (fault, effects) = core
@@ -1881,47 +1726,84 @@ fn a_failing_publish_queue_deadline_read_is_a_typed_error_not_a_false_none() {
 fn a_failing_post_admission_coverage_peek_keeps_the_immediate_seed() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
-    let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
-    let faults = Rc::new(Cell::new(false));
-    let mut core = EngineCore::new_with_fixture_routing_facts(
-        FailIngestStore::peek_armed(Rc::clone(&faults)),
-        dir,
-        10,
+    let absent_relay = RelayUrl::parse("wss://absent.example.com").unwrap();
+    let atom = ctx_atom(cf(&[1], &[&author.public_key().to_hex()]));
+    let key = nmp_store::coverage_key(&atom);
+    let directory = tempfile::tempdir().expect("coverage corruption directory");
+    let path = directory.path().join("post-admission-coverage.redb");
+    {
+        let mut store = RedbStore::open(&path).expect("create persistent Redb fixture");
+        store
+            .record_coverage(&[(
+                atom.clone(),
+                relay.clone(),
+                CoverageInterval::new(Timestamp::from(10u64), Timestamp::from(20u64)),
+            )])
+            .expect("seed exact coverage row");
+    }
+    let wrong_atom = ctx_atom(cf(&[2], &[&author.public_key().to_hex()]));
+    assert_eq!(
+        testing::corrupt_coverage(&path, nmp_store::coverage_key(&wrong_atom), &relay)
+            .expect_err("a different coverage key must be refused")
+            .fault(),
+        PersistenceFault::Invariant
     );
+    assert_eq!(
+        testing::corrupt_coverage(&path, key, &absent_relay)
+            .expect_err("an absent relay row must be refused")
+            .fault(),
+        PersistenceFault::Invariant
+    );
+    {
+        let store = RedbStore::open(&path).expect("inspect refused corruption controls");
+        assert_eq!(
+            store.get_coverage(key, &relay).unwrap(),
+            Some(CoverageInterval::new(
+                Timestamp::from(10u64),
+                Timestamp::from(20u64)
+            )),
+            "wrong-target refusals must leave the exact row healthy"
+        );
+    }
+    testing::corrupt_coverage(&path, key, &relay).expect("corrupt exact coverage row");
+
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
+    let store = RedbStore::open(&path).expect("reopen corrupt coverage fixture");
+    let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
     let _ = connect(&mut core, 0, &relay);
 
-    faults.set(true);
-    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
+    let seed = core.handle(EngineMsg::Subscribe(literal_query(
         &[1],
         &author.public_key().to_hex(),
     )));
     assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::EmitDiagnostics(snap) if snap.store_degraded.is_some())),
-        "a failed coverage peek must surface the #122 degrade fact, got {effects:?}"
+        seed.iter().all(
+            |effect| !matches!(effect, Effect::EmitDiagnostics(snap) if snap.store_degraded.is_some())
+        ),
+        "the immediate seed must precede the deferred coverage read: {seed:?}"
     );
     assert_eq!(
-        effects
-            .iter()
+        seed.iter()
             .filter(|effect| matches!(effect, Effect::EmitRows(..)))
             .count(),
         1,
-        "the immediate cache seed stands; failed post-admission evidence must not overwrite it"
+        "the immediate cache seed is delivered before relay admission"
     );
 
-    // And the engine is still usable: healing the store lets another exact
-    // observer attach to the already-running request.
-    faults.set(false);
-    let effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
-        &[1],
-        &author.public_key().to_hex(),
-    )));
+    let admission = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
     assert!(
-        effects
+        admission
             .iter()
-            .any(|effect| matches!(effect, Effect::EmitRows(..))),
-        "a healthy store opens the observation normally, got {effects:?}"
+            .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.as_deref().is_some_and(|message| message.contains("decode coverage row")))),
+        "the exact coverage decode failure must surface after admission: {admission:?}"
+    );
+    assert_eq!(
+        admission
+            .iter()
+            .filter(|effect| matches!(effect, Effect::EmitRows(..)))
+            .count(),
+        0,
+        "failed post-admission evidence must not replace the delivered seed"
     );
 }
 
@@ -1936,96 +1818,69 @@ fn a_failing_post_admission_coverage_peek_keeps_the_immediate_seed() {
 /// merely could not see.
 #[test]
 fn a_failing_coverage_peek_never_republishes_live_evidence_as_unproven() {
-    let author = Keys::generate();
+    let account_a = Keys::generate();
+    let account_b = Keys::generate();
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
-    let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
-    let faults = Rc::new(Cell::new(false));
-    let mut core = EngineCore::new_with_fixture_routing_facts(
-        FailIngestStore::peek_armed(Rc::clone(&faults)),
-        dir,
-        10,
-    );
-    let _ = connect(&mut core, 0, &relay);
-    let opened = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
-        &[1],
-        &author.public_key().to_hex(),
-    )));
-    let baseline = opened
-        .iter()
-        .find_map(|effect| match effect {
-            Effect::EmitRows(_, _, evidence) => Some(evidence.clone()),
-            _ => None,
-        })
-        .expect("a healthy open delivers one evidence frame");
+    let atom_a = ctx_atom(cf(&[1], &[&account_a.public_key().to_hex()]));
+    let atom_b = ctx_atom(cf(&[1], &[&account_b.public_key().to_hex()]));
+    let directory = tempfile::tempdir().expect("reactive coverage corruption directory");
+    let path = directory.path().join("reactive-coverage.redb");
+    {
+        let mut store = RedbStore::open(&path).expect("create persistent Redb fixture");
+        store
+            .record_coverage(&[
+                (
+                    atom_a,
+                    relay.clone(),
+                    CoverageInterval::new(Timestamp::from(10u64), Timestamp::from(20u64)),
+                ),
+                (
+                    atom_b.clone(),
+                    relay.clone(),
+                    CoverageInterval::new(Timestamp::from(10u64), Timestamp::from(20u64)),
+                ),
+            ])
+            .expect("seed healthy A and target B coverage");
+    }
+    testing::corrupt_coverage(&path, nmp_store::coverage_key(&atom_b), &relay)
+        .expect("corrupt B coverage row");
 
-    faults.set(true);
-    let second_relay = RelayUrl::parse("wss://second.example.com").unwrap();
-    let effects = connect(&mut core, 1, &second_relay);
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(account_a.public_key(), [relay.clone()])
+        .with_outbound_routes(account_b.public_key(), [relay.clone()]);
+    let store = RedbStore::open(&path).expect("reopen reactive coverage fixture");
+    let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
+    let _ = connect(&mut core, 0, &relay);
+    let _ = core.handle(EngineMsg::SetActivePubkey(Some(account_a.public_key())));
+    let opened = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::from_filter(Filter {
+        kinds: Some(BTreeSet::from([1u16])),
+        authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+        ..Filter::default()
+    })));
+    assert!(
+        opened.iter().all(
+            |effect| !matches!(effect, Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.is_some())
+        ),
+        "A's coverage row must be healthy before the reactive switch: {opened:?}"
+    );
+    assert!(
+        opened
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitRows(..))),
+        "a healthy A open delivers its initial evidence frame"
+    );
+
+    let effects = core.handle(EngineMsg::SetActivePubkey(Some(account_b.public_key())));
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::EmitDiagnostics(snap) if snap.store_degraded.is_some())),
-        "the failed refresh must surface the degrade, got {effects:?}"
-    );
-    for effect in &effects {
-        if let Effect::EmitRows(_, _, evidence) = effect {
-            assert_eq!(
-                *evidence, baseline,
-                "a failed coverage read must not republish evidence at all"
-            );
-        }
-    }
-}
-
-/// #763 falsifier: the diagnostics snapshot cannot show empty coverage as a
-/// healthy store.
-///
-/// `FilterCoverageEntry::coverage` has no third state and is not gaining one
-/// for this (#920's rule: reuse the vocabulary that exists). What it must
-/// never do is present `None` beside `store_degraded: None`, because that
-/// pair reads as "the store is fine and nothing is proven".
-#[test]
-fn a_diagnostics_snapshot_built_over_a_failing_store_says_so() {
-    let author = Keys::generate();
-    let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
-    let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
-    let faults = Rc::new(Cell::new(false));
-    let mut core = EngineCore::new_with_fixture_routing_facts(
-        FailIngestStore::peek_armed(Rc::clone(&faults)),
-        dir,
-        10,
-    );
-    let _ = connect(&mut core, 0, &relay);
-    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
-        &[1],
-        &author.public_key().to_hex(),
-    )));
-
-    let healthy = core.diagnostics_snapshot();
-    assert!(
-        healthy.store_degraded.is_none(),
-        "a healthy store reports no degradation"
+            .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.as_deref().is_some_and(|message| message.contains("decode coverage row")))),
+        "B's first post-open coverage dereference must surface the decode failure: {effects:?}"
     );
     assert!(
-        healthy
-            .relays
+        effects
             .iter()
-            .any(|relay| !relay.coverage.is_empty()),
-        "the fixture must actually project per-filter coverage entries"
+            .all(|effect| !matches!(effect, Effect::EmitRows(..))),
+        "a failed reactive coverage read must not republish evidence"
     );
-
-    faults.set(true);
-    let degraded = core.diagnostics_snapshot();
-    assert!(
-        degraded.store_degraded.is_some(),
-        "empty coverage entries must never stand beside a healthy-looking store"
-    );
-    for relay in &degraded.relays {
-        for entry in &relay.coverage {
-            assert!(
-                entry.coverage.is_none(),
-                "a failed read proves nothing, so it fabricates no interval either"
-            );
-        }
-    }
 }

@@ -8,8 +8,6 @@
 //! `limit` poisoning, and per-query scoped acquisition evidence).
 
 use std::borrow::Cow;
-use std::cell::Cell;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use nmp::mechanism::core::{
@@ -29,11 +27,8 @@ use nmp_grammar::{
 };
 use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, CompensateOutcome, CompensationReason, CoverageInterval,
-    CoverageKey, DurabilityOutcome, EventStore, GcReport, GcRetentionSet, InsertOutcome,
-    PersistenceError, PersistenceFault, PromoteOutcome, PublishQueueAttempt,
-    PublishQueueAttemptOutcome, PublishQueueIntent, PublishQueueReceipt, PublishQueueRouteRevision,
-    RedbStore, RelayObserved, RetractReason, StoredEvent,
+    AcceptWrite, CoverageInterval, DurabilityOutcome, EventStore, PersistenceFault,
+    PublishQueueAttemptOutcome, RedbStore, RelayObserved,
 };
 use nmp_transport::{DisconnectReason, HandoffResult, RelayFrame, RelayHandle};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
@@ -140,41 +135,6 @@ fn new_core_without_attempt_ceiling(dir: FixtureRoutingFacts) -> EngineCore<Redb
 
 fn activate<S: EventStore>(core: &mut EngineCore<S>, keys: &Keys) {
     core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
-}
-
-/// The app-facing outbox door (#1039): enumerate what is outstanding, and
-/// forget one entry. Plus the refusal-into-custody door every acceptance
-/// path needs.
-macro_rules! delegate_publish_queue_door {
-    ($inner:ident) => {
-        fn enumerate_publish_queue_receipts(
-            &self,
-        ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
-            self.$inner.enumerate_publish_queue_receipts()
-        }
-        fn publish_queue_receipts_after(
-            &self,
-            after: Option<u64>,
-            limit: u8,
-        ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
-            self.$inner.publish_queue_receipts_after(after, limit)
-        }
-        fn remove_publish_queue_entry(
-            &mut self,
-            receipt_id: u64,
-        ) -> Result<nmp_store::RemoveQueueEntryOutcome, PersistenceError> {
-            self.$inner.remove_publish_queue_entry(receipt_id)
-        }
-        fn accept_refused(
-            &mut self,
-            frozen_id: nostr::EventId,
-            expected_pubkey: nostr::PublicKey,
-            reason: nmp_store::RefuseReason,
-        ) -> Result<u64, PersistenceError> {
-            self.$inner
-                .accept_refused(frozen_id, expected_pubkey, reason)
-        }
-    };
 }
 
 /// Find the single `WireOp::Req` for `relay` inside `effects`, panicking if
