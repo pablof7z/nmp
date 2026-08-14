@@ -257,7 +257,6 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
             payload: materializer
                 .operation(
                     &base_row,
-                    &base_row,
                     ReplaceableSourcePolicy::Continuing,
                     alice.to_bytes().to_vec(),
                 )
@@ -282,7 +281,6 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
         .publish(WriteIntent {
             payload: materializer
                 .operation(
-                    &base_row,
                     &first_current,
                     ReplaceableSourcePolicy::Continuing,
                     bob.to_bytes().to_vec(),
@@ -444,7 +442,6 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
             payload: materializer
                 .operation(
                     &base_row,
-                    &base_row,
                     ReplaceableSourcePolicy::Continuing,
                     alice.to_bytes().to_vec(),
                 )
@@ -459,7 +456,6 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
         .publish(WriteIntent {
             payload: materializer
                 .operation(
-                    &base_row,
                     &first_current,
                     ReplaceableSourcePolicy::Continuing,
                     bob.public_key().to_bytes().to_vec(),
@@ -583,7 +579,6 @@ async fn source_session_replacement_wakes_every_signed_successor_destination() {
             payload: materializer
                 .operation(
                     &base_row,
-                    &base_row,
                     ReplaceableSourcePolicy::Continuing,
                     alice.to_bytes().to_vec(),
                 )
@@ -704,7 +699,6 @@ async fn relay_source_successors_resume_current_delivery_and_remain_continuing_a
         .publish(WriteIntent {
             payload: materializer
                 .operation(
-                    &base_row,
                     &base_row,
                     ReplaceableSourcePolicy::Continuing,
                     alice.to_bytes().to_vec(),

@@ -187,6 +187,16 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And stale or unrelated request evidence cannot settle or resurrect the source round
     And after relay 2 and every current destination become terminal the operation cohort settles atomically
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-023
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::finite_source_policy_reuses_advanced_round_and_refuses_every_policy_change
+  # nmp:falsifier=Rebuild a fresh finite round when the second operation declares the same relay/access set; the already-open request becomes pending again and can be reopened or settled twice.
+  Scenario: Later operations reuse the exact finite source round
+    Given a semantic resource has a finite source round with one request already open
+    When another operation declares the same relay and access set over the current pending generation
+    Then acceptance keeps the original round identity and request evidence
+    And changing the source lifetime, relay set, or access is refused before custody
+
   # nmp:id=WRITES-REPLACEABLE-EDIT-020
   # nmp:status=built
   # nmp:evidence=rust:nmp::route_only_addition_preserves_signed_e2_and_sends_only_the_new_destination
