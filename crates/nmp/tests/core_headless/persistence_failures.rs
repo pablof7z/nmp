@@ -3,12 +3,11 @@ use nmp_store::testing;
 
 // ---- fallible persistence doors and recovery indexing ------------------
 //
-// A fault-injecting `EventStore` retained only for projection and peek failures
-// that cannot yet be expressed by the concrete Redb fixture. Relay-observation
-// I/O uses Redb's real transaction and handle-reconstruction lifecycle below.
+// A fault-injecting `EventStore` retained only for peek failures that cannot
+// yet be expressed by the concrete Redb fixture. Relay-observation I/O and
+// projection corruption use Redb's real lifecycle below.
 pub(super) struct FailIngestStore {
     inner: RedbStore,
-    fail_query: Rc<Cell<bool>>,
     /// #763's two peeks and the deadline read whose error the caller used to
     /// erase. Sticky (not one-shot) because these model a store that has
     /// gone away rather than a single failed operation, and because the
@@ -18,20 +17,11 @@ pub(super) struct FailIngestStore {
 }
 
 impl FailIngestStore {
-    fn projection_armed(fail_query: Rc<Cell<bool>>) -> Self {
-        Self {
-            inner: RedbStore::temporary().expect("temporary Redb store"),
-            fail_query,
-            fail_peeks: Rc::new(Cell::new(false)),
-        }
-    }
-
     /// Healthy in every door except the three #763 reads, which refuse while
     /// `fail_peeks` is set.
     fn peek_armed(fail_peeks: Rc<Cell<bool>>) -> Self {
         Self {
             inner: RedbStore::temporary().expect("temporary Redb store"),
-            fail_query: Rc::new(Cell::new(false)),
             fail_peeks,
         }
     }
@@ -62,11 +52,6 @@ impl EventStore for FailIngestStore {
         self.inner.insert(event, from)
     }
     fn query(&self, filter: &nostr::Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
-        if self.fail_query.replace(false) {
-            return Err(PersistenceError::invariant(
-                "injected post-commit projection read failure",
-            ));
-        }
         self.inner.query(filter)
     }
     fn remove(
@@ -748,26 +733,84 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
 #[test]
 fn post_commit_projection_failure_does_not_poison_request_coverage() {
     let author = Keys::generate();
-    let followed = Keys::generate();
     let relay = RelayUrl::parse("wss://projection-failure.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
-    let fail_query = Rc::new(Cell::new(false));
-    let store = FailIngestStore::projection_armed(fail_query.clone());
+    let directory = tempfile::tempdir().expect("projection corruption directory");
+    let path = directory
+        .path()
+        .join("postcommit-projection-corruption.redb");
+    let corrupt_older = nmp_resolver::testkit::kind1(&author, "corrupt older row", 100);
+    let healthy_newer = nmp_resolver::testkit::kind1(&author, "healthy newest row", 200);
+    {
+        let mut store = RedbStore::open(&path).expect("create persistent Redb fixture");
+        for event in [corrupt_older.clone(), healthy_newer.clone()] {
+            store
+                .insert(
+                    event,
+                    RelayObserved::new(relay.clone(), Timestamp::from(201u64)),
+                )
+                .expect("seed projection source row");
+        }
+    }
+    testing::corrupt_canonical_event(&path, corrupt_older.id)
+        .expect("store-owned canonical-event corruption");
+    let store = RedbStore::open(&path).expect("reopen persistent Redb fixture");
+    let top = store
+        .query_newest(
+            &nostr::Filter::new()
+                .kind(Kind::TextNote)
+                .author(author.public_key()),
+            1,
+        )
+        .expect("the top-1 store read stops before the corrupt older row");
+    assert_eq!(top.len(), 1);
+    assert_eq!(top[0].event.id, healthy_newer.id);
     let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
-    let my_follows = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
+    let mut derived_filter = Filter {
+        kinds: Some(BTreeSet::from([7u16])),
+        ..Filter::default()
+    };
+    derived_filter.tags.insert(
+        nmp_grammar::IndexedTagName::new('p').expect("indexed p tag"),
+        Binding::Derived(Box::new(nmp_grammar::Derived {
             inner: nmp_grammar::Demand::from_filter(Filter {
-                kinds: Some(BTreeSet::from([3u16])),
+                kinds: Some(BTreeSet::from([1u16])),
                 authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+                limit: Some(1),
                 ..Filter::default()
             }),
-            project: nmp_grammar::Selector::Tag("p".to_string()),
-        }))),
-        ..Filter::default()
-    });
-    let _ = core.handle_and_flush(EngineMsg::Subscribe(my_follows));
+            project: nmp_grammar::Selector::Authors,
+        })),
+    );
+    let derived_from_latest_note = LiveQuery::from_filter(derived_filter);
+    let initial = core.handle_and_flush(EngineMsg::Subscribe(derived_from_latest_note));
+    assert!(
+        initial.iter().all(|effect| !matches!(
+            effect,
+            Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.is_some()
+        )),
+        "the initial top-1 projection must select only the healthy newest row: {initial:?}"
+    );
+    let kind5 = LiveQuery::single(
+        nmp_grammar::Demand::new(
+            Filter {
+                kinds: Some(BTreeSet::from([5u16])),
+                ..Filter::default()
+            },
+            SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            AccessContext::Public,
+        )
+        .expect("a literal kind:5 request can be pinned to the fixture relay"),
+    );
+    let kind5_open = core.handle_and_flush(EngineMsg::Subscribe(kind5));
+    assert!(
+        kind5_open.iter().all(|effect| !matches!(
+            effect,
+            Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.is_some()
+        )),
+        "the independent kind:5 request must open before the post-commit failure: {kind5_open:?}"
+    );
     let connected = connect(&mut core, 0, &relay);
     let request = connected
         .iter()
@@ -779,17 +822,20 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
                         .filter
                         .kinds
                         .as_ref()
-                        .is_some_and(|kinds| kinds.contains(&3))
+                        .is_some_and(|kinds| kinds.contains(&5))
                 })
                 .map(|request| request.sub_id.clone()),
             _ => None,
         })
-        .expect("connect replays the derived query's kind:3 request");
+        .unwrap_or_else(|| panic!("connect replays the independent kind:5 request: {connected:?}"));
     let wire = wire_sub_string(&request);
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
 
-    fail_query.set(true);
-    let event = nmp_resolver::testkit::kind3(&author, &[followed.public_key()], 100);
+    let event = nostr::EventBuilder::new(Kind::EventDeletion, "")
+        .tag(nostr::Tag::event(healthy_newer.id))
+        .custom_created_at(Timestamp::from(300u64))
+        .sign_with_keys(&author)
+        .expect("valid deletion event");
     let failed_projection = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -811,11 +857,27 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
         public_session(&relay),
         eose_frame(&wire),
     ));
-    let atom = ctx_atom(cf(&[3], &[&author.public_key().to_hex()]));
+    let atom = ctx_atom_with(
+        ConcreteFilter {
+            kinds: Some(BTreeSet::from([5u16])),
+            ..ConcreteFilter::default()
+        },
+        SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+    );
     assert!(core
         .get_coverage(&atom, &relay)
         .expect("coverage peek")
         .is_some());
+
+    drop(core);
+    let store = RedbStore::open(&path).expect("inspect committed deletion");
+    assert!(
+        store
+            .query(&nostr::Filter::new().id(healthy_newer.id))
+            .expect("the deleted healthy row has an exact readable id path")
+            .is_empty(),
+        "the projection failure happens after the deletion transaction commits"
+    );
 }
 
 /// #816's request-atomic coverage falsifier. Two narrow atoms coalesced into
