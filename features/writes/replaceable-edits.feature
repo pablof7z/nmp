@@ -199,7 +199,7 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     Then relay B receives the exact same E2 event id and signature once
     And relay A does not receive E2 again
 
-  # nmp:id=WRITES-REPLACEABLE-EDIT-021
+  # nmp:id=WRITES-REPLACEABLE-EDIT-022
   # nmp:status=built
   # nmp:evidence=rust:nmp::source_session_replacement_wakes_every_signed_successor_destination
   # nmp:falsifier=Re-bootstrap current E2 lanes against retained terminal E1 attempt history; recovery refuses the valid successor lanes and both destinations remain Waiting(NotConnected).
