@@ -531,7 +531,6 @@ fn persistent_engine_recovers_after_precommit_acceptance_io_once() {
 #[test]
 fn persistent_engine_keeps_healthy_store_usable_after_invariant_fault() {
     use nmp_grammar::{Identity, WritePayload, WriteRouting};
-    use nmp_store::EventStore;
     use nostr::EventBuilder;
 
     let fixture = tempfile::tempdir().expect("persistent store fixture");
@@ -2375,8 +2374,6 @@ fn shutdown_wakes_a_live_history_receiver_within_a_bound() {
 
 #[test]
 fn history_advance_and_blocking_recv_have_safe_split_ownership() {
-    use nmp_store::EventStore;
-
     let fixture = tempfile::tempdir().expect("temporary directory");
     let path = fixture.path().join("history-advance.redb");
     let keys = Keys::generate();

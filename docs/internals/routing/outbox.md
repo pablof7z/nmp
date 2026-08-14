@@ -35,7 +35,7 @@ The reply contribution has two deliberately separate inputs:
 
 - `ThreadPosition::read` determines the direct parent event id from the signed
   event's NIP-10/NIP-22 rows;
-- `EventStore::query(id)` supplies the canonical row, and only
+- `RedbStore::query(id)` supplies the canonical row, and only
   `row.provenance.seen` may supply a destination.
 
 The relay cell authored into an `e` tag is never a routing fact. A signature

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use nmp_store::{
-    run_lmdb_governed_ingest_bench, run_packed_postings_bench, run_store_bench_variant, EventStore,
+    run_lmdb_governed_ingest_bench, run_packed_postings_bench, run_store_bench_variant,
     LmdbGovernedIngestMetrics, PackedPostingsBackend, PackedPostingsMetrics, RedbStore,
     RelayObserved, StoreBenchMetrics, StoreBenchProcessCounters, StoreBenchVariant,
 };

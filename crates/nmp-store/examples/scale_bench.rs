@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use nmp_store::{EventStore, RedbStore, RelayObserved};
+use nmp_store::{RedbStore, RelayObserved};
 use nostr::{
     Alphabet, Event, EventBuilder, Filter, Keys, Kind, PublicKey, RelayUrl, SingleLetterTag, Tag,
     Timestamp,

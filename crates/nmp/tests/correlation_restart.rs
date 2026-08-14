@@ -31,7 +31,7 @@ use nmp_grammar::{
     WriteRouting,
 };
 use nmp_router::FixtureRoutingFacts;
-use nmp_store::{EventStore, RedbStore};
+use nmp_store::RedbStore;
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{
     EventBuilder, Keys, Kind, PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,

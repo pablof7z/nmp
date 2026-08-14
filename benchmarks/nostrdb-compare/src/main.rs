@@ -16,7 +16,7 @@ use fjall::{
 use memmap2::{Mmap, MmapOptions};
 use nmp_store::{
     prepare_equivalent_store_corpus, run_prepared_redb_store_bench, run_store_bench_variant,
-    EventStore, InsertOutcome, RedbStore, RelayObserved, StoreBenchMetrics,
+    InsertOutcome, RedbStore, RelayObserved, StoreBenchMetrics,
     StoreBenchPreparedCorpus, StoreBenchPreparedMetrics, StoreBenchPreparedTable,
     StoreBenchProcessCounters, StoreBenchVariant,
 };

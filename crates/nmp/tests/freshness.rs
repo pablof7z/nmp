@@ -11,7 +11,7 @@ use nmp_grammar::{
     RelaySessionKey, Selector, SourceAuthority,
 };
 use nmp_router::{FixtureRoutingFacts, WireOp};
-use nmp_store::{CoverageInterval, EventStore, RedbStore, RelayObserved};
+use nmp_store::{CoverageInterval, RedbStore, RelayObserved};
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{Event, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
 

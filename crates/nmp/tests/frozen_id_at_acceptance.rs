@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use nmp::{Engine, EngineConfig, SigningState, WriteFact};
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
-use nmp_store::{EventStore, RedbStore, RelayObserved};
+use nmp_store::{RedbStore, RelayObserved};
 use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Tags, Timestamp};
 
 /// Far enough ahead that no wall clock in this test can reach it, so the

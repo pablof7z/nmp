@@ -1,4 +1,4 @@
-//! The one transaction exit for direct `EventStore` redb mutations.
+//! The one transaction exit for direct `RedbStore` mutations.
 //!
 //! Callers must finish every fallible read, decode, validation, and return
 //! value construction before entering this function. Once redb reports a

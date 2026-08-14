@@ -15,7 +15,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use nmp_store::{EventStore, InsertOutcome, RedbStore, RelayObserved};
+use nmp_store::{InsertOutcome, RedbStore, RelayObserved};
 use nostr::{Alphabet, Event, Filter, Kind, RelayUrl, SingleLetterTag};
 use redb::Database;
 

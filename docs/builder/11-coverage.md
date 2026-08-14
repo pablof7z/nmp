@@ -168,7 +168,7 @@ retention policy.
 Durable storage is not promised to be literally infinite. An operator or user
 may choose a quota, disk-pressure, or time-based retention policy, but that
 choice must be inspectable and explicit. The current engine ships no automatic
-retention policy. Its store-level `EventStore::gc` door is the explicit
+retention policy. Its store-level `RedbStore::gc` door is the explicit
 claim-based eviction operation: it reports what it evicted and lowers or
 removes every affected coverage interval in the same transaction as the row
 deletion. A future engine-facing policy must preserve that governed operation;

@@ -15,10 +15,10 @@ use super::store::RedbStore;
 use super::{
     address_key_for, binary_event, compute_coverage_key, merge_interval, shrink_after_eviction,
     window_erase, BTreeMap, BTreeSet, ConcreteFilter, ContextualAtom, CoverageInterval,
-    CoverageKey, Event, EventCursor, EventId, EventStore, Filter, GcReport, GcRetentionSet,
-    GcVictimIndex, HashMap, IndexedMatch, InsertOutcome, LocalOrigin, PersistenceError,
-    PreparedFilter, RelayObserved, RelayUrl, RetractReason, ShapeRecord, SigState, StoredEvent,
-    StoredEventView, Timestamp,
+    CoverageKey, Event, EventCursor, EventId, Filter, GcReport, GcRetentionSet, GcVictimIndex,
+    HashMap, IndexedMatch, InsertOutcome, LocalOrigin, PersistenceError, PreparedFilter,
+    RelayObserved, RelayUrl, RetractReason, ShapeRecord, SigState, StoredEvent, StoredEventView,
+    Timestamp,
 };
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
@@ -345,7 +345,7 @@ pub(super) fn query_newest_before(
     }
     // Exact ids are already a caller-bounded lookup rather than an
     // ordered index range. Preserve that narrow path, then apply the
-    // same exact exclusive cursor predicate as the EventStore contract.
+    // same exact exclusive cursor predicate as the RedbStore contract.
     if filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
         let mut rows = store.query(filter)?;
         rows.retain(|row| {
