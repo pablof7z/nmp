@@ -623,7 +623,7 @@ mod semantic_successor_tests {
     }
 
     #[test]
-    fn finite_source_policy_recovers_exact_pending_members_and_cannot_be_mixed() {
+    fn finite_source_policy_reuses_advanced_round_and_refuses_every_policy_change() {
         let author = Keys::generate();
         let person = Keys::generate().public_key();
         let source_relay = RelayUrl::parse("wss://semantic-source.example").unwrap();
@@ -681,7 +681,7 @@ mod semantic_successor_tests {
         };
         drop(core);
 
-        let reopened = RedbStore::open(&path).unwrap();
+        let mut reopened = RedbStore::open(&path).unwrap();
         let recovered = reopened
             .replaceable_operation_snapshot(&coordinate)
             .unwrap()
@@ -690,17 +690,33 @@ mod semantic_successor_tests {
             panic!("finite declaration recovered as continuing");
         };
         assert_eq!(
-            round.sources,
+            round.sources.clone(),
             finite_relays
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|relay| {
                     (
                         nmp_store::SemanticSource::new(relay, AccessContext::Public),
                         nmp_store::SemanticSourceMemberState::Pending,
                     )
                 })
-                .collect(),
+                .collect::<BTreeMap<_, _>>(),
             "the durable round must contain exactly the declared relay/access members"
+        );
+        let opened = nmp_store::SemanticSourceRequest {
+            round: round.id,
+            source: nmp_store::SemanticSource::new(relay_a.clone(), AccessContext::Public),
+            transport_generation: 1,
+            request_revision: 1,
+        };
+        assert_eq!(
+            reopened
+                .advance_replaceable_source_round(
+                    &coordinate,
+                    nmp_store::SemanticSourceRoundFact::RequestOpened(opened.clone()),
+                )
+                .unwrap(),
+            nmp_store::SemanticSourceRoundOutcome::Advanced
         );
 
         let mut core = EngineCore::new(reopened, 10);
@@ -717,25 +733,86 @@ mod semantic_successor_tests {
             .unwrap()
             .pop()
             .unwrap();
-        let mixed = nmp_grammar::ReplaceableOperation::from_registered_parts(
+        let current_unsigned = UnsignedEvent::from(current.event);
+        let same_finite = nmp_grammar::ReplaceableOperation::from_registered_parts(
             instance,
-            original,
-            UnsignedEvent::from(current.event),
-            nmp_grammar::ReplaceableSourcePolicy::Continuing,
+            current_unsigned.clone(),
+            current_unsigned,
+            nmp_grammar::ReplaceableSourcePolicy::Finite {
+                relays: finite_relays.clone(),
+                access: AccessContext::Public,
+            },
             Keys::generate().public_key().to_bytes().to_vec(),
         )
         .unwrap();
-        let refused = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::ReplaceableOperation(mixed),
-            routing: WriteRouting::Explicit(vec![relay_b]),
+        let accepted_again = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(same_finite),
+            routing: WriteRouting::Explicit(vec![relay_b.clone()]),
             identity: Identity::Active,
             correlation: None,
         }));
-        assert!(refused.iter().any(|effect| matches!(
-            effect,
-            Effect::PublishFailed(PublishError::ReplaceableOperationRefused { reason })
-                if reason.contains("IncompatibleSourcePolicy")
-        )));
+        let current_id = accepted_again
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::WriteAccepted(_, event_id) => Some(*event_id),
+                _ => None,
+            })
+            .expect("the same finite declaration reuses the advanced durable round");
+        let retained = core
+            .store
+            .replaceable_operation_snapshot(&coordinate)
+            .unwrap()
+            .unwrap();
+        let nmp_store::SemanticSourcePolicy::Finite(retained_round) = retained.source_policy else {
+            panic!("the second operation changed the finite source lifetime");
+        };
+        assert_eq!(retained_round.id, opened.round);
+        assert_eq!(
+            retained_round.sources.get(&opened.source),
+            Some(&nmp_store::SemanticSourceMemberState::Open(opened.clone())),
+            "accepting another operation must not reset durable request evidence"
+        );
+        let mut refuse_changed_policy = |source_policy: nmp_grammar::ReplaceableSourcePolicy| {
+            let current = core
+                .store
+                .query(&nostr::Filter::new().id(current_id))
+                .unwrap()
+                .pop()
+                .unwrap();
+            let current_unsigned = UnsignedEvent::from(current.event);
+            let changed = nmp_grammar::ReplaceableOperation::from_registered_parts(
+                instance,
+                current_unsigned.clone(),
+                current_unsigned,
+                source_policy,
+                Keys::generate().public_key().to_bytes().to_vec(),
+            )
+            .unwrap();
+            core.handle(EngineMsg::Publish(WriteIntent {
+                payload: WritePayload::ReplaceableOperation(changed),
+                routing: WriteRouting::Explicit(vec![relay_b.clone()]),
+                identity: Identity::Active,
+                correlation: None,
+            }))
+        };
+        for changed_policy in [
+            nmp_grammar::ReplaceableSourcePolicy::Continuing,
+            nmp_grammar::ReplaceableSourcePolicy::Finite {
+                relays: BTreeSet::from([relay_a]),
+                access: AccessContext::Public,
+            },
+            nmp_grammar::ReplaceableSourcePolicy::Finite {
+                relays: finite_relays,
+                access: AccessContext::Nip42(author.public_key()),
+            },
+        ] {
+            let refused = refuse_changed_policy(changed_policy);
+            assert!(refused.iter().any(|effect| matches!(
+                effect,
+                Effect::PublishFailed(PublishError::ReplaceableOperationRefused { reason })
+                    if reason.contains("IncompatibleSourcePolicy")
+            )));
+        }
     }
 
     #[test]
