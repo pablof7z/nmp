@@ -102,6 +102,10 @@ pub struct RedbStore {
     /// production build carries or can mutate this set.
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) failed_lane_start_relays: BTreeSet<RelayUrl>,
+    /// One construction-armed lane-bootstrap refusal consumed at the existing
+    /// pre-commit boundary. No production build carries this setting.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(super) fail_next_lane_bootstrap: bool,
     /// Fixed construction-time refusal for route-revision rollback tests. No
     /// production build carries or can mutate this setting.
     #[cfg(any(test, feature = "test-instrumentation"))]
@@ -327,6 +331,15 @@ impl RedbStore {
     ) -> Result<Self, RedbStoreOpenError> {
         let mut store = Self::temporary()?;
         store.failed_lane_start_relays = failed_relays.into_iter().collect();
+        Ok(store)
+    }
+
+    /// Open a real temporary Redb store whose next staged lane bootstrap
+    /// refuses at the existing pre-commit boundary.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn temporary_with_failed_lane_bootstrap() -> Result<Self, RedbStoreOpenError> {
+        let mut store = Self::temporary()?;
+        store.fail_next_lane_bootstrap = true;
         Ok(store)
     }
 
@@ -865,6 +878,8 @@ impl RedbStore {
             publish_queue_relays: Mutex::new(PublishQueueRelayCache::default()),
             #[cfg(any(test, feature = "test-instrumentation"))]
             failed_lane_start_relays: BTreeSet::new(),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            fail_next_lane_bootstrap: false,
             #[cfg(any(test, feature = "test-instrumentation"))]
             fail_route_revision_writes: false,
             #[cfg(any(test, feature = "test-instrumentation"))]
