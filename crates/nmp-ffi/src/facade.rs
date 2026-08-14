@@ -22,10 +22,10 @@ use std::sync::Arc;
 
 use crate::auth::{FfiAuthPolicyAdapter, FfiAuthPolicyCallback, FfiAuthPolicyRegistration};
 use crate::convert::{
-    cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, filter_from_ffi, live_query_from_ffi,
-    parse_event_id, parse_pubkey, publish_queue_entry_to_ffi, publish_queue_error_to_ffi,
-    relay_information_error_kind, remove_queue_entry_error_to_ffi, sign_event_request_from_ffi,
-    sign_event_start_error, window_from_ffi, write_intent_from_ffi, FfiError,
+    cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, parse_event_id, parse_pubkey,
+    publish_queue_entry_to_ffi, publish_queue_error_to_ffi, relay_information_error_kind,
+    remove_queue_entry_error_to_ffi, sign_event_request_from_ffi, sign_event_start_error,
+    write_intent_from_ffi, FfiError,
 };
 #[cfg(test)]
 use crate::convert::{FfiRequestRowsError, FfiRowPullError};
@@ -35,11 +35,10 @@ use crate::session::{
     FfiPrivateKey, FfiPublicKey, FfiSessionAccount, FfiSessionPayload, FfiSessionSnapshot,
 };
 use crate::types::{
-    FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiFilter,
-    FfiLiveQuery, FfiPublishQueueEntry, FfiPublishQueueError, FfiReceiptReattachment,
-    FfiRelayInformation, FfiRelayInformationCachePolicy, FfiRelayInformationDocument,
-    FfiRelayInformationFreshness, FfiRelayInformationLimitations, FfiRemoveQueueEntryError,
-    FfiSignEventRequest, FfiWindow, FfiWriteIntent,
+    FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiPublishQueueEntry,
+    FfiPublishQueueError, FfiReceiptReattachment, FfiRelayInformation,
+    FfiRelayInformationCachePolicy, FfiRelayInformationDocument, FfiRelayInformationFreshness,
+    FfiRelayInformationLimitations, FfiRemoveQueueEntryError, FfiSignEventRequest, FfiWriteIntent,
 };
 use nmp::ReceiptReattachment;
 
@@ -388,66 +387,6 @@ impl NmpEngine {
             cancel,
             result: receiver.into_async(),
         }))
-    }
-
-    /// Open a live subscription (#680). Delivery is pull-based: await
-    /// [`NmpRowStream::next`], which parks a waker on the engine-owned mailbox
-    /// rather than blocking a dedicated OS thread — opening one costs no native
-    /// thread. `None` from `next()` is the terminal signal (cancel / engine
-    /// shutdown / producer drop). The returned [`NmpRowStream`]'s `Drop`
-    /// withdraws the subscription; call [`NmpRowStream::cancel`] for an
-    /// explicit early teardown.
-    ///
-    /// `window` selects the observation's delivery policy (#485). `None` is
-    /// today's unbounded observation: exact deltas are rebased when a slow
-    /// consumer skips intermediate reducer emits, and the full set is never
-    /// redelivered. `Some(FfiWindow::Expandable { initial, max })` is a
-    /// bounded newest-first window: each frame carries the complete
-    /// current row set + growth fact in `FfiFrame::window` (deltas stay
-    /// empty on the wire) and grows only via
-    /// [`NmpRowStream::request_rows`], never above `max`. Zero bounds and
-    /// `initial > max` fail closed here with a typed [`FfiError`]; a
-    /// windowed selection that already declares a NIP-01 `limit` fails with
-    /// [`FfiError::WindowSelectionHasLimit`].
-    pub fn observe(
-        &self,
-        query: FfiFilter,
-        window: Option<FfiWindow>,
-    ) -> Result<Arc<NmpRowStream>, FfiError> {
-        let filter = filter_from_ffi(query)?;
-        let window = window_from_ffi(window)?;
-        let windowed = window.is_some();
-        let subscription = self
-            .engine
-            .observe_async(nmp::LiveQuery::from_filter(filter), window)?;
-        Ok(NmpRowStream::new(subscription, windowed))
-    }
-
-    /// Open a live subscription over an explicit [`FfiLiveQuery`] (#1108) --
-    /// the constructor an app reaches for once [`Self::observe`]'s bare
-    /// [`FfiFilter`] (which always takes `Demand::from_filter`'s static
-    /// default, one branch) isn't enough: declaring `Pinned` wire authority,
-    /// a non-default `AccessContext`, a non-`Agnostic` `CacheMode`, SEVERAL
-    /// independent demand branches, or a bound on their merged row union.
-    ///
-    /// Branches are observed through this ONE subscription: rows are unioned
-    /// by event id with provenance merged, each frame carries one evidence
-    /// entry per canonical branch, and one cancellation withdraws every
-    /// branch exactly once. Same pull-based/cancel/window shape as `observe`
-    /// in every other respect (see that method's doc for the `window`
-    /// policy); a window and an `aggregate_result_limit` are two owners of
-    /// row membership and fail closed with
-    /// [`FfiError::WindowAggregateResultLimit`].
-    pub fn observe_query(
-        &self,
-        query: FfiLiveQuery,
-        window: Option<FfiWindow>,
-    ) -> Result<Arc<NmpRowStream>, FfiError> {
-        let query = live_query_from_ffi(query)?;
-        let window = window_from_ffi(window)?;
-        let windowed = window.is_some();
-        let subscription = self.engine.observe_async(query, window)?;
-        Ok(NmpRowStream::new(subscription, windowed))
     }
 
     /// Enqueue a write (#680). The returned [`NmpReceiptStream`] exposes the
