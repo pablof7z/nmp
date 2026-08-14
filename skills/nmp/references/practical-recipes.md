@@ -165,7 +165,7 @@ Rules:
   appearance -- per-host, on that host's own acceptance, is the correct and
   intentional behavior.
 
-For rich rendering, parse row content with `parseNostrContent` and open ordinary queries for the locators you actually need live, bounded to a visible-plus-prefetch window keyed by stable event id. There is no content session, no claim, and no permit budget to manage — the budget is whatever query ownership the app imposes on itself. Swift's `NMPUI` offers `observeWhileVisible` components over the same idea.
+For rich rendering, parse row content with `parseNostrContent` and open ordinary queries for the locators you actually need live, bounded to a visible-plus-prefetch window keyed by stable event id. There is no content session, no claim, and no permit budget to manage — the budget is whatever query ownership the app imposes on itself. Swift's `NMPUI` builds `observeWhileVisible` components over the same idea, but `NMPUI` is not in the prepared-product catalog — it lives in this repository's qualification package, so an app writes that visibility scoping itself today.
 
 ## Follow button and relationship state
 
@@ -200,14 +200,15 @@ Goal: accept a post offline, show honest delivery, and resume after process loss
 
 Goal: explain why one query is partial without inventing a health score.
 
-Show two sections:
+Show three sections:
 
-- Query evidence: planned sources, each source status and reconciled-through value, plus explicit shortfalls.
-- Engine diagnostics: relay URL, exact wire filters, wire subscription count, authors served, lane counts, events by kind, coverage intervals, dropped merge rules, uncovered-author count, and transport degradation.
+- Query evidence: planned sources, each source status and reconciled-through value, plus explicit shortfalls. This is `RowBatch.evidence` — one entry per canonical query branch, in branch order, never collapsed across branches.
+- Engine diagnostics, per relay session: relay URL, the frozen access identity, exact wire filters, wire subscription count, authors served, lane counts, events by kind, per-filter coverage intervals, the NIP-11 and NIP-77 evidence fields, and — snapshot-wide — dropped merge rules, uncovered-author count, and transport degradation.
+- Stuck writes: `DiagnosticsSnapshot.stalledWrites` is every durable obligation that cannot progress, answerable for an app holding no receipt at all, bounded to `stalledWriteTotals.detailLimit` rows in deterministic display order. Render the totals (`unroutable`/`unsignable`/`undeliverable`/`omittedDetails`) beside the detail rows: a bound on displayed rows must never read as a claim about how much is stuck. Reading it changes nothing.
 
-Correlate by relay where the two public projections provide one, then compare the semantic demand with diagnostics' wire-filter JSON. There is no public stable query/filter identifier joining one `SourceEvidence` row to one exact diagnostic filter, and Swift's filter encoder is internal. Useful questions are: Was a source planned? Does the observed wire shape match the demand? Did events arrive? Is coverage present? Was a local cap reported?
+Correlate by `(relay, access)`, not by relay URL alone — one URL hosts distinct sessions (`.public` versus a `.nip42` identity), each with its own diagnostics row, and merging them would credit one identity's coverage to another. Then compare the semantic demand with diagnostics' wire-filter JSON. There is no public stable query/filter identifier joining one evidence row to one exact diagnostic filter, and Swift's filter encoder is internal. Useful questions are: Was a source planned? Does the observed wire shape match the demand? Did events arrive? Is coverage present? Was a local cap reported?
 
-Do not display `100% synced`, infer zero from missing coverage, or promise native fields for Rust-only store degradation/rejection counters. `SourceStatus.awaitingAuth`/`authDenied`, `AuthPhase`, and `DiagnosticsSnapshot.authSessions` are live, populated states for `AccessContext::Nip42` demands, not reserved vocabulary awaiting a future implementation — a relay-debug sheet can render them today.
+Do not display `100% synced`, infer zero from missing coverage, or promise native fields for counters that stop short of your platform: `store_degraded` and `sessions_refused_by_subscription_budget` are reachable only from direct Rust, and `sessions_rejected_over_cap` stops at the raw UniFFI layer. `SourceStatus.awaitingAuth`/`authDenied`, `AuthPhase`, and `DiagnosticsSnapshot.authSessions` are live, populated states for `AccessContext::Nip42` demands, not reserved vocabulary awaiting a future implementation — a relay-debug sheet can render them today.
 
 ## Cache-first bounded list
 
