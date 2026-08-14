@@ -22,6 +22,9 @@
 //! tears down `EngineThread` cleanly rather than detaching it.
 
 mod observation;
+mod relay_information;
+
+pub use relay_information::RelayInformationRequestError;
 
 use std::sync::Mutex;
 
@@ -45,6 +48,7 @@ use nmp_signer::SigningCapability;
 use nmp_store::{RedbStore, RedbStoreOpenError, RedbStoreResetError};
 use nmp_transport::PoolConfig;
 use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
+#[cfg(any(test, all(feature = "unstable-mechanism", feature = "nip65")))]
 use nostr::RelayUrl;
 use nostr::{EventId, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
@@ -53,9 +57,8 @@ use crate::auth::{AuthPolicy, EngineAuthPolicyAdapter};
 use crate::config::build_nip65_sources;
 use crate::config::{build_routing_facts, EngineConfig};
 use crate::error::EngineError;
-use crate::relay_information::{
-    RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot,
-};
+#[cfg(test)]
+use crate::relay_information::{RelayInformationCachePolicy, RelayInformationError};
 use crate::subscription::{AsyncDiagnosticsSubscription, DiagnosticsSubscription};
 
 /// The open state: the `Handle` verbs are driven through, plus the
@@ -236,25 +239,6 @@ pub struct SignEventRequest {
     pub tags: Vec<Tag>,
     pub content: String,
 }
-
-/// Failure of an explicit NIP-11 one-shot: lifecycle/URL validation stays
-/// distinct from network/document acquisition.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RelayInformationRequestError {
-    Engine(EngineError),
-    Acquisition(RelayInformationError),
-}
-
-impl std::fmt::Display for RelayInformationRequestError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Engine(error) => error.fmt(f),
-            Self::Acquisition(error) => error.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for RelayInformationRequestError {}
 
 impl Engine {
     /// Configure one synchronous capability implementation and return the
@@ -983,49 +967,6 @@ impl Engine {
             let (diag_handle, snapshots) = handle.observe_diagnostics();
             AsyncDiagnosticsSubscription::new(diag_handle, snapshots)
         })
-    }
-
-    /// Acquire a relay's NIP-11 document once through the engine-owned,
-    /// bounded, single-flight cache. This is intentionally not `observe_*`:
-    /// NIP-11 is one HTTP representation, not a stream. Callers choose when
-    /// to refresh; ordinary relay reconnects reuse the same freshness rules.
-    pub async fn relay_information(
-        &self,
-        relay: &str,
-        policy: RelayInformationCachePolicy,
-    ) -> Result<RelayInformationSnapshot, RelayInformationRequestError> {
-        let relay = RelayUrl::parse(relay).map_err(|_| {
-            RelayInformationRequestError::Engine(EngineError::InvalidRelayUrl {
-                url: relay.to_string(),
-            })
-        })?;
-        let handle = {
-            let guard = self
-                .inner
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            guard.as_ref().map(|inner| inner.handle.clone()).ok_or(
-                RelayInformationRequestError::Engine(EngineError::EngineClosed),
-            )?
-        };
-        handle
-            .relay_information_async(relay, policy)
-            .await
-            .map_err(RelayInformationRequestError::Acquisition)
-    }
-
-    #[cfg(test)]
-    fn relay_information_retention_census(
-        &self,
-    ) -> crate::relay_information_service::RelayInformationRetentionCensus {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        guard
-            .as_ref()
-            .map(|inner| crate::runtime::relay_information_retention_census(&inner.handle))
-            .expect("test census requires an open engine")
     }
 
     /// Stop the engine. Idempotent: a second call (or a call racing another
