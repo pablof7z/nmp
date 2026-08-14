@@ -1,9 +1,11 @@
 use std::sync::{Arc, Mutex};
 
-#[cfg(doc)]
 use super::NmpEngine;
-use crate::convert::{frame_to_ffi, FfiRequestRowsError, FfiRowPullError};
-use crate::types::FfiFrame;
+use crate::convert::{
+    filter_from_ffi, frame_to_ffi, live_query_from_ffi, window_from_ffi, FfiError,
+    FfiRequestRowsError, FfiRowPullError,
+};
+use crate::types::{FfiFilter, FfiFrame, FfiLiveQuery, FfiWindow};
 
 /// The app-facing pull-based handle to a live subscription (returned by
 /// [`NmpEngine::observe`], #680/#762). Native SDKs synchronously call
@@ -73,7 +75,7 @@ enum ReceiveStart {
 }
 
 impl NmpRowStream {
-    pub(super) fn new(inner: nmp::AsyncSubscription, windowed: bool) -> Arc<Self> {
+    fn new(inner: nmp::AsyncSubscription, windowed: bool) -> Arc<Self> {
         Arc::new(Self {
             shared: Arc::new(RowStreamShared {
                 inner,
@@ -90,6 +92,69 @@ impl NmpRowStream {
                 }),
             }),
         })
+    }
+}
+
+#[uniffi::export]
+impl NmpEngine {
+    /// Open a live subscription (#680). Delivery is pull-based: await
+    /// [`NmpRowStream::next`], which parks a waker on the engine-owned mailbox
+    /// rather than blocking a dedicated OS thread — opening one costs no native
+    /// thread. `None` from `next()` is the terminal signal (cancel / engine
+    /// shutdown / producer drop). The returned [`NmpRowStream`]'s `Drop`
+    /// withdraws the subscription; call [`NmpRowStream::cancel`] for an
+    /// explicit early teardown.
+    ///
+    /// `window` selects the observation's delivery policy (#485). `None` is
+    /// today's unbounded observation: exact deltas are rebased when a slow
+    /// consumer skips intermediate reducer emits, and the full set is never
+    /// redelivered. `Some(FfiWindow::Expandable { initial, max })` is a
+    /// bounded newest-first window: each frame carries the complete
+    /// current row set + growth fact in `FfiFrame::window` (deltas stay
+    /// empty on the wire) and grows only via
+    /// [`NmpRowStream::request_rows`], never above `max`. Zero bounds and
+    /// `initial > max` fail closed here with a typed [`FfiError`]; a
+    /// windowed selection that already declares a NIP-01 `limit` fails with
+    /// [`FfiError::WindowSelectionHasLimit`].
+    pub fn observe(
+        &self,
+        query: FfiFilter,
+        window: Option<FfiWindow>,
+    ) -> Result<Arc<NmpRowStream>, FfiError> {
+        let filter = filter_from_ffi(query)?;
+        let window = window_from_ffi(window)?;
+        let windowed = window.is_some();
+        let subscription = self
+            .engine
+            .observe_async(nmp::LiveQuery::from_filter(filter), window)?;
+        Ok(NmpRowStream::new(subscription, windowed))
+    }
+
+    /// Open a live subscription over an explicit [`FfiLiveQuery`] (#1108) --
+    /// the constructor an app reaches for once [`Self::observe`]'s bare
+    /// [`FfiFilter`] (which always takes `Demand::from_filter`'s static
+    /// default, one branch) isn't enough: declaring `Pinned` wire authority,
+    /// a non-default `AccessContext`, a non-`Agnostic` `CacheMode`, SEVERAL
+    /// independent demand branches, or a bound on their merged row union.
+    ///
+    /// Branches are observed through this ONE subscription: rows are unioned
+    /// by event id with provenance merged, each frame carries one evidence
+    /// entry per canonical branch, and one cancellation withdraws every
+    /// branch exactly once. Same pull-based/cancel/window shape as `observe`
+    /// in every other respect (see that method's doc for the `window`
+    /// policy); a window and an `aggregate_result_limit` are two owners of
+    /// row membership and fail closed with
+    /// [`FfiError::WindowAggregateResultLimit`].
+    pub fn observe_query(
+        &self,
+        query: FfiLiveQuery,
+        window: Option<FfiWindow>,
+    ) -> Result<Arc<NmpRowStream>, FfiError> {
+        let query = live_query_from_ffi(query)?;
+        let window = window_from_ffi(window)?;
+        let windowed = window.is_some();
+        let subscription = self.engine.observe_async(query, window)?;
+        Ok(NmpRowStream::new(subscription, windowed))
     }
 }
 
