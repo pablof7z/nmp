@@ -84,9 +84,9 @@ serde_json.workspace = true
 # feature set as nmp-engine's own tokio dependency, minus `sync`.
 tokio = { version = "1", features = ["rt", "time", "net"] }
 
-# #99: the corrupt-retained-receipt reattach falsifier needs to write a
-# genuinely undecodable row directly into a real `RedbStore` file, the same
-# technique `nmp-engine`'s own restart/corruption tests use -- test-only.
+# #99/#920: store-owned test-instrumentation fixtures corrupt the exact
+# retained receipt and create the markerless schema witness without exposing
+# Redb types or tables here.
 [dev-dependencies]
 # #851/#934: the ONE mechanism value this crate still reaches for, and only
 # from `#[cfg(test)]`. `nmp` re-exports `ShortfallFact`, whose
@@ -99,7 +99,6 @@ tokio = { version = "1", features = ["rt", "time", "net"] }
 nmp-grammar.workspace = true
 nmp-test-support.workspace = true
 nmp-store = { workspace = true, features = ["test-instrumentation"] }
-redb = "4.1"
 tempfile = "3"
 tungstenite = "0.29"
 url = "2"

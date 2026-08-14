@@ -1,7 +1,7 @@
-//! Store-owned corruption fixtures for tests outside this crate.
+//! Store-owned physical fixtures for tests outside this crate.
 //!
-//! Callers name a receipt, attempt, route key, or intent. They do not name a
-//! Redb table.
+//! Callers name a store path, receipt, attempt, route key, or intent. They do
+//! not name a Redb table.
 
 use std::path::Path;
 
@@ -23,6 +23,24 @@ use crate::{
     PublishQueueAttemptOutcome, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
     PublishQueueLaneState,
 };
+
+/// Create a nonempty physical store with no NMP schema marker.
+///
+/// Opening this fresh target through [`RedbStore`] must produce the typed
+/// unsupported-schema refusal with `found: None`. The foreign table is only a
+/// physical non-emptiness witness; callers never name or inspect it.
+pub fn create_nonempty_markerless_store(path: &Path) -> Result<(), PersistenceError> {
+    const NON_CURRENT_SCHEMA_WITNESS: TableDefinition<u64, &[u8]> =
+        TableDefinition::new("a-table-this-schema-never-writes");
+
+    let database = Database::create(path).map_err(persist_err)?;
+    let write = database.begin_write().map_err(persist_err)?;
+    write
+        .open_table(NON_CURRENT_SCHEMA_WITNESS)
+        .map_err(persist_err)?;
+    write.commit().map_err(persist_err)?;
+    Ok(())
+}
 
 /// Commit one real event acceptance, close that exact Redb generation, and
 /// hide the committed outcome behind a typed I/O failure. This test-owned
