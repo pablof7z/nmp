@@ -768,8 +768,21 @@ pub(super) fn accept_write(
         wall_clock_now(),
         TerminalRetentionLimits::PRODUCTION,
     )?;
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if std::mem::take(&mut store.fail_next_accept_write_before_commit) {
+        drop(write);
+        drop(store.db.take());
+        return Err(PersistenceError::new(
+            crate::PersistenceFault::Io,
+            "injected acceptance failed before commit",
+        ));
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::AcceptBeforeCommit);
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if std::mem::take(&mut store.fail_next_accept_write_after_commit) {
+        return super::testing::commit_acceptance_then_return_io(store, write, outcome);
+    }
     write.commit_prepared(outcome)
 }
 
