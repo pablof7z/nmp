@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use nmp_store::{testing, EventStore, RedbStore};
+use nmp_store::{testing, RedbStore};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, Timestamp};
 
 use super::*;

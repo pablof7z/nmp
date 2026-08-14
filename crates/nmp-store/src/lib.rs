@@ -1,5 +1,4 @@
-//! `nmp-store` — the `EventStore` contract and its one complete
-//! implementation, [`RedbStore`]: the one
+//! `nmp-store` — NMP's one concrete durable store, [`RedbStore`]: the one
 //! mutating door (VISION §4 "the store", bug-class ledger #1), extended in
 //! M3 step A1 with persistence, provenance merge, and coverage watermarks
 //! (VISION §7 ledger #7 / #5).
@@ -1013,7 +1012,7 @@ pub enum ReceiptState {
     /// every other completed receipt.
     Superseded,
     /// Routing finished — knowledge exhausted — and named zero relays, so
-    /// there was nowhere to publish ([`EventStore::close_unroutable_intent`]).
+    /// there was nowhere to publish ([`RedbStore::close_unroutable_intent`]).
     /// Terminal, and distinct from [`Self::Refused`]: the instruction was
     /// fine and the store took it; the WORLD had no destination for it.
     /// Retained so a reattaching app is told that, rather than told nothing.
@@ -1427,7 +1426,8 @@ pub enum PublishQueueAttemptOutcome {
     GaveUp,
 }
 
-/// The single mutating door onto the event store.
+/// The remaining contract for canonical events, accepted writes, receipts,
+/// coverage, and semantic edits.
 pub trait EventStore {
     /// Insert an event observed via `from`. An already-expired event (NIP-40,
     /// judged against `from.at`) is `Refused` before anything else runs —
@@ -2040,201 +2040,6 @@ pub trait EventStore {
     /// a token into an ordinary [`Self::reattach_receipt`] call. Retained
     /// forever, exactly like `PUBLISH_QUEUE_RECEIPTS` -- there is no removal door.
     fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError>;
-
-    /// Append the next canonical resolved-route revision for an open intent.
-    /// This must commit before any attempt starts or wire publication for a
-    /// relay in the revision.
-    fn record_route_revision(
-        &mut self,
-        intent_id: IntentId,
-        relays: BTreeSet<RelayUrl>,
-    ) -> Result<PublishQueueRouteRevision, PersistenceError>;
-
-    /// Recover every resolved-route revision in ascending ordinal order.
-    fn recover_route_revisions(
-        &self,
-        intent_id: IntentId,
-    ) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError>;
-
-    /// Read all retained attempt facts for one intent in stable key order.
-    fn recover_attempts(
-        &self,
-        intent_id: IntentId,
-    ) -> Result<Vec<PublishQueueAttempt>, PersistenceError>;
-
-    /// Idempotently seed every missing lane from bounded route/attempt
-    /// ranges. Existing cursors are validated and retained.
-    fn bootstrap_publish_queue_lanes(
-        &mut self,
-        _intent_id: IntentId,
-    ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
-        Err(PersistenceError::invariant("delivery lanes unsupported"))
-    }
-
-    fn recover_publish_queue_lanes(
-        &self,
-        _intent_id: IntentId,
-    ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
-        Err(PersistenceError::invariant("delivery lanes unsupported"))
-    }
-
-    /// Read at most `limit` due rows in stable `(time,intent,relay)` order.
-    fn due_publish_queue_deadlines(
-        &self,
-        _now: Timestamp,
-        _limit: usize,
-    ) -> Result<Vec<PublishQueueDeadline>, PersistenceError> {
-        Err(PersistenceError::invariant(
-            "delivery deadlines unsupported",
-        ))
-    }
-
-    fn next_publish_queue_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        Err(PersistenceError::invariant(
-            "delivery deadlines unsupported",
-        ))
-    }
-
-    fn set_lane_waiting(
-        &mut self,
-        _key: &PublishQueueLaneKey,
-        _expected_revision: u64,
-        _auth: bool,
-    ) -> Result<PublishQueueLane, PersistenceError> {
-        Err(PersistenceError::invariant("delivery lanes unsupported"))
-    }
-
-    fn set_lane_eligible(
-        &mut self,
-        _key: &PublishQueueLaneKey,
-        _expected_revision: u64,
-        _since: Timestamp,
-    ) -> Result<PublishQueueLane, PersistenceError> {
-        Err(PersistenceError::invariant("delivery lanes unsupported"))
-    }
-
-    fn set_lane_transient(
-        &mut self,
-        _key: &PublishQueueLaneKey,
-        _expected_revision: u64,
-        _ordinal: u64,
-        _eligible_at: Timestamp,
-        _cause: PublishQueueTransientCause,
-        _raw_reason: Option<String>,
-    ) -> Result<PublishQueueLane, PersistenceError> {
-        Err(PersistenceError::invariant("delivery lanes unsupported"))
-    }
-
-    /// End the current ordinal as a nonterminal wait with no deadline.
-    /// The attempt detail and waiting cursor advance atomically, so restart
-    /// cannot mistake an AUTH/offline wait for a live ambiguous send.
-    #[allow(clippy::too_many_arguments)]
-    fn suspend_lane_attempt(
-        &mut self,
-        _key: &PublishQueueLaneKey,
-        _expected_revision: u64,
-        _ordinal: u64,
-        _at: Timestamp,
-        _cause: PublishQueueTransientCause,
-        _raw_reason: Option<String>,
-        _auth: bool,
-    ) -> Result<PublishQueueLane, PersistenceError> {
-        Err(PersistenceError::invariant("delivery lanes unsupported"))
-    }
-
-    /// Atomically append new immutable v1 Started evidence, additive details,
-    /// and advance an eligible cursor to awaiting handoff.
-    fn start_lane_attempt(
-        &mut self,
-        _key: &PublishQueueLaneKey,
-        _expected_revision: u64,
-        _event: Event,
-        _started_at: Timestamp,
-    ) -> Result<(PublishQueueAttempt, PublishQueueLane), PersistenceError> {
-        Err(PersistenceError::invariant("delivery lanes unsupported"))
-    }
-
-    /// Atomically retain handoff evidence and apply the engine-selected next
-    /// fact, maintaining the typed deadline index in the same commit.
-    fn record_lane_handoff(
-        &mut self,
-        _key: &PublishQueueLaneKey,
-        _expected_revision: u64,
-        _ordinal: u64,
-        _detail: PublishQueueAttemptHandoff,
-        _next: PublishQueuePostHandoffState,
-    ) -> Result<PublishQueueLane, PersistenceError> {
-        Err(PersistenceError::invariant("delivery lanes unsupported"))
-    }
-
-    /// Make the current attempt terminal without rewriting its immutable v1
-    /// Started row. Exact ordinal + lane revision reject late ACKs against a
-    /// newer attempt; detail, cursor, and deadline removal share one commit.
-    fn finish_lane_attempt(
-        &mut self,
-        _key: &PublishQueueLaneKey,
-        _expected_revision: u64,
-        _ordinal: u64,
-        _outcome: PublishQueueAttemptOutcome,
-        _finished_at: Timestamp,
-    ) -> Result<PublishQueueLane, PersistenceError> {
-        Err(PersistenceError::invariant("delivery lanes unsupported"))
-    }
-
-    /// Atomically finish an exact AUTH-waiting lane without fabricating an
-    /// EVENT attempt. Exact lane revision is checked before idempotence, so a
-    /// stale writer can never borrow success from a newer terminal fact.
-    fn deny_lane_auth(
-        &mut self,
-        _key: &PublishQueueLaneKey,
-        _expected_revision: u64,
-        _denial: AuthDenial,
-    ) -> Result<PublishQueueLane, PersistenceError> {
-        Err(PersistenceError::invariant("delivery lanes unsupported"))
-    }
-
-    fn recover_attempt_details(
-        &self,
-        _intent_id: IntentId,
-    ) -> Result<Vec<PublishQueueAttemptDetails>, PersistenceError> {
-        Err(PersistenceError::invariant(
-            "delivery attempt details unsupported",
-        ))
-    }
-
-    /// Delete an intent's bounded open-work rows when it owns NO lanes at all.
-    ///
-    /// The exact structural complement of [`Self::close_terminal_intent`],
-    /// which requires a NON-EMPTY all-terminal lane set. Zero lanes is a fact
-    /// this crate can check for itself, so neither door asks the store to
-    /// guess at routing policy: the engine calls this one only when its own
-    /// resolution reported knowledge exhausted with zero destinations, and
-    /// the store still refuses if any lane exists.
-    ///
-    /// Without it a write that resolved to nowhere kept its open-work row
-    /// forever — unremovable (the removal door refuses an open intent),
-    /// uncancellable once signed, and replayed on every boot. That is the
-    /// FIRST-RUN path now that a fresh install with no reachable relay list
-    /// terminates as `NoDestination`, so it is a leak on the most common
-    /// path rather than an edge case.
-    ///
-    /// Receipts stay retained and reattachable, exactly as
-    /// [`Self::close_terminal_intent`] leaves them.
-    fn close_unroutable_intent(
-        &mut self,
-        _intent_id: IntentId,
-    ) -> Result<CloseIntentOutcome, PersistenceError> {
-        Err(PersistenceError::invariant("delivery lanes unsupported"))
-    }
-
-    /// Delete bounded open-work rows only after a non-empty lane set is all
-    /// terminal. Receipts and all route/attempt/detail evidence are retained.
-    fn close_terminal_intent(
-        &mut self,
-        _intent_id: IntentId,
-    ) -> Result<CloseIntentOutcome, PersistenceError> {
-        Err(PersistenceError::invariant("delivery lanes unsupported"))
-    }
 
     /// Take custody of a write the acceptance door REFUSED, as one
     /// permanently-failed queue entry.
