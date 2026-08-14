@@ -125,6 +125,11 @@ pub struct RedbStore {
     /// from a newly opened Redb generation.
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fail_next_accept_write_after_commit: bool,
+    /// One construction-armed refusal consumed by the next bounded read
+    /// behind an exact history cursor. No production build carries this
+    /// setting, and no caller can re-arm it after construction.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    fail_next_query_newest_before: std::sync::atomic::AtomicBool,
     /// One construction-armed pause consumed before the shared ordered event
     /// read. The pause controls scheduling only; Redb still supplies every
     /// row and every error.
@@ -332,6 +337,23 @@ impl RedbStore {
         let mut store = Self::temporary()?;
         store.fail_next_lane_attempt_finish = true;
         Ok(store)
+    }
+
+    /// Open a real temporary Redb store whose next bounded read behind an
+    /// exact history cursor refuses once.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn temporary_with_failed_query_newest_before() -> Result<Self, RedbStoreOpenError> {
+        let store = Self::temporary()?;
+        store
+            .fail_next_query_newest_before
+            .store(true, Ordering::Relaxed);
+        Ok(store)
+    }
+
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(super) fn take_query_newest_before_failure(&self) -> bool {
+        self.fail_next_query_newest_before
+            .swap(false, Ordering::Relaxed)
     }
 
     /// Open a persistent Redb store whose named lane starts fail at the
@@ -835,6 +857,8 @@ impl RedbStore {
             fail_next_accept_write_before_commit: false,
             #[cfg(any(test, feature = "test-instrumentation"))]
             fail_next_accept_write_after_commit: false,
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            fail_next_query_newest_before: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-instrumentation"))]
             ordered_event_read_pause: Mutex::new(None),
             #[cfg(test)]

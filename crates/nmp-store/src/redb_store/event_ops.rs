@@ -319,6 +319,12 @@ pub(super) fn query_newest_before(
     {
         return Ok(Vec::new());
     }
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if store.take_query_newest_before_failure() {
+        return Err(PersistenceError::invariant(
+            "injected query-newest-before failure",
+        ));
+    }
     // Exact ids are already a caller-bounded lookup rather than an
     // ordered index range. Preserve that narrow path, then apply the
     // same exact exclusive cursor predicate as the EventStore contract.

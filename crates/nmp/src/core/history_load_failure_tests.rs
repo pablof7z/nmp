@@ -17,7 +17,6 @@ use super::*;
 #[derive(Debug)]
 enum StoreFailure {
     Query(String),
-    NewestBefore(String),
     CoverageWrite(String),
 }
 
@@ -27,10 +26,6 @@ pub(super) struct StoreFailureControl(Arc<Mutex<Option<StoreFailure>>>);
 impl StoreFailureControl {
     fn fail_query(&self, message: &str) {
         *self.0.lock().unwrap() = Some(StoreFailure::Query(message.to_owned()));
-    }
-
-    fn fail_newest_before(&self, message: &str) {
-        *self.0.lock().unwrap() = Some(StoreFailure::NewestBefore(message.to_owned()));
     }
 
     pub(super) fn fail_coverage_write(&self, message: &str) {
@@ -53,18 +48,6 @@ impl StoreFailureControl {
         let mut failure = self.0.lock().unwrap();
         if matches!(failure.as_ref(), Some(StoreFailure::Query(_))) {
             let Some(StoreFailure::Query(message)) = failure.take() else {
-                unreachable!()
-            };
-            Some(PersistenceError::invariant(message))
-        } else {
-            None
-        }
-    }
-
-    fn take_newest_before_failure(&self) -> Option<PersistenceError> {
-        let mut failure = self.0.lock().unwrap();
-        if matches!(failure.as_ref(), Some(StoreFailure::NewestBefore(_))) {
-            let Some(StoreFailure::NewestBefore(message)) = failure.take() else {
                 unreachable!()
             };
             Some(PersistenceError::invariant(message))
@@ -114,9 +97,6 @@ impl EventStore for ControlledFailureStore {
         before: EventCursor,
         limit: usize,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
-        if let Some(error) = self.control.take_newest_before_failure() {
-            return Err(error);
-        }
         self.inner.query_newest_before(filter, before, limit)
     }
 
@@ -938,7 +918,7 @@ struct HistorySnapshot {
     history_by_handle: HashMap<HandleId, HistorySessionId>,
 }
 
-fn snapshot(core: &EngineCore<ControlledFailureStore>, id: HistorySessionId) -> HistorySnapshot {
+fn snapshot<S: EventStore>(core: &EngineCore<S>, id: HistorySessionId) -> HistorySnapshot {
     let state = &core.histories[&id];
     assert!(state.pending_load.is_none());
     HistorySnapshot {
@@ -1041,8 +1021,8 @@ fn open_history(
     (core, id)
 }
 
-fn assert_failed_load(
-    core: &EngineCore<ControlledFailureStore>,
+fn assert_failed_load<S: EventStore>(
+    core: &EngineCore<S>,
     id: HistorySessionId,
     before: &HistorySnapshot,
     effects: &[Effect],
@@ -1149,14 +1129,30 @@ fn older_window_read_failure_dispatches_diagnostics_and_exact_rollback() {
 fn projection_advance_read_failure_dispatches_diagnostics_and_exact_rollback() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://history-advance-failure.example").unwrap();
-    let store = seeded_store(
-        (100..106).map(|created_at| event(&keys, 9, created_at)),
-        &relay,
-    );
-    let control = StoreFailureControl::default();
-    let (mut core, id) = open_history(store, control.clone(), literal_history_query(), None);
+    let mut store = RedbStore::temporary_with_failed_query_newest_before()
+        .expect("temporary Redb query-newest-before failure fixture");
+    store
+        .insert_batch(
+            (100..106)
+                .map(|created_at| {
+                    (
+                        event(&keys, 9, created_at),
+                        RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+    let mut core = EngineCore::new(store, 20);
+    let opened = core.handle(EngineMsg::SubscribeHistory(literal_history_query()));
+    let id = opened
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitHistory(id, _) => Some(*id),
+            _ => None,
+        })
+        .expect("fixture must open a history frame");
     let before = snapshot(&core, id);
-    control.fail_newest_before("projection advance read failed");
 
     let effects = core.handle(EngineMsg::RequestRows(id, 4));
 
@@ -1165,7 +1161,7 @@ fn projection_advance_read_failure_dispatches_diagnostics_and_exact_rollback() {
         id,
         &before,
         &effects,
-        "durable-store persistence failure: projection advance read failed",
+        "durable-store persistence failure: injected query-newest-before failure",
     );
 }
 
@@ -1191,12 +1187,7 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
     );
     let directory =
         FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [first, second]);
-    let control = StoreFailureControl::default();
-    let mut core = EngineCore::new_with_fixture_routing_facts(
-        ControlledFailureStore::new(store, control),
-        directory,
-        1,
-    );
+    let mut core = EngineCore::new_with_fixture_routing_facts(store, directory, 1);
     let opened = core.handle(EngineMsg::SubscribeHistory(query));
     let id = opened
         .iter()
