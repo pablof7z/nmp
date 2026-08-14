@@ -105,6 +105,15 @@ mod receipt_allocator_tests {
             nmp_store::PersistenceError::new(nmp_store::PersistenceFault::Io, "fixture I/O"),
             &mut effects,
         );
+        assert!(
+            matches!(
+                effects.last(),
+                Some(Effect::EmitDiagnostics(snapshot))
+                    if snapshot.store_degraded.as_deref()
+                        == Some("durable-store persistence failure: fixture invariant")
+            ),
+            "a later distinct I/O failure must not replace the first diagnostic"
+        );
         assert_eq!(
             core.take_store_recovery_request(),
             Some(nmp_store::PersistenceFault::Io),
