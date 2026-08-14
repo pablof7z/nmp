@@ -2,11 +2,12 @@ use nmp_store::RelayObserved;
 use nmp_store::{
     AcceptOutcome, AcceptWrite, AcceptWritePayload, AccessContextId, EventStore, HandoffEvidence,
     IntentSigState, MaterializationCandidate, MaterializationId, PendingMaterializationState,
-    PromoteOutcome, PromotionTarget, PublishQueueAttemptHandoff, PublishQueueLaneState,
-    PublishQueuePostHandoffState, PublishQueueReceiptPayload, QualifiedSource, RedbStore,
-    ReplaceableOperationReceiptState, ReplayFormatId, ReplayProgramId, SemanticAccept,
-    SemanticInstallOutcome, SemanticPlan, SemanticRematerialize, SemanticSourceInstall,
-    SourceEvidence, SourcePlanId, StartingSource, StartingSourceRequirement, VerifiedSignature,
+    PromoteOutcome, PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
+    PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceiptPayload,
+    QualifiedSource, RedbStore, ReplaceableOperationReceiptState, ReplayFormatId, ReplayProgramId,
+    SemanticAccept, SemanticInstallOutcome, SemanticPlan, SemanticRematerialize,
+    SemanticSourceInstall, SourceEvidence, SourcePlanId, StartingSource, StartingSourceRequirement,
+    VerifiedSignature,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{EventBuilder, Filter, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
@@ -468,7 +469,7 @@ fn exercise_source_successor(store: &mut dyn EventStore) -> SourceSuccessorEvide
             VerifiedSignature::verify(&first_signed).unwrap(),
         )
         .unwrap();
-    let (_, awaiting_handoff) = store
+    let (first_attempt, awaiting_handoff) = store
         .start_lane_attempt(
             &eligible.key,
             eligible.revision,
@@ -476,11 +477,11 @@ fn exercise_source_successor(store: &mut dyn EventStore) -> SourceSuccessorEvide
             Timestamp::from(3),
         )
         .unwrap();
-    store
+    let awaiting_ack = store
         .record_lane_handoff(
             &awaiting_handoff.key,
             awaiting_handoff.revision,
-            1,
+            first_attempt.ordinal,
             PublishQueueAttemptHandoff {
                 at: Timestamp::from(3),
                 result: HandoffEvidence::Written,
@@ -491,6 +492,16 @@ fn exercise_source_successor(store: &mut dyn EventStore) -> SourceSuccessorEvide
         )
         .unwrap();
     assert!(store.next_publish_queue_deadline().unwrap().is_some());
+    store
+        .finish_lane_attempt(
+            &awaiting_ack.key,
+            awaiting_ack.revision,
+            first_attempt.ordinal,
+            PublishQueueAttemptOutcome::Acked,
+            Timestamp::from(4),
+        )
+        .unwrap();
+    assert_eq!(store.next_publish_queue_deadline().unwrap(), None);
 
     let newer = EventBuilder::new(Kind::ContactList, "B5")
         .custom_created_at(Timestamp::from(5))
@@ -584,7 +595,7 @@ fn qualified_source_and_complete_successor_survive_redb_reopen() {
         exercise_source_successor(&mut redb)
     };
 
-    let reopened = RedbStore::open(&path).unwrap();
+    let mut reopened = RedbStore::open(&path).unwrap();
     let snapshot = reopened
         .replaceable_operation_snapshot(&evidence.coordinate)
         .unwrap()
@@ -603,8 +614,11 @@ fn qualified_source_and_complete_successor_survive_redb_reopen() {
         receipt_ids(&reopened, evidence.receipt),
         (evidence.predecessor, evidence.successor)
     );
+    // Bootstrap must validate the current successor lane against attempts for
+    // that event. The terminal predecessor attempt remains valid history and
+    // still supplies the monotonically increasing attempt cursor.
     let mut lanes = reopened
-        .recover_publish_queue_lanes(evidence.intent)
+        .bootstrap_publish_queue_lanes(evidence.intent)
         .unwrap();
     assert_eq!(lanes.len(), 1);
     let successor_lane = lanes.remove(0);

@@ -570,7 +570,16 @@ pub(super) fn bootstrap_publish_queue_lanes(
                 .filter(|(attempt_relay_id, _)| attempt_relay_id == relay_id)
                 .map(|(_, attempt)| attempt)
                 .collect();
-            let live_count = lane_attempts
+            // Attempt ordinals remain monotonic across every generation that
+            // used this durable lane. Lane state, however, belongs only to
+            // the exact current event; retained predecessor attempts are
+            // historical evidence and cannot make the successor terminal.
+            let current_attempts: Vec<_> = lane_attempts
+                .iter()
+                .copied()
+                .filter(|attempt| attempt.event.id == event_id)
+                .collect();
+            let live_count = current_attempts
                 .iter()
                 .filter(|attempt| {
                     crate::attempt_is_live(
@@ -581,7 +590,7 @@ pub(super) fn bootstrap_publish_queue_lanes(
                 .count();
             if live_count > 1
                 || (live_count == 1
-                    && lane_attempts.last().is_some_and(|attempt| {
+                    && current_attempts.last().is_some_and(|attempt| {
                         !crate::attempt_is_live(
                             attempt,
                             details_by_key.get(&(*relay_id, attempt.ordinal)),
@@ -613,7 +622,7 @@ pub(super) fn bootstrap_publish_queue_lanes(
                         "delivery lane cursor disagrees with retained attempt history",
                     ));
                 }
-                match lane_attempts.last() {
+                match current_attempts.last() {
                     Some(attempt) if attempt.outcome != PublishQueueAttemptOutcome::Started => {
                         if lane.state
                             != (PublishQueueLaneState::Terminal {
