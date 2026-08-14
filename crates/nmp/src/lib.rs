@@ -85,10 +85,6 @@ mod subscription;
 mod core;
 #[cfg(feature = "bench-instrumentation")]
 mod ingest_attribution;
-/// Test-only durable-store double. It lives outside `core` on purpose: it is
-/// a store implementation, not reducer code.
-#[cfg(test)]
-mod lane_fault_store;
 mod negentropy;
 mod publish_queue;
 mod relay_information_service;
