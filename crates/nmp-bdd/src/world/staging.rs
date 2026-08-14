@@ -25,7 +25,7 @@ use nostr::{Keys, PublicKey, Timestamp, UnsignedEvent};
 use nmp::mechanism::runtime::Handle;
 use nmp::Engine;
 use nmp_router::FixtureRoutingFacts;
-use nmp_store::{EventStore, RedbStore};
+use nmp_store::RedbStore;
 use nmp_transport::PoolConfig;
 
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -492,10 +492,8 @@ impl NmpWorld {
         self.diag = Some(DiagFeed::new(diag_handle, diag_rx));
     }
 
-    /// Spawn over whichever store this scenario chose. Generic so the choice
-    /// above is a value rather than a duplicated call, and so neither store
-    /// type leaks into `NmpWorld` -- `Engine` is not generic, and the store is
-    /// moved whole into the engine thread and never comes back.
+    /// Spawn over whichever Redb store this scenario chose. The store is moved
+    /// whole into the engine thread and never comes back.
     ///
     /// ONE engine, TWO surfaces. The product verbs a scenario is about run
     /// through `Engine` (`features/groups/` publishes through the
@@ -503,10 +501,7 @@ impl NmpWorld {
     /// delta and diagnostics channels a `Then` step has to FOLD run through
     /// the same engine's `Handle`. See `Engine::mechanism_handle`'s doc for
     /// why a fixture that owns both ends may hold both.
-    fn spawn_over<S>(&self, store: S, facts: FixtureRoutingFacts) -> (Engine, Handle)
-    where
-        S: EventStore + Send + 'static,
-    {
+    fn spawn_over(&self, store: RedbStore, facts: FixtureRoutingFacts) -> (Engine, Handle) {
         let nip65_sources = self
             .indexer_names
             .iter()
