@@ -133,6 +133,11 @@ pub struct RedbStore {
     /// from a newly opened Redb generation.
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fail_next_accept_write_after_commit: bool,
+    /// One construction-armed relay-observation I/O failure consumed at the
+    /// staged pre-commit boundary. The prepared Redb transaction and actual
+    /// database handle are closed before the typed error is returned.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(super) fail_next_observation_before_commit: bool,
     /// One construction-armed refusal consumed by the next bounded read
     /// behind an exact history cursor. No production build carries this
     /// setting, and no caller can re-arm it after construction.
@@ -372,6 +377,15 @@ impl RedbStore {
     pub fn temporary_with_failed_lane_handoff() -> Result<Self, RedbStoreOpenError> {
         let mut store = Self::temporary()?;
         store.fail_next_lane_handoff = true;
+        Ok(store)
+    }
+
+    /// Open a real temporary Redb store whose next nonempty observation
+    /// transaction closes the database handle and returns I/O before commit.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn temporary_with_observation_precommit_io() -> Result<Self, RedbStoreOpenError> {
+        let mut store = Self::temporary()?;
+        store.fail_next_observation_before_commit = true;
         Ok(store)
     }
 
@@ -910,6 +924,8 @@ impl RedbStore {
             fail_next_accept_write_before_commit: false,
             #[cfg(any(test, feature = "test-instrumentation"))]
             fail_next_accept_write_after_commit: false,
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            fail_next_observation_before_commit: false,
             #[cfg(any(test, feature = "test-instrumentation"))]
             fail_next_query_newest_before: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-instrumentation"))]
