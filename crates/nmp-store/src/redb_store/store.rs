@@ -138,6 +138,11 @@ pub struct RedbStore {
     /// setting, and no caller can re-arm it after construction.
     #[cfg(any(test, feature = "test-instrumentation"))]
     fail_next_query_newest_before: std::sync::atomic::AtomicBool,
+    /// One construction-armed coverage-write refusal consumed only when the
+    /// staged batch contains this exact durable row. No production build
+    /// carries this setting, and no caller can re-arm it after construction.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(super) fail_next_coverage_write: Option<(CoverageKey, RelayUrl)>,
     /// One construction-armed pause consumed before the shared ordered event
     /// read. The pause controls scheduling only; Redb still supplies every
     /// row and every error.
@@ -407,6 +412,19 @@ impl RedbStore {
     ) -> Result<Self, RedbStoreOpenError> {
         let mut store = Self::open(path)?;
         store.fail_route_revision_writes = true;
+        Ok(store)
+    }
+
+    /// Open a persistent Redb store whose next coverage write containing the
+    /// exact durable row refuses at the existing pre-commit boundary.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn open_with_failed_coverage_write(
+        path: impl AsRef<Path>,
+        key: CoverageKey,
+        relay: RelayUrl,
+    ) -> Result<Self, RedbStoreOpenError> {
+        let mut store = Self::open(path)?;
+        store.fail_next_coverage_write = Some((key, relay));
         Ok(store)
     }
 
@@ -894,6 +912,8 @@ impl RedbStore {
             fail_next_accept_write_after_commit: false,
             #[cfg(any(test, feature = "test-instrumentation"))]
             fail_next_query_newest_before: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            fail_next_coverage_write: None,
             #[cfg(any(test, feature = "test-instrumentation"))]
             ordered_event_read_pause: Mutex::new(None),
             #[cfg(test)]

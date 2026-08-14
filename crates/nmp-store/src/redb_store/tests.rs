@@ -700,6 +700,66 @@ fn configured_query_newest_before_failure_is_consumed_once() {
 }
 
 #[test]
+fn configured_coverage_write_failure_targets_one_row_rolls_back_and_is_consumed_once() {
+    let directory = tempfile::tempdir().expect("coverage failure directory");
+    let path = directory.path().join("coverage-write-failure.redb");
+    let relay = RelayUrl::parse("wss://coverage-write-failure.example").unwrap();
+    let atom = |kind| ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([kind])),
+            ..ConcreteFilter::default()
+        },
+        source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+        access: nmp_grammar::AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let target = atom(1);
+    let collateral = atom(2);
+    let unrelated = atom(3);
+    let target_key = compute_coverage_key(&target);
+    let collateral_key = compute_coverage_key(&collateral);
+    let unrelated_key = compute_coverage_key(&unrelated);
+    let interval = CoverageInterval::new(Timestamp::from(100), Timestamp::from(200));
+    let mut store = RedbStore::open_with_failed_coverage_write(&path, target_key, relay.clone())
+        .expect("persistent Redb coverage-write failure fixture");
+
+    store
+        .record_coverage(&[(unrelated, relay.clone(), interval)])
+        .expect("an unrelated row cannot consume the exact construction arm");
+
+    let batch = [
+        (target, relay.clone(), interval),
+        (collateral, relay.clone(), interval),
+    ];
+    let error = store
+        .record_coverage(&batch)
+        .expect_err("the exact target row must refuse the staged batch once");
+    assert_eq!(
+        error.to_string(),
+        "durable-store persistence failure: injected coverage write failure"
+    );
+    assert_eq!(store.get_coverage(target_key, &relay).unwrap(), None);
+    assert_eq!(store.get_coverage(collateral_key, &relay).unwrap(), None);
+    assert_eq!(
+        store.get_coverage(unrelated_key, &relay).unwrap(),
+        Some(interval),
+        "the independently committed unrelated row survives"
+    );
+
+    store
+        .record_coverage(&batch)
+        .expect("the same store retries after consuming the one-shot refusal");
+    assert_eq!(
+        store.get_coverage(target_key, &relay).unwrap(),
+        Some(interval)
+    );
+    assert_eq!(
+        store.get_coverage(collateral_key, &relay).unwrap(),
+        Some(interval)
+    );
+}
+
+#[test]
 fn configured_compensation_failure_rolls_back_and_is_consumed_once() {
     let keys = nostr::Keys::generate();
     let mut store = RedbStore::temporary_with_failed_compensation_with_state()

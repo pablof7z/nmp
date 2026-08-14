@@ -552,6 +552,21 @@ pub(super) fn record_coverage(
                 .map_err(persist_err)?;
         }
     }
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if store
+        .fail_next_coverage_write
+        .as_ref()
+        .is_some_and(|(target_key, target_relay)| {
+            claims.iter().any(|(atom, relay, _)| {
+                compute_coverage_key(atom) == *target_key && relay == target_relay
+            })
+        })
+    {
+        store.fail_next_coverage_write = None;
+        return Err(PersistenceError::invariant(
+            "injected coverage write failure",
+        ));
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::CoverageBeforeCommit);
     commit_prepared(write_txn, ())?;

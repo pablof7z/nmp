@@ -30,12 +30,17 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
     let added_claim = coverage_key(&added);
     let old = CoverageInterval::new(Timestamp::from(0), Timestamp::from(99));
     let generation = CoverageInterval::new(Timestamp::from(100), Timestamp::from(200));
-    let mut memory = RedbStore::temporary().expect("temporary Redb store");
-    memory
-        .record_coverage(&[(added.clone(), relay.clone(), old)])
-        .unwrap();
-    let control = StoreFailureControl::default();
-    let mut core = EngineCore::new(ControlledFailureStore::new(memory, control.clone()), 20);
+    let directory = tempfile::tempdir().expect("coverage retry directory");
+    let path = directory.path().join("post-eose-transfer-retry.redb");
+    {
+        let mut store = RedbStore::open(&path).expect("create persistent Redb fixture");
+        store
+            .record_coverage(&[(added.clone(), relay.clone(), old)])
+            .unwrap();
+    }
+    let store = RedbStore::open_with_failed_coverage_write(&path, added_claim, relay.clone())
+        .expect("reopen exact coverage-write failure fixture");
+    let mut core = EngineCore::new(store, 20);
     core.attribution.observe_atom(&incumbent);
     core.attribution.observe_atom(&added);
     let sub_id = SubId::for_wire(
@@ -62,7 +67,6 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
         },
     );
 
-    control.fail_coverage_write("one-shot post-EOSE transfer failure");
     let mut failed = Vec::new();
     core.apply_request_metadata_updates(
         &[nmp_router::RequestMetadataUpdate {
@@ -164,14 +168,11 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
     };
     let incumbent_claim = coverage_key(&incumbent);
     let added_claim = coverage_key(&added);
-    let control = StoreFailureControl::default();
-    let mut core = EngineCore::new(
-        ControlledFailureStore::new(
-            RedbStore::temporary().expect("temporary Redb store"),
-            control.clone(),
-        ),
-        20,
-    );
+    let directory = tempfile::tempdir().expect("coverage supersession directory");
+    let path = directory.path().join("post-eose-transfer-superseded.redb");
+    let store = RedbStore::open_with_failed_coverage_write(&path, added_claim, relay.clone())
+        .expect("persistent exact coverage-write failure fixture");
+    let mut core = EngineCore::new(store, 20);
     core.attribution.observe_atom(&incumbent);
     core.attribution.observe_atom(&added);
     let sub_id = SubId::for_wire(
@@ -213,7 +214,6 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
         ))),
     );
 
-    control.fail_coverage_write("leave the first exact transfer pending");
     core.apply_request_metadata_updates(
         &[nmp_router::RequestMetadataUpdate {
             session: session.clone(),
