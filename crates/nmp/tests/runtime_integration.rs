@@ -1446,7 +1446,8 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         handle_impl_owners,
         vec![
             ("mod.rs".to_owned(), 1),
-            ("receipt_stream.rs".to_owned(), 1)
+            ("receipt_stream.rs".to_owned(), 1),
+            ("sign_event.rs".to_owned(), 1)
         ],
         "Handle must have exactly one impl in each reviewed owner and none elsewhere"
     );
