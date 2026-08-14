@@ -25,39 +25,19 @@ use nostr::{Event, Event as SignedEvent, EventId, PublicKey, RelayUrl, Timestamp
 
 #[derive(Default)]
 pub(crate) struct LaneFaultState {
-    bootstrap: Option<PersistenceFault>,
     route_revisions: bool,
-    bootstrap_calls: u32,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct LaneFaults(Arc<Mutex<LaneFaultState>>);
 
 impl LaneFaults {
-    pub(crate) fn fail_bootstrap(&self, fault: PersistenceFault) {
-        self.0.lock().unwrap().bootstrap = Some(fault);
-    }
-
     pub(crate) fn fail_route_revisions(&self) {
         self.0.lock().unwrap().route_revisions = true;
     }
 
     pub(crate) fn heal(&self) {
-        let mut state = self.0.lock().unwrap();
-        state.bootstrap = None;
-        state.route_revisions = false;
-    }
-
-    pub(crate) fn bootstrap_calls(&self) -> u32 {
-        self.0.lock().unwrap().bootstrap_calls
-    }
-
-    fn take_bootstrap_failure(&self) -> Option<PersistenceError> {
-        let mut state = self.0.lock().unwrap();
-        state.bootstrap_calls = state.bootstrap_calls.saturating_add(1);
-        state.bootstrap.map(|fault| {
-            PersistenceError::new(fault, "injected lane bootstrap failure".to_string())
-        })
+        self.0.lock().unwrap().route_revisions = false;
     }
 
     fn take_route_revision_failure(&self) -> Option<PersistenceError> {
@@ -70,9 +50,9 @@ impl LaneFaults {
     }
 }
 
-/// A delegating store whose lane-bootstrap and route-revision reads can be
-/// made to fail and then healed. Generic over its delegate so the same narrow
-/// double covers temporary and reopened Redb fixtures.
+/// A delegating store whose route-revision reads can be made to fail and then
+/// healed. Generic over its delegate so the remaining boot fixture can wrap a
+/// reopened Redb store.
 pub(crate) struct FaultyLaneStore<S> {
     inner: S,
     faults: LaneFaults,
@@ -89,11 +69,9 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
         &mut self,
         intent_id: IntentId,
     ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
-        if let Some(error) = self.faults.take_bootstrap_failure() {
-            return Err(error);
-        }
         self.inner.bootstrap_publish_queue_lanes(intent_id)
     }
+
     fn recover_route_revisions(
         &self,
         intent_id: IntentId,
