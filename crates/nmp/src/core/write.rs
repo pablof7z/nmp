@@ -8,6 +8,10 @@ use nmp_grammar::ThreadPosition;
 use nostr::nips::nip01::Coordinate;
 
 mod replaceable_operation;
+pub(crate) use replaceable_operation::{
+    PreparedReplaceableMaterialization, PublishPreparation, ReplaceableMaterializationCall,
+    ReplaceableMaterializationContinuation, ReplaceableMaterializationOutcome,
+};
 
 fn public_retry_cause(cause: PublishQueueTransientCause) -> Option<RetryCause> {
     match cause {
@@ -2789,6 +2793,23 @@ impl EngineCore {
     /// capability parks durably as `AwaitingCapability` rather than failing
     /// or drifting.
     pub(super) fn on_publish(&mut self, intent: WriteIntent) -> Vec<Effect> {
+        let mut preparation = self.prepare_publish(intent);
+        loop {
+            match preparation {
+                PublishPreparation::Complete(effects) => return effects,
+                PublishPreparation::Materialize(prepared) => {
+                    let PreparedReplaceableMaterialization { call, continuation } = prepared;
+                    let outcome =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call.execute()))
+                            .unwrap_or(ReplaceableMaterializationOutcome::Panicked);
+                    preparation =
+                        self.complete_body_complete_replaceable_operation(continuation, outcome);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn prepare_publish(&mut self, intent: WriteIntent) -> PublishPreparation {
         let WriteIntent {
             payload,
             routing,
@@ -2803,7 +2824,9 @@ impl EngineCore {
         // because sending a write to relays the caller did not choose is the
         // failure this refusal exists to prevent.
         if matches!(&routing, WriteRouting::Explicit(relays) if relays.is_empty()) {
-            return self.refuse_publish(PublishError::EmptyExplicitRoute);
+            return PublishPreparation::Complete(
+                self.refuse_publish(PublishError::EmptyExplicitRoute),
+            );
         }
 
         // #591: a token that already resolves to a previously-accepted
@@ -2850,7 +2873,7 @@ impl EngineCore {
                             }
                         }
                         effects.push(Effect::ReplayReceipt(receipt_id, page));
-                        return effects;
+                        return PublishPreparation::Complete(effects);
                     }
                     // Review (#591, PR #604 finding 1): never mask a corrupt
                     // retained identity behind fabricated acceptance.
@@ -2868,20 +2891,22 @@ impl EngineCore {
                     };
                     debug_assert!(page.facts.is_empty());
                     let _ = page;
-                    return self.refuse_publish(status);
+                    return PublishPreparation::Complete(self.refuse_publish(status));
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    return self.refuse_publish(PublishError::PersistenceFailed {
-                        reason: err.to_string(),
-                    })
+                    return PublishPreparation::Complete(self.refuse_publish(
+                        PublishError::PersistenceFailed {
+                            reason: err.to_string(),
+                        },
+                    ))
                 }
             }
         }
 
         let payload = match payload {
             WritePayload::ReplaceableOperation(operation) => {
-                return self.on_body_complete_replaceable_operation(
+                return self.prepare_body_complete_replaceable_operation(
                     operation,
                     routing,
                     identity,
@@ -2915,9 +2940,9 @@ impl EngineCore {
             WritePayload::ReplaceableOperation(_) => unreachable!("handled above"),
         };
         if payload_kind == nostr::Kind::Authentication {
-            return self.refuse_publish(PublishError::ReservedKind {
+            return PublishPreparation::Complete(self.refuse_publish(PublishError::ReservedKind {
                 kind: payload_kind.as_u16(),
-            });
+            }));
         }
 
         let signing_pubkey = match &payload {
@@ -2935,7 +2960,11 @@ impl EngineCore {
                 // is pinned, so nothing may park.
                 Identity::Active => match self.active_pubkey {
                     Some(active) => active,
-                    None => return self.refuse_publish(PublishError::NoCurrentAccount),
+                    None => {
+                        return PublishPreparation::Complete(
+                            self.refuse_publish(PublishError::NoCurrentAccount),
+                        )
+                    }
                 },
             },
             // Already-signed payloads are verified verbatim and never ask a
@@ -2945,10 +2974,12 @@ impl EngineCore {
             // contradiction and fails closed before acceptance (#47).
             WritePayload::Signed(event) => match identity {
                 Identity::Explicit(pk) if pk != event.pubkey => {
-                    return self.refuse_publish(PublishError::IdentityContradictsSignedAuthor {
-                        identity: pk,
-                        author: event.pubkey,
-                    });
+                    return PublishPreparation::Complete(self.refuse_publish(
+                        PublishError::IdentityContradictsSignedAuthor {
+                            identity: pk,
+                            author: event.pubkey,
+                        },
+                    ));
                 }
                 Identity::Explicit(_) | Identity::Active => event.pubkey,
             },
@@ -2957,9 +2988,11 @@ impl EngineCore {
 
         if let WritePayload::Signed(event) = &payload {
             if let Err(err) = event.verify() {
-                return self.refuse_publish(PublishError::SignatureInvalid {
-                    reason: err.to_string(),
-                });
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::SignatureInvalid {
+                        reason: err.to_string(),
+                    },
+                ));
             }
         }
 
@@ -2998,7 +3031,7 @@ impl EngineCore {
                             reason: err.to_string(),
                         });
                         self.degrade_store(err, &mut effects);
-                        return effects;
+                        return PublishPreparation::Complete(effects);
                     }
                 };
             let Some(intent_id) = outcome.journaled_intent_id() else {
@@ -3006,7 +3039,9 @@ impl EngineCore {
                     unreachable!("only Refused omits journal ids")
                 };
                 if reason == nmp_store::RefuseReason::AlreadyExpired {
-                    return self.refuse_publish(PublishError::AlreadyExpired);
+                    return PublishPreparation::Complete(
+                        self.refuse_publish(PublishError::AlreadyExpired),
+                    );
                 }
                 // CUSTODY. The store was working and said no, which is an
                 // answer the app is entitled to read back — so the refusal
@@ -3015,25 +3050,27 @@ impl EngineCore {
                 // both event ids, which is what lets an app fetch what is
                 // actually there, reapply the user's change and resubmit
                 // without ever troubling them.
-                return match self.store.accept_refused(frozen.id, signing_pubkey, reason) {
-                    Ok(receipt_id) => {
-                        let id = ReceiptId(receipt_id);
-                        vec![
-                            // The refusal never reached the CAS that could
-                            // have restamped anything, so the body this froze
-                            // is the body custody holds — and it is exactly
-                            // what `accept_refused` retained above.
-                            Effect::WriteAccepted(id, frozen.id),
-                            Effect::EmitReceipt(
-                                id,
-                                WriteFact::Outcome(WriteOutcome::Refused(reason)),
-                            ),
-                        ]
-                    }
-                    Err(err) => self.refuse_publish(PublishError::PersistenceFailed {
-                        reason: err.to_string(),
-                    }),
-                };
+                return PublishPreparation::Complete(
+                    match self.store.accept_refused(frozen.id, signing_pubkey, reason) {
+                        Ok(receipt_id) => {
+                            let id = ReceiptId(receipt_id);
+                            vec![
+                                // The refusal never reached the CAS that could
+                                // have restamped anything, so the body this froze
+                                // is the body custody holds — and it is exactly
+                                // what `accept_refused` retained above.
+                                Effect::WriteAccepted(id, frozen.id),
+                                Effect::EmitReceipt(
+                                    id,
+                                    WriteFact::Outcome(WriteOutcome::Refused(reason)),
+                                ),
+                            ]
+                        }
+                        Err(err) => self.refuse_publish(PublishError::PersistenceFailed {
+                            reason: err.to_string(),
+                        }),
+                    },
+                );
             };
             let receipt_id = outcome
                 .journaled_receipt_id()
@@ -3180,7 +3217,7 @@ impl EngineCore {
             }
             WritePayload::ReplaceableOperation(_) => unreachable!("handled above"),
         }
-        effects
+        PublishPreparation::Complete(effects)
     }
 
     /// `SignerCompleted` (plan §3.4 step 2 continuation): the runtime's

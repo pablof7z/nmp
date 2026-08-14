@@ -1,19 +1,86 @@
 use super::*;
+use std::sync::Arc;
+
+pub(crate) enum PublishPreparation {
+    Complete(Vec<Effect>),
+    Materialize(PreparedReplaceableMaterialization),
+}
+
+pub(crate) struct PreparedReplaceableMaterialization {
+    pub(crate) call: ReplaceableMaterializationCall,
+    pub(crate) continuation: ReplaceableMaterializationContinuation,
+}
+
+pub(crate) struct ReplaceableMaterializationCall {
+    materializer: Arc<dyn crate::ReplaceableMaterializer>,
+    source: UnsignedEvent,
+    current: UnsignedEvent,
+    operations: Vec<Vec<u8>>,
+}
+
+pub(crate) enum ReplaceableMaterializationOutcome {
+    Materialized(nmp_grammar::EventBuilder),
+    Refused(String),
+    Panicked,
+    ThreadUnavailable(String),
+}
+
+pub(crate) struct ReplaceableMaterializationContinuation {
+    instance: [u8; 16],
+    program: ReplayProgramId,
+    format: ReplayFormatId,
+    materializer: Arc<dyn crate::ReplaceableMaterializer>,
+    original_source: UnsignedEvent,
+    declared_source_policy: nmp_grammar::ReplaceableSourcePolicy,
+    operation_bytes: Vec<u8>,
+    signing_pubkey: PublicKey,
+    coordinate: Coordinate,
+    routing: WriteRouting,
+    correlation: Option<nmp_grammar::CorrelationToken>,
+    fence: ReplaceableMaterializationFence,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ReplaceableMaterializationFence {
+    source_revision: Option<nmp_store::SourceRevision>,
+    program_digest: Option<nmp_store::SemanticProgramDigest>,
+    current_materialization: Option<nmp_store::MaterializationId>,
+    operations: Vec<nmp_store::SemanticOperation>,
+}
+
+impl ReplaceableMaterializationCall {
+    pub(crate) fn execute(self) -> ReplaceableMaterializationOutcome {
+        let operations = self
+            .operations
+            .iter()
+            .map(|operation| ReplaceableMaterializerOperation::new(operation))
+            .collect::<Vec<_>>();
+        match self
+            .materializer
+            .materialize(&self.source, &self.current, &operations)
+        {
+            Ok(builder) => ReplaceableMaterializationOutcome::Materialized(builder),
+            Err(refusal) => ReplaceableMaterializationOutcome::Refused(refusal.reason),
+        }
+    }
+}
 
 impl EngineCore {
-    pub(super) fn on_body_complete_replaceable_operation(
+    pub(super) fn prepare_body_complete_replaceable_operation(
         &mut self,
         operation: nmp_grammar::ReplaceableOperation,
         routing: WriteRouting,
         identity: Identity,
         correlation: Option<nmp_grammar::CorrelationToken>,
-    ) -> Vec<Effect> {
+    ) -> PublishPreparation {
         let (instance, original_source, supplied_current, declared_source_policy, operation_bytes) =
             operation.into_registered_parts();
         let Some(registration) = self.replaceable_materializers.get(&instance) else {
-            return self.refuse_publish(PublishError::ReplaceableOperationRefused {
-                reason: "replaceable materializer registration is not active".to_string(),
-            });
+            return PublishPreparation::Complete(self.refuse_publish(
+                PublishError::ReplaceableOperationRefused {
+                    reason: "replaceable materializer registration is not active".to_string(),
+                },
+            ));
         };
         let program = ReplayProgramId(registration.program);
         let format = ReplayFormatId(registration.format);
@@ -21,27 +88,35 @@ impl EngineCore {
 
         let signing_pubkey = match identity {
             Identity::Explicit(pubkey) if pubkey != original_source.pubkey => {
-                return self.refuse_publish(PublishError::IdentityContradictsSignedAuthor {
-                    identity: pubkey,
-                    author: original_source.pubkey,
-                });
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::IdentityContradictsSignedAuthor {
+                        identity: pubkey,
+                        author: original_source.pubkey,
+                    },
+                ));
             }
             Identity::Explicit(pubkey) => pubkey,
             Identity::Active => match self.active_pubkey {
                 Some(pubkey) if pubkey == original_source.pubkey => pubkey,
                 Some(pubkey) => {
-                    return self.refuse_publish(PublishError::IdentityContradictsSignedAuthor {
-                        identity: pubkey,
-                        author: original_source.pubkey,
-                    });
+                    return PublishPreparation::Complete(self.refuse_publish(
+                        PublishError::IdentityContradictsSignedAuthor {
+                            identity: pubkey,
+                            author: original_source.pubkey,
+                        },
+                    ));
                 }
-                None => return self.refuse_publish(PublishError::NoCurrentAccount),
+                None => {
+                    return PublishPreparation::Complete(
+                        self.refuse_publish(PublishError::NoCurrentAccount),
+                    )
+                }
             },
         };
         if original_source.kind == nostr::Kind::Authentication {
-            return self.refuse_publish(PublishError::ReservedKind {
+            return PublishPreparation::Complete(self.refuse_publish(PublishError::ReservedKind {
                 kind: original_source.kind.as_u16(),
-            });
+            }));
         }
 
         let coordinate = Coordinate {
@@ -52,9 +127,11 @@ impl EngineCore {
         let snapshot = match self.store.replaceable_operation_snapshot(&coordinate) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                return self.refuse_publish(PublishError::PersistenceFailed {
-                    reason: error.to_string(),
-                });
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::PersistenceFailed {
+                        reason: error.to_string(),
+                    },
+                ));
             }
         };
 
@@ -71,9 +148,12 @@ impl EngineCore {
                     .expect("registered operation validation froze a source id")
             });
         if supplied_current_id != expected_current_id {
-            return self.refuse_publish(PublishError::ReplaceableOperationRefused {
-                reason: "operation was composed over a stale current materialization".to_string(),
-            });
+            return PublishPreparation::Complete(self.refuse_publish(
+                PublishError::ReplaceableOperationRefused {
+                    reason:
+                        "operation was composed over a stale current materialization".to_string(),
+                },
+            ));
         }
         if snapshot.as_ref().is_some_and(|snapshot| {
             snapshot
@@ -81,9 +161,11 @@ impl EngineCore {
                 .iter()
                 .any(|operation| operation.program != program || operation.format != format)
         }) {
-            return self.refuse_publish(PublishError::ReplaceableOperationRefused {
-                reason: "replaceable coordinate uses another replay program".to_string(),
-            });
+            return PublishPreparation::Complete(self.refuse_publish(
+                PublishError::ReplaceableOperationRefused {
+                    reason: "replaceable coordinate uses another replay program".to_string(),
+                },
+            ));
         }
         let replay_source = snapshot
             .as_ref()
@@ -97,36 +179,272 @@ impl EngineCore {
                 snapshot
                     .operations
                     .iter()
-                    .map(|operation| ReplaceableMaterializerOperation::new(operation.plan.bytes()))
+                    .map(|operation| operation.plan.bytes().to_vec())
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        replay_operations.push(ReplaceableMaterializerOperation::new(&operation_bytes));
-        let builder =
-            match materializer.materialize(&replay_source, &supplied_current, &replay_operations) {
-                Ok(builder) => builder,
-                Err(refusal) => {
-                    return self.refuse_publish(PublishError::ReplaceableOperationRefused {
-                        reason: refusal.reason,
-                    });
+        replay_operations.push(operation_bytes.clone());
+        let fence = Self::replaceable_materialization_fence(snapshot.as_ref());
+        PublishPreparation::Materialize(PreparedReplaceableMaterialization {
+            call: ReplaceableMaterializationCall {
+                materializer: materializer.clone(),
+                source: replay_source,
+                current: supplied_current,
+                operations: replay_operations,
+            },
+            continuation: ReplaceableMaterializationContinuation {
+                instance,
+                program,
+                format,
+                materializer,
+                original_source,
+                declared_source_policy,
+                operation_bytes,
+                signing_pubkey,
+                coordinate,
+                routing,
+                correlation,
+                fence,
+            },
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn retry_body_complete_replaceable_operation(
+        &mut self,
+        instance: [u8; 16],
+        program: ReplayProgramId,
+        format: ReplayFormatId,
+        materializer: Arc<dyn crate::ReplaceableMaterializer>,
+        original_source: UnsignedEvent,
+        declared_source_policy: nmp_grammar::ReplaceableSourcePolicy,
+        operation_bytes: Vec<u8>,
+        signing_pubkey: PublicKey,
+        coordinate: Coordinate,
+        routing: WriteRouting,
+        correlation: Option<nmp_grammar::CorrelationToken>,
+        snapshot: Option<nmp_store::RecoveredSemanticResource>,
+    ) -> PublishPreparation {
+        if snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .operations
+                .iter()
+                .any(|operation| operation.program != program || operation.format != format)
+        }) {
+            return PublishPreparation::Complete(self.refuse_publish(
+                PublishError::ReplaceableOperationRefused {
+                    reason: "replaceable coordinate uses another replay program".to_string(),
+                },
+            ));
+        }
+        let replay_source = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.source.as_ref())
+            .map(|stored| UnsignedEvent::from(stored.event.clone()))
+            .unwrap_or_else(|| original_source.clone());
+        let current_id = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.current.generation.as_ref())
+            .map(|generation| generation.materialization.event_id)
+            .or(replay_source.id)
+            .expect("registered operation retained a complete source id");
+        let current = if replay_source.id == Some(current_id) {
+            replay_source.clone()
+        } else {
+            let rows = match self.store.query(&nostr::Filter::new().id(current_id)) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    return PublishPreparation::Complete(self.refuse_publish(
+                        PublishError::PersistenceFailed {
+                            reason: error.to_string(),
+                        },
+                    ));
                 }
             };
+            let Some(stored) = rows
+                .into_iter()
+                .find(|stored| stored.event.id == current_id)
+            else {
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::ReplaceableOperationRefused {
+                        reason:
+                            "complete current materialization is no longer retained".to_string(),
+                    },
+                ));
+            };
+            UnsignedEvent::from(stored.event)
+        };
+        let mut operations = snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .operations
+                    .iter()
+                    .map(|operation| operation.plan.bytes().to_vec())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        operations.push(operation_bytes.clone());
+        let fence = Self::replaceable_materialization_fence(snapshot.as_ref());
+        PublishPreparation::Materialize(PreparedReplaceableMaterialization {
+            call: ReplaceableMaterializationCall {
+                materializer: materializer.clone(),
+                source: replay_source,
+                current,
+                operations,
+            },
+            continuation: ReplaceableMaterializationContinuation {
+                instance,
+                program,
+                format,
+                materializer,
+                original_source,
+                declared_source_policy,
+                operation_bytes,
+                signing_pubkey,
+                coordinate,
+                routing,
+                correlation,
+                fence,
+            },
+        })
+    }
+
+    fn replaceable_materialization_fence(
+        snapshot: Option<&nmp_store::RecoveredSemanticResource>,
+    ) -> ReplaceableMaterializationFence {
+        ReplaceableMaterializationFence {
+            source_revision: snapshot.map(|snapshot| snapshot.current.source_revision.clone()),
+            program_digest: snapshot.map(|snapshot| snapshot.current.program_digest),
+            current_materialization: snapshot.and_then(|snapshot| {
+                snapshot
+                    .current
+                    .generation
+                    .as_ref()
+                    .map(|generation| generation.materialization.materialization_id)
+            }),
+            operations: snapshot
+                .map(|snapshot| snapshot.operations.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    pub(crate) fn complete_body_complete_replaceable_operation(
+        &mut self,
+        continuation: ReplaceableMaterializationContinuation,
+        outcome: ReplaceableMaterializationOutcome,
+    ) -> PublishPreparation {
+        self.complete_replaceable_materialization(continuation, outcome)
+    }
+
+    fn complete_replaceable_materialization(
+        &mut self,
+        continuation: ReplaceableMaterializationContinuation,
+        outcome: ReplaceableMaterializationOutcome,
+    ) -> PublishPreparation {
+        let ReplaceableMaterializationContinuation {
+            instance,
+            program,
+            format,
+            materializer,
+            original_source,
+            declared_source_policy,
+            operation_bytes,
+            signing_pubkey,
+            coordinate,
+            routing,
+            correlation,
+            fence,
+        } = continuation;
+        let Some(registration) = self.replaceable_materializers.get(&instance) else {
+            return PublishPreparation::Complete(self.refuse_publish(
+                PublishError::ReplaceableOperationRefused {
+                    reason: "replaceable materializer registration is not active".to_string(),
+                },
+            ));
+        };
+        if registration.program != program.0
+            || registration.format != format.0
+            || !Arc::ptr_eq(&registration.materializer, &materializer)
+        {
+            return PublishPreparation::Complete(self.refuse_publish(
+                PublishError::ReplaceableOperationRefused {
+                    reason: "replaceable materializer registration was replaced".to_string(),
+                },
+            ));
+        }
+        let outcome = match outcome {
+            ReplaceableMaterializationOutcome::ThreadUnavailable(reason) => {
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::ReplaceableOperationRefused {
+                        reason: format!("replaceable materializer thread unavailable: {reason}"),
+                    },
+                ));
+            }
+            outcome => outcome,
+        };
+        let snapshot = match self.store.replaceable_operation_snapshot(&coordinate) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::PersistenceFailed {
+                        reason: error.to_string(),
+                    },
+                ));
+            }
+        };
+        if Self::replaceable_materialization_fence(snapshot.as_ref()) != fence {
+            return self.retry_body_complete_replaceable_operation(
+                instance,
+                program,
+                format,
+                materializer,
+                original_source,
+                declared_source_policy,
+                operation_bytes,
+                signing_pubkey,
+                coordinate,
+                routing,
+                correlation,
+                snapshot,
+            );
+        }
+        let builder = match outcome {
+            ReplaceableMaterializationOutcome::Materialized(builder) => builder,
+            ReplaceableMaterializationOutcome::Refused(reason) => {
+                return PublishPreparation::Complete(
+                    self.refuse_publish(PublishError::ReplaceableOperationRefused { reason }),
+                );
+            }
+            ReplaceableMaterializationOutcome::Panicked => {
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::ReplaceableOperationRefused {
+                        reason: "replaceable materializer panicked".to_string(),
+                    },
+                ));
+            }
+            ReplaceableMaterializationOutcome::ThreadUnavailable(_) => {
+                unreachable!("thread unavailability returned before durable fence checks")
+            }
+        };
         if builder.kind != coordinate.kind
             || nostr::Tags::from_list(builder.tags.clone())
                 .identifier()
                 .unwrap_or("")
                 != coordinate.identifier
         {
-            return self.refuse_publish(PublishError::ReplaceableOperationRefused {
-                reason: "materializer changed the replaceable coordinate".to_string(),
-            });
+            return PublishPreparation::Complete(self.refuse_publish(
+                PublishError::ReplaceableOperationRefused {
+                    reason: "materializer changed the replaceable coordinate".to_string(),
+                },
+            ));
         }
 
         let source_event_id = original_source
             .id
             .expect("registered operation validation froze a source id");
         let source_plan = SourcePlanId(
-            *blake3::hash(&[b"nmp-exact-source-v1".as_slice(), &registration.program].concat())
+            *blake3::hash(&[b"nmp-exact-source-v1".as_slice(), program.0.as_slice()].concat())
                 .as_bytes(),
         );
         let source_access = match &declared_source_policy {
@@ -135,7 +453,7 @@ impl EngineCore {
                 access: AccessContext::Public,
                 ..
             } => AccessContextId(
-                *blake3::hash(&[b"nmp-public-source-v1".as_slice(), &registration.format].concat())
+                *blake3::hash(&[b"nmp-public-source-v1".as_slice(), format.0.as_slice()].concat())
                     .as_bytes(),
             ),
             nmp_grammar::ReplaceableSourcePolicy::Finite {
@@ -190,9 +508,11 @@ impl EngineCore {
                 QualifiedSource::Event { event_id, .. } if event_id == source_event_id
             )
         {
-            return self.refuse_publish(PublishError::ReplaceableOperationRefused {
-                reason: "original source does not match retained source evidence".to_string(),
-            });
+            return PublishPreparation::Complete(self.refuse_publish(
+                PublishError::ReplaceableOperationRefused {
+                    reason: "original source does not match retained source evidence".to_string(),
+                },
+            ));
         }
         let source_event = snapshot
             .as_ref()
@@ -207,9 +527,11 @@ impl EngineCore {
                     })
             });
         let Some(source_event) = source_event else {
-            return self.refuse_publish(PublishError::ReplaceableOperationRefused {
-                reason: "complete original source is no longer retained".to_string(),
-            });
+            return PublishPreparation::Complete(self.refuse_publish(
+                PublishError::ReplaceableOperationRefused {
+                    reason: "complete original source is no longer retained".to_string(),
+                },
+            ));
         };
 
         let source_floor = match source.qualified {
@@ -233,9 +555,11 @@ impl EngineCore {
         let plan = match SemanticPlan::new(1, operation_bytes) {
             Ok(plan) => plan,
             Err(reason) => {
-                return self.refuse_publish(PublishError::ReplaceableOperationRefused {
-                    reason: reason.to_string(),
-                });
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::ReplaceableOperationRefused {
+                        reason: reason.to_string(),
+                    },
+                ));
             }
         };
         let (expected_source_revision, expected_program_digest, expected_materialization) =
@@ -274,9 +598,11 @@ impl EngineCore {
                 snapshot.source_policy.clone()
             }
             (Some(_), _) => {
-                return self.refuse_publish(PublishError::ReplaceableOperationRefused {
-                    reason: nmp_store::SemanticRefusal::IncompatibleSourcePolicy.to_string(),
-                });
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::ReplaceableOperationRefused {
+                        reason: nmp_store::SemanticRefusal::IncompatibleSourcePolicy.to_string(),
+                    },
+                ));
             }
             (None, nmp_grammar::ReplaceableSourcePolicy::Continuing) => {
                 nmp_store::SemanticSourcePolicy::Continuing
@@ -342,7 +668,7 @@ impl EngineCore {
                         reason: error.to_string(),
                     });
                     self.degrade_store(error, &mut effects);
-                    return effects;
+                    return PublishPreparation::Complete(effects);
                 }
             };
         let (intent_id, receipt_id, current, installed) = match outcome {
@@ -354,16 +680,20 @@ impl EngineCore {
                 ..
             } => (intent_id, ReceiptId(receipt_id), current, installed),
             AcceptOutcome::ReplaceableOperationRefused(reason) => {
-                return self.refuse_publish(PublishError::ReplaceableOperationRefused {
-                    reason: reason.to_string(),
-                });
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::ReplaceableOperationRefused {
+                        reason: reason.to_string(),
+                    },
+                ));
             }
             AcceptOutcome::ReplaceableOperation {
                 installed: None, ..
             } => {
-                return self.refuse_publish(PublishError::PersistenceFailed {
-                    reason: "body-complete acceptance produced no canonical row".to_string(),
-                });
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::PersistenceFailed {
+                        reason: "body-complete acceptance produced no canonical row".to_string(),
+                    },
+                ));
             }
             _ => unreachable!("semantic acceptance returns a semantic outcome"),
         };
@@ -470,6 +800,6 @@ impl EngineCore {
         }
         self.apply_committed_mutation(committed, &mut effects);
         self.sync_semantic_source_owners(&coordinate, &mut effects);
-        effects
+        PublishPreparation::Complete(effects)
     }
 }

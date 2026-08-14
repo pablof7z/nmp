@@ -1570,6 +1570,83 @@ mod semantic_successor_tests {
             "retired E1 deadlines must be gone rather than poisoning the current scheduler"
         );
     }
+
+    #[test]
+    fn initial_materializer_thread_spawn_refusal_leaves_no_acceptance_residue() {
+        let author = Keys::generate();
+        let person = Keys::generate().public_key();
+        let base = source(&author, 1, "base", &[]);
+        let mut core = EngineCore::new(RedbStore::temporary().unwrap(), 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        let instance = [71; 16];
+        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
+            instance,
+            program: [72; 16],
+            format: [73; 16],
+            materializer: Arc::new(AddPeople),
+        });
+        let original = UnsignedEvent::from(base);
+        let operation = nmp_grammar::ReplaceableOperation::from_registered_parts(
+            instance,
+            original.clone(),
+            original,
+            nmp_grammar::ReplaceableSourcePolicy::Continuing,
+            person.to_bytes().to_vec(),
+        )
+        .unwrap();
+        let prepared = match core.prepare_publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(operation),
+            routing: WriteRouting::Explicit(vec![
+                RelayUrl::parse("wss://spawn-refusal.example").unwrap()
+            ]),
+            identity: Identity::Active,
+            correlation: None,
+        }) {
+            PublishPreparation::Materialize(prepared) => prepared,
+            PublishPreparation::Complete(effects) => {
+                panic!("fixture refused before the injected spawn outcome: {effects:#?}")
+            }
+        };
+        let effects = match core.complete_body_complete_replaceable_operation(
+            prepared.continuation,
+            ReplaceableMaterializationOutcome::ThreadUnavailable(
+                "injected spawn refusal".to_string(),
+            ),
+        ) {
+            PublishPreparation::Complete(effects) => effects,
+            PublishPreparation::Materialize(_) => {
+                panic!("an unchanged spawn refusal must not retry capability work")
+            }
+        };
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::PublishFailed(PublishError::ReplaceableOperationRefused { reason })]
+                if reason.contains("injected spawn refusal")
+        ));
+        assert!(core
+            .publish_queue_entries(None, u8::MAX)
+            .unwrap()
+            .is_empty());
+        let coordinate = Coordinate {
+            kind: Kind::ContactList,
+            public_key: author.public_key(),
+            identifier: String::new(),
+        };
+        assert!(core
+            .store
+            .replaceable_operation_snapshot(&coordinate)
+            .unwrap()
+            .is_none());
+        assert!(core
+            .store
+            .query(
+                &nostr::Filter::new()
+                    .kind(Kind::ContactList)
+                    .author(author.public_key())
+            )
+            .unwrap()
+            .is_empty());
+    }
 }
 
 /// The receipt-replay cursor must keep the two persistence stalls apart.
