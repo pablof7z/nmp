@@ -23,8 +23,10 @@ boundary records:
   replaceable/addressable winner, retired with retained receipt facts;
 - initial route/retry state that is already known.
 
-If that transaction fails, the caller receives an acceptance error and no
-pending row becomes visible. `Accepted` never means merely queued in memory.
+If the call returns an error, the caller receives no `Accepted` answer. An I/O
+error has unknown durability: reconstruction and correlation lookup may reveal
+that the transaction committed one pending row. `Accepted` never means merely
+queued in memory.
 
 ### Guarded whole-value replacement
 
@@ -251,13 +253,20 @@ engine scheduler.
 
 Falsifiers:
 `nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once`
-(failed reopen attempts, both acceptance-boundary durability outcomes, one
-live engine/query handle, and one correlated obligation),
+(the real post-commit Redb generation closes, the first runtime reconstruction
+reopens it, and one live engine/query handle reconciles one correlated
+obligation),
+`nmp::persistent_engine_recovers_after_precommit_acceptance_io_once` (the real
+pre-commit transaction is dropped, the Redb generation closes, the first
+runtime reconstruction reopens it, and the exact retry creates one receipt),
 `nmp-store::reopen_replaces_only_the_database_generation_and_preserves_durable_identity`
 (the ownership fence never opens and the original receipt/event survive the
 new database generation),
-`nmp::persistent_engine_does_not_reconstruct_for_an_invariant_fault` (the
-next write succeeds with zero reopen calls), and
+`nmp::invariant_store_failure_does_not_request_reconstruction` (the typed core
+branch arms reconstruction for I/O but not for an invariant),
+`nmp::persistent_engine_keeps_healthy_store_usable_after_invariant_fault` (real
+targeted canonical corruption surfaces the invariant and the next write uses
+the same healthy Redb handle), and
 `nmp::recovery_backoff_is_exponential_event_driven_and_capped` (100 ms
 initial delay, 30 s ceiling, no polling owner).
 

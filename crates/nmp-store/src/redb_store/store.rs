@@ -114,6 +114,17 @@ pub struct RedbStore {
     /// pre-commit boundary. No production build carries this setting.
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fail_next_lane_attempt_finish: bool,
+    /// One construction-armed event acceptance refusal consumed immediately
+    /// before commit. The real prepared Redb transaction is dropped and the
+    /// real database handle is closed before the typed I/O error is returned.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(super) fail_next_accept_write_before_commit: bool,
+    /// One construction-armed event acceptance refusal consumed immediately
+    /// after the real Redb commit. The real database handle is closed before
+    /// the typed I/O error is returned, so recovery must read durable identity
+    /// from a newly opened Redb generation.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(super) fail_next_accept_write_after_commit: bool,
     /// One construction-armed pause consumed before the shared ordered event
     /// read. The pause controls scheduling only; Redb still supplies every
     /// row and every error.
@@ -343,6 +354,28 @@ impl RedbStore {
     ) -> Result<Self, RedbStoreOpenError> {
         let mut store = Self::open(path)?;
         store.fail_route_revision_writes = true;
+        Ok(store)
+    }
+
+    /// Open a persistent Redb store whose next event acceptance closes the
+    /// real database handle and returns I/O immediately before commit.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn open_with_accept_write_precommit_io(
+        path: impl AsRef<Path>,
+    ) -> Result<Self, RedbStoreOpenError> {
+        let mut store = Self::open(path)?;
+        store.fail_next_accept_write_before_commit = true;
+        Ok(store)
+    }
+
+    /// Open a persistent Redb store whose next event acceptance commits,
+    /// closes the real database handle, and then returns I/O.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn open_with_accept_write_commit_then_io(
+        path: impl AsRef<Path>,
+    ) -> Result<Self, RedbStoreOpenError> {
+        let mut store = Self::open(path)?;
+        store.fail_next_accept_write_after_commit = true;
         Ok(store)
     }
 
@@ -798,6 +831,10 @@ impl RedbStore {
             fail_next_compensation_with_state: false,
             #[cfg(any(test, feature = "test-instrumentation"))]
             fail_next_lane_attempt_finish: false,
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            fail_next_accept_write_before_commit: false,
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            fail_next_accept_write_after_commit: false,
             #[cfg(any(test, feature = "test-instrumentation"))]
             ordered_event_read_pause: Mutex::new(None),
             #[cfg(test)]

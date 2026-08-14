@@ -214,6 +214,108 @@ fn attempt_durable_write(store: &mut RedbStore, created_at: u64) -> Result<(), P
         .map(|_| ())
 }
 
+fn attempt_correlated_write(
+    store: &mut RedbStore,
+    created_at: u64,
+    correlation: &str,
+) -> Result<crate::AcceptOutcome, PersistenceError> {
+    let keys = keys();
+    let frozen = frozen_event(created_at);
+    store.accept_write(AcceptWrite {
+        payload: crate::AcceptWritePayload::Event {
+            frozen: Box::new(frozen),
+            replaceable_base: None,
+            monotonic_stamp: false,
+            routing: "durability-proof".into(),
+            sig_state: IntentSigState::Pending,
+        },
+        expected_pubkey: keys.public_key(),
+        signing_identity_ref: "durability-proof".into(),
+        accepted_at: Timestamp::from(created_at),
+        correlation: Some(nmp_grammar::CorrelationToken::try_from(correlation).unwrap()),
+    })
+}
+
+#[test]
+fn redb_accept_precommit_io_reopens_with_correlation_absent() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("accept-precommit-io.redb");
+    let mut store = RedbStore::open_with_accept_write_precommit_io(&path)
+        .expect("persistent precommit-I/O store");
+
+    let error = attempt_correlated_write(&mut store, 901, "precommit-io-correlation")
+        .expect_err("construction-armed precommit I/O must refuse acceptance");
+    assert_eq!(error.fault(), PersistenceFault::Io);
+    assert!(
+        store.db.is_none(),
+        "the failed Redb generation stays closed"
+    );
+
+    store
+        .reopen_after_failure()
+        .expect("the existing Redb reconstruction door reopens the target");
+    assert_eq!(
+        store
+            .lookup_correlation("precommit-io-correlation")
+            .unwrap(),
+        None,
+        "the dropped transaction cannot leave durable correlation identity"
+    );
+    assert!(store.recover_publish_queue().unwrap().is_empty());
+
+    let accepted = attempt_correlated_write(&mut store, 901, "precommit-io-correlation")
+        .expect("the reopened store accepts the exact retry once");
+    assert_eq!(
+        store
+            .lookup_correlation("precommit-io-correlation")
+            .unwrap(),
+        accepted.journaled_receipt_id()
+    );
+}
+
+#[test]
+fn redb_accept_commit_then_io_reopens_and_reads_back_one_correlation() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("accept-commit-then-io.redb");
+    let frozen = frozen_event(902);
+    let mut store = RedbStore::open_with_accept_write_commit_then_io(&path)
+        .expect("persistent commit-then-I/O store");
+
+    let error = attempt_correlated_write(&mut store, 902, "commit-then-io-correlation")
+        .expect_err("construction-armed postcommit I/O must hide the committed outcome");
+    assert_eq!(error.fault(), PersistenceFault::Io);
+    assert!(
+        store.db.is_none(),
+        "the failed Redb generation stays closed"
+    );
+
+    store
+        .reopen_after_failure()
+        .expect("the existing Redb reconstruction door reopens the target");
+    let receipt_id = store
+        .lookup_correlation("commit-then-io-correlation")
+        .unwrap()
+        .expect("the committed correlation is readable after reconstruction");
+    let receipt = store
+        .reattach_receipt(receipt_id)
+        .unwrap()
+        .expect("the committed receipt is reattachable after reconstruction");
+    assert_eq!(receipt.event_id(), Some(frozen.id));
+    assert_eq!(
+        store
+            .query(&nostr::Filter::new().id(frozen.id))
+            .unwrap()
+            .len(),
+        1,
+        "the committed pending row survives the real Redb generation change"
+    );
+    assert_eq!(
+        store.enumerate_publish_queue_receipts().unwrap().len(),
+        1,
+        "the ambiguous result owns exactly one durable receipt"
+    );
+}
+
 #[test]
 fn reopen_replaces_only_the_database_generation_and_preserves_durable_identity() {
     let dir = TempDir::new().expect("tempdir");
