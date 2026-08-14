@@ -535,7 +535,7 @@ removed and re-profiled.
   - `dispatch_core_effects`
   - worker retirement and retry
 - `crates/nmp-store/src/lib.rs`
-  - backend-independent lane transition and recovery API
+  - concrete `RedbStore` lane transition and recovery API
   - persistence-error durability classification
 - `crates/nmp-store/src/redb_store/schema.rs`
   - redb lane table representation

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, AuthDenial,
-    AuthDenialSource, CloseIntentOutcome, EventStore, HandoffEvidence, IntentId, IntentSigState,
+    AuthDenialSource, CloseIntentOutcome, HandoffEvidence, IntentId, IntentSigState,
     PersistenceFault, PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
     PublishQueueDeadline, PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane,
     PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState,

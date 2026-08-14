@@ -77,7 +77,7 @@ impl Harness {
     }
 
     /// Script a LOCAL optimistic write: enter `accept` through the
-    /// `EventStore::accept_write` door and let the engine react
+    /// `RedbStore::accept_write` door and let the engine react
     /// (`crashsafe-accepted-2-3-plan.md` §1.2, U2). The pass-through mirror
     /// of `deliver` for the write side; unwraps the persistence `Result`
     /// through the temporary Redb store and returns both the

@@ -31,17 +31,17 @@
 //! split implementation must keep each authority internally atomic, persist
 //! control intent before event projection, replay deterministically and
 //! idempotently, and reconcile before serving queries or transport. A
-//! locally-authored write intent enters through [`EventStore::accept_write`]
+//! locally-authored write intent enters through [`RedbStore::accept_write`]
 //! (the same dedup/tombstone/supersession rules `insert` runs, stamping
 //! local provenance + [`SigState::Pending`] instead of a `RelayObserved`),
 //! committing the pending row AND the durable intent/displaced-stash journal
-//! in ONE transaction. [`EventStore::promote_signed`] swaps the real
+//! in ONE transaction. [`RedbStore::promote_signed`] swaps the real
 //! signature in place (zero id churn — a NIP-01 id never depends on `sig`)
-//! and durably drops the displaced stash. [`EventStore::compensate_write`]
+//! and durably drops the displaced stash. [`RedbStore::compensate_write`]
 //! undoes a pre-signature-terminated intent: `remove(id, Rejected)` (no
 //! tombstone — the row was never validly signed) plus a compensating
 //! re-`insert` of whatever it displaced, through the same one door.
-//! [`EventStore::recover_publish_queue`] replays every still-open intent after a
+//! [`RedbStore::recover_publish_queue`] replays every still-open intent after a
 //! restart. Exact resolved relay sets use a separate append-only route-
 //! revision door which commits before any corresponding attempt. Every policy
 //! decision (retry ownership, deadline scheduling, signer orchestration) stays
@@ -53,7 +53,7 @@
 //! bumped inside `accept_write`'s own transaction — never caller-supplied
 //! (see its doc for the reuse hazard this closes); (2) receipt identity/
 //! state is retained under `PUBLISH_QUEUE_RECEIPTS`, independently of
-//! `PUBLISH_QUEUE_INTENTS`'s open-work row, so [`EventStore::reattach_receipt`]
+//! `PUBLISH_QUEUE_INTENTS`'s open-work row, so [`RedbStore::reattach_receipt`]
 //! keeps answering for a terminal receipt after its open-work row is gone
 //! (see [`ReceiptState`]'s doc).
 //!
@@ -138,7 +138,7 @@ use serde::{Deserialize, Serialize};
 /// infers "next free" from the currently-*open* recovered set will
 /// eventually reissue an id that a terminated intent already used —
 /// colliding with that intent's still-*retained* [`PublishQueueReceipt`] (see
-/// [`EventStore::reattach_receipt`]) or any retained per-relay attempt
+/// [`RedbStore::reattach_receipt`]) or any retained per-relay attempt
 /// evidence. Issue #3's "ids remain stable and unique across restart"
 /// means unique for the store's ENTIRE lifetime, not merely among what
 /// recovery currently sees open — so allocation must be a fact the store
@@ -161,7 +161,7 @@ pub enum SigState {
 
 /// A locally-authored row's provenance (issue #2's "`Local` origin; a row
 /// *field*, exactly ledger #5's shape"). Set iff this row entered through
-/// [`EventStore::accept_write`] rather than [`RedbStore::insert`].
+/// [`RedbStore::accept_write`] rather than [`RedbStore::insert`].
 ///
 /// `owners` is a SET, not a single `IntentId` (architecture review
 /// correction, team-lead decision on issue #2): an earlier revision
@@ -175,11 +175,11 @@ pub enum SigState {
 /// coalescing duplicates into one owner was rejected because it would
 /// silently drop a later intent's own receipt, violating "every accepted
 /// write returns a receipt." `sig_state` stays canonical to the ROW, never
-/// per-owner: ANY owner's [`EventStore::promote_signed`] call sets it, in
+/// per-owner: ANY owner's [`RedbStore::promote_signed`] call sets it, in
 /// place, for every owner at once — there is exactly one signature on one
 /// row, however many intents are backing it.
 ///
-/// [`EventStore::compensate_write`] on one owner only removes THAT owner
+/// [`RedbStore::compensate_write`] on one owner only removes THAT owner
 /// from the set; the canonical row is only actually retracted once the set
 /// is empty AND `sig_state` is still `Pending` AND no relay has
 /// independently confirmed it (`Provenance::seen` empty) — an owner-less
@@ -249,7 +249,7 @@ impl Provenance {
     /// rows never answer for a host that did not serve them.
     ///
     /// OUR OWN row is not that case at all. It entered through
-    /// [`EventStore::accept_write`], it is in the outbound publication queue,
+    /// [`RedbStore::accept_write`], it is in the outbound publication queue,
     /// and it is ours whatever any relay subsequently does with it.
     /// Withholding it would make every pinned live query lie about what the
     /// user just did, and withdrawing it later would be worse: the feed would
@@ -285,7 +285,7 @@ pub fn visible_under_pin<'a>(
 }
 
 /// The sentinel signature every pending row's frozen body carries until
-/// [`EventStore::promote_signed`] swaps in the real one (Fable checkpoint
+/// [`RedbStore::promote_signed`] swaps in the real one (Fable checkpoint
 /// Q1, APPROVED): a NIP-01 id is `hash([0,pubkey,created_at,kind,tags,
 /// content])` — the signature is not an id input — so an all-zero 64-byte
 /// value round-trips through `nostr::Event`/JSON/`Filter::match_event`
@@ -296,7 +296,7 @@ pub fn sentinel_signature() -> Signature {
         .expect("64 zero bytes is always a structurally valid (length-checked) schnorr signature")
 }
 
-/// The only thing [`EventStore::promote_signed`] accepts (#768): a
+/// The only thing [`RedbStore::promote_signed`] accepts (#768): a
 /// signature that a `nostr::Event::verify` call actually passed, carried
 /// together with the [`EventId`] it was verified against.
 ///
@@ -489,7 +489,7 @@ pub enum InsertOutcome {
 ///
 /// Serialized because most semantic refusals of a locally-authored write are
 /// retained as one permanently-failed receipt through
-/// [`EventStore::accept_refused`]. [`RefuseReason::AlreadyExpired`] is the
+/// [`RedbStore::accept_refused`]. [`RefuseReason::AlreadyExpired`] is the
 /// deliberate exception: the engine refuses it before custody, so it creates
 /// no receipt, event body, signer request, route, lane, or attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -547,7 +547,7 @@ pub enum IntentSigState {
     /// A signer is (or was) in flight; the row's `sig` is still
     /// [`sentinel_signature`].
     Pending,
-    /// [`EventStore::promote_signed`] has run; the row carries a real
+    /// [`RedbStore::promote_signed`] has run; the row carries a real
     /// signature.
     Signed,
 }
@@ -577,7 +577,7 @@ pub struct AcceptWrite {
     /// content are final and `event.id` is already `EventId::new(..)` over
     /// exactly those fields (the signature is not an id input — Q1).
     /// `event.sig` must be [`sentinel_signature`] until
-    /// [`EventStore::promote_signed`] swaps in the real one.
+    /// [`RedbStore::promote_signed`] swaps in the real one.
     /// The pinned signing identity (#43 "pins the chosen identity at
     /// acceptance"). Ordinarily equal to `frozen.pubkey`; kept as an
     /// explicit field because it is a distinct journal fact (#2's "expected
@@ -590,11 +590,11 @@ pub struct AcceptWrite {
     pub accepted_at: Timestamp,
     /// #591 crash-safe correlation token. When `Some`, checked (and, on a
     /// first sighting, journaled) inside this SAME acceptance transaction
-    /// -- see [`EventStore::accept_write`]'s doc for the exact protocol.
+    /// -- see [`RedbStore::accept_write`]'s doc for the exact protocol.
     pub correlation: Option<nmp_grammar::CorrelationToken>,
 }
 
-/// The closed work shape accepted through [`EventStore::accept_write`].
+/// The closed work shape accepted through [`RedbStore::accept_write`].
 /// There is no optional semantic sidecar beside an authoritative event body.
 pub enum AcceptWritePayload {
     Event {
@@ -607,7 +607,7 @@ pub enum AcceptWritePayload {
     ReplaceableOperation(Box<SemanticAccept>),
 }
 
-/// The result of an [`EventStore::accept_write`] call — mirrors
+/// The result of an [`RedbStore::accept_write`] call — mirrors
 /// [`InsertOutcome`]'s shape (Fable checkpoint: "reuses the widened
 /// `Superseded` shape so the resolver sorts it exactly like a relay
 /// insert"), including `Kind5Processed`: a locally-composed kind:5 draft
@@ -793,7 +793,7 @@ impl AcceptOutcome {
     }
 }
 
-/// The result of an [`EventStore::promote_signed`] call — keyed by
+/// The result of an [`RedbStore::promote_signed`] call — keyed by
 /// `IntentId`, not the frozen event's id (architecture review correction: a
 /// `Duplicate`/`Stale` intent with no shared row never won a live row at
 /// its own id at all, and a once-live row can since have been superseded,
@@ -860,7 +860,7 @@ pub enum PromoteOutcome {
     NotFound,
 }
 
-/// The result of an [`EventStore::compensate_write`] call — keyed by
+/// The result of an [`RedbStore::compensate_write`] call — keyed by
 /// `IntentId`, same three-case dispatch [`PromoteOutcome`] documents (live
 /// row / displaced-in-another-intent's-stash / neither), same ownership-SET
 /// model (issue #2, team-lead decision). If live, `intent_id` is removed
@@ -907,7 +907,7 @@ pub enum CompensateOutcome {
 }
 
 /// Typed result from the receipt-keyed queue-entry removal door
-/// ([`EventStore::remove_publish_queue_entry`], #1039).
+/// ([`RedbStore::remove_publish_queue_entry`], #1039).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoveQueueEntryOutcome {
     Removed,
@@ -918,7 +918,7 @@ pub enum RemoveQueueEntryOutcome {
     StillOpen,
 }
 
-/// One still-open intent replayed by [`EventStore::recover_publish_queue`] on
+/// One still-open intent replayed by [`RedbStore::recover_publish_queue`] on
 /// boot. The pending row itself is NOT re-inserted — it is already live in
 /// the store (committed atomically at `accept_write` time) and query-visible
 /// from the first post-boot subscription; this is only the journal metadata
@@ -980,7 +980,7 @@ pub struct MaterializationWork {
 /// `Rejected`/`GaveUp`/`Failed`; this crate only knows what its OWN four
 /// doors did to a receipt). Retained under `PUBLISH_QUEUE_RECEIPTS` — separately
 /// from `PUBLISH_QUEUE_INTENTS`'s open-work row — precisely so a receipt stays
-/// reattachable via [`EventStore::reattach_receipt`] after the open-work
+/// reattachable via [`RedbStore::reattach_receipt`] after the open-work
 /// row is gone (architecture review correction: R8-style terminal cleanup
 /// of `PUBLISH_QUEUE_INTENTS` must never also delete receipt identity/state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1012,7 +1012,7 @@ pub enum ReceiptState {
     /// Retained so a reattaching app is told that, rather than told nothing.
     NoDestination,
     /// The acceptance instruction was answered with a semantic no
-    /// ([`EventStore::accept_refused`]): the store was working and said no.
+    /// ([`RedbStore::accept_refused`]): the store was working and said no.
     /// Terminal at birth — there was never an intent, a journal row, a
     /// signer request or a relay write, only this one retained receipt.
     ///
@@ -1022,19 +1022,6 @@ pub enum ReceiptState {
     /// the app can fetch what is actually there, reapply the user's change
     /// and resubmit without ever troubling them.
     Refused(RefuseReason),
-}
-
-/// Backend-extension vocabulary for why the one atomic compensation
-/// transaction is running. This is not a third app-facing workload noun:
-/// [`EventStore`] remains implementable outside this crate, so its shared
-/// implementation door must be nameable by adapter stores. The exhaustive
-/// enum admits only the two legal terminal outcomes instead of exposing a
-/// `ReceiptState` parameter that could persist an impossible transition.
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompensationReason {
-    Failure,
-    ExplicitCancellation,
 }
 
 /// A durably-retained receipt record, independent of whether the intent's
@@ -1047,7 +1034,7 @@ pub struct PublishQueueReceipt {
     pub receipt_id: u64,
     /// `Some` for a receipt backed by a real (open or since-closed)
     /// `accept_write` intent. `None` for a receipt-ONLY record
-    /// ([`EventStore::accept_refused`]): a write refused at the acceptance
+    /// ([`RedbStore::accept_refused`]): a write refused at the acceptance
     /// door still enters custody as one retained, reattachable receipt,
     /// without ever gaining a journal row, a pending event row, a signer
     /// request or a relay write.
@@ -1418,281 +1405,4 @@ pub enum PublishQueueAttemptOutcome {
     Acked,
     Rejected(String),
     GaveUp,
-}
-
-/// The remaining contract for accepted writes, receipts, and semantic edits.
-pub trait EventStore {
-    /// Accept a durably-owned local write intent (issues #2/#3): runs the
-    /// SAME tombstone-refusal and replaceable/addressable supersession
-    /// rules `insert` runs against `accept.frozen`, but stamps
-    /// local [`Provenance`] instead of a `RelayObserved`, and commits
-    /// the resulting row together with `accept`'s full journal payload
-    /// (`PUBLISH_QUEUE_INTENTS` + `PUBLISH_QUEUE_DISPLACED`, if a predecessor was
-    /// evicted) in ONE transaction (Fable checkpoint R7) — a crash mid-call
-    /// leaves either nothing recoverable or a fully `recover_publish_queue`-able
-    /// `Accepted`. `Refused` writes nothing at all (R3). A locally-composed
-    /// kind:5 draft additionally runs the identical author-verified
-    /// tombstone-write processing `insert` runs for a relay-observed
-    /// kind:5, in the SAME transaction (architecture review correction:
-    /// issue #2's immediate-delete promise extends to local compositions,
-    /// not only the relay echo) — see `AcceptOutcome::Kind5Processed`.
-    ///
-    /// Fallible (architecture review correction): a realistic persistence
-    /// failure (disk full, I/O error) returns `Err` rather than panicking the
-    /// embedding app. That result carries no `Accepted` answer, but I/O has
-    /// unknown durability: reconstruction and correlation lookup may reveal
-    /// that the transaction committed one fully journaled pending row. As of
-    /// issue #122 the inherent `RedbStore` ingest/read operations
-    /// (`insert`/`query`/`remove`/`expire_due`/`record_coverage`/`gc`) are
-    /// fallible on the same footing; only serde/logic invariant violations
-    /// (a corrupt persisted row) remain `.expect()`-on-invariant by design.
-    /// Redb propagates backend failures through this result.
-    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError>;
-
-    /// Point-load one active replaceable-operation resource. Opaque replay
-    /// bytes and exact CAS witnesses are returned without interpreting them.
-    fn replaceable_operation_snapshot(
-        &self,
-        coordinate: &nostr::nips::nip01::Coordinate,
-    ) -> Result<Option<RecoveredSemanticResource>, PersistenceError>;
-
-    /// Atomically install a materializer result computed outside store locks,
-    /// or report a typed stale/refusal outcome without mutation.
-    fn install_replaceable_materialization(
-        &mut self,
-        rematerialize: SemanticRematerialize,
-    ) -> Result<SemanticInstallOutcome, PersistenceError>;
-
-    /// Atomically adopt a newer verified relay source and install the complete
-    /// semantic successor prepared from it. The raw source is never exposed as
-    /// the effective canonical value between commits.
-    fn install_replaceable_source_materialization(
-        &mut self,
-        install: SemanticSourceInstall,
-    ) -> Result<SemanticInstallOutcome, PersistenceError>;
-
-    /// Persist one typed request lifecycle fact owned by an exact finite
-    /// semantic source round. Unrelated rounds, sources, or request identities
-    /// are reported stale without mutation.
-    fn advance_replaceable_source_round(
-        &mut self,
-        _coordinate: &nostr::nips::nip01::Coordinate,
-        _fact: SemanticSourceRoundFact,
-    ) -> Result<SemanticSourceRoundOutcome, PersistenceError> {
-        Err(PersistenceError::invariant(
-            "semantic source rounds unsupported",
-        ))
-    }
-
-    /// Atomically close every contributing intent/receipt and compact its
-    /// semantic program after the store verifies the exact finite source round
-    /// and current destination generation are both terminal.
-    fn close_replaceable_operation_cohort(
-        &mut self,
-        _close: SemanticCohortClose,
-    ) -> Result<SemanticCohortCloseOutcome, PersistenceError> {
-        Err(PersistenceError::invariant(
-            "semantic cohort close unsupported",
-        ))
-    }
-
-    /// Swap the sentinel signature on `intent_id`'s frozen body for
-    /// `verified`'s real one and flip the canonical
-    /// `SigState`/`IntentSigState` to
-    /// `Signed`, in the SAME transaction that durably drops the intent's
-    /// own `PUBLISH_QUEUE_DISPLACED` stash (R6) and updates its retained receipt.
-    /// Keyed by `IntentId`, NOT the frozen event's id (architecture review
-    /// correction — load-bearing): the intent's `PUBLISH_QUEUE_INTENTS.frozen_json`
-    /// is the durable source of truth for its body regardless of whether a
-    /// live `EVENTS` row currently exists for it. Three cases, uniformly:
-    /// (a) a live row's owner set CONTAINS `intent_id` (issue #2, team-lead
-    /// decision: ownership is a SET — an exact `Duplicate` is a CO-OWNER
-    /// of the SAME row, not a second row of its own; see `LocalOrigin`'s
-    /// doc) — mutate it in place (same id — a NIP-01 id never depends on
-    /// `sig` — so this is a value update, not a remove/re-add) — refused
-    /// (`NotFound`) if the row's `SigState` is ALREADY `Signed`, even by a
-    /// different co-owner, so a later distinct owner's promotion can never
-    /// overwrite the one real signature with a second one; (b) no live
-    /// row, but `intent_id` is a member of some OTHER intent's
-    /// `PUBLISH_QUEUE_DISPLACED` stash entry's owner set (it was superseded by a
-    /// later local edit before it could sign) — sync the real signature
-    /// into that stash entry too (same already-`Signed` refusal applies),
-    /// so a future restore of it never resurrects a stale sentinel copy;
-    /// (c) neither (the intent was `Stale`/`Duplicate` at acceptance with
-    /// no shared row, or its row was since superseded by a RELAY-observed
-    /// event, kind:5-deleted, or NIP-40-expired) — mutate only the durable
-    /// `PUBLISH_QUEUE_INTENTS`/`PUBLISH_QUEUE_RECEIPTS` journal copies; the resulting
-    /// signed bytes are still returned so the engine can publish them even
-    /// though this intent does not (or no longer) wins any local address.
-    /// [`VerifiedSignature`] is the whole precondition, typed (#768): it
-    /// cannot be built without one successful `nostr::Event::verify`, and
-    /// this door refuses — [`PersistenceFault::Invariant`], before any
-    /// mutation of any table — unless [`VerifiedSignature::event_id`]
-    /// equals the intent's own durable frozen id. A signature that is
-    /// perfectly valid for a DIFFERENT event is therefore refused here, not
-    /// promoted. No implementation re-verifies: verification happened once,
-    /// on the caller's side, to produce the evidence (#387). Fallible for
-    /// the same reason `accept_write` is.
-    fn promote_signed(
-        &mut self,
-        target: PromotionTarget,
-        verified: VerifiedSignature,
-    ) -> Result<PromoteOutcome, PersistenceError>;
-
-    /// Pre-signature compensation only (retraction doc §4.2's "Promotion
-    /// correction": once `promote_signed` has run, relay ACK/reject/timeout
-    /// is receipt-only and NEVER reaches this door — a `Signed` intent
-    /// answers `NotFound` here). Keyed by `IntentId` (same architecture
-    /// review correction as `promote_signed`, same three cases, same
-    /// ownership-SET model): (a) a live row's owner set CONTAINS
-    /// `intent_id` — remove `intent_id` from that set; the row is only
-    /// actually `remove(id, Rejected)`-ed (no tombstone) once the set is
-    /// EMPTY, `SigState` is still `Pending`, AND no relay has
-    /// independently confirmed it (`Provenance::seen` empty) — an exact
-    /// `Duplicate`'s still-open obligation, an already-`Signed` state some
-    /// OTHER co-owner committed, or independent relay provenance, all
-    /// survive this one intent's cancellation (see `LocalOrigin`'s doc);
-    /// if actually removed, this intent's durably-stashed `displaced`
-    /// predecessor (if any) is then re-`insert`ed through the same one
-    /// door — it wins its address back by ordinary supersession, never an
-    /// un-supersede operation; (b) no live row, but `intent_id` is a
-    /// member of some OTHER intent's `PUBLISH_QUEUE_DISPLACED` stash entry's
-    /// owner set — same conditional removal, applied to that stash slot's
-    /// owner set instead; (c) neither — nothing to remove or restore in
-    /// `EVENTS`. In every case, this intent's own `PUBLISH_QUEUE_INTENTS`/
-    /// `PUBLISH_QUEUE_DISPLACED` rows are deleted and its retained receipt
-    /// updated to `Compensated`. Fallible for the same reason
-    /// `accept_write` is.
-    fn compensate_write(
-        &mut self,
-        intent_id: IntentId,
-    ) -> Result<CompensateOutcome, PersistenceError> {
-        self.compensate_write_with_state(intent_id, CompensationReason::Failure)
-    }
-
-    /// The explicit-cancellation form of [`Self::compensate_write`]. It has
-    /// identical atomic row/predecessor/lane semantics, but persists
-    /// [`ReceiptState::Cancelled`] so reattachment can distinguish deliberate
-    /// cancellation from a terminal signer/protocol failure.
-    fn cancel_write(&mut self, intent_id: IntentId) -> Result<CompensateOutcome, PersistenceError> {
-        self.compensate_write_with_state(intent_id, CompensationReason::ExplicitCancellation)
-    }
-
-    /// Read every retained receipt back out, newest id last (#1039).
-    fn enumerate_publish_queue_receipts(
-        &self,
-    ) -> Result<Vec<PublishQueueReceipt>, PersistenceError>;
-
-    /// Read at most `limit` retained receipts whose ids are strictly greater
-    /// than `after`, in ascending receipt-id order (#903).
-    ///
-    /// This is the bounded app-inspection primitive. The public limit is a
-    /// `u8`, and `EngineCore` rejects a backend page that exceeds it, crosses
-    /// the exclusive cursor backwards, or is not strictly ordered. Every
-    /// store must still provide the bounded read directly; there is
-    /// deliberately no default that first materializes the complete retained
-    /// queue and truncates it afterward.
-    fn publish_queue_receipts_after(
-        &self,
-        after: Option<u64>,
-        limit: u8,
-    ) -> Result<Vec<PublishQueueReceipt>, PersistenceError>;
-
-    /// Forget one retained receipt and every piece of evidence keyed to it
-    /// (#1039). The removal half of the app's outbox door, and a real
-    /// TERMINATION path: a write parked forever on a missing signer, and a
-    /// permanently-failed refused entry, end no other way.
-    ///
-    /// Refuses with [`RemoveQueueEntryOutcome::StillOpen`] while the receipt
-    /// still owns an open `PUBLISH_QUEUE_INTENTS` row — that write is
-    /// cancelled, not removed.
-    fn remove_publish_queue_entry(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<RemoveQueueEntryOutcome, PersistenceError>;
-
-    /// Backend implementation for the two typed pre-signature compensation
-    /// outcomes. Callers use [`Self::compensate_write`] or
-    /// [`Self::cancel_write`], never this shared atomic door directly.
-    #[doc(hidden)]
-    fn compensate_write_with_state(
-        &mut self,
-        intent_id: IntentId,
-        reason: CompensationReason,
-    ) -> Result<CompensateOutcome, PersistenceError>;
-
-    /// Read every still-open intent back out of the durable journal on
-    /// boot (issue #3 §2.3). Read-only: the pending rows themselves are
-    /// already live in the store (committed at `accept_write` time) — this
-    /// returns only the journal metadata `nmp-engine` needs to rebuild its
-    /// in-memory write-delivery bookkeeping. Redb returns the durable open
-    /// obligations required to rebuild that projection.
-    ///
-    /// Fallible (#790). This used to return a bare `Vec`, which left the
-    /// backend nothing to do with a journal row that will not decode except
-    /// panic the embedding host at boot — the one moment the host is least
-    /// able to survive it. `Ok(vec![])` and `Err(..)` are different facts and
-    /// must stay distinguishable: the first says "no durable obligation is
-    /// open", the second says "the durable obligation set is unreadable".
-    /// A caller must never collapse the second into the first, and this door
-    /// never returns a partial prefix — an undecodable row fails the whole
-    /// call rather than silently shortening the obligation set.
-    fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError>;
-
-    /// Look up `receipt_id`'s durably-RETAINED record — independent of
-    /// whether its intent's `PUBLISH_QUEUE_INTENTS` open-work row still exists
-    /// (architecture review correction: separates "recoverable open work"
-    /// from "receipt identity/state", so a terminal receipt stays
-    /// reattachable — issue #3's "receipts remain... reattachable" —
-    /// rather than disappearing the moment its open-work row is cleaned
-    /// up). Unlike `recover_publish_queue`, this is an ordinary retained-data
-    /// lookup, not a boot-only replay: Redb answers it from retained durable
-    /// receipt state.
-    fn reattach_receipt(
-        &self,
-        receipt_id: u64,
-    ) -> Result<Option<PublishQueueReceipt>, PersistenceError>;
-
-    /// #591: resolve a caller's [`AcceptWrite::correlation`] token to the
-    /// receipt id it was journaled under, if any. `Ok(None)` means the
-    /// token has never been accepted (or this store never received it) --
-    /// distinct from a persistence failure. `accept_write` uses this same
-    /// mapping internally (checked inside its own transaction) to decide
-    /// whether a token is a first sighting; the engine's
-    /// `reattach_by_correlation` lookup door uses it directly to translate
-    /// a token into an ordinary [`Self::reattach_receipt`] call. Retained
-    /// forever, exactly like `PUBLISH_QUEUE_RECEIPTS` -- there is no removal door.
-    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError>;
-
-    /// Take custody of a write the acceptance door REFUSED, as one
-    /// permanently-failed queue entry.
-    ///
-    /// `accept_write` answering [`AcceptOutcome::Refused`] is the store
-    /// working and saying no — a semantic answer, not a failure to write.
-    /// The app must be able to read that answer back, so the refusal is
-    /// recorded rather than thrown: THIS door writes just the
-    /// `PUBLISH_QUEUE_RECEIPTS` row with `intent_id: None` (nothing backs it
-    /// — no intent, no journal, no pending event row, no signer request, no
-    /// relay write) and [`ReceiptState::Refused`] carrying `reason`
-    /// verbatim, including a [`RefuseReason::ReplaceableBaseChanged`]'s two
-    /// event ids. [`RefuseReason::AlreadyExpired`] never reaches this door:
-    /// expiry is a pre-custody refusal with no retained receipt.
-    ///
-    /// Terminal at birth. Custody is not viability: the entry exists so the
-    /// app can see the failure while it remains in the store's bounded
-    /// terminal history, never because anything will retry it. The app may
-    /// still remove it explicitly through [`Self::remove_publish_queue_entry`].
-    ///
-    /// Returns the store-allocated receipt id — the same durable
-    /// high-water-mark `accept_write` allocates from (architecture review
-    /// correction: a caller-side receipt-id counter that resets on
-    /// restart has the identical reuse hazard `IntentId` had, now that
-    /// receipts are durably retained across restart). Fallible for the
-    /// same reason `accept_write` is: recording a refusal needs the disk.
-    fn accept_refused(
-        &mut self,
-        frozen_id: EventId,
-        expected_pubkey: PublicKey,
-        reason: RefuseReason,
-    ) -> Result<u64, PersistenceError>;
 }

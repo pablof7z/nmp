@@ -24,8 +24,7 @@ use tempfile::TempDir;
 
 use super::store::RedbStore;
 use crate::{
-    AcceptWrite, DurabilityOutcome, EventStore, IntentId, IntentSigState, PersistenceError,
-    PersistenceFault,
+    AcceptWrite, DurabilityOutcome, IntentId, IntentSigState, PersistenceError, PersistenceFault,
 };
 
 // ---- fault-injecting storage backend -----------------------------------

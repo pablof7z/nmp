@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 use nmp_store::{
     coverage_key, sentinel_signature, AcceptWrite, AcceptWritePayload, CoverageInterval,
-    EventCursor, EventStore, GcRetentionSet, InsertOutcome, IntentSigState, Provenance, RedbStore,
+    EventCursor, GcRetentionSet, InsertOutcome, IntentSigState, Provenance, RedbStore,
     RefuseReason, RelayObserved, RetractReason, StoredEvent,
 };
 use nostr::nips::nip01::Coordinate;

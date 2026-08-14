@@ -18,11 +18,11 @@ use std::path::Path;
 
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, CompensateOutcome,
-    EventCursor, EventStore, GcRetentionSet, InsertOutcome, IntentSigState, LocalOrigin,
-    PersistenceFault, PromoteOutcome, PromotionTarget, PublishQueueAttemptOutcome,
-    PublishQueueIntent, PublishQueueReceipt, PublishQueueReceiptPayload, PublishQueueWork,
-    ReceiptState, RedbStore, RefuseReason, RelayObserved, RemoveQueueEntryOutcome, RetractReason,
-    SigState, StoredEvent, VerifiedSignature,
+    EventCursor, GcRetentionSet, InsertOutcome, IntentSigState, LocalOrigin, PersistenceFault,
+    PromoteOutcome, PromotionTarget, PublishQueueAttemptOutcome, PublishQueueIntent,
+    PublishQueueReceipt, PublishQueueReceiptPayload, PublishQueueWork, ReceiptState, RedbStore,
+    RefuseReason, RelayObserved, RemoveQueueEntryOutcome, RetractReason, SigState, StoredEvent,
+    VerifiedSignature,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventBuilder, EventId, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
