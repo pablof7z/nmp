@@ -14,56 +14,30 @@ use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Tag, Timestamp};
 
 use super::*;
 
-#[derive(Debug)]
-enum StoreFailure {
-    Query(String),
-    CoverageWrite(String),
-}
-
 #[derive(Clone, Default)]
-pub(super) struct StoreFailureControl(Arc<Mutex<Option<StoreFailure>>>);
+struct StoreFailureControl(Arc<Mutex<Option<String>>>);
 
 impl StoreFailureControl {
     fn fail_query(&self, message: &str) {
-        *self.0.lock().unwrap() = Some(StoreFailure::Query(message.to_owned()));
-    }
-
-    pub(super) fn fail_coverage_write(&self, message: &str) {
-        *self.0.lock().unwrap() = Some(StoreFailure::CoverageWrite(message.to_owned()));
-    }
-
-    fn take_coverage_write_failure(&self) -> Option<PersistenceError> {
-        let mut failure = self.0.lock().unwrap();
-        if matches!(failure.as_ref(), Some(StoreFailure::CoverageWrite(_))) {
-            let Some(StoreFailure::CoverageWrite(message)) = failure.take() else {
-                unreachable!()
-            };
-            Some(PersistenceError::invariant(message))
-        } else {
-            None
-        }
+        *self.0.lock().unwrap() = Some(message.to_owned());
     }
 
     fn take_query_failure(&self) -> Option<PersistenceError> {
-        let mut failure = self.0.lock().unwrap();
-        if matches!(failure.as_ref(), Some(StoreFailure::Query(_))) {
-            let Some(StoreFailure::Query(message)) = failure.take() else {
-                unreachable!()
-            };
-            Some(PersistenceError::invariant(message))
-        } else {
-            None
-        }
+        self.0
+            .lock()
+            .unwrap()
+            .take()
+            .map(PersistenceError::invariant)
     }
 }
 
-pub(super) struct ControlledFailureStore {
+struct ControlledFailureStore {
     inner: RedbStore,
     control: StoreFailureControl,
 }
 
 impl ControlledFailureStore {
-    pub(super) fn new(inner: RedbStore, control: StoreFailureControl) -> Self {
+    fn new(inner: RedbStore, control: StoreFailureControl) -> Self {
         Self { inner, control }
     }
 }
@@ -120,9 +94,6 @@ impl EventStore for ControlledFailureStore {
         &mut self,
         claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
-        if let Some(error) = self.control.take_coverage_write_failure() {
-            return Err(error);
-        }
         self.inner.record_coverage(claims)
     }
 

@@ -255,21 +255,29 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
         routing_evidence: BTreeSet::new(),
     };
     let incumbent_claim = coverage_key(&incumbent);
-    let control = StoreFailureControl::default();
-    let mut core = EngineCore::new(
-        ControlledFailureStore::new(
-            RedbStore::temporary().expect("temporary Redb store"),
-            control.clone(),
-        ),
-        20,
-    );
-    core.attribution.observe_atom(&incumbent);
     let sub_id = SubId::for_wire(
-        relay,
+        relay.clone(),
         &incumbent.filter,
         &incumbent.source,
         incumbent.access,
     );
+    let added_for_generation = |generation: u16| ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1_000 + generation])),
+            since: Some(100),
+            ..ConcreteFilter::default()
+        },
+        source: SourceAuthority::Pinned(BTreeSet::from([sub_id.0.clone()])),
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let first_added_claim = coverage_key(&added_for_generation(1));
+    let directory = tempfile::tempdir().expect("bounded coverage transfer directory");
+    let path = directory.path().join("post-eose-transfer-bounded.redb");
+    let store = RedbStore::open_with_failed_coverage_write(&path, first_added_claim, relay)
+        .expect("persistent exact coverage-write failure fixture");
+    let mut core = EngineCore::new(store, 20);
+    core.attribution.observe_atom(&incumbent);
     core.attribution
         .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]));
     core.live_wire_requests.insert(
@@ -293,16 +301,7 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
 
     let mut added_atoms = Vec::with_capacity(GENERATIONS as usize);
     for generation in 1..=GENERATIONS {
-        let added = ContextualAtom {
-            filter: ConcreteFilter {
-                kinds: Some(BTreeSet::from([1_000 + generation])),
-                since: Some(100),
-                ..ConcreteFilter::default()
-            },
-            source: SourceAuthority::Pinned(BTreeSet::from([sub_id.0.clone()])),
-            access: AccessContext::Public,
-            routing_evidence: BTreeSet::new(),
-        };
+        let added = added_for_generation(generation);
         let claim = coverage_key(&added);
         core.attribution.observe_atom(&added);
         if let Some(live) = core
@@ -316,9 +315,6 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
                     Timestamp::from(200 + generation as u64),
                 )),
             };
-        }
-        if generation == 1 {
-            control.fail_coverage_write("first transfer failure arms one bounded retry");
         }
         core.apply_request_metadata_updates(
             &[nmp_router::RequestMetadataUpdate {
