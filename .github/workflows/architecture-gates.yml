@@ -187,6 +187,27 @@ jobs:
       - name: Refuse a declared deprecation
         run: bash scripts/check-no-compatibility-surface.sh
 
+  # #1559: the dependency-direction policy (#922) answers whether a package
+  # may reach another package; nothing answered whether a package deserves to
+  # exist. Every `[workspace] members` entry must carry a machine-readable
+  # justification (or `grandfathered: true`) in
+  # scripts/workspace-membership-justifications.json, and "no other package
+  # owns this NIP" is refused explicitly -- a module can be the sole semantic
+  # owner of a NIP, an event kind, or a pipeline stage.
+  workspace-membership-justification:
+    name: Workspace members justify their own existence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Refuse an undocumented or under-justified workspace member
+        run: bash scripts/check-workspace-membership-justification.sh
+
+      - name: Falsify the pass/fail record contract
+        run: bash scripts/test-workspace-membership-justification.sh
+
   ffi-facade-boundary:
     name: FFI consumes the canonical nmp facade
     runs-on: ubuntu-latest
