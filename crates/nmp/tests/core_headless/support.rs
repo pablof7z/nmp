@@ -8,7 +8,7 @@
 //! `limit` poisoning, and per-query scoped acquisition evidence).
 
 use std::borrow::Cow;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
