@@ -3,16 +3,11 @@ use nmp_store::testing;
 
 // ---- fallible persistence doors and recovery indexing ------------------
 //
-// A fault-injecting `EventStore` whose ONE mutating ingest door (`insert`)
-// returns a `PersistenceError` (a stand-in for disk-full / an I/O error on
-// the real redb backend) while every OTHER door delegates to a healthy
-// temporary Redb store. This isolates the ingest failure so the falsifiers below
-// prove (a) the door surfaces `Err` rather than panicking, and (b) the
-// engine degrades the local cache to read-only and emits a diagnostic
-// instead of crashing the host app on a relay EVENT frame.
+// A fault-injecting `EventStore` retained only for projection and peek failures
+// that cannot yet be expressed by the concrete Redb fixture. Relay-observation
+// I/O uses Redb's real transaction and handle-reconstruction lifecycle below.
 pub(super) struct FailIngestStore {
     inner: RedbStore,
-    fail_insert: bool,
     fail_query: Rc<Cell<bool>>,
     /// #763's two peeks and the deadline read whose error the caller used to
     /// erase. Sticky (not one-shot) because these model a store that has
@@ -23,19 +18,9 @@ pub(super) struct FailIngestStore {
 }
 
 impl FailIngestStore {
-    pub(super) fn armed() -> Self {
-        Self {
-            inner: RedbStore::temporary().expect("temporary Redb store"),
-            fail_insert: true,
-            fail_query: Rc::new(Cell::new(false)),
-            fail_peeks: Rc::new(Cell::new(false)),
-        }
-    }
-
     fn projection_armed(fail_query: Rc<Cell<bool>>) -> Self {
         Self {
             inner: RedbStore::temporary().expect("temporary Redb store"),
-            fail_insert: false,
             fail_query,
             fail_peeks: Rc::new(Cell::new(false)),
         }
@@ -46,7 +31,6 @@ impl FailIngestStore {
     fn peek_armed(fail_peeks: Rc<Cell<bool>>) -> Self {
         Self {
             inner: RedbStore::temporary().expect("temporary Redb store"),
-            fail_insert: false,
             fail_query: Rc::new(Cell::new(false)),
             fail_peeks,
         }
@@ -75,16 +59,6 @@ impl EventStore for FailIngestStore {
         event: nostr::Event,
         from: RelayObserved,
     ) -> Result<InsertOutcome, PersistenceError> {
-        if self.fail_insert {
-            self.fail_insert = false;
-            // Classified as the real backend would classify a disk-full
-            // write (#895): the originating I/O failure, durability unknown
-            // — never `invariant`, which would claim the write is absent.
-            return Err(PersistenceError::new(
-                PersistenceFault::Io,
-                "injected ingest I/O failure",
-            ));
-        }
         self.inner.insert(event, from)
     }
     fn query(&self, filter: &nostr::Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
@@ -211,11 +185,32 @@ impl EventStore for FailIngestStore {
     delegate_publish_queue_door!(inner);
 }
 
-/// Door-level falsifier (issue #122): the `insert` ingest door surfaces a
-/// realistic persistence I/O failure as `Err(PersistenceError)` rather than
-/// panicking. The ordinary Redb fixture is not fault-injected, so the fault is
-/// entirely the injected one — this is the exact contract the backend honors via
-/// `.map_err(persist_err)?` on every real redb operation.
+pub(super) fn recover_after_observation_io(core: &mut EngineCore<RedbStore>) -> Vec<Effect> {
+    let (fault, effects) = core
+        .recover_requested_redb_store_for_test()
+        .expect("the same Redb target reconstructs")
+        .expect("observation I/O must request reconstruction");
+    assert_eq!(fault, PersistenceFault::Io);
+    assert!(matches!(
+        effects.last(),
+        Some(Effect::EmitDiagnostics(snapshot)) if snapshot.store_degraded.is_none()
+    ));
+    assert!(
+        effects.iter().all(|effect| matches!(
+            effect,
+            Effect::EmitDiagnostics(_)
+                | Effect::DiagnosticsChanged
+                | Effect::EmitRows(..)
+                | Effect::Wire(_)
+        )),
+        "unexpected reconstruction effect: {effects:?}"
+    );
+    effects
+}
+
+/// Door-level falsifier (issue #122): the real Redb `insert` transaction
+/// surfaces a persistence I/O failure as `Err(PersistenceError)` rather than
+/// panicking, closes that failed generation, and reconstructs the same target.
 ///
 /// It also pins #895's classification across the crate boundary: the fault
 /// and its durability outcome reach `nmp` as types, so a consumer
@@ -223,8 +218,10 @@ impl EventStore for FailIngestStore {
 #[test]
 fn ingest_door_surfaces_io_failure_as_persistence_error_not_panic() {
     let a = Keys::generate();
-    let mut store = FailIngestStore::armed();
+    let mut store = RedbStore::temporary_with_observation_precommit_io()
+        .expect("temporary Redb observation-I/O fixture");
     let event = nmp_resolver::testkit::kind1(&a, "disk is full", 1_000);
+    let event_id = event.id;
     let from = RelayObserved::new(
         RelayUrl::parse("wss://relay.example.com").unwrap(),
         Timestamp::from(1_000u64),
@@ -238,6 +235,17 @@ fn ingest_door_surfaces_io_failure_as_persistence_error_not_panic() {
         "an I/O failure never claims the write is absent"
     );
     assert!(error.fault().requires_reopen());
+    let latched = store
+        .query(&nostr::Filter::new().id(event_id))
+        .expect_err("the failed Redb generation must stay closed");
+    assert_eq!(latched.fault(), PersistenceFault::Latched);
+    store
+        .reopen_after_failure()
+        .expect("the same temporary Redb target must reconstruct");
+    assert!(store
+        .query(&nostr::Filter::new().id(event_id))
+        .unwrap()
+        .is_empty());
 }
 
 /// Engine-level falsifier (issue #122): a relay EVENT frame whose store
@@ -249,10 +257,9 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
-    // `query`/coverage doors stay healthy; only `insert` fails — so the
-    // subscribe/connect setup below (which reads, never inserts) succeeds,
-    // proving the degrade is specific to the failing ingest door.
-    let mut core = EngineCore::new_with_fixture_routing_facts(FailIngestStore::armed(), dir, 10);
+    let store = RedbStore::temporary_with_observation_precommit_io()
+        .expect("temporary Redb observation-I/O fixture");
+    let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
 
     let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -293,7 +300,8 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
             .any(|e| matches!(e, Effect::EmitRows(_, rows, _) if !rows.is_empty())),
         "a failed ingest must not deliver phantom rows, got {effects:?}"
     );
-    // The reducer survives and keeps handling messages (no poisoned state).
+    let _ = recover_after_observation_io(&mut core);
+    // The reducer survives reconstruction and keeps handling messages.
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(1u64)));
 }
 
@@ -310,7 +318,9 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
     let dir = FixtureRoutingFacts::new()
         .with_outbound_routes(author.public_key(), [relay.clone()])
         .with_outbound_routes(healthy_author.public_key(), [healthy_relay.clone()]);
-    let mut core = EngineCore::new_with_fixture_routing_facts(FailIngestStore::armed(), dir, 10);
+    let store = RedbStore::temporary_with_observation_precommit_io()
+        .expect("temporary Redb observation-I/O fixture");
+    let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
 
     let _ = connect(&mut core, 0, &relay);
     let _ = connect(&mut core, 1, &healthy_relay);
@@ -394,6 +404,7 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
         .iter()
         .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
             if snapshot.store_degraded.is_some())));
+    let _ = recover_after_observation_io(&mut core);
 
     let completed = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -486,11 +497,10 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         )
         .expect("protected pinned demand"),
     );
-    let mut core = EngineCore::new_with_fixture_routing_facts(
-        FailIngestStore::armed(),
-        FixtureRoutingFacts::new(),
-        10,
-    );
+    let store = RedbStore::temporary_with_observation_precommit_io()
+        .expect("temporary Redb observation-I/O fixture");
+    let mut core =
+        EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10);
 
     let _ = core.handle_and_flush(EngineMsg::Subscribe(public_query));
     let _ = core.handle_and_flush(EngineMsg::Subscribe(protected_query));
@@ -559,6 +569,7 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         .iter()
         .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
             if snapshot.store_degraded.is_some())));
+    let _ = recover_after_observation_io(&mut core);
 
     let protected_event =
         nmp_resolver::testkit::kind1(&protected_author, "the protected transaction commits", 101);
@@ -616,8 +627,8 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
 }
 
 /// A failed EVENT commit poisons only the immutable request that delivered
-/// it. Independent requests admitted before or after that failure retain
-/// their own attribution and can still earn coverage.
+/// it. Real store reconstruction retires that request; its stale EOSE earns
+/// nothing, while the fresh successor can still earn coverage.
 #[test]
 fn failed_event_commit_poisons_only_its_immutable_request() {
     let a = Keys::generate();
@@ -628,7 +639,9 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
         .with_outbound_routes(a.public_key(), [relay.clone()])
         .with_outbound_routes(b.public_key(), [relay.clone()])
         .with_outbound_routes(c.public_key(), [relay.clone()]);
-    let mut core = EngineCore::new_with_fixture_routing_facts(FailIngestStore::armed(), dir, 10);
+    let store = RedbStore::temporary_with_observation_precommit_io()
+        .expect("temporary Redb observation-I/O fixture");
+    let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
     connect(&mut core, 0, &relay);
 
     let first = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
@@ -660,6 +673,10 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
         .iter()
         .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
             if snapshot.store_degraded.is_some())));
+    let recovery = recover_after_observation_io(&mut core);
+    let recovered_sub = req_for(&recovery, &relay).0.clone();
+    assert_ne!(first_sub, recovered_sub);
+    assert_ne!(second_sub, recovered_sub);
 
     let third = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -668,12 +685,13 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
     let third_sub = req_for(&third, &relay).0.clone();
     assert_ne!(first_sub, third_sub);
     assert_ne!(second_sub, third_sub);
+    assert_ne!(recovered_sub, third_sub);
 
     let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
     let atom_c = ctx_atom(cf(&[1], &[&c.public_key().to_hex()]));
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(600u64)));
-    let _ = core.handle(EngineMsg::RelayFrame(
+    let stale_first = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -681,30 +699,46 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
         public_session(&relay),
         eose_frame(&first_wire),
     ));
-
-    for (now, request) in [(700u64, &second_sub), (800u64, &third_sub)] {
-        let _ = core.handle(EngineMsg::Tick(Timestamp::from(now)));
-        let _ = core.handle(EngineMsg::RelayFrame(
-            RelayHandle {
-                slot: 0,
-                generation: 1,
-            },
-            public_session(&relay),
-            eose_frame(&wire_sub_string(request)),
-        ));
-    }
-    assert_eq!(
-        core.get_coverage(&atom_a, &relay).expect("coverage peek"),
-        None
+    assert!(
+        !stale_first.iter().any(|effect| match effect {
+            Effect::EmitObservationEvidence(_, evidence) => evidence
+                .iter()
+                .any(|item| matches!(item.fact, ObservationFact::RequestSettled { .. })),
+            _ => false,
+        }),
+        "the retired failed request must not settle: {stale_first:?}"
     );
-    assert!(core
-        .get_coverage(&atom_b, &relay)
-        .expect("coverage peek")
-        .is_some());
-    assert!(core
-        .get_coverage(&atom_c, &relay)
-        .expect("coverage peek")
-        .is_some());
+    for atom in [&atom_a, &atom_b, &atom_c] {
+        assert_eq!(
+            core.get_coverage(atom, &relay).expect("coverage peek"),
+            None,
+            "stale EOSE must not mint coverage after reconstruction"
+        );
+    }
+
+    let _ = core.handle(EngineMsg::Tick(Timestamp::from(800u64)));
+    let current = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        eose_frame(&wire_sub_string(&third_sub)),
+    ));
+    assert!(
+        current
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitRows(..))),
+        "only the fresh successor may advance acquisition evidence: {current:?}"
+    );
+    for atom in [&atom_a, &atom_b, &atom_c] {
+        assert!(
+            core.get_coverage(atom, &relay)
+                .expect("coverage peek")
+                .is_some(),
+            "the fresh successor must retain coverage authority"
+        );
+    }
 }
 
 /// A projection read can fail only after the EVENT transaction has committed.

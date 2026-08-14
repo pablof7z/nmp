@@ -71,6 +71,15 @@ pub(super) fn insert(
             crate::terminal_retention::TerminalRetentionLimits::PRODUCTION,
         )?;
     }
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if std::mem::take(&mut store.fail_next_observation_before_commit) {
+        drop(write);
+        drop(store.db.take());
+        return Err(PersistenceError::new(
+            crate::PersistenceFault::Io,
+            "injected observation failed before commit",
+        ));
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
     let outcome = write.commit_prepared(outcome)?;
@@ -115,6 +124,15 @@ pub(super) fn insert_batch(
             crate::terminal_retention::wall_clock_now(),
             crate::terminal_retention::TerminalRetentionLimits::PRODUCTION,
         )?;
+    }
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if std::mem::take(&mut store.fail_next_observation_before_commit) {
+        drop(write);
+        drop(store.db.take());
+        return Err(PersistenceError::new(
+            crate::PersistenceFault::Io,
+            "injected observation failed before commit",
+        ));
     }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
