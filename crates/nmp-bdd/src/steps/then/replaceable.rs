@@ -109,22 +109,18 @@ async fn foreign_contact_list_unchanged(w: &mut NmpWorld, pubkey: String) {
     );
 }
 
-/// A stale base now takes CUSTODY and ends refused, so "nothing was
-/// journaled" can no longer mean "nothing was accepted" -- the refusal IS a
-/// queue entry. What the scenario is protecting is the second half, which is
-/// unchanged and is the load-bearing one: no event id was ever allocated, so
-/// nothing was written on top of the base that moved.
-#[then(regex = r#"^nothing was journaled and no event id was allocated$"#)]
-async fn nothing_journaled_and_no_id(w: &mut NmpWorld) {
-    let statuses = w.receipt_statuses();
+/// A stale base takes CUSTODY as a terminal receipt-only refusal. The publish
+/// door returns a receipt id and frozen attempted event id, but the write
+/// creates no signing, routing, delivery, or retry work.
+#[then(
+    regex = r#"^the refused write remains one terminal receipt with no signing, routing, delivery, or retry work$"#
+)]
+async fn refused_write_remains_receipt_only(w: &mut NmpWorld) {
     assert!(
-        !statuses.iter().any(|s| matches!(
-            s,
-            nmp::mechanism::publish_queue::WriteFact::Signing(
-                nmp::mechanism::publish_queue::SigningState::Signed { .. }
-            )
-        )),
-        "the precondition is checked BEFORE an event id is allocated; saw {statuses:?}"
+        w.replacement_refusal_is_receipt_only(),
+        "the stale edit must retain one terminal refusal receipt and create no downstream \
+         work; saw {:?}",
+        w.receipt_statuses()
     );
 }
 

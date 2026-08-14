@@ -182,7 +182,19 @@ impl NmpWorld {
         });
         self.last_publish_was_auto = true;
         self.last_receipt_text = None;
-        self.receipts.push(ReceiptState::from_publish(result));
+        let state = match result {
+            Ok(stream) => {
+                self.last_receipt_id = Some(stream.id);
+                self.last_receipt_body = Some(stream.event_id);
+                ReceiptState::new(stream.statuses)
+            }
+            Err(error) => {
+                self.last_receipt_id = None;
+                self.last_receipt_body = None;
+                ReceiptState::refused(error)
+            }
+        };
+        self.receipts.push(state);
     }
 
     // ---- Then: the row, the conflict, the stamp --------------------------
@@ -197,8 +209,7 @@ impl NmpWorld {
     /// A stale base takes CUSTODY and then ends refused -- it is one queue
     /// entry the app can read back and remove, not a door refusal. What the
     /// scenario is protecting is that nothing was ever written on top of the
-    /// stale base, and the observable for that is the write never obtaining
-    /// an event id: no signature, no id, no row.
+    /// stale base.
     pub fn replacement_conflicted(&mut self) -> bool {
         self.receipt_eventually(|seen| {
             seen.iter().any(|s| {
@@ -209,10 +220,41 @@ impl NmpWorld {
                     ))
                 )
             })
-        }) && !self
-            .receipt_statuses()
-            .iter()
-            .any(|s| matches!(s, WriteFact::Signing(SigningState::Signed { .. })))
+        })
+    }
+
+    /// `And the refused write remains one terminal receipt with no signing,
+    /// routing, delivery, or retry work`.
+    ///
+    /// The publish door returns both store-issued receipt identity and the
+    /// frozen attempted event id. The receipt itself contains exactly the
+    /// terminal semantic refusal: no signing, destination, or relay fact can
+    /// have preceded it, and a terminal-at-birth stream owns no retry.
+    pub fn replacement_refusal_is_receipt_only(&mut self) -> bool {
+        let has_custody = self.last_receipt_id.is_some()
+            && self.last_receipt_body.is_some()
+            && self.publish_was_accepted();
+        if !has_custody
+            || !self.receipt_eventually(|seen| {
+                seen.iter().any(|fact| {
+                    matches!(
+                        fact,
+                        WriteFact::Outcome(WriteOutcome::Refused(
+                            RefuseReason::ReplaceableBaseChanged { .. }
+                        ))
+                    )
+                })
+            })
+        {
+            return false;
+        }
+
+        matches!(
+            self.receipt_statuses_after_settling().as_slice(),
+            [WriteFact::Outcome(WriteOutcome::Refused(
+                RefuseReason::ReplaceableBaseChanged { .. }
+            ))]
+        )
     }
 
     /// `Then the conflict names "<a>" as expected and "<b>" as actual`.
@@ -354,5 +396,50 @@ impl NmpWorld {
             .id_labels
             .get(label)
             .unwrap_or_else(|| panic!("nmp-bdd: no version is bound to the word {label:?}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::thread;
+    use std::time::Duration;
+
+    use nmp::mechanism::core::ReceiptId;
+    use nmp::mechanism::publish_queue::{RefuseReason, WriteFact, WriteOutcome};
+    use nmp::mechanism::runtime::fifo_channel;
+
+    use super::{NmpWorld, ReceiptState};
+
+    #[test]
+    fn replacement_receipt_only_witness_rejects_a_late_downstream_fact() {
+        let (sender, receiver) = fifo_channel();
+        let mut world = NmpWorld::default();
+        world.last_receipt_id = Some(ReceiptId(1));
+        world.last_receipt_body = Some(nostr::EventId::from_byte_array([1; 32]));
+        world.receipts.push(ReceiptState::new(receiver));
+
+        let dispatch = thread::spawn(move || {
+            assert!(sender.send(WriteFact::Outcome(WriteOutcome::Refused(
+                RefuseReason::ReplaceableBaseChanged {
+                    expected: Some(nostr::EventId::from_byte_array([2; 32])),
+                    actual: Some(nostr::EventId::from_byte_array([3; 32])),
+                },
+            ))));
+            thread::sleep(Duration::from_millis(100));
+            assert!(sender.send(WriteFact::Destinations {
+                relays: BTreeSet::new(),
+                complete: false,
+                awaiting_author_routes: BTreeSet::new(),
+            }));
+        });
+
+        let receipt_only = world.replacement_refusal_is_receipt_only();
+        dispatch.join().expect("delayed fact dispatch must finish");
+        assert!(
+            !receipt_only,
+            "a receipt-only refusal witness must read through closure before accepting the exact \
+             one-fact history"
+        );
     }
 }
