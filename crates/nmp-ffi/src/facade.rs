@@ -25,9 +25,9 @@ use crate::convert::{
     cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, filter_from_ffi, frame_to_ffi,
     live_query_from_ffi, parse_event_id, parse_pubkey, publish_queue_entry_to_ffi,
     publish_queue_error_to_ffi, receipt_result_to_ffi, relay_information_error_kind,
-    remove_queue_entry_error_to_ffi, sign_event_failure, sign_event_request_from_ffi,
-    sign_event_start_error, signed_event_to_ffi, window_from_ffi, write_intent_from_ffi,
-    write_status_to_ffi, FfiError, FfiRequestRowsError, FfiRowPullError, WriteStatusRef,
+    remove_queue_entry_error_to_ffi, sign_event_request_from_ffi, sign_event_start_error,
+    window_from_ffi, write_intent_from_ffi, write_status_to_ffi, FfiError, FfiRequestRowsError,
+    FfiRowPullError, WriteStatusRef,
 };
 #[cfg(feature = "nip02")]
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
@@ -39,8 +39,7 @@ use crate::types::{
     FfiLiveQuery, FfiPublishQueueEntry, FfiPublishQueueError, FfiReceiptReattachment,
     FfiReceiptResult, FfiRelayInformation, FfiRelayInformationCachePolicy,
     FfiRelayInformationDocument, FfiRelayInformationFreshness, FfiRelayInformationLimitations,
-    FfiRemoveQueueEntryError, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiWindow,
-    FfiWriteFact, FfiWriteIntent,
+    FfiRemoveQueueEntryError, FfiSignEventRequest, FfiWindow, FfiWriteFact, FfiWriteIntent,
 };
 use nmp::ReceiptReattachment;
 
@@ -1375,41 +1374,8 @@ impl Drop for ReceiptReadingGuard<'_> {
     }
 }
 
-/// Scoped one-shot sign-only handle (#680). It owns no signer registration and
-/// cannot affect accepted durable writes. Await [`Self::signed`] once for the
-/// verified event (or a typed failure); [`Self::cancel`] cancels only this
-/// signer operation.
-#[derive(uniffi::Object)]
-pub struct NmpSignEventHandle {
-    cancel: nmp::SignEventCancel,
-    result: nmp::AsyncFifoReceiver<Result<nmp::Event, nmp::SignEventError>>,
-}
-
-#[uniffi::export]
-impl NmpSignEventHandle {
-    /// Await the one-shot outcome: the fully-verified signed event, or a typed
-    /// [`FfiSignEventFailure`]. This is one-shot — a second await (sequential or
-    /// concurrent) returns [`FfiSignEventFailure::AlreadyConsumed`], because the
-    /// single result was already delivered to the first await.
-    pub async fn signed(&self) -> Result<FfiSignedEvent, FfiSignEventFailure> {
-        match self.result.next().await {
-            Ok(Some(Ok(event))) => Ok(signed_event_to_ffi(event)),
-            Ok(Some(Err(error))) => Err(sign_event_failure(error)),
-            Ok(None) | Err(_) => Err(FfiSignEventFailure::AlreadyConsumed),
-        }
-    }
-
-    /// Cancel this sign-only operation. Idempotent; safe after completion.
-    pub fn cancel(&self) {
-        self.cancel.cancel();
-    }
-}
-
-impl Drop for NmpSignEventHandle {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-    }
-}
+mod sign_event_handle;
+pub use sign_event_handle::NmpSignEventHandle;
 
 #[cfg(test)]
 mod tests;
