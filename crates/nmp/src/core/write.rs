@@ -2503,6 +2503,25 @@ impl<S: EventStore> EngineCore<S> {
             // Let ordinary ingest adopt it and satisfy the existing owners.
             return false;
         }
+        if let Some(generation) = snapshot.current.generation.as_ref() {
+            for member in &generation.members {
+                let attempts = match self.resolver.store().recover_attempts(*member) {
+                    Ok(attempts) => attempts,
+                    Err(error) => {
+                        self.degrade_store(error, effects);
+                        return true;
+                    }
+                };
+                if attempts.iter().any(|attempt| attempt.event.id == source.id) {
+                    // Successor lanes retain predecessor attempts as immutable
+                    // delivery history. A relay may replay one of those
+                    // previously published materializations after the public
+                    // source session reconnects; it is local-generation
+                    // evidence, not a new semantic base.
+                    return true;
+                }
+            }
+        }
         if let nmp_store::SemanticSourcePolicy::Finite(round) = &snapshot.source_policy {
             let Some(owned) = owned_request else {
                 // An active finite resource exclusively owns its coordinate.
