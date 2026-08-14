@@ -208,10 +208,7 @@ fn source_statuses(effects: &[Effect], observation: ObservationId) -> Vec<Source
         .collect()
 }
 
-fn current_source_statuses<S: EventStore>(
-    core: &EngineCore<S>,
-    observation: ObservationId,
-) -> Vec<SourceStatus> {
+fn current_source_statuses(core: &EngineCore, observation: ObservationId) -> Vec<SourceStatus> {
     core.observations[&observation]
         .last_evidence
         .as_ref()
@@ -302,12 +299,12 @@ fn wire_ops(effects: &[Effect]) -> Vec<&WireOp> {
         .collect()
 }
 
-fn flush<S: EventStore>(core: &mut EngineCore<S>) -> Vec<Effect> {
+fn flush(core: &mut EngineCore) -> Vec<Effect> {
     core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)))
 }
 
-fn current_attempt<S: EventStore>(
-    core: &EngineCore<S>,
+fn current_attempt(
+    core: &EngineCore,
     session: &RelaySessionKey,
     sub_id: &SubId,
     filter_hash: DescriptorHash,
@@ -320,8 +317,8 @@ fn current_attempt<S: EventStore>(
         .attempt_id
 }
 
-fn accept_request<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn accept_request(
+    core: &mut EngineCore,
     session: &RelaySessionKey,
     sub_id: &SubId,
     filter_hash: DescriptorHash,
@@ -331,8 +328,8 @@ fn accept_request<S: EventStore>(
     core.on_wire_request_handoff(RequestHandoffOutcome::Accepted { attempt_id, handle })
 }
 
-fn refuse_request<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn refuse_request(
+    core: &mut EngineCore,
     session: &RelaySessionKey,
     sub_id: &SubId,
     filter_hash: DescriptorHash,
@@ -344,8 +341,8 @@ fn refuse_request<S: EventStore>(
     })
 }
 
-fn accept_first_request<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn accept_first_request(
+    core: &mut EngineCore,
     session: &RelaySessionKey,
     slot: u32,
 ) -> Vec<Effect> {

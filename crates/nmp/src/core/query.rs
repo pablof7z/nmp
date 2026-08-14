@@ -61,7 +61,7 @@ pub enum Nip77Frame {
     Continue,
 }
 
-impl<S: EventStore> EngineCore<S> {
+impl EngineCore {
     /// The sole EngineCore authority crossing the durable coverage-write
     /// boundary. Callers own completion or retry policy, but every path
     /// commits one request-scoped batch atomically through this door.

@@ -13,7 +13,7 @@ use nmp_grammar::{
 };
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CompensateOutcome, EventStore, InsertOutcome, PersistenceError,
-    RelayObserved, SemanticInstallOutcome, SemanticSourceInstall, SigState, StoredEvent,
+    RedbStore, RelayObserved, SemanticInstallOutcome, SemanticSourceInstall, SigState, StoredEvent,
 };
 use nostr::filter::MatchEventOptions;
 use nostr::RelayUrl;
@@ -411,8 +411,8 @@ struct ProjectionShape {
 
 /// The graph engine (M1 plan §2.3): owns the store, the graph, the
 /// descriptor/atom refcount tables, the identity register, and metrics.
-pub struct Engine<S: EventStore> {
-    store: S,
+pub struct Engine {
+    store: RedbStore,
     graph: Graph,
     descriptor_to_root: BTreeMap<AcquisitionKey, NodeId>,
     graph_entries: HashMap<NodeId, GraphEntry>,
@@ -433,8 +433,8 @@ pub struct Engine<S: EventStore> {
     pending_drops: Rc<RefCell<Vec<HandleId>>>,
 }
 
-impl<S: EventStore> Engine<S> {
-    pub fn new(store: S) -> Self {
+impl Engine {
+    pub fn new(store: RedbStore) -> Self {
         Self {
             store,
             graph: Graph::default(),
@@ -463,7 +463,7 @@ impl<S: EventStore> Engine<S> {
     /// to do with graph evaluation — the resolver's own methods only ever
     /// touch the store via `insert`/`query` internally, so there was no
     /// existing seam for a caller that needs the store's OTHER door.
-    pub fn store(&self) -> &S {
+    pub fn store(&self) -> &RedbStore {
         &self.store
     }
 
@@ -472,7 +472,7 @@ impl<S: EventStore> Engine<S> {
     /// `docs/design/query-demand-and-evidence.md` keep this engine-owned;
     /// the resolver has no notion of relays or wire REQs at all, so it
     /// cannot and must not decide what to record here itself).
-    pub fn store_mut(&mut self) -> &mut S {
+    pub fn store_mut(&mut self) -> &mut RedbStore {
         &mut self.store
     }
 

@@ -24,8 +24,8 @@ fn session_for(relay: &RelayUrl, author: &Keys) -> RelaySessionKey {
 
 /// Accept and sign one durable narrow write, returning the effects the
 /// signer completion produced.
-fn publish_narrow<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn publish_narrow(
+    core: &mut EngineCore,
     author: &Keys,
     relay: &RelayUrl,
     created_at: u64,
@@ -72,7 +72,7 @@ fn publish_correlation(
     })
 }
 
-fn lane_state<S: EventStore>(core: &EngineCore<S>, receipt: ReceiptId) -> PublishQueueLaneState {
+fn lane_state(core: &EngineCore, receipt: ReceiptId) -> PublishQueueLaneState {
     let intent_id = core.pending[&receipt].intent_id;
     core.resolver
         .store()

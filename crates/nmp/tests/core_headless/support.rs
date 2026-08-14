@@ -42,7 +42,7 @@ trait HeadlessAdmission {
     fn handle_and_flush(&mut self, message: EngineMsg) -> Vec<Effect>;
 }
 
-impl<S: EventStore> HeadlessAdmission for EngineCore<S> {
+impl HeadlessAdmission for EngineCore {
     fn handle_and_flush(&mut self, message: EngineMsg) -> Vec<Effect> {
         let mut effects = self.handle(message);
         effects.extend(self.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
@@ -118,7 +118,7 @@ fn literal_query(kinds: &[u16], author_hex: &str) -> LiveQuery {
     })
 }
 
-fn new_core(dir: FixtureRoutingFacts) -> EngineCore<RedbStore> {
+fn new_core(dir: FixtureRoutingFacts) -> EngineCore {
     EngineCore::new_with_fixture_routing_facts(
         RedbStore::temporary().expect("temporary Redb store"),
         dir,
@@ -129,11 +129,11 @@ fn new_core(dir: FixtureRoutingFacts) -> EngineCore<RedbStore> {
 /// A core whose per-relay attempt ceiling (#1031) is deliberately out of the
 /// way. The ceiling is its own falsifier; a test about replay PAGING must not
 /// quietly turn into a test about giving up when its retry loop crosses 16.
-fn new_core_without_attempt_ceiling(dir: FixtureRoutingFacts) -> EngineCore<RedbStore> {
+fn new_core_without_attempt_ceiling(dir: FixtureRoutingFacts) -> EngineCore {
     new_core(dir).with_max_publish_attempts(u64::MAX)
 }
 
-fn activate<S: EventStore>(core: &mut EngineCore<S>, keys: &Keys) {
+fn activate(core: &mut EngineCore, keys: &Keys) {
     core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
 }
 
@@ -255,7 +255,7 @@ fn assert_no_protected_req(effects: &[Effect], session: &RelaySessionKey) {
     );
 }
 
-fn connect<S: EventStore>(core: &mut EngineCore<S>, slot: u32, url: &RelayUrl) -> Vec<Effect> {
+fn connect(core: &mut EngineCore, slot: u32, url: &RelayUrl) -> Vec<Effect> {
     let mut effects = core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot,
@@ -270,8 +270,8 @@ fn connect<S: EventStore>(core: &mut EngineCore<S>, slot: u32, url: &RelayUrl) -
     effects
 }
 
-fn connect_signer<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn connect_signer(
+    core: &mut EngineCore,
     slot: u32,
     url: &RelayUrl,
     signer: nostr::PublicKey,
@@ -287,8 +287,8 @@ fn connect_signer<S: EventStore>(
     effects
 }
 
-fn release_author_probe<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn release_author_probe(
+    core: &mut EngineCore,
     handle: RelayHandle,
     url: &RelayUrl,
     signer: nostr::PublicKey,
@@ -304,8 +304,8 @@ fn release_author_probe<S: EventStore>(
 /// Protected-write tests call this explicitly after `connect_signer`; the
 /// returned effects are the matching AUTH `OK` wake, so callers can still
 /// assert any write scheduling caused by readiness.
-fn authenticate_signer<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn authenticate_signer(
+    core: &mut EngineCore,
     slot: u32,
     url: &RelayUrl,
     signer: &Keys,
@@ -321,8 +321,8 @@ fn authenticate_signer<S: EventStore>(
     )
 }
 
-fn authenticate_signer_generation<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn authenticate_signer_generation(
+    core: &mut EngineCore,
     handle: RelayHandle,
     url: &RelayUrl,
     signer: &Keys,
@@ -351,8 +351,8 @@ fn authenticate_signer_generation<S: EventStore>(
     finish_authentication(core, handle, session, signer, policy_token)
 }
 
-fn finish_authentication<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn finish_authentication(
+    core: &mut EngineCore,
     handle: RelayHandle,
     session: RelaySessionKey,
     signer: &Keys,
@@ -438,11 +438,7 @@ fn nip11_evidence_until(
     }
 }
 
-fn mark_written<S: EventStore>(
-    core: &mut EngineCore<S>,
-    effects: &[Effect],
-    relay: &RelayUrl,
-) -> Vec<Effect> {
+fn mark_written(core: &mut EngineCore, effects: &[Effect], relay: &RelayUrl) -> Vec<Effect> {
     let correlation = effects
         .iter()
         .find_map(|effect| match effect {
@@ -460,8 +456,8 @@ fn mark_written<S: EventStore>(
     core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written))
 }
 
-fn publish_explicit<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn publish_explicit(
+    core: &mut EngineCore,
     author: &Keys,
     relays: impl IntoIterator<Item = RelayUrl>,
 ) -> (ReceiptId, nostr::Event, Vec<Effect>) {

@@ -13,7 +13,7 @@ type AttributedRelayObservation = (
     Option<(RelaySessionKey, String)>,
 );
 
-impl<S: EventStore> EngineCore<S> {
+impl EngineCore {
     // ---- transport wiring (slot bookkeeping only — C owns the pool) -----
 
     /// `u64::MAX` is structurally reserved for [`AUTH_SEQUENCE_SENTINEL`]:

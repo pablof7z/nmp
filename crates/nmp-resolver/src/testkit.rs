@@ -1,5 +1,5 @@
 //! The scripted fake-relay / ingest harness (M1 plan §2.3) + event builders.
-//! `Harness` wraps `Engine<RedbStore>`; there is no network, no async —
+//! `Harness` wraps `Engine`; there is no network, no async —
 //! `deliver` scripts what a real relay push would look like.
 //!
 //! The throwaway `Keys` used by the event builders below are test fixtures,
@@ -16,10 +16,10 @@ use nostr::{EventBuilder, Kind, Tag, Timestamp};
 
 use crate::engine::{Engine, GraphSnapshot, HandleId, Metrics, QueryHandle, SubscribeOutcome};
 
-/// The scripted "fake relay" harness: `Engine<RedbStore>` plus the
+/// The scripted "fake relay" harness: `Engine` plus the
 /// pass-through calls the contract tests drive.
 pub struct Harness {
-    engine: Engine<RedbStore>,
+    engine: Engine,
 }
 
 impl Default for Harness {

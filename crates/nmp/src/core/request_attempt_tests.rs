@@ -82,10 +82,7 @@ fn atom(relay: &RelayUrl, author: &str) -> ContextualAtom {
     }
 }
 
-fn apply_compile(
-    core: &mut EngineCore<RedbStore>,
-    demand: BTreeSet<ContextualAtom>,
-) -> Vec<Effect> {
+fn apply_compile(core: &mut EngineCore, demand: BTreeSet<ContextualAtom>) -> Vec<Effect> {
     let outcome = core
         .router
         .compile(&demand, &core.routing_facts, core.compile_budget());

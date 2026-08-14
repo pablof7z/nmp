@@ -39,7 +39,7 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
     core.slot_to_relay
         .insert(transport.slot, (transport, session.clone()));
 
-    let open_piece = |core: &mut EngineCore<RedbStore>, piece: &ContextualAtom| {
+    let open_piece = |core: &mut EngineCore, piece: &ContextualAtom| {
         let sub_id = SubId::for_wire(relay.clone(), &piece.filter, &piece.source, piece.access);
         let claim = coverage_key(piece);
         core.attribution
