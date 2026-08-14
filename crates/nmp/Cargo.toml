@@ -74,7 +74,7 @@ bench-instrumentation = [
     "nmp-resolver/bench-instrumentation",
     "nmp-transport/bench-instrumentation",
 ]
-test-instrumentation = []
+test-instrumentation = ["nmp-store/test-instrumentation"]
 
 [[example]]
 name = "incremental_delta_bench"
