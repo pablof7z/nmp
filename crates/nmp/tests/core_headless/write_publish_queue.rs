@@ -385,7 +385,9 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("start-failure.redb");
     let (receipt, event_id) = {
-        let mut first = EngineCore::new(RedbFailStartStore::open(&path, [relay.clone()]), 10);
+        let store = RedbStore::open_with_failed_lane_starts(&path, [relay.clone()])
+            .expect("open Redb lane-start failure fixture");
+        let mut first = EngineCore::new(store, 10);
         connect_signer(&mut first, 0, &relay, author.public_key());
         authenticate_signer(&mut first, 0, &relay, &author);
         let (id, signed, effects) = publish_explicit(&mut first, &author, [relay.clone()]);
@@ -395,7 +397,9 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
         (id, signed.id)
     };
 
-    let mut still_blocked = EngineCore::new(RedbFailStartStore::open(&path, [relay.clone()]), 10);
+    let store = RedbStore::open_with_failed_lane_starts(&path, [relay.clone()])
+        .expect("reopen Redb lane-start failure fixture");
+    let mut still_blocked = EngineCore::new(store, 10);
     assert!(still_blocked
         .recover_on_boot()
         .iter()
@@ -408,7 +412,10 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     assert!(replay.facts.contains(&attempt_stalled(event_id, &relay)));
     drop(still_blocked);
 
-    let mut recovered = EngineCore::new(RedbFailStartStore::open(&path, []), 10);
+    let mut recovered = EngineCore::new(
+        RedbStore::open(&path).expect("reopen healthy Redb store"),
+        10,
+    );
     let boot = recovered.recover_on_boot();
     assert!(boot
         .iter()
@@ -451,7 +458,8 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
         let directory =
             FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
         let mut core = EngineCore::new_with_fixture_routing_facts(
-            RedbFailStartStore::open(&path, [relay.clone()]),
+            RedbStore::open_with_failed_lane_starts(&path, [relay.clone()])
+                .expect("open Redb lane-start failure fixture"),
             directory,
             10,
         );
@@ -486,7 +494,10 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
         assert!(store.recover_attempts(intent).unwrap().is_empty());
     }
 
-    let mut recovered = EngineCore::new(RedbFailStartStore::open(&path, []), 10);
+    let mut recovered = EngineCore::new(
+        RedbStore::open(&path).expect("reopen healthy Redb store"),
+        10,
+    );
     recovered.recover_on_boot();
     connect_signer(&mut recovered, 0, &relay, author.public_key());
     let effects = release_author_probe(
@@ -821,7 +832,8 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
         let directory =
             FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [old.clone()]);
         let mut core = EngineCore::new_with_fixture_routing_facts(
-            RedbFailStartStore::open(&path, [old.clone()]),
+            RedbStore::open_with_failed_lane_starts(&path, [old.clone()])
+                .expect("open Redb lane-start failure fixture"),
             directory,
             10,
         );
@@ -920,7 +932,7 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
     let changed =
         FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [new.clone()]);
     let mut core = EngineCore::new_with_fixture_routing_facts(
-        RedbFailStartStore::open(&path, []),
+        RedbStore::open(&path).expect("reopen healthy Redb store"),
         changed,
         10,
     );
@@ -990,7 +1002,10 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
     assert!(store.recover_attempts(intent).unwrap().is_empty());
     drop(store);
 
-    let mut recovered = EngineCore::new(RedbFailStartStore::open(&path, []), 10);
+    let mut recovered = EngineCore::new(
+        RedbStore::open(&path).expect("reopen healthy Redb store"),
+        10,
+    );
     let effects = recovered.recover_on_boot();
     assert!(
         matches!(
