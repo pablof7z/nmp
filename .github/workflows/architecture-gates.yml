@@ -6,7 +6,7 @@
 #           (scripts/check-sdk-parity.sh + its documented allowlist).
 #
 # Alongside it live narrow, per-boundary structural checks that enforce one
-# specific ownership contract each (currently #863's NIP-51 observational
+# specific ownership contract each (currently #1551/#863's NIP-29 group-list
 # parsing rule and #879's pure content/locator boundary). Same character, same
 # trust properties.
 #
@@ -99,21 +99,22 @@ jobs:
       - name: Forbid acquisition policy and engine dependencies in locator parsing
         run: bash scripts/check-content-parser-boundary.sh
 
-  # #863: NIP-51 Simple-groups parsing is tolerant/observational, and the two
+  # #1551/#863: the NIP-51 Simple-groups value exposed by NMP's NIP-29 product
+  # capability is tolerant/observational, and the two
   # withdrawn shapes (an authoritative-sounding `decode_*` door and a public
   # observation-qualified `ObservedSimpleGroupsList`) must be excluded by a
   # mechanism, not by reviewer memory. Same "plain shell over repo content,
   # no toolchain, no secrets" character as the two gates above.
-  nip51-no-derived-authority:
-    name: NIP-51 observational parsing (no derived authority)
+  nip29-group-list-ownership:
+    name: NIP-29 group-list ownership
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Forbid derived NIP-51 authority and authoritative-sounding parser names
-        run: bash scripts/check-nip51-no-derived-authority.sh
+      - name: Forbid the deleted component and derived group-list authority
+        run: bash scripts/check-nip29-group-list-ownership.sh
 
   # #816: an EVENT persistence failure revokes only the exact request owners
   # named by its relay session and wire FIFO. Ordinary EOSE and NIP-77
@@ -244,4 +245,3 @@ jobs:
 
       - name: Falsify runner ownership, suite coverage, and cancellation isolation
         run: bash scripts/test-macos-ci-throughput.sh
-

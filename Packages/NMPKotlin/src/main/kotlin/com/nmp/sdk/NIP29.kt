@@ -32,8 +32,8 @@
 // Deliberately absent, same as before #1033: a fixed group-content kind
 // catalog and a kind:9 composer -- NIP-29 owns neither; C7 and client
 // notification policy remain independently optional (#838). Also absent:
-// any second projection of a NIP-51 Simple-groups entry -- `NIP51.kt` keeps
-// that one shape.
+// any second projection of a Simple-groups entry --
+// `NIP29SimpleGroups.kt` keeps that one shape.
 //
 // Deleted in this change, no alias: the old single-host discovery-demand
 // free function pinned to one relay, and `Group`'s single-host constructor.

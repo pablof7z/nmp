@@ -68,7 +68,9 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-nip29/Cargo.toml`
 - Source: `crates/nmp-nip29/src/lib.rs`
 - Source: `crates/nmp-nip29/src/context.rs`
+- Source: `crates/nmp-nip29/src/group_list.rs`
 - Source: `crates/nmp-nip29/src/operations.rs`
+- Source: `crates/nmp-nip29/src/simple_groups.rs`
 - Source: `crates/nmp-nip73/src/lib.rs`
 - Source: `crates/nmp-signer/src/op.rs`
 - Source: `crates/nmp-content/src/document.rs`
@@ -85,7 +87,6 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp/src/nip29/predicate.rs`
 - Source: `crates/nmp/src/nip29/read.rs`
 - Source: `crates/nmp/src/nip29/records.rs`
-- Source: `crates/nmp/src/nip51.rs`
 - Source: `crates/nmp/src/nip65.rs`
 - Source: `crates/nmp/src/nipc7.rs`
 - Source: `crates/nmp/src/content.rs`
@@ -101,7 +102,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-ffi/src/nip02.rs`
 - Source: `crates/nmp-ffi/src/nip22.rs`
 - Source: `crates/nmp-ffi/src/nip29.rs`
-- Source: `crates/nmp-ffi/src/nip51.rs`
+- Source: `crates/nmp-ffi/src/nip29_simple_groups.rs`
 - Source: `crates/nmp-ffi/src/tagging.rs`
 - Source: `crates/nmp-ffi/src/content.rs`
 - Source: `crates/nmp-ffi/src/asset.rs`
@@ -161,7 +162,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMP/Sources/NMP/Tagging.swift`
 - Source: `Packages/NMP/Sources/NMP/NIP22.swift`
 - Source: `Packages/NMP/Sources/NMP/NIP29.swift`
-- Source: `Packages/NMP/Sources/NMP/NIP51.swift`
+- Source: `Packages/NMP/Sources/NMP/NIP29SimpleGroups.swift`
 - Source: `Packages/NMP/Sources/NMP/Blossom.swift`
 - Source: `Packages/NMP/Sources/NMPContent`
 - Source: `Packages/NMP/Sources/NMPContent/ContentDocument.swift`
@@ -176,7 +177,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Tagging.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP22.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt`
-- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP51.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29SimpleGroups.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Blossom.kt`
 - Source: `Packages/NMPAndroid/README.md`
 - Source: `Packages/NMPAndroid/build.gradle.kts`

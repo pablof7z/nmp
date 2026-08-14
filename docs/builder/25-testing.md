@@ -114,9 +114,10 @@ Engine-level contract tests must show that:
 - arbitrary event tag names such as `alt`, `-`, and application-defined strings
   round-trip and can be projected without becoming generic filter keys;
 - no whitelist grants one protocol tag special treatment; and
-- the NIP-29 remembered-groups surface consumes NIP-51's typed kind `10009`
-  values without claiming `10009` or kind `30002`, and the underlying list
-  demand never runs through the selected group host.
+- the NIP-29 remembered-groups product surface exposes and consumes the typed
+  observational value of NIP-51 kind `10009` without claiming protocol
+  ownership of `10009` or kind `30002`, and the underlying list demand never
+  runs through the selected group host.
 
 ## Diagnostics make good golden evidence
 

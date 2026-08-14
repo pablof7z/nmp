@@ -1,8 +1,8 @@
 //! NIP-29's own kinds (join/leave/moderation, 9000-9022) -- pure event
 //! composition (#989).
 //!
-//! Unlike kind:9 chat (`nmp-nipc7`'s) or the NIP-51 simple-groups list
-//! (`nmp-nip51`'s), the schema for join, leave, put-user, remove-user,
+//! Unlike kind:9 chat (`nmp-nipc7`'s), the schema for join, leave, put-user,
+//! remove-user,
 //! edit-metadata, delete-event, create-group, delete-group and create-invite
 //! is genuinely NIP-29's own -- <https://github.com/nostr-protocol/nips/blob/master/29.md>.
 //! Owning it here is what lets an app write `group.remove_users(pubkeys)`

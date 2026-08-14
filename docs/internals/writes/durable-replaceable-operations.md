@@ -554,9 +554,10 @@ logs, unrelated callbacks, diagnostics, or uncontrolled duplicate buffers.
 
 ### 4.7 Kind `10009` simple groups: identity includes the host
 
-NIP-51 defines the kind-10009 “simple groups” list; its entries refer to
-host-scoped NIP-29 groups. The capability belongs with group behavior rather
-than an omnibus NIP-51 module because group identity is host-sensitive. The
+Kind 10009 is the NIP-51 Simple groups list. NMP exposes its observational
+value with the NIP-29 product capability because its entries refer to
+host-scoped NIP-29 groups. The capability belongs with group behavior because
+group identity is host-sensitive. The
 same textual group id at two host relays can describe different groups or
 forks.
 

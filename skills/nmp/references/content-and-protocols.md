@@ -159,12 +159,12 @@ own `sources`:
 - `react(to:with:)` in Swift, `react(target, reaction)` in Kotlin — NIP-25, taking a closed `Reaction` (`.like`/`.dislike`/`.emoji`) rather than a raw content string, since NIP-25 assigns `+`, `-` and the empty string fixed meanings.
 - `.withContent([ContentPart])` — states what a draft says AND emits the rows its inline references need from the same call, so a `nostr:npub…` token and its `p` row cannot be written apart. Parts are `.text`, `.person(pubkey:relay:)` and `.quote(Row)`. Rows are appended after whatever the composer already stated, never reordered or deduplicated against them.
 
-The facade also carries NIP-51 simple-groups lists (`current_account_demand`
-plus the tolerant parsers, projected as `currentAccountDemand()` and
-`parseSimpleGroupsListTolerant(_:)`), Blossom blob storage, and exact-byte
-asset identity, each behind its own cargo feature (`nip18`, `nip22`, `nip25`,
-`nip29`, `nip51`, `nip65`, `nipc7`, `content`, `asset`, `blossom`; `blossom`
-turns on `asset`). All are non-default. Blossom's client verbs are upload,
+The facade also carries NIP-51 simple-groups lists (`current_account_group_list_demand`
+plus the tolerant parsers, projected as `currentAccountGroupListDemand()` and
+`parseSimpleGroupsListTolerant(_:)`) through the `nip29` product capability,
+alongside Blossom blob storage and exact-byte asset identity. The non-default
+Cargo features are `nip18`, `nip22`, `nip25`, `nip29`, `nip65`, `nipc7`,
+`content`, `asset`, and `blossom`; `blossom` turns on `asset`. Blossom's client verbs are upload,
 mirror, delete and list, each with its own typed error and its own unsigned
 authorization draft the caller signs through the ordinary signing path; the
 client is engine-free and is not a second way to publish. Everything above

@@ -27,15 +27,11 @@
 //! - [`entity`] -- the bech32 nostr-entity DECODE codec (#116), the one
 //!   exported free function that needs no `NmpEngine` instance at all: no
 //!   engine, no network, no signing.
-//! - [`nip51`] -- tolerant, observational NIP-51 Simple-groups parsing
-//!   (#863). A free function over a caller-constructible `FfiRow` returning
-//!   plain data; no observation-qualified wrapper, projection error, or
-//!   frame proof exists here, and none may be reintroduced
-//!   (`scripts/check-nip51-no-derived-authority.sh`).
 //! - [`nip29`] -- the read-only NIP-29 host-browser projection (#108):
-//!   `nmp-nip29`'s group-discovery constructor as a top-level free function,
-//!   same "no `NmpEngine` instance needed" shape as [`entity`]. NIP-29 does
-//!   not project a fixed content catalog or a kind:9 composer (#838).
+//!   group discovery plus tolerant, observational kind:10009 Simple-groups
+//!   parsing. The parser is a free function over caller-constructible data;
+//!   it grants no authority. NIP-29 does not project a fixed content catalog
+//!   or a kind:9 composer (#838).
 //! - [`blossom`] -- the opt-in Blossom blob projection (#555): kind:24242
 //!   authorization drafts/validation and the blocking BUD-02/04/12 client,
 //!   engine-less like [`entity`]/[`nip29`], with each operation's failure
@@ -54,8 +50,8 @@
 //! NIP-22 comment vocabulary, which it reaches by enabling the facade's
 //! `nip22` feature rather than by a second edge to `nmp-nip22`.
 //! `scripts/check-ffi-facade-boundary.sh` is the mechanism that keeps that
-//! true. `nmp-nip51`/`nmp-nip29` (see [`nip29`]'s own doc) and
-//! `nmp-blossom` (#555, see [`blossom`]'s) are the opt-in protocol
+//! true. `nmp-nip29` (see [`nip29`]'s own doc) and `nmp-blossom` (#555, see
+//! [`blossom`]'s) are the opt-in protocol
 //! dependencies projected by this boundary.
 
 #[cfg(feature = "asset")]
@@ -74,8 +70,8 @@ pub mod nip02;
 pub mod nip22;
 #[cfg(feature = "nip29")]
 pub mod nip29;
-#[cfg(feature = "nip51")]
-pub mod nip51;
+#[cfg(feature = "nip29")]
+mod nip29_simple_groups;
 pub mod session;
 // #1243: the one tagging door at the native boundary -- reply, chat reply and
 // repost, each returning the `FfiEventBuilder` the publish door already takes.

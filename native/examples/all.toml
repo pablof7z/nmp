@@ -8,7 +8,6 @@ capabilities = [
   "nip22",
   "nip25",
   "nip29",
-  "nip51",
   "nip65",
   "nipc7",
 ]

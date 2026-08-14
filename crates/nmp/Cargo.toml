@@ -54,7 +54,6 @@ nip29 = ["dep:nmp-nip29"]
 # dependency cargo refuses to resolve, so reaching the follow service through
 # the facade needs the service's engine coupling inverted first, not a feature.
 nip18 = ["dep:nmp-nip18"]
-nip51 = ["dep:nmp-nip51"]
 nipc7 = ["dep:nmp-nipc7"]
 content = ["dep:nmp-content"]
 
@@ -99,7 +98,6 @@ nmp-nip65 = { workspace = true, optional = true }
 # #1239: the families the facade did not offer and `nmp-ffi` did. Optional for
 # the same reason `nmp-nip22` is -- see the feature block above.
 nmp-nip18 = { workspace = true, optional = true }
-nmp-nip51 = { workspace = true, optional = true }
 nmp-nipc7 = { workspace = true, optional = true }
 nmp-content = { workspace = true, optional = true }
 nmp-asset = { workspace = true, optional = true }
@@ -154,10 +152,9 @@ libc = { version = "0.2", optional = true }
 # configured. That discovery is the optional NIP-65 coordinator, so this
 # crate's own test targets enable it. Test-only: the default feature set a
 # consumer links is unchanged.
-# `nip51` joins it for #1239: `nip51_headless.rs` proves the kind:10009 demand
-# against a real engine, and it now proves it through `nmp::nip51` -- the same
-# path an app has -- instead of through a second `nmp-nip51` dev edge.
-nmp = { path = ".", features = ["nip29", "nip51", "nip65", "test-instrumentation"] }
+# `nip29_group_list_headless.rs` proves the kind:10009 demand against a real
+# engine through the same `nmp::nip29` path an app uses.
+nmp = { path = ".", features = ["nip29", "nip65", "test-instrumentation"] }
 nmp-test-support.workspace = true
 nmp-store = { workspace = true, features = ["test-instrumentation"] }
 cucumber = "0.21"

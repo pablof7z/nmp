@@ -1,8 +1,8 @@
-//! #108: `nmp::nip51::current_account_demand()` proven against a REAL
+//! #108: `nmp::nip29::current_account_group_list_demand()` proven against a REAL
 //! `EngineCore` -- signed-out state yields no current-account kind-10009
 //! demand, and signing in (or rerooting to a different account)
 //! reconstructs it correctly. This is a cross-crate integration proof
-//! `nmp-nip51` itself cannot make (it is deliberately engine-free).
+//! `nmp-nip29` itself cannot make (it is deliberately engine-free).
 
 use nmp::mechanism::core::{EngineCore, EngineMsg};
 use nmp_grammar::ContextualAtom;
@@ -27,10 +27,10 @@ fn kind_10009_atoms(atoms: &std::collections::BTreeSet<ContextualAtom>) -> usize
 }
 
 #[test]
-fn signed_out_current_account_demand_resolves_to_zero_atoms() {
+fn signed_out_current_account_group_list_demand_resolves_to_zero_atoms() {
     let mut core = new_core(FixtureRoutingFacts::new());
     let _ = core.handle(EngineMsg::Subscribe(LiveQuery::single(
-        nmp::nip51::current_account_demand(),
+        nmp::nip29::current_account_group_list_demand(),
     )));
     assert_eq!(
         kind_10009_atoms(&core.active_demand()),
@@ -48,7 +48,7 @@ fn signing_in_reconstructs_the_current_account_kind_10009_demand() {
     let mut core = new_core(dir);
 
     let _ = core.handle(EngineMsg::Subscribe(LiveQuery::single(
-        nmp::nip51::current_account_demand(),
+        nmp::nip29::current_account_group_list_demand(),
     )));
     assert_eq!(kind_10009_atoms(&core.active_demand()), 0);
 
@@ -71,7 +71,7 @@ fn rerooting_to_a_different_account_replaces_the_kind_10009_atom_not_adds_a_seco
     let mut core = new_core(dir);
 
     let _ = core.handle(EngineMsg::Subscribe(LiveQuery::single(
-        nmp::nip51::current_account_demand(),
+        nmp::nip29::current_account_group_list_demand(),
     )));
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
     assert_eq!(kind_10009_atoms(&core.active_demand()), 1);

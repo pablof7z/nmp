@@ -482,27 +482,28 @@ impl std::fmt::Display for FfiSignEventFailure {
 
 impl std::error::Error for FfiSignEventFailure {}
 
-/// One tolerantly parsed Simple-groups item (#863, `nmp::nip51::
-/// SimpleGroupEntry` mirror) -- group id, host relay, optional name.
+/// One tolerantly parsed NIP-51 Simple-groups item exposed through NMP's
+/// NIP-29 product capability (#863, `nmp::nip29::SimpleGroupEntry` mirror) --
+/// group id, host relay, optional name.
 /// `host_relay` is a canonically SPELLED observed string; it is not a
 /// routing permission and no NIP-29 constructor accepts it implicitly.
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
-#[cfg(feature = "nip51")]
+#[cfg(feature = "nip29")]
 pub struct FfiSimpleGroupEntry {
     pub group_id: String,
     pub host_relay: String,
     pub name: Option<String>,
 }
 
-/// NIP-51's tolerantly parsed Simple groups list (#863,
-/// `nmp::nip51::SimpleGroupsList` mirror), with every evidence field
-/// preserved across the FFI boundary. OBSERVATIONAL DATA ONLY: it may be
+/// NIP-51's tolerantly parsed Simple groups list, exposed through NMP's NIP-29
+/// product capability (#863, `nmp::nip29::SimpleGroupsList` mirror), with every
+/// evidence field preserved across the FFI boundary. OBSERVATIONAL DATA ONLY: it may be
 /// produced from a caller-constructed [`FfiRow`] of any kind, and it asserts
 /// no signature, canonical-store, provenance, routing, or mutation
 /// authority. There is deliberately no observation-qualified wrapper,
 /// projection error, or frame proof around it.
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
-#[cfg(feature = "nip51")]
+#[cfg(feature = "nip29")]
 pub struct FfiSimpleGroupsList {
     pub items: Vec<FfiSimpleGroupEntry>,
     pub relays_in_use: Vec<String>,

@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
-# #863: NIP-51 Simple-groups parsing is tolerant and OBSERVATIONAL. A parser
-# result is data, never authority.
+# #1551/#863: the NIP-51 Simple-groups value exposed by NMP's NIP-29 product
+# capability is tolerant and OBSERVATIONAL. A parser result is data, never authority.
 #
 # Two shapes have already been shipped and withdrawn here:
 #
 #   1. `decode_simple_groups_list(FfiRow)` -- a tolerant tag/content reader
 #      whose name sounded authoritative, so a caller-constructed row could be
-#      mistaken for canonical NIP-51 state and fed into NIP-29 host selection.
+#      mistaken for canonical group-list state and fed into host selection.
 #   2. a public observation-qualified `ObservedSimpleGroupsList` minted from a
 #      frame proof -- a speculative protocol-specific lifecycle/capability on
 #      top of `LiveQuery`, with no operation that needed it.
 #
 # Prose cannot keep either out (bug-class-ledger type-over-convention
 # doctrine). This script is the mechanism: it fails the build if the
-# authoritative-sounding door reopens, if any observation-qualified NIP-51
-# noun appears, or if the explicit relay-scope NIP-29 selection seam
+# authoritative-sounding door reopens, if the deleted NIP-51 component family
+# returns, if any observation-qualified group-list noun appears, or if the
+# explicit relay-scope NIP-29 selection seam
 # disappears.
 #
 # #1033 widened NIP-29 browsing from one pinned host to a caller-supplied
 # relay SET (`nip29::on(hosts)` -> `RelayScope`, narrowed with `.group(id)`);
 # `group_discovery_demand(host)` is gone, no alias. The invariant this script
 # polices is unchanged by that widening: the host(s) an app browses a group
-# with are its own explicit typed input, never harvested from NIP-51 parser
+# with are its own explicit typed input, never harvested from group-list parser
 # output by the boundary itself.
 set -euo pipefail
 
@@ -34,7 +35,7 @@ require_commands dirname git grep xargs || exit 2
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
-fail() { echo "nip51-no-derived-authority: $*" >&2; exit 1; }
+fail() { echo "nip29-group-list-ownership: $*" >&2; exit 1; }
 
 # Portability note: plain POSIX `grep` only. GitHub's ubuntu-latest runner has
 # no `ripgrep`, and this gate must run with no toolchain and no setup step.
@@ -48,11 +49,11 @@ census() { git ls-files -- crates Packages | xargs grep -nE "$1" || true; }
 
 # Every layer that projects Simple-groups parsing must actually exist. A
 # missing file would otherwise turn each search below into a vacuous pass.
-NIP51_SOURCES=(
-  crates/nmp-nip51/src/simple_groups.rs
-  crates/nmp-ffi/src/nip51.rs
-  Packages/NMP/Sources/NMP/NIP51.swift
-  Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP51.kt
+GROUP_LIST_SOURCES=(
+  crates/nmp-nip29/src/simple_groups.rs
+  crates/nmp-ffi/src/nip29_simple_groups.rs
+  Packages/NMP/Sources/NMP/NIP29SimpleGroups.swift
+  Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29SimpleGroups.kt
 )
 NIP29_SOURCES=(
   crates/nmp-nip29/src/discovery.rs
@@ -60,7 +61,7 @@ NIP29_SOURCES=(
   Packages/NMP/Sources/NMP/NIP29.swift
   Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt
 )
-for required in "${NIP51_SOURCES[@]}" "${NIP29_SOURCES[@]}"; do
+for required in "${GROUP_LIST_SOURCES[@]}" "${NIP29_SOURCES[@]}"; do
   [[ -f $required ]] || fail "required path is missing: $required"
 done
 
@@ -73,10 +74,10 @@ if [[ -n $found ]]; then
 fi
 
 for requirement in \
-  'crates/nmp-nip51/src/simple_groups.rs:parse_simple_groups_list_tolerant' \
-  'crates/nmp-ffi/src/nip51.rs:parse_simple_groups_list_tolerant' \
-  'Packages/NMP/Sources/NMP/NIP51.swift:parseSimpleGroupsListTolerant' \
-  'Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP51.kt:parseSimpleGroupsListTolerant'
+  'crates/nmp-nip29/src/simple_groups.rs:parse_simple_groups_list_tolerant' \
+  'crates/nmp-ffi/src/nip29_simple_groups.rs:parse_simple_groups_list_tolerant' \
+  'Packages/NMP/Sources/NMP/NIP29SimpleGroups.swift:parseSimpleGroupsListTolerant' \
+  'Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29SimpleGroups.kt:parseSimpleGroupsListTolerant'
 do
   file=${requirement%%:*}
   symbol=${requirement#*:}
@@ -89,31 +90,31 @@ done
 found=$(census 'ObservedSimpleGroups|QualifiedSimpleGroups|SimpleGroupsProjection|CanonicalSimpleGroups|AuthoritativeSimpleGroups|project_observed_simple_groups|projectObservedSimpleGroups|SimpleGroupsWitness|SimpleGroupsProof')
 if [[ -n $found ]]; then
   printf '%s\n' "$found"
-  fail "derived NIP-51 authority/lifecycle API appeared"
+  fail "derived NIP-29 group-list authority/lifecycle API appeared"
 fi
 
 # 3. No frame proof or second observation handle may be reachable from the
-#    NIP-51 parsing files themselves -- the kind:10009 read is the ordinary
+#    `nmp-nip29` group-list parsing files themselves -- the kind:10009 read is the ordinary
 #    `LiveQuery`, and parsing adds no handle beside it.
 if grep -nE \
   'FrameProof|ObservationHandle|AuthorityToken|FfiObservation|FfiFrame([^A-Za-z0-9_]|$)' \
-  "${NIP51_SOURCES[@]}"; then
-  fail "NIP-51 parsing acquired an observation lifecycle or proof surface"
+  "${GROUP_LIST_SOURCES[@]}"; then
+  fail "NIP-29 group-list parsing acquired an observation lifecycle or proof surface"
 fi
 
 # 4. The tolerant-parser falsifiers must keep proving that fabricated,
 #    wrong-kind input preserves evidence instead of becoming authority.
 grep -qF 'tolerant_parse_of_fabricated_input_yields_plain_evidence_not_authority' \
-  crates/nmp-nip51/src/simple_groups.rs ||
+  crates/nmp-nip29/src/simple_groups.rs ||
   fail "direct-Rust fabricated-input falsifier is missing"
 grep -qF 'tolerant_parser_preserves_evidence_even_for_fabricated_wrong_kind_row' \
-  crates/nmp-ffi/src/nip51.rs ||
+  crates/nmp-ffi/src/nip29_simple_groups.rs ||
   fail "FFI fabricated-wrong-kind falsifier is missing"
 grep -qF 'testTolerantParserPreservesEvidenceForFabricatedWrongKindRow' \
-  Packages/NMP/Tests/NMPTests/NIP51Tests.swift ||
+  Packages/NMP/Tests/NMPTests/NIP29SimpleGroupsTests.swift ||
   fail "Swift fabricated-wrong-kind falsifier is missing"
 grep -qF 'tolerantParserPreservesEvidenceForFabricatedWrongKindRow' \
-  Packages/NMPKotlin/src/test/kotlin/com/nmp/sdk/NIP51Test.kt ||
+  Packages/NMPKotlin/src/test/kotlin/com/nmp/sdk/NIP29SimpleGroupsTest.kt ||
   fail "Kotlin fabricated-wrong-kind falsifier is missing"
 
 # 5. NIP-29 browsing takes an EXPLICIT typed relay set the app selected. If
@@ -141,13 +142,24 @@ grep -qE 'func on\(' Packages/NMP/Sources/NMP/NIP29.swift ||
   fail "Swift NIP-29 explicit relay-scope selection seam is missing"
 grep -qE 'fun on\(' Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt ||
   fail "Kotlin NIP-29 explicit relay-scope selection seam is missing"
-grep -qF 'nip29_browsing_still_demands_an_explicitly_supplied_host' crates/nmp-ffi/src/nip51.rs ||
+grep -qF 'nip29_browsing_still_demands_an_explicitly_supplied_host' crates/nmp-ffi/src/nip29_simple_groups.rs ||
   fail "the FFI falsifier proving NIP-29 browsing takes an explicit host is missing"
 
-# 6. The workload nouns stay exactly two. A NIP-51 file must not export a
+# 6. The workload nouns stay exactly two. A group-list file must not export a
 #    third query/intent-shaped noun of its own.
-if grep -nE 'pub struct .*Query|pub struct .*Intent|struct .*Observation' "${NIP51_SOURCES[@]}"; then
-  fail "NIP-51 parsing introduced a third workload noun"
+if grep -nE 'pub struct .*Query|pub struct .*Intent|struct .*Observation' "${GROUP_LIST_SOURCES[@]}"; then
+  fail "NIP-29 group-list parsing introduced a third workload noun"
 fi
 
-echo "nip51-no-derived-authority: ok"
+# 7. The removed component and feature family must stay deleted. This scans
+#    build/product sources plus the native capability catalogue and consumer
+#    skill. The lowercase `nip51` token is a deleted feature/component key;
+#    truthful prose may still name the NIP-51 wire definition.
+tombstones=$(git ls-files -- Cargo.toml crates Packages native skills/nmp | xargs grep -nE \
+  'nmp-nip51|nmp_nip51|nmp::nip51|feature = "nip51"|(^|[^A-Za-z0-9_-])nip51([^A-Za-z0-9_-]|$)|NIP51\\.(swift|kt)' || true)
+if [[ -n $tombstones ]]; then
+  printf '%s\n' "$tombstones"
+  fail "deleted NIP-51 component or feature family reappeared"
+fi
+
+echo "nip29-group-list-ownership: ok"
