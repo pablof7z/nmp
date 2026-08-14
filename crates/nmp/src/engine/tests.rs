@@ -312,16 +312,9 @@ fn removing_or_clearing_session_never_retargets_or_discards_accepted_writes() {
     }
 }
 
-fn engine_with_store_and_lane_faults<S>(
-    store: S,
-    faults: crate::lane_fault_store::LaneFaults,
-) -> Engine
-where
-    S: nmp_store::EventStore + Send + 'static,
-{
-    let store = crate::lane_fault_store::FaultyLaneStore::new(store, faults);
+fn engine_with_store(store: RedbStore) -> Engine {
     let (engine_thread, handle) = EngineThread::spawn(store, 4, PoolConfig::default())
-        .expect("fault-injecting engine construction");
+        .expect("concrete Redb engine construction");
     Engine {
         inner: Mutex::new(Some(Inner {
             handle,
@@ -330,28 +323,19 @@ where
     }
 }
 
-fn engine_with_lane_faults(faults: crate::lane_fault_store::LaneFaults) -> Engine {
-    engine_with_store_and_lane_faults(
-        RedbStore::temporary().expect("temporary Redb store"),
-        faults,
-    )
-}
-
 #[test]
 fn persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once() {
     use std::time::Duration;
 
-    use crate::lane_fault_store::LaneFaults;
     use nmp_grammar::{Identity, WritePayload, WriteRouting};
     use nostr::EventBuilder;
 
-    let faults = LaneFaults::default();
-    faults.fail_reopen_attempts(2);
-    let reopen_events = faults.fail_accept_after_commit_once();
     let persistent_fixture = tempfile::tempdir().expect("persistent store fixture");
-    let store = RedbStore::open(persistent_fixture.path().join("ambiguous-acceptance.redb"))
-        .expect("persistent fault-injection store must open");
-    let engine = engine_with_store_and_lane_faults(store, faults.clone());
+    let store = RedbStore::open_with_accept_write_commit_then_io(
+        persistent_fixture.path().join("ambiguous-acceptance.redb"),
+    )
+    .expect("persistent commit-then-I/O store must open");
+    let engine = engine_with_store(store);
 
     let author = Keys::generate();
     engine
@@ -391,18 +375,6 @@ fn persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_on
             .unwrap_or_default()
     );
 
-    assert!(
-        !reopen_events.recv_timeout(Duration::from_secs(5)).unwrap(),
-        "the first bounded reopen attempt remains unavailable"
-    );
-    assert!(
-        !reopen_events.recv_timeout(Duration::from_secs(5)).unwrap(),
-        "the second bounded reopen attempt remains unavailable"
-    );
-    assert!(
-        reopen_events.recv_timeout(Duration::from_secs(5)).unwrap(),
-        "the supervisor reconstructs without replacing the Engine"
-    );
     let recovered_frame = subscription
         .recv_timeout(Duration::from_secs(5))
         .expect("the pre-failure query handle receives reconstructed rows");
@@ -499,78 +471,116 @@ fn persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_on
         })
         .expect("later independent work is accepted by the reconstructed Engine");
 
-    // Exercise the other honest I/O boundary in the same public Engine:
-    // this transaction is absent rather than committed-but-errored.
-    faults.fail_reopen_attempts(1);
-    let absent_reopen_events = faults.fail_accept_before_commit_once();
-    let absent_event = EventBuilder::text_note("absent boundary acceptance")
+    engine.shutdown();
+}
+
+#[test]
+fn persistent_engine_recovers_after_precommit_acceptance_io_once() {
+    use nmp_grammar::{Identity, WritePayload, WriteRouting};
+    use nostr::EventBuilder;
+
+    let persistent_fixture = tempfile::tempdir().expect("persistent store fixture");
+    let store = RedbStore::open_with_accept_write_precommit_io(
+        persistent_fixture.path().join("precommit-acceptance.redb"),
+    )
+    .expect("persistent precommit-I/O store must open");
+    let engine = engine_with_store(store);
+    let author = Keys::generate();
+    engine
+        .select_test_account(Some(author.public_key()))
+        .expect("set facade-owned identity");
+    let relay = RelayUrl::parse("wss://precommit-io.example").unwrap();
+    let event = EventBuilder::text_note("absent boundary acceptance")
         .sign_with_keys(&author)
         .unwrap();
-    let absent_intent = || WriteIntent {
-        payload: WritePayload::Signed(absent_event.clone()),
+    let intent = || WriteIntent {
+        payload: WritePayload::Signed(event.clone()),
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity: Identity::Active,
         correlation: Some(
-            nmp_grammar::CorrelationToken::try_from("absent-recovery-correlation").unwrap(),
+            nmp_grammar::CorrelationToken::try_from("precommit-recovery-correlation").unwrap(),
         ),
     };
-    let absent_first = engine.publish(absent_intent());
+
+    let first = engine.publish(intent());
     assert!(
-        matches!(&absent_first, Err(EngineError::PublishRefused { reason }) if reason.contains("failed before commit")),
-        "an absent I/O boundary must not report acceptance: {}",
-        absent_first
+        matches!(&first, Err(EngineError::PublishRefused { reason }) if reason.contains("failed before commit")),
+        "a precommit I/O boundary must not report acceptance: {}",
+        first
             .err()
             .map(|error| error.to_string())
             .unwrap_or_default()
     );
-    assert!(!absent_reopen_events
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap());
-    assert!(absent_reopen_events
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap());
-    let absent_recovered = engine
-        .publish(absent_intent())
-        .expect("an absent transaction can be accepted once after reconstruction");
-    assert_eq!(absent_recovered.event_id, absent_event.id);
-    assert_eq!(engine.publish_queue(None, u8::MAX).unwrap().len(), 3);
+
+    assert!(
+        engine
+            .publish_queue(None, u8::MAX)
+            .expect("the armed real reopen precedes the first later command")
+            .is_empty(),
+        "the absent transaction leaves no receipt after reconstruction"
+    );
+    let recovered = engine
+        .publish(intent())
+        .expect("the absent transaction can be accepted once after reconstruction");
+    assert_eq!(recovered.event_id, event.id);
+    assert_eq!(engine.publish_queue(None, u8::MAX).unwrap().len(), 1);
 
     engine.shutdown();
 }
 
 #[test]
-fn persistent_engine_does_not_reconstruct_for_an_invariant_fault() {
-    use crate::lane_fault_store::LaneFaults;
+fn persistent_engine_keeps_healthy_store_usable_after_invariant_fault() {
     use nmp_grammar::{Identity, WritePayload, WriteRouting};
+    use nmp_store::EventStore;
     use nostr::EventBuilder;
 
-    let faults = LaneFaults::default();
-    faults.fail_accept_with_invariant_once();
-    let engine = engine_with_lane_faults(faults.clone());
+    let fixture = tempfile::tempdir().expect("persistent store fixture");
+    let path = fixture.path().join("acceptance-invariant.redb");
     let author = Keys::generate();
+    let corrupt = EventBuilder::text_note("corrupt canonical acceptance target")
+        .sign_with_keys(&author)
+        .unwrap();
+    {
+        let mut store = RedbStore::open(&path).expect("create corruption fixture");
+        store
+            .insert(
+                corrupt.clone(),
+                nmp_store::RelayObserved::new(
+                    RelayUrl::parse("wss://corruption-source.example").unwrap(),
+                    Timestamp::from(1u64),
+                ),
+            )
+            .expect("seed canonical acceptance target");
+    }
+    nmp_store::testing::corrupt_canonical_event(&path, corrupt.id)
+        .expect("store-owned targeted canonical corruption");
+    let engine = engine_with_store(RedbStore::open(&path).expect("open corrupted Redb fixture"));
     engine
         .select_test_account(Some(author.public_key()))
         .expect("set facade-owned identity");
     let relay = RelayUrl::parse("wss://invariant.example").unwrap();
-    let intent = |content: &str| WriteIntent {
-        payload: WritePayload::Signed(
-            EventBuilder::text_note(content)
-                .sign_with_keys(&author)
-                .unwrap(),
-        ),
+    let intent = |event| WriteIntent {
+        payload: WritePayload::Signed(event),
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity: Identity::Active,
         correlation: None,
     };
 
-    let refused = engine.publish(intent("invariant refusal"));
+    let refused = engine.publish(intent(corrupt));
     assert!(
-        matches!(&refused, Err(EngineError::PublishRefused { reason }) if reason.contains("non-reopenable acceptance invariant"))
+        matches!(&refused, Err(EngineError::PublishRefused { reason }) if reason.contains("decode canonical event")),
+        "targeted durable corruption must surface as the store's real invariant: {}",
+        refused
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default()
     );
+    let ordinary = EventBuilder::text_note("ordinary next write")
+        .sign_with_keys(&author)
+        .unwrap();
     engine
-        .publish(intent("ordinary next write"))
-        .expect("a non-reopenable refusal does not replace the healthy store handle");
-    assert_eq!(faults.reopen_attempt_count(), 0);
+        .publish(intent(ordinary))
+        .expect("a real invariant leaves the healthy Redb handle usable");
     assert_eq!(engine.publish_queue(None, u8::MAX).unwrap().len(), 1);
 
     engine.shutdown();

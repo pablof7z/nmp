@@ -6,7 +6,6 @@ use super::*;
 mod receipt_allocator_tests {
     use super::*;
 
-    use crate::lane_fault_store::{FaultyLaneStore, LaneFaults};
     use nmp_router::FixtureRoutingFacts;
     use nmp_store::{PersistenceFault, RedbStore, RefuseReason};
     use nostr::{EventBuilder, Keys, Kind};
@@ -52,12 +51,13 @@ mod receipt_allocator_tests {
 
     #[test]
     fn acceptance_io_refuses_publish_and_requests_store_reconstruction() {
-        let faults = LaneFaults::default();
-        let _reopen_events = faults.fail_accept_before_commit_once();
-        let store = FaultyLaneStore::new(
-            RedbStore::temporary().expect("temporary Redb store"),
-            faults,
-        );
+        let persistent_fixture = tempfile::tempdir().expect("persistent store fixture");
+        let store = RedbStore::open_with_accept_write_precommit_io(
+            persistent_fixture
+                .path()
+                .join("core-precommit-acceptance.redb"),
+        )
+        .expect("persistent precommit-I/O store must open");
         let mut core = EngineCore::new(store, 10);
         let author = Keys::generate();
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
@@ -83,6 +83,32 @@ mod receipt_allocator_tests {
             core.take_store_recovery_request(),
             Some(PersistenceFault::Io),
             "acceptance I/O must arm concrete-store reconstruction"
+        );
+    }
+
+    #[test]
+    fn invariant_store_failure_does_not_request_reconstruction() {
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
+        let mut effects = Vec::new();
+
+        core.degrade_store(
+            nmp_store::PersistenceError::invariant("fixture invariant"),
+            &mut effects,
+        );
+        assert_eq!(
+            core.take_store_recovery_request(),
+            None,
+            "a healthy handle cannot be made safer by reconstruction"
+        );
+
+        core.degrade_store(
+            nmp_store::PersistenceError::new(nmp_store::PersistenceFault::Io, "fixture I/O"),
+            &mut effects,
+        );
+        assert_eq!(
+            core.take_store_recovery_request(),
+            Some(nmp_store::PersistenceFault::Io),
+            "the same typed branch must still arm reconstruction for I/O"
         );
     }
 
