@@ -1,221 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, Mutex};
 
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_router::FixtureRoutingFacts;
-use nmp_store::{
-    testing, AcceptOutcome, AcceptWrite, CompensateOutcome, CompensationReason, CoverageInterval,
-    CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet, InsertOutcome,
-    PersistenceError, PromoteOutcome, PublishQueueAttempt, PublishQueueIntent, PublishQueueReceipt,
-    PublishQueueRouteRevision, RedbStore, RefuseReason, RelayObserved, RemoveQueueEntryOutcome,
-    RetractReason, StoredEvent,
-};
+use nmp_store::{testing, CoverageInterval, PersistenceFault, RedbStore, RelayObserved};
 use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Tag, Timestamp};
 
 use super::*;
-
-#[derive(Clone, Default)]
-struct StoreFailureControl(Arc<Mutex<Option<String>>>);
-
-impl StoreFailureControl {
-    fn fail_query(&self, message: &str) {
-        *self.0.lock().unwrap() = Some(message.to_owned());
-    }
-
-    fn take_query_failure(&self) -> Option<PersistenceError> {
-        self.0
-            .lock()
-            .unwrap()
-            .take()
-            .map(PersistenceError::invariant)
-    }
-}
-
-struct ControlledFailureStore {
-    inner: RedbStore,
-    control: StoreFailureControl,
-}
-
-impl ControlledFailureStore {
-    fn new(inner: RedbStore, control: StoreFailureControl) -> Self {
-        Self { inner, control }
-    }
-}
-
-impl EventStore for ControlledFailureStore {
-    fn compensate_write_with_state(
-        &mut self,
-        intent_id: IntentId,
-        reason: CompensationReason,
-    ) -> Result<CompensateOutcome, PersistenceError> {
-        self.inner.compensate_write_with_state(intent_id, reason)
-    }
-    fn insert(
-        &mut self,
-        event: Event,
-        from: RelayObserved,
-    ) -> Result<InsertOutcome, PersistenceError> {
-        self.inner.insert(event, from)
-    }
-
-    fn query(&self, filter: &nostr::Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
-        if let Some(error) = self.control.take_query_failure() {
-            return Err(error);
-        }
-        self.inner.query(filter)
-    }
-
-    fn query_newest_before(
-        &self,
-        filter: &nostr::Filter,
-        before: EventCursor,
-        limit: usize,
-    ) -> Result<Vec<StoredEvent>, PersistenceError> {
-        self.inner.query_newest_before(filter, before, limit)
-    }
-
-    fn remove(
-        &mut self,
-        id: EventId,
-        reason: RetractReason,
-    ) -> Result<Option<StoredEvent>, PersistenceError> {
-        self.inner.remove(id, reason)
-    }
-
-    fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
-        self.inner.expire_due(now)
-    }
-
-    fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        self.inner.next_expiration()
-    }
-
-    fn record_coverage(
-        &mut self,
-        claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
-    ) -> Result<(), PersistenceError> {
-        self.inner.record_coverage(claims)
-    }
-
-    fn get_coverage(
-        &self,
-        key: CoverageKey,
-        relay: &RelayUrl,
-    ) -> Result<Option<CoverageInterval>, PersistenceError> {
-        self.inner.get_coverage(key, relay)
-    }
-
-    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
-        self.inner.gc(claims)
-    }
-
-    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
-        self.inner.accept_write(accept)
-    }
-    fn replaceable_operation_snapshot(
-        &self,
-        coordinate: &nostr::nips::nip01::Coordinate,
-    ) -> Result<Option<nmp_store::RecoveredSemanticResource>, PersistenceError> {
-        self.inner.replaceable_operation_snapshot(coordinate)
-    }
-    fn install_replaceable_materialization(
-        &mut self,
-        rematerialize: nmp_store::SemanticRematerialize,
-    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
-        self.inner
-            .install_replaceable_materialization(rematerialize)
-    }
-    fn install_replaceable_source_materialization(
-        &mut self,
-        install: nmp_store::SemanticSourceInstall,
-    ) -> Result<nmp_store::SemanticInstallOutcome, PersistenceError> {
-        self.inner
-            .install_replaceable_source_materialization(install)
-    }
-
-    fn promote_signed(
-        &mut self,
-        target: nmp_store::PromotionTarget,
-        verified: nmp_store::VerifiedSignature,
-    ) -> Result<PromoteOutcome, PersistenceError> {
-        self.inner.promote_signed(target, verified)
-    }
-
-    fn compensate_write(
-        &mut self,
-        intent_id: IntentId,
-    ) -> Result<CompensateOutcome, PersistenceError> {
-        self.inner.compensate_write(intent_id)
-    }
-
-    fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
-        self.inner.recover_publish_queue()
-    }
-
-    fn reattach_receipt(
-        &self,
-        receipt_id: u64,
-    ) -> Result<Option<PublishQueueReceipt>, PersistenceError> {
-        self.inner.reattach_receipt(receipt_id)
-    }
-
-    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
-        self.inner.lookup_correlation(token)
-    }
-
-    fn record_route_revision(
-        &mut self,
-        intent_id: IntentId,
-        relays: BTreeSet<RelayUrl>,
-    ) -> Result<PublishQueueRouteRevision, PersistenceError> {
-        self.inner.record_route_revision(intent_id, relays)
-    }
-
-    fn recover_route_revisions(
-        &self,
-        intent_id: IntentId,
-    ) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError> {
-        self.inner.recover_route_revisions(intent_id)
-    }
-
-    fn recover_attempts(
-        &self,
-        intent_id: IntentId,
-    ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
-        self.inner.recover_attempts(intent_id)
-    }
-
-    fn enumerate_publish_queue_receipts(
-        &self,
-    ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
-        self.inner.enumerate_publish_queue_receipts()
-    }
-
-    fn publish_queue_receipts_after(
-        &self,
-        after: Option<u64>,
-        limit: u8,
-    ) -> Result<Vec<PublishQueueReceipt>, PersistenceError> {
-        self.inner.publish_queue_receipts_after(after, limit)
-    }
-
-    fn remove_publish_queue_entry(
-        &mut self,
-        receipt_id: u64,
-    ) -> Result<RemoveQueueEntryOutcome, PersistenceError> {
-        self.inner.remove_publish_queue_entry(receipt_id)
-    }
-
-    fn accept_refused(
-        &mut self,
-        frozen_id: EventId,
-        expected_pubkey: PublicKey,
-        reason: RefuseReason,
-    ) -> Result<u64, PersistenceError> {
-        self.inner
-            .accept_refused(frozen_id, expected_pubkey, reason)
-    }
-}
 
 fn canonical_corruption(kind: u16, filename: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let directory = tempfile::tempdir().expect("canonical corruption directory");
@@ -947,7 +737,7 @@ struct HistorySnapshot {
     history_by_handle: HashMap<HandleId, HistorySessionId>,
 }
 
-fn snapshot<S: EventStore>(core: &EngineCore<S>, id: HistorySessionId) -> HistorySnapshot {
+fn snapshot(core: &EngineCore<RedbStore>, id: HistorySessionId) -> HistorySnapshot {
     let state = &core.histories[&id];
     assert!(state.pending_load.is_none());
     HistorySnapshot {
@@ -1020,7 +810,7 @@ fn literal_history_query() -> HistoryQuery {
 
 /// The oldest retained row's second: the boundary an advance would fetch
 /// behind. Derived from state now that windows carry no continuation token.
-fn boundary_second(core: &EngineCore<ControlledFailureStore>, id: HistorySessionId) -> u64 {
+fn boundary_second(core: &EngineCore<RedbStore>, id: HistorySessionId) -> u64 {
     core.histories[&id]
         .last_rows
         .values()
@@ -1031,11 +821,10 @@ fn boundary_second(core: &EngineCore<ControlledFailureStore>, id: HistorySession
 
 fn open_history(
     store: RedbStore,
-    control: StoreFailureControl,
     query: HistoryQuery,
     active_pubkey: Option<PublicKey>,
-) -> (EngineCore<ControlledFailureStore>, HistorySessionId) {
-    let mut core = EngineCore::new(ControlledFailureStore::new(store, control), 20);
+) -> (EngineCore<RedbStore>, HistorySessionId) {
+    let mut core = EngineCore::new(store, 20);
     if let Some(active_pubkey) = active_pubkey {
         core.handle(EngineMsg::SetActivePubkey(Some(active_pubkey)));
     }
@@ -1050,8 +839,8 @@ fn open_history(
     (core, id)
 }
 
-fn assert_failed_load<S: EventStore>(
-    core: &EngineCore<S>,
+fn assert_failed_load(
+    core: &EngineCore<RedbStore>,
     id: HistorySessionId,
     before: &HistorySnapshot,
     effects: &[Effect],
@@ -1079,11 +868,7 @@ fn assert_failed_load<S: EventStore>(
     assert_eq!(&snapshot(core, id), before, "rollback must be exact");
 }
 
-fn derived_fixture() -> (
-    EngineCore<ControlledFailureStore>,
-    HistorySessionId,
-    StoreFailureControl,
-) {
+fn derived_fixture() -> (tempfile::TempDir, EngineCore<RedbStore>, HistorySessionId) {
     let me = Keys::generate();
     let followed = Keys::generate();
     let relay = RelayUrl::parse("wss://history-read-failure.example").unwrap();
@@ -1093,47 +878,70 @@ fn derived_fixture() -> (
         .sign_with_keys(&me)
         .unwrap();
     let rows = (100..106).map(|created_at| event(&followed, 1, created_at));
-    let store = seeded_store(std::iter::once(contact_list).chain(rows), &relay);
-    let control = StoreFailureControl::default();
-    let (core, id) = open_history(
-        store,
-        control.clone(),
-        derived_history_query(),
-        Some(me.public_key()),
-    );
-    (core, id, control)
+    let directory = tempfile::tempdir().expect("persistent history-read failure directory");
+    let path = directory.path().join("history-read-failure.redb");
+    {
+        let mut store = RedbStore::open(&path).expect("create persistent history fixture");
+        store
+            .insert_batch(
+                std::iter::once(contact_list)
+                    .chain(rows)
+                    .map(|event| {
+                        (
+                            event,
+                            RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("seed persistent history fixture");
+    }
+    let store = RedbStore::open_with_accept_write_precommit_io(&path)
+        .expect("reopen history fixture with one real precommit I/O failure");
+    let (core, id) = open_history(store, derived_history_query(), Some(me.public_key()));
+    (directory, core, id)
 }
+
+fn latch_redb_generation_without_core_diagnostics(core: &mut EngineCore<RedbStore>) {
+    let keys = Keys::generate();
+    let accepted = event(&keys, 1, 1_500);
+    let error = match core
+        .resolver
+        .accept_local(nmp_resolver::testkit::accept_write_of(accepted, 1_501))
+    {
+        Ok(_) => panic!("construction-armed acceptance I/O must close the Redb generation"),
+        Err(error) => error,
+    };
+    assert_eq!(error.fault(), PersistenceFault::Io);
+    assert_eq!(error.message(), "injected acceptance failed before commit");
+    assert!(
+        core.store_degraded.is_none(),
+        "the direct resolver refusal must leave RequestRows as the first diagnostic owner"
+    );
+}
+
+const LATCHED_READ_ERROR: &str = "durable-store persistence failure [fault=latched durability=absent reopen=required]: durable database handle is closed for reconstruction";
 
 #[test]
 fn tie_second_read_failure_dispatches_diagnostics_and_exact_rollback() {
-    let (mut core, id, control) = derived_fixture();
+    let (_directory, mut core, id) = derived_fixture();
     let before = snapshot(&core, id);
-    control.fail_query("tie-second read failed");
+    latch_redb_generation_without_core_diagnostics(&mut core);
 
     let effects = core.handle(EngineMsg::RequestRows(id, 4));
 
-    assert_failed_load(
-        &core,
-        id,
-        &before,
-        &effects,
-        "durable-store persistence failure: tie-second read failed",
-    );
+    assert_failed_load(&core, id, &before, &effects, LATCHED_READ_ERROR);
 
-    control.fail_query("later failure must not replace first");
+    // The real handle remains latched until reconstruction. A repeated load
+    // must therefore roll back just as exactly. The distinct-later-error
+    // first-diagnostic policy is proved at `degrade_store`'s owning test.
     let repeated = core.handle(EngineMsg::RequestRows(id, 4));
-    assert_failed_load(
-        &core,
-        id,
-        &before,
-        &repeated,
-        "durable-store persistence failure: tie-second read failed",
-    );
+    assert_failed_load(&core, id, &before, &repeated, LATCHED_READ_ERROR);
 }
 
 #[test]
 fn older_window_read_failure_dispatches_diagnostics_and_exact_rollback() {
-    let (mut core, id, control) = derived_fixture();
+    let (_directory, mut core, id) = derived_fixture();
     let boundary_secs = boundary_second(&core, id);
     core.histories
         .get_mut(&id)
@@ -1141,17 +949,11 @@ fn older_window_read_failure_dispatches_diagnostics_and_exact_rollback() {
         .acquired_tie_seconds
         .insert(boundary_secs);
     let before = snapshot(&core, id);
-    control.fail_query("older-window read failed");
+    latch_redb_generation_without_core_diagnostics(&mut core);
 
     let effects = core.handle(EngineMsg::RequestRows(id, 4));
 
-    assert_failed_load(
-        &core,
-        id,
-        &before,
-        &effects,
-        "durable-store persistence failure: older-window read failed",
-    );
+    assert_failed_load(&core, id, &before, &effects, LATCHED_READ_ERROR);
 }
 
 #[test]
