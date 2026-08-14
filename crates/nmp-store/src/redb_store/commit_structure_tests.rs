@@ -202,7 +202,7 @@ fn inspect_function(file: &str, name: &str, block: &Block, failures: &mut Vec<St
         }
     } else if !RAW_COMMIT_EXEMPTIONS.contains(&identity) && !calls.raw.is_empty() {
         failures.push(format!(
-            "{file}::{name} contains a raw .commit(); EventStore mutations must use commit_prepared"
+            "{file}::{name} contains a raw .commit(); store mutations must use commit_prepared"
         ));
     }
 
