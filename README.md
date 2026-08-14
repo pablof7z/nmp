@@ -250,7 +250,7 @@ Diagnostics are a **permanent, read-only proof plane** — source plan, wire fil
 ## Repo layout
 
 - `crates/nmp` — the supported Rust facade (`nmp::Engine`); `crates/nmp-ffi` projects it to Swift/Kotlin via UniFFI
-- `crates/nmp-{store,resolver,router,transport,engine,signer,executor}` — internal seams, not alternate APIs
+- `crates/nmp-{store,resolver,router,transport,signer}` — internal seams, not alternate APIs
 - `crates/nmp-content` — optional parser-only semantic document layer
 - `crates/nmp-{nip02,nip29,nip51,nip65,blossom,nip68,media}` — opt-in protocol modules
 - `Packages/NMP` (Swift) · `Packages/NMPKotlin` (Kotlin/JVM)
