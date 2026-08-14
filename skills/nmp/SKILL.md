@@ -9,7 +9,7 @@ Use NMP as an embeddable engine with two app-facing nouns: a live query and a wr
 
 ## Establish current truth first
 
-Verified-Revision: `4f9fbd544fe337fb0bfcc13de4cfb7ca6281a5c7`
+Verified-Revision: `24fb8eba933aeda45b2249f1afd1c6534158fc51`
 
 This is the audited revision of the declared product/source authorities, not the skill package's own commit. A newer checkout is not automatically stale when only skill files changed; the bundled validator proves whether any declared source drifted.
 
