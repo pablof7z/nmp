@@ -435,21 +435,22 @@ The implementation carries these permanent falsifiers:
 - `every_core_lane_mutation_uses_the_projection_door` recursively scans the
   production core source and rejects a raw lane-writing store call outside the
   projection module.
-- `transient_io_bootstrap_failure_leaves_no_pinned_worker_behind` and its
-  `Invariant` twin drive a failed bootstrap through recovery to a terminal
-  receipt and assert the worker set returns to what a canonical rebuild from
-  durable rows yields. Both fail on the pre-#1000 reducer with both candidate
-  relays still pinned against an empty oracle.
-- `a_failed_bootstrap_never_parks_an_intent_permanently` proves the intent
-  progresses or terminates rather than sitting in `pending` with a
-  `uncertain` set nothing can drain.
+- `transient_redb_bootstrap_failure_is_fully_reversible` drives one
+  construction-armed Redb pre-commit refusal through recovery to a terminal
+  receipt and proves the worker set returns to the canonical durable oracle.
 - `an_unresolved_bootstrap_keeps_retaining_and_backs_off` proves the fix did
-  not buy that exit with under-retention: while the store keeps refusing,
-  every candidate stays owned and the retry backs off instead of spinning.
-- `a_boot_route_revision_read_error_re_enables_worker_reconciliation` proves a
-  boot-time read error no longer disables `retry_required_relay_workers` for
-  the process lifetime, and that the recovered projection equals a clean
-  boot's.
+  not buy that exit with under-retention: while a real persisted attempt row
+  remains undecodable, every route candidate stays owned and the retry backs
+  off instead of spinning.
+- `corrupt_route_lane_evidence_is_unreadable_not_absent` proves a real
+  persisted route-revision schema violation refuses the boot projection,
+  fabricates no receipt fact, and retains the parent durable obligation.
+- `persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once`
+  and `persistent_engine_recovers_after_precommit_acceptance_io_once`
+  separately prove the reopen-required case: a real Redb handle is closed,
+  the runtime supervisor installs a new generation, reconstructs the existing
+  public `Engine`, and accepts later work. They prove handle-generation
+  recovery, not a route-specific same-handle heal.
 
 Future #975 route-revision minting and #968 route-parking still require their
 own positive falsifiers when those states exist. The projection boundary is
