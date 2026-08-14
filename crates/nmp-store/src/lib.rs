@@ -1429,22 +1429,6 @@ pub enum PublishQueueAttemptOutcome {
 
 /// The single mutating door onto the event store.
 pub trait EventStore {
-    /// Replace a backend handle that a prior [`PersistenceError`] proved must
-    /// be reopened, while preserving this store owner's exact durable target.
-    ///
-    /// This is a mechanism door for the engine supervisor, not permission to
-    /// retry the failed mutation. The caller must reconstruct every volatile
-    /// projection from the reopened store and resolve any
-    /// [`DurabilityOutcome::Unknown`] operation through its stable durable
-    /// identity before issuing another mutation. Backends without a
-    /// reopenable handle keep the default refusal; an engine only calls this
-    /// after a fault whose [`PersistenceFault::requires_reopen`] is true.
-    fn reopen_after_failure(&mut self) -> Result<(), PersistenceError> {
-        Err(PersistenceError::invariant(
-            "event store does not support handle reconstruction",
-        ))
-    }
-
     /// Insert an event observed via `from`. An already-expired event (NIP-40,
     /// judged against `from.at`) is `Refused` before anything else runs —
     /// never stored, nothing to retract. Otherwise dedup-by-id FIRST — on a

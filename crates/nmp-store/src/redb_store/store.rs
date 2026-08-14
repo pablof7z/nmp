@@ -81,8 +81,8 @@ pub(super) enum RedbCrashPoint {
 pub struct RedbStore {
     /// `None` is the closed half of the recovery state machine: the poisoned
     /// redb handle has been dropped, while `_ownership` still fences this
-    /// canonical pathname. Only
-    /// `reopen_database_after_failure` installs the next generation.
+    /// canonical pathname. Only `reopen_after_failure` installs the next
+    /// generation.
     pub(super) db: Option<Database>,
     // Field order is load-bearing: Rust drops `db` before this ownership
     // token, so no process can open or reset the target until this database
@@ -500,7 +500,15 @@ impl RedbStore {
     /// that fences this exact canonical target. No fresh store is initialized
     /// here: a missing or non-current target is a refusal, never an empty
     /// database silently substituted for the caller's durable obligations.
-    pub(super) fn reopen_database_after_failure(&mut self) -> Result<(), PersistenceError> {
+    ///
+    /// This is a mechanism door for the engine supervisor, not permission to
+    /// retry the failed mutation. The caller must reconstruct every volatile
+    /// projection from the reopened store and resolve any
+    /// [`crate::DurabilityOutcome::Unknown`] operation through its stable
+    /// durable identity before issuing another mutation. The engine calls this
+    /// only after a fault whose [`crate::PersistenceFault::requires_reopen`] is
+    /// true.
+    pub fn reopen_after_failure(&mut self) -> Result<(), PersistenceError> {
         let target = self._ownership.target().to_path_buf();
 
         // `Option::take` is the lifecycle transition. The old Database must
