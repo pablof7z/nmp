@@ -115,7 +115,7 @@ At `investigated_revision`, `write_relay_workers`:
 2. walks every `PendingWrite`;
 3. includes the pending write's already-known pending, unstarted, and
    route-blocked relays;
-4. calls `EventStore::recover_publish_queue_lanes(intent_id)` for every pending intent;
+4. calls `RedbStore::recover_publish_queue_lanes(intent_id)` for every pending intent;
 5. range-scans the durable lane table, JSON-decodes every returned lane, and
    parses its relay URL;
 6. retains the relay session for every nonterminal lane.

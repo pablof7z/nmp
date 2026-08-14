@@ -727,14 +727,15 @@ mod tests {
     /// against today's call sites is exactly the failure mode #985's
     /// sequencing comment warns about.
     ///
-    /// 1. **Nothing is missing from the enumeration.** Every `EventStore`
-    ///    door that takes `&mut self` and deals in `PublishQueueLane` is a
-    ///    lane-mutation constructor, scraped straight out of `nmp-store`'s
-    ///    own trait; adding one there without giving it a `commit_*` door in
-    ///    this module fails here. Two further constructors never mention
-    ///    `PublishQueueLane` in their signature and are therefore named
-    ///    explicitly: `close_terminal_intent`, which removes an intent's open
-    ///    work wholesale, and `record_route_revision`.
+    /// 1. **Nothing is missing from the enumeration.** Every concrete
+    ///    `RedbStore` door that takes `&mut self` and deals in
+    ///    `PublishQueueLane` is a lane-mutation constructor, scraped straight
+    ///    out of `nmp-store`'s inherent implementation; adding one there
+    ///    without giving it a `commit_*` door in this module fails here. Two
+    ///    further constructors never mention `PublishQueueLane` in their
+    ///    signature and are therefore named explicitly:
+    ///    `close_terminal_intent`, which removes an intent's open work
+    ///    wholesale, and `record_route_revision`.
     ///
     ///    `record_route_revision` is the one the second #985 design comment
     ///    singles out. Today a revision mints no lane by itself -- its paired
@@ -747,11 +748,10 @@ mod tests {
     ///
     /// 2. **Nothing bypasses the door.** No file in `crates/nmp/src` -- the
     ///    whole crate, not just `src/core` -- other than this one may reach a
-    ///    lane-mutation door; only a file that implements `EventStore` itself
-    ///    (a delegating test double) may name one. Matching is on `.method(`
-    ///    rather than on `self.store.method(`, so binding the store to a local
-    ///    first does not evade it. Comments are removed and whitespace
-    ///    stripped before matching, so rustfmt's multi-line
+    ///    lane-mutation door. Matching is on `.method(` rather than on
+    ///    `self.store.method(`, so binding the store to a local first does not
+    ///    evade it. Comments are removed and whitespace stripped before
+    ///    matching, so rustfmt's multi-line
     ///    `self\n.store\n.set_lane_waiting(` chain is caught exactly like the
     ///    single-line spelling, while a commented-out call neither fails the
     ///    build spuriously nor hides a real one behind a trailing comment.
@@ -762,11 +762,12 @@ mod tests {
         const NAMED_EXPLICITLY: &[&str] = &["record_route_revision", "close_terminal_intent"];
 
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let store_source = std::fs::read_to_string(manifest.join("../nmp-store/src/lib.rs"))
-            .expect("read nmp-store/src/lib.rs");
+        let store_source =
+            std::fs::read_to_string(manifest.join("../nmp-store/src/redb_store/mod.rs"))
+                .expect("read nmp-store/src/redb_store/mod.rs");
 
         let mut doors: Vec<String> = Vec::new();
-        for chunk in store_source.split("\n    fn ").skip(1) {
+        for chunk in store_source.split("\n    pub fn ").skip(1) {
             let name = chunk.split('(').next().unwrap_or_default();
             let signature = chunk.split('{').next().unwrap_or_default();
             if signature.contains("&mut self") && signature.contains("PublishQueueLane") {
@@ -776,7 +777,8 @@ mod tests {
         assert!(
             doors.len() >= 8,
             "the signature scrape found only {} lane-mutation doors, which means \
-             the scrape itself broke rather than the trait shrinking: {doors:?}",
+             the scrape itself broke rather than the concrete delivery door \
+             shrinking: {doors:?}",
             doors.len()
         );
         doors.extend(NAMED_EXPLICITLY.iter().map(|door| door.to_string()));
@@ -795,7 +797,7 @@ mod tests {
         for door in &doors {
             assert!(
                 projection.contains(&format!(".{door}(")),
-                "`EventStore::{door}` mutates lane state but core/lane_projection.rs \
+                "`RedbStore::{door}` mutates lane state but core/lane_projection.rs \
                  has no `commit_*` door for it -- every engine lane mutation must be \
                  funnelled so its committed `PublishQueueLane` updates the projection"
             );
@@ -820,11 +822,10 @@ mod tests {
                 inspected += 1;
                 let source = std::fs::read_to_string(&path).expect("read engine source");
                 let squeezed = searchable(&source);
-                let delegating_double = squeezed.contains("EventStorefor");
                 for door in &doors {
                     if squeezed.contains(&format!("store_mut().{door}(")) {
                         offenders.push(format!("{} calls store_mut().{door}", path.display()));
-                    } else if !delegating_double && squeezed.contains(&format!(".{door}(")) {
+                    } else if squeezed.contains(&format!(".{door}(")) {
                         offenders.push(format!(
                             "{} names .{door} outside the projection door",
                             path.display()
