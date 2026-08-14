@@ -6,9 +6,10 @@ use super::*;
 mod receipt_allocator_tests {
     use super::*;
 
+    use crate::lane_fault_store::{FaultyLaneStore, LaneFaults};
     use nmp_router::FixtureRoutingFacts;
-    use nmp_store::{RedbStore, RefuseReason};
-    use nostr::{Keys, Kind};
+    use nmp_store::{PersistenceFault, RedbStore, RefuseReason};
+    use nostr::{EventBuilder, Keys, Kind};
 
     /// The same frozen note, `p`-tagging the given recipients — the shape
     /// whose route answer has more than one contributor to wait on.
@@ -47,6 +48,42 @@ mod receipt_allocator_tests {
             content,
             nmp_store::sentinel_signature(),
         )
+    }
+
+    #[test]
+    fn acceptance_io_refuses_publish_and_requests_store_reconstruction() {
+        let faults = LaneFaults::default();
+        let _reopen_events = faults.fail_accept_before_commit_once();
+        let store = FaultyLaneStore::new(
+            RedbStore::temporary().expect("temporary Redb store"),
+            faults,
+        );
+        let mut core = EngineCore::new(store, 10);
+        let author = Keys::generate();
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        let event = EventBuilder::text_note("acceptance I/O")
+            .sign_with_keys(&author)
+            .unwrap();
+
+        let effects = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Signed(event),
+            routing: WriteRouting::Explicit(vec![
+                RelayUrl::parse("wss://acceptance-io.example").unwrap()
+            ]),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::PublishFailed(PublishError::PersistenceFailed { reason })
+                if reason.contains("injected acceptance failed before commit")
+        )));
+        assert_eq!(
+            core.take_store_recovery_request(),
+            Some(PersistenceFault::Io),
+            "acceptance I/O must arm concrete-store reconstruction"
+        );
     }
 
     #[test]
