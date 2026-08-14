@@ -166,7 +166,7 @@ Feature: Publishing tells the truth, per relay
     # nmp:status=built
     # nmp:evidence=rust:nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once
     # nmp:evidence=rust:nmp-store::reopen_replaces_only_the_database_generation_and_preserves_durable_identity
-    # nmp:falsifier=Disable the runtime recovery driver; the same Engine never accepts or reattaches a later write after the injected handle latch.
+    # nmp:falsifier=Disable the runtime recovery driver; after an acceptance I/O closes the real Redb generation, the same Engine never reconstructs the committed row or accepts a later write.
     @ledger-9 @ledger-15
     Scenario: A transient storage failure does not require a new Engine
       Given an app is using one persistent Engine
@@ -192,11 +192,9 @@ Feature: Publishing tells the truth, per relay
       And exactly one durable receipt owns the write
 
     # nmp:id=WRITES-STORE-RECOVERY-003
-    # nmp:status=built
-    # nmp:evidence=rust:nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once
-    # nmp:evidence=rust:nmp::persistent_engine_does_not_reconstruct_for_an_invariant_fault
-    # nmp:evidence=rust:nmp::recovery_backoff_is_exponential_event_driven_and_capped
-    # nmp:falsifier=Treat either injected unavailable reopen as success; publishing can report acceptance before durable reconstruction completes.
+    # nmp:status=specified
+    # nmp:gap=evidence
+    # nmp:issue=#1495
     @ledger-9
     Scenario: A store that cannot be reconstructed never fabricates acceptance
       Given the durable store remains unavailable

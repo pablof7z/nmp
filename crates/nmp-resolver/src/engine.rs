@@ -1100,8 +1100,10 @@ impl<S: EventStore> Engine<S> {
     /// hidden rows to `removed`); `Duplicate` (row already reflected) and
     /// `Stale` (no pending row produced) yield an empty delta; `Refused`
     /// yields an empty delta and carries no journal ids. A door-level
-    /// persistence failure is surfaced as `Err` — the resolver graph is
-    /// untouched (`accept_write` is atomic: on `Err` nothing committed).
+    /// persistence failure is surfaced as `Err` with unknown durability: the
+    /// transaction may or may not have committed. The resolver applies no
+    /// graph delta unless and until an [`AcceptOutcome`] is available; an
+    /// error is never interpreted as proof that nothing committed.
     pub fn accept_local(
         &mut self,
         accept: AcceptWrite,

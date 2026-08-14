@@ -8,12 +8,30 @@ use std::path::Path;
 use nostr::{EventId, RelayUrl};
 use redb::{Database, ReadableTable, TableDefinition};
 
+use super::ingest_txn::GovernedWrite;
 use super::schema::{
     event_row_key, persist_err, COVERAGE, EVENTS, EVENT_IDS, PUBLISH_QUEUE_ATTEMPTS,
     PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
 use super::RedbStore;
-use crate::{CoverageKey, PersistenceError};
+use crate::{AcceptOutcome, CoverageKey, PersistenceError, PersistenceFault};
+
+/// Commit one real event acceptance, close that exact Redb generation, and
+/// hide the committed outcome behind a typed I/O failure. This test-owned
+/// exit is deliberately outside the production transaction modules so their
+/// structural gate continues to require a tail-position commit.
+pub(super) fn commit_acceptance_then_return_io(
+    store: &mut RedbStore,
+    write: GovernedWrite,
+    outcome: AcceptOutcome,
+) -> Result<AcceptOutcome, PersistenceError> {
+    let _committed = write.commit_prepared(outcome)?;
+    drop(store.db.take());
+    Err(PersistenceError::new(
+        PersistenceFault::Io,
+        "injected acceptance committed before I/O failure",
+    ))
+}
 
 fn corrupt_first_row<const N: usize>(
     path: &Path,
