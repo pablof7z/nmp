@@ -146,7 +146,7 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 
 **Storage**
 - ✅ Crash-safe redb: binary canonical rows, secondary + tag + cardinality indexes, interned relay URLs
-- ✅ In-memory store for tests
+- ✅ Isolated temporary Redb stores for tests
 - ✅ Destructive reset that structurally **refuses to delete a live store**
 - 🧪 Cross-process reset exclusion (no advisory/sidecar lock yet)
 
@@ -163,7 +163,7 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 ## Status / maturity
 
 - **Pre-1.0, pre-v2.** The v2 *public API is freezing*; public names and shapes are provisional.
-- **Proven:** the core store, resolver, router, transport, engine, Rust facade, and the Swift + Kotlin packages — backed by 100+ Rust test modules, differential falsifiers against an independent store, and live-relay tests.
+- **Proven:** the core store, resolver, router, transport, engine, Rust facade, and the Swift + Kotlin packages — backed by 100+ Rust test modules, real Redb semantic and crash-reopen falsifiers, and live-relay tests.
 - **Pending:** several promoted guarantees remain active work — see [`docs/known-gaps.md`](docs/known-gaps.md) (honest built-vs-missing record) and the [bug-class ledger](docs/bug-class-ledger.md) (target vs partial vs structurally proven).
 - The ownership boundary and behavioral invariants are the stable frame; the app-facing spelling is not.
 - **Headline (merged):** history is no longer a second noun — `observe(query, window)` makes windowing a policy on the one read noun, delivery mode derives from boundedness, and the #486 per-advance relay-REQ leak is fixed (deep scroll now holds O(1) live subscriptions per relay). Closes [#474](https://github.com/pablof7z/nmp/issues/474)/[#485](https://github.com/pablof7z/nmp/issues/485)/[#486](https://github.com/pablof7z/nmp/issues/486) — [#531](https://github.com/pablof7z/nmp/pull/531).

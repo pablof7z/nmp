@@ -10,22 +10,12 @@ use crate::{
     RemoveQueueEntryOutcome,
 };
 
-trait RetentionTestStore: EventStore {
-    fn maintain_at(
-        &mut self,
-        now: Timestamp,
-        limits: TerminalRetentionLimits,
-    ) -> Result<Vec<u64>, crate::PersistenceError>;
-}
-
-impl RetentionTestStore for RedbStore {
-    fn maintain_at(
-        &mut self,
-        now: Timestamp,
-        limits: TerminalRetentionLimits,
-    ) -> Result<Vec<u64>, crate::PersistenceError> {
-        crate::redb_store::publish_queue_ops::maintain_terminal_receipts_at(self, now, limits)
-    }
+fn maintain_at(
+    store: &mut RedbStore,
+    now: Timestamp,
+    limits: TerminalRetentionLimits,
+) -> Result<Vec<u64>, crate::PersistenceError> {
+    crate::redb_store::publish_queue_ops::maintain_terminal_receipts_at(store, now, limits)
 }
 
 fn frozen(keys: &Keys, content: &str, created_at: u64) -> Event {
@@ -45,7 +35,7 @@ fn frozen(keys: &Keys, content: &str, created_at: u64) -> Event {
 }
 
 fn accept(
-    store: &mut dyn RetentionTestStore,
+    store: &mut RedbStore,
     keys: &Keys,
     content: &str,
     created_at: u64,
@@ -83,7 +73,7 @@ fn assert_event_receipt_state(receipt: PublishQueueReceipt, expected: ReceiptSta
     }
 }
 
-fn exercise_global_fifo(store: &mut dyn RetentionTestStore) {
+fn exercise_global_fifo(store: &mut RedbStore) {
     let keys = Keys::generate();
     let cancelled = accept(store, &keys, "cancelled", 1, None);
     let cancelled_id = cancelled.journaled_receipt_id().unwrap();
@@ -108,16 +98,16 @@ fn exercise_global_fifo(store: &mut dyn RetentionTestStore) {
     let open = accept(store, &keys, "still open", 4, None);
     let open_id = open.journaled_receipt_id().unwrap();
 
-    let removed = store
-        .maintain_at(
-            Timestamp::from(u64::MAX / 4),
-            TerminalRetentionLimits {
-                max_age_secs: u64::MAX,
-                max_count: 2,
-                max_bytes: u64::MAX,
-            },
-        )
-        .unwrap();
+    let removed = maintain_at(
+        store,
+        Timestamp::from(u64::MAX / 4),
+        TerminalRetentionLimits {
+            max_age_secs: u64::MAX,
+            max_count: 2,
+            max_bytes: u64::MAX,
+        },
+    )
+    .unwrap();
     assert_eq!(removed, vec![refused]);
     assert!(store.reattach_receipt(refused).unwrap().is_none());
     assert_event_receipt_state(
@@ -167,16 +157,16 @@ fn terminal_receipt_fifo_survives_redb_reopen() {
         Some(receipt_id)
     );
     assert_eq!(
-        reopened
-            .maintain_at(
-                Timestamp::from(u64::MAX / 4),
-                TerminalRetentionLimits {
-                    max_age_secs: 0,
-                    max_count: u64::MAX,
-                    max_bytes: u64::MAX,
-                },
-            )
-            .unwrap(),
+        maintain_at(
+            &mut reopened,
+            Timestamp::from(u64::MAX / 4),
+            TerminalRetentionLimits {
+                max_age_secs: 0,
+                max_count: u64::MAX,
+                max_bytes: u64::MAX,
+            },
+        )
+        .unwrap(),
         vec![receipt_id]
     );
     assert!(reopened.reattach_receipt(receipt_id).unwrap().is_none());
@@ -193,7 +183,7 @@ fn terminal_age_count_and_bytes_each_force_whole_eviction() {
     }
 }
 
-fn exercise_limit(trigger: &str, store: &mut dyn RetentionTestStore) {
+fn exercise_limit(trigger: &str, store: &mut RedbStore) {
     let keys = Keys::generate();
     let receipt_id = store
         .accept_refused(
@@ -220,9 +210,7 @@ fn exercise_limit(trigger: &str, store: &mut dyn RetentionTestStore) {
         },
     };
     assert_eq!(
-        store
-            .maintain_at(Timestamp::from(u64::MAX / 4), limits)
-            .unwrap(),
+        maintain_at(store, Timestamp::from(u64::MAX / 4), limits).unwrap(),
         vec![receipt_id],
         "{trigger} must independently force eviction"
     );

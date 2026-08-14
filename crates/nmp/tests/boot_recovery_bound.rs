@@ -50,7 +50,7 @@ fn populate(path: &std::path::Path, keys: &Keys, relay: &RelayUrl, count: usize)
 
 /// Every durable lane in the store, ordered, with its revision — the exact
 /// value a rewrite would change.
-fn lane_snapshot(store: &dyn EventStore) -> Vec<PublishQueueLane> {
+fn lane_snapshot(store: &RedbStore) -> Vec<PublishQueueLane> {
     let mut lanes: Vec<PublishQueueLane> = store
         .recover_publish_queue()
         .expect("recover intents")
@@ -68,7 +68,7 @@ fn lane_snapshot(store: &dyn EventStore) -> Vec<PublishQueueLane> {
 /// Drive every lane in the store to `Eligible`, the state the incident's
 /// store was in: a relay that was reachable once, so the lanes were woken,
 /// and then was not, so nothing consumed them.
-fn make_every_lane_eligible(store: &mut dyn EventStore) {
+fn make_every_lane_eligible(store: &mut RedbStore) {
     let intents = store.recover_publish_queue().expect("recover intents");
     for intent in intents {
         let lanes = store

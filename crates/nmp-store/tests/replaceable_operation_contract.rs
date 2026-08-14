@@ -85,7 +85,7 @@ fn body_complete_accept(
 }
 
 fn accept_body_complete(
-    store: &mut dyn EventStore,
+    store: &mut RedbStore,
     keys: &Keys,
     accepted_at: u64,
     accept: SemanticAccept,
@@ -110,7 +110,7 @@ fn accept_body_complete(
     }
 }
 
-fn receipt_ids(store: &dyn EventStore, receipt_id: u64) -> (nostr::EventId, nostr::EventId) {
+fn receipt_ids(store: &RedbStore, receipt_id: u64) -> (nostr::EventId, nostr::EventId) {
     let receipt = store.reattach_receipt(receipt_id).unwrap().unwrap();
     match receipt.payload {
         PublishQueueReceiptPayload::ReplaceableOperation {
@@ -126,7 +126,7 @@ fn receipt_ids(store: &dyn EventStore, receipt_id: u64) -> (nostr::EventId, nost
 }
 
 fn accept_operation(
-    store: &mut dyn EventStore,
+    store: &mut RedbStore,
     keys: &Keys,
     accepted_at: u64,
     accept: SemanticAccept,
@@ -155,7 +155,7 @@ fn accept_operation(
 }
 
 fn assert_receipt_current(
-    store: &dyn EventStore,
+    store: &RedbStore,
     receipt_id: u64,
     expected_materialization: MaterializationId,
     expected_sig_state: IntentSigState,
@@ -180,7 +180,7 @@ fn assert_receipt_current(
 }
 
 fn install_shared_materialization(
-    store: &mut dyn EventStore,
+    store: &mut RedbStore,
     keys: &Keys,
     coordinate: &Coordinate,
     members: Vec<nmp_store::IntentId>,
@@ -225,7 +225,7 @@ fn install_shared_materialization(
     }
 }
 
-fn exercise_bodyless_shared_lifecycle(store: &mut dyn EventStore) {
+fn exercise_bodyless_shared_lifecycle(store: &mut RedbStore) {
     let keys = Keys::generate();
     let coordinate = coordinate(&keys);
     let (first, first_receipt) = accept_operation(
@@ -387,7 +387,7 @@ struct SourceSuccessorEvidence {
     successor: nostr::EventId,
 }
 
-fn exercise_source_successor(store: &mut dyn EventStore) -> SourceSuccessorEvidence {
+fn exercise_source_successor(store: &mut RedbStore) -> SourceSuccessorEvidence {
     let keys = Keys::generate();
     let coordinate = coordinate(&keys);
     let relay = RelayUrl::parse("wss://source-contract.example").unwrap();
@@ -636,7 +636,7 @@ fn qualified_source_and_complete_successor_survive_redb_reopen() {
 
 #[test]
 fn body_complete_receipt_keeps_accepted_id_while_current_advances_across_reopen() {
-    fn exercise(store: &mut dyn EventStore) -> (u64, u64, nostr::EventId, nostr::EventId) {
+    fn exercise(store: &mut RedbStore) -> (u64, u64, nostr::EventId, nostr::EventId) {
         let keys = Keys::generate();
         let coordinate = coordinate(&keys);
         let (first, first_receipt, first_event) = accept_body_complete(

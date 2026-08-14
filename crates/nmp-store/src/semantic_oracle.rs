@@ -1,7 +1,8 @@
 //! Redb semantic and reconstruction qualification for event and publishing
 //! state.
 //!
-//! The oracle deliberately observes only `EventStore` semantics. It never
+//! The oracle deliberately observes only the typed semantics of a real
+//! `RedbStore`. It never
 //! reads physical tables, keys, row counts, or backend file bytes. The harness
 //! closes and reopens Redb after every successful operation,
 //! proving that each checkpoint's complete normalized state and digest
@@ -282,7 +283,7 @@ impl TraceFixture {
 
 struct Harness {
     path: PathBuf,
-    store: Option<Box<RedbStore>>,
+    store: Option<RedbStore>,
 }
 
 impl Harness {
@@ -290,14 +291,12 @@ impl Harness {
         let store = RedbStore::open(&path).expect("open oracle Redb store");
         Self {
             path,
-            store: Some(Box::new(store)),
+            store: Some(store),
         }
     }
 
-    fn store(&mut self) -> &mut dyn EventStore {
-        self.store
-            .as_deref_mut()
-            .expect("Redb harness store is open")
+    fn store(&mut self) -> &mut RedbStore {
+        self.store.as_mut().expect("Redb harness store is open")
     }
 
     fn checkpoint(
@@ -310,14 +309,12 @@ impl Harness {
         let before = normalized_state(self.store(), context, alice, primary_relay);
 
         let recovery_before = normalized_recovery_state(
-            self.store.as_deref().expect("Redb harness store is open"),
+            self.store.as_ref().expect("Redb harness store is open"),
             context,
         );
         drop(self.store.take());
-        self.store = Some(Box::new(
-            RedbStore::open(&self.path).expect("reopen oracle Redb store"),
-        ));
-        let reopened = self.store.as_deref().expect("reopened Redb harness store");
+        self.store = Some(RedbStore::open(&self.path).expect("reopen oracle Redb store"));
+        let reopened = self.store.as_ref().expect("reopened Redb harness store");
         let after = normalized_state(reopened, context, alice, primary_relay);
         assert_eq!(
             after, before,
@@ -504,7 +501,7 @@ fn ordered_ids(rows: Vec<StoredEvent>) -> Vec<String> {
 }
 
 fn normalized_state(
-    store: &dyn EventStore,
+    store: &RedbStore,
     context: &OracleContext,
     alice: &Keys,
     primary_relay: &RelayUrl,
@@ -605,7 +602,7 @@ fn normalized_state(
     serde_json::to_string(&state).expect("serialize normalized oracle state")
 }
 
-fn normalized_recovery_state(store: &dyn EventStore, context: &OracleContext) -> String {
+fn normalized_recovery_state(store: &RedbStore, context: &OracleContext) -> String {
     let intents = store
         .recover_publish_queue()
         .expect("crash-oracle recover_publish_queue")
@@ -656,7 +653,7 @@ fn normalized_recovery_state(store: &dyn EventStore, context: &OracleContext) ->
 /// this adds a backend-table-independent proof that the recovered state,
 /// ordered query projection, and durable publishing journal survive a second
 /// reopen byte-for-byte.
-pub(crate) fn recovered_semantic_digest(store: &dyn EventStore) -> String {
+pub(crate) fn recovered_semantic_digest(store: &RedbStore) -> String {
     let rows = canonical_rows(store.query(&Filter::new()).expect("crash-oracle query"));
     let ordered = ordered_ids(
         store
