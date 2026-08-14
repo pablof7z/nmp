@@ -66,6 +66,29 @@ impl crate::ReplaceableMaterializer for FirstCallBlockingPeopleMaterializer {
         }
         result
     }
+
+    fn materialize_default(
+        &self,
+        coordinate: &nostr::nips::nip01::Coordinate,
+        operations: &[crate::ReplaceableMaterializerOperation<'_>],
+    ) -> Result<nmp_grammar::EventBuilder, crate::ReplaceableMaterializerRefusal> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == 1 {
+            self.first_entered
+                .send(call)
+                .expect("the barrier witness remains alive");
+            self.first_release
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .recv()
+                .expect("the test releases the first capability call");
+        }
+        let result = add_people_default(coordinate, operations);
+        if call == 1 && result.is_ok() {
+            let _ = self.first_exited.send(());
+        }
+        result
+    }
 }
 
 struct AddPeopleMaterializer;
@@ -79,6 +102,44 @@ impl crate::ReplaceableMaterializer for AddPeopleMaterializer {
     ) -> Result<nmp_grammar::EventBuilder, crate::ReplaceableMaterializerRefusal> {
         add_people(current, operations)
     }
+
+    fn materialize_default(
+        &self,
+        coordinate: &nostr::nips::nip01::Coordinate,
+        operations: &[crate::ReplaceableMaterializerOperation<'_>],
+    ) -> Result<nmp_grammar::EventBuilder, crate::ReplaceableMaterializerRefusal> {
+        add_people_default(coordinate, operations)
+    }
+}
+
+fn add_people_default(
+    coordinate: &nostr::nips::nip01::Coordinate,
+    operations: &[crate::ReplaceableMaterializerOperation<'_>],
+) -> Result<nmp_grammar::EventBuilder, crate::ReplaceableMaterializerRefusal> {
+    let mut tags = if coordinate.kind.is_addressable() {
+        vec![Tag::identifier(coordinate.identifier.clone())]
+    } else {
+        Vec::new()
+    };
+    for operation in operations {
+        let person = PublicKey::from_slice(operation.bytes()).map_err(|error| {
+            crate::ReplaceableMaterializerRefusal {
+                reason: error.to_string(),
+            }
+        })?;
+        if !tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["p", person.to_hex().as_str()])
+        {
+            tags.push(Tag::public_key(person));
+        }
+    }
+    Ok(nmp_grammar::EventBuilder {
+        kind: coordinate.kind,
+        tags,
+        content: String::new(),
+        created_at: None,
+    })
 }
 
 fn add_people(
@@ -130,6 +191,29 @@ impl crate::ReplaceableMaterializer for InitialMaterializerFailure {
                 kind: Kind::TextNote,
                 tags: current.tags.clone().to_vec(),
                 content: current.content.clone(),
+                created_at: None,
+            }),
+        }
+    }
+
+    fn materialize_default(
+        &self,
+        coordinate: &nostr::nips::nip01::Coordinate,
+        _operations: &[crate::ReplaceableMaterializerOperation<'_>],
+    ) -> Result<nmp_grammar::EventBuilder, crate::ReplaceableMaterializerRefusal> {
+        match self {
+            Self::Refusal => Err(crate::ReplaceableMaterializerRefusal {
+                reason: "fixture refusal".to_string(),
+            }),
+            Self::Panic => panic!("fixture panic"),
+            Self::InvalidCoordinate => Ok(nmp_grammar::EventBuilder {
+                kind: Kind::TextNote,
+                tags: if coordinate.kind.is_addressable() {
+                    vec![Tag::identifier(coordinate.identifier.clone())]
+                } else {
+                    Vec::new()
+                },
+                content: String::new(),
                 created_at: None,
             }),
         }
@@ -2757,6 +2841,33 @@ fn initial_materializer_failures_leave_no_acceptance_residue() {
             matches!(&error, EngineError::PublishRefused { reason } if reason.contains(expected)),
             "{failure:?} must remain a typed pre-custody refusal: {error:?}"
         );
+        let default_token = format!("initial-default-materializer-failure-{slot}");
+        let default_error = engine
+            .publish(WriteIntent {
+                payload: registration
+                    .first_value_operation(
+                        Kind::ContactList,
+                        String::new(),
+                        nmp_grammar::ReplaceableSourcePolicy::Continuing,
+                        Keys::generate().public_key().to_bytes().to_vec(),
+                    )
+                    .expect("the default failure operation is structurally valid"),
+                routing: WriteRouting::Explicit(vec![RelayUrl::parse(
+                    "wss://initial-default-refusal.example",
+                )
+                .unwrap()]),
+                identity: Identity::Active,
+                correlation: Some(
+                    nmp_grammar::CorrelationToken::try_from(default_token.as_str())
+                        .expect("the default failure fixture token is valid"),
+                ),
+            })
+            .err()
+            .expect("the same capability failure refuses a default-based publication");
+        assert!(
+            matches!(&default_error, EngineError::PublishRefused { reason } if reason.contains(expected)),
+            "{failure:?} default path must remain a typed pre-custody refusal: {default_error:?}"
+        );
         assert!(
             engine
                 .publish_queue(None, u8::MAX)
@@ -2784,6 +2895,12 @@ fn initial_materializer_failures_leave_no_acceptance_residue() {
             engine
                 .reattach_by_correlation(token)
                 .expect("the correlation lookup remains readable"),
+            ReceiptReattachment::NotFound
+        ));
+        assert!(matches!(
+            engine
+                .reattach_by_correlation(default_token)
+                .expect("the default correlation lookup remains readable"),
             ReceiptReattachment::NotFound
         ));
         engine.shutdown();

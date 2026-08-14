@@ -612,6 +612,37 @@ mod semantic_successor_tests {
                 created_at: None,
             })
         }
+
+        fn materialize_default(
+            &self,
+            coordinate: &Coordinate,
+            operations: &[ReplaceableMaterializerOperation<'_>],
+        ) -> Result<nmp_grammar::EventBuilder, ReplaceableMaterializerRefusal> {
+            let mut tags = if coordinate.kind.is_addressable() {
+                vec![Tag::identifier(coordinate.identifier.clone())]
+            } else {
+                Vec::new()
+            };
+            for operation in operations {
+                let key = PublicKey::from_slice(operation.bytes()).map_err(|error| {
+                    ReplaceableMaterializerRefusal {
+                        reason: error.to_string(),
+                    }
+                })?;
+                if !tags
+                    .iter()
+                    .any(|tag| tag.as_slice() == ["p", &key.to_hex()])
+                {
+                    tags.push(Tag::public_key(key));
+                }
+            }
+            Ok(nmp_grammar::EventBuilder {
+                kind: coordinate.kind,
+                tags,
+                content: String::new(),
+                created_at: None,
+            })
+        }
     }
 
     fn source(keys: &Keys, at: u64, content: &str, people: &[PublicKey]) -> SignedEvent {
@@ -832,6 +863,88 @@ mod semantic_successor_tests {
             after_refusals, retained,
             "policy refusals must leave the semantic snapshot and finite round unchanged"
         );
+    }
+
+    #[test]
+    fn capability_default_fallback_uses_a_preexisting_canonical_source() {
+        let author = Keys::generate();
+        let existing_person = Keys::generate().public_key();
+        let added_person = Keys::generate().public_key();
+        let source_relay = RelayUrl::parse("wss://known-source.example").unwrap();
+        let destination = RelayUrl::parse("wss://known-source-destination.example").unwrap();
+        let base = source(&author, 1, "known relay body", &[existing_person]);
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
+        store
+            .insert(
+                base,
+                RelayObserved::new(source_relay.clone(), Timestamp::from(1)),
+            )
+            .unwrap();
+        let mut core = EngineCore::new(store, 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        let instance = [8; 16];
+        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
+            instance,
+            program: [9; 16],
+            format: [10; 16],
+            materializer: Arc::new(AddPeople),
+        });
+        let operation = nmp_grammar::ReplaceableOperation::from_registered_default_parts(
+            instance,
+            Kind::ContactList,
+            String::new(),
+            nmp_grammar::ReplaceableSourcePolicy::Finite {
+                relays: BTreeSet::from([source_relay]),
+                access: AccessContext::Public,
+            },
+            added_person.to_bytes().to_vec(),
+        )
+        .expect("the first-value fallback names a valid replaceable coordinate");
+
+        let mut preparation = core.prepare_publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(operation),
+            routing: WriteRouting::Explicit(vec![destination]),
+            identity: Identity::Active,
+            correlation: None,
+        });
+        let effects = loop {
+            match preparation {
+                PublishPreparation::Complete(effects) => break effects,
+                PublishPreparation::Materialize(prepared) => {
+                    let PreparedReplaceableMaterialization { call, continuation } = *prepared;
+                    preparation = core
+                        .complete_body_complete_replaceable_operation(continuation, call.execute());
+                }
+            }
+        };
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::PublishFailed(_))),
+            "a source that became known before preparation must be used rather than refused: {effects:#?}"
+        );
+        let current = core
+            .store
+            .query_newest(
+                &nostr::Filter::new()
+                    .kind(Kind::ContactList)
+                    .author(author.public_key()),
+                1,
+            )
+            .unwrap()
+            .pop()
+            .expect("the materialized current row exists");
+        assert_eq!(current.event.content, "known relay body");
+        assert!(current
+            .event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["p", &existing_person.to_hex()]));
+        assert!(current
+            .event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["p", &added_person.to_hex()]));
     }
 
     #[test]

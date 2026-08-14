@@ -392,6 +392,23 @@ fn apply_plan(
             .qualified;
         match (source, current_winner.as_ref()) {
             (crate::QualifiedSource::Absent, None) => None,
+            // A capability-defined first value is complete local truth, but
+            // it is not evidence that relays established absence. The
+            // operation requirement is what authorizes this one unresolved
+            // starting point; any later qualified source still replaces it
+            // through the ordinary source-install CAS path.
+            (crate::QualifiedSource::Unresolved, None)
+                if plan.next.as_ref().is_some_and(|next| {
+                    next.operations.iter().all(|operation| {
+                        matches!(
+                            &operation.source_requirement,
+                            crate::OperationSourceRequirement::CapabilityDefault(_)
+                        )
+                    })
+                }) =>
+            {
+                None
+            }
             (
                 crate::QualifiedSource::Event {
                     event_id,

@@ -704,6 +704,16 @@ mod tests {
                 created_at: None,
             })
         }
+
+        fn materialize_default(
+            &self,
+            _coordinate: &Coordinate,
+            _operations: &[ReplaceableMaterializerOperation<'_>],
+        ) -> Result<nmp_grammar::EventBuilder, ReplaceableMaterializerRefusal> {
+            Err(ReplaceableMaterializerRefusal {
+                reason: "fixture requires an existing source".to_string(),
+            })
+        }
     }
 
     fn source(author: &Keys, at: u64, content: &str) -> SignedEvent {

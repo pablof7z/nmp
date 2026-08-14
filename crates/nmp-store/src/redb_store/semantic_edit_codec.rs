@@ -185,6 +185,7 @@ fn encode_starting_source(encoder: &mut Encoder, source: StartingSource) {
             encoder.u8(1);
             encoder.fixed(event_id.as_bytes());
         }
+        StartingSource::CapabilityDefault => encoder.u8(2),
     }
 }
 
@@ -195,6 +196,7 @@ fn decode_starting_source(decoder: &mut Decoder<'_>) -> Result<StartingSource, P
             EventId::from_slice(&decoder.array::<32>()?)
                 .map_err(|_| invariant("invalid starting event id"))?,
         )),
+        2 => Ok(StartingSource::CapabilityDefault),
         _ => Err(invariant("invalid starting-source tag")),
     }
 }
@@ -394,6 +396,7 @@ pub(super) fn encode_operation(operation: &SemanticOperation) -> Result<Vec<u8>,
     let (tag, requirement) = match &operation.source_requirement {
         OperationSourceRequirement::Awaiting(requirement) => (0, requirement),
         OperationSourceRequirement::Qualified(requirement) => (1, requirement),
+        OperationSourceRequirement::CapabilityDefault(requirement) => (2, requirement),
     };
     encoder.u8(tag);
     encoder.fixed(&requirement.plan.0);
@@ -419,6 +422,7 @@ pub(super) fn decode_operation(bytes: &[u8]) -> Result<SemanticOperation, Persis
     let source_requirement = match qualification {
         0 => OperationSourceRequirement::Awaiting(requirement),
         1 => OperationSourceRequirement::Qualified(requirement),
+        2 => OperationSourceRequirement::CapabilityDefault(requirement),
         _ => return Err(invariant("invalid operation qualification tag")),
     };
     let accepted_at = Timestamp::from(decoder.u64()?);

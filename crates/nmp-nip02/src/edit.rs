@@ -176,6 +176,16 @@ impl ReplaceableMaterializer for FollowMaterializer {
         )
         .map_err(|reason| ReplaceableMaterializerRefusal { reason })
     }
+
+    fn materialize_default(
+        &self,
+        _coordinate: &nostr::nips::nip01::Coordinate,
+        _operations: &[ReplaceableMaterializerOperation<'_>],
+    ) -> Result<EventBuilder, ReplaceableMaterializerRefusal> {
+        Err(ReplaceableMaterializerRefusal {
+            reason: "NIP-02 first-value materialization is not exposed yet".to_string(),
+        })
+    }
 }
 
 fn follow_selector(target: PublicKey) -> TagItemSelector {

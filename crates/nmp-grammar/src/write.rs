@@ -176,10 +176,28 @@ const MAX_REPLACEABLE_OPERATION_BYTES: usize = 64 * 1024;
 /// the closed continuing/finite source policy that the engine will own.
 pub struct ReplaceableOperation {
     registration_instance: [u8; 16],
-    original_source: UnsignedEvent,
-    current: UnsignedEvent,
+    start: ReplaceableOperationStart,
     source_policy: ReplaceableSourcePolicy,
     operation: Vec<u8>,
+}
+
+/// Mechanism-only starting value for a registered replaceable operation.
+///
+/// Existing values carry the exact source/current bytes the caller observed.
+/// A capability default carries only the replaceable coordinate without an
+/// author: the write intent's identity remains the sole author authority, and
+/// the registered capability constructs the complete empty body.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub enum ReplaceableOperationStart {
+    Existing {
+        original_source: Box<UnsignedEvent>,
+        current: Box<UnsignedEvent>,
+    },
+    CapabilityDefault {
+        kind: Kind,
+        identifier: String,
+    },
 }
 
 /// How long a replayable operation continues accepting newer source events.
@@ -222,22 +240,42 @@ impl ReplaceableOperation {
         {
             return Err(ReplaceableOperationError::CoordinateChanged);
         }
-        if operation.is_empty() {
-            return Err(ReplaceableOperationError::OperationEmpty);
-        }
-        if operation.len() > MAX_REPLACEABLE_OPERATION_BYTES {
-            return Err(ReplaceableOperationError::OperationTooLarge);
-        }
-        if matches!(
-            source_policy,
-            ReplaceableSourcePolicy::Finite { ref relays, .. } if relays.is_empty()
-        ) {
-            return Err(ReplaceableOperationError::FiniteSourcesEmpty);
-        }
+        validate_replaceable_operation(&source_policy, &operation)?;
         Ok(Self {
             registration_instance,
-            original_source,
-            current,
+            start: ReplaceableOperationStart::Existing {
+                original_source: Box::new(original_source),
+                current: Box::new(current),
+            },
+            source_policy,
+            operation,
+        })
+    }
+
+    /// Mechanism-only constructor for a capability-defined first value.
+    ///
+    /// The registered capability owns the empty body. This payload names only
+    /// its coordinate; the receiving engine selects the author from
+    /// [`WriteIntent::identity`] and validates the complete materialized body
+    /// before custody.
+    #[doc(hidden)]
+    pub fn from_registered_default_parts(
+        registration_instance: [u8; 16],
+        kind: Kind,
+        identifier: String,
+        source_policy: ReplaceableSourcePolicy,
+        operation: Vec<u8>,
+    ) -> Result<Self, ReplaceableOperationError> {
+        if !kind.is_replaceable() && !kind.is_addressable() {
+            return Err(ReplaceableOperationError::InvalidCoordinate);
+        }
+        if !kind.is_addressable() && !identifier.is_empty() {
+            return Err(ReplaceableOperationError::NonAddressableIdentifier);
+        }
+        validate_replaceable_operation(&source_policy, &operation)?;
+        Ok(Self {
+            registration_instance,
+            start: ReplaceableOperationStart::CapabilityDefault { kind, identifier },
             source_policy,
             operation,
         })
@@ -250,19 +288,36 @@ impl ReplaceableOperation {
         self,
     ) -> (
         [u8; 16],
-        UnsignedEvent,
-        UnsignedEvent,
+        ReplaceableOperationStart,
         ReplaceableSourcePolicy,
         Vec<u8>,
     ) {
         (
             self.registration_instance,
-            self.original_source,
-            self.current,
+            self.start,
             self.source_policy,
             self.operation,
         )
     }
+}
+
+fn validate_replaceable_operation(
+    source_policy: &ReplaceableSourcePolicy,
+    operation: &[u8],
+) -> Result<(), ReplaceableOperationError> {
+    if operation.is_empty() {
+        return Err(ReplaceableOperationError::OperationEmpty);
+    }
+    if operation.len() > MAX_REPLACEABLE_OPERATION_BYTES {
+        return Err(ReplaceableOperationError::OperationTooLarge);
+    }
+    if matches!(
+        source_policy,
+        ReplaceableSourcePolicy::Finite { relays, .. } if relays.is_empty()
+    ) {
+        return Err(ReplaceableOperationError::FiniteSourcesEmpty);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +325,8 @@ pub enum ReplaceableOperationError {
     OriginalSourceInvalid,
     CurrentInvalid,
     CoordinateChanged,
+    InvalidCoordinate,
+    NonAddressableIdentifier,
     FiniteSourcesEmpty,
     OperationEmpty,
     OperationTooLarge,
@@ -281,6 +338,12 @@ impl std::fmt::Display for ReplaceableOperationError {
             Self::OriginalSourceInvalid => "replaceable operation original source is invalid",
             Self::CurrentInvalid => "replaceable operation current event is invalid",
             Self::CoordinateChanged => "replaceable operation source coordinate changed",
+            Self::InvalidCoordinate => {
+                "replaceable operation requires a valid replaceable or addressable coordinate"
+            }
+            Self::NonAddressableIdentifier => {
+                "only an addressable replaceable coordinate may carry an identifier"
+            }
             Self::FiniteSourcesEmpty => {
                 "finite replaceable source policy requires at least one relay"
             }
@@ -682,5 +745,59 @@ mod tests {
             ),
             Err(ReplaceableOperationError::FiniteSourcesEmpty)
         ));
+    }
+
+    #[test]
+    fn capability_default_freezes_only_kind_and_identifier() {
+        assert!(matches!(
+            ReplaceableOperation::from_registered_default_parts(
+                [8; 16],
+                Kind::ContactList,
+                "aliases-contact-list".to_string(),
+                ReplaceableSourcePolicy::Continuing,
+                vec![6],
+            ),
+            Err(ReplaceableOperationError::NonAddressableIdentifier)
+        ));
+        assert!(matches!(
+            ReplaceableOperation::from_registered_default_parts(
+                [8; 16],
+                Kind::TextNote,
+                String::new(),
+                ReplaceableSourcePolicy::Continuing,
+                vec![6],
+            ),
+            Err(ReplaceableOperationError::InvalidCoordinate)
+        ));
+        let empty_identifier = ReplaceableOperation::from_registered_default_parts(
+            [8; 16],
+            Kind::from(30_001u16),
+            String::new(),
+            ReplaceableSourcePolicy::Continuing,
+            vec![6],
+        )
+        .expect("an addressable coordinate may use its canonical empty identifier");
+        assert!(matches!(
+            empty_identifier.into_registered_parts().1,
+            ReplaceableOperationStart::CapabilityDefault { kind, identifier }
+                if kind == Kind::from(30_001u16) && identifier.is_empty()
+        ));
+        let operation = ReplaceableOperation::from_registered_default_parts(
+            [9; 16],
+            Kind::from(30_001u16),
+            "bookmarks".to_string(),
+            ReplaceableSourcePolicy::Continuing,
+            vec![7, 8],
+        )
+        .expect("a capability default operation is valid without an author or source event");
+        let (instance, start, policy, bytes) = operation.into_registered_parts();
+        assert_eq!(instance, [9; 16]);
+        assert!(matches!(
+            start,
+            ReplaceableOperationStart::CapabilityDefault { kind, identifier }
+                if kind == Kind::from(30_001u16) && identifier == "bookmarks"
+        ));
+        assert_eq!(policy, ReplaceableSourcePolicy::Continuing);
+        assert_eq!(bytes, vec![7, 8]);
     }
 }

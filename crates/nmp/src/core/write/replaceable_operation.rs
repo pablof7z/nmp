@@ -26,9 +26,18 @@ impl std::fmt::Debug for PreparedReplaceableSuccessor {
 
 pub(crate) struct ReplaceableMaterializationCall {
     materializer: Arc<dyn crate::ReplaceableMaterializer>,
-    source: UnsignedEvent,
-    current: UnsignedEvent,
+    input: ReplaceableMaterializationInput,
     operations: Vec<Vec<u8>>,
+}
+
+enum ReplaceableMaterializationInput {
+    Existing {
+        source: Box<UnsignedEvent>,
+        current: Box<UnsignedEvent>,
+    },
+    CapabilityDefault {
+        coordinate: Coordinate,
+    },
 }
 
 pub(crate) enum ReplaceableMaterializationOutcome {
@@ -43,7 +52,7 @@ pub(crate) struct ReplaceableMaterializationContinuation {
     program: ReplayProgramId,
     format: ReplayFormatId,
     materializer: Arc<dyn crate::ReplaceableMaterializer>,
-    original_source: UnsignedEvent,
+    start: nmp_grammar::ReplaceableOperationStart,
     declared_source_policy: nmp_grammar::ReplaceableSourcePolicy,
     operation_bytes: Vec<u8>,
     signing_pubkey: PublicKey,
@@ -51,6 +60,7 @@ pub(crate) struct ReplaceableMaterializationContinuation {
     routing: WriteRouting,
     correlation: Option<nmp_grammar::CorrelationToken>,
     fence: ReplaceableMaterializationFence,
+    canonical_source_id: Option<EventId>,
 }
 
 pub(crate) struct ReplaceableSuccessorContinuation {
@@ -84,8 +94,10 @@ impl ReplaceableMaterializationCall {
     ) -> Self {
         Self {
             materializer,
-            source,
-            current,
+            input: ReplaceableMaterializationInput::Existing {
+                source: Box::new(source),
+                current: Box::new(current),
+            },
             operations,
         }
     }
@@ -96,10 +108,15 @@ impl ReplaceableMaterializationCall {
             .iter()
             .map(|operation| ReplaceableMaterializerOperation::new(operation))
             .collect::<Vec<_>>();
-        match self
-            .materializer
-            .materialize(&self.source, &self.current, &operations)
-        {
+        let result = match &self.input {
+            ReplaceableMaterializationInput::Existing { source, current } => {
+                self.materializer.materialize(source, current, &operations)
+            }
+            ReplaceableMaterializationInput::CapabilityDefault { coordinate } => self
+                .materializer
+                .materialize_default(coordinate, &operations),
+        };
+        match result {
             Ok(builder) => ReplaceableMaterializationOutcome::Materialized(builder),
             Err(refusal) => ReplaceableMaterializationOutcome::Refused(refusal.reason),
         }
@@ -114,7 +131,7 @@ impl EngineCore {
         identity: Identity,
         correlation: Option<nmp_grammar::CorrelationToken>,
     ) -> PublishPreparation {
-        let (instance, original_source, supplied_current, declared_source_policy, operation_bytes) =
+        let (instance, start, declared_source_policy, operation_bytes) =
             operation.into_registered_parts();
         let Some(registration) = self.replaceable_materializers.get(&instance) else {
             return PublishPreparation::Complete(self.refuse_publish(
@@ -127,23 +144,35 @@ impl EngineCore {
         let format = ReplayFormatId(registration.format);
         let materializer = registration.materializer.clone();
 
+        let existing_author = match &start {
+            nmp_grammar::ReplaceableOperationStart::Existing {
+                original_source, ..
+            } => Some(original_source.pubkey),
+            nmp_grammar::ReplaceableOperationStart::CapabilityDefault { .. } => None,
+        };
         let signing_pubkey = match identity {
-            Identity::Explicit(pubkey) if pubkey != original_source.pubkey => {
+            Identity::Explicit(pubkey)
+                if existing_author.is_some_and(|author| author != pubkey) =>
+            {
                 return PublishPreparation::Complete(self.refuse_publish(
                     PublishError::IdentityContradictsSignedAuthor {
                         identity: pubkey,
-                        author: original_source.pubkey,
+                        author: existing_author.expect("mismatching existing author"),
                     },
                 ));
             }
             Identity::Explicit(pubkey) => pubkey,
             Identity::Active => match self.active_pubkey {
-                Some(pubkey) if pubkey == original_source.pubkey => pubkey,
+                Some(pubkey)
+                    if existing_author.is_none_or(|existing_author| existing_author == pubkey) =>
+                {
+                    pubkey
+                }
                 Some(pubkey) => {
                     return PublishPreparation::Complete(self.refuse_publish(
                         PublishError::IdentityContradictsSignedAuthor {
                             identity: pubkey,
-                            author: original_source.pubkey,
+                            author: existing_author.expect("mismatching existing author"),
                         },
                     ));
                 }
@@ -154,16 +183,27 @@ impl EngineCore {
                 }
             },
         };
-        if original_source.kind == nostr::Kind::Authentication {
+        let (kind, identifier) = match &start {
+            nmp_grammar::ReplaceableOperationStart::Existing {
+                original_source, ..
+            } => (
+                original_source.kind,
+                original_source.tags.identifier().unwrap_or("").to_owned(),
+            ),
+            nmp_grammar::ReplaceableOperationStart::CapabilityDefault { kind, identifier } => {
+                (*kind, identifier.clone())
+            }
+        };
+        if kind == nostr::Kind::Authentication {
             return PublishPreparation::Complete(self.refuse_publish(PublishError::ReservedKind {
-                kind: original_source.kind.as_u16(),
+                kind: kind.as_u16(),
             }));
         }
 
         let coordinate = Coordinate {
-            kind: original_source.kind,
-            public_key: original_source.pubkey,
-            identifier: original_source.tags.identifier().unwrap_or("").to_owned(),
+            kind,
+            public_key: signing_pubkey,
+            identifier,
         };
         let snapshot = match self.store.replaceable_operation_snapshot(&coordinate) {
             Ok(snapshot) => snapshot,
@@ -176,25 +216,31 @@ impl EngineCore {
             }
         };
 
-        let supplied_current_id = supplied_current
-            .id
-            .expect("registered operation validation froze a current id");
-        let expected_current_id = snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.current.generation.as_ref())
-            .map(|generation| generation.materialization.event_id)
-            .unwrap_or_else(|| {
-                original_source
-                    .id
-                    .expect("registered operation validation froze a source id")
-            });
-        if supplied_current_id != expected_current_id {
-            return PublishPreparation::Complete(self.refuse_publish(
-                PublishError::ReplaceableOperationRefused {
-                    reason:
-                        "operation was composed over a stale current materialization".to_string(),
-                },
-            ));
+        if let nmp_grammar::ReplaceableOperationStart::Existing {
+            original_source,
+            current,
+        } = &start
+        {
+            let supplied_current_id = current
+                .id
+                .expect("registered operation validation froze a current id");
+            let expected_current_id = snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.current.generation.as_ref())
+                .map(|generation| generation.materialization.event_id)
+                .unwrap_or_else(|| {
+                    original_source
+                        .id
+                        .expect("registered operation validation froze a source id")
+                });
+            if supplied_current_id != expected_current_id {
+                return PublishPreparation::Complete(
+                    self.refuse_publish(PublishError::ReplaceableOperationRefused {
+                        reason: "operation was composed over a stale current materialization"
+                            .to_string(),
+                    }),
+                );
+            }
         }
         if snapshot.as_ref().is_some_and(|snapshot| {
             snapshot
@@ -208,12 +254,6 @@ impl EngineCore {
                 },
             ));
         }
-        let replay_source = snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.source.as_ref())
-            .map(|stored| UnsignedEvent::from(stored.event.clone()))
-            .unwrap_or_else(|| original_source.clone());
-
         let mut replay_operations = snapshot
             .as_ref()
             .map(|snapshot| {
@@ -225,12 +265,32 @@ impl EngineCore {
             })
             .unwrap_or_default();
         replay_operations.push(operation_bytes.clone());
+        let canonical_source =
+            match self.canonical_replaceable_source(&coordinate, &declared_source_policy) {
+                Ok(source) => source,
+                Err(error) => {
+                    return PublishPreparation::Complete(self.refuse_publish(
+                        PublishError::PersistenceFailed {
+                            reason: error.to_string(),
+                        },
+                    ));
+                }
+            };
+        let input = match self.replaceable_materialization_input(
+            &start,
+            &coordinate,
+            snapshot.as_ref(),
+            canonical_source.as_ref(),
+        ) {
+            Ok(input) => input,
+            Err(effects) => return PublishPreparation::Complete(effects),
+        };
         let fence = Self::replaceable_materialization_fence(snapshot.as_ref());
+        let canonical_source_id = canonical_source.map(|stored| stored.event.id);
         PublishPreparation::Materialize(Box::new(PreparedReplaceableMaterialization {
             call: ReplaceableMaterializationCall {
                 materializer: materializer.clone(),
-                source: replay_source,
-                current: supplied_current,
+                input,
                 operations: replay_operations,
             },
             continuation: ReplaceableMaterializationContinuation {
@@ -238,7 +298,7 @@ impl EngineCore {
                 program,
                 format,
                 materializer,
-                original_source,
+                start,
                 declared_source_policy,
                 operation_bytes,
                 signing_pubkey,
@@ -246,6 +306,7 @@ impl EngineCore {
                 routing,
                 correlation,
                 fence,
+                canonical_source_id,
             },
         }))
     }
@@ -257,7 +318,7 @@ impl EngineCore {
         program: ReplayProgramId,
         format: ReplayFormatId,
         materializer: Arc<dyn crate::ReplaceableMaterializer>,
-        original_source: UnsignedEvent,
+        start: nmp_grammar::ReplaceableOperationStart,
         declared_source_policy: nmp_grammar::ReplaceableSourcePolicy,
         operation_bytes: Vec<u8>,
         signing_pubkey: PublicKey,
@@ -278,43 +339,6 @@ impl EngineCore {
                 },
             ));
         }
-        let replay_source = snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.source.as_ref())
-            .map(|stored| UnsignedEvent::from(stored.event.clone()))
-            .unwrap_or_else(|| original_source.clone());
-        let current_id = snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.current.generation.as_ref())
-            .map(|generation| generation.materialization.event_id)
-            .or(replay_source.id)
-            .expect("registered operation retained a complete source id");
-        let current = if replay_source.id == Some(current_id) {
-            replay_source.clone()
-        } else {
-            let rows = match self.store.query(&nostr::Filter::new().id(current_id)) {
-                Ok(rows) => rows,
-                Err(error) => {
-                    return PublishPreparation::Complete(self.refuse_publish(
-                        PublishError::PersistenceFailed {
-                            reason: error.to_string(),
-                        },
-                    ));
-                }
-            };
-            let Some(stored) = rows
-                .into_iter()
-                .find(|stored| stored.event.id == current_id)
-            else {
-                return PublishPreparation::Complete(self.refuse_publish(
-                    PublishError::ReplaceableOperationRefused {
-                        reason:
-                            "complete current materialization is no longer retained".to_string(),
-                    },
-                ));
-            };
-            UnsignedEvent::from(stored.event)
-        };
         let mut operations = snapshot
             .as_ref()
             .map(|snapshot| {
@@ -326,12 +350,32 @@ impl EngineCore {
             })
             .unwrap_or_default();
         operations.push(operation_bytes.clone());
+        let canonical_source =
+            match self.canonical_replaceable_source(&coordinate, &declared_source_policy) {
+                Ok(source) => source,
+                Err(error) => {
+                    return PublishPreparation::Complete(self.refuse_publish(
+                        PublishError::PersistenceFailed {
+                            reason: error.to_string(),
+                        },
+                    ));
+                }
+            };
+        let input = match self.replaceable_materialization_input(
+            &start,
+            &coordinate,
+            snapshot.as_ref(),
+            canonical_source.as_ref(),
+        ) {
+            Ok(input) => input,
+            Err(effects) => return PublishPreparation::Complete(effects),
+        };
         let fence = Self::replaceable_materialization_fence(snapshot.as_ref());
+        let canonical_source_id = canonical_source.map(|stored| stored.event.id);
         PublishPreparation::Materialize(Box::new(PreparedReplaceableMaterialization {
             call: ReplaceableMaterializationCall {
                 materializer: materializer.clone(),
-                source: replay_source,
-                current,
+                input,
                 operations,
             },
             continuation: ReplaceableMaterializationContinuation {
@@ -339,7 +383,7 @@ impl EngineCore {
                 program,
                 format,
                 materializer,
-                original_source,
+                start,
                 declared_source_policy,
                 operation_bytes,
                 signing_pubkey,
@@ -347,8 +391,92 @@ impl EngineCore {
                 routing,
                 correlation,
                 fence,
+                canonical_source_id,
             },
         }))
+    }
+
+    fn replaceable_materialization_input(
+        &mut self,
+        start: &nmp_grammar::ReplaceableOperationStart,
+        coordinate: &Coordinate,
+        snapshot: Option<&nmp_store::RecoveredSemanticResource>,
+        canonical_source: Option<&nmp_store::StoredEvent>,
+    ) -> Result<ReplaceableMaterializationInput, Vec<Effect>> {
+        let retained_default = snapshot
+            .and_then(|snapshot| snapshot.operations.first())
+            .is_some_and(|operation| {
+                matches!(
+                    &operation.source_requirement,
+                    nmp_store::OperationSourceRequirement::CapabilityDefault(_)
+                )
+            });
+        if snapshot.is_some_and(|snapshot| snapshot.source.is_none()) && retained_default {
+            return Ok(ReplaceableMaterializationInput::CapabilityDefault {
+                coordinate: coordinate.clone(),
+            });
+        }
+        if snapshot.is_none()
+            && canonical_source.is_none()
+            && matches!(
+                start,
+                nmp_grammar::ReplaceableOperationStart::CapabilityDefault { .. }
+            )
+        {
+            return Ok(ReplaceableMaterializationInput::CapabilityDefault {
+                coordinate: coordinate.clone(),
+            });
+        }
+        let source = snapshot
+            .and_then(|snapshot| snapshot.source.as_ref())
+            .map(|stored| UnsignedEvent::from(stored.event.clone()))
+            .or_else(|| canonical_source.map(|stored| UnsignedEvent::from(stored.event.clone())))
+            .or_else(|| match start {
+                nmp_grammar::ReplaceableOperationStart::Existing {
+                    original_source, ..
+                } => Some((**original_source).clone()),
+                nmp_grammar::ReplaceableOperationStart::CapabilityDefault { .. } => None,
+            });
+        let Some(source) = source else {
+            return Err(
+                self.refuse_publish(PublishError::ReplaceableOperationRefused {
+                    reason: "complete original source is no longer retained".to_string(),
+                }),
+            );
+        };
+        let current_id = snapshot
+            .and_then(|snapshot| snapshot.current.generation.as_ref())
+            .map(|generation| generation.materialization.event_id)
+            .or(source.id)
+            .expect("registered operation retained a complete source id");
+        let current = if source.id == Some(current_id) {
+            source.clone()
+        } else {
+            let rows = self
+                .store
+                .query(&nostr::Filter::new().id(current_id))
+                .map_err(|error| {
+                    self.refuse_publish(PublishError::PersistenceFailed {
+                        reason: error.to_string(),
+                    })
+                })?;
+            let Some(stored) = rows
+                .into_iter()
+                .find(|stored| stored.event.id == current_id)
+            else {
+                return Err(
+                    self.refuse_publish(PublishError::ReplaceableOperationRefused {
+                        reason: "complete current materialization is no longer retained"
+                            .to_string(),
+                    }),
+                );
+            };
+            UnsignedEvent::from(stored.event)
+        };
+        Ok(ReplaceableMaterializationInput::Existing {
+            source: Box::new(source),
+            current: Box::new(current),
+        })
     }
 
     pub(super) fn replaceable_materialization_fence(
@@ -370,6 +498,34 @@ impl EngineCore {
         }
     }
 
+    fn canonical_replaceable_source(
+        &self,
+        coordinate: &Coordinate,
+        source_policy: &nmp_grammar::ReplaceableSourcePolicy,
+    ) -> Result<Option<nmp_store::StoredEvent>, nmp_store::PersistenceError> {
+        let mut filter = nostr::Filter::new()
+            .kind(coordinate.kind)
+            .author(coordinate.public_key);
+        if coordinate.kind.is_addressable() {
+            filter = filter.identifier(coordinate.identifier.clone());
+        }
+        Ok(self
+            .store
+            .query_newest(&filter, 1)?
+            .into_iter()
+            .next()
+            .filter(|stored| match source_policy {
+                nmp_grammar::ReplaceableSourcePolicy::Continuing => {
+                    !stored.provenance.seen.is_empty()
+                }
+                nmp_grammar::ReplaceableSourcePolicy::Finite { relays, .. } => stored
+                    .provenance
+                    .seen
+                    .keys()
+                    .any(|relay| relays.contains(relay)),
+            }))
+    }
+
     pub(crate) fn complete_body_complete_replaceable_operation(
         &mut self,
         continuation: ReplaceableMaterializationContinuation,
@@ -388,7 +544,7 @@ impl EngineCore {
             program,
             format,
             materializer,
-            original_source,
+            start,
             declared_source_policy,
             operation_bytes,
             signing_pubkey,
@@ -396,6 +552,7 @@ impl EngineCore {
             routing,
             correlation,
             fence,
+            canonical_source_id,
         } = continuation;
         // The first correlation lookup happened before this capability call
         // left the reducer. Another publish can enter custody while the call
@@ -447,13 +604,26 @@ impl EngineCore {
                 ));
             }
         };
-        if Self::replaceable_materialization_fence(snapshot.as_ref()) != fence {
+        let canonical_source =
+            match self.canonical_replaceable_source(&coordinate, &declared_source_policy) {
+                Ok(source) => source,
+                Err(error) => {
+                    return PublishPreparation::Complete(self.refuse_publish(
+                        PublishError::PersistenceFailed {
+                            reason: error.to_string(),
+                        },
+                    ));
+                }
+            };
+        if canonical_source.as_ref().map(|stored| stored.event.id) != canonical_source_id
+            || Self::replaceable_materialization_fence(snapshot.as_ref()) != fence
+        {
             return self.retry_body_complete_replaceable_operation(
                 instance,
                 program,
                 format,
                 materializer,
-                original_source,
+                start,
                 declared_source_policy,
                 operation_bytes,
                 signing_pubkey,
@@ -494,9 +664,15 @@ impl EngineCore {
             ));
         }
 
-        let source_event_id = original_source
-            .id
-            .expect("registered operation validation froze a source id");
+        let existing_source = match &start {
+            nmp_grammar::ReplaceableOperationStart::Existing {
+                original_source, ..
+            } => Some((**original_source).clone()),
+            nmp_grammar::ReplaceableOperationStart::CapabilityDefault { .. } => canonical_source
+                .as_ref()
+                .map(|stored| UnsignedEvent::from(stored.event.clone())),
+        };
+        let source_event_id = existing_source.as_ref().and_then(|source| source.id);
         let source_plan = SourcePlanId(
             *blake3::hash(&[b"nmp-exact-source-v1".as_slice(), program.0.as_slice()].concat())
                 .as_bytes(),
@@ -524,20 +700,26 @@ impl EngineCore {
         let source = snapshot
             .as_ref()
             .map(|snapshot| snapshot.current.source_revision.evidence().clone())
-            .unwrap_or(SemanticSourceEvidence {
+            .unwrap_or_else(|| SemanticSourceEvidence {
                 plan: source_plan,
                 access: source_access,
-                qualified: QualifiedSource::Event {
-                    event_id: source_event_id,
-                    created_at: original_source.created_at,
-                },
+                qualified: existing_source
+                    .as_ref()
+                    .map_or(QualifiedSource::Unresolved, |source| {
+                        QualifiedSource::Event {
+                            event_id: source_event_id
+                                .expect("registered existing source retained a complete id"),
+                            created_at: source.created_at,
+                        }
+                    }),
             });
         let starting_source = snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.operations.first())
             .map(|operation| match &operation.source_requirement {
                 nmp_store::OperationSourceRequirement::Awaiting(requirement)
-                | nmp_store::OperationSourceRequirement::Qualified(requirement) => {
+                | nmp_store::OperationSourceRequirement::Qualified(requirement)
+                | nmp_store::OperationSourceRequirement::CapabilityDefault(requirement) => {
                     StartingSourceRequirement {
                         plan: requirement.plan,
                         access: requirement.access,
@@ -554,14 +736,19 @@ impl EngineCore {
             .unwrap_or(StartingSourceRequirement {
                 plan: source_plan,
                 access: source_access,
-                source: StartingSource::Event(source_event_id),
+                source: match source.qualified {
+                    QualifiedSource::Event { event_id, .. } => StartingSource::Event(event_id),
+                    QualifiedSource::Absent => StartingSource::Absent,
+                    QualifiedSource::Unresolved => source_event_id
+                        .map_or(StartingSource::CapabilityDefault, StartingSource::Event),
+                },
             });
-        if snapshot.is_none()
-            && !matches!(
-                source.qualified,
-                QualifiedSource::Event { event_id, .. } if event_id == source_event_id
-            )
-        {
+        let initial_source_matches = match (source_event_id, source.qualified) {
+            (Some(expected), QualifiedSource::Event { event_id, .. }) => expected == event_id,
+            (None, QualifiedSource::Unresolved) => true,
+            _ => false,
+        };
+        if snapshot.is_none() && !initial_source_matches {
             return PublishPreparation::Complete(self.refuse_publish(
                 PublishError::ReplaceableOperationRefused {
                     reason: "original source does not match retained source evidence".to_string(),
@@ -571,16 +758,20 @@ impl EngineCore {
         let source_event = snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.source.clone())
+            .or_else(|| canonical_source.clone())
             .or_else(|| {
-                self.store
-                    .query(&nostr::Filter::new().id(source_event_id))
-                    .ok()
-                    .and_then(|rows| {
-                        rows.into_iter()
-                            .find(|stored| stored.event.id == source_event_id)
-                    })
+                snapshot.is_none().then_some(())?;
+                source_event_id.and_then(|source_event_id| {
+                    self.store
+                        .query(&nostr::Filter::new().id(source_event_id))
+                        .ok()
+                        .and_then(|rows| {
+                            rows.into_iter()
+                                .find(|stored| stored.event.id == source_event_id)
+                        })
+                })
             });
-        let Some(source_event) = source_event else {
+        if matches!(source.qualified, QualifiedSource::Event { .. }) && source_event.is_none() {
             return PublishPreparation::Complete(self.refuse_publish(
                 PublishError::ReplaceableOperationRefused {
                     reason: "complete original source is no longer retained".to_string(),
@@ -699,7 +890,7 @@ impl EngineCore {
                 starting_source,
                 source,
                 source_policy,
-                source_event: Some(source_event),
+                source_event,
                 plan,
                 materialized: Some(MaterializationCandidate {
                     event,
