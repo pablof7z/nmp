@@ -475,6 +475,16 @@ impl EngineCore {
         }
     }
 
+    pub(super) fn defer_owned_semantic_source_terminal(
+        &mut self,
+        key: SemanticSourceRequestKey,
+        terminal: SemanticSourceTerminal,
+    ) {
+        if self.semantic_source_requests.contains_key(&key) {
+            self.defer_semantic_source_terminal(key, terminal);
+        }
+    }
+
     pub(super) fn finish_semantic_successor_request(
         &mut self,
         key: &SemanticSourceRequestKey,
@@ -649,6 +659,7 @@ mod tests {
     use std::borrow::Cow;
     use std::sync::Arc;
 
+    use ::negentropy::{Negentropy as RawNegentropy, NegentropyStorageVector as RawStorage};
     use nmp_store::{RedbStore, RelayObserved};
     use nostr::{EventBuilder as NostrEventBuilder, Keys, Kind, RelayMessage, SubscriptionId, Tag};
 
@@ -820,6 +831,14 @@ mod tests {
         )))
     }
 
+    fn neg_done_reply(initial_hex: &str) -> String {
+        let mut storage = RawStorage::new();
+        storage.seal().unwrap();
+        let mut relay = RawNegentropy::owned(storage, 0).unwrap();
+        let initial = hex::decode(initial_hex).unwrap();
+        hex::encode(relay.reconcile(&initial).unwrap())
+    }
+
     struct FiniteSuccessorFixture {
         core: EngineCore,
         author: Keys,
@@ -891,6 +910,64 @@ mod tests {
             base,
             person,
         }
+    }
+
+    fn install_accepted_empty_neg_session(
+        fixture: &mut FiniteSuccessorFixture,
+    ) -> (SubId, AttributionSendId, ConcreteFilter, String) {
+        let metadata = fixture.core.plan_execution_metadata[&fixture.sub_id].clone();
+        let neg_filter = ConcreteFilter {
+            since: None,
+            until: None,
+            limit: None,
+            ..metadata.filter.clone()
+        };
+        let neg_sub_id = nip77_role_sub_id(
+            &fixture.sub_id,
+            NIP77_NEG_ROLE,
+            &neg_filter,
+            fixture.core.next_nip77_incarnation,
+        );
+        fixture.core.next_nip77_incarnation = fixture.core.next_nip77_incarnation.wrapping_add(1);
+        let (attribution_send, attempt_id) = fixture.core.record_observed_request_with_purpose(
+            RequestSend {
+                session: &fixture.session,
+                sub_id: &neg_sub_id,
+                filter: &neg_filter,
+                coverage_claims: metadata.coverage_claims,
+                owner_demands: metadata.owner_demands,
+                replay: false,
+                event_failure_target: EventFailureTarget::ThisSend,
+            },
+            RequestAttemptPurpose::Nip77Open {
+                plan_sub_id: fixture.sub_id.clone(),
+            },
+        );
+        let (reconciler, initial_hex) = crate::negentropy::Reconciler::open(&[]);
+        fixture
+            .core
+            .neg_sessions_by_plan
+            .entry(fixture.sub_id.clone())
+            .or_default()
+            .insert(neg_sub_id.clone());
+        fixture.core.neg_sessions.insert(
+            neg_sub_id.clone(),
+            NegSession {
+                plan_sub_id: fixture.sub_id.clone(),
+                relay: fixture.relay.clone(),
+                filter: neg_filter.clone(),
+                attribution_send,
+                started_at: fixture.core.clock,
+                reconciler,
+            },
+        );
+        fixture
+            .core
+            .on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+                attempt_id,
+                handle: fixture.handle,
+            });
+        (neg_sub_id, attribution_send, neg_filter, initial_hex)
     }
 
     fn member_state(
@@ -979,6 +1056,165 @@ mod tests {
         assert!(matches!(
             installed.current.source_revision.evidence().qualified,
             QualifiedSource::Event { event_id, .. } if event_id == successor.id
+        ));
+    }
+
+    #[test]
+    fn nip77_done_precloses_successor_admission_before_later_same_turn_frames() {
+        let mut fixture = finite_successor_fixture();
+        let successor = source(&fixture.author, 20, "successor");
+        let late = source(&fixture.author, 30, "late after NEG-DONE");
+        let prepared = prepared_successors(fixture.core.handle(EngineMsg::RelayFrame(
+            fixture.handle,
+            fixture.session.clone(),
+            event_frame(&fixture.sub_id, successor),
+        )));
+        assert_eq!(prepared.len(), 1);
+
+        let (neg_sub_id, _, _, initial_hex) = install_accepted_empty_neg_session(&mut fixture);
+
+        let effects = fixture.core.handle(EngineMsg::RelayFrames(vec![
+            (
+                fixture.handle,
+                fixture.session.clone(),
+                RelayFrame::from_message(RelayMessage::NegMsg {
+                    subscription_id: Cow::Owned(SubscriptionId::new(wire_sub_id_string(
+                        &neg_sub_id,
+                    ))),
+                    message: Cow::Owned(neg_done_reply(&initial_hex)),
+                }),
+            ),
+            (
+                fixture.handle,
+                fixture.session.clone(),
+                event_frame(&fixture.sub_id, late),
+            ),
+            (
+                fixture.handle,
+                fixture.session.clone(),
+                RelayFrame::from_message(RelayMessage::Closed {
+                    subscription_id: Cow::Owned(SubscriptionId::new(wire_sub_id_string(
+                        &fixture.sub_id,
+                    ))),
+                    message: Cow::Borrowed("later terminal"),
+                }),
+            ),
+        ]));
+
+        assert!(effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::MaterializeReplaceableSuccessor(_))));
+        assert!(matches!(
+            fixture
+                .core
+                .semantic_successor_requests
+                .get(&(fixture.session.clone(), fixture.sub_id.clone())),
+            Some(SemanticSuccessorRequestState::TerminalDeferred {
+                in_flight: 1,
+                terminal: SemanticSourceTerminal::Eose,
+            })
+        ));
+    }
+
+    #[test]
+    fn nip77_missing_id_eose_precloses_successor_admission_before_later_same_turn_frames() {
+        let mut fixture = finite_successor_fixture();
+        let successor = source(&fixture.author, 20, "successor");
+        let late = source(&fixture.author, 30, "late after NIP-77 backfill");
+        let prepared = prepared_successors(fixture.core.handle(EngineMsg::RelayFrame(
+            fixture.handle,
+            fixture.session.clone(),
+            event_frame(&fixture.sub_id, successor),
+        )));
+        assert_eq!(prepared.len(), 1);
+
+        let (neg_sub_id, attribution_send, _, _) = install_accepted_empty_neg_session(&mut fixture);
+        fixture
+            .core
+            .take_neg_session(&neg_sub_id)
+            .expect("the accepted NEG session becomes a missing-id backfill");
+        let backfill_filter = ConcreteFilter {
+            ids: Some(BTreeSet::from([late.id.to_hex()])),
+            ..ConcreteFilter::default()
+        };
+        let backfill_sub_id = nip77_role_sub_id(
+            &fixture.sub_id,
+            NIP77_MISSING_ROLE,
+            &backfill_filter,
+            fixture.core.next_nip77_incarnation,
+        );
+        fixture.core.next_nip77_incarnation = fixture.core.next_nip77_incarnation.wrapping_add(1);
+        fixture
+            .core
+            .pending_backfills_by_plan
+            .entry(fixture.sub_id.clone())
+            .or_default()
+            .insert(backfill_sub_id.clone());
+        fixture.core.pending_backfills.insert(
+            backfill_sub_id.clone(),
+            TemporaryReq::MissingIds {
+                plan_sub_id: fixture.sub_id.clone(),
+                neg_sub_id: neg_sub_id.clone(),
+                attribution_send,
+                completed_at: fixture.core.clock,
+            },
+        );
+        let (_, attempt_id) = fixture.core.record_observed_request_with_purpose(
+            RequestSend {
+                session: &fixture.session,
+                sub_id: &backfill_sub_id,
+                filter: &backfill_filter,
+                coverage_claims: BTreeSet::new(),
+                owner_demands: BTreeSet::new(),
+                replay: false,
+                event_failure_target: EventFailureTarget::Correlated(attribution_send),
+            },
+            RequestAttemptPurpose::Nip77MissingIds {
+                plan_sub_id: fixture.sub_id.clone(),
+            },
+        );
+        fixture
+            .core
+            .on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+                attempt_id,
+                handle: fixture.handle,
+            });
+
+        let effects = fixture.core.handle(EngineMsg::RelayFrames(vec![
+            (
+                fixture.handle,
+                fixture.session.clone(),
+                eose_frame(&backfill_sub_id),
+            ),
+            (
+                fixture.handle,
+                fixture.session.clone(),
+                event_frame(&fixture.sub_id, late),
+            ),
+            (
+                fixture.handle,
+                fixture.session.clone(),
+                RelayFrame::from_message(RelayMessage::Closed {
+                    subscription_id: Cow::Owned(SubscriptionId::new(wire_sub_id_string(
+                        &fixture.sub_id,
+                    ))),
+                    message: Cow::Borrowed("later terminal"),
+                }),
+            ),
+        ]));
+
+        assert!(effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::MaterializeReplaceableSuccessor(_))));
+        assert!(matches!(
+            fixture
+                .core
+                .semantic_successor_requests
+                .get(&(fixture.session.clone(), fixture.sub_id.clone())),
+            Some(SemanticSuccessorRequestState::TerminalDeferred {
+                in_flight: 1,
+                terminal: SemanticSourceTerminal::Eose,
+            })
         ));
     }
 

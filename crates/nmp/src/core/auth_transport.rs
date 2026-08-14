@@ -1813,10 +1813,10 @@ impl EngineCore {
                         self.abandon_sub(&resolved);
                         match request {
                             TemporaryReq::MissingIds {
+                                plan_sub_id,
                                 neg_sub_id,
                                 attribution_send,
                                 completed_at,
-                                ..
                             } => {
                                 let committed_coverage = self.credit_neg_coverage(
                                     &neg_sub_id,
@@ -1826,6 +1826,15 @@ impl EngineCore {
                                     &mut effects,
                                 );
                                 let terminal_demands = if committed_coverage.is_some() {
+                                    // The missing-id EOSE completes the
+                                    // retained NEG question. Close successor
+                                    // admission before this RelayFrames turn
+                                    // can reduce another EVENT for the same
+                                    // exact finite request.
+                                    self.defer_owned_semantic_source_terminal(
+                                        (session.clone(), plan_sub_id),
+                                        nmp_store::SemanticSourceTerminal::Eose,
+                                    );
                                     self.emit_request_settled(
                                         attribution_send,
                                         completed_at,
