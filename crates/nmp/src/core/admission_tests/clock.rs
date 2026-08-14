@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 
 use super::*;
-use crate::lane_fault_store::{FaultyLaneStore, LaneFaults};
 use nmp_store::{EventStore, RedbStore};
 use nostr::SubscriptionId;
 
@@ -41,11 +40,7 @@ fn nip77_liveness_is_anchored_to_admission_time_without_maintenance() {
     let relay = RelayUrl::parse("wss://admission-clock.example").unwrap();
     let old_time = Timestamp::from(100u64);
     let admission_time = Timestamp::from(10_000u64);
-    let faults = LaneFaults::default();
-    let store = FaultyLaneStore::new(
-        RedbStore::temporary().expect("temporary Redb store"),
-        faults.clone(),
-    );
+    let store = RedbStore::temporary().expect("temporary Redb store");
     let mut core = EngineCore::new(store, 20);
 
     core.handle(EngineMsg::Subscribe(query(
@@ -70,7 +65,7 @@ fn nip77_liveness_is_anchored_to_admission_time_without_maintenance() {
         core.next_deadline().expect("deadline read"),
         Some(admission_time + NEG_LIVENESS_DEADLINE_SECS)
     );
-    assert_eq!(faults.maintenance_sweeps(), 0);
+    assert_eq!(core.maintenance_turn_count(), 0);
 }
 
 /// Reconnect replay can enter the same live-first NIP-77 handoff without an
@@ -81,11 +76,7 @@ fn nip77_reconnect_liveness_is_anchored_to_connect_time_without_maintenance() {
     let relay = RelayUrl::parse("wss://reconnect-clock.example").unwrap();
     let old_time = Timestamp::from(100u64);
     let connect_time = Timestamp::from(10_000u64);
-    let faults = LaneFaults::default();
-    let store = FaultyLaneStore::new(
-        RedbStore::temporary().expect("temporary Redb store"),
-        faults.clone(),
-    );
+    let store = RedbStore::temporary().expect("temporary Redb store");
     let mut core = EngineCore::new(store, 20);
 
     core.handle(EngineMsg::Subscribe(query(
@@ -120,5 +111,5 @@ fn nip77_reconnect_liveness_is_anchored_to_connect_time_without_maintenance() {
         core.next_deadline().expect("deadline read"),
         Some(connect_time + NEG_LIVENESS_DEADLINE_SECS)
     );
-    assert_eq!(faults.maintenance_sweeps(), 0);
+    assert_eq!(core.maintenance_turn_count(), 0);
 }
