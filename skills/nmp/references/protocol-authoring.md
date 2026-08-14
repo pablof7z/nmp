@@ -4,13 +4,17 @@ Use this workflow only when the desired behavior is absent from the supported fa
 
 ## Establish whether this is current or target work
 
-Inspect the existing protocol crate before creating another module. Extend the established owner when the requested schema/context belongs there; for example, `nmp-nip29` owns NIP-29's vocabulary — the `h` context row, the relationships between the three relay-signed kinds, and the 9000-9022 composers — while the app-facing door that retains a relay scope and mints the write lives in the `nmp` facade, because a lower crate cannot mint a `WriteIntent` without importing the write plane.
+Inspect the existing protocol crate before creating another module. Extend the established owner when the requested schema/context belongs there; for example, `nmp-nip29` owns NIP-29's vocabulary — the `h` context row, the relationships between the three relay-signed kinds, and the composers for the moderation kinds 9000-9022 — while the app-facing door that retains a relay scope and mints the write lives in the `nmp` facade, because a lower crate cannot mint a `WriteIntent` without importing the write plane. `nmp-nip29` is engine-free by construction (`nostr` + `nmp-grammar`, enforced by `scripts/check-nip29-ownership.sh`): it returns validated semantic values and never imports, constructs, stores or returns a `WriteIntent`.
+
+Dependency direction decides where a door can live at all. `nmp-nip02` is classified a `protocol-service` in `scripts/dependency-direction-policy.json` — it sits ABOVE the facade and depends on `nmp` — so it cannot be a facade feature; an `nmp -> nmp-nip02` edge is a package cycle cargo refuses to resolve. `nmp-ffi` binds it directly instead. Check that classification before proposing a facade re-export.
 
 There is no ownership registry, and none is planned. The generic claim vocabulary and design-level module-registration composition the repository once carried were deleted in #859 (`nmp-ownership`, `nmp-audit`, and every protocol crate's `claims()` export), and #757/#758 — which would have wired them into routing — are closed NOT_PLANNED. A protocol crate owns a schema because it is the crate that defines, builds, and parses it, and because other crates consume its typed output rather than re-parsing the wire. Do not tell an author to declare claims, enroll in an audit, register modules at runtime, or pass registrations to `Engine`; none of those doors exist. A design proposing new governance must say what workspace-graph or API-boundary fact would enforce it, not propose a registry a future crate could decline to join.
 
 Check schema prerequisites too. There is no NIP-23 owner at all: no crate, no `Article` type, no decode, and `NMPUI` does not decode it either. A design that composes an article must add that owner from scratch, decode included, rather than pretending one ships.
 
-Rust protocol crates may be opt-in dependencies, but current Swift/Kotlin packaging bundles the projected NIP-29 helpers into the base facade. Do not describe native protocol packaging as opt-in until separate products/artifacts and parity tests exist.
+Rust protocol crates are opt-in Cargo features, and application-facing native packaging is compile-time selected too. One committed `.nmp.toml` names capabilities; `nmp prepare` materializes only the matching Swift/Kotlin sources and FFI feature set, so an unselected protocol name does not exist in that product. The repository's `Packages/NMP` and `Packages/NMPKotlin` trees are complete-surface qualification projects, not the package shape an application consumes. `NMPUI` and the desktop-JVM `:ui` child are qualification-only and are not in the prepared-product catalog.
+
+Protocol values take decoded types, never bech32. `nip29::on` takes `RelayUrl`s, `Group::publish` takes a `PublicKey`, `set_following` takes a `PublicKey`, and `ListedSubject.pubkey` is a `PublicKey`. `npub`/`nevent`/`naddr` belong at the app's own user boundary; a proposed module signature carrying one is wrong regardless of how convenient the caller finds it.
 
 ## Decide the owner
 
@@ -63,13 +67,27 @@ composer returns `WriteIntent`, then the app uses generic `publish`.
 
 When the door must retain state that the intent cannot carry, own the publish
 step instead and return the ordinary `ReceiptStream`. NIP-29 is that precedent:
-`nip29::on(hosts)` retains a nonempty host *set*, `group(id)` narrows it, and
-`Group::publish(&engine, author, builder)` appends the one `h` row, routes
-`Explicit` to every host in the scope, and hands back the same receipt stream
-every other write returns. Its intent mint is private on purpose — handing out a
-`WriteIntent` would buy nothing and would create a second write lifecycle to
-keep honest. C7 independently owns kind:9 and its `e` replies; mention and
-notification policy remain app-owned.
+`nip29::on(hosts)` retains a nonempty host *set*, `group(id)` narrows it to one
+group and `groups(ids)` to the several a single event belongs to, and
+`Group::publish(&engine, author, builder)` appends the `h` row(s) BEFORE the
+stamp/sign step — so context is inside the signed bytes — routes `Explicit` to
+every host in the scope, and hands back the same receipt stream every other
+write returns. Its intent mint is private on purpose, and the reason is
+concrete: a `WriteIntent` carries no derives at all — not `Clone`, not `Debug`,
+not `Serialize` — so an app holding one could not persist it across a restart,
+batch it, or inspect it. Handing one out would buy nothing and would create a
+second write lifecycle to keep honest.
+
+Note the arity lesson from `groups(ids)`: widening a retained context is a
+larger arity of the SAME door, not a second mechanism. `Group`'s write half is
+literally a one-element `Groups`. If a proposal answers "several" with a
+parallel type, a flag, or a per-call override, that is the shape to reject.
+
+C7 independently owns kind:9 and its `e` replies. Notification `p` policy
+remains app-owned. Mentions do NOT: the one tagging door's `with_content`
+emits a mention's rendered token and its `p` row from the same call, precisely
+so an app cannot write the two apart. A new module composing inline references
+uses that door rather than emitting rows beside hand-written content.
 
 ## Rust, FFI, and native projection
 
@@ -83,11 +101,18 @@ A consumer-facing semantic change is not complete at the Rust implementation alo
 6. Update known gaps and affected docs when required.
 7. Rebuild generated bindings and compile consumers from a clean-clone shape.
 
-Choose and document one native shape: protocol-owned immutable composition into
-the ordinary `WriteIntent`, followed by generic publication. If the operation
-derives current time, add an internal fixed-clock/test seam so
-Rust/FFI/Swift/Kotlin can prove byte parity without exposing app-selected
-timestamps.
+Pick ONE of the two shapes above for a given operation and document it; do not
+project both for symmetry. If the operation derives current time, add an
+internal fixed-clock/test seam so Rust/FFI/Swift/Kotlin can prove byte parity
+without exposing app-selected timestamps. Prefer naming no clock at all:
+composition that leaves `created_at` unset lets the engine stamp at acceptance,
+which is what every projected composer already does.
+
+Generic bounds do not cross UniFFI. Where direct Rust takes `&impl RootScope`,
+FFI and the wrappers take a closed enum over the shapes an app actually holds —
+`CommentTarget` is `.root(CommentRoot) | .row(Row)`. Design the closed enum
+from what a caller holds, not by mechanically enumerating the trait's
+implementors.
 
 If one native platform is deliberately deferred, document the gap precisely. Never imply parity from generated bindings compiling.
 
@@ -117,7 +142,8 @@ Stop and redesign if a proposal includes:
 - app callbacks invoked from routing or store admission;
 - early signing followed by tag mutation;
 - a module registry that performs startup work;
-- hidden polling/retry beside engine ownership; or
+- hidden polling/retry beside engine ownership;
+- a bech32 string in any module-owned parameter, field, or FFI argument; or
 - compatibility aliases retaining an unsafe path after the replacement lands.
 
 Use the [protocol-module plan asset](../assets/protocol-module-plan.md) before implementation and the [feature review asset](../assets/feature-review.md) for the completed review.
