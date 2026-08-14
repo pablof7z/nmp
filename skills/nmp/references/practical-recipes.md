@@ -76,14 +76,30 @@ let room = nip29::group(hosts, group_id)?.observe(&engine, [Metadata, Members])?
 engine.observe(group.read(contentFilter)?, None)?
 ```
 
-`group.read` takes one ordinary `LiveQuery` -- `Single` for one host, `Union`
-of complete per-host branches for more -- never a per-host list the app merges
-itself. The records observation folds the same per-host branches for you and
-delivers a complete `GroupSnapshot`; you never see a row delta.
+`group.read` takes one ordinary app-supplied `Filter` and RETURNS one
+`LiveQuery` -- `Single` for one host, `Union` of complete per-host branches for
+more -- never a per-host list the app merges itself. Hand that result straight
+to `engine.observe(query, None)`. The records observation folds the same
+per-host branches for you and delivers a complete `GroupSnapshot`; you never
+see a row delta.
 
-`group.read` REFUSES a selection naming 39000/39001/39002: those key on `d`,
-not `h`, so an `h`-scoped filter over them matches nothing forever. Read them
-through the records observation instead.
+`group.read` has two typed refusals, both about ownership:
+
+- a selection naming 39000/39001/39002
+  (`GroupContextError::RecordsAreNotContextScoped { kinds }`) -- those key on
+  `d`, not `h`, so an `h`-scoped filter over them
+  matches nothing forever and an app could not tell that apart from a group
+  whose relay published no roster. Read them through the records observation
+  instead.
+- a selection that already constrains `#h`
+  (`GroupContextError::CallerSuppliedContextConstraint`) -- the group id the
+  scope retained is the sole semantic source of that row, so a caller's own is
+  refused rather than silently overwritten. The same rule refuses a draft that
+  arrives carrying `h` on the write side.
+
+`GroupReadError::Declaration` is the separate refusal for a scope naming more
+hosts than one observation supports (`LiveQuery::MAX_BRANCHES`) -- a refusal,
+never a degraded answer.
 
 Across hosts, the lists UNION (every entry carries the hosts that named it)
 and the metadata does NOT -- one host's whole record wins on `created_at`,
@@ -128,9 +144,15 @@ Rules:
   row before signing, routes `Explicit` to every host in the scope, and
   returns the ordinary `ReceiptStream`. It emits no `previous`, and a draft
   that arrives carrying `h` or `previous` is a typed refusal. The nine named
-  9000-9022 operations (`join_request`, `add_user`, `edit_metadata`,
-  `create_group` with an optional parent for subgroups, and the rest) all
-  delegate to it.
+  operations all delegate to it: `add_users` (9000), `remove_users` (9001),
+  `edit_metadata` (9002), `delete_event` (9005), `create_group` (9007, with an
+  optional `parent` for subgroups — parenting is read off the create, not off
+  `edit_metadata`), `delete_group` (9008), `create_invite` (9009),
+  `join_request` (9021, publishable with no subscription at all, which is the
+  case it exists for), and `leave_request` (9022). Each takes `(&engine,
+  author: PublicKey, ...)`; `author` is an exact decoded key, never a reactive
+  selector, because a semantic group write freezes who is writing at
+  composition time.
 - For a write that must carry several `h` rows, `scope.groups(ids)?.publish(...)`
   is the multi-context door; `group(id)` is the single-context one.
 - The app never names a host on a write, never spells a routing value, and
@@ -168,11 +190,11 @@ Goal: accept a post offline, show honest delivery, and resume after process loss
 2. Construct an unsigned `WriteIntent` with deliberate durability and routing.
 3. Publish and persist `receipt.id` in app-owned durable state immediately.
 4. Observe write facts independently from the query that renders the canonical row. The row is not an optimistic overlay created from the draft. Before `SigningState::Signed { event_id }` the public row exposes no intent/receipt id, so delivery UI must remain receipt-centric; correlate to a feed row only after the signed event id exists.
-5. On restart, reopen the same NMP store, restore the same signer identity, then call `publishQueue()` to see what is outstanding and `reattachReceipt(id:)` / `reattachReceipt(correlation:)` to resume the ones you care about. Writes parked on a missing signer end only by `cancel` followed by `removePublishQueueEntry`.
+5. On restart, reopen the same NMP store, restore the same signer identity, then page `publishQueue(afterReceiptID:limit:)` to see what is outstanding and `reattachReceipt(id:)` / `reattachReceipt(correlation:)` to resume the ones you care about. `limit` is a required `UInt8` and `afterReceiptID` is the exclusive cursor, so enumeration is a loop, never one call. Writes parked on a missing signer end only by `cancel` followed by `removePublishQueueEntry`.
 6. Distinguish attached, not found, and retained-but-unreadable. Reattachment traverses the durable `WriteFact` history in finite pages before streaming onward; stream lag is the typed `FactStreamLagged`, not silent loss.
 7. Remove the app's receipt pointer only under explicit product retention policy after terminal evidence has been handled.
 
-`Ok` from `publish` is acceptance, so a returned id names a write actually in custody. Process loss before you persist the id is recoverable two ways: mint a `correlation` token and persist it *before* publishing, then reattach by token; or enumerate with `publishQueue()`. Do not blindly publish a replacement for an obligation you have not looked for first.
+`Ok` from `publish` is acceptance, so a returned id names a write actually in custody. Process loss before you persist the id is recoverable three ways: mint a `correlation` token and persist it *before* publishing, then reattach by token; page the whole queue with `publishQueue(afterReceiptID:limit:)`; or, when a rendered row is what you have, join from its event id with `publishQueue(forEventID:afterReceiptID:limit:)` (Kotlin: `publishQueueForEvent`). That join is paged rather than single-valued on purpose — more than one receipt can own identical event bytes, and choosing one would hide the rest. Do not blindly publish a replacement for an obligation you have not looked for first.
 
 ## Relay-debug sheet
 
