@@ -91,6 +91,9 @@ def find_repo(skill_dir: Path, explicit: Path | None) -> Path | None:
 
 
 def official_validator() -> Path | None:
+    # Deliberately workstation/agent-local, not a CI dependency (#1310): CI
+    # runs this validator with --skip-official and gates on the currency
+    # check (validate_sources) instead. See scripts/check-skill-currency.sh.
     candidates: list[Path] = []
     if os.environ.get("CODEX_HOME"):
         candidates.append(
@@ -226,6 +229,17 @@ def validate_sources(
     if exists.returncode:
         fail(errors, f"verified revision is unavailable: {revision}")
         return
+    ancestor = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", revision, "HEAD"],
+        capture_output=True,
+        check=False,
+    )
+    if ancestor.returncode == 1:
+        fail(errors, f"verified revision is not an ancestor of HEAD: {revision}")
+        return
+    if ancestor.returncode != 0:
+        fail(errors, f"could not determine whether verified revision is an ancestor of HEAD: {revision}")
+        return
     drift = subprocess.run(
         ["git", "-C", str(repo), "diff", "--quiet", revision, "--", *checked_sources],
         capture_output=True,
@@ -256,7 +270,15 @@ def main() -> int:
     parser.add_argument("skill_dir", nargs="?", default=".")
     parser.add_argument("--repo-root", type=Path)
     parser.add_argument("--test-skip-sources", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--test-skip-official", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--skip-official",
+        action="store_true",
+        help=(
+            "skip the official skill-creator packaging validator "
+            "(~/.codex/skills/.system/skill-creator), which is a "
+            "workstation/agent-local tool with no CI equivalent"
+        ),
+    )
     args = parser.parse_args()
 
     skill_dir = Path(args.skill_dir).resolve()
@@ -289,8 +311,8 @@ def main() -> int:
     repo = find_repo(skill_dir, args.repo_root)
     validate_sources(skill_dir, markdown_files, repo, args.test_skip_sources, errors)
 
-    if args.test_skip_official:
-        print("warning: official validation explicitly bypassed for tests", file=sys.stderr)
+    if args.skip_official:
+        print("warning: official skill-creator validation skipped (--skip-official)", file=sys.stderr)
     else:
         validator = official_validator()
         if validator is None:
