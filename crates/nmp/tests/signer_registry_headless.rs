@@ -4,7 +4,7 @@
 //! a write resolves the exact signer frozen at that boundary; later read-root
 //! changes cannot redirect it. Deliberately
 //! offline (an empty `FixtureRoutingFacts`, `RedbStore` pre-seeded directly
-//! via `EventStore::insert` rather than a live relay round trip): the read
+//! via `RedbStore::insert` rather than a live relay round trip): the read
 //! side's first batch is computed purely from the local store
 //! (`EngineCore::on_subscribe`, zero I/O -- the same fact
 //! `integration_capstone.rs`'s `watermark_cold_start_offline` documents), and
@@ -32,7 +32,7 @@ use nmp_signer::{
     SignerError, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,
     SigningCapability,
 };
-use nmp_store::{EventStore, RedbStore, RelayObserved};
+use nmp_store::{RedbStore, RelayObserved};
 use nostr::{EventId, Keys, Kind, PublicKey, RelayUrl, Timestamp, UnsignedEvent};
 
 /// #765: `LocalKeySigner` now owns its scalar in one canonical zeroizing

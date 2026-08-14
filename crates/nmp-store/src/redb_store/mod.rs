@@ -1,4 +1,4 @@
-//! [`RedbStore`] — the persistent, `redb`-backed `EventStore` (M3 step A1).
+//! [`RedbStore`] — NMP's persistent `redb`-backed store (M3 step A1).
 //!
 //! Canonical events use an immutable portable binary note value addressed by
 //! a compact monotonic `u64` key. Raw event ids map to that key, optional local
@@ -143,8 +143,27 @@ pub(crate) mod publish_queue_ops;
 mod semantic_edit_ops;
 mod write_ops;
 
-impl EventStore for RedbStore {
-    fn insert(
+impl RedbStore {
+    /// Insert an event observed via `from`. An already-expired event (NIP-40,
+    /// judged against `from.at`) is `Refused` before anything else runs —
+    /// never stored, nothing to retract. Otherwise dedup-by-id FIRST — on a
+    /// hit, merge `from` into the existing row's provenance and return
+    /// `Duplicate{provenance_grew}` with NO index churn. Next, a tombstone
+    /// check (retraction-and-negative-deltas.md §2): an id (or address, at
+    /// or before its permanently-recorded deletion ceiling) tombstoned by an
+    /// earlier verified kind:5 is `Refused(Tombstoned)`, never stored.
+    /// Otherwise run replaceable/addressable supersession (unchanged M1
+    /// semantics). A kind:5 event is stored like any other regular event
+    /// and, in the same call, drops every currently-held target it names
+    /// whose author matches its own (NIP-09 author-only, enforced
+    /// structurally) — see `Kind5Processed`.
+    ///
+    /// Fallible (issue #122): the ingest door runs on every relay EVENT
+    /// frame, so a realistic persistence failure (disk full, I/O error) must
+    /// return `Err(PersistenceError)` rather than panic the embedding app.
+    /// Redb errors and store-owned decode/invariant failures propagate through
+    /// this result rather than panicking the embedding app.
+    pub fn insert(
         &mut self,
         event: Event,
         from: RelayObserved,
@@ -152,18 +171,66 @@ impl EventStore for RedbStore {
         event_ops::insert(self, event, from)
     }
 
-    fn insert_batch(
+    /// Insert a relay-delivery batch in input order in one Redb transaction,
+    /// preserving the exact per-event governed semantics and outcomes of
+    /// repeated [`Self::insert`] calls.
+    pub fn insert_batch(
         &mut self,
         events: Vec<(Event, RelayObserved)>,
     ) -> Result<Vec<InsertOutcome>, PersistenceError> {
         event_ops::insert_batch(self, events)
     }
 
-    fn query(&self, filter: &Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
+    /// Query current winners only (never a superseded/stale event), matched
+    /// via `nostr::Filter::match_event`, each with its provenance attached.
+    /// Fallible for the same reason as [`Self::insert`] (issue #122):
+    /// a read-path I/O error surfaces as `Err` instead of panicking.
+    ///
+    /// `filter.limit` is NOT consulted by this LOCAL read path (#124): every
+    /// currently-matching row is returned, in no particular order, regardless
+    /// of `limit`. This is DELIBERATE, not
+    /// an oversight — honoring `limit` locally requires a `created_at`-desc
+    /// ordering + truncation, and choosing that ordering is an owner-
+    /// reserved decision (issue #9's app-defined-sort-vs-closed-`OrderKey`
+    /// fork, deferred to the Collection Tier-A gate), not something to
+    /// settle as a side effect of this fix. Contrast with the WIRE path:
+    /// `nmp_grammar::ConcreteFilter::to_nostr` DOES lower `limit` into this
+    /// very `filter` before it ever reaches a relay, so a well-behaved
+    /// relay caps what it SENDS you — a genuine, honored guarantee. But
+    /// that guarantee governs the wire only; it says nothing about what a
+    /// LATER local-only call to THIS method returns once the cache holds
+    /// more than `limit` matching rows (reconnect replay, multiple relays
+    /// each independently capped, etc.) — this method's own answer is
+    /// uncapped regardless. `store_contract.rs` checks this exact contract;
+    /// when #9 resolves, whoever implements
+    /// ordered/truncated local reads updates that test, not just adds one.
+    ///
+    /// The app never sees this uncapped answer directly, though: the handle
+    /// PROJECTION (`EngineCore::rows_and_evidence_for`, #124 via #139) caps the
+    /// app-facing row set to the `limit` most recent by `created_at`
+    /// (`EventId`-tiebroken). Redb uses the separate
+    /// [`Self::query_newest`] door to pre-bound each root atom before
+    /// that final merged cap. That is NIP-01 limit-recency SELECTION — WHICH
+    /// rows survive — not a display ordering: the app receives an unordered,
+    /// `EventId`-keyed `RowDelta` stream and sorts it itself, so #9's
+    /// display-sort fork stays open and the two compose. This store door
+    /// deliberately stays uncapped so unlimited reactive recompute and
+    /// negentropy still see every match. A `Derived` node carrying an explicit
+    /// limit uses [`Self::query_newest`] instead: its projection is
+    /// defined over the selected newest `N`, not over the complete history.
+    pub fn query(&self, filter: &Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
         event_ops::query(self, filter)
     }
 
-    fn query_newest(
+    /// Return at most `limit` current matches in NIP-01 newest-first
+    /// selection order: `created_at` descending, then event id ascending.
+    ///
+    /// This is a distinct door from [`Self::query`], whose deliberately
+    /// complete result is required by unlimited reactive recompute and
+    /// negentropy. Handle root projections and explicitly limited `Derived`
+    /// nodes use this bounded door. Redb uses an ordered index scan that stops
+    /// as soon as `limit` accepted rows have been found.
+    pub fn query_newest(
         &self,
         filter: &Filter,
         limit: usize,
@@ -171,7 +238,12 @@ impl EventStore for RedbStore {
         event_ops::query_newest(self, filter, limit)
     }
 
-    fn query_newest_ids(
+    /// Return only the canonical ids from [`Self::query_newest`].
+    ///
+    /// Consumers that need selection identity but not event payloads use this
+    /// door so Redb can project ids from ordered indexes without allocating
+    /// owned content.
+    pub fn query_newest_ids(
         &self,
         filter: &Filter,
         limit: usize,
@@ -179,7 +251,17 @@ impl EventStore for RedbStore {
         event_ops::query_newest_ids(self, filter, limit)
     }
 
-    fn query_newest_under_pin(
+    /// Return the first `limit` canonical newest rows visible under a pin on
+    /// `pinned` — [`Provenance::visible_under_pin`] is the one rule that
+    /// decides which those are.
+    ///
+    /// This is the store-side projection required by a Strict pinned cache:
+    /// the bound applies *after* visibility, never before it. Filtering an
+    /// already-limited agnostic page can under-fill the result even when
+    /// older visible rows exist. Redb tests visibility while walking its
+    /// ordered index and stops only after `limit` visible rows have been
+    /// accepted.
+    pub fn query_newest_under_pin(
         &self,
         filter: &Filter,
         pinned: &BTreeSet<RelayUrl>,
@@ -188,7 +270,16 @@ impl EventStore for RedbStore {
         event_ops::query_newest_under_pin(self, filter, pinned, limit)
     }
 
-    fn query_newest_before(
+    /// Return at most `limit` current matches strictly after `before` in the
+    /// canonical newest-first order used by [`Self::query_newest`].
+    ///
+    /// The exact exclusive predicate is:
+    /// `created_at < before.created_at ||
+    /// (created_at == before.created_at && id > before.event_id)`.
+    /// This predicate intersects the filter's ordinary inclusive time window;
+    /// it never rewrites that window or turns a cursor into relay acquisition
+    /// authority. Redb implements it with an exact ordered-index range.
+    pub fn query_newest_before(
         &self,
         filter: &Filter,
         before: EventCursor,
@@ -197,7 +288,10 @@ impl EventStore for RedbStore {
         event_ops::query_newest_before(self, filter, before, limit)
     }
 
-    fn query_newest_before_under_pin(
+    /// Pinned counterpart of [`Self::query_newest_before`]. The cursor
+    /// remains exact and exclusive, while `limit` counts only rows visible
+    /// under a pin on `pinned` ([`Provenance::visible_under_pin`]).
+    pub fn query_newest_before_under_pin(
         &self,
         filter: &Filter,
         pinned: &BTreeSet<RelayUrl>,
@@ -207,7 +301,18 @@ impl EventStore for RedbStore {
         event_ops::query_newest_before_under_pin(self, filter, pinned, before, limit)
     }
 
-    fn query_newest_before_any(
+    /// Return one canonical newest-first page from the UNION of `filters`,
+    /// strictly after `before` in that order.
+    ///
+    /// A row matching more than one filter appears once. The global `limit`
+    /// applies only after that de-duplication and merge, so callers can repair
+    /// one bounded projection with one logical store read even when its
+    /// resolved selection has multiple concrete roots. Redb evaluates each
+    /// root with an ordered bounded scan: no row ranked
+    /// below the first `limit` matches of its own root can enter the global
+    /// first `limit` of the union.
+    /// This remains selection-only; callers own presentation ordering.
+    pub fn query_newest_before_any(
         &self,
         filters: &[Filter],
         before: EventCursor,
@@ -216,7 +321,10 @@ impl EventStore for RedbStore {
         event_ops::query_newest_before_any(self, filters, before, limit)
     }
 
-    fn query_newest_before_any_under_pin(
+    /// Pinned counterpart of [`Self::query_newest_before_any`]. The
+    /// page bound counts only de-duplicated union rows visible under a pin
+    /// on `pinned` ([`Provenance::visible_under_pin`]).
+    pub fn query_newest_before_any_under_pin(
         &self,
         filters: &[Filter],
         pinned: &BTreeSet<RelayUrl>,
@@ -226,7 +334,12 @@ impl EventStore for RedbStore {
         event_ops::query_newest_before_any_under_pin(self, filters, pinned, before, limit)
     }
 
-    fn remove(
+    /// Remove `id` from the store — clearing both the id index and, if `id`
+    /// is the current replaceable/addressable winner for its address, the
+    /// address index too — and hand back the removed row whole, or `None`
+    /// if `id` was not held. Engine-facing only (kind:5 processing,
+    /// optimistic-write rejection); never a general delete API.
+    pub fn remove(
         &mut self,
         id: EventId,
         _reason: RetractReason,
@@ -234,22 +347,55 @@ impl EventStore for RedbStore {
         event_ops::remove(self, id, _reason)
     }
 
-    fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
+    /// Drain every row whose NIP-40 `expiration` is `<= now`, removing each
+    /// one (through the same [`Self::remove`] door) and returning the
+    /// full rows. Index-backed (retraction-and-negative-deltas.md §3.1): a
+    /// persistent `(expiry_ts -> {id})` index is maintained on every insert
+    /// and every removal, so this drains in `O(log n + due)`, not a full
+    /// scan.
+    pub fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
         event_ops::expire_due(self, now)
     }
 
-    fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
+    /// The earliest NIP-40 `expiration` deadline among currently stored
+    /// rows, or `Ok(None)` if nothing carries one. Index-backed: peeks the
+    /// minimum of the same persistent expiration index `expire_due` drains.
+    ///
+    /// Fallible for the same reason every other read door is (#122/#763): a
+    /// durable read can fail for reasons that are not a bug in the caller —
+    /// a disk error, a latched handle, a poisoned lock — and on an embedded
+    /// host a panic here takes the whole application down. `Ok(None)` is
+    /// honest absence and NOTHING else; a read that could not answer is
+    /// `Err`.
+    pub fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
         event_ops::next_expiration(self)
     }
 
-    fn record_coverage(
+    /// Atomically record every coverage claim earned by one completed
+    /// request. Each tuple is `(atom, relay, proven interval)`. The coverage
+    /// identity is the full [`ContextualAtom`], never a bare
+    /// `ConcreteFilter`; the caller that owns request attribution supplies
+    /// the complete batch. A successful return makes every merged claim
+    /// visible, while an error may make none or the entire batch visible but
+    /// never a prefix. Merge-only: no public lowering path exists outside
+    /// `gc`.
+    pub fn record_coverage(
         &mut self,
         claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
         event_ops::record_coverage(self, claims)
     }
 
-    fn get_coverage(
+    /// The proven interval for `key` at `relay`, or `Ok(None)` if no row
+    /// exists. `Ok(None)` means this relay has no persisted interval for
+    /// this key; it makes no wider claim.
+    ///
+    /// Fallible for the same reason [`Self::next_expiration`] is
+    /// (#122/#763). The distinction is load-bearing here rather than merely
+    /// tidy: "no coverage is proven" drives a refetch, while "the store
+    /// could not be read" must not be answered as absent coverage, or a
+    /// corrupt/unreadable watermark reads as an honest cache miss.
+    pub fn get_coverage(
         &self,
         key: CoverageKey,
         relay: &RelayUrl,
@@ -257,10 +403,41 @@ impl EventStore for RedbStore {
         event_ops::get_coverage(self, key, relay)
     }
 
-    fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
+    /// Apply an EXPLICIT durable-retention policy by running claim-based GC
+    /// (ruling §5): evicts every regular
+    /// (non-replaceable, non-addressable) event matched by NO claim in
+    /// `claims`. A claimed event, and every replaceable/addressable current
+    /// winner, are ALWAYS retained — winners are never GC candidates at all,
+    /// regardless of `claims`. When an evicted event falls inside a coverage
+    /// row's proven interval and that row's retained shape matches it, the
+    /// row is shrunk (or deleted, if the shrink empties it) in the same step
+    /// — a watermark must never claim coverage of data no longer held.
+    ///
+    /// GC exclusion for open intents (Fable checkpoint R5): a row with
+    /// local provenance still in `SigState::Pending` is NEVER a GC
+    /// candidate, regardless of `claims` — structurally the same
+    /// unconditional retention already given to replaceable/addressable
+    /// winners, so an unsigned pending row can never be evicted before it
+    /// ever signs. Once `promote_signed` flips it to `Signed`, it is an
+    /// ordinary event again, GC-able like any other under `claims`.
+    ///
+    /// This is never an ordinary startup, query, shutdown, or implicit
+    /// memory-pressure maintenance step. The production engine does not call
+    /// this door: verified durable rows are retained by default. A host that
+    /// deliberately adopts a quota, disk-pressure, or user-selected retention
+    /// policy must make that policy inspectable and invoke this destructive
+    /// door explicitly. Query/result/delivery bounds limit resident work; they
+    /// are not permission to call `gc` or delete durable history.
+    ///
+    /// This contract does not promise infinite disk. It makes the transition
+    /// from retained history to policy-evicted history explicit, reportable,
+    /// and coverage-safe.
+    pub fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
         event_ops::gc(self, claims)
     }
+}
 
+impl EventStore for RedbStore {
     fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
         write_ops::accept_write(self, accept)
     }

@@ -1,6 +1,6 @@
 //! [`Engine`] — the graph engine, atom refcounting, identity register, and
-//! metrics (M1 plan §2.3, §3, §4). This is the only module that touches the
-//! `EventStore`; `graph.rs` holds the pure graph data + read-only algorithm,
+//! metrics (M1 plan §2.3, §3, §4). This is the only module that borrows the
+//! `RedbStore`; `graph.rs` holds the pure graph data + read-only algorithm,
 //! `eval.rs` holds pure leaf computations.
 
 use std::cell::RefCell;
@@ -752,7 +752,7 @@ impl Engine {
     /// (`testkit::Harness::deliver`, which has no relay concept either), so
     /// it attributes every ingested event to a single fixture relay identity
     /// at the event's own `created_at` — sufficient to satisfy the new
-    /// `EventStore::insert` door without inventing resolver-owned routing.
+    /// `RedbStore::insert` door without inventing resolver-owned routing.
     /// `EngineCore` (M3 step B), which DOES know the real relay a frame
     /// arrived on, calls [`Self::ingest_observed`] directly instead.
     fn ingest_fixture_observation(at: nostr::Timestamp) -> RelayObserved {
@@ -1296,7 +1296,7 @@ impl Engine {
     /// optimistic-write rejection) — feeds `removed` into the SAME `react`
     /// `ingest_observed` uses, on the removed side only. The caller (M3's
     /// `EngineCore`) is responsible for having already removed these rows
-    /// from the store itself (`EventStore::expire_due`/`remove`) before
+    /// from the store itself (`RedbStore::expire_due`/`remove`) before
     /// calling this: `retract` only re-evaluates the graph, it never
     /// touches the store door.
     pub fn retract(

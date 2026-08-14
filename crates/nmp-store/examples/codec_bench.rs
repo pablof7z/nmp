@@ -7,7 +7,7 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use nmp_store::{EventStore, RedbStore, RelayObserved};
+use nmp_store::{RedbStore, RelayObserved};
 use nostr::{Event, JsonUtil, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 

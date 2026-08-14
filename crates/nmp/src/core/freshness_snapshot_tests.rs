@@ -4,7 +4,7 @@ use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness, LiveQuery,
     SourceAuthority,
 };
-use nmp_store::{CoverageInterval, EventStore, RedbStore};
+use nmp_store::{CoverageInterval, RedbStore};
 use nostr::{Keys, RelayUrl, Timestamp};
 
 use super::{Effect, EngineCore, EngineMsg, SourceStatus};

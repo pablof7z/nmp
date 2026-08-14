@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use nmp_grammar::{Binding, Demand, Filter, Freshness, LiveQuery};
-use nmp_store::{EventStore, RedbStore, RelayObserved};
+use nmp_store::{RedbStore, RelayObserved};
 use nostr::{Keys, Kind, RelayUrl, Timestamp};
 
 use super::*;

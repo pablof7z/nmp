@@ -317,7 +317,7 @@ impl<'a> GcVictimIndex<'a> {
 ///
 /// `gc()` may evict only events matched by NO claim; a claimed event, and
 /// every replaceable/addressable current winner (never a GC candidate at
-/// all — see [`crate::EventStore::gc`]), are retained.
+/// all — see [`crate::RedbStore::gc`]), are retained.
 #[derive(Debug, Clone, Default)]
 pub struct GcRetentionSet {
     claims: Vec<ConcreteFilter>,
@@ -339,7 +339,7 @@ impl GcRetentionSet {
     }
 }
 
-/// The result of a [`crate::EventStore::gc`] call.
+/// The result of a [`crate::RedbStore::gc`] call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GcReport {
     /// Regular (non-replaceable, non-addressable) events evicted because no

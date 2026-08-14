@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey};
 use nmp_router::{RelayPlan, SubId, WireReq};
-use nmp_store::{coverage_claim_atoms, coverage_key, EventStore, PersistenceError, RedbStore};
+use nmp_store::{coverage_claim_atoms, coverage_key, PersistenceError, RedbStore};
 use nostr::{RelayUrl, Timestamp};
 
 /// Compact acquisition evidence for one query snapshot, scoped to THIS

@@ -2494,7 +2494,7 @@ pub struct EngineCore {
     /// not require reopen remain observable but never trigger blind retry.
     ///
     /// Originally this was a permanent read-only latch (issue #122): set once the first time an
-    /// ingest/read [`EventStore`] door returns [`PersistenceError`] (disk
+    /// ingest/read [`RedbStore`] door returns [`PersistenceError`] (disk
     /// full, I/O error). The reducer NEVER panics on such a failure — it
     /// records the error message here, skips the affected reactive step
     /// (leaving already-delivered state untouched rather than fabricating a

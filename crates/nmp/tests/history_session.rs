@@ -7,7 +7,7 @@ use nmp::mechanism::core::{
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter};
 use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
-use nmp_store::{EventStore, RedbStore, RelayObserved};
+use nmp_store::{RedbStore, RelayObserved};
 use nostr::{Event, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
 
 fn signed(keys: &Keys, created_at: u64, content: &str) -> Event {
