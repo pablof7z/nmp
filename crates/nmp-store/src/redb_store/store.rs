@@ -44,9 +44,9 @@ use super::{
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
 use std::sync::Mutex;
 
-/// The one complete `EventStore` implementation. One Redb database, MVCC,
-/// ACID. Persistent stores open a caller-selected path; isolated engines and
-/// tests use [`Self::temporary`] and keep the same transactions and indexes.
+/// NMP's complete durable-store implementation. One Redb database, MVCC, ACID.
+/// Persistent stores open a caller-selected path; isolated engines and tests
+/// use [`Self::temporary`] and keep the same transactions and indexes.
 #[cfg(test)]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

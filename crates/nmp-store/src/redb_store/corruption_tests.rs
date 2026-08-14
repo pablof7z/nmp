@@ -1,5 +1,5 @@
 //! #790 falsifiers: a persisted row that does not decode surfaces as a
-//! typed [`PersistenceError`] through its owning `EventStore` door, and the
+//! typed [`PersistenceError`] through its owning typed store door, and the
 //! process stays alive.
 //!
 //! Each test corrupts exactly ONE class of persisted row through a raw

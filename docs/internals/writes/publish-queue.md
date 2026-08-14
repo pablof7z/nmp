@@ -179,7 +179,7 @@ distribution.
 
 ## Authority and transaction boundaries
 
-`EventStore` remains the only policy-independent door. The engine decides
+The concrete store remains the only policy-independent durable door. The engine decides
 routes, retry causes, eligibility, and terminal outcomes; the store atomically
 records the selected fact. In particular:
 
