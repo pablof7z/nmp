@@ -62,7 +62,7 @@ NMP may restore canonical rows, provenance, source evidence, durable write lanes
 |---|---|---|
 | Attached | retained facts are readable; carries the resolved receipt id and a replay cursor that is `None` once caught up to live work | resume observation and fold facts. When you reattached by correlation token, record the returned id — it is the only place you can learn it |
 | Not found | no retained receipt at that id or token | show unknown/not retained; do not claim failure or success |
-| Retained but unreadable | retained state exists but the durable receipt or attempt evidence cannot be decoded | surface recovery failure and preserve evidence for diagnosis. The obligation is untouched and nothing published, so never re-author on this |
+| Retained but unreadable | retained state exists but the durable receipt or attempt evidence cannot be decoded | surface recovery failure and preserve evidence for diagnosis. Publication and terminal outcome are unknown, so never re-author blindly |
 
 A refusal before acceptance yields a typed error and no id at all, so every id you hold names a write actually in custody. Fact-stream closure is not an ACK. Reattachment traverses the durable `WriteFact` history in finite pages before streaming onward, and lag is the typed `FactStreamLagged` rather than silent loss. `RelayWaiting::BackingOff` is the engine-owned scheduler's evidence, not a same-obligation retry door — app-controlled retry is the one thing on this list that genuinely does not exist. Enumeration (`publishQueue`), write cancellation (`cancel`), and live-stream detachment (Swift `ReceiptStatus.cancel()`, Kotlin collection-scope teardown) all do.
 

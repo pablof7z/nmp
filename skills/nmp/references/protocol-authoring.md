@@ -12,7 +12,7 @@ There is no ownership registry, and none is planned. The generic claim vocabular
 
 Check schema prerequisites too. There is no NIP-23 owner at all: no crate, no `Article` type, no decode, and `NMPUI` does not decode it either. A design that composes an article must add that owner from scratch, decode included, rather than pretending one ships.
 
-Rust protocol crates may be opt-in Cargo features, but native packaging is not. SwiftPM ships three products — `NMP`, `NMPContent`, `NMPUI` — and the projected NIP-22/NIP-29/NIP-51/Blossom/tagging helpers all live in the base `NMP` target. Kotlin's root project is the SDK, with only the desktop-JVM Compose library split out as `:ui`. Do not describe native protocol packaging as opt-in until separate products/artifacts and parity tests exist.
+Rust protocol crates are opt-in Cargo features, and application-facing native packaging is compile-time selected too. One committed `.nmp.toml` names capabilities; `nmp prepare` materializes only the matching Swift/Kotlin sources and FFI feature set, so an unselected protocol name does not exist in that product. The repository's `Packages/NMP` and `Packages/NMPKotlin` trees are complete-surface qualification projects, not the package shape an application consumes. `NMPUI` and the desktop-JVM `:ui` child are qualification-only and are not in the prepared-product catalog.
 
 Protocol values take decoded types, never bech32. `nip29::on` takes `RelayUrl`s, `Group::publish` takes a `PublicKey`, `set_following` takes a `PublicKey`, and `ListedSubject.pubkey` is a `PublicKey`. `npub`/`nevent`/`naddr` belong at the app's own user boundary; a proposed module signature carrying one is wrong regardless of how convenient the caller finds it.
 
