@@ -152,9 +152,11 @@ if grep -nE 'pub struct .*Query|pub struct .*Intent|struct .*Observation' "${GRO
 fi
 
 # 7. The removed component and feature family must stay deleted. This scans
-#    build/product sources rather than prose that may discuss the NIP itself.
-tombstones=$(git ls-files -- Cargo.toml crates Packages | xargs grep -nE \
-  'nmp-nip51|nmp_nip51|nmp::nip51|feature = "nip51"|^[[:space:]]*nip51[[:space:]]*=|NIP51\\.(swift|kt)' || true)
+#    build/product sources plus the native capability catalogue and consumer
+#    skill. The lowercase `nip51` token is a deleted feature/component key;
+#    truthful prose may still name the NIP-51 wire definition.
+tombstones=$(git ls-files -- Cargo.toml crates Packages native skills/nmp | xargs grep -nE \
+  'nmp-nip51|nmp_nip51|nmp::nip51|feature = "nip51"|(^|[^A-Za-z0-9_-])nip51([^A-Za-z0-9_-]|$)|NIP51\\.(swift|kt)' || true)
 if [[ -n $tombstones ]]; then
   printf '%s\n' "$tombstones"
   fail "deleted NIP-51 component or feature family reappeared"

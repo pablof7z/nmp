@@ -1,6 +1,6 @@
 ---
 name: nmp
-description: Build, review, debug, test, or plan applications and protocol modules that use the Nostr Multi-Platform (NMP) Rust, Swift, or Kotlin public facade. Use for live queries, write intents and receipts, identity/signers, diagnostics, content parsing and NMPUI, the projected protocol doors (NIP-02, NIP-18, NIP-22, NIP-25, NIP-29, NIP-51, NIP-65, Blossom, NIP-C7), lifecycle and recovery, practical feature recipes, protocol extension, and consumer-facing API verification. Do not use this as authority for unverified internals or future VISION contracts.
+description: Build, review, debug, test, or plan applications and protocol modules that use the Nostr Multi-Platform (NMP) Rust, Swift, or Kotlin public facade. Use for live queries, write intents and receipts, identity/signers, diagnostics, content parsing and NMPUI, the projected protocol doors (NIP-02, NIP-18, NIP-22, NIP-25, NIP-29 including NIP-51 simple-groups lists, NIP-65, Blossom, NIP-C7), lifecycle and recovery, practical feature recipes, protocol extension, and consumer-facing API verification. Do not use this as authority for unverified internals or future VISION contracts.
 ---
 
 # NMP application development
@@ -9,7 +9,7 @@ Use NMP as an embeddable engine with two app-facing nouns: a live query and a wr
 
 ## Establish current truth first
 
-Verified-Revision: `24fb8eba933aeda45b2249f1afd1c6534158fc51`
+Verified-Revision: `ba7c4da02e929f2b0fc93347a568a18662baf503`
 
 This is the audited revision of the declared product/source authorities, not the skill package's own commit. A newer checkout is not automatically stale when only skill files changed; the bundled validator proves whether any declared source drifted.
 
@@ -29,7 +29,7 @@ If asked to modify the NMP repository, follow its `AGENTS.md`: capture an issue 
 - Restart, sign-out, reset, reconnect, teardown, or resource pressure: [Lifecycle and recovery](references/lifecycle-and-recovery.md)
 - Relay proof screens, acquisition state, or debugging: [Diagnostics](references/diagnostics.md)
 - Rust/Swift/Kotlin setup, call maps, and test commands: [Platforms](references/platforms.md)
-- Content parsing, NMPUI, or any projected protocol door (NIP-02, NIP-18, NIP-22, NIP-25, NIP-29, NIP-51, NIP-65, Blossom, NIP-C7): [Content and protocols](references/content-and-protocols.md)
+- Content parsing, NMPUI, or any projected protocol door (NIP-02, NIP-18, NIP-22, NIP-25, NIP-29 including NIP-51 simple-groups lists, NIP-65, Blossom, NIP-C7): [Content and protocols](references/content-and-protocols.md)
 - Adding or reviewing a protocol module or cross-platform API: [Protocol authoring](references/protocol-authoring.md)
 - Test strategy, falsifiers, restart proof, or live smoke verification: [Verification](references/verification.md)
 - Exact implementation authority: [Source map](references/source-map.md)
