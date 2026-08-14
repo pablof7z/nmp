@@ -11,6 +11,19 @@ pub(crate) struct PreparedReplaceableMaterialization {
     pub(crate) continuation: ReplaceableMaterializationContinuation,
 }
 
+pub struct PreparedReplaceableSuccessor {
+    pub(crate) call: ReplaceableMaterializationCall,
+    pub(crate) continuation: ReplaceableSuccessorContinuation,
+}
+
+impl std::fmt::Debug for PreparedReplaceableSuccessor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedReplaceableSuccessor")
+            .finish_non_exhaustive()
+    }
+}
+
 pub(crate) struct ReplaceableMaterializationCall {
     materializer: Arc<dyn crate::ReplaceableMaterializer>,
     source: UnsignedEvent,
@@ -40,8 +53,22 @@ pub(crate) struct ReplaceableMaterializationContinuation {
     fence: ReplaceableMaterializationFence,
 }
 
+pub(crate) struct ReplaceableSuccessorContinuation {
+    pub(super) instance: [u8; 16],
+    pub(super) program: ReplayProgramId,
+    pub(super) format: ReplayFormatId,
+    pub(super) materializer: Arc<dyn crate::ReplaceableMaterializer>,
+    pub(super) coordinate: Coordinate,
+    pub(super) fence: ReplaceableMaterializationFence,
+    pub(super) observation: AttributedRelayObservation,
+    pub(super) source_request: Option<(
+        super::super::semantic_sources::SemanticSourceRequestKey,
+        super::super::semantic_sources::OwnedSemanticSourceRequest,
+    )>,
+}
+
 #[derive(Clone, PartialEq, Eq)]
-struct ReplaceableMaterializationFence {
+pub(super) struct ReplaceableMaterializationFence {
     source_revision: Option<nmp_store::SourceRevision>,
     program_digest: Option<nmp_store::SemanticProgramDigest>,
     current_materialization: Option<nmp_store::MaterializationId>,
@@ -49,6 +76,20 @@ struct ReplaceableMaterializationFence {
 }
 
 impl ReplaceableMaterializationCall {
+    pub(super) fn new(
+        materializer: Arc<dyn crate::ReplaceableMaterializer>,
+        source: UnsignedEvent,
+        current: UnsignedEvent,
+        operations: Vec<Vec<u8>>,
+    ) -> Self {
+        Self {
+            materializer,
+            source,
+            current,
+            operations,
+        }
+    }
+
     pub(crate) fn execute(self) -> ReplaceableMaterializationOutcome {
         let operations = self
             .operations
@@ -310,7 +351,7 @@ impl EngineCore {
         }))
     }
 
-    fn replaceable_materialization_fence(
+    pub(super) fn replaceable_materialization_fence(
         snapshot: Option<&nmp_store::RecoveredSemanticResource>,
     ) -> ReplaceableMaterializationFence {
         ReplaceableMaterializationFence {

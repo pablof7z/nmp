@@ -69,9 +69,12 @@ mod semantic_sources;
 #[cfg(test)]
 mod transport_tests;
 mod write;
+#[doc(hidden)]
+pub use write::PreparedReplaceableSuccessor;
 pub(crate) use write::{
     PreparedReplaceableMaterialization, PublishPreparation, ReplaceableMaterializationCall,
     ReplaceableMaterializationContinuation, ReplaceableMaterializationOutcome,
+    ReplaceableSuccessorContinuation,
 };
 #[cfg(test)]
 mod write_tests;
@@ -133,6 +136,13 @@ use crate::relay_information_service::RelayInformationCapabilityEvidence;
 use crate::replaceable_materializer::{
     ReplaceableMaterializerOperation, ReplaceableMaterializerRegistration,
 };
+
+type AttributedRelayObservation = (
+    SignedEvent,
+    RelayObserved,
+    Option<CommittedObservationCandidate>,
+    Option<(RelaySessionKey, String)>,
+);
 
 /// The liveness deadline (plan §4/harvest `nmp-nip77`) past which an open
 /// negentropy session with no reply is abandoned in favor of a plain REQ
@@ -1515,6 +1525,11 @@ pub enum Effect {
     Replay(RelaySessionKey, AttemptedReplay),
     /// Acquire/revalidate NIP-11 without blocking the reducer thread.
     FetchRelayInformation(RelayUrl),
+    /// Run one already-snapshotted replaceable successor capability call
+    /// away from the reducer. Runtime owns its completion id and pending
+    /// continuation; core retains only the exact finite-request lifecycle.
+    #[doc(hidden)]
+    MaterializeReplaceableSuccessor(Box<PreparedReplaceableSuccessor>),
     /// Open the exact protected transport generation's ordinary outbound gate
     /// after its ordered initial-read edge is applied, or required AUTH
     /// completes.
@@ -2273,6 +2288,14 @@ pub struct EngineCore {
     /// exact session/subscription before it may advance a finite resource.
     semantic_source_requests:
         HashMap<(RelaySessionKey, SubId), semantic_sources::OwnedSemanticSourceRequest>,
+    /// Volatile successor preparation owned by one exact accepted finite
+    /// source request. A terminal wire fact closes admission immediately but
+    /// reaches the durable round only after every matching preparation has
+    /// installed, refused, or taken its ordinary-ingest fallback.
+    semantic_successor_requests: HashMap<
+        semantic_sources::SemanticSourceRequestKey,
+        semantic_sources::SemanticSuccessorRequestState,
+    >,
     /// Observation ids retired while the current reducer turn is still
     /// draining their synchronous withdrawal effects.
     semantic_source_retired_observations: BTreeSet<ObservationId>,
@@ -2687,6 +2710,7 @@ impl EngineCore {
             live_wire_requests: HashMap::new(),
             semantic_source_observations: HashMap::new(),
             semantic_source_requests: HashMap::new(),
+            semantic_successor_requests: HashMap::new(),
             semantic_source_retired_observations: BTreeSet::new(),
             pending_request_claim_transfers: BTreeMap::new(),
             slot_to_relay: HashMap::new(),

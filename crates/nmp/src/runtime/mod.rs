@@ -106,10 +106,10 @@ pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
     self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg,
     HistoryAdvanceError, HistoryQuery, HistorySessionId, LocalSendRefusal, Nip77Frame,
-    ObservationEvidence, ObservationId, ObservationOpen, PublishError, PublishPreparation,
-    ReattachOutcome, ReceiptId, ReplaceableMaterializationCall,
-    ReplaceableMaterializationContinuation, ReplaceableMaterializationOutcome, RequestAttemptId,
-    RequestHandoffOutcome, RowDelta,
+    ObservationEvidence, ObservationId, ObservationOpen, PreparedReplaceableSuccessor,
+    PublishError, PublishPreparation, ReattachOutcome, ReceiptId, ReplaceableMaterializationCall,
+    ReplaceableMaterializationContinuation, ReplaceableMaterializationOutcome,
+    ReplaceableSuccessorContinuation, RequestAttemptId, RequestHandoffOutcome, RowDelta,
 };
 #[cfg(test)]
 use crate::core::{HistoryBatch, Row};
@@ -255,6 +255,7 @@ enum Cmd {
         id: u64,
         outcome: ReplaceableMaterializationOutcome,
     },
+    StartReplaceableSuccessor(Box<PreparedReplaceableSuccessor>),
     ReattachReceipt {
         id: ReceiptId,
         cursor: Option<ReceiptReplayCursor>,
@@ -609,6 +610,11 @@ struct PendingInitialPublication {
     sender: FifoSender<WriteFact>,
     registration: ReceiptDeliveryRegistration,
     reply: Sender<Result<(ReceiptId, EventId), PublishError>>,
+}
+
+enum PendingReplaceableMaterialization {
+    Initial(Box<PendingInitialPublication>),
+    Successor(Box<ReplaceableSuccessorContinuation>),
 }
 
 fn spawn_replaceable_materialization(
@@ -2832,7 +2838,8 @@ fn engine_loop(
     let mut next_sign_event_id = 1u64;
     let mut sign_event_cancellations: HashMap<u64, ActiveSignEvent> = HashMap::new();
     let mut next_replaceable_materialization_id = 1u64;
-    let mut pending_initial_publications: HashMap<u64, PendingInitialPublication> = HashMap::new();
+    let mut pending_replaceable_materializations: HashMap<u64, PendingReplaceableMaterialization> =
+        HashMap::new();
     let nip11_decisions = RefCell::new(Nip11DecisionState::default());
     let wire_admission = RefCell::new(WireAdmissionState::default());
     let diagnostics_delivery = RefCell::new(DiagnosticsDeliveryState::default());
@@ -3205,7 +3212,8 @@ fn engine_loop(
                 Cmd::PublishTracked { reply, .. } => {
                     let _ = reply.send(Err(PublishError::EngineShuttingDown));
                 }
-                Cmd::ReplaceableMaterializationCompleted { .. } => {}
+                Cmd::ReplaceableMaterializationCompleted { .. }
+                | Cmd::StartReplaceableSuccessor(_) => {}
                 Cmd::PublishQueueEntries { reply, .. } => {
                     let _ = reply.send(Err(PublishQueueReadError::EngineClosed));
                 }
@@ -3343,8 +3351,10 @@ fn engine_loop(
         match cmd {
             Cmd::Shutdown => {
                 shutting_down = true;
-                for (_, pending) in pending_initial_publications.drain() {
-                    let _ = pending.reply.send(Err(PublishError::EngineShuttingDown));
+                for (_, pending) in pending_replaceable_materializations.drain() {
+                    if let PendingReplaceableMaterialization::Initial(pending) = pending {
+                        let _ = pending.reply.send(Err(PublishError::EngineShuttingDown));
+                    }
                 }
                 auth_tasks.borrow_mut().shutdown();
                 registry.cancel_all_pending_writes();
@@ -4123,14 +4133,16 @@ fn engine_loop(
                     next_replaceable_materialization_id =
                         next_replaceable_materialization_id.wrapping_add(1).max(1);
                     let core::PreparedReplaceableMaterialization { call, continuation } = *prepared;
-                    pending_initial_publications.insert(
+                    pending_replaceable_materializations.insert(
                         id,
-                        PendingInitialPublication {
-                            continuation,
-                            sender,
-                            registration,
-                            reply,
-                        },
+                        PendingReplaceableMaterialization::Initial(Box::new(
+                            PendingInitialPublication {
+                                continuation,
+                                sender,
+                                registration,
+                                reply,
+                            },
+                        )),
                     );
                     if let Err(reason) =
                         spawn_replaceable_materialization(self_inbox.clone(), id, call)
@@ -4143,52 +4155,95 @@ fn engine_loop(
                 }
             },
             Cmd::ReplaceableMaterializationCompleted { id, outcome } => {
-                let Some(pending) = pending_initial_publications.remove(&id) else {
+                let Some(pending) = pending_replaceable_materializations.remove(&id) else {
                     continue;
                 };
-                let PendingInitialPublication {
-                    continuation,
-                    sender,
-                    registration,
-                    reply,
-                } = pending;
-                match core.complete_body_complete_replaceable_operation(continuation, outcome) {
-                    PublishPreparation::Complete(publish_effects) => complete_tracked_publish(
-                        &mut core,
-                        publish_effects,
-                        sender,
-                        registration,
-                        reply,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &registry,
-                        dispatch_runtime,
-                    ),
-                    PublishPreparation::Materialize(prepared) => {
-                        let core::PreparedReplaceableMaterialization { call, continuation } =
-                            *prepared;
-                        pending_initial_publications.insert(
-                            id,
-                            PendingInitialPublication {
-                                continuation,
-                                sender,
-                                registration,
-                                reply,
-                            },
-                        );
-                        if let Err(reason) =
-                            spawn_replaceable_materialization(self_inbox.clone(), id, call)
+                match pending {
+                    PendingReplaceableMaterialization::Initial(pending) => {
+                        let PendingInitialPublication {
+                            continuation,
+                            sender,
+                            registration,
+                            reply,
+                        } = *pending;
+                        match core
+                            .complete_body_complete_replaceable_operation(continuation, outcome)
                         {
-                            let _ = self_inbox.send(Cmd::ReplaceableMaterializationCompleted {
-                                id,
-                                outcome: ReplaceableMaterializationOutcome::ThreadUnavailable(
-                                    reason,
-                                ),
-                            });
+                            PublishPreparation::Complete(publish_effects) => {
+                                complete_tracked_publish(
+                                    &mut core,
+                                    publish_effects,
+                                    sender,
+                                    registration,
+                                    reply,
+                                    &pool,
+                                    &mut row_channels,
+                                    &mut history_channels,
+                                    &mut diag_channels,
+                                    &registry,
+                                    dispatch_runtime,
+                                )
+                            }
+                            PublishPreparation::Materialize(prepared) => {
+                                let core::PreparedReplaceableMaterialization { call, continuation } =
+                                    *prepared;
+                                pending_replaceable_materializations.insert(
+                                    id,
+                                    PendingReplaceableMaterialization::Initial(Box::new(
+                                        PendingInitialPublication {
+                                            continuation,
+                                            sender,
+                                            registration,
+                                            reply,
+                                        },
+                                    )),
+                                );
+                                if let Err(reason) =
+                                    spawn_replaceable_materialization(self_inbox.clone(), id, call)
+                                {
+                                    let _ = self_inbox.send(
+                                        Cmd::ReplaceableMaterializationCompleted {
+                                            id,
+                                            outcome: ReplaceableMaterializationOutcome::ThreadUnavailable(
+                                                reason,
+                                            ),
+                                        },
+                                    );
+                                }
+                            }
                         }
                     }
+                    PendingReplaceableMaterialization::Successor(continuation) => {
+                        let effects = core
+                            .complete_replaceable_successor_materialization(*continuation, outcome);
+                        dispatch_core_effects(
+                            &mut core,
+                            effects,
+                            &pool,
+                            &mut row_channels,
+                            &mut history_channels,
+                            &mut diag_channels,
+                            &registry,
+                            dispatch_runtime,
+                        );
+                    }
+                }
+            }
+            Cmd::StartReplaceableSuccessor(prepared) => {
+                let PreparedReplaceableSuccessor { call, continuation } = *prepared;
+                let id = next_replaceable_materialization_id;
+                next_replaceable_materialization_id =
+                    next_replaceable_materialization_id.wrapping_add(1).max(1);
+                pending_replaceable_materializations.insert(
+                    id,
+                    PendingReplaceableMaterialization::Successor(Box::new(continuation)),
+                );
+                if let Err(reason) = spawn_replaceable_materialization(self_inbox.clone(), id, call)
+                {
+                    let _ = self_inbox.send(Cmd::ReplaceableMaterializationCompleted {
+                        id,
+                        outcome: ReplaceableMaterializationOutcome::ThreadUnavailable(reason),
+                    });
                 }
             }
             Cmd::Subscribe { query, reply } => {
@@ -4463,8 +4518,10 @@ fn engine_loop(
 
     auth_tasks.borrow_mut().shutdown();
     registry.cancel_all_pending_writes();
-    for (_, pending) in pending_initial_publications.drain() {
-        let _ = pending.reply.send(Err(PublishError::EngineShuttingDown));
+    for (_, pending) in pending_replaceable_materializations.drain() {
+        if let PendingReplaceableMaterialization::Initial(pending) = pending {
+            let _ = pending.reply.send(Err(PublishError::EngineShuttingDown));
+        }
     }
     for (_, active) in sign_event_cancellations.drain() {
         active.terminal.cancel();
@@ -4992,6 +5049,11 @@ fn dispatch_effect(
                     .self_inbox
                     .send(Cmd::Engine(EngineMsg::RelayInformationResolved(url, None)));
             }
+        }
+        Effect::MaterializeReplaceableSuccessor(prepared) => {
+            let _ = runtime
+                .self_inbox
+                .send(Cmd::StartReplaceableSuccessor(prepared));
         }
         Effect::PublishEvent(session, event, correlation) => {
             let Ok(handle) = pool.ensure_session(&session) else {

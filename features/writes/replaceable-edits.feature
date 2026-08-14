@@ -79,6 +79,20 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     And the blocked publication reports that the engine closed
     And NMP retains no receipt, write intent, optimistic row, signing work, route, delivery work, or correlation for the blocked operation
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-025
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::finite_successor_materialization_does_not_block_the_engine_or_lose_adjacent_eose
+  # nmp:falsifier=Run relay successor preparation on the engine state thread or settle the adjacent end-of-stored-events before preparation finishes; the bounded public publication cannot enter custody or the completed successor never becomes the settled finite generation.
+  @acceptance
+  Scenario: A finite relay source waits for successor preparation without freezing NMP
+    Given a finite source relay returns a newer event and then end-of-stored-events
+    And successor preparation remains blocked after the event batch
+    When I publish an unrelated event
+    Then the unrelated publication enters custody while successor preparation remains blocked
+    And the finite source does not settle while preparation remains blocked
+    When successor preparation completes
+    Then the complete successor is installed before the saved source terminal settles
+
   # The encrypted content is opaque to an operation that owns only a public
   # tag. Its presence does not turn that operation into a crypto operation.
 
