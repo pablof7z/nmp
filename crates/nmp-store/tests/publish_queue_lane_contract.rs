@@ -56,7 +56,7 @@ fn accept(frozen: Event, keys: &Keys, accepted_at: u64) -> AcceptWrite {
 }
 
 fn seed(
-    store: &mut dyn EventStore,
+    store: &mut RedbStore,
     content: &str,
     created_at: u64,
     relay: RelayUrl,
@@ -95,7 +95,7 @@ fn seed(
     (intent_id, receipt_id, signed, key, lane)
 }
 
-fn with_store(body: impl FnOnce(&mut dyn EventStore)) {
+fn with_store(body: impl FnOnce(&mut RedbStore)) {
     let mut store = RedbStore::temporary().expect("temporary Redb store");
     body(&mut store);
 }

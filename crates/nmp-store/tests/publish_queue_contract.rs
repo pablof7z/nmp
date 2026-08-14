@@ -147,7 +147,7 @@ fn set_replaceable_base(write: &mut AcceptWrite, base: Option<EventId>) {
 /// `accept_write`, unwrapping the persistence `Result` — every test here
 /// exercises a healthy in-process store, so a persistence failure would
 /// itself be the bug under test.
-fn do_accept(store: &mut dyn EventStore, accept: AcceptWrite) -> AcceptOutcome {
+fn do_accept(store: &mut RedbStore, accept: AcceptWrite) -> AcceptOutcome {
     store
         .accept_write(accept)
         .expect("accept_write persistence")
@@ -157,7 +157,7 @@ fn do_accept(store: &mut dyn EventStore, accept: AcceptWrite) -> AcceptOutcome {
 /// A persisted attempt means a relay may already have observed these bytes,
 /// so a newer replaceable winner must preserve the older obligation.
 fn start_publish_queue_attempt(
-    store: &mut dyn EventStore,
+    store: &mut RedbStore,
     intent_id: nmp_store::IntentId,
     signed: Event,
     relay: &str,
@@ -182,7 +182,7 @@ fn start_publish_queue_attempt(
         .expect("start delivery attempt");
 }
 
-fn with_store(body: impl FnOnce(&mut dyn EventStore)) {
+fn with_store(body: impl FnOnce(&mut RedbStore)) {
     let mut store = RedbStore::temporary().expect("temporary Redb store");
     body(&mut store);
 }

@@ -100,7 +100,7 @@ fn atom(filter: &ConcreteFilter) -> ContextualAtom {
 
 /// Run a contract against the one complete store implementation, isolated by
 /// an engine-owned temporary directory.
-fn with_store(body: impl FnOnce(&mut dyn EventStore)) {
+fn with_store(body: impl FnOnce(&mut RedbStore)) {
     let mut store = RedbStore::temporary().expect("temporary Redb store");
     body(&mut store);
 }
