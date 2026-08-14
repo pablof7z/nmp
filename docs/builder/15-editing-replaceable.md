@@ -59,14 +59,25 @@ acceptance precondition. The generic guard can express `None` for a future
 protocol operation whose explicitly designed first-value policy permits it,
 but NIP-02's ordinary follow action never emits that form.
 
-Memory and redb stores check that precondition inside the same atomic
-transaction that would allocate the intent/receipt and insert the pending
-canonical row. If another winner arrived first, the store changes nothing and
-the receipt emits:
+The Redb store checks that precondition inside the same atomic transaction
+that would allocate a journaled intent and its receipt id, then insert the
+pending canonical row. If another winner arrived first, that transaction
+changes nothing and returns:
 
 ```text
-ReplaceableConflict { expected, actual }
+AcceptOutcome::Refused(
+    RefuseReason::ReplaceableBaseChanged { expected, actual }
+)
 ```
+
+The reducer then takes that semantic refusal into one terminal receipt-only
+record. `publish()` returns its store-issued receipt id and frozen attempted
+event id, and the receipt ends with
+`WriteOutcome::Refused(RefuseReason::ReplaceableBaseChanged { expected,
+actual })`. There is no accepted intent, optimistic event, signer request,
+route, delivery work, or retry obligation. The retained expected/actual pair
+lets the app read the current winner, reapply the user's change, and submit a
+new action.
 
 The action does not silently rebuild on the new base. A caller may wait for the
 live resource to refine and explicitly invoke a new action.
@@ -147,8 +158,8 @@ The shipped falsifiers cover:
 - tag order, content, relay hint, petname, duplicate-target, and unrelated-tag
   preservation;
 - exact-base success, generic `None`-means-`None`, regular-event misuse
-  rejection, and a concurrent winner producing a typed conflict with no
-  journal residue;
+  rejection, and a concurrent winner producing one typed terminal receipt-only
+  refusal with no accepted-intent journal or downstream work;
 - signed-out, no-source, and reconciled-no-contact-list failure without a
   write;
 - a real loopback indexer/outbox relay through both direct Rust and the iOS FFI

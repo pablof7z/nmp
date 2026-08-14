@@ -161,17 +161,27 @@ monotonicity for free, instead of each crate reimplementing the
 ## 4. The CAS coordinate, and the foreign-base failure — DESIGNED
 
 Today the store derives the CAS coordinate from the event itself
-(`crates/nmp-store/src/address_key.rs:41-51`): `(event.pubkey, kind)` for
+(`crates/nmp-store/src/address_key.rs`): `(event.pubkey, kind)` for
 replaceable kinds, `(event.pubkey, kind, d)` for addressable ones. The
 precondition check runs inside `accept_write`'s atomic transaction
-(`crates/nmp-store/src/redb_store/write_ops.rs:68-92`): look up the canonical
-winner at that coordinate, refuse with
-`RefuseReason::ReplaceableBaseChanged { expected, actual }`
-(`crates/nmp-store/src/lib.rs:628-636`) if it isn't `expected_base`, and the
-engine surfaces that as the typed
-`WriteStatus::ReplaceableConflict { expected, actual }`
-(`crates/nmp/src/core/write.rs:1702-1706`). Nothing is stored or journaled
-and no ids are allocated on refusal.
+(`crates/nmp-store/src/redb_store/write_ops.rs`): look up the canonical winner
+at that coordinate and return
+`AcceptOutcome::Refused(RefuseReason::ReplaceableBaseChanged { expected,
+actual })` if it is not `expected_base`. That transaction creates no accepted
+intent, journal row, optimistic event, or receipt id for a journaled intent.
+
+The semantic answer is nevertheless in custody. `EngineCore` immediately
+passes it through `accept_refused`, which allocates one durable receipt id and
+stores one terminal receipt-only record (`intent_id: None`) carrying the
+frozen attempted event id and the typed expected/actual pair. The receipt
+stream ends with
+`WriteOutcome::Refused(RefuseReason::ReplaceableBaseChanged { expected,
+actual })`; no signer request, route, lane, attempt, relay write, or retry
+obligation exists. The app can reattach or enumerate that receipt, fetch the
+actual winner, reapply the user's change, and resubmit. The executable anchors
+are `replaceable_base_precondition_rejects_a_concurrent_winner_atomically`,
+`a_refused_write_is_taken_into_custody_as_one_permanently_failed_receipt`, and
+`stale_replaceable_edit_is_refused_into_custody_keeping_both_event_ids`.
 
 Under the builder, the event has no `pubkey` until identity resolution
 supplies one, so the coordinate becomes **`(kind, resolved_identity, d)`** —
@@ -186,12 +196,13 @@ the timestamp. One transaction, one row, three formerly-scattered concerns.
 `BaseHasWrongAuthor` used to catch at compose time. The CAS runs at the
 *resolved identity's* coordinate; a foreign-authored event is never the
 canonical winner at your coordinate; so `actual != expected` and the write
-fails the precondition with the *existing* typed conflict,
-`ReplaceableConflict`. No new variant, no author comparison — the coordinate
-system itself makes a foreign base unsatisfiable, and reports it through the
-same door as every other stale base. (The store also fails closed on a
+fails the precondition with the existing typed
+`WriteOutcome::Refused(RefuseReason::ReplaceableBaseChanged { expected,
+actual })`. No new variant, no author comparison — the coordinate system
+itself makes a foreign base unsatisfiable, and reports it through the same
+door as every other stale base. (The store also fails closed on a
 precondition attached to a kind with no replaceable coordinate at all:
-`RefuseReason::ReplaceableBaseOnRegularEvent`, `lib.rs:637-640`. That guard
+`RefuseReason::ReplaceableBaseOnRegularEvent`. That guard
 survives unchanged.)
 
 One acceptance rule carries over verbatim: replaceable edits refuse
@@ -267,8 +278,9 @@ drop the precondition, or stamp the wrong author — the exact regression class
   (`BaseHasWrongKind`, `InvalidGeneratedTag` — both survive, both really are
   about the base's content rather than the seam). Its `NoChange` proof
   ("already follows") is unaffected.
-- **Receipts.** `ReplaceableConflict` is already a receipt-stream status;
-  under fused methods it is the app's signal to re-read and re-derive. No new
-  status is needed, and none should be added — one conflict door, whatever
-  the staleness's cause (raced edit, foreign base, crossed replacement from
-  another device).
+- **Receipts.**
+  `WriteOutcome::Refused(RefuseReason::ReplaceableBaseChanged { .. })` is
+  already a terminal receipt-stream fact; under fused methods it is the app's
+  signal to re-read and re-derive. No new status is needed, and none should be
+  added — one conflict door, whatever the staleness's cause (raced edit,
+  foreign base, crossed replacement from another device).
