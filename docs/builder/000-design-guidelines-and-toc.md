@@ -99,9 +99,10 @@ Composition is immutable. A NIP-29 group operation may add an `h` tag and host
 relay context to a NIP-68 photo draft without claiming ownership of the photo
 kind. Core freezes and signs the final value once.
 
-Cross-module dependency does not transfer ownership. NIP-51 owns kind `10009`;
-NIP-29 may compose its typed values into remembered group/host operations but
-claims neither `10009` nor generic kind `30002` relay sets.
+Cross-module dependency does not transfer protocol ownership. NIP-51 defines
+kind `10009`; `nmp-nip29` exposes NMP's observational group-list value beside
+the remembered-group product behavior that consumes it. NIP-29 claims neither
+`10009` nor generic kind `30002` relay sets.
 
 ## 9. Use native platform idioms
 

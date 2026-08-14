@@ -210,7 +210,7 @@
     <ul class="bullets">
       <li>The issue's contract is confirmed as settled doctrine, now promoted into <code>docs/VISION.md</code> §4 (lines 192-214) and bug-class-ledger #14.</li>
       <li>The one open design fork is ruled: <b>kind ownership does not gate contextual route contribution.</b> A module claims only its exact NIP-defined schema; a contextual operation may contribute closed typed tags/route facts to a foreign-owned immutable draft without claiming that draft's kind.</li>
-      <li>Canonical example ratified verbatim: <code>nmp-nip51</code> exclusively owns kind:10009; <code>nmp-nip29</code> composes that output into <code>GroupRef</code>/host context and claims neither 10009 nor 30002.</li>
+      <li>Current correction (#1551): the separate <code>nmp-nip51</code> component is deleted. NIP-51 still defines kind:10009; <code>nmp-nip29</code> owns NMP's product-facing group-list value while granting it no signature, routing, or mutation authority. Apps still select and pass the exact host and group id explicitly.</li>
       <li>Next implementation unit: the NIP-29 contextual group-publication operation (bind <code>GroupRef</code>, add typed <code>h</code>/host-relay constraint, core signs once, ordinary receipt stream, no Swift-owned optimistic mirror).</li>
     </ul>
     <div class="explain">

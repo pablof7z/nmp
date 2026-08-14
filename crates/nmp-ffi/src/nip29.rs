@@ -36,10 +36,10 @@
 //! Deliberately absent, same as before #1033: a fixed group-content kind
 //! catalog and a kind:9 composer. NIP-29 owns neither; C7 and client
 //! notification policy remain independently optional (#838). Also absent:
-//! any second projection of a NIP-51 Simple-groups entry -- [`nip51`](crate::nip51)
-//! keeps that one shape, and a caller wanting to browse a group hands its
-//! `host_relay`/`group_id` fields to [`FfiRelayScope::on`]/[`FfiRelayScope::group`]
-//! itself.
+//! any second projection of a Simple-groups entry. The observational value
+//! lives in this NIP-29 feature family, and a caller wanting to browse a group
+//! hands its `host_relay`/`group_id` fields to [`FfiRelayScope::on`]/
+//! [`FfiRelayScope::group`] itself.
 
 use std::sync::Arc;
 

@@ -49,8 +49,8 @@ Some app features span two protocols. They compose across module boundaries;
 they do not relabel one module's value inside another (#858):
 
 ```swift
-for await snapshot in try engine.observe(currentAccountDemand()) {
-    // NIP-51 decodes its own kind:10009 list, as itself.
+for await snapshot in try engine.observe(currentAccountGroupListDemand()) {
+    // NMP's NIP-29 product capability decodes the observational NIP-51 kind:10009 list.
     guard let list = snapshot.rows.first.map(parseSimpleGroupsListTolerant)
     else { continue }
     // The app selects one entry and names the relay(s) it discovers on with
@@ -64,21 +64,21 @@ for await snapshot in try engine.observe(currentAccountDemand()) {
 }
 ```
 
-Two exact owners, no wrapper between them:
+One product capability, no second projection:
 
-- NIP-51 owns kind `10009` Simple groups, including its public/private list
-  codec, replacement construction, and typed list entries — plus every
-  evidence field on the decode (malformed item count, private content).
-- NIP-29 owns its group metadata, membership, role, and moderation schemas and
+- `nmp-nip29` exposes NMP's typed view of the NIP-51 kind `10009` Simple groups
+  list, including every decode evidence field (malformed item count, private
+  content). NIP-29 owns its group metadata, membership, role, and moderation
+  schemas.
+- The app owns selection and
   its scope-narrowed operations. It accepts the exact fields an operation
-  needs (a relay set named once, a group id) and claims neither kind `10009`
-  nor kind `30002`. It does not depend on the NIP-51 package at all.
+  needs (a relay set named once, a group id); NMP does not derive routing
+  authority from the tolerant decode.
 
 The underlying kind `10009` demand is rooted at current pubkey and acquired
 through user-list authority, never through the currently selected group's
-relay scope. The selected group remains app state. Neither module maintains a
-parallel cache, a second projection of the other's value, or its own
-subscription lifecycle.
+relay scope. The selected group remains app state. NMP maintains no parallel
+cache, second projection, or protocol-specific subscription lifecycle.
 
 ## Semantic operations
 

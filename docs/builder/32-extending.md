@@ -34,10 +34,10 @@ the NIP-29 fields and authority it contributes.
 
 The originating module remains the draft's schema owner.
 
-Dependencies do not transfer ownership either. An NIP-29 module may depend on
-NIP-51 and compose typed kind `10009` Simple-group entries into NIP-29 group
-references. NIP-51 remains unaware of NIP-29 and exclusively owns the `10009`
-schema; NIP-29 claims neither `10009` nor generic kind `30002` relay sets.
+Kind `10009` is the NIP-51 Simple groups list. `nmp-nip29` exposes its tolerant
+decode as the remembered-host input to NMP's NIP-29 product capability; the app
+still chooses one decoded entry and explicitly supplies the relay scope, so
+parsing never becomes routing authority.
 
 ## Return closed values
 

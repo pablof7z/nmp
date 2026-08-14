@@ -2,7 +2,7 @@ import XCTest
 
 @testable import NMP
 
-final class NIP51Tests: XCTestCase {
+final class NIP29SimpleGroupsTests: XCTestCase {
     private func fabricatedRow(kind: UInt16) -> Row {
         Row(
             id: "caller-chosen-id", pubkey: "caller-chosen-pubkey",
@@ -35,7 +35,7 @@ final class NIP51Tests: XCTestCase {
     }
 
     func testCurrentAccountDemandTargetsKind10009() {
-        let demand = NMP.currentAccountDemand()
+        let demand = NMP.currentAccountGroupListDemand()
         XCTAssertEqual(demand.selection.kinds, [10009])
     }
 
@@ -44,8 +44,8 @@ final class NIP51Tests: XCTestCase {
     ///
     /// #858's Swift falsifier too, updated for #1033: the selected
     /// `SimpleGroupEntry` feeds NIP-29's host-scoped door
-    /// (`NMPRelayScope.on`/`.group`) directly, with no NIP-29-owned copy of
-    /// the NIP-51 value in between.
+    /// (`NMPRelayScope.on`/`.group`) directly, with no NIP-29 group-reference
+    /// copy of the NIP-51 value in between.
     func testGroupBrowsingStillTakesAnExplicitlySuppliedHost() throws {
         let list = NMP.parseSimpleGroupsListTolerant(fabricatedRow(kind: 10009))
         let selected = list.items[0]

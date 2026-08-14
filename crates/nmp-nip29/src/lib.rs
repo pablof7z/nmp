@@ -15,6 +15,8 @@
 //! - [`group_metadata_at`] / [`listed_record_at`] -- what one of those
 //!   relay-signed records SAYS, read once here rather than four times in two
 //!   applications (#1233).
+//! - [`current_account_group_list_demand`] and the tolerant kind:10009
+//!   Simple-groups codec used to select a remembered NIP-29 host.
 //! - the kinds NIP-29 itself defines (#989, 9000-9022: [`join_request`],
 //!   [`leave_request`], [`add_users`], [`remove_users`], [`edit_metadata`],
 //!   [`delete_event`], [`create_group`], [`delete_group`], [`create_invite`]).
@@ -40,12 +42,12 @@
 //!
 //! # What this crate does not own
 //!
-//! Neither kind:10009's schema (owned exclusively by `nmp-nip51`, which this
-//! crate does not depend on at all -- #858) nor the schema of any event that
-//! is merely *published into* a group rather than defined by NIP-29 itself.
-//! NIP-C7 kind:9 chat belongs to `nmp-nipc7`; mention and notification policy
-//! belongs to the client/content layer (#838). Contextual publication is not
-//! kind ownership.
+//! The kind:10009 read is deliberately observational: its tolerant result
+//! grants no signature, canonical-store, routing, or mutation authority.
+//! The schema of any event merely *published into* a group remains outside
+//! this crate. NIP-C7 kind:9 chat belongs to `nmp-nipc7`; mention and
+//! notification policy belongs to the client/content layer (#838).
+//! Contextual publication is not kind ownership.
 //!
 //! `previous` is deliberately absent. It remains omitted until a host-scoped,
 //! group-scoped, author-aware live-window capability can mint it without
@@ -57,14 +59,17 @@
 
 mod context;
 mod discovery;
+mod group_list;
 mod operations;
 mod records;
+mod simple_groups;
 
 pub use context::{contextualize, group_demand_at, validate_context, GroupContextError};
 pub use discovery::{
     admin_list_includes_at, groups_whose_record_matches_at, member_list_includes_at,
     GROUP_ADMINS_KIND, GROUP_MEMBERS_KIND, GROUP_METADATA_KIND,
 };
+pub use group_list::current_account_group_list_demand;
 pub use operations::{
     add_users, create_group, create_invite, delete_event, delete_group, edit_metadata,
     join_request, leave_request, remove_users, GroupMetadataEdit, GroupUser, GroupUsersError,
@@ -73,4 +78,8 @@ pub use operations::{
 pub use records::{
     group_metadata_at, group_records_at, join_key_of, listed_record_at, GroupMetadata, GroupRecord,
     ListedRecord, ListedSubject,
+};
+pub use simple_groups::{
+    parse_simple_groups_list_from_raw_tags_tolerant, parse_simple_groups_list_tolerant,
+    SimpleGroupEntry, SimpleGroupsList,
 };

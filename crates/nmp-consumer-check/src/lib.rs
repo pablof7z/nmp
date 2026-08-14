@@ -220,11 +220,11 @@ pub fn compose_every_retrofitted_family(target: &Event, source: Option<RelayUrl>
     // the retrofit and the family that avoided it are proven the same way.
     let reaction = nmp::nip25::react(target, source, nmp::nip25::Reaction::Like);
     // NIP-51 kind:10009: the demand that reads it and the tolerant codec that
-    // decodes what came back (`nmp::nip51`).
-    let groups_demand: Demand = nmp::nip51::current_account_demand();
-    let groups: nmp::nip51::SimpleGroupsList =
-        nmp::nip51::parse_simple_groups_list_tolerant(target);
-    let first_group: Option<&nmp::nip51::SimpleGroupEntry> = groups.items.first();
+    // decodes what came back (`nmp::nip29`).
+    let groups_demand: Demand = nmp::nip29::current_account_group_list_demand();
+    let groups: nmp::nip29::SimpleGroupsList =
+        nmp::nip29::parse_simple_groups_list_tolerant(target);
+    let first_group: Option<&nmp::nip29::SimpleGroupEntry> = groups.items.first();
     // Content parsing (`nmp::content`) -- the door mosaico hand-rolled a
     // `find("nostr:")` scanner for, because it could not reach this one.
     let document: nmp::content::ContentDocument =
