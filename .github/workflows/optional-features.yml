@@ -63,6 +63,12 @@ jobs:
       - name: cargo clippy (workspace, all features, all targets, deny warnings)
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
+      # Keep this package-only: selecting nmp's test instrumentation must
+      # activate every dependency feature it needs without a dev target or
+      # another workspace member donating that feature through unification.
+      - name: nmp test-instrumentation feature closure
+        run: cargo check -p nmp --no-default-features --features test-instrumentation --lib
+
       - name: cargo test (workspace, all features)
         run: cargo test --workspace --all-features
 
