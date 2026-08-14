@@ -25,7 +25,7 @@ use super::schema::{
 #[cfg(test)]
 use super::store::RedbCrashPoint;
 use super::store::RedbStore;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-instrumentation"))]
 use super::Ordering;
 use super::{
     AuthDenial, BTreeMap, BTreeSet, CloseIntentOutcome, Event, EventId, IntentId, IntentSigState,
@@ -731,6 +731,10 @@ pub(super) fn recover_publish_queue_lanes(
     store: &RedbStore,
     intent_id: IntentId,
 ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    store
+        .publish_queue_lane_recovery_reads
+        .fetch_add(1, Ordering::Relaxed);
     let read_txn = store.database()?.begin_read().map_err(persist_err)?;
     let lanes = read_txn
         .open_table(PUBLISH_QUEUE_LANES)

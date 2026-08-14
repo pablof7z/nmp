@@ -163,6 +163,11 @@ pub struct RedbStore {
         feature = "test-instrumentation"
     ))]
     pub(super) coverage_reads: AtomicU64,
+    /// Calls through the concrete publish-queue lane-recovery door. This is
+    /// test-only work attribution for reducer scheduling falsifiers, not a
+    /// runtime diagnostic.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(super) publish_queue_lane_recovery_reads: AtomicU64,
     /// Benchmark-only ceiling: governed commits skip persistence barriers.
     /// Ordinary builds cannot construct a store with this set.
     #[cfg(feature = "bench-instrumentation")]
@@ -892,6 +897,8 @@ impl RedbStore {
                 feature = "test-instrumentation"
             ))]
             coverage_reads: AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            publish_queue_lane_recovery_reads: AtomicU64::new(0),
             #[cfg(feature = "bench-instrumentation")]
             benchmark_durability: _benchmark_durability,
             #[cfg(test)]
@@ -1008,6 +1015,18 @@ impl RedbStore {
     ))]
     pub fn coverage_reads(&self) -> u64 {
         self.coverage_reads.load(Ordering::Relaxed)
+    }
+
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn reset_publish_queue_lane_recovery_reads(&self) {
+        self.publish_queue_lane_recovery_reads
+            .store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub fn publish_queue_lane_recovery_reads(&self) -> u64 {
+        self.publish_queue_lane_recovery_reads
+            .load(Ordering::Relaxed)
     }
 
     /// The current coverage-key schema prefix, mirroring `CoverageKey`'s own
