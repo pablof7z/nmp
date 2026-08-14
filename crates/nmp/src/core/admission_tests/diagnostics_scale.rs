@@ -1,6 +1,70 @@
 //! diagnostics scale admission proofs.
 
 use super::*;
+use nmp_store::testing;
+
+/// #763 falsifier: diagnostics keeps an unreadable coverage entry coupled to
+/// the exact store-degradation fact instead of rendering a healthy `None`.
+#[test]
+fn a_diagnostics_snapshot_built_over_corrupt_coverage_says_so() {
+    let relay = RelayUrl::parse("wss://diagnostic-coverage.example").unwrap();
+    let atom = bounded_atom(&relay, "corrupt-owner");
+    let key = coverage_key(&atom);
+    let directory = tempfile::tempdir().expect("diagnostic coverage corruption directory");
+    let path = directory.path().join("diagnostic-coverage.redb");
+    {
+        let mut store = RedbStore::open(&path).expect("create persistent Redb fixture");
+        store
+            .record_coverage(&[(
+                atom.clone(),
+                relay.clone(),
+                CoverageInterval::new(Timestamp::from(10u64), Timestamp::from(20u64)),
+            )])
+            .expect("seed exact coverage row");
+    }
+    testing::corrupt_coverage(&path, key, &relay).expect("corrupt exact coverage row");
+
+    let store = RedbStore::open(&path).expect("reopen diagnostic coverage fixture");
+    let mut core = EngineCore::new(store, 20);
+    let budget = core.compile_budget();
+    let admitted = core
+        .router
+        .admit(&BTreeSet::from([atom]), &core.routing_facts, budget);
+    assert_eq!(
+        admitted
+            .wire
+            .ops
+            .iter()
+            .flat_map(|(_, ops)| ops)
+            .filter(|op| matches!(op, WireOp::Req(_, _)))
+            .count(),
+        1,
+        "the private plan installation must create exactly one coverage entry"
+    );
+    core.resolver.store().reset_coverage_reads();
+
+    let snapshot = core.diagnostics_snapshot();
+
+    assert_eq!(
+        core.resolver.store().coverage_reads(),
+        1,
+        "diagnostics_snapshot must own the first and only coverage dereference"
+    );
+    assert!(
+        snapshot
+            .store_degraded
+            .as_deref()
+            .is_some_and(|message| message.contains("decode coverage row")),
+        "the exact decode failure must accompany the unreadable entry: {snapshot:?}"
+    );
+    let relay_snapshot = snapshot
+        .relays
+        .iter()
+        .find(|candidate| candidate.relay == relay)
+        .expect("the installed plan projects its relay");
+    assert_eq!(relay_snapshot.coverage.len(), 1);
+    assert_eq!(relay_snapshot.coverage[0].coverage, None);
+}
 
 #[test]
 fn distinct_physical_closes_defer_diagnostic_coverage_projection() {
