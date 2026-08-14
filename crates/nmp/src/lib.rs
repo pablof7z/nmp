@@ -60,11 +60,11 @@ mod subscription;
 // the SAME modules, at the same names, moved verbatim -- the crate boundary
 // they used to sit behind added nothing but a second public API.
 //
-// - [`mod@core`] -- `EngineCore`: the PURE synchronous reducer. No I/O, no
-//   threads, no imposed runtime. Its whole interface is
-//   `handle(EngineMsg) -> Vec<Effect>` / `tick(Timestamp) -> Vec<Effect>`.
-//   This is what keeps the whole engine headlessly testable (plan §2
-//   position 1).
+// - [`mod@core`] -- `EngineCore`: the synchronous reducer and durable-state
+//   owner. It performs concrete Redb I/O but owns no threads, sockets, or
+//   imposed runtime. Its main message-driven interface is
+//   `handle(EngineMsg) -> Vec<Effect>` / `tick(Timestamp) -> Vec<Effect>`;
+//   that boundary keeps the engine headlessly testable (plan §2 position 1).
 // - [`mod@runtime`] -- the async edge: `EngineThread` (one dedicated OS
 //   thread, blocking `mpsc` recv loop, D8) + `Handle` (the cheap
 //   `Clone + Send` value the app holds).

@@ -1,7 +1,8 @@
-//! The PURE synchronous reducer (plan §2 position 1, §3.4). `EngineCore`
-//! owns the M1 resolver `Engine`, the M2 `Router`, the write-delivery
-//! state, and the coverage-attribution bookkeeping (`attribution.rs`,
-//! `evidence.rs`). Its entire surface is:
+//! The synchronous reducer and durable-state owner (plan §2 position 1,
+//! §3.4). `EngineCore` owns the concrete `RedbStore`, the M1 resolver
+//! `Engine`, the M2 `Router`, the write-delivery state, and the
+//! coverage-attribution bookkeeping (`attribution.rs`, `evidence.rs`). Its
+//! main message-driven surface is:
 //!
 //! ```ignore
 //! impl EngineCore {
@@ -15,10 +16,11 @@
 //! means the driver has genuinely nothing to wake up for and never that the
 //! store could not be read (#763).
 //!
-//! `EngineCore` does NO I/O, spawns no threads, touches no socket, imposes
-//! no runtime — this is the seam that preserves M1/M2's headless property:
-//! the whole engine's logic is testable by feeding `EngineMsg`s and
-//! asserting `Effect`s, with zero network (plan §5 tier A).
+//! `EngineCore` performs synchronous durable I/O through its `RedbStore`, but
+//! spawns no threads, touches no socket, and imposes no runtime. This is the
+//! seam that preserves M1/M2's headless property: the whole engine's logic is
+//! testable by feeding `EngineMsg`s and asserting `Effect`s against a concrete
+//! temporary or persistent store, with zero network (plan §5 tier A).
 //!
 //! Coverage attribution follows
 //! `docs/design/query-demand-and-evidence.md` plus issue #816's
