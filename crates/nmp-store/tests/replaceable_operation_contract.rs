@@ -1,13 +1,13 @@
 use nmp_store::RelayObserved;
 use nmp_store::{
     AcceptOutcome, AcceptWrite, AcceptWritePayload, AccessContextId, EventStore, HandoffEvidence,
-    IntentSigState, MaterializationCandidate, MaterializationId, PendingMaterializationState,
-    PromoteOutcome, PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
-    PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceiptPayload,
-    QualifiedSource, RedbStore, ReplaceableOperationReceiptState, ReplayFormatId, ReplayProgramId,
-    SemanticAccept, SemanticInstallOutcome, SemanticPlan, SemanticRematerialize,
-    SemanticSourceInstall, SourceEvidence, SourcePlanId, StartingSource, StartingSourceRequirement,
-    VerifiedSignature,
+    IntentSigState, MaterializationCandidate, MaterializationId, OperationSourceRequirement,
+    PendingMaterializationState, PromoteOutcome, PromotionTarget, PublishQueueAttemptHandoff,
+    PublishQueueAttemptOutcome, PublishQueueLaneState, PublishQueuePostHandoffState,
+    PublishQueueReceiptPayload, QualifiedSource, RedbStore, ReplaceableOperationReceiptState,
+    ReplayFormatId, ReplayProgramId, SemanticAccept, SemanticInstallOutcome, SemanticPlan,
+    SemanticRematerialize, SemanticSourceInstall, SourceEvidence, SourcePlanId, StartingSource,
+    StartingSourceRequirement, VerifiedSignature,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{EventBuilder, Filter, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
@@ -632,6 +632,50 @@ fn qualified_source_and_complete_successor_survive_redb_reopen() {
     let attempts = reopened.recover_attempts(evidence.intent).unwrap();
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].event.id, evidence.predecessor);
+}
+
+#[test]
+fn capability_default_marker_and_unresolved_source_survive_redb_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("capability-default.redb");
+    let (coordinate, receipt, event_id) = {
+        let mut store = RedbStore::open(&path).unwrap();
+        let keys = Keys::generate();
+        let coordinate = coordinate(&keys);
+        let mut accept = body_complete_accept(coordinate.clone(), None, Vec::new(), 7, 10);
+        accept.starting_source.source = StartingSource::CapabilityDefault;
+        accept.source.qualified = QualifiedSource::Unresolved;
+        let (_, receipt, event_id) = accept_body_complete(&mut store, &keys, 10, accept);
+        (coordinate, receipt, event_id)
+    };
+
+    let reopened = RedbStore::open(&path).unwrap();
+    let snapshot = reopened
+        .replaceable_operation_snapshot(&coordinate)
+        .unwrap()
+        .expect("the capability-default resource survives reopen");
+    assert!(snapshot.source.is_none());
+    assert_eq!(
+        snapshot.current.source_revision.evidence().qualified,
+        QualifiedSource::Unresolved,
+        "a capability-owned local start is not relay-qualified absence"
+    );
+    assert_eq!(snapshot.operations.len(), 1);
+    assert!(matches!(
+        &snapshot.operations[0].source_requirement,
+        OperationSourceRequirement::CapabilityDefault(requirement)
+            if requirement.source == StartingSource::CapabilityDefault
+    ));
+    assert_eq!(
+        snapshot
+            .current
+            .generation
+            .expect("the body-complete local generation is durable")
+            .materialization
+            .event_id,
+        event_id
+    );
+    assert_eq!(receipt_ids(&reopened, receipt), (event_id, event_id));
 }
 
 #[test]

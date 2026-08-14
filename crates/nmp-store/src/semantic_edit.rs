@@ -199,6 +199,9 @@ pub struct ResolvedOperation {
 pub enum StartingSource {
     Absent,
     Event(EventId),
+    /// Capability-owned local starting value. This is not qualified relay
+    /// absence and grants no source provenance.
+    CapabilityDefault,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +215,7 @@ pub struct StartingSourceRequirement {
 pub enum OperationSourceRequirement {
     Awaiting(StartingSourceRequirement),
     Qualified(StartingSourceRequirement),
+    CapabilityDefault(StartingSourceRequirement),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -568,7 +572,15 @@ pub(crate) fn plan_accept(
     )?;
 
     operations.retain(|operation| !resolved.contains_key(&operation.intent_id));
-    let source_requirement = if source_qualifies(&accept.starting_source, &accept.source) {
+    let source_requirement = if matches!(
+        accept.starting_source.source,
+        StartingSource::CapabilityDefault
+    ) {
+        if !matches!(accept.source.qualified, QualifiedSource::Unresolved) {
+            return Err(SemanticRefusal::InvalidSourceRevision);
+        }
+        OperationSourceRequirement::CapabilityDefault(accept.starting_source)
+    } else if source_qualifies(&accept.starting_source, &accept.source) {
         OperationSourceRequirement::Qualified(accept.starting_source)
     } else {
         OperationSourceRequirement::Awaiting(accept.starting_source)
@@ -980,7 +992,8 @@ fn validate_source_event(
 fn source_requirement(operation: &SemanticOperation) -> &StartingSourceRequirement {
     match &operation.source_requirement {
         OperationSourceRequirement::Awaiting(requirement)
-        | OperationSourceRequirement::Qualified(requirement) => requirement,
+        | OperationSourceRequirement::Qualified(requirement)
+        | OperationSourceRequirement::CapabilityDefault(requirement) => requirement,
     }
 }
 
@@ -993,6 +1006,7 @@ fn source_qualifies(required: &StartingSourceRequirement, evidence: &SourceEvide
         (StartingSource::Event(expected), QualifiedSource::Event { event_id, .. }) => {
             *expected == event_id
         }
+        (StartingSource::CapabilityDefault, _) => false,
         _ => false,
     }
 }
@@ -1178,6 +1192,7 @@ pub(crate) fn semantic_program_digest(operations: &[SemanticOperation]) -> Seman
         let (qualification, requirement) = match &operation.source_requirement {
             OperationSourceRequirement::Awaiting(requirement) => (0u8, requirement),
             OperationSourceRequirement::Qualified(requirement) => (1u8, requirement),
+            OperationSourceRequirement::CapabilityDefault(requirement) => (2u8, requirement),
         };
         hasher.update(&[qualification]);
         hasher.update(&requirement.plan.0);
@@ -1189,6 +1204,9 @@ pub(crate) fn semantic_program_digest(operations: &[SemanticOperation]) -> Seman
             StartingSource::Event(event_id) => {
                 hasher.update(&[1]);
                 hasher.update(event_id.as_bytes());
+            }
+            StartingSource::CapabilityDefault => {
+                hasher.update(&[2]);
             }
         }
         hasher.update(&operation.accepted_at.as_secs().to_be_bytes());
@@ -1220,6 +1238,16 @@ pub(crate) fn validate_resource_state(
                 })
         }
     };
+    let unresolved_generation_valid = !matches!(
+        state.source_revision.evidence().qualified,
+        QualifiedSource::Unresolved
+    ) || state.generation.is_none()
+        || state.operations.iter().all(|operation| {
+            matches!(
+                &operation.source_requirement,
+                OperationSourceRequirement::CapabilityDefault(_)
+            )
+        });
     let valid = !state.operations.is_empty()
         && operation_ids.len() == state.operations.len()
         && state
@@ -1235,6 +1263,7 @@ pub(crate) fn validate_resource_state(
                     == Some(generation.materialization.materialization_id)
         })
         && validate_source_event(state.source_revision.evidence(), state.source.as_ref()).is_ok()
+        && unresolved_generation_valid
         && source_policy_valid;
     valid
         .then_some(())

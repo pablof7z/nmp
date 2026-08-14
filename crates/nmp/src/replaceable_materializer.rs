@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use nmp_grammar::{EventBuilder, ReplaceableOperationError, ReplaceableSourcePolicy, WritePayload};
-use nostr::UnsignedEvent;
+use nostr::nips::nip01::Coordinate;
+use nostr::{Kind, UnsignedEvent};
 
 use crate::Row;
 
@@ -35,6 +36,18 @@ pub trait ReplaceableMaterializer: Send + Sync + 'static {
         &self,
         source: &UnsignedEvent,
         current: &UnsignedEvent,
+        operations: &[ReplaceableMaterializerOperation<'_>],
+    ) -> Result<EventBuilder, ReplaceableMaterializerRefusal>;
+
+    /// Construct the capability-defined first value and apply the operations
+    /// when NMP has no qualified source or retained generation yet.
+    ///
+    /// The coordinate's public key is selected from the write intent identity;
+    /// implementations own only kind-specific tags/content. NMP validates the
+    /// returned coordinate and derives timestamp, id, and signature.
+    fn materialize_default(
+        &self,
+        coordinate: &Coordinate,
         operations: &[ReplaceableMaterializerOperation<'_>],
     ) -> Result<EventBuilder, ReplaceableMaterializerRefusal>;
 }
@@ -72,6 +85,28 @@ impl RegisteredReplaceableMaterializer {
             self.instance,
             current.body.clone(),
             current.body.clone(),
+            source_policy,
+            operation,
+        )
+        .map(WritePayload::ReplaceableOperation)
+    }
+
+    /// Construct an operation for a coordinate that may not have a value yet.
+    ///
+    /// The configured capability defines the empty body. This handle names
+    /// only kind and parameterized identifier; the write intent identity is
+    /// the sole source of the author.
+    pub fn first_value_operation(
+        &self,
+        kind: Kind,
+        identifier: String,
+        source_policy: ReplaceableSourcePolicy,
+        operation: Vec<u8>,
+    ) -> Result<WritePayload, ReplaceableOperationError> {
+        nmp_grammar::ReplaceableOperation::from_registered_default_parts(
+            self.instance,
+            kind,
+            identifier,
             source_policy,
             operation,
         )
