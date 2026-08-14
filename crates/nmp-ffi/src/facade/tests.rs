@@ -618,25 +618,15 @@ fn ffi_persistent_store_reset_is_destructive_and_idempotent() {
 /// cannot make that call from `StoreOpenFailed`'s prose.
 ///
 /// The fixture is a nonempty store whose marker this build cannot read,
-/// so `found` is `None`. The table is one this schema never writes.
-/// Retired table names are not recorded here.
+/// so `found` is `None`. The store-owned fixture retains every physical
+/// table detail; retired table names are not recorded here.
 #[test]
 fn ffi_superseded_epoch_store_is_its_own_refusal_and_damaged_bytes_are_not() {
-    use redb::{Database, TableDefinition};
-
     let fixture = tempfile::tempdir().expect("tempdir");
 
     let superseded = fixture.path().join("superseded-epoch.redb");
-    {
-        let database = Database::create(&superseded).expect("epoch fixture must create");
-        let write = database.begin_write().expect("epoch fixture must begin");
-        write
-            .open_table(TableDefinition::<u64, &[u8]>::new(
-                "a-table-this-schema-never-writes",
-            ))
-            .expect("epoch fixture must open a table this schema never writes");
-        write.commit().expect("epoch fixture must commit");
-    }
+    nmp_store::testing::create_nonempty_markerless_store(&superseded)
+        .expect("epoch fixture must create");
     let refusal = NmpEngine::new(
         NmpEngineConfig {
             store_path: Some(superseded.to_string_lossy().into_owned()),
