@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 pub(crate) enum PublishPreparation {
     Complete(Vec<Effect>),
-    Materialize(PreparedReplaceableMaterialization),
+    Materialize(Box<PreparedReplaceableMaterialization>),
 }
 
 pub(crate) struct PreparedReplaceableMaterialization {
@@ -185,7 +185,7 @@ impl EngineCore {
             .unwrap_or_default();
         replay_operations.push(operation_bytes.clone());
         let fence = Self::replaceable_materialization_fence(snapshot.as_ref());
-        PublishPreparation::Materialize(PreparedReplaceableMaterialization {
+        PublishPreparation::Materialize(Box::new(PreparedReplaceableMaterialization {
             call: ReplaceableMaterializationCall {
                 materializer: materializer.clone(),
                 source: replay_source,
@@ -206,7 +206,7 @@ impl EngineCore {
                 correlation,
                 fence,
             },
-        })
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -286,7 +286,7 @@ impl EngineCore {
             .unwrap_or_default();
         operations.push(operation_bytes.clone());
         let fence = Self::replaceable_materialization_fence(snapshot.as_ref());
-        PublishPreparation::Materialize(PreparedReplaceableMaterialization {
+        PublishPreparation::Materialize(Box::new(PreparedReplaceableMaterialization {
             call: ReplaceableMaterializationCall {
                 materializer: materializer.clone(),
                 source: replay_source,
@@ -307,7 +307,7 @@ impl EngineCore {
                 correlation,
                 fence,
             },
-        })
+        }))
     }
 
     fn replaceable_materialization_fence(

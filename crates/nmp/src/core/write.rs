@@ -2798,7 +2798,7 @@ impl EngineCore {
             match preparation {
                 PublishPreparation::Complete(effects) => return effects,
                 PublishPreparation::Materialize(prepared) => {
-                    let PreparedReplaceableMaterialization { call, continuation } = prepared;
+                    let PreparedReplaceableMaterialization { call, continuation } = *prepared;
                     let outcome =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call.execute()))
                             .unwrap_or(ReplaceableMaterializationOutcome::Panicked);

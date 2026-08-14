@@ -4122,7 +4122,7 @@ fn engine_loop(
                     let id = next_replaceable_materialization_id;
                     next_replaceable_materialization_id =
                         next_replaceable_materialization_id.wrapping_add(1).max(1);
-                    let core::PreparedReplaceableMaterialization { call, continuation } = prepared;
+                    let core::PreparedReplaceableMaterialization { call, continuation } = *prepared;
                     pending_initial_publications.insert(
                         id,
                         PendingInitialPublication {
@@ -4168,7 +4168,7 @@ fn engine_loop(
                     ),
                     PublishPreparation::Materialize(prepared) => {
                         let core::PreparedReplaceableMaterialization { call, continuation } =
-                            prepared;
+                            *prepared;
                         pending_initial_publications.insert(
                             id,
                             PendingInitialPublication {
