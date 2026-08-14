@@ -60,12 +60,12 @@ use crate::persistent_store_lifetime::{
 use crate::AuthDenialSource;
 use crate::{
     AcceptOutcome, AcceptWrite, AuthDenial, CloseIntentOutcome, CompensateOutcome,
-    CoverageInterval, CoverageKey, EventCursor, EventStore, GcReport, GcRetentionSet,
-    InsertOutcome, IntentId, IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome,
-    Provenance, PublishQueueAttempt, PublishQueueAttemptDetails, PublishQueueAttemptHandoff,
-    PublishQueueAttemptOutcome, PublishQueueAttemptTransient, PublishQueueDeadline,
-    PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueIntent, PublishQueueLane,
-    PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
+    CoverageInterval, CoverageKey, EventCursor, GcReport, GcRetentionSet, InsertOutcome, IntentId,
+    IntentSigState, LocalOrigin, PersistenceError, PromoteOutcome, Provenance, PublishQueueAttempt,
+    PublishQueueAttemptDetails, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
+    PublishQueueAttemptTransient, PublishQueueDeadline, PublishQueueDeadlineKind,
+    PublishQueueInFlightPhase, PublishQueueIntent, PublishQueueLane, PublishQueueLaneKey,
+    PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
     PublishQueueRouteRevision, PublishQueueTerminalOutcome, PublishQueueTransientCause,
     ReceiptState, RefuseReason, RelayObserved, RetractReason, SigState, StoredEvent,
     VerifiedSignature,
@@ -437,33 +437,68 @@ impl RedbStore {
     }
 }
 
-impl EventStore for RedbStore {
-    fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
+impl RedbStore {
+    /// Accept a durably-owned local write intent (issues #2/#3): runs the
+    /// SAME tombstone-refusal and replaceable/addressable supersession
+    /// rules `insert` runs against `accept.frozen`, but stamps
+    /// local [`Provenance`] instead of a `RelayObserved`, and commits
+    /// the resulting row together with `accept`'s full journal payload
+    /// (`PUBLISH_QUEUE_INTENTS` + `PUBLISH_QUEUE_DISPLACED`, if a predecessor was
+    /// evicted) in ONE transaction (Fable checkpoint R7) — a crash mid-call
+    /// leaves either nothing recoverable or a fully `recover_publish_queue`-able
+    /// `Accepted`. `Refused` writes nothing at all (R3). A locally-composed
+    /// kind:5 draft additionally runs the identical author-verified
+    /// tombstone-write processing `insert` runs for a relay-observed
+    /// kind:5, in the SAME transaction (architecture review correction:
+    /// issue #2's immediate-delete promise extends to local compositions,
+    /// not only the relay echo) — see `AcceptOutcome::Kind5Processed`.
+    ///
+    /// Fallible (architecture review correction): a realistic persistence
+    /// failure (disk full, I/O error) returns `Err` rather than panicking the
+    /// embedding app. That result carries no `Accepted` answer, but I/O has
+    /// unknown durability: reconstruction and correlation lookup may reveal
+    /// that the transaction committed one fully journaled pending row. As of
+    /// issue #122 the ingest/read doors above
+    /// (`insert`/`query`/`remove`/`expire_due`/`record_coverage`/`gc`) are
+    /// fallible on the same footing; only serde/logic invariant violations
+    /// (a corrupt persisted row) remain `.expect()`-on-invariant by design.
+    /// Redb propagates backend failures through this result.
+    pub fn accept_write(&mut self, accept: AcceptWrite) -> Result<AcceptOutcome, PersistenceError> {
         write_ops::accept_write(self, accept)
     }
 
-    fn replaceable_operation_snapshot(
+    /// Point-load one active replaceable-operation resource. Opaque replay
+    /// bytes and exact CAS witnesses are returned without interpreting them.
+    pub fn replaceable_operation_snapshot(
         &self,
         coordinate: &nostr::nips::nip01::Coordinate,
     ) -> Result<Option<crate::RecoveredSemanticResource>, PersistenceError> {
         semantic_edit_ops::snapshot(self, coordinate)
     }
 
-    fn install_replaceable_materialization(
+    /// Atomically install a materializer result computed outside store locks,
+    /// or report a typed stale/refusal outcome without mutation.
+    pub fn install_replaceable_materialization(
         &mut self,
         rematerialize: crate::SemanticRematerialize,
     ) -> Result<crate::SemanticInstallOutcome, PersistenceError> {
         semantic_edit_ops::install(self, rematerialize)
     }
 
-    fn install_replaceable_source_materialization(
+    /// Atomically adopt a newer verified relay source and install the complete
+    /// semantic successor prepared from it. The raw source is never exposed as
+    /// the effective canonical value between commits.
+    pub fn install_replaceable_source_materialization(
         &mut self,
         install: crate::SemanticSourceInstall,
     ) -> Result<crate::SemanticInstallOutcome, PersistenceError> {
         semantic_edit_ops::install_source(self, install)
     }
 
-    fn advance_replaceable_source_round(
+    /// Persist one typed request lifecycle fact owned by an exact finite
+    /// semantic source round. Unrelated rounds, sources, or request identities
+    /// are reported stale without mutation.
+    pub fn advance_replaceable_source_round(
         &mut self,
         coordinate: &nostr::nips::nip01::Coordinate,
         fact: crate::SemanticSourceRoundFact,
@@ -471,14 +506,54 @@ impl EventStore for RedbStore {
         semantic_edit_ops::advance_source_round_fact(self, coordinate, fact)
     }
 
-    fn close_replaceable_operation_cohort(
+    /// Atomically close every contributing intent/receipt and compact its
+    /// semantic program after the store verifies the exact finite source round
+    /// and current destination generation are both terminal.
+    pub fn close_replaceable_operation_cohort(
         &mut self,
         close: crate::SemanticCohortClose,
     ) -> Result<crate::SemanticCohortCloseOutcome, PersistenceError> {
         semantic_edit_ops::close_cohort(self, close)
     }
 
-    fn promote_signed(
+    /// Swap the sentinel signature on `intent_id`'s frozen body for
+    /// `verified`'s real one and flip the canonical
+    /// `SigState`/`IntentSigState` to
+    /// `Signed`, in the SAME transaction that durably drops the intent's
+    /// own `PUBLISH_QUEUE_DISPLACED` stash (R6) and updates its retained receipt.
+    /// Keyed by `IntentId`, NOT the frozen event's id (architecture review
+    /// correction — load-bearing): the intent's `PUBLISH_QUEUE_INTENTS.frozen_json`
+    /// is the durable source of truth for its body regardless of whether a
+    /// live `EVENTS` row currently exists for it. Three cases, uniformly:
+    /// (a) a live row's owner set CONTAINS `intent_id` (issue #2, team-lead
+    /// decision: ownership is a SET — an exact `Duplicate` is a CO-OWNER
+    /// of the SAME row, not a second row of its own; see `LocalOrigin`'s
+    /// doc) — mutate it in place (same id — a NIP-01 id never depends on
+    /// `sig` — so this is a value update, not a remove/re-add) — refused
+    /// (`NotFound`) if the row's `SigState` is ALREADY `Signed`, even by a
+    /// different co-owner, so a later distinct owner's promotion can never
+    /// overwrite the one real signature with a second one; (b) no live
+    /// row, but `intent_id` is a member of some OTHER intent's
+    /// `PUBLISH_QUEUE_DISPLACED` stash entry's owner set (it was superseded by a
+    /// later local edit before it could sign) — sync the real signature
+    /// into that stash entry too (same already-`Signed` refusal applies),
+    /// so a future restore of it never resurrects a stale sentinel copy;
+    /// (c) neither (the intent was `Stale`/`Duplicate` at acceptance with
+    /// no shared row, or its row was since superseded by a RELAY-observed
+    /// event, kind:5-deleted, or NIP-40-expired) — mutate only the durable
+    /// `PUBLISH_QUEUE_INTENTS`/`PUBLISH_QUEUE_RECEIPTS` journal copies; the resulting
+    /// signed bytes are still returned so the engine can publish them even
+    /// though this intent does not (or no longer) wins any local address.
+    /// [`VerifiedSignature`] is the whole precondition, typed (#768): it
+    /// cannot be built without one successful `nostr::Event::verify`, and
+    /// this door refuses — [`crate::PersistenceFault::Invariant`], before any
+    /// mutation of any table — unless [`VerifiedSignature::event_id`]
+    /// equals the intent's own durable frozen id. A signature that is
+    /// perfectly valid for a DIFFERENT event is therefore refused here, not
+    /// promoted. No implementation re-verifies: verification happened once,
+    /// on the caller's side, to produce the evidence (#387). Fallible for
+    /// the same reason `accept_write` is.
+    pub fn promote_signed(
         &mut self,
         target: crate::PromotionTarget,
         verified: VerifiedSignature,
@@ -508,21 +583,72 @@ impl EventStore for RedbStore {
         }
     }
 
-    fn compensate_write_with_state(
+    /// Pre-signature compensation only (retraction doc §4.2's "Promotion
+    /// correction": once `promote_signed` has run, relay ACK/reject/timeout
+    /// is receipt-only and NEVER reaches this door — a `Signed` intent
+    /// answers `NotFound` here). Keyed by `IntentId` (same architecture
+    /// review correction as `promote_signed`, same three cases, same
+    /// ownership-SET model): (a) a live row's owner set CONTAINS
+    /// `intent_id` — remove `intent_id` from that set; the row is only
+    /// actually `remove(id, Rejected)`-ed (no tombstone) once the set is
+    /// EMPTY, `SigState` is still `Pending`, AND no relay has
+    /// independently confirmed it (`Provenance::seen` empty) — an exact
+    /// `Duplicate`'s still-open obligation, an already-`Signed` state some
+    /// OTHER co-owner committed, or independent relay provenance, all
+    /// survive this one intent's cancellation (see `LocalOrigin`'s doc);
+    /// if actually removed, this intent's durably-stashed `displaced`
+    /// predecessor (if any) is then re-`insert`ed through the same one
+    /// door — it wins its address back by ordinary supersession, never an
+    /// un-supersede operation; (b) no live row, but `intent_id` is a
+    /// member of some OTHER intent's `PUBLISH_QUEUE_DISPLACED` stash entry's
+    /// owner set — same conditional removal, applied to that stash slot's
+    /// owner set instead; (c) neither — nothing to remove or restore in
+    /// `EVENTS`. In every case, this intent's own `PUBLISH_QUEUE_INTENTS`/
+    /// `PUBLISH_QUEUE_DISPLACED` rows are deleted and its retained receipt
+    /// updated to `Compensated`. Fallible for the same reason
+    /// `accept_write` is.
+    pub fn compensate_write(
         &mut self,
         intent_id: IntentId,
-        reason: crate::CompensationReason,
     ) -> Result<CompensateOutcome, PersistenceError> {
-        write_ops::compensate_write_with_state(self, intent_id, reason)
+        write_ops::compensate_write_with_state(
+            self,
+            intent_id,
+            write_ops::CompensationReason::Failure,
+        )
     }
 
-    fn enumerate_publish_queue_receipts(
+    /// The explicit-cancellation form of [`Self::compensate_write`]. It has
+    /// identical atomic row/predecessor/lane semantics, but persists
+    /// [`ReceiptState::Cancelled`] so reattachment can distinguish deliberate
+    /// cancellation from a terminal signer/protocol failure.
+    pub fn cancel_write(
+        &mut self,
+        intent_id: IntentId,
+    ) -> Result<CompensateOutcome, PersistenceError> {
+        write_ops::compensate_write_with_state(
+            self,
+            intent_id,
+            write_ops::CompensationReason::ExplicitCancellation,
+        )
+    }
+
+    /// Read every retained receipt back out, newest id last (#1039).
+    pub fn enumerate_publish_queue_receipts(
         &self,
     ) -> Result<Vec<crate::PublishQueueReceipt>, PersistenceError> {
         publish_queue_ops::enumerate_publish_queue_receipts(self)
     }
 
-    fn publish_queue_receipts_after(
+    /// Read at most `limit` retained receipts whose ids are strictly greater
+    /// than `after`, in ascending receipt-id order (#903).
+    ///
+    /// This is the bounded app-inspection primitive. The public limit is a
+    /// `u8`, and `EngineCore` rejects a page that exceeds it, crosses
+    /// the exclusive cursor backwards, or is not strictly ordered. Redb
+    /// provides the bounded read directly; there is deliberately no fallback
+    /// that first materializes the complete retained queue and truncates it.
+    pub fn publish_queue_receipts_after(
         &self,
         after: Option<u64>,
         limit: u8,
@@ -530,29 +656,96 @@ impl EventStore for RedbStore {
         publish_queue_ops::publish_queue_receipts_after(self, after, limit)
     }
 
-    fn remove_publish_queue_entry(
+    /// Forget one retained receipt and every piece of evidence keyed to it
+    /// (#1039). The removal half of the app's outbox door, and a real
+    /// TERMINATION path: a write parked forever on a missing signer, and a
+    /// permanently-failed refused entry, end no other way.
+    ///
+    /// Refuses with [`crate::RemoveQueueEntryOutcome::StillOpen`] while the
+    /// receipt still owns an open `PUBLISH_QUEUE_INTENTS` row — that write is
+    /// cancelled, not removed.
+    pub fn remove_publish_queue_entry(
         &mut self,
         receipt_id: u64,
     ) -> Result<crate::RemoveQueueEntryOutcome, PersistenceError> {
         publish_queue_ops::remove_publish_queue_entry(self, receipt_id)
     }
 
-    fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
+    /// Read every still-open intent back out of the durable journal on
+    /// boot (issue #3 §2.3). Read-only: the pending rows themselves are
+    /// already live in the store (committed at `accept_write` time) — this
+    /// returns only the journal metadata the engine needs to rebuild its
+    /// in-memory write-delivery bookkeeping. Redb returns the durable open
+    /// obligations required to rebuild that projection.
+    ///
+    /// Fallible (#790). This used to return a bare `Vec`, which left the
+    /// store nothing to do with a journal row that will not decode except
+    /// panic the embedding host at boot — the one moment the host is least
+    /// able to survive it. `Ok(vec![])` and `Err(..)` are different facts and
+    /// must stay distinguishable: the first says "no durable obligation is
+    /// open", the second says "the durable obligation set is unreadable".
+    /// A caller must never collapse the second into the first, and this door
+    /// never returns a partial prefix — an undecodable row fails the whole
+    /// call rather than silently shortening the obligation set.
+    pub fn recover_publish_queue(&self) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
         publish_queue_ops::recover_publish_queue(self)
     }
 
-    fn reattach_receipt(
+    /// Look up `receipt_id`'s durably-RETAINED record — independent of
+    /// whether its intent's `PUBLISH_QUEUE_INTENTS` open-work row still exists
+    /// (architecture review correction: separates "recoverable open work"
+    /// from "receipt identity/state", so a terminal receipt stays
+    /// reattachable — issue #3's "receipts remain... reattachable" —
+    /// rather than disappearing the moment its open-work row is cleaned
+    /// up). Unlike `recover_publish_queue`, this is an ordinary retained-data
+    /// lookup, not a boot-only replay: Redb answers it from retained durable
+    /// receipt state.
+    pub fn reattach_receipt(
         &self,
         receipt_id: u64,
     ) -> Result<Option<PublishQueueReceipt>, PersistenceError> {
         publish_queue_ops::reattach_receipt(self, receipt_id)
     }
 
-    fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
+    /// #591: resolve a caller's [`AcceptWrite::correlation`] token to the
+    /// receipt id it was journaled under, if any. `Ok(None)` means the
+    /// token has never been accepted (or this store never received it) --
+    /// distinct from a persistence failure. `accept_write` uses this same
+    /// mapping internally (checked inside its own transaction) to decide
+    /// whether a token is a first sighting; the engine's
+    /// `reattach_by_correlation` lookup door uses it directly to translate
+    /// a token into an ordinary [`Self::reattach_receipt`] call. Retained
+    /// forever, exactly like `PUBLISH_QUEUE_RECEIPTS` -- there is no removal door.
+    pub fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
         publish_queue_ops::lookup_correlation(self, token)
     }
 
-    fn accept_refused(
+    /// Take custody of a write the acceptance door REFUSED, as one
+    /// permanently-failed queue entry.
+    ///
+    /// `accept_write` answering [`AcceptOutcome::Refused`] is the store
+    /// working and saying no — a semantic answer, not a failure to write.
+    /// The app must be able to read that answer back, so the refusal is
+    /// recorded rather than thrown: THIS door writes just the
+    /// `PUBLISH_QUEUE_RECEIPTS` row with `intent_id: None` (nothing backs it
+    /// — no intent, no journal, no pending event row, no signer request, no
+    /// relay write) and [`ReceiptState::Refused`] carrying `reason`
+    /// verbatim, including a [`RefuseReason::ReplaceableBaseChanged`]'s two
+    /// event ids. [`RefuseReason::AlreadyExpired`] never reaches this door:
+    /// expiry is a pre-custody refusal with no retained receipt.
+    ///
+    /// Terminal at birth. Custody is not viability: the entry exists so the
+    /// app can see the failure while it remains in the store's bounded
+    /// terminal history, never because anything will retry it. The app may
+    /// still remove it explicitly through [`Self::remove_publish_queue_entry`].
+    ///
+    /// Returns the store-allocated receipt id — the same durable
+    /// high-water-mark `accept_write` allocates from (architecture review
+    /// correction: a caller-side receipt-id counter that resets on
+    /// restart has the identical reuse hazard `IntentId` had, now that
+    /// receipts are durably retained across restart). Fallible for the
+    /// same reason `accept_write` is: recording a refusal needs the disk.
+    pub fn accept_refused(
         &mut self,
         frozen_id: EventId,
         expected_pubkey: PublicKey,

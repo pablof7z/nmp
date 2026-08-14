@@ -11,7 +11,7 @@ use nmp::{
     RowDelta, RowSignature, SigningState, WriteIntent, WriteRouting,
 };
 use nmp_nip02::{register_follow_writes, ComposeFollowResult, FollowChange};
-use nmp_store::{EventStore, RedbStore, RelayObserved};
+use nmp_store::{RedbStore, RelayObserved};
 use nostr::{EventBuilder, EventId, Keys, Kind, RelayUrl, Timestamp};
 
 fn contact(keys: &Keys, created_at: u64) -> nostr::Event {

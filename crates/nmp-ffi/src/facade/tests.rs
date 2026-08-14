@@ -392,8 +392,6 @@ async fn recv_window_load(
 /// handle type.
 #[tokio::test]
 async fn ffi_windowed_observe_delivers_snapshot_frames_grows_and_reports_at_bound() {
-    use nmp_store::EventStore;
-
     let fixture = tempfile::tempdir().unwrap();
     let path = fixture.path().join("ffi-window.redb");
     let keys = nostr::Keys::generate();

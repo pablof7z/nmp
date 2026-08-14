@@ -12,8 +12,8 @@ use nmp_grammar::{
     DescriptorHash, Filter, SourceAuthority,
 };
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, CompensateOutcome, EventStore, InsertOutcome, PersistenceError,
-    RedbStore, RelayObserved, SemanticInstallOutcome, SemanticSourceInstall, SigState, StoredEvent,
+    AcceptOutcome, AcceptWrite, CompensateOutcome, InsertOutcome, PersistenceError, RedbStore,
+    RelayObserved, SemanticInstallOutcome, SemanticSourceInstall, SigState, StoredEvent,
 };
 use nostr::filter::MatchEventOptions;
 use nostr::RelayUrl;
@@ -1077,7 +1077,7 @@ impl Engine {
     /// The local-authorship mirror of [`Self::ingest_observed`]
     /// (`crashsafe-accepted-2-3-plan.md` §1.2, #2/#3 under epic #23): a
     /// locally-composed write enters the ONE store through the
-    /// [`EventStore::accept_write`] door (local provenance +
+    /// [`RedbStore::accept_write`] door (local provenance +
     /// `SigState::Pending` instead of a `RelayObserved`) and its
     /// [`AcceptOutcome`] is sorted into `react`'s `inserted`/`removed`
     /// EXACTLY as a relay insert's [`InsertOutcome`] is — so the pending row

@@ -1,6 +1,6 @@
 use nmp_store::RelayObserved;
 use nmp_store::{
-    AcceptOutcome, AcceptWrite, AcceptWritePayload, AccessContextId, EventStore, HandoffEvidence,
+    AcceptOutcome, AcceptWrite, AcceptWritePayload, AccessContextId, HandoffEvidence,
     IntentSigState, MaterializationCandidate, MaterializationId, PendingMaterializationState,
     PromoteOutcome, PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
     PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceiptPayload,

@@ -926,9 +926,12 @@ fn configured_compensation_failure_rolls_back_and_is_consumed_once() {
     let (intent, event) = accepted_pending(&mut store, &keys, "compensate once", 1_000);
     let before = store.recover_publish_queue().unwrap();
 
-    let error = store
-        .compensate_write_with_state(intent, crate::CompensationReason::Failure)
-        .expect_err("construction-armed compensation must fail before commit");
+    let error = super::write_ops::compensate_write_with_state(
+        &mut store,
+        intent,
+        super::write_ops::CompensationReason::Failure,
+    )
+    .expect_err("construction-armed compensation must fail before commit");
     assert_eq!(
         error.to_string(),
         "durable-store persistence failure: injected compensation failure"
@@ -941,9 +944,12 @@ fn configured_compensation_failure_rolls_back_and_is_consumed_once() {
     );
 
     assert!(matches!(
-        store
-            .compensate_write_with_state(intent, crate::CompensationReason::Failure)
-            .expect("the same store retries after consuming the one-shot refusal"),
+        super::write_ops::compensate_write_with_state(
+            &mut store,
+            intent,
+            super::write_ops::CompensationReason::Failure,
+        )
+        .expect("the same store retries after consuming the one-shot refusal"),
         CompensateOutcome::Compensated { .. }
     ));
     assert!(store.recover_publish_queue().unwrap().is_empty());
