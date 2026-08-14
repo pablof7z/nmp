@@ -41,12 +41,12 @@ fn a_diagnostics_snapshot_built_over_corrupt_coverage_says_so() {
         1,
         "the private plan installation must create exactly one coverage entry"
     );
-    core.resolver.store().reset_coverage_reads();
+    core.store.reset_coverage_reads();
 
     let snapshot = core.diagnostics_snapshot();
 
     assert_eq!(
-        core.resolver.store().coverage_reads(),
+        core.store.coverage_reads(),
         1,
         "diagnostics_snapshot must own the first and only coverage dereference"
     );

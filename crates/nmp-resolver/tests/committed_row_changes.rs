@@ -28,13 +28,17 @@ fn inserted_row_carries_every_same_batch_source_and_later_growth_carries_only_ne
     let second = relay("second");
     let third = relay("third");
     let fourth = relay("fourth");
-    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    let mut engine = Engine::new();
 
     let inserted = engine
-        .ingest_observed_detailed(vec![
-            (event.clone(), observed(first.clone(), 11)),
-            (event.clone(), observed(second.clone(), 12)),
-        ])
+        .ingest_observed_detailed(
+            &mut store,
+            vec![
+                (event.clone(), observed(first.clone(), 11)),
+                (event.clone(), observed(second.clone(), 12)),
+            ],
+        )
         .unwrap()
         .committed
         .row_changes;
@@ -48,10 +52,13 @@ fn inserted_row_carries_every_same_batch_source_and_later_growth_carries_only_ne
     assert!(inserted.provenance_grew.is_empty());
 
     let grew = engine
-        .ingest_observed_detailed(vec![
-            (event.clone(), observed(third.clone(), 13)),
-            (event.clone(), observed(fourth.clone(), 14)),
-        ])
+        .ingest_observed_detailed(
+            &mut store,
+            vec![
+                (event.clone(), observed(third.clone(), 13)),
+                (event.clone(), observed(fourth.clone(), 14)),
+            ],
+        )
         .unwrap()
         .committed
         .row_changes;
@@ -75,13 +82,17 @@ fn same_batch_insert_then_delete_reports_only_the_durable_deletion_row() {
         .sign_with_keys(&keys)
         .unwrap();
     let source = relay("delete");
-    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    let mut engine = Engine::new();
 
     let ingest = engine
-        .ingest_observed_detailed(vec![
-            (target, observed(source.clone(), 11)),
-            (deletion.clone(), observed(source.clone(), 21)),
-        ])
+        .ingest_observed_detailed(
+            &mut store,
+            vec![
+                (target, observed(source.clone(), 11)),
+                (deletion.clone(), observed(source.clone(), 21)),
+            ],
+        )
         .unwrap();
     assert_eq!(ingest.current_after_commit, vec![false, true]);
     let changes = ingest.committed.row_changes;
@@ -103,16 +114,23 @@ fn same_batch_supersession_chain_collapses_to_old_removed_and_final_winner_inser
     let middle = event(&keys, Kind::from(10_000u16), "middle", 20);
     let winner = event(&keys, Kind::from(10_000u16), "winner", 30);
     let source = relay("replaceable");
-    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    let mut engine = Engine::new();
     engine
-        .ingest_observed_detailed(vec![(old.clone(), observed(source.clone(), 11))])
+        .ingest_observed_detailed(
+            &mut store,
+            vec![(old.clone(), observed(source.clone(), 11))],
+        )
         .unwrap();
 
     let ingest = engine
-        .ingest_observed_detailed(vec![
-            (middle, observed(source.clone(), 21)),
-            (winner.clone(), observed(source.clone(), 31)),
-        ])
+        .ingest_observed_detailed(
+            &mut store,
+            vec![
+                (middle, observed(source.clone(), 21)),
+                (winner.clone(), observed(source.clone(), 31)),
+            ],
+        )
         .unwrap();
     assert_eq!(ingest.current_after_commit, vec![false, true]);
     let changes = ingest.committed.row_changes;
@@ -134,12 +152,18 @@ fn local_supersession_and_compensation_carry_exact_inverse_row_changes() {
     let predecessor = event(&keys, Kind::from(10_000u16), "old", 10);
     let winner = event(&keys, Kind::from(10_000u16), "new", 20);
     let source = relay("valid-predecessor");
-    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    let mut engine = Engine::new();
     engine
-        .ingest_observed_detailed(vec![(predecessor.clone(), observed(source.clone(), 11))])
+        .ingest_observed_detailed(
+            &mut store,
+            vec![(predecessor.clone(), observed(source.clone(), 11))],
+        )
         .unwrap();
 
-    let accepted = engine.accept_local(accept_write_of(winner, 21)).unwrap();
+    let accepted = engine
+        .accept_local(&mut store, accept_write_of(winner, 21))
+        .unwrap();
     let (intent_id, pending) = match &accepted.outcome {
         AcceptOutcome::Superseded { intent_id, row, .. } => (*intent_id, row.event.clone()),
         other => panic!("expected local supersession, got {other:?}"),
@@ -155,10 +179,10 @@ fn local_supersession_and_compensation_carry_exact_inverse_row_changes() {
     assert_eq!(accepted.committed.row_changes.removed.len(), 1);
     assert_eq!(accepted.committed.row_changes.removed[0].id, predecessor.id);
 
-    let outcome = engine.store_mut().compensate_write(intent_id).unwrap();
+    let outcome = store.compensate_write(intent_id).unwrap();
     assert!(matches!(outcome, CompensateOutcome::Compensated { .. }));
     let compensated = engine
-        .react_to_compensation(pending.clone(), &outcome)
+        .react_to_compensation(&store, pending.clone(), &outcome)
         .unwrap();
     assert_eq!(compensated.row_changes.inserted.len(), 1);
     assert_eq!(compensated.row_changes.inserted[0].event.id, predecessor.id);
@@ -179,12 +203,15 @@ fn a_retired_pending_predecessor_is_removed_and_never_restored() {
     let keys = Keys::generate();
     let predecessor = event(&keys, Kind::from(10_000u16), "old", 10);
     let winner = event(&keys, Kind::from(10_000u16), "new", 20);
-    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    let mut engine = Engine::new();
     engine
-        .accept_local(accept_write_of(predecessor.clone(), 11))
+        .accept_local(&mut store, accept_write_of(predecessor.clone(), 11))
         .unwrap();
 
-    let accepted = engine.accept_local(accept_write_of(winner, 21)).unwrap();
+    let accepted = engine
+        .accept_local(&mut store, accept_write_of(winner, 21))
+        .unwrap();
     let (intent_id, pending) = match &accepted.outcome {
         AcceptOutcome::Superseded {
             intent_id,
@@ -200,10 +227,10 @@ fn a_retired_pending_predecessor_is_removed_and_never_restored() {
     assert_eq!(accepted.committed.row_changes.removed.len(), 1);
     assert_eq!(accepted.committed.row_changes.removed[0].id, predecessor.id);
 
-    let outcome = engine.store_mut().compensate_write(intent_id).unwrap();
+    let outcome = store.compensate_write(intent_id).unwrap();
     assert!(matches!(outcome, CompensateOutcome::Compensated { .. }));
     let compensated = engine
-        .react_to_compensation(pending.clone(), &outcome)
+        .react_to_compensation(&store, pending.clone(), &outcome)
         .unwrap();
     assert!(compensated.row_changes.inserted.is_empty());
     assert_eq!(compensated.row_changes.removed, vec![pending]);
@@ -218,12 +245,15 @@ fn local_kind5_compensation_carries_exact_revealed_target() {
         .custom_created_at(Timestamp::from(20u64))
         .sign_with_keys(&keys)
         .unwrap();
-    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    let mut engine = Engine::new();
     engine
-        .accept_local(accept_write_of(target.clone(), 11))
+        .accept_local(&mut store, accept_write_of(target.clone(), 11))
         .unwrap();
 
-    let accepted = engine.accept_local(accept_write_of(deletion, 21)).unwrap();
+    let accepted = engine
+        .accept_local(&mut store, accept_write_of(deletion, 21))
+        .unwrap();
     let (intent_id, pending) = match &accepted.outcome {
         AcceptOutcome::Kind5Processed { intent_id, row, .. } => (*intent_id, row.event.clone()),
         other => panic!("expected local kind5, got {other:?}"),
@@ -236,9 +266,9 @@ fn local_kind5_compensation_carries_exact_revealed_target() {
     assert_eq!(accepted.committed.row_changes.removed.len(), 1);
     assert_eq!(accepted.committed.row_changes.removed[0].id, target.id);
 
-    let outcome = engine.store_mut().compensate_write(intent_id).unwrap();
+    let outcome = store.compensate_write(intent_id).unwrap();
     let compensated = engine
-        .react_to_compensation(pending.clone(), &outcome)
+        .react_to_compensation(&store, pending.clone(), &outcome)
         .unwrap();
     assert_eq!(compensated.row_changes.inserted.len(), 1);
     assert_eq!(compensated.row_changes.inserted[0].event.id, target.id);
@@ -254,17 +284,15 @@ fn expiry_retraction_carries_the_exact_removed_row() {
         .sign_with_keys(&keys)
         .unwrap();
     let source = relay("expiry");
-    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    let mut engine = Engine::new();
     engine
-        .ingest_observed_detailed(vec![(expiring.clone(), observed(source, 51))])
+        .ingest_observed_detailed(&mut store, vec![(expiring.clone(), observed(source, 51))])
         .unwrap();
 
-    let expired = engine
-        .store_mut()
-        .expire_due(Timestamp::from(100u64))
-        .unwrap();
+    let expired = store.expire_due(Timestamp::from(100u64)).unwrap();
     let removed: Vec<_> = expired.into_iter().map(|row| row.event).collect();
-    let retracted = engine.retract(removed).unwrap();
+    let retracted = engine.retract(&store, removed).unwrap();
 
     assert!(retracted.row_changes.inserted.is_empty());
     assert_eq!(retracted.row_changes.removed, vec![expiring]);
@@ -274,13 +302,16 @@ fn expiry_retraction_carries_the_exact_removed_row() {
 #[test]
 fn local_duplicate_stale_and_refused_outcomes_carry_no_phantom_row_changes() {
     let keys = Keys::generate();
-    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    let mut engine = Engine::new();
 
     let ordinary = event(&keys, Kind::TextNote, "ordinary", 10);
     engine
-        .accept_local(accept_write_of(ordinary.clone(), 11))
+        .accept_local(&mut store, accept_write_of(ordinary.clone(), 11))
         .unwrap();
-    let duplicate = engine.accept_local(accept_write_of(ordinary, 12)).unwrap();
+    let duplicate = engine
+        .accept_local(&mut store, accept_write_of(ordinary, 12))
+        .unwrap();
     assert!(matches!(duplicate.outcome, AcceptOutcome::Duplicate { .. }));
     assert!(duplicate.committed.delta.is_empty());
     assert!(duplicate.committed.affected_handles.is_empty());
@@ -290,8 +321,12 @@ fn local_duplicate_stale_and_refused_outcomes_carry_no_phantom_row_changes() {
 
     let winner = event(&keys, Kind::from(10_000u16), "winner", 30);
     let loser = event(&keys, Kind::from(10_000u16), "loser", 20);
-    engine.accept_local(accept_write_of(winner, 31)).unwrap();
-    let stale = engine.accept_local(accept_write_of(loser, 32)).unwrap();
+    engine
+        .accept_local(&mut store, accept_write_of(winner, 31))
+        .unwrap();
+    let stale = engine
+        .accept_local(&mut store, accept_write_of(loser, 32))
+        .unwrap();
     assert!(matches!(stale.outcome, AcceptOutcome::Stale { .. }));
     assert!(stale.committed.delta.is_empty());
     assert!(stale.committed.affected_handles.is_empty());
@@ -304,7 +339,9 @@ fn local_duplicate_stale_and_refused_outcomes_carry_no_phantom_row_changes() {
         .custom_created_at(Timestamp::from(39u64))
         .sign_with_keys(&keys)
         .unwrap();
-    let refused = engine.accept_local(accept_write_of(expired, 41)).unwrap();
+    let refused = engine
+        .accept_local(&mut store, accept_write_of(expired, 41))
+        .unwrap();
     assert!(matches!(refused.outcome, AcceptOutcome::Refused(_)));
     assert!(refused.committed.delta.is_empty());
     assert!(refused.committed.affected_handles.is_empty());

@@ -90,14 +90,12 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
         );
     }
     assert!(core
-        .resolver
-        .store()
+        .store
         .get_coverage(first_claim, &relay)
         .unwrap()
         .is_none());
     assert!(core
-        .resolver
-        .store()
+        .store
         .get_coverage(second_claim, &relay)
         .unwrap()
         .is_some());

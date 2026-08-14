@@ -68,22 +68,13 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
         ))),
     );
     assert_eq!(
-        core.resolver
-            .store()
-            .get_coverage(incumbent_claim, &relay)
-            .unwrap(),
+        core.store.get_coverage(incumbent_claim, &relay).unwrap(),
         Some(CoverageInterval::new(
             Timestamp::from(0),
             Timestamp::from(180)
         ))
     );
-    assert_eq!(
-        core.resolver
-            .store()
-            .get_coverage(whole_claim, &relay)
-            .unwrap(),
-        None
-    );
+    assert_eq!(core.store.get_coverage(whole_claim, &relay).unwrap(), None);
 
     core.clock = Timestamp::from(200u64);
     core.on_relay_frame(
@@ -94,20 +85,14 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
         ))),
     );
     assert_eq!(
-        core.resolver
-            .store()
-            .get_coverage(residual_claim, &relay)
-            .unwrap(),
+        core.store.get_coverage(residual_claim, &relay).unwrap(),
         Some(CoverageInterval::new(
             Timestamp::from(0),
             Timestamp::from(200)
         ))
     );
     assert_eq!(
-        core.resolver
-            .store()
-            .get_coverage(whole_claim, &relay)
-            .unwrap(),
+        core.store.get_coverage(whole_claim, &relay).unwrap(),
         Some(CoverageInterval::new(
             Timestamp::from(0),
             Timestamp::from(180)

@@ -74,8 +74,7 @@ fn publish_correlation(
 
 fn lane_state(core: &EngineCore, receipt: ReceiptId) -> PublishQueueLaneState {
     let intent_id = core.pending[&receipt].intent_id;
-    core.resolver
-        .store()
+    core.store
         .recover_publish_queue_lanes(intent_id)
         .expect("lane recovery")
         .into_iter()

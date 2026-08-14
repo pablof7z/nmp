@@ -1,10 +1,10 @@
 //! `nmp-resolver` — the graph engine, atom refcounting, identity register,
 //! and metrics that resolve the reactive filter-binding grammar
-//! (`nmp-grammar`) into abstract demand-set deltas over an `EventStore`
-//! (`nmp-store`). See `docs/plans/M1-grammar-engine-plan.md` §2.3-§6 for the
-//! full spec this crate implements; `src/testkit.rs` is the scripted
-//! fake-relay harness, and `tests/` holds the M1 contract tests (the pass
-//! criteria).
+//! (`nmp-grammar`) into abstract demand-set deltas against a borrowed
+//! `RedbStore` (`nmp-store`). See `docs/plans/M1-grammar-engine-plan.md`
+//! §2.3-§6 for the full spec this crate implements; `src/testkit.rs` is the
+//! scripted fake-relay harness, and `tests/` holds the M1 contract tests (the
+//! pass criteria).
 //!
 //! Module layout:
 //! - `types` — the small shared vocabulary (`NodeId`, `Element`,

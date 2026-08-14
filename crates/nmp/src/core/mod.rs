@@ -2170,8 +2170,9 @@ struct PendingRequestClaimTransfer {
     failures: u32,
 }
 
-/// The PURE synchronous reducer (§2 position 1). No I/O, no threads.
+/// The synchronous reducer and durable-state owner (§2 position 1). No threads.
 pub struct EngineCore {
+    store: RedbStore,
     resolver: ResolverEngine,
     replaceable_materializers: HashMap<[u8; 16], ReplaceableMaterializerRegistration>,
     router: Router,
@@ -2636,7 +2637,8 @@ impl EngineCore {
         cap: usize,
     ) -> Self {
         Self {
-            resolver: ResolverEngine::new(store),
+            store,
+            resolver: ResolverEngine::new(),
             replaceable_materializers: HashMap::new(),
             router: Router::new(RuleRegistry::default_widen_only()),
             routing_facts,
@@ -3193,8 +3195,7 @@ impl EngineCore {
         atom: &ContextualAtom,
         relay: &RelayUrl,
     ) -> Result<Option<nmp_store::CoverageInterval>, PersistenceError> {
-        self.resolver
-            .store()
+        self.store
             .get_coverage(nmp_store::coverage_key(atom), relay)
     }
 
@@ -3259,7 +3260,7 @@ impl EngineCore {
             self.router.diagnostics(),
             self.router.plan(),
             &self.events_by_session_kind,
-            |relay, key| self.resolver.store().get_coverage(key, relay),
+            |relay, key| self.store.get_coverage(key, relay),
         );
         // Surface the read-only degrade signal (issue #122) if an ingest/read
         // door has failed — the one persistence-health fact `build` cannot
@@ -3483,10 +3484,10 @@ impl EngineCore {
         // seeds dirty-marks from `removed` alone, then stable simple handles
         // consume the exact committed removals while demand-changing or
         // complex shapes retain the broad refresh oracle.
-        match self.resolver.store_mut().expire_due(now) {
+        match self.store.expire_due(now) {
             Ok(expired) if !expired.is_empty() => {
                 let removed: Vec<_> = expired.into_iter().map(|se| se.event).collect();
-                match self.resolver.retract(removed) {
+                match self.resolver.retract(&self.store, removed) {
                     Ok(committed) => {
                         self.apply_committed_mutation(committed, &mut effects);
                     }
@@ -3575,7 +3576,7 @@ impl EngineCore {
     /// scheduled with nothing recording why. `runtime::engine_loop` degrades
     /// the store on `Err`, which is the #122 fact an app already reads.
     pub fn next_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        let expiry = self.resolver.store().next_expiration()?;
+        let expiry = self.store.next_expiration()?;
         let neg_liveness = self
             .neg_sessions
             .values()
@@ -3591,7 +3592,7 @@ impl EngineCore {
         // is a recorded decision rather than an erased read. The read itself
         // still propagates.
         let delivery = match (!self.retry_scheduler_blocked)
-            .then(|| self.resolver.store().next_publish_queue_deadline())
+            .then(|| self.store.next_publish_queue_deadline())
         {
             Some(read) => read?,
             None => None,
@@ -3783,7 +3784,7 @@ impl EngineCore {
         // Re-rooting reactive nodes can re-query the store (a `Derived`
         // binding over a reactive field). Degrade to read-only on a
         // persistence failure (issue #122) rather than panic.
-        if let Err(e) = self.resolver.set_active_pubkey(pk) {
+        if let Err(e) = self.resolver.set_active_pubkey(&self.store, pk) {
             self.degrade_store(e, &mut effects);
             return effects;
         }
@@ -3828,14 +3829,12 @@ impl EngineCore {
     /// worker scheduling falsifiers.
     #[doc(hidden)]
     pub fn reset_publish_queue_lane_recovery_reads(&self) {
-        self.resolver
-            .store()
-            .reset_publish_queue_lane_recovery_reads();
+        self.store.reset_publish_queue_lane_recovery_reads();
     }
 
     #[doc(hidden)]
     pub fn publish_queue_lane_recovery_reads(&self) -> u64 {
-        self.resolver.store().publish_queue_lane_recovery_reads()
+        self.store.publish_queue_lane_recovery_reads()
     }
 }
 
@@ -3986,24 +3985,24 @@ impl EngineCore {
     /// million-row scale proofs. Not an application/store API.
     #[doc(hidden)]
     pub fn bench_reset_query_work(&self) {
-        self.resolver.store().reset_query_work();
+        self.store.reset_query_work();
     }
 
     #[doc(hidden)]
     pub fn bench_query_work(&self) -> (u64, u64, u64) {
-        self.resolver.store().query_work()
+        self.store.query_work()
     }
 
     /// Coverage-table point reads are counted separately from event
     /// projection rows because diagnostics and freshness evidence use them.
     #[doc(hidden)]
     pub fn bench_reset_coverage_reads(&self) {
-        self.resolver.store().reset_coverage_reads();
+        self.store.reset_coverage_reads();
     }
 
     #[doc(hidden)]
     pub fn bench_coverage_reads(&self) -> u64 {
-        self.resolver.store().coverage_reads()
+        self.store.coverage_reads()
     }
 
     /// Drive the production committed-delta path without constructing a
@@ -4041,7 +4040,7 @@ impl EngineCore {
         }
         let ingest = self
             .resolver
-            .ingest_observed_detailed(events)
+            .ingest_observed_detailed(&mut self.store, events)
             .expect("benchmark fixture store commit");
         assert!(
             ingest.committed.delta.is_empty(),
@@ -4064,7 +4063,7 @@ impl EngineCore {
     pub fn bench_accept_local(&mut self, accept: AcceptWrite) -> Vec<Effect> {
         let accepted = self
             .resolver
-            .accept_local(accept)
+            .accept_local(&mut self.store, accept)
             .expect("benchmark local acceptance commit");
         assert!(
             accepted.outcome.journaled_intent_id().is_some(),
@@ -4082,7 +4081,7 @@ impl EngineCore {
     pub fn bench_accept_local_with_forced_refresh(&mut self, accept: AcceptWrite) -> Vec<Effect> {
         let accepted = self
             .resolver
-            .accept_local(accept)
+            .accept_local(&mut self.store, accept)
             .expect("benchmark local acceptance commit");
         assert!(
             accepted.outcome.journaled_intent_id().is_some(),
@@ -4115,16 +4114,12 @@ impl EngineCore {
     }
 
     fn bench_expire_due_with_mode(&mut self, now: Timestamp, force_refresh: bool) -> Vec<Effect> {
-        let expired = self
-            .resolver
-            .store_mut()
-            .expire_due(now)
-            .expect("benchmark expiry commit");
+        let expired = self.store.expire_due(now).expect("benchmark expiry commit");
         assert_eq!(expired.len(), 1, "benchmark owns exactly one due row");
         let removed = expired.into_iter().map(|row| row.event).collect();
         let committed = self
             .resolver
-            .retract(removed)
+            .retract(&self.store, removed)
             .expect("benchmark expiry reaction");
         let mut effects = Vec::new();
         if force_refresh {

@@ -1391,7 +1391,9 @@ impl EngineCore {
         let resolver_started = std::time::Instant::now();
         #[cfg(feature = "bench-instrumentation")]
         let resolver_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
-        let resolver_result = self.resolver.ingest_observed_detailed(observed_events);
+        let resolver_result = self
+            .resolver
+            .ingest_observed_detailed(&mut self.store, observed_events);
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::relay_resolver_call(resolver_started.elapsed());
         #[cfg(feature = "bench-instrumentation")]

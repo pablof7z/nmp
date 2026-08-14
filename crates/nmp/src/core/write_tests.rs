@@ -200,8 +200,7 @@ mod receipt_allocator_tests {
         );
         assert!(core.pending.is_empty());
         assert!(core
-            .resolver
-            .store()
+            .store
             .recover_publish_queue()
             .expect("recover delivery")
             .is_empty());
@@ -274,12 +273,7 @@ mod receipt_allocator_tests {
         assert!(core.attempt_correlations.is_empty());
         assert!(core.pending[&receipt].pending_relays.is_empty());
         assert!(core.pending[&receipt].attempt_ordinals.is_empty());
-        assert!(core
-            .resolver
-            .store()
-            .recover_attempts(intent)
-            .unwrap()
-            .is_empty());
+        assert!(core.store.recover_attempts(intent).unwrap().is_empty());
         assert_eq!(
             core.alloc_attempt_correlation(),
             Err(AttemptCorrelationExhausted),
@@ -718,8 +712,7 @@ mod semantic_successor_tests {
             materializer: Arc::new(AddPeople),
         });
         let current = core
-            .resolver
-            .store()
+            .store
             .query(&nostr::Filter::new().id(current_id))
             .unwrap()
             .pop()
@@ -817,8 +810,7 @@ mod semantic_successor_tests {
                 _ => None,
             });
             current = UnsignedEvent::from(
-                core.resolver
-                    .store()
+                core.store
                     .query(&nostr::Filter::new().id(event_id))
                     .unwrap()
                     .pop()
@@ -889,8 +881,7 @@ mod semantic_successor_tests {
             &mut echo_effects,
         );
         assert_eq!(
-            core.resolver
-                .store()
+            core.store
                 .replaceable_operation_snapshot(&Coordinate {
                     kind: Kind::ContactList,
                     public_key: author.public_key(),
@@ -920,8 +911,7 @@ mod semantic_successor_tests {
             .iter()
             .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))));
         let unavailable_snapshot = core
-            .resolver
-            .store()
+            .store
             .replaceable_operation_snapshot(&Coordinate {
                 kind: Kind::ContactList,
                 public_key: author.public_key(),
@@ -940,8 +930,7 @@ mod semantic_successor_tests {
             first_local_id
         );
         assert_eq!(
-            core.resolver
-                .store()
+            core.store
                 .query(
                     &nostr::Filter::new()
                         .kind(Kind::ContactList)
@@ -970,8 +959,7 @@ mod semantic_successor_tests {
         );
 
         let first_successor = core
-            .resolver
-            .store()
+            .store
             .query(
                 &nostr::Filter::new()
                     .kind(Kind::ContactList)
@@ -1012,8 +1000,7 @@ mod semantic_successor_tests {
         ));
         assert!(stale_effects.is_empty());
         assert_eq!(
-            core.resolver
-                .store()
+            core.store
                 .query(
                     &nostr::Filter::new()
                         .kind(Kind::ContactList)
@@ -1094,8 +1081,7 @@ mod semantic_successor_tests {
                 .unwrap_or_else(|| panic!("operation after B5 was refused: {accepted_later:#?}")),
         );
         assert_eq!(
-            core.resolver
-                .store()
+            core.store
                 .replaceable_operation_snapshot(&Coordinate {
                     kind: Kind::ContactList,
                     public_key: author.public_key(),
@@ -1118,8 +1104,7 @@ mod semantic_successor_tests {
             &mut later_effects,
         );
         let second_successor = core
-            .resolver
-            .store()
+            .store
             .query(
                 &nostr::Filter::new()
                     .kind(Kind::ContactList)
@@ -1179,8 +1164,7 @@ mod semantic_successor_tests {
         }
         let owner_intent = core.pending[&owner].intent_id;
         let lanes = core
-            .resolver
-            .store()
+            .store
             .recover_publish_queue_lanes(owner_intent)
             .unwrap();
         assert_eq!(
@@ -1194,8 +1178,7 @@ mod semantic_successor_tests {
         assert!(core.pending.iter().all(|(receipt, pending)| {
             *receipt == owner
                 || core
-                    .resolver
-                    .store()
+                    .store
                     .recover_publish_queue_lanes(pending.intent_id)
                     .unwrap()
                     .is_empty()
@@ -1316,11 +1299,7 @@ mod semantic_successor_tests {
         ));
 
         let e1_intent = core.pending[&receipt].intent_id;
-        let e1_lanes = core
-            .resolver
-            .store()
-            .recover_publish_queue_lanes(e1_intent)
-            .unwrap();
+        let e1_lanes = core.store.recover_publish_queue_lanes(e1_intent).unwrap();
         let state_for = |relay: &RelayUrl| {
             e1_lanes
                 .iter()
@@ -1401,11 +1380,7 @@ mod semantic_successor_tests {
             core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written));
         }
 
-        let e2_lanes_before = core
-            .resolver
-            .store()
-            .recover_publish_queue_lanes(e1_intent)
-            .unwrap();
+        let e2_lanes_before = core.store.recover_publish_queue_lanes(e1_intent).unwrap();
         assert_eq!(e2_lanes_before.len(), destinations.len());
         assert!(e2_lanes_before.iter().all(|lane| {
             lane.key.event_id == e2.id
@@ -1418,8 +1393,7 @@ mod semantic_successor_tests {
                 )
         }));
         let semantic_before = core
-            .resolver
-            .store()
+            .store
             .replaceable_operation_snapshot(&Coordinate {
                 kind: Kind::ContactList,
                 public_key: author.public_key(),
@@ -1469,18 +1443,13 @@ mod semantic_successor_tests {
             );
         }
 
-        let e2_lanes_after = core
-            .resolver
-            .store()
-            .recover_publish_queue_lanes(e1_intent)
-            .unwrap();
+        let e2_lanes_after = core.store.recover_publish_queue_lanes(e1_intent).unwrap();
         assert_eq!(
             e2_lanes_after, e2_lanes_before,
             "stale E1 handoff, ACK, AUTH-required result, timeout, or retry changed E2"
         );
         assert_eq!(
-            core.resolver
-                .store()
+            core.store
                 .replaceable_operation_snapshot(&Coordinate {
                     kind: Kind::ContactList,
                     public_key: author.public_key(),

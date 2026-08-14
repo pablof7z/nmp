@@ -221,15 +221,14 @@ fn exact_policy_denial_commits_before_emit_and_replays_the_same_terminal_fact() 
 
     let intent = fixture
         .core
-        .resolver
-        .store()
+        .store
         .reattach_receipt(receipt.0)
         .unwrap()
         .unwrap()
         .intent_id
         .unwrap();
     assert!(matches!(
-        fixture.core.resolver.store().recover_publish_queue_lanes(intent).unwrap()[0].state,
+        fixture.core.store.recover_publish_queue_lanes(intent).unwrap()[0].state,
         PublishQueueLaneState::Terminal {
             ordinal: 0,
             outcome: PublishQueueTerminalOutcome::AuthDenied(StoredAuthDenial {
@@ -289,8 +288,7 @@ fn challenge_parks_an_inflight_event_before_fast_policy_denial_can_win_the_ok_ra
     assert!(matches!(
         fixture
             .core
-            .resolver
-            .store()
+            .store
             .recover_publish_queue_lanes(intent)
             .unwrap()[0]
             .state,
@@ -330,8 +328,7 @@ fn challenge_parks_an_inflight_event_before_fast_policy_denial_can_win_the_ok_ra
     assert!(matches!(
         fixture
             .core
-            .resolver
-            .store()
+            .store
             .recover_publish_queue_lanes(intent)
             .unwrap()[0]
             .state,
@@ -409,8 +406,7 @@ fn auth_error_unavailable_and_subscription_closed_never_terminalize_a_write() {
         assert_eq!(
             fixture
                 .core
-                .resolver
-                .store()
+                .store
                 .recover_publish_queue_lanes(intent)
                 .unwrap()[0]
                 .state,
@@ -437,8 +433,7 @@ fn auth_error_unavailable_and_subscription_closed_never_terminalize_a_write() {
     assert_eq!(
         closed
             .core
-            .resolver
-            .store()
+            .store
             .recover_publish_queue_lanes(intent)
             .unwrap()[0]
             .state,
@@ -541,11 +536,7 @@ fn auth_denial_isolated_by_exact_identity_leaves_same_url_peer_live() {
     )));
     let bob_intent = core.pending[&bob_receipt].intent_id;
     assert_eq!(
-        core.resolver
-            .store()
-            .recover_publish_queue_lanes(bob_intent)
-            .unwrap()[0]
-            .state,
+        core.store.recover_publish_queue_lanes(bob_intent).unwrap()[0].state,
         PublishQueueLaneState::WaitingAuth
     );
 
