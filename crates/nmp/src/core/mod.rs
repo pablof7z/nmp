@@ -1,10 +1,10 @@
 //! The PURE synchronous reducer (plan §2 position 1, §3.4). `EngineCore`
-//! owns the M1 resolver `Engine<S>`, the M2 `Router`, the write-delivery
+//! owns the M1 resolver `Engine`, the M2 `Router`, the write-delivery
 //! state, and the coverage-attribution bookkeeping (`attribution.rs`,
 //! `evidence.rs`). Its entire surface is:
 //!
 //! ```ignore
-//! impl<S: EventStore> EngineCore<S> {
+//! impl EngineCore {
 //!     pub fn handle(&mut self, msg: EngineMsg) -> Vec<Effect>;
 //!     pub fn tick(&mut self, now: nostr::Timestamp) -> Vec<Effect>;
 //!     pub fn next_deadline(&self) -> Result<Option<nostr::Timestamp>, PersistenceError>;
@@ -105,7 +105,7 @@ use nmp_store::{
     PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
     PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueReceipt,
     PublishQueueReceiptPayload, PublishQueueTerminalOutcome, PublishQueueTransientCause,
-    QualifiedSource, ReceiptState, RelayObserved, RemoveQueueEntryOutcome,
+    QualifiedSource, ReceiptState, RedbStore, RelayObserved, RemoveQueueEntryOutcome,
     ReplaceableMaterializationTarget, ReplayFormatId, ReplayProgramId, SemanticAccept,
     SemanticPlan, SemanticRematerialize, SemanticSourceInstall, SigState,
     SourceEvidence as SemanticSourceEvidence, SourcePlanId, StartingSource,
@@ -2171,8 +2171,8 @@ struct PendingRequestClaimTransfer {
 }
 
 /// The PURE synchronous reducer (§2 position 1). No I/O, no threads.
-pub struct EngineCore<S: EventStore> {
-    resolver: ResolverEngine<S>,
+pub struct EngineCore {
+    resolver: ResolverEngine,
     replaceable_materializers: HashMap<[u8; 16], ReplaceableMaterializerRegistration>,
     router: Router,
     routing_facts: RoutingFactStore,
@@ -2601,7 +2601,7 @@ struct AttemptCorrelationTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AttemptCorrelationExhausted;
 
-impl<S: EventStore> EngineCore<S> {
+impl EngineCore {
     pub(crate) fn add_replaceable_materializer(
         &mut self,
         registration: ReplaceableMaterializerRegistration,
@@ -2613,7 +2613,7 @@ impl<S: EventStore> EngineCore<S> {
             .insert(registration.instance, registration);
     }
 
-    pub fn new(store: S, cap: usize) -> Self {
+    pub fn new(store: RedbStore, cap: usize) -> Self {
         Self::new_with_routing_facts(store, RoutingFactStore::default(), cap)
     }
 
@@ -2623,7 +2623,7 @@ impl<S: EventStore> EngineCore<S> {
     /// the private mutable fact store and uses [`Self::new`].
     #[doc(hidden)]
     pub fn new_with_fixture_routing_facts(
-        store: S,
+        store: RedbStore,
         facts: nmp_router::FixtureRoutingFacts,
         cap: usize,
     ) -> Self {
@@ -2631,7 +2631,7 @@ impl<S: EventStore> EngineCore<S> {
     }
 
     pub(crate) fn new_with_routing_facts(
-        store: S,
+        store: RedbStore,
         routing_facts: RoutingFactStore,
         cap: usize,
     ) -> Self {
@@ -3810,7 +3810,7 @@ impl<S: EventStore> EngineCore<S> {
 }
 
 #[cfg(any(test, feature = "test-instrumentation"))]
-impl EngineCore<nmp_store::RedbStore> {
+impl EngineCore {
     /// Execute the runtime's existing requested Redb reconstruction sequence
     /// without exposing its two internal lifecycle doors independently.
     #[doc(hidden)]
@@ -3840,7 +3840,7 @@ impl EngineCore<nmp_store::RedbStore> {
 }
 
 #[cfg(feature = "bench-instrumentation")]
-impl EngineCore<nmp_store::RedbStore> {
+impl EngineCore {
     /// Reset reducer lifecycle counters independently from Redb's row-work
     /// counters so a benchmark can attribute admission and projection work.
     #[doc(hidden)]

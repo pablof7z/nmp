@@ -86,7 +86,7 @@ impl LiveWire {
 
 /// Open `count` mutually unmergeable watches, then connect the relay without
 /// resolving any document.
-fn core_watching(count: u16) -> (EngineCore<RedbStore>, LiveWire) {
+fn core_watching(count: u16) -> (EngineCore, LiveWire) {
     let mut core = new_core(FixtureRoutingFacts::new());
     let mut wire = LiveWire::default();
     for index in 0..count {
@@ -105,7 +105,7 @@ fn core_watching(count: u16) -> (EngineCore<RedbStore>, LiveWire) {
     (core, wire)
 }
 
-fn relay_row(core: &EngineCore<RedbStore>) -> nmp::mechanism::core::RelayDiagnosticsSnapshot {
+fn relay_row(core: &EngineCore) -> nmp::mechanism::core::RelayDiagnosticsSnapshot {
     core.diagnostics_snapshot()
         .relays
         .into_iter()

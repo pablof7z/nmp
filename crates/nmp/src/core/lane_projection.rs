@@ -7,7 +7,7 @@
 
 use super::*;
 
-impl<S: EventStore> EngineCore<S> {
+impl EngineCore {
     /// Replace one intent's projection from a complete recovered lane set.
     ///
     /// Bootstrap returns every retained lane for the intent, so this is an
@@ -90,7 +90,7 @@ impl<S: EventStore> EngineCore<S> {
     fn commit_lane_transition<T>(
         &mut self,
         key: &PublishQueueLaneKey,
-        operation: impl FnOnce(&mut S) -> Result<(T, PublishQueueLane), PersistenceError>,
+        operation: impl FnOnce(&mut RedbStore) -> Result<(T, PublishQueueLane), PersistenceError>,
     ) -> Result<(T, PublishQueueLane), PersistenceError> {
         let result = operation(self.resolver.store_mut());
         match result {
@@ -406,8 +406,8 @@ mod tests {
 
     /// Accept and sign one durable private write, which routes and bootstraps
     /// its lanes.
-    fn publish_to<S: EventStore>(
-        core: &mut EngineCore<S>,
+    fn publish_to(
+        core: &mut EngineCore,
         author: &Keys,
         relays: &[RelayUrl],
         created_at: u64,
@@ -441,8 +441,8 @@ mod tests {
         (id, signed, effects)
     }
 
-    fn publish_waiting<S: EventStore>(
-        core: &mut EngineCore<S>,
+    fn publish_waiting(
+        core: &mut EngineCore,
         author: &Keys,
         relay: &RelayUrl,
         created_at: u64,
@@ -463,7 +463,7 @@ mod tests {
     /// Independent semantic oracle: reconstruct the old exact answer from
     /// canonical store rows plus the reducer's non-lane transient owners.
     /// This deliberately does not inspect `LaneWorkerProjection`.
-    fn durable_worker_oracle<S: EventStore>(core: &EngineCore<S>) -> BTreeSet<RelaySessionKey> {
+    fn durable_worker_oracle(core: &EngineCore) -> BTreeSet<RelaySessionKey> {
         let mut expected: BTreeSet<_> = core
             .attempt_correlations
             .values()
@@ -493,7 +493,7 @@ mod tests {
         expected
     }
 
-    fn assert_projection_matches_store<S: EventStore>(core: &EngineCore<S>) {
+    fn assert_projection_matches_store(core: &EngineCore) {
         let actual = core
             .relay_worker_requirements()
             .expect("projection remains available")

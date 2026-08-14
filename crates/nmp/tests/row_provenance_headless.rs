@@ -34,7 +34,7 @@ fn literal_kind_query(kind: u16, author_hex: &str) -> LiveQuery {
     })
 }
 
-fn connect(core: &mut EngineCore<RedbStore>, slot: u32, url: &RelayUrl) {
+fn connect(core: &mut EngineCore, slot: u32, url: &RelayUrl) {
     core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot,
@@ -49,7 +49,7 @@ fn event_frame(sub: &str, event: nostr::Event) -> RelayFrame {
 }
 
 fn deliver(
-    core: &mut EngineCore<RedbStore>,
+    core: &mut EngineCore,
     slot: u32,
     relay: &RelayUrl,
     event: &nostr::Event,

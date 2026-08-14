@@ -8,7 +8,7 @@ use super::query::PlanDeltaMode;
 use super::*;
 
 struct Fixture {
-    core: EngineCore<RedbStore>,
+    core: EngineCore,
     relay: RelayUrl,
     session: RelaySessionKey,
     handle: TransportRelayHandle,

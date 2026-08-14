@@ -193,7 +193,7 @@ mod affected_handle_invalidation_tests {
             .collect()
     }
 
-    fn assert_remembered_rows_match_oracle(core: &EngineCore<RedbStore>, id: ObservationId) {
+    fn assert_remembered_rows_match_oracle(core: &EngineCore, id: ObservationId) {
         let branch = core.observations[&id].branches[0];
         let oracle = core.rows_for(branch).unwrap();
         let oracle: BTreeMap<_, _> = oracle
@@ -607,7 +607,7 @@ mod affected_handle_invalidation_tests {
     }
 
     fn apply_local_differential_accept(
-        core: &mut EngineCore<RedbStore>,
+        core: &mut EngineCore,
         event: SignedEvent,
         accepted_at: u64,
         direct: bool,
@@ -635,7 +635,7 @@ mod affected_handle_invalidation_tests {
     }
 
     fn apply_local_differential_compensation(
-        core: &mut EngineCore<RedbStore>,
+        core: &mut EngineCore,
         intent_id: IntentId,
         pending: SignedEvent,
         direct: bool,
@@ -658,11 +658,7 @@ mod affected_handle_invalidation_tests {
         }
     }
 
-    fn apply_local_differential_expiry(
-        core: &mut EngineCore<RedbStore>,
-        now: Timestamp,
-        direct: bool,
-    ) {
+    fn apply_local_differential_expiry(core: &mut EngineCore, now: Timestamp, direct: bool) {
         let expired = core.resolver.store_mut().expire_due(now).unwrap();
         let removed = expired.into_iter().map(|row| row.event).collect();
         let committed = core.resolver.retract(removed).unwrap();
@@ -716,7 +712,7 @@ mod affected_handle_invalidation_tests {
         let (mut direct, direct_handle) = make_core();
         let (mut oracle, oracle_handle) = make_core();
 
-        let assert_same = |direct: &EngineCore<RedbStore>, oracle: &EngineCore<RedbStore>| {
+        let assert_same = |direct: &EngineCore, oracle: &EngineCore| {
             assert_remembered_rows_match_oracle(direct, direct_handle);
             assert_remembered_rows_match_oracle(oracle, oracle_handle);
             assert_eq!(
@@ -1444,8 +1440,8 @@ mod coverage_evidence_refresh_tests {
 
     use super::*;
 
-    fn accept_request<S: EventStore>(
-        core: &mut EngineCore<S>,
+    fn accept_request(
+        core: &mut EngineCore,
         session: &RelaySessionKey,
         sub_id: &SubId,
         filter_hash: DescriptorHash,
@@ -1498,16 +1494,14 @@ mod coverage_evidence_refresh_tests {
         )
     }
 
-    fn connected_core(
-        relay: &RelayUrl,
-    ) -> (EngineCore<RedbStore>, TransportRelayHandle, RelaySessionKey) {
+    fn connected_core(relay: &RelayUrl) -> (EngineCore, TransportRelayHandle, RelaySessionKey) {
         connected_core_with_store(relay, RedbStore::temporary().expect("temporary Redb store"))
     }
 
-    fn connected_core_with_store<S: EventStore>(
+    fn connected_core_with_store(
         relay: &RelayUrl,
-        store: S,
-    ) -> (EngineCore<S>, TransportRelayHandle, RelaySessionKey) {
+        store: RedbStore,
+    ) -> (EngineCore, TransportRelayHandle, RelaySessionKey) {
         let mut core = EngineCore::new(store, 20);
         let handle = TransportRelayHandle {
             slot: 7,
@@ -1535,8 +1529,8 @@ mod coverage_evidence_refresh_tests {
             .expect("subscription opens a wire request")
     }
 
-    fn eose<S: EventStore>(
-        core: &mut EngineCore<S>,
+    fn eose(
+        core: &mut EngineCore,
         handle: TransportRelayHandle,
         session: RelaySessionKey,
         wire_id: String,
@@ -1551,7 +1545,7 @@ mod coverage_evidence_refresh_tests {
         ))
     }
 
-    fn advance_clock<S: EventStore>(core: &mut EngineCore<S>, seconds: u64) {
+    fn advance_clock(core: &mut EngineCore, seconds: u64) {
         core.clock = Timestamp::from(seconds);
     }
 

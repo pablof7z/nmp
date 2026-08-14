@@ -249,7 +249,7 @@ impl ReceiptDeliveryRegistry {
         }
     }
 
-    fn deliver(&mut self, core: &mut EngineCore<RedbStore>, id: ReceiptId, status: WriteFact) {
+    fn deliver(&mut self, core: &mut EngineCore, id: ReceiptId, status: WriteFact) {
         let Some(deliveries) = self.by_receipt.get_mut(&id) else {
             return;
         };
@@ -271,7 +271,7 @@ impl ReceiptDeliveryRegistry {
     /// Drop terminal producers only after the complete reducer batch has
     /// been delivered, so multiple terminal replay facts from one command
     /// cannot close the FIFO after the first fact.
-    fn finish_batch(&mut self, core: &EngineCore<RedbStore>) {
+    fn finish_batch(&mut self, core: &EngineCore) {
         self.by_receipt.retain(|id, _| core.receipt_is_live(*id));
     }
 
@@ -293,7 +293,7 @@ fn arm_receipt_delivery_close(
 }
 
 fn deliver_receipt_replay_page(
-    core: &EngineCore<RedbStore>,
+    core: &EngineCore,
     deliveries: &mut ReceiptDeliveryRegistry,
     id: ReceiptId,
     sender: FifoSender<WriteFact>,
@@ -4671,7 +4671,7 @@ fn engine_loop(
 
 #[allow(clippy::too_many_arguments)]
 fn reduce_and_dispatch_committed_observations(
-    core: &mut EngineCore<RedbStore>,
+    core: &mut EngineCore,
     frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
     pool: &Pool,
     row_channels: &mut HashMap<ObservationId, RowsSender>,
@@ -4732,7 +4732,7 @@ fn reduce_and_dispatch_committed_observations(
 
 #[allow(clippy::too_many_arguments)]
 fn reduce_and_dispatch_relay_frames(
-    core: &mut EngineCore<RedbStore>,
+    core: &mut EngineCore,
     frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
     pool: &Pool,
     row_channels: &mut HashMap<ObservationId, RowsSender>,
@@ -4780,7 +4780,7 @@ fn reduce_and_dispatch_relay_frames(
 // adds only the reducer reference needed for exact ownership reconciliation.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_core_effects(
-    core: &mut EngineCore<RedbStore>,
+    core: &mut EngineCore,
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<ObservationId, RowsSender>,
@@ -4830,7 +4830,7 @@ fn dispatch_core_effects(
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch_relay_open_failure(
-    core: &mut EngineCore<RedbStore>,
+    core: &mut EngineCore,
     session: RelaySessionKey,
     error: nmp_transport::RelayOpenError,
     pool: &Pool,
@@ -4954,7 +4954,7 @@ fn ensure_write_effect_session(
 /// advances public reads; protected reads park until the exact AUTH OK.
 /// Every NMP read worker keeps an empty transport preamble because reducer
 /// replay is the single generation-aware owner.
-fn retry_required_relay_workers(core: &EngineCore<RedbStore>, pool: &Pool) {
+fn retry_required_relay_workers(core: &EngineCore, pool: &Pool) {
     let Some(required) = core.relay_worker_requirements() else {
         return;
     };
@@ -4986,7 +4986,7 @@ fn retry_required_relay_workers(core: &EngineCore<RedbStore>, pool: &Pool) {
 // cannot acquire hidden mutable state.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_effects(
-    core: &mut EngineCore<RedbStore>,
+    core: &mut EngineCore,
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<ObservationId, RowsSender>,
@@ -5014,7 +5014,7 @@ fn dispatch_effects(
 // at the one-effect boundary where its ownership is audited.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_effect(
-    core: &mut EngineCore<RedbStore>,
+    core: &mut EngineCore,
     effect: Effect,
     pool: &Pool,
     row_channels: &mut HashMap<ObservationId, RowsSender>,

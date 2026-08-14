@@ -53,18 +53,18 @@ fn relay(host: &str) -> RelayUrl {
     RelayUrl::parse(&format!("wss://{host}.example")).expect("fixture relay url")
 }
 
-fn core() -> EngineCore<RedbStore> {
+fn core() -> EngineCore {
     core_over(RedbStore::temporary().expect("temporary Redb store"))
 }
 
-fn core_over(store: RedbStore) -> EngineCore<RedbStore> {
+fn core_over(store: RedbStore) -> EngineCore {
     EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10)
 }
 
 /// Cross the explicit pending-admission boundary while keeping these
 /// headless falsifiers deterministic. The runtime owns the 10 ms timer; core
 /// tests drive the corresponding message directly.
-fn handle_and_flush<S: EventStore>(core: &mut EngineCore<S>, msg: EngineMsg) -> Vec<Effect> {
+fn handle_and_flush(core: &mut EngineCore, msg: EngineMsg) -> Vec<Effect> {
     let mut effects = core.handle(msg);
     if effects
         .iter()
@@ -122,8 +122,8 @@ fn store_event(
     store_event_of_kind(store, keys, KIND, created_at, identifier, served_by)
 }
 
-fn store_event_of_kind<S: EventStore>(
-    store: &mut S,
+fn store_event_of_kind(
+    store: &mut RedbStore,
     keys: &Keys,
     kind: u16,
     created_at: u64,

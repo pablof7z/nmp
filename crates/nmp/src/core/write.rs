@@ -225,7 +225,7 @@ impl ReceiptReplayCursor {
     }
 }
 
-impl<S: EventStore> EngineCore<S> {
+impl EngineCore {
     /// Record an ingest/read persistence failure (issue #122) without
     /// panicking: latch the first error message (read-only degrade) and push
     /// a fresh diagnostics snapshot so an observer sees the degraded state
@@ -5640,10 +5640,10 @@ impl<S: EventStore> EngineCore<S> {
     }
 }
 
-/// Defend the public bounded-page contract even when an application supplies
-/// its own [`EventStore`] implementation. Built-in stores perform the bounded
-/// range read directly; this boundary check prevents a faulty backend from
-/// exposing an oversized, overlapping, duplicated, or reordered page.
+/// Defend the public bounded-page contract at the reducer boundary after the
+/// concrete Redb range read. Redb performs the bounded read directly; this
+/// second check prevents an oversized, overlapping, duplicated, or reordered
+/// page from crossing the reducer boundary.
 fn validate_publish_queue_page(
     after: Option<u64>,
     limit: u8,

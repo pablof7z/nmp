@@ -16,7 +16,7 @@
 //! - `graph` — the node graph: data + pure, store-independent algorithm
 //!   (atom computation, wide-query-filter computation, structural
 //!   traversal).
-//! - `engine` — `Engine<S: EventStore>`: construction, incremental
+//! - `engine` — `Engine`: construction, incremental
 //!   recompute, identity re-root, subscribe/unsubscribe, and the public
 //!   API surface (`HandleId`, `QueryHandle`, `Metrics`,
 //!   `GraphSnapshot`).

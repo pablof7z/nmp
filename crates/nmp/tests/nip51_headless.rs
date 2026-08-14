@@ -11,7 +11,7 @@ use nmp_router::FixtureRoutingFacts;
 use nmp_store::RedbStore;
 use nostr::{Keys, RelayUrl};
 
-fn new_core(dir: FixtureRoutingFacts) -> EngineCore<RedbStore> {
+fn new_core(dir: FixtureRoutingFacts) -> EngineCore {
     EngineCore::new_with_fixture_routing_facts(
         RedbStore::temporary().expect("temporary Redb store"),
         dir,
