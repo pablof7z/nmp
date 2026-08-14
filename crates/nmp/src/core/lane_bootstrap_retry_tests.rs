@@ -304,24 +304,32 @@ fn oversized_auth_denial_reason_emits_no_terminal_receipt_fact() {
 fn a_failed_bootstrap_never_parks_an_intent_permanently() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://bootstrap-parked.example.com").unwrap();
-    let faults = LaneFaults::default();
-    faults.fail_bootstrap(PersistenceFault::Io);
     let mut core = EngineCore::new(
-        FaultyLaneStore::new(
-            RedbStore::temporary().expect("temporary Redb store"),
-            faults.clone(),
-        ),
+        RedbStore::temporary_with_failed_lane_bootstrap()
+            .expect("temporary Redb lane-bootstrap failure fixture"),
         10,
     );
 
-    let (receipt, signed, _) =
+    let (receipt, signed, blocked) =
         publish_narrow(&mut core, &author, std::slice::from_ref(&relay), 702);
+    assert!(
+        blocked.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(
+                id,
+                WriteFact::Relay {
+                    state: RelayState::Waiting(RelayWaiting::PersistenceStalled { .. }),
+                    ..
+                }
+            ) if *id == receipt
+        )),
+        "the Redb bootstrap refusal must surface as a persistence stall, got {blocked:?}"
+    );
     assert!(
         !core.pending[&receipt].lane_projection.can_close(),
         "the gap really does block closure while it stands"
     );
 
-    faults.heal();
     core.tick(
         core.next_deadline()
             .expect("deadline peek")
