@@ -61,11 +61,7 @@ impl EngineCore {
         coordinate: &Coordinate,
         effects: &mut Vec<Effect>,
     ) {
-        let snapshot = match self
-            .resolver
-            .store()
-            .replaceable_operation_snapshot(coordinate)
-        {
+        let snapshot = match self.store.replaceable_operation_snapshot(coordinate) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 self.degrade_store(error, effects);
@@ -228,7 +224,7 @@ impl EngineCore {
                     }) {
                         continue;
                     }
-                    match self.resolver.store_mut().advance_replaceable_source_round(
+                    match self.store.advance_replaceable_source_round(
                         &owner.coordinate,
                         SemanticSourceRoundFact::RequestOpened(request.clone()),
                     ) {
@@ -308,7 +304,7 @@ impl EngineCore {
             .get(&key)
             .cloned()
             .expect("the selected semantic source request remains owned");
-        match self.resolver.store_mut().advance_replaceable_source_round(
+        match self.store.advance_replaceable_source_round(
             &owner.coordinate,
             SemanticSourceRoundFact::RequestSettled {
                 request: owned.request,
@@ -348,11 +344,7 @@ impl EngineCore {
         coordinate: &Coordinate,
         effects: &mut Vec<Effect>,
     ) {
-        let snapshot = match self
-            .resolver
-            .store()
-            .replaceable_operation_snapshot(coordinate)
-        {
+        let snapshot = match self.store.replaceable_operation_snapshot(coordinate) {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => return,
             Err(error) => {
@@ -396,11 +388,7 @@ impl EngineCore {
             expected_materialization: generation.materialization,
             destination,
         };
-        match self
-            .resolver
-            .store_mut()
-            .close_replaceable_operation_cohort(close)
-        {
+        match self.store.close_replaceable_operation_cohort(close) {
             Ok(SemanticCohortCloseOutcome::Closed { members }) => {
                 for member in members {
                     let Some(receipt) = self.intent_receipts.get(&member).copied() else {
@@ -616,8 +604,7 @@ mod tests {
         relay: &RelayUrl,
     ) -> SemanticSourceMemberState {
         let snapshot = core
-            .resolver
-            .store()
+            .store
             .replaceable_operation_snapshot(coordinate)
             .unwrap()
             .unwrap();
@@ -805,8 +792,7 @@ mod tests {
             successor.clone(),
         );
         let before_restart = core
-            .resolver
-            .store()
+            .store
             .replaceable_operation_snapshot(&coordinate(&author))
             .unwrap()
             .unwrap();
@@ -941,8 +927,7 @@ mod tests {
             later_unrelated,
         );
         let unchanged = reopened
-            .resolver
-            .store()
+            .store
             .replaceable_operation_snapshot(&coordinate(&author))
             .unwrap()
             .unwrap();
@@ -995,15 +980,13 @@ mod tests {
             Effect::EmitReceipt(id, WriteFact::Outcome(WriteOutcome::Settled)) if *id == receipt
         )));
         assert!(reopened
-            .resolver
-            .store()
+            .store
             .replaceable_operation_snapshot(&coordinate(&author))
             .unwrap()
             .is_none());
         assert!(matches!(
             reopened
-                .resolver
-                .store()
+                .store
                 .reattach_receipt(receipt.0)
                 .unwrap()
                 .unwrap()

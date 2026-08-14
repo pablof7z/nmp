@@ -92,7 +92,7 @@ impl EngineCore {
         key: &PublishQueueLaneKey,
         operation: impl FnOnce(&mut RedbStore) -> Result<(T, PublishQueueLane), PersistenceError>,
     ) -> Result<(T, PublishQueueLane), PersistenceError> {
-        let result = operation(self.resolver.store_mut());
+        let result = operation(&mut self.store);
         match result {
             Ok((value, lane)) => {
                 self.apply_committed_lane(&lane);
@@ -119,10 +119,7 @@ impl EngineCore {
         intent_id: IntentId,
         candidate_relays: Option<&BTreeSet<RelayUrl>>,
     ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
-        let result = self
-            .resolver
-            .store_mut()
-            .bootstrap_publish_queue_lanes(intent_id);
+        let result = self.store.bootstrap_publish_queue_lanes(intent_id);
         match result {
             Ok(lanes) => {
                 if let Some(id) = self.intent_receipts.get(&intent_id).copied() {
@@ -175,7 +172,7 @@ impl EngineCore {
         intent_id: IntentId,
         event_id: EventId,
     ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
-        let lanes = match self.resolver.store().recover_publish_queue_lanes(intent_id) {
+        let lanes = match self.store.recover_publish_queue_lanes(intent_id) {
             Ok(lanes) => lanes,
             Err(error) => {
                 self.lane_projection_unprovable = true;
@@ -366,7 +363,7 @@ impl EngineCore {
     /// caller's own route-blocked bookkeeping already retains worker demand
     /// when the append fails.
     ///
-    /// It is nonetheless a door rather than a direct `store_mut()` call
+    /// It is nonetheless a door rather than a direct `self.store` call
     /// because under #975 `Auto` re-executes its strategy at every send
     /// opportunity and appends a revision whenever resolution learns
     /// something new — at which point lane minting moves onto this path. The
@@ -377,9 +374,7 @@ impl EngineCore {
         intent_id: IntentId,
         relays: BTreeSet<RelayUrl>,
     ) -> Result<nmp_store::PublishQueueRouteRevision, PersistenceError> {
-        self.resolver
-            .store_mut()
-            .record_route_revision(intent_id, relays)
+        self.store.record_route_revision(intent_id, relays)
     }
 
     /// Close one intent's open work through the projection door.
@@ -393,7 +388,7 @@ impl EngineCore {
         &mut self,
         intent_id: IntentId,
     ) -> Result<CloseIntentOutcome, PersistenceError> {
-        self.resolver.store_mut().close_terminal_intent(intent_id)
+        self.store.close_terminal_intent(intent_id)
     }
 }
 
@@ -481,8 +476,7 @@ mod tests {
                     .map(|relay| RelaySessionKey::new(relay, access)),
             );
             expected.extend(
-                core.resolver
-                    .store()
+                core.store
                     .recover_publish_queue_lanes(pending.intent_id)
                     .expect("oracle lane recovery")
                     .into_iter()
@@ -755,13 +749,12 @@ mod tests {
     ///    whole crate, not just `src/core` -- other than this one may reach a
     ///    lane-mutation door; only a file that implements `EventStore` itself
     ///    (a delegating test double) may name one. Matching is on `.method(`
-    ///    rather than on `store_mut().method(`, so binding the store to a
-    ///    local first does not evade it. Comments are removed and whitespace
+    ///    rather than on `self.store.method(`, so binding the store to a local
+    ///    first does not evade it. Comments are removed and whitespace
     ///    stripped before matching, so rustfmt's multi-line
-    ///    `self\n.resolver\n.store_mut()\n.set_lane_waiting(` chain is caught
-    ///    exactly like the single-line spelling, while a commented-out call
-    ///    neither fails the build spuriously nor hides a real one behind a
-    ///    trailing comment.
+    ///    `self\n.store\n.set_lane_waiting(` chain is caught exactly like the
+    ///    single-line spelling, while a commented-out call neither fails the
+    ///    build spuriously nor hides a real one behind a trailing comment.
     #[test]
     fn every_lane_mutation_constructor_goes_through_the_projection_door() {
         /// Lane-minting/removing doors whose signature does not mention

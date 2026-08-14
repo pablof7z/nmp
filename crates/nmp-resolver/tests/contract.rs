@@ -532,8 +532,8 @@ fn derived_inner_strict_cache_filters_provenance_before_limit() {
         ..Filter::default()
     };
 
-    let mut engine = Engine::new(store);
-    let (_handle, _opened) = opened(engine.subscribe(Demand::from_filter(outer)));
+    let mut engine = Engine::new();
+    let (_handle, _opened) = opened(engine.subscribe(&store, Demand::from_filter(outer)));
     let demand = engine.active_demand();
     let outer_authors: BTreeSet<String> = demand
         .iter()
@@ -594,8 +594,8 @@ fn derived_inner_agnostic_cache_accepts_rows_from_any_provenance_before_limit() 
         ..Filter::default()
     };
 
-    let mut engine = Engine::new(store);
-    let (_handle, _opened) = opened(engine.subscribe(Demand::from_filter(outer)));
+    let mut engine = Engine::new();
+    let (_handle, _opened) = opened(engine.subscribe(&store, Demand::from_filter(outer)));
     let authors: BTreeSet<String> = engine
         .active_demand()
         .into_iter()
@@ -650,7 +650,7 @@ fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
             RelayObserved::new(other.clone(), Timestamp::from(100)),
         )
         .unwrap();
-    let mut engine = Engine::new(store);
+    let mut engine = Engine::new();
 
     let query = |cache| {
         let mut inner = Demand::new(
@@ -672,8 +672,8 @@ fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
             ..Filter::default()
         })
     };
-    let (strict, _) = opened(engine.subscribe(query(CacheMode::Strict)));
-    let (agnostic, _) = opened(engine.subscribe(query(CacheMode::Agnostic)));
+    let (strict, _) = opened(engine.subscribe(&store, query(CacheMode::Strict)));
+    let (agnostic, _) = opened(engine.subscribe(&store, query(CacheMode::Agnostic)));
     assert!(derived_scalar_values(&engine, strict.id()).is_empty());
     assert_eq!(
         derived_scalar_values(&engine, agnostic.id()),
@@ -681,10 +681,10 @@ fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
     );
 
     engine
-        .ingest_observed(vec![(
-            second,
-            RelayObserved::new(other, Timestamp::from(200)),
-        )])
+        .ingest_observed(
+            &mut store,
+            vec![(second, RelayObserved::new(other, Timestamp::from(200)))],
+        )
         .unwrap();
     assert!(derived_scalar_values(&engine, strict.id()).is_empty());
     assert_eq!(
@@ -697,10 +697,10 @@ fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
     );
 
     engine
-        .ingest_observed(vec![(
-            first,
-            RelayObserved::new(pinned, Timestamp::from(201)),
-        )])
+        .ingest_observed(
+            &mut store,
+            vec![(first, RelayObserved::new(pinned, Timestamp::from(201)))],
+        )
         .unwrap();
     assert_eq!(
         derived_scalar_values(&engine, strict.id()),
@@ -1369,26 +1369,36 @@ fn different_selectors_share_identical_inner_wire_atom() {
 
 #[test]
 fn duplicate_source_observation_grows_projected_routing_evidence() {
-    let mut engine = Engine::new(RedbStore::temporary().expect("temporary Redb store"));
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    let mut engine = Engine::new();
     let author = Keys::generate();
     let target = dummy_event_id("provenance-growth");
-    engine.set_active_pubkey(Some(author.public_key())).unwrap();
-    let (_handle, _open) = opened(engine.subscribe(Demand::from_filter(bookmarks_filter())));
+    engine
+        .set_active_pubkey(&store, Some(author.public_key()))
+        .unwrap();
+    let (_handle, _open) =
+        opened(engine.subscribe(&store, Demand::from_filter(bookmarks_filter())));
     let event = kind10003_bookmarks(&author, &[target], 100);
     let first = nostr::RelayUrl::parse("wss://first.example").unwrap();
     let second = nostr::RelayUrl::parse("wss://second.example").unwrap();
     engine
-        .ingest_observed(vec![(
-            event.clone(),
-            RelayObserved::new(first.clone(), Timestamp::from(100)),
-        )])
+        .ingest_observed(
+            &mut store,
+            vec![(
+                event.clone(),
+                RelayObserved::new(first.clone(), Timestamp::from(100)),
+            )],
+        )
         .unwrap();
 
     let result = engine
-        .ingest_observed_detailed(vec![(
-            event,
-            RelayObserved::new(second.clone(), Timestamp::from(101)),
-        )])
+        .ingest_observed_detailed(
+            &mut store,
+            vec![(
+                event,
+                RelayObserved::new(second.clone(), Timestamp::from(101)),
+            )],
+        )
         .unwrap();
     assert_eq!(result.committed.row_changes.provenance_grew.len(), 1);
     let delta = result.committed.delta;

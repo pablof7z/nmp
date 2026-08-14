@@ -151,8 +151,7 @@ mod history_mutation_tests {
         // Middle provenance growth is exact from the committed fact.
         let middle = ordered_ids(&core, id)[2];
         let middle_event = core
-            .resolver
-            .store()
+            .store
             .query(&nostr::Filter::new().id(middle))
             .unwrap()
             .pop()
@@ -591,23 +590,20 @@ mod history_mutation_tests {
             let visible = ordered_ids(&core, id);
             let removed_id = visible[(seed as usize) % visible.len()];
             let removed = core
-                .resolver
-                .store()
+                .store
                 .query(&nostr::Filter::new().id(removed_id))
                 .unwrap()
                 .pop()
                 .unwrap()
                 .event;
-            core.resolver
-                .store_mut()
+            core.store
                 .remove(removed_id, nmp_store::RetractReason::Rejected)
                 .unwrap();
 
             seed = seed.rotate_left(17) ^ 0xa5a5_5a5a_0123_4567;
             let created_at = 50 + (seed % 1_500);
             let inserted = room_event(&keys, 47, 10_000 + step, created_at);
-            core.resolver
-                .store_mut()
+            core.store
                 .insert(
                     inserted.clone(),
                     RelayObserved::new(relay.clone(), Timestamp::from(2_000 + step as u64)),

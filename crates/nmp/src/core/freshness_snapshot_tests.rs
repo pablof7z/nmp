@@ -40,7 +40,7 @@ fn fresh_max_age_reads_each_coverage_row_once() {
         .unwrap();
     let mut core = EngineCore::new(store, 8);
     core.handle(EngineMsg::Tick(Timestamp::from(100_000u64)));
-    core.resolver.store().reset_coverage_reads();
+    core.store.reset_coverage_reads();
 
     let mut demand = Demand::new(
         filter,
@@ -51,7 +51,7 @@ fn fresh_max_age_reads_each_coverage_row_once() {
     demand.freshness = Freshness::MaxAge { seconds: 3_600 };
     let effects = core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));
 
-    assert_eq!(core.resolver.store().coverage_reads(), 1);
+    assert_eq!(core.store.coverage_reads(), 1);
     let evidence = effects
         .iter()
         .find_map(|effect| match effect {

@@ -69,7 +69,7 @@ impl EngineCore {
         &mut self,
         batch: &[(ContextualAtom, RelayUrl, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
-        self.resolver.store_mut().record_coverage(batch)
+        self.store.record_coverage(batch)
     }
 
     /// Mint a NIP-77 role wire id nobody has ever been handed before (#932).
@@ -116,7 +116,7 @@ impl EngineCore {
         // withdrawn here for the same reason.
         let mut opened: Vec<QueryHandle> = Vec::new();
         for branch in query.branches() {
-            match self.resolver.subscribe(branch.clone()) {
+            match self.resolver.subscribe(&self.store, branch.clone()) {
                 SubscribeOutcome::Opened { handle, delta } => {
                     self.consume_resolver_delta(delta);
                     opened.push(handle);
@@ -1712,7 +1712,7 @@ impl EngineCore {
                 &atoms,
                 plan,
                 evidence::AcquisitionEvidenceContext {
-                    store: self.resolver.store(),
+                    store: &self.store,
                     connected: &self.connected_relays,
                     auth_status: &auth_status,
                     ever_connected: &self.ever_connected_relays,
@@ -1749,7 +1749,7 @@ impl EngineCore {
             atoms,
             plan,
             evidence::AcquisitionEvidenceContext {
-                store: self.resolver.store(),
+                store: &self.store,
                 connected: &self.connected_relays,
                 auth_status: &auth_status,
                 ever_connected: &self.ever_connected_relays,
@@ -2320,7 +2320,7 @@ impl EngineCore {
         // degrade to read-only and do not open the session rather than panic
         // — the `Close` pushed above still stands, so the sub-id is simply
         // released.
-        let local_rows = match self.resolver.store().query(&neg_filter.to_nostr()) {
+        let local_rows = match self.store.query(&neg_filter.to_nostr()) {
             Ok(rows) => rows,
             Err(e) => {
                 self.degrade_store(e, effects);
@@ -3737,8 +3737,8 @@ impl EngineCore {
                 .set(self.projection_store_queries.get().saturating_add(1));
             let filter = atom.to_nostr();
             let rows = match row_limit {
-                Some(limit) => self.resolver.store().query_newest(&filter, limit)?,
-                None => self.resolver.store().query(&filter)?,
+                Some(limit) => self.store.query_newest(&filter, limit)?,
+                None => self.store.query(&filter)?,
             };
             for se in rows {
                 if let Some(pinned) = &pinned_relays {
