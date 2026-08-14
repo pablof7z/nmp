@@ -11,7 +11,7 @@
 //! slot for the life of the process — which is what wedged a production
 //! publish lane behind one entry while the backlog grew monotonically.
 
-use nmp_store::{EventStore, RedbStore};
+use nmp_store::RedbStore;
 use nostr::{Keys, Kind, RelayUrl, Timestamp};
 
 use super::*;

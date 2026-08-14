@@ -15,8 +15,8 @@
 //! store-owned row does the same: a malformed, truncated, or
 //! schema-incompatible persisted value, and a broken relational invariant
 //! such as an index naming a canonical row that is missing or will not
-//! decode, both surface as `PersistenceError` through the owning
-//! `EventStore` door. They are classified [`crate::PersistenceFault::
+//! decode, both surface as `PersistenceError` through the owning typed store
+//! door. They are classified [`crate::PersistenceFault::
 //! Invariant`] rather than `Corrupted`: the backend is healthy, and the
 //! decode happens before the enclosing write transaction commits, so
 //! `DurabilityOutcome::Absent` is provable rather than merely convenient
@@ -375,7 +375,21 @@ impl EventStore for RedbStore {
         publish_queue_ops::lookup_correlation(self, token)
     }
 
-    fn record_route_revision(
+    fn accept_refused(
+        &mut self,
+        frozen_id: EventId,
+        expected_pubkey: PublicKey,
+        reason: crate::RefuseReason,
+    ) -> Result<u64, PersistenceError> {
+        publish_queue_ops::accept_refused(self, frozen_id, expected_pubkey, reason)
+    }
+}
+
+impl RedbStore {
+    /// Append the next canonical resolved-route revision for an open intent.
+    /// This must commit before any attempt starts or wire publication for a
+    /// relay in the revision.
+    pub fn record_route_revision(
         &mut self,
         intent_id: IntentId,
         relays: BTreeSet<RelayUrl>,
@@ -383,35 +397,40 @@ impl EventStore for RedbStore {
         publish_queue_ops::record_route_revision(self, intent_id, relays)
     }
 
-    fn recover_route_revisions(
+    /// Recover every resolved-route revision in ascending ordinal order.
+    pub fn recover_route_revisions(
         &self,
         intent_id: IntentId,
     ) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError> {
         publish_queue_ops::recover_route_revisions(self, intent_id)
     }
 
-    fn recover_attempts(
+    /// Read all retained attempt facts for one intent in stable key order.
+    pub fn recover_attempts(
         &self,
         intent_id: IntentId,
     ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
         publish_queue_ops::recover_attempts(self, intent_id)
     }
 
-    fn bootstrap_publish_queue_lanes(
+    /// Idempotently seed every missing lane from bounded route/attempt
+    /// ranges. Existing cursors are validated and retained.
+    pub fn bootstrap_publish_queue_lanes(
         &mut self,
         intent_id: IntentId,
     ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
         publish_queue_ops::bootstrap_publish_queue_lanes(self, intent_id)
     }
 
-    fn recover_publish_queue_lanes(
+    pub fn recover_publish_queue_lanes(
         &self,
         intent_id: IntentId,
     ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
         publish_queue_ops::recover_publish_queue_lanes(self, intent_id)
     }
 
-    fn due_publish_queue_deadlines(
+    /// Read at most `limit` due rows in stable `(time,intent,relay)` order.
+    pub fn due_publish_queue_deadlines(
         &self,
         now: Timestamp,
         limit: usize,
@@ -419,11 +438,11 @@ impl EventStore for RedbStore {
         publish_queue_ops::due_publish_queue_deadlines(self, now, limit)
     }
 
-    fn next_publish_queue_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+    pub fn next_publish_queue_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
         publish_queue_ops::next_publish_queue_deadline(self)
     }
 
-    fn set_lane_waiting(
+    pub fn set_lane_waiting(
         &mut self,
         key: &PublishQueueLaneKey,
         expected_revision: u64,
@@ -432,7 +451,7 @@ impl EventStore for RedbStore {
         publish_queue_ops::set_lane_waiting(self, key, expected_revision, auth)
     }
 
-    fn set_lane_eligible(
+    pub fn set_lane_eligible(
         &mut self,
         key: &PublishQueueLaneKey,
         expected_revision: u64,
@@ -441,7 +460,7 @@ impl EventStore for RedbStore {
         publish_queue_ops::set_lane_eligible(self, key, expected_revision, since)
     }
 
-    fn set_lane_transient(
+    pub fn set_lane_transient(
         &mut self,
         key: &PublishQueueLaneKey,
         expected_revision: u64,
@@ -461,7 +480,11 @@ impl EventStore for RedbStore {
         )
     }
 
-    fn suspend_lane_attempt(
+    /// End the current ordinal as a nonterminal wait with no deadline.
+    /// The attempt detail and waiting cursor advance atomically, so restart
+    /// cannot mistake an AUTH/offline wait for a live ambiguous send.
+    #[allow(clippy::too_many_arguments)]
+    pub fn suspend_lane_attempt(
         &mut self,
         key: &PublishQueueLaneKey,
         expected_revision: u64,
@@ -483,7 +506,9 @@ impl EventStore for RedbStore {
         )
     }
 
-    fn start_lane_attempt(
+    /// Atomically append new immutable v1 Started evidence, additive details,
+    /// and advance an eligible cursor to awaiting handoff.
+    pub fn start_lane_attempt(
         &mut self,
         key: &PublishQueueLaneKey,
         expected_revision: u64,
@@ -493,7 +518,9 @@ impl EventStore for RedbStore {
         publish_queue_ops::start_lane_attempt(self, key, expected_revision, event, started_at)
     }
 
-    fn record_lane_handoff(
+    /// Atomically retain handoff evidence and apply the engine-selected next
+    /// fact, maintaining the typed deadline index in the same commit.
+    pub fn record_lane_handoff(
         &mut self,
         key: &PublishQueueLaneKey,
         expected_revision: u64,
@@ -504,7 +531,10 @@ impl EventStore for RedbStore {
         publish_queue_ops::record_lane_handoff(self, key, expected_revision, ordinal, detail, next)
     }
 
-    fn finish_lane_attempt(
+    /// Make the current attempt terminal without rewriting its immutable v1
+    /// Started row. Exact ordinal + lane revision reject late ACKs against a
+    /// newer attempt; detail, cursor, and deadline removal share one commit.
+    pub fn finish_lane_attempt(
         &mut self,
         key: &PublishQueueLaneKey,
         expected_revision: u64,
@@ -522,7 +552,10 @@ impl EventStore for RedbStore {
         )
     }
 
-    fn deny_lane_auth(
+    /// Atomically finish an exact AUTH-waiting lane without fabricating an
+    /// EVENT attempt. Exact lane revision is checked before idempotence, so a
+    /// stale writer can never borrow success from a newer terminal fact.
+    pub fn deny_lane_auth(
         &mut self,
         key: &PublishQueueLaneKey,
         expected_revision: u64,
@@ -531,34 +564,45 @@ impl EventStore for RedbStore {
         publish_queue_ops::deny_lane_auth(self, key, expected_revision, denial)
     }
 
-    fn recover_attempt_details(
+    pub fn recover_attempt_details(
         &self,
         intent_id: IntentId,
     ) -> Result<Vec<PublishQueueAttemptDetails>, PersistenceError> {
         publish_queue_ops::recover_attempt_details(self, intent_id)
     }
 
-    fn close_terminal_intent(
+    /// Delete bounded open-work rows only after a non-empty lane set is all
+    /// terminal. Receipts and all route/attempt/detail evidence are retained.
+    pub fn close_terminal_intent(
         &mut self,
         intent_id: IntentId,
     ) -> Result<CloseIntentOutcome, PersistenceError> {
         publish_queue_ops::close_terminal_intent(self, intent_id)
     }
 
-    fn close_unroutable_intent(
+    /// Delete an intent's bounded open-work rows when it owns NO lanes at all.
+    ///
+    /// The exact structural complement of [`Self::close_terminal_intent`],
+    /// which requires a NON-EMPTY all-terminal lane set. Zero lanes is a fact
+    /// this crate can check for itself, so neither door asks the store to
+    /// guess at routing policy: the engine calls this one only when its own
+    /// resolution reported knowledge exhausted with zero destinations, and
+    /// the store still refuses if any lane exists.
+    ///
+    /// Without it a write that resolved to nowhere kept its open-work row
+    /// forever — unremovable (the removal door refuses an open intent),
+    /// uncancellable once signed, and replayed on every boot. That is the
+    /// FIRST-RUN path now that a fresh install with no reachable relay list
+    /// terminates as `NoDestination`, so it is a leak on the most common
+    /// path rather than an edge case.
+    ///
+    /// Receipts stay retained and reattachable, exactly as
+    /// [`Self::close_terminal_intent`] leaves them.
+    pub fn close_unroutable_intent(
         &mut self,
         intent_id: IntentId,
     ) -> Result<CloseIntentOutcome, PersistenceError> {
         publish_queue_ops::close_unroutable_intent(self, intent_id)
-    }
-
-    fn accept_refused(
-        &mut self,
-        frozen_id: EventId,
-        expected_pubkey: PublicKey,
-        reason: crate::RefuseReason,
-    ) -> Result<u64, PersistenceError> {
-        publish_queue_ops::accept_refused(self, frozen_id, expected_pubkey, reason)
     }
 }
 
