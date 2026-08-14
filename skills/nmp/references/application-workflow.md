@@ -16,6 +16,7 @@ Avoid these boundary errors:
 
 ## Build a vertical slice
 
+0. Declare the compile-time surface before writing a line of feature code. An app commits one `.nmp.toml` naming its capabilities and products, then runs `nmp prepare`. Following, comments, groups, reposts, reactions, chat replies, lists, Blossom, verified assets, rich content, and outbox routing are each a capability key — an unselected one is not a runtime gap, it is a name that does not exist at compile time. Add the capability rather than reaching around it.
 1. Choose one user-visible query and define its matching `LiveQuery`. One filter or demand is the one-branch case; use several branches when the feature genuinely unions distinct demands, and read `RowBatch.evidence` by branch index.
 2. Choose source authority deliberately. A bare filter defaults by shape: author-bound filters use author outboxes; authorless filters use public/operator lanes. Use explicit `Demand` for pinned authority or strict pinned-cache provenance.
 3. Start one observation at the feature/lifecycle owner. Rust consumers accumulate deltas by id; Swift/Kotlin replace from each already-accumulated `RowBatch` snapshot. Render app-owned order.
@@ -26,13 +27,22 @@ Avoid these boundary errors:
 
 ## Review checklist
 
-- Does every API name exist for the selected platform?
+- Does every API name exist for the selected platform *and* the capability set the app's `.nmp.toml` actually selects?
 - Does any target/internal behavior masquerade as current public behavior?
 - Is relay authority explicit where the default is unsuitable?
 - Are rows accumulated from the SDK stream instead of mirrored from write intent?
 - Can every observation and connection be cancelled promptly?
-- Does the delivery UI keep `Destinations.complete` separate from delivery, and preserve per-relay `Rejected`/`AuthFailed`/`GaveUp` rather than collapsing them?
+- Does the delivery UI keep the `WriteFact.destinations(relays:complete:awaitingAuthorRoutes:)` `complete` flag separate from delivery, and preserve per-relay `RelayState` `.rejected`/`.authFailed`/`.gaveUp` rather than collapsing them? "Still determining where to send" and "nowhere to send" are the two sides of that one branch, not one sentence.
 - Are identity persistence and destructive store reset separate operations?
 - Are secrets absent from logs and source?
 
-For repo implementation work, public API changes must update every affected projection (Rust, FFI, Swift, Kotlin) and their tests in the same PR.
+## When the work is in the NMP repo itself
+
+`AGENTS.md` is the canonical contributor guide; `skills/nmp-dev/SKILL.md` routes internal implementation work. This consumer skill is not authority for NMP internals. The rules that most often surprise someone arriving from app work:
+
+- **Issue first, always.** Every unit of work traces to a captured GitHub issue before it starts, and the issue states the *why* as a consequence. If the honest why is "this is a plain bug", say exactly that — a fabricated rationale is worse than a small true one. One issue per coherent unit; one PR closes it.
+- **No backwards compatibility, ever.** A replaced spelling is DELETED in the same change — no alias, no deprecation window, no forwarding wrapper. NMP has no external consumers, so "this would break a caller" must name one inside this workspace or it is not an argument. Never present "replace vs wrap" as a choice.
+- **Public API changes update every affected projection — Rust, FFI, Swift, Kotlin — and their tests in the same PR.** `scripts/check-sdk-parity.sh` enforces it as a blocking CI job; intentional per-platform differences are exact records in `scripts/check-sdk-parity-allowlist.toml` with a justification, nowhere else.
+- **Five architecture review gates apply to every PR** (`docs/design/architecture-review-gates.md`): Noun, Reachability, Bool-Lifecycle, Destructive-API, and Cross-SDK Parity. The first four are read by eye against the diff; the fifth runs mechanically.
+- **Work in an isolated git worktree, branch and PR, never push to `master` from a shared build.** Run `cargo test -p <crate>` for the crates you touched; `cargo test --workspace` is the merge-time gate, not the per-change loop.
+- **Hand off out loud.** A worktree left behind, a blocker punted, a PR not yet merged — leave the branch name, blocker, and next step as a note on the owning issue or PR.
