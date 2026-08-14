@@ -130,7 +130,7 @@ fn durable_worker_oracle<S: EventStore>(core: &EngineCore<S>) -> BTreeSet<RelayS
 
 // ---- falsifiers --------------------------------------------------------
 
-/// The headline #1000 regression, once per durability classification.
+/// The headline #1000 regression through the real Redb transaction door.
 ///
 /// A bootstrap that fails and then recovers must cost nothing permanent: the
 /// worker set has to come back to exactly what a canonical rebuild from
@@ -138,22 +138,19 @@ fn durable_worker_oracle<S: EventStore>(core: &EngineCore<S>) -> BTreeSet<RelayS
 /// the receipt has to leave `pending`. On the unfixed reducer the intent owns
 /// no lane rows, so no committed lane fact can ever clear `uncertain`: both
 /// relays stay pinned and the receipt never terminates.
-fn transient_bootstrap_failure_is_fully_reversible(fault: PersistenceFault, seq: u64) {
+#[test]
+fn transient_redb_bootstrap_failure_is_fully_reversible() {
     let author = Keys::generate();
     let relay_a = RelayUrl::parse("wss://bootstrap-retry-a.example.com").unwrap();
     let relay_b = RelayUrl::parse("wss://bootstrap-retry-b.example.com").unwrap();
-    let faults = LaneFaults::default();
-    faults.fail_bootstrap(fault);
     let mut core = EngineCore::new(
-        FaultyLaneStore::new(
-            RedbStore::temporary().expect("temporary Redb store"),
-            faults.clone(),
-        ),
+        RedbStore::temporary_with_failed_lane_bootstrap()
+            .expect("temporary Redb lane-bootstrap failure fixture"),
         10,
     );
 
     let (receipt, signed, blocked) =
-        publish_narrow(&mut core, &author, &[relay_a.clone(), relay_b.clone()], seq);
+        publish_narrow(&mut core, &author, &[relay_a.clone(), relay_b.clone()], 700);
     assert!(
         blocked.iter().any(|effect| matches!(
             effect,
@@ -165,7 +162,7 @@ fn transient_bootstrap_failure_is_fully_reversible(fault: PersistenceFault, seq:
                 }
             ) if *id == receipt
         )),
-        "the injected bootstrap failure must surface as a persistence stall, got {blocked:?}"
+        "the Redb bootstrap refusal must surface as a persistence stall, got {blocked:?}"
     );
 
     // Retention first: while the projection is genuinely unknown BOTH route
@@ -185,9 +182,9 @@ fn transient_bootstrap_failure_is_fully_reversible(fault: PersistenceFault, seq:
     );
     assert!(core.pending.contains_key(&receipt));
 
-    // The store becomes usable again. Nothing external tells the reducer;
-    // its own deadline is what brings it back.
-    faults.heal();
+    // The construction-armed refusal is consumed by the failed Redb
+    // transaction. Nothing external tells the reducer; its own deadline is
+    // what brings it back.
     let due = core
         .next_deadline()
         .expect("deadline peek")
@@ -203,6 +200,10 @@ fn transient_bootstrap_failure_is_fully_reversible(fault: PersistenceFault, seq:
     assert!(
         core.pending[&receipt].lane_projection.uncertain.is_empty(),
         "a committed bootstrap replaces every conservative guess it stood in for"
+    );
+    assert!(
+        core.lane_bootstrap_retries.is_empty(),
+        "a committed bootstrap closes its own retry gap"
     );
 
     deliver_ok(&mut core, &author, &relay_a, 0, &signed);
@@ -221,16 +222,6 @@ fn transient_bootstrap_failure_is_fully_reversible(fault: PersistenceFault, seq:
         after.is_empty(),
         "a transient bootstrap failure must leave zero pinned workers, got {after:?}"
     );
-}
-
-#[test]
-fn transient_io_bootstrap_failure_leaves_no_pinned_worker_behind() {
-    transient_bootstrap_failure_is_fully_reversible(PersistenceFault::Io, 700);
-}
-
-#[test]
-fn transient_invariant_bootstrap_failure_leaves_no_pinned_worker_behind() {
-    transient_bootstrap_failure_is_fully_reversible(PersistenceFault::Invariant, 701);
 }
 
 #[test]
@@ -293,57 +284,6 @@ fn oversized_auth_denial_reason_emits_no_terminal_receipt_fact() {
             .unwrap()[0]
             .state,
         PublishQueueLaneState::WaitingAuth
-    );
-}
-
-/// An intent whose bootstrap failed must PROGRESS or TERMINATE. It may not
-/// sit in `pending` with a non-empty `uncertain` set that nothing can drain:
-/// `can_close` requires `uncertain` to be empty, so such an intent is
-/// structurally stuck rather than merely waiting.
-#[test]
-fn a_failed_bootstrap_never_parks_an_intent_permanently() {
-    let author = Keys::generate();
-    let relay = RelayUrl::parse("wss://bootstrap-parked.example.com").unwrap();
-    let mut core = EngineCore::new(
-        RedbStore::temporary_with_failed_lane_bootstrap()
-            .expect("temporary Redb lane-bootstrap failure fixture"),
-        10,
-    );
-
-    let (receipt, signed, blocked) =
-        publish_narrow(&mut core, &author, std::slice::from_ref(&relay), 702);
-    assert!(
-        blocked.iter().any(|effect| matches!(
-            effect,
-            Effect::EmitReceipt(
-                id,
-                WriteFact::Relay {
-                    state: RelayState::Waiting(RelayWaiting::PersistenceStalled { .. }),
-                    ..
-                }
-            ) if *id == receipt
-        )),
-        "the Redb bootstrap refusal must surface as a persistence stall, got {blocked:?}"
-    );
-    assert!(
-        !core.pending[&receipt].lane_projection.can_close(),
-        "the gap really does block closure while it stands"
-    );
-
-    core.tick(
-        core.next_deadline()
-            .expect("deadline peek")
-            .expect("the gap arms a deadline"),
-    );
-    deliver_ok(&mut core, &author, &relay, 0, &signed);
-
-    assert!(
-        !core.pending.contains_key(&receipt),
-        "an intent whose bootstrap failed must still reach a terminal state"
-    );
-    assert!(
-        core.lane_bootstrap_retries.is_empty(),
-        "a committed bootstrap closes its own gap"
     );
 }
 
