@@ -213,6 +213,29 @@ jobs:
       - name: Keep every crates/nmp-bdd file under 600 lines
         run: bash scripts/check-bdd-file-length.sh
 
+  # #1561: `check-bdd-file-length.sh`'s production-source counterpart --
+  # production/test/documentation/generated line counts per file and per
+  # package, with review triggers at 500/1,000/1,500 non-test lines and a
+  # flag for packages under ~250 production lines. This is a REPORT, not a
+  # gate: `scripts/report-source-concentration.sh` exits 0 once it has
+  # produced output regardless of how many thresholds are crossed, so a file
+  # or package crossing a trigger never fails this job or the build. It gives
+  # #1496's own completion criterion (production/test/documentation/generated
+  # measured separately) a tool instead of hand-counting.
+  source-concentration-report:
+    name: Source concentration report (non-blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Select the repository Rust toolchain
+        run: rustup show
+
+      - name: Report production/test/documentation/generated lines per file and package
+        run: bash scripts/report-source-concentration.sh
+
   macos-ci-throughput:
     name: macOS CI throughput contract
     runs-on: ubuntu-latest
