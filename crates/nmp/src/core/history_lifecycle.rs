@@ -17,7 +17,7 @@ impl EngineCore {
         // opened: a window is installed whole or not at all.
         let mut handles = Vec::new();
         for branch in query.initial_demands() {
-            match self.resolver.subscribe(branch) {
+            match self.resolver.subscribe(&self.store, branch) {
                 SubscribeOutcome::Opened { handle, delta } => {
                     self.consume_resolver_delta(delta);
                     handles.push(handle);
@@ -370,7 +370,7 @@ impl EngineCore {
                 .map(|(branch, demand)| (branch, demand, None)),
         );
         for (branch, demand, kind) in staged {
-            match self.resolver.subscribe(demand) {
+            match self.resolver.subscribe(&self.store, demand) {
                 SubscribeOutcome::Opened { handle, delta } => {
                     self.consume_resolver_delta(delta);
                     opened.push((branch, handle, kind));
@@ -942,15 +942,11 @@ impl EngineCore {
                 // many newer witnesses in that same branch, so it can never
                 // belong to the global newest `target_rows` either.
                 let rows = match pinned_relays {
-                    Some(relays) => self.resolver.store().query_newest_under_pin(
-                        &filter,
-                        relays,
-                        state.target_rows,
-                    )?,
-                    None => self
-                        .resolver
-                        .store()
-                        .query_newest(&filter, state.target_rows)?,
+                    Some(relays) => {
+                        self.store
+                            .query_newest_under_pin(&filter, relays, state.target_rows)?
+                    }
+                    None => self.store.query_newest(&filter, state.target_rows)?,
                 };
                 #[cfg(test)]
                 self.history_rows_examined.set(
@@ -1053,13 +1049,9 @@ impl EngineCore {
                 let filter = atom.to_nostr();
                 let rows = match pinned_relays {
                     Some(relays) => self
-                        .resolver
-                        .store()
+                        .store
                         .query_newest_before_under_pin(&filter, relays, before, needed)?,
-                    None => self
-                        .resolver
-                        .store()
-                        .query_newest_before(&filter, before, needed)?,
+                    None => self.store.query_newest_before(&filter, before, needed)?,
                 };
                 #[cfg(test)]
                 self.history_rows_examined.set(
@@ -1218,11 +1210,7 @@ impl EngineCore {
                 #[cfg(test)]
                 self.history_affected_row_queries
                     .set(self.history_affected_row_queries.get().saturating_add(1));
-                let current = match self
-                    .resolver
-                    .store()
-                    .query(&nostr::Filter::new().id(changed.event.id))
-                {
+                let current = match self.store.query(&nostr::Filter::new().id(changed.event.id)) {
                     Ok(mut rows) => rows.pop().map(|stored| {
                         let signature_state = stored
                             .provenance
@@ -1380,17 +1368,15 @@ impl EngineCore {
             self.history_store_queries
                 .set(self.history_store_queries.get().saturating_add(1));
             let queried = match pinned_relays.as_ref() {
-                Some(relays) => self.resolver.store().query_newest_before_any_under_pin(
+                Some(relays) => self.store.query_newest_before_any_under_pin(
                     &filters,
                     relays,
                     boundary,
                     visible_removals,
                 ),
-                None => self.resolver.store().query_newest_before_any(
-                    &filters,
-                    boundary,
-                    visible_removals,
-                ),
+                None => self
+                    .store
+                    .query_newest_before_any(&filters, boundary, visible_removals),
             };
             let rows = match queried {
                 Ok(rows) => rows,

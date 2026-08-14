@@ -114,8 +114,7 @@ fn durable_worker_oracle(core: &EngineCore) -> BTreeSet<RelaySessionKey> {
                 .map(|relay| RelaySessionKey::new(relay, access)),
         );
         expected.extend(
-            core.resolver
-                .store()
+            core.store
                 .recover_publish_queue_lanes(pending.intent_id)
                 .expect("oracle lane recovery")
                 .into_iter()
@@ -276,11 +275,7 @@ fn oversized_auth_denial_reason_emits_no_terminal_receipt_fact() {
     );
     let intent = core.pending[&receipt].intent_id;
     assert_eq!(
-        core.resolver
-            .store()
-            .recover_publish_queue_lanes(intent)
-            .unwrap()[0]
-            .state,
+        core.store.recover_publish_queue_lanes(intent).unwrap()[0].state,
         PublishQueueLaneState::WaitingAuth
     );
 }

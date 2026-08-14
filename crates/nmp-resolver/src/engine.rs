@@ -409,10 +409,10 @@ struct ProjectionShape {
     subtree_atoms: BTreeSet<ContextualAtom>,
 }
 
-/// The graph engine (M1 plan §2.3): owns the store, the graph, the
-/// descriptor/atom refcount tables, the identity register, and metrics.
+/// The graph engine (M1 plan §2.3): owns the graph, descriptor/atom refcount
+/// tables, identity register, and metrics. Store-dependent operations borrow
+/// the caller-owned durable store only for the operation that needs it.
 pub struct Engine {
-    store: RedbStore,
     graph: Graph,
     descriptor_to_root: BTreeMap<AcquisitionKey, NodeId>,
     graph_entries: HashMap<NodeId, GraphEntry>,
@@ -434,9 +434,12 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(store: RedbStore) -> Self {
+    #[allow(
+        clippy::new_without_default,
+        reason = "resolver construction is an explicit engine-assembly action"
+    )]
+    pub fn new() -> Self {
         Self {
-            store,
             graph: Graph::default(),
             descriptor_to_root: BTreeMap::new(),
             graph_entries: HashMap::new(),
@@ -456,24 +459,6 @@ impl Engine {
 
     pub fn active_demand(&self) -> BTreeSet<ContextualAtom> {
         self.atoms.values().map(|(atom, _)| atom.clone()).collect()
-    }
-
-    /// Read access to the underlying store. `EngineCore` (M3 step B) needs
-    /// this for coverage watermark reads (`get_coverage`) that have nothing
-    /// to do with graph evaluation — the resolver's own methods only ever
-    /// touch the store via `insert`/`query` internally, so there was no
-    /// existing seam for a caller that needs the store's OTHER door.
-    pub fn store(&self) -> &RedbStore {
-        &self.store
-    }
-
-    /// Mutable access to the underlying store. `EngineCore` needs this to
-    /// call `record_coverage` (issue #816 and
-    /// `docs/design/query-demand-and-evidence.md` keep this engine-owned;
-    /// the resolver has no notion of relays or wire REQs at all, so it
-    /// cannot and must not decide what to record here itself).
-    pub fn store_mut(&mut self) -> &mut RedbStore {
-        &mut self.store
     }
 
     /// The ROOT FilterNode's own current atoms for `id`'s subscription —
@@ -563,6 +548,7 @@ impl Engine {
 
     pub fn set_active_pubkey(
         &mut self,
+        store: &RedbStore,
         pk: Option<nostr::PublicKey>,
     ) -> Result<DemandDelta, PersistenceError> {
         let drop_delta = self.drain_pending_drops();
@@ -572,7 +558,7 @@ impl Engine {
             return Ok(drop_delta);
         }
         self.metrics.recompute_passes += 1;
-        Ok(merge_deltas(drop_delta, self.run_recompute(seed)?))
+        Ok(merge_deltas(drop_delta, self.run_recompute(store, seed)?))
     }
 
     /// Re-read every store-derived binding after the backend handle was
@@ -580,19 +566,22 @@ impl Engine {
     /// every `Derived` value is recomputed dependency-first from the reopened
     /// durable store, and the ordinary atom diff reports any routing-demand
     /// change. Existing query handles and their ids remain valid.
-    pub fn rebuild_after_store_reopen(&mut self) -> Result<DemandDelta, PersistenceError> {
+    pub fn rebuild_after_store_reopen(
+        &mut self,
+        store: &RedbStore,
+    ) -> Result<DemandDelta, PersistenceError> {
         let drop_delta = self.drain_pending_drops();
         let seed: BTreeSet<NodeId> = self.graph.derived_node_ids().into_iter().collect();
         if seed.is_empty() {
             return Ok(drop_delta);
         }
         self.metrics.recompute_passes += 1;
-        Ok(merge_deltas(drop_delta, self.run_recompute(seed)?))
+        Ok(merge_deltas(drop_delta, self.run_recompute(store, seed)?))
     }
 
     // ---- subscribe / unsubscribe (M1 plan §4) ---------------------------
 
-    pub fn subscribe(&mut self, branch: Demand) -> SubscribeOutcome {
+    pub fn subscribe(&mut self, store: &RedbStore, branch: Demand) -> SubscribeOutcome {
         let drop_delta = self.drain_pending_drops();
         let handle_id = self.alloc_handle();
         let key = AcquisitionKey::from(&branch);
@@ -631,19 +620,25 @@ impl Engine {
 
         let (source, access) = branch.atom_context();
         let graph_checkpoint = self.graph.allocation_checkpoint();
-        let root =
-            match self.build_filter_node(&branch.selection, source, access, ParentLink::Root, 0) {
-                Ok(root) => root,
-                Err(error) => {
-                    self.graph.discard_allocated_after(graph_checkpoint);
-                    self.reactive_nodes
-                        .retain(|node_id| *node_id <= graph_checkpoint);
-                    return SubscribeOutcome::Refused {
-                        error,
-                        delta: drop_delta,
-                    };
-                }
-            };
+        let root = match self.build_filter_node(
+            store,
+            &branch.selection,
+            source,
+            access,
+            ParentLink::Root,
+            0,
+        ) {
+            Ok(root) => root,
+            Err(error) => {
+                self.graph.discard_allocated_after(graph_checkpoint);
+                self.reactive_nodes
+                    .retain(|node_id| *node_id <= graph_checkpoint);
+                return SubscribeOutcome::Refused {
+                    error,
+                    delta: drop_delta,
+                };
+            }
+        };
         self.descriptor_to_root.insert(key.clone(), root);
         self.graph_entries.insert(
             root,
@@ -768,7 +763,11 @@ impl Engine {
         )
     }
 
-    pub fn ingest(&mut self, events: Vec<nostr::Event>) -> Result<DemandDelta, PersistenceError> {
+    pub fn ingest(
+        &mut self,
+        store: &mut RedbStore,
+        events: Vec<nostr::Event>,
+    ) -> Result<DemandDelta, PersistenceError> {
         let observed = events
             .into_iter()
             .map(|e| {
@@ -776,7 +775,7 @@ impl Engine {
                 (e, Self::ingest_fixture_observation(at))
             })
             .collect();
-        self.ingest_observed(observed)
+        self.ingest_observed(store, observed)
     }
 
     /// The real ingest path (M1 plan §3.3), parameterized over each event's
@@ -800,15 +799,17 @@ impl Engine {
     /// finding).
     pub fn ingest_observed(
         &mut self,
+        store: &mut RedbStore,
         events: Vec<(nostr::Event, RelayObserved)>,
     ) -> Result<DemandDelta, PersistenceError> {
-        self.ingest_observed_detailed(events)
+        self.ingest_observed_detailed(store, events)
             .map(|result| result.committed.delta)
             .map_err(RelayIngestError::into_persistence_error)
     }
 
     pub fn ingest_observed_detailed(
         &mut self,
+        store: &mut RedbStore,
         events: Vec<(nostr::Event, RelayObserved)>,
     ) -> Result<RelayIngestResult, RelayIngestError> {
         #[cfg(feature = "bench-instrumentation")]
@@ -860,8 +861,7 @@ impl Engine {
         let store_started = std::time::Instant::now();
         #[cfg(feature = "bench-instrumentation")]
         let store_cpu_started = crate::ingest_attribution::thread_cpu_time_ns();
-        let outcomes = self
-            .store
+        let outcomes = store
             .insert_batch(events)
             .map_err(RelayIngestError::EventCommit)?;
         #[cfg(feature = "bench-instrumentation")]
@@ -996,7 +996,7 @@ impl Engine {
         let mut inserted_or_provenance_changed = inserted;
         inserted_or_provenance_changed.extend(provenance_grew);
         let delta = self
-            .react(inserted_or_provenance_changed, removed)
+            .react(store, inserted_or_provenance_changed, removed)
             .map_err(RelayIngestError::PostCommitProjection)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         #[cfg(feature = "bench-instrumentation")]
@@ -1106,10 +1106,11 @@ impl Engine {
     /// error is never interpreted as proof that nothing committed.
     pub fn accept_local(
         &mut self,
+        store: &mut RedbStore,
         accept: AcceptWrite,
     ) -> Result<LocalAcceptResult, PersistenceError> {
         let before_shapes = self.projection_shapes();
-        let outcome = self.store.accept_write(accept)?;
+        let outcome = store.accept_write(accept)?;
         let mut inserted_rows: Vec<StoredEvent> = Vec::new();
         let mut removed_rows: Vec<nostr::Event> = Vec::new();
         match &outcome {
@@ -1146,7 +1147,7 @@ impl Engine {
             .cloned()
             .collect();
         let row_changes = committed_row_changes(inserted_rows, removed_rows.clone());
-        let delta = self.react(inserted_events, removed_rows)?;
+        let delta = self.react(store, inserted_events, removed_rows)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         Ok(LocalAcceptResult {
             outcome,
@@ -1162,12 +1163,11 @@ impl Engine {
     /// predecessor/successor pair returned by the store's CAS transaction.
     pub fn install_replaceable_source_materialization(
         &mut self,
+        store: &mut RedbStore,
         install: SemanticSourceInstall,
     ) -> Result<SemanticInstallResult, PersistenceError> {
         let before_shapes = self.projection_shapes();
-        let outcome = self
-            .store
-            .install_replaceable_source_materialization(install)?;
+        let outcome = store.install_replaceable_source_materialization(install)?;
         let (inserted_rows, removed_rows) = match &outcome {
             SemanticInstallOutcome::Installed {
                 installed,
@@ -1195,7 +1195,7 @@ impl Engine {
             .cloned()
             .collect::<Vec<_>>();
         let row_changes = committed_row_changes(inserted_rows, removed_rows.clone());
-        let delta = self.react(inserted_events, removed_rows)?;
+        let delta = self.react(store, inserted_events, removed_rows)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         Ok(SemanticInstallResult {
             outcome,
@@ -1217,9 +1217,10 @@ impl Engine {
     /// from the signer callback.
     pub fn react_to_signature_promotion(
         &mut self,
+        store: &RedbStore,
         event_id: nostr::EventId,
     ) -> Result<CommittedMutationResult, PersistenceError> {
-        let mut rows = self.store.query(&nostr::Filter::new().id(event_id))?;
+        let mut rows = store.query(&nostr::Filter::new().id(event_id))?;
         let Some(row) = rows.pop() else {
             return Ok(CommittedMutationResult {
                 delta: DemandDelta::default(),
@@ -1256,6 +1257,7 @@ impl Engine {
     /// the store committed atomically.
     pub fn react_to_compensation(
         &mut self,
+        store: &RedbStore,
         removed_pending: nostr::Event,
         outcome: &CompensateOutcome,
     ) -> Result<CommittedMutationResult, PersistenceError> {
@@ -1271,7 +1273,7 @@ impl Engine {
                 let mut changed_events = inserted_events.clone();
                 changed_events.push(removed_pending.clone());
                 let row_changes = committed_row_changes(inserted_rows, [removed_pending.clone()]);
-                let delta = self.react(inserted_events, vec![removed_pending])?;
+                let delta = self.react(store, inserted_events, vec![removed_pending])?;
                 let affected_handles = self.affected_handles(&before_shapes, &changed_events);
                 Ok(CommittedMutationResult {
                     delta,
@@ -1299,12 +1301,13 @@ impl Engine {
     /// touches the store door.
     pub fn retract(
         &mut self,
+        store: &RedbStore,
         removed: Vec<nostr::Event>,
     ) -> Result<CommittedMutationResult, PersistenceError> {
         let before_shapes = self.projection_shapes();
         let changed_events = removed.clone();
         let row_changes = committed_row_changes(Vec::<StoredEvent>::new(), removed.clone());
-        let delta = self.react(Vec::new(), removed)?;
+        let delta = self.react(store, Vec::new(), removed)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         Ok(CommittedMutationResult {
             delta,
@@ -1330,6 +1333,7 @@ impl Engine {
     /// §1.4 feeders differ only in who populates `removed`.
     fn react(
         &mut self,
+        store: &RedbStore,
         inserted: Vec<nostr::Event>,
         removed: Vec<nostr::Event>,
     ) -> Result<DemandDelta, PersistenceError> {
@@ -1360,7 +1364,7 @@ impl Engine {
                 }
             }
         }
-        Ok(merge_deltas(drop_delta, self.run_recompute(seed)?))
+        Ok(merge_deltas(drop_delta, self.run_recompute(store, seed)?))
     }
 
     // ---- recompute rounds (shared by ingest + re-root) ------------------
@@ -1371,6 +1375,7 @@ impl Engine {
     /// `SetOp`) has multiple simultaneously-dirty children (M1 plan §3.3).
     fn run_recompute(
         &mut self,
+        store: &RedbStore,
         mut pending: BTreeSet<NodeId>,
     ) -> Result<DemandDelta, PersistenceError> {
         let mut acc = DeltaAcc::default();
@@ -1390,7 +1395,7 @@ impl Engine {
             }
             for id in this_round {
                 self.metrics.sets_reevaluated += 1;
-                let changed = self.recompute_node(id, &mut acc)?;
+                let changed = self.recompute_node(store, id, &mut acc)?;
                 if changed {
                     self.metrics.nodes_recomputed += 1;
                     match self.graph.parent_of(id) {
@@ -1414,6 +1419,7 @@ impl Engine {
     /// `Derived` node from silently turning into an unbounded local scan.
     fn projection_input_events(
         &self,
+        store: &RedbStore,
         filter_id: NodeId,
         filter: &ConcreteFilter,
         cache: nmp_grammar::CacheMode,
@@ -1422,17 +1428,15 @@ impl Engine {
         let strict_relays = self.graph.strict_projection_relays(filter_id, cache);
         let rows = match (strict_relays.as_ref(), filter.limit) {
             (Some(pinned), Some(limit)) => {
-                self.store
-                    .query_newest_under_pin(&nostr_filter, pinned, limit)?
+                store.query_newest_under_pin(&nostr_filter, pinned, limit)?
             }
-            (Some(pinned), None) => self
-                .store
+            (Some(pinned), None) => store
                 .query(&nostr_filter)?
                 .into_iter()
                 .filter(|row| row.provenance.visible_under_pin(pinned))
                 .collect(),
-            (None, Some(limit)) => self.store.query_newest(&nostr_filter, limit)?,
-            (None, None) => self.store.query(&nostr_filter)?,
+            (None, Some(limit)) => store.query_newest(&nostr_filter, limit)?,
+            (None, None) => store.query(&nostr_filter)?,
         };
         Ok(rows)
     }
@@ -1440,10 +1444,15 @@ impl Engine {
     /// Recompute node `id`'s value from its (already-current) children.
     /// Returns whether the value changed. For a FilterNode, also diffs +
     /// applies its atom-set change into the global demand table via `acc`.
-    fn recompute_node(&mut self, id: NodeId, acc: &mut DeltaAcc) -> Result<bool, PersistenceError> {
+    fn recompute_node(
+        &mut self,
+        store: &RedbStore,
+        id: NodeId,
+        acc: &mut DeltaAcc,
+    ) -> Result<bool, PersistenceError> {
         // Snapshot the node (cheap: M1 graphs are tiny) so we can mutate
-        // `self.graph`/`self.store` in the match arms without fighting the
-        // borrow checker over a live reference into `self.graph.nodes`.
+        // `self.graph` in the match arms without fighting the borrow checker
+        // over a live reference into `self.graph.nodes`.
         let snapshot = self.graph.node(id).clone();
         let changed = match snapshot {
             Node::Literal(_) => false,
@@ -1454,7 +1463,7 @@ impl Engine {
             Node::Derived(n) => {
                 let new = match self.graph.wide_concrete(n.inner) {
                     Some(cf) => project_events(
-                        &self.projection_input_events(n.inner, &cf, n.cache)?,
+                        &self.projection_input_events(store, n.inner, &cf, n.cache)?,
                         &n.project,
                     ),
                     None => ResolvedSet::new(),
@@ -1534,6 +1543,7 @@ impl Engine {
     /// decided one level up.
     fn build_filter_node(
         &mut self,
+        store: &RedbStore,
         filter: &Filter,
         source: SourceAuthority,
         access: AccessContext,
@@ -1544,15 +1554,15 @@ impl Engine {
 
         let mut bound = Vec::new();
         if let Some(b) = &filter.authors {
-            let bid = self.build_binding_node(b, ParentLink::FilterField(id), depth + 1)?;
+            let bid = self.build_binding_node(store, b, ParentLink::FilterField(id), depth + 1)?;
             bound.push((FieldSlot::Authors, bid));
         }
         if let Some(b) = &filter.ids {
-            let bid = self.build_binding_node(b, ParentLink::FilterField(id), depth + 1)?;
+            let bid = self.build_binding_node(store, b, ParentLink::FilterField(id), depth + 1)?;
             bound.push((FieldSlot::Ids, bid));
         }
         for (tag, b) in &filter.tags {
-            let bid = self.build_binding_node(b, ParentLink::FilterField(id), depth + 1)?;
+            let bid = self.build_binding_node(store, b, ParentLink::FilterField(id), depth + 1)?;
             bound.push((FieldSlot::Tag(*tag), bid));
         }
 
@@ -1574,6 +1584,7 @@ impl Engine {
 
     fn build_binding_node(
         &mut self,
+        store: &RedbStore,
         binding: &Binding,
         parent: ParentLink,
         depth: u32,
@@ -1609,6 +1620,7 @@ impl Engine {
                 // inherited across a `Binding::Derived` boundary.
                 let (inner_source, inner_access) = d.inner.atom_context();
                 let inner = self.build_filter_node(
+                    store,
                     &d.inner.selection,
                     inner_source,
                     inner_access,
@@ -1617,7 +1629,7 @@ impl Engine {
                 )?;
                 let cached = match self.graph.wide_concrete(inner) {
                     Some(cf) => project_events(
-                        &self.projection_input_events(inner, &cf, d.inner.cache)?,
+                        &self.projection_input_events(store, inner, &cf, d.inner.cache)?,
                         &d.project,
                     ),
                     None => ResolvedSet::new(),
@@ -1641,7 +1653,9 @@ impl Engine {
                 let operands: Vec<NodeId> = s
                     .operands
                     .iter()
-                    .map(|op| self.build_binding_node(op, ParentLink::SetOpOperand(id), depth + 1))
+                    .map(|op| {
+                        self.build_binding_node(store, op, ParentLink::SetOpOperand(id), depth + 1)
+                    })
                     .collect::<Result<_, _>>()?;
                 let cached = {
                     let sets: Vec<&ResolvedSet> = operands

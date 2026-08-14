@@ -63,9 +63,9 @@ fn main() {
     let mut graph_nodes = 0usize;
     for _ in 0..iterations {
         let store = RedbStore::open(&path).expect("open benchmark store");
-        let mut engine = Engine::new(store);
+        let mut engine = Engine::new();
         let started = Instant::now();
-        let (_handle, _delta) = match engine.subscribe(profile_query(&room, limit)) {
+        let (_handle, _delta) = match engine.subscribe(&store, profile_query(&room, limit)) {
             SubscribeOutcome::Opened { handle, delta } => (handle, delta),
             SubscribeOutcome::Refused { error, .. } => {
                 panic!("subscribe bounded Derived query: {error}")

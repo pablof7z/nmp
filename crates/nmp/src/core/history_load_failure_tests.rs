@@ -291,13 +291,13 @@ fn opening_freshness_refusal_leaves_no_candidate_request_target_index() {
 #[test]
 fn resolver_refusal_carries_the_pending_drop_delta_exactly_once() {
     let (_directory, path) = canonical_corruption(3, "pending-drop-corruption.redb");
-    let mut resolver =
-        ResolverEngine::new(RedbStore::open(&path).expect("reopen corrupted Redb fixture"));
+    let store = RedbStore::open(&path).expect("reopen corrupted Redb fixture");
+    let mut resolver = ResolverEngine::new();
     let first = nmp_grammar::Demand::from_filter(Filter {
         kinds: Some(BTreeSet::from([1])),
         ..Filter::default()
     });
-    let first_handle = match resolver.subscribe(first) {
+    let first_handle = match resolver.subscribe(&store, first) {
         SubscribeOutcome::Opened { handle, .. } => handle,
         SubscribeOutcome::Refused { error, .. } => panic!("fixture open refused: {error}"),
     };
@@ -314,7 +314,7 @@ fn resolver_refusal_carries_the_pending_drop_delta_exactly_once() {
         }))),
         ..Filter::default()
     });
-    let delta = match resolver.subscribe(failing) {
+    let delta = match resolver.subscribe(&store, failing) {
         SubscribeOutcome::Refused { error, delta } => {
             assert!(error.to_string().contains("decode canonical event view"));
             delta
@@ -905,10 +905,10 @@ fn derived_fixture() -> (tempfile::TempDir, EngineCore, HistorySessionId) {
 fn latch_redb_generation_without_core_diagnostics(core: &mut EngineCore) {
     let keys = Keys::generate();
     let accepted = event(&keys, 1, 1_500);
-    let error = match core
-        .resolver
-        .accept_local(nmp_resolver::testkit::accept_write_of(accepted, 1_501))
-    {
+    let error = match core.resolver.accept_local(
+        &mut core.store,
+        nmp_resolver::testkit::accept_write_of(accepted, 1_501),
+    ) {
         Ok(_) => panic!("construction-armed acceptance I/O must close the Redb generation"),
         Err(error) => error,
     };

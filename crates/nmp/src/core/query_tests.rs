@@ -219,8 +219,7 @@ mod affected_handle_invalidation_tests {
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
 
         let initial = room_event(&keys, 7, 0, 10);
-        core.resolver
-            .store_mut()
+        core.store
             .insert(
                 initial,
                 RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
@@ -614,7 +613,10 @@ mod affected_handle_invalidation_tests {
     ) -> (IntentId, SignedEvent) {
         let accepted = core
             .resolver
-            .accept_local(nmp_resolver::testkit::accept_write_of(event, accepted_at))
+            .accept_local(
+                &mut core.store,
+                nmp_resolver::testkit::accept_write_of(event, accepted_at),
+            )
             .unwrap();
         let (intent_id, pending) = match &accepted.outcome {
             AcceptOutcome::Inserted { intent_id, row, .. }
@@ -640,14 +642,10 @@ mod affected_handle_invalidation_tests {
         pending: SignedEvent,
         direct: bool,
     ) {
-        let outcome = core
-            .resolver
-            .store_mut()
-            .compensate_write(intent_id)
-            .unwrap();
+        let outcome = core.store.compensate_write(intent_id).unwrap();
         let committed = core
             .resolver
-            .react_to_compensation(pending, &outcome)
+            .react_to_compensation(&core.store, pending, &outcome)
             .unwrap();
         let mut effects = Vec::new();
         if direct {
@@ -659,9 +657,9 @@ mod affected_handle_invalidation_tests {
     }
 
     fn apply_local_differential_expiry(core: &mut EngineCore, now: Timestamp, direct: bool) {
-        let expired = core.resolver.store_mut().expire_due(now).unwrap();
+        let expired = core.store.expire_due(now).unwrap();
         let removed = expired.into_iter().map(|row| row.event).collect();
-        let committed = core.resolver.retract(removed).unwrap();
+        let committed = core.resolver.retract(&core.store, removed).unwrap();
         let mut effects = Vec::new();
         if direct {
             core.apply_committed_mutation(committed, &mut effects);
@@ -805,7 +803,7 @@ mod affected_handle_invalidation_tests {
                 ));
             }
         }
-        core.resolver.store_mut().insert_batch(seed).unwrap();
+        core.store.insert_batch(seed).unwrap();
 
         for room in 0..HANDLE_COUNT {
             core.handle(EngineMsg::Subscribe(room_query(room)));
@@ -888,8 +886,7 @@ mod affected_handle_invalidation_tests {
         let oldest = room_event(&keys, 7, 0, 10);
         let retained = room_event(&keys, 7, 1, 20);
         let unrelated = room_event(&keys, 8, 0, 10);
-        core.resolver
-            .store_mut()
+        core.store
             .insert_batch(
                 [oldest.clone(), retained, unrelated]
                     .into_iter()
@@ -936,8 +933,7 @@ mod affected_handle_invalidation_tests {
         let oldest = room_event(&keys, 21, 0, 10);
         let middle = room_event(&keys, 21, 1, 20);
         let newest = room_event(&keys, 21, 2, 30);
-        core.resolver
-            .store_mut()
+        core.store
             .insert_batch(
                 [oldest.clone(), middle, newest.clone()]
                     .into_iter()
@@ -992,8 +988,7 @@ mod affected_handle_invalidation_tests {
         let arriving = pair[0].clone();
         let seeded = pair[1].clone();
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-        core.resolver
-            .store_mut()
+        core.store
             .insert(
                 seeded.clone(),
                 RelayObserved::new(relay.clone(), Timestamp::from(51u64)),
@@ -1105,8 +1100,7 @@ mod affected_handle_invalidation_tests {
                 .unwrap()
         };
         let old = replaceable(3, 10);
-        core.resolver
-            .store_mut()
+        core.store
             .insert_batch(vec![(
                 old.clone(),
                 RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
@@ -1147,8 +1141,7 @@ mod affected_handle_invalidation_tests {
         let relay = RelayUrl::parse("wss://deletion-affected.example").unwrap();
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let target = room_event(&keys, 12, 0, 10);
-        core.resolver
-            .store_mut()
+        core.store
             .insert_batch(vec![(
                 target.clone(),
                 RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
@@ -1236,8 +1229,7 @@ mod affected_handle_invalidation_tests {
             .custom_created_at(Timestamp::from(10u64))
             .sign_with_keys(&me)
             .unwrap();
-        core.resolver
-            .store_mut()
+        core.store
             .insert(
                 contact_list,
                 RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
@@ -1416,7 +1408,10 @@ mod affected_handle_invalidation_tests {
     #[test]
     fn resolver_internal_handle_is_filtered_before_any_projection_read() {
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-        let internal = match core.resolver.subscribe(room_query(1).branches()[0].clone()) {
+        let internal = match core
+            .resolver
+            .subscribe(&core.store, room_query(1).branches()[0].clone())
+        {
             SubscribeOutcome::Opened { handle, .. } => handle,
             SubscribeOutcome::Refused { error, .. } => panic!("resolver refused: {error}"),
         };
