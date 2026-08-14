@@ -180,7 +180,7 @@ Swift has `observeFollowing`, `follow`, `unfollow`, and the `NMPFollowing` resou
 
 Do not set `isFollowing = true` on tap. Render action progress separately until the live following snapshot changes. A missing reconciled contact list is an explicit refusal: ordinary follow must not create a first kind-3 list containing only one contact. Product onboarding must handle first-list creation as a distinct capability/workflow.
 
-Both wrappers expose `observeFollowing`/`follow`/`unfollow` on `NMPEngine`; only the SwiftUI `NMPFollowing` observable object is Swift-specific. Do not import generated FFI types or reproduce contact-list editing in application code.
+Both wrappers expose `observeFollowing`/`follow`/`unfollow` on `NMPEngine` when the `nip02` ("following") capability is in the app's `.nmp.toml`; without it the whole family is absent at compile time. Only the SwiftUI `NMPFollowing` observable object is Swift-specific, and it ships in this repository's qualification package rather than the prepared Apple product. Terminal failures arrive as `FollowActionStatus.Failed` carrying a `FollowActionFailure` — `NoContactList`, `SignedOut`, `AccountChanged`, `AcquisitionTimedOut`, `CachedOnly`, `SourceUnavailable`, and the rest are distinct outcomes, not one error. Do not import generated FFI types or reproduce contact-list editing in application code.
 
 ## Durable publishing and restart
 
