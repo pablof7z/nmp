@@ -722,6 +722,12 @@ pub(super) fn bootstrap_publish_queue_lanes(
             .fetch_add(1, Ordering::Relaxed);
         return Ok(prepared);
     }
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if std::mem::take(&mut store.fail_next_lane_bootstrap) {
+        return Err(PersistenceError::invariant(
+            "injected lane bootstrap failure",
+        ));
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::LaneBootstrapBeforeCommit);
     commit_prepared(write_txn, prepared)
