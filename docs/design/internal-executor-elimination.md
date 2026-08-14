@@ -189,7 +189,7 @@ folded into the plan above.
    scaling #704 permits; it is not a generic executor per session.
 
 3. **The pool-bridge stays a dedicated infra thread.** `pool_bridge_loop`
-   (`runtime/mod.rs:1727`) is a permanent blocking crossbeam batch loop that IS
+   (`runtime/pool_bridge.rs`) is a permanent blocking crossbeam batch loop that IS
    the transport→reducer backpressure; crossbeam has no async recv, so hosting it
    on the runtime would pin a worker forever. #704 forbids admission *capacity*,
    not O(1) fixed infra threads. Fixed infra after this change: engine reducer
