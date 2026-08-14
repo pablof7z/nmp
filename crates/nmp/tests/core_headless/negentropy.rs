@@ -1,4 +1,3 @@
-use super::persistence_failures::FailIngestStore;
 use super::*;
 use nmp_grammar::{Demand, Derived, Freshness, Selector};
 
@@ -1097,7 +1096,9 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         .with_outbound_routes(a.public_key(), [relay.clone()])
         .with_outbound_routes(b.public_key(), [relay.clone()])
         .with_outbound_routes(healthy.public_key(), [healthy_relay.clone()]);
-    let mut core = EngineCore::new_with_fixture_routing_facts(FailIngestStore::armed(), dir, 10);
+    let store = RedbStore::temporary_with_observation_precommit_io()
+        .expect("temporary Redb observation-I/O fixture");
+    let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
 
     let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -1213,6 +1214,7 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         .iter()
         .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
             if snapshot.store_degraded.is_some())));
+    let _ = super::persistence_failures::recover_after_observation_io(&mut core);
 
     let completed = core.handle(EngineMsg::RelayFrame(
         RelayHandle {

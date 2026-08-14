@@ -1,5 +1,6 @@
 use super::publish_queue_codec::{NEXT_RELAY_ID_KEY, PUBLISH_QUEUE_CODEC_VERSION_KEY};
 use super::*;
+use crate::{DurabilityOutcome, PersistenceFault};
 
 /// The refcount half of one `relays` row, for falsifiers that assert
 /// reference counting rather than URL interning.
@@ -697,6 +698,87 @@ fn configured_query_newest_before_failure_is_consumed_once() {
         rows.iter().map(|row| row.event.id).collect::<Vec<_>>(),
         expected
     );
+}
+
+#[test]
+fn observation_precommit_io_closes_reopens_and_retries_single_insert() {
+    let keys = nostr::Keys::generate();
+    let relay = RelayUrl::parse("wss://observation-single-io.example").unwrap();
+    let event = nostr::EventBuilder::new(Kind::TextNote, "single observation")
+        .custom_created_at(Timestamp::from(1_000u64))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let observed = RelayObserved::new(relay, Timestamp::from(1_001u64));
+    let mut store = RedbStore::temporary_with_observation_precommit_io()
+        .expect("temporary Redb observation-I/O fixture");
+
+    let error = store
+        .insert(event.clone(), observed.clone())
+        .expect_err("the construction-armed observation must refuse once");
+    assert_eq!(error.fault(), PersistenceFault::Io);
+    assert_eq!(error.durability(), DurabilityOutcome::Unknown);
+    let latched = store
+        .query(&Filter::new().id(event.id))
+        .expect_err("the actual failed Redb generation must stay closed");
+    assert_eq!(latched.fault(), PersistenceFault::Latched);
+
+    store
+        .reopen_after_failure()
+        .expect("the existing reconstruction door reopens the same target");
+    assert!(store.query(&Filter::new().id(event.id)).unwrap().is_empty());
+    assert!(matches!(
+        store.insert(event.clone(), observed).unwrap(),
+        InsertOutcome::Inserted
+    ));
+    assert_eq!(store.query(&Filter::new().id(event.id)).unwrap().len(), 1);
+}
+
+#[test]
+fn observation_precommit_io_preserves_empty_arm_and_rolls_back_whole_batch() {
+    let keys = nostr::Keys::generate();
+    let relay = RelayUrl::parse("wss://observation-batch-io.example").unwrap();
+    let events: Vec<_> = [1_000u64, 1_001]
+        .into_iter()
+        .map(|created_at| {
+            nostr::EventBuilder::new(Kind::TextNote, format!("batch-{created_at}"))
+                .custom_created_at(Timestamp::from(created_at))
+                .sign_with_keys(&keys)
+                .unwrap()
+        })
+        .collect();
+    let ids = events.iter().map(|event| event.id).collect::<Vec<_>>();
+    let batch = events
+        .into_iter()
+        .map(|event| {
+            (
+                event,
+                RelayObserved::new(relay.clone(), Timestamp::from(2_000u64)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut store = RedbStore::temporary_with_observation_precommit_io()
+        .expect("temporary Redb observation-I/O fixture");
+
+    assert!(store.insert_batch(Vec::new()).unwrap().is_empty());
+    let error = store
+        .insert_batch(batch.clone())
+        .expect_err("the first nonempty batch must consume the construction arm");
+    assert_eq!(error.fault(), PersistenceFault::Io);
+    assert_eq!(error.durability(), DurabilityOutcome::Unknown);
+    let latched = store
+        .query(&Filter::new().ids(ids.clone()))
+        .expect_err("the actual failed Redb generation must stay closed");
+    assert_eq!(latched.fault(), PersistenceFault::Latched);
+
+    store
+        .reopen_after_failure()
+        .expect("the existing reconstruction door reopens the same target");
+    assert!(store
+        .query(&Filter::new().ids(ids.clone()))
+        .unwrap()
+        .is_empty());
+    assert_eq!(store.insert_batch(batch).unwrap().len(), 2);
+    assert_eq!(store.query(&Filter::new().ids(ids)).unwrap().len(), 2);
 }
 
 #[test]
