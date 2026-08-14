@@ -2,6 +2,7 @@ use super::*;
 use nmp_local_signer::LocalKeySigner;
 use nmp_store::RedbStore;
 use nostr::{Keys, Kind};
+use std::time::Instant;
 
 /// #765: `LocalKeySigner` now owns its scalar in one canonical zeroizing
 /// allocation and no longer accepts a `nostr::Keys`. These fixtures still
@@ -212,4 +213,40 @@ fn callback_owned_join_exempts_only_itself_and_drains_another_callback() {
     returned_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("callback-owned join must return after the other callback completes");
+}
+
+#[test]
+fn repeated_engine_shutdown_returns_runtime_threads_to_exact_baseline() {
+    let _serial = RUNTIME_LIFECYCLE_TEST_LOCK.lock().unwrap();
+    for _ in 0..16 {
+        let (engine, handle) = EngineThread::spawn(
+            RedbStore::temporary().expect("temporary Redb store"),
+            1,
+            PoolConfig::default(),
+        )
+        .expect("engine construction");
+        let runtime_threads = Arc::clone(&engine.runtime_threads);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // #704: the auth-release bridge is gone (the adapter executor was
+        // replaced by the tokio runtime, whose workers are NOT counted by
+        // this reducer/bridge guard). One engine now owns exactly the
+        // reducer thread + the pool-bridge thread.
+        while runtime_threads.load(std::sync::atomic::Ordering::SeqCst) != 2
+            && Instant::now() < deadline
+        {
+            thread::yield_now();
+        }
+        assert_eq!(
+            runtime_threads.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one engine must own exactly its reducer and pool-bridge threads"
+        );
+        handle.shutdown();
+        engine.join();
+        assert_eq!(
+            runtime_threads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "join must be an exact engine/bridge teardown barrier"
+        );
+    }
 }
