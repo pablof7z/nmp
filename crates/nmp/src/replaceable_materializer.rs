@@ -60,24 +60,17 @@ pub struct RegisteredReplaceableMaterializer {
 impl RegisteredReplaceableMaterializer {
     pub fn operation(
         &self,
-        original_source: &Row,
         current: &Row,
         source_policy: ReplaceableSourcePolicy,
         operation: Vec<u8>,
     ) -> Result<WritePayload, ReplaceableOperationError> {
-        let signed = original_source
-            .signed_event()
-            .ok_or(ReplaceableOperationError::OriginalSourceInvalid)?;
-        signed
-            .verify()
-            .map_err(|_| ReplaceableOperationError::OriginalSourceInvalid)?;
         current
             .body
             .verify_id()
             .map_err(|_| ReplaceableOperationError::CurrentInvalid)?;
         nmp_grammar::ReplaceableOperation::from_registered_parts(
             self.instance,
-            UnsignedEvent::from(signed),
+            current.body.clone(),
             current.body.clone(),
             source_policy,
             operation,

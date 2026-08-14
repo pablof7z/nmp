@@ -53,21 +53,18 @@ pub fn register_follow_writes(engine: &Engine) -> Result<FollowWrites, nmp::Engi
 }
 
 impl FollowWrites {
-    /// Compose one semantic follow change over a complete current event while
-    /// retaining the first signed source as replay evidence.
+    /// Compose one semantic follow change over a complete current event.
     ///
     /// `current` may be NMP's complete signature-pending optimistic row. The
-    /// registration handle validates `original_source` as signed provenance
-    /// and binds the operation to this engine instance before returning the
-    /// ordinary write noun.
+    /// registration handle binds the operation to this engine instance; NMP
+    /// owns the retained source authority used for later replay.
     pub fn compose(
         &self,
-        original_source: &Row,
         current: &Row,
         target: PublicKey,
         change: FollowChange,
     ) -> Result<ComposeFollowResult, ComposeFollowError> {
-        if original_source.kind() != Kind::ContactList || current.kind() != Kind::ContactList {
+        if current.kind() != Kind::ContactList {
             return Err(ComposeFollowError::BaseHasWrongKind);
         }
         let wants_follow = change == FollowChange::Follow;
@@ -78,7 +75,6 @@ impl FollowWrites {
         let payload = self
             .registration
             .operation(
-                original_source,
                 current,
                 ReplaceableSourcePolicy::Continuing,
                 encode_follow_operation(target, change),
