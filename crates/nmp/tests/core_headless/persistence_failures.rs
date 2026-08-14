@@ -955,14 +955,6 @@ struct WakeLaneProbeStore {
 }
 
 impl WakeLaneProbeStore {
-    fn new(recover_publish_queue_lanes_calls: Rc<Cell<u64>>) -> Self {
-        Self {
-            inner: RedbStore::temporary().expect("temporary Redb store"),
-            recover_publish_queue_lanes_calls,
-            fail_next_bootstrap: false,
-        }
-    }
-
     fn with_failing_bootstrap(recover_publish_queue_lanes_calls: Rc<Cell<u64>>) -> Self {
         Self {
             inner: RedbStore::temporary().expect("temporary Redb store"),
@@ -1102,9 +1094,15 @@ impl EventStore for WakeLaneProbeStore {
         &self,
         intent_id: nmp_store::IntentId,
     ) -> Result<Vec<nmp_store::PublishQueueLane>, PersistenceError> {
+        let before = self.inner.publish_queue_lane_recovery_reads();
+        let result = self.inner.recover_publish_queue_lanes(intent_id);
+        let observed = self
+            .inner
+            .publish_queue_lane_recovery_reads()
+            .saturating_sub(before);
         self.recover_publish_queue_lanes_calls
-            .set(self.recover_publish_queue_lanes_calls.get() + 1);
-        self.inner.recover_publish_queue_lanes(intent_id)
+            .set(self.recover_publish_queue_lanes_calls.get() + observed);
+        result
     }
     fn due_publish_queue_deadlines(
         &self,
@@ -1213,8 +1211,7 @@ fn schedule_ready_skips_lane_less_obligations() {
     const PARKED: usize = 207;
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://lane-less-scheduler.example.com").unwrap();
-    let calls = Rc::new(Cell::new(0u64));
-    let mut core = EngineCore::new(WakeLaneProbeStore::new(calls.clone()), 10);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
     activate(&mut core, &author);
 
     for i in 0..PARKED {
@@ -1236,12 +1233,12 @@ fn schedule_ready_skips_lane_less_obligations() {
         correlation: None,
     }));
     let (id, generation, unsigned) = find_sign_request(&accepted);
-    calls.set(0);
+    core.reset_publish_queue_lane_recovery_reads();
     let signed = unsigned.sign_with_keys(&author).unwrap();
     core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
 
     assert_eq!(
-        calls.get(),
+        core.publish_queue_lane_recovery_reads(),
         0,
         "the one current routed lane is already reducer-owned; {PARKED} unrelated signer waits and the healthy write must cost zero recovery reads"
     );
@@ -1262,8 +1259,7 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
         .map(|i| RelayUrl::parse(&format!("wss://wake-falsifier-{i}.example.com")).unwrap())
         .collect();
 
-    let calls = Rc::new(Cell::new(0u64));
-    let mut core = EngineCore::new(WakeLaneProbeStore::new(calls.clone()), 10);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
     activate(&mut core, &author);
 
     // N distinct durable writes, each routed to its OWN distinct relay, none
@@ -1295,7 +1291,7 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
     // connect itself now only parks the lane behind the probe; the wake that
     // actually publishes is `AuthProbeReleased`, with the same read
     // composition the old connect-time wake had.
-    calls.set(0);
+    core.reset_publish_queue_lane_recovery_reads();
     let effects = core.handle(EngineMsg::AuthProbeReleased(
         RelayHandle {
             slot: 0,
@@ -1305,7 +1301,7 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
     ));
 
     assert_eq!(
-        calls.get(),
+        core.publish_queue_lane_recovery_reads(),
         1,
         "expected zero recovery reads from schedule_ready plus 1 read from \
          the exact wake scan (collapsed from N={N}) -- strictly less than \
@@ -1335,8 +1331,7 @@ fn unchanged_worker_demand_reads_zero_publish_queue_lanes() {
         .map(|i| RelayUrl::parse(&format!("wss://worker-projection-{i}.example.com")).unwrap())
         .collect();
 
-    let calls = Rc::new(Cell::new(0u64));
-    let mut core = EngineCore::new(WakeLaneProbeStore::new(calls.clone()), 10);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
     activate(&mut core, &author);
 
     for (i, relay) in relays.iter().enumerate() {
@@ -1359,7 +1354,7 @@ fn unchanged_worker_demand_reads_zero_publish_queue_lanes() {
         );
     }
 
-    calls.set(0);
+    core.reset_publish_queue_lane_recovery_reads();
     let required = signer_session(&relays[0], author.public_key());
     // REPEATED unchanged passes, not one: the residual #985 names is that the
     // count grew by `N` on EVERY dispatch pass, so a single pass could hide a
@@ -1377,7 +1372,7 @@ fn unchanged_worker_demand_reads_zero_publish_queue_lanes() {
             "the reducer must still recognize the projected worker as owned on pass {pass}"
         );
         assert_eq!(
-            calls.get(),
+            core.publish_queue_lane_recovery_reads(),
             0,
             "unchanged worker-demand checks must use reducer memory; durable lane \
              reads belong to bootstrap/recovery and actual lane transitions. After \
@@ -1405,8 +1400,7 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
     let routed_relay = RelayUrl::parse("wss://parked-routed.example.com").unwrap();
     let parked_relay = RelayUrl::parse("wss://parked-unrouted.example.com").unwrap();
 
-    let calls = Rc::new(Cell::new(0u64));
-    let mut core = EngineCore::new(WakeLaneProbeStore::new(calls.clone()), 10);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
     activate(&mut core, &author);
 
     // One ordinary routed write, so the assertions below distinguish "parked
@@ -1450,7 +1444,7 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
         );
     }
 
-    calls.set(0);
+    core.reset_publish_queue_lane_recovery_reads();
     let parked_session = signer_session(&parked_relay, author.public_key());
     for pass in 0..5 {
         let effects = core.handle(EngineMsg::RelayOpenFailed(
@@ -1479,7 +1473,7 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
     }
 
     assert_eq!(
-        calls.get(),
+        core.publish_queue_lane_recovery_reads(),
         0,
         "{PARKED} parked intents plus ten unchanged dispatch passes must cost \
          zero recover_publish_queue_lanes calls"
