@@ -29,6 +29,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 
 - Source: `crates/nmp/src/lib.rs`
 - Source: `crates/nmp/src/engine.rs`
+- Source: `crates/nmp/src/engine`
 - Source: `crates/nmp/src/error.rs`
 - Source: `crates/nmp/src/config.rs`
 - Source: `crates/nmp/src/relay_information.rs`
@@ -49,6 +50,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp/src/core/write.rs`
 - Source: `crates/nmp/src/diagnostics.rs`
 - Source: `crates/nmp/src/runtime/mod.rs`
+- Source: `crates/nmp/src/runtime`
 - Source: `crates/nmp/src/runtime/receipt_stream.rs`
 - Source: `crates/nmp/src/relay_information_service.rs`
 - Source: `crates/nmp-store/src/lib.rs`
@@ -91,6 +93,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 ## FFI and native wrappers
 
 - Source: `crates/nmp-ffi/src/facade.rs`
+- Source: `crates/nmp-ffi/src/facade`
 - Source: `crates/nmp-ffi/src/types.rs`
 - Source: `crates/nmp-ffi/src/convert.rs`
 - Source: `crates/nmp-ffi/src/nip02.rs`
@@ -99,6 +102,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-ffi/src/nip51.rs`
 - Source: `crates/nmp-ffi/src/tagging.rs`
 - Source: `crates/nmp-ffi/src/content.rs`
+- Source: `crates/nmp-ffi/src/asset.rs`
 - Source: `crates/nmp-ffi/src/blossom.rs`
 - Source: `Packages/NMP/Sources/NMP/Engine.swift`
 - Source: `Packages/NMP/Sources/NMP/NMPError.swift`
@@ -114,6 +118,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMP/Sources/NMP/Diagnostics.swift`
 - Source: `Packages/NMP/Sources/NMP/NostrEntity.swift`
 - Source: `Packages/NMP/Sources/NMP/Signing.swift`
+- Source: `Packages/NMP/Sources/NMP/Asset.swift`
 - Source: `Packages/NMP/Sources/NMP/AuthPolicy.swift`
 - Source: `Packages/NMP/Sources/NMP/RelayInformation.swift`
 - Source: `Packages/NMP/Tests/NMPTests/DiagnosticsTests.swift`
@@ -134,6 +139,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Diagnostics.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NostrEntity.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Signing.kt`
+- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Asset.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/RelayInformation.kt`
 - Source: `Packages/NMPKotlin/src/test/kotlin/com/nmp/sdk/DiagnosticsConcurrencyTest.kt`
 - Source: `Packages/NMPKotlin/src/test/kotlin/com/nmp/sdk/SigningTest.kt`
