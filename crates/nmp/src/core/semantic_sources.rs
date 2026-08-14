@@ -28,10 +28,23 @@ pub(super) struct SemanticSourceOwner {
     filter: ConcreteFilter,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OwnedSemanticSourceRequest {
     pub(super) coordinate: Coordinate,
     pub(super) request: SemanticSourceRequest,
+}
+
+pub(super) type SemanticSourceRequestKey = (RelaySessionKey, SubId);
+
+#[derive(Debug)]
+pub(super) enum SemanticSuccessorRequestState {
+    Running {
+        in_flight: usize,
+    },
+    TerminalDeferred {
+        in_flight: usize,
+        terminal: SemanticSourceTerminal,
+    },
 }
 
 impl EngineCore {
@@ -147,11 +160,20 @@ impl EngineCore {
             return;
         };
         self.semantic_source_retired_observations.insert(id);
-        self.semantic_source_requests.retain(|_, request| {
-            request.coordinate != owner.coordinate
-                || request.request.round != owner.round
-                || request.request.source != owner.source
-        });
+        let retired_requests = self
+            .semantic_source_requests
+            .iter()
+            .filter_map(|(key, request)| {
+                (request.coordinate == owner.coordinate
+                    && request.request.round == owner.round
+                    && request.request.source == owner.source)
+                    .then(|| key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in retired_requests {
+            self.semantic_source_requests.remove(&key);
+            self.semantic_successor_requests.remove(&key);
+        }
         effects.extend(self.on_unsubscribe(id));
     }
 
@@ -250,13 +272,17 @@ impl EngineCore {
                     terminal: RequestTerminal::Eose | RequestTerminal::Nip77,
                     ..
                 } if relay == owner.source.relay && access == owner.source.access => {
-                    self.settle_semantic_source_request(
+                    if let Some(key) = self.semantic_source_request_key(
                         owner,
                         transport_generation,
                         request_revision,
-                        SemanticSourceTerminal::Eose,
-                        effects,
-                    );
+                    ) {
+                        self.defer_or_settle_semantic_source_request(
+                            key,
+                            SemanticSourceTerminal::Eose,
+                            effects,
+                        );
+                    }
                 }
                 ObservationFact::RelayClosed {
                     relay,
@@ -266,29 +292,30 @@ impl EngineCore {
                     reason,
                     ..
                 } if relay == owner.source.relay && access == owner.source.access => {
-                    self.settle_semantic_source_request(
+                    if let Some(key) = self.semantic_source_request_key(
                         owner,
                         transport_generation,
                         request_revision,
-                        SemanticSourceTerminal::Failed(reason),
-                        effects,
-                    );
+                    ) {
+                        self.defer_or_settle_semantic_source_request(
+                            key,
+                            SemanticSourceTerminal::Failed(reason),
+                            effects,
+                        );
+                    }
                 }
                 _ => {}
             }
         }
     }
 
-    fn settle_semantic_source_request(
-        &mut self,
+    fn semantic_source_request_key(
+        &self,
         owner: &SemanticSourceOwner,
         transport_generation: u64,
         request_revision: u64,
-        terminal: SemanticSourceTerminal,
-        effects: &mut Vec<Effect>,
-    ) {
-        let key = self
-            .semantic_source_requests
+    ) -> Option<SemanticSourceRequestKey> {
+        self.semantic_source_requests
             .iter()
             .find_map(|(key, owned)| {
                 (owned.coordinate == owner.coordinate
@@ -296,26 +323,65 @@ impl EngineCore {
                     && owned.request.source == owner.source
                     && owned.request.transport_generation == transport_generation
                     && owned.request.request_revision == request_revision)
-                    .then_some(key.clone())
-            });
-        let Some(key) = key else { return };
+                    .then(|| key.clone())
+            })
+    }
+
+    fn defer_or_settle_semantic_source_request(
+        &mut self,
+        key: SemanticSourceRequestKey,
+        terminal: SemanticSourceTerminal,
+        effects: &mut Vec<Effect>,
+    ) {
+        self.defer_semantic_source_terminal(key.clone(), terminal);
+        let ready = matches!(
+            self.semantic_successor_requests.get(&key),
+            Some(SemanticSuccessorRequestState::TerminalDeferred { in_flight: 0, .. })
+        );
+        if !ready {
+            return;
+        }
+        let Some(SemanticSuccessorRequestState::TerminalDeferred { terminal, .. }) =
+            self.semantic_successor_requests.remove(&key)
+        else {
+            unreachable!("the zero-flight deferred terminal was just matched")
+        };
+        self.settle_semantic_source_request_key(key, terminal, effects);
+    }
+
+    fn settle_semantic_source_request_key(
+        &mut self,
+        key: SemanticSourceRequestKey,
+        terminal: SemanticSourceTerminal,
+        effects: &mut Vec<Effect>,
+    ) {
         let owned = self
             .semantic_source_requests
             .get(&key)
             .cloned()
-            .expect("the selected semantic source request remains owned");
+            .filter(|owned| {
+                self.semantic_source_observations.values().any(|owner| {
+                    owner.coordinate == owned.coordinate
+                        && owner.round == owned.request.round
+                        && owner.source == owned.request.source
+                })
+            });
+        let Some(owned) = owned else {
+            self.semantic_source_requests.remove(&key);
+            return;
+        };
         match self.store.advance_replaceable_source_round(
-            &owner.coordinate,
+            &owned.coordinate,
             SemanticSourceRoundFact::RequestSettled {
-                request: owned.request,
+                request: owned.request.clone(),
                 terminal,
             },
         ) {
             Ok(SemanticSourceRoundOutcome::Advanced)
             | Ok(SemanticSourceRoundOutcome::AlreadyApplied) => {
                 self.semantic_source_requests.remove(&key);
-                self.sync_semantic_source_owners(&owner.coordinate, effects);
-                self.try_close_semantic_cohort(&owner.coordinate, effects);
+                self.sync_semantic_source_owners(&owned.coordinate, effects);
+                self.try_close_semantic_cohort(&owned.coordinate, effects);
             }
             Ok(SemanticSourceRoundOutcome::Stale) => {
                 self.semantic_source_requests.remove(&key);
@@ -324,15 +390,129 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn semantic_source_request_for_wire(
+    pub(super) fn semantic_source_request_with_key_for_wire(
         &self,
         session: &RelaySessionKey,
         wire_sub_id: &str,
-    ) -> Option<OwnedSemanticSourceRequest> {
-        let sub_id = self.attribution.sub_id_for_wire(session, wire_sub_id)?;
+    ) -> Option<(SemanticSourceRequestKey, OwnedSemanticSourceRequest)> {
+        let key = self.semantic_source_request_key_for_wire(session, wire_sub_id)?;
         self.semantic_source_requests
-            .get(&(session.clone(), sub_id))
+            .get(&key)
             .cloned()
+            .map(|owned| (key, owned))
+    }
+
+    pub(super) fn semantic_source_request_key_for_wire(
+        &self,
+        session: &RelaySessionKey,
+        wire_sub_id: &str,
+    ) -> Option<SemanticSourceRequestKey> {
+        let sub_id = self.attribution.sub_id_for_wire(session, wire_sub_id)?;
+        let key = (session.clone(), sub_id);
+        self.semantic_source_requests
+            .contains_key(&key)
+            .then_some(key)
+    }
+
+    pub(super) fn begin_semantic_successor_request(
+        &mut self,
+        key: &SemanticSourceRequestKey,
+    ) -> bool {
+        match self.semantic_successor_requests.get_mut(key) {
+            Some(SemanticSuccessorRequestState::Running { in_flight }) => {
+                *in_flight = in_flight
+                    .checked_add(1)
+                    .expect("one finite source request cannot own usize::MAX successor calls");
+                true
+            }
+            Some(SemanticSuccessorRequestState::TerminalDeferred { .. }) => false,
+            None => {
+                self.semantic_successor_requests.insert(
+                    key.clone(),
+                    SemanticSuccessorRequestState::Running { in_flight: 1 },
+                );
+                true
+            }
+        }
+    }
+
+    pub(super) fn semantic_source_request_is_current(
+        &self,
+        key: &SemanticSourceRequestKey,
+        owned: &OwnedSemanticSourceRequest,
+    ) -> bool {
+        self.semantic_source_requests.get(key) == Some(owned)
+    }
+
+    pub(super) fn defer_semantic_source_terminal(
+        &mut self,
+        key: SemanticSourceRequestKey,
+        terminal: SemanticSourceTerminal,
+    ) {
+        match self.semantic_successor_requests.get_mut(&key) {
+            Some(state @ SemanticSuccessorRequestState::Running { .. }) => {
+                let SemanticSuccessorRequestState::Running { in_flight } = state else {
+                    unreachable!()
+                };
+                let in_flight = *in_flight;
+                *state = SemanticSuccessorRequestState::TerminalDeferred {
+                    in_flight,
+                    terminal,
+                };
+            }
+            Some(SemanticSuccessorRequestState::TerminalDeferred { .. }) => {
+                // First terminal wins; later wire facts cannot replace it.
+            }
+            None => {
+                self.semantic_successor_requests.insert(
+                    key,
+                    SemanticSuccessorRequestState::TerminalDeferred {
+                        in_flight: 0,
+                        terminal,
+                    },
+                );
+            }
+        }
+    }
+
+    pub(super) fn finish_semantic_successor_request(
+        &mut self,
+        key: &SemanticSourceRequestKey,
+        effects: &mut Vec<Effect>,
+    ) {
+        let Some(state) = self.semantic_successor_requests.remove(key) else {
+            return;
+        };
+        match state {
+            SemanticSuccessorRequestState::Running { in_flight } => match in_flight {
+                0 => unreachable!("a successor completion requires one in-flight owner"),
+                1 => {}
+                _ => {
+                    self.semantic_successor_requests.insert(
+                        key.clone(),
+                        SemanticSuccessorRequestState::Running {
+                            in_flight: in_flight - 1,
+                        },
+                    );
+                }
+            },
+            SemanticSuccessorRequestState::TerminalDeferred {
+                in_flight,
+                terminal,
+            } => match in_flight {
+                0 => unreachable!("a successor completion requires one in-flight owner"),
+                1 => self.settle_semantic_source_request_key(key.clone(), terminal, effects),
+                _ => {
+                    self.semantic_successor_requests.insert(
+                        key.clone(),
+                        SemanticSuccessorRequestState::TerminalDeferred {
+                            in_flight: in_flight - 1,
+                            terminal,
+                        },
+                    );
+                }
+            },
+        }
     }
 
     /// Ask the existing atomic store door to close the complete cohort. The
@@ -588,14 +768,129 @@ mod tests {
         sub_id: &SubId,
         event: SignedEvent,
     ) -> Vec<Effect> {
-        core.handle(EngineMsg::RelayFrame(
+        let effects = core.handle(EngineMsg::RelayFrame(
             handle,
             session,
             RelayFrame::from_message(RelayMessage::Event {
                 subscription_id: Cow::Owned(SubscriptionId::new(wire_sub_id_string(sub_id))),
                 event: Cow::Owned(event),
             }),
-        ))
+        ));
+        complete_successors(core, effects)
+    }
+
+    fn complete_successors(core: &mut EngineCore, effects: Vec<Effect>) -> Vec<Effect> {
+        let mut pending = VecDeque::from(effects);
+        let mut completed = Vec::new();
+        while let Some(effect) = pending.pop_front() {
+            match effect {
+                Effect::MaterializeReplaceableSuccessor(prepared) => {
+                    let PreparedReplaceableSuccessor { call, continuation } = *prepared;
+                    pending.extend(core.complete_replaceable_successor_materialization(
+                        continuation,
+                        call.execute(),
+                    ));
+                }
+                other => completed.push(other),
+            }
+        }
+        completed
+    }
+
+    fn prepared_successors(effects: Vec<Effect>) -> Vec<PreparedReplaceableSuccessor> {
+        effects
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::MaterializeReplaceableSuccessor(prepared) => Some(*prepared),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn event_frame(sub_id: &SubId, event: SignedEvent) -> RelayFrame {
+        RelayFrame::from_message(RelayMessage::Event {
+            subscription_id: Cow::Owned(SubscriptionId::new(wire_sub_id_string(sub_id))),
+            event: Cow::Owned(event),
+        })
+    }
+
+    fn eose_frame(sub_id: &SubId) -> RelayFrame {
+        RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+            SubscriptionId::new(wire_sub_id_string(sub_id)),
+        )))
+    }
+
+    struct FiniteSuccessorFixture {
+        core: EngineCore,
+        author: Keys,
+        relay: RelayUrl,
+        session: RelaySessionKey,
+        handle: TransportRelayHandle,
+        sub_id: SubId,
+        base: SignedEvent,
+        person: PublicKey,
+    }
+
+    fn finite_successor_fixture() -> FiniteSuccessorFixture {
+        let author = Keys::generate();
+        let person = Keys::generate().public_key();
+        let relay = RelayUrl::parse("wss://finite-successor.example").unwrap();
+        let session = RelaySessionKey::public(relay.clone());
+        let handle = TransportRelayHandle {
+            slot: 41,
+            generation: 1,
+        };
+        let base = source(&author, 10, "base");
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
+        store
+            .insert(
+                base.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(10u64)),
+            )
+            .unwrap();
+        let mut core = EngineCore::new(store, 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        register(&mut core);
+        core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+        let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
+            INSTANCE,
+            UnsignedEvent::from(base.clone()),
+            UnsignedEvent::from(base.clone()),
+            nmp_grammar::ReplaceableSourcePolicy::Finite {
+                relays: BTreeSet::from([relay.clone()]),
+                access: AccessContext::Public,
+            },
+            person.to_bytes().to_vec(),
+        )
+        .unwrap();
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(payload),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        assert!(accepted
+            .iter()
+            .any(|effect| matches!(effect, Effect::WriteAccepted(..))));
+        let admitted = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(11u64)));
+        let request = requests(&admitted)
+            .into_iter()
+            .find(|(request_session, ..)| request_session == &session)
+            .expect("finite source opens one exact request");
+        core.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+            attempt_id: request.3,
+            handle,
+        });
+        FiniteSuccessorFixture {
+            core,
+            author,
+            relay,
+            session,
+            handle,
+            sub_id: request.1,
+            base,
+            person,
+        }
     }
 
     fn member_state(
@@ -612,6 +907,452 @@ mod tests {
             panic!("fixture must retain a finite source round");
         };
         round.sources[&SemanticSource::new(relay.clone(), AccessContext::Public)].clone()
+    }
+
+    #[test]
+    fn exact_finite_terminal_waits_for_successor_and_rejects_late_event_admission() {
+        let mut fixture = finite_successor_fixture();
+        let successor = source(&fixture.author, 20, "successor");
+        let late = source(&fixture.author, 30, "late after terminal");
+        let effects = fixture.core.handle(EngineMsg::RelayFrames(vec![
+            (
+                fixture.handle,
+                fixture.session.clone(),
+                event_frame(&fixture.sub_id, successor.clone()),
+            ),
+            (
+                fixture.handle,
+                fixture.session.clone(),
+                eose_frame(&fixture.sub_id),
+            ),
+        ]));
+        let mut prepared_effects = prepared_successors(effects).into_iter();
+        let prepared = prepared_effects
+            .next()
+            .expect("the relay source prepares one successor");
+        assert!(prepared_effects.next().is_none());
+        assert!(matches!(
+            member_state(&fixture.core, &coordinate(&fixture.author), &fixture.relay,),
+            SemanticSourceMemberState::Open(_)
+        ));
+        assert!(matches!(
+            fixture.core.semantic_successor_requests.values().next(),
+            Some(SemanticSuccessorRequestState::TerminalDeferred {
+                in_flight: 1,
+                terminal: SemanticSourceTerminal::Eose,
+            })
+        ));
+
+        let late_effects = fixture.core.handle(EngineMsg::RelayFrame(
+            fixture.handle,
+            fixture.session.clone(),
+            event_frame(&fixture.sub_id, late),
+        ));
+        assert!(late_effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::MaterializeReplaceableSuccessor(_))));
+        let before_completion = fixture
+            .core
+            .store
+            .replaceable_operation_snapshot(&coordinate(&fixture.author))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            before_completion.current.source_revision.evidence().qualified,
+            QualifiedSource::Event { event_id, .. } if event_id == fixture.base.id
+        ));
+
+        let PreparedReplaceableSuccessor { call, continuation } = prepared;
+        fixture
+            .core
+            .complete_replaceable_successor_materialization(continuation, call.execute());
+        assert!(matches!(
+            member_state(&fixture.core, &coordinate(&fixture.author), &fixture.relay,),
+            SemanticSourceMemberState::Settled { .. }
+        ));
+        let installed = fixture
+            .core
+            .store
+            .replaceable_operation_snapshot(&coordinate(&fixture.author))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            installed.current.source_revision.evidence().qualified,
+            QualifiedSource::Event { event_id, .. } if event_id == successor.id
+        ));
+    }
+
+    #[test]
+    fn successor_completion_cannot_install_or_settle_under_a_replacement_request() {
+        let mut fixture = finite_successor_fixture();
+        let successor = source(&fixture.author, 20, "stale request successor");
+        let effects = fixture.core.handle(EngineMsg::RelayFrame(
+            fixture.handle,
+            fixture.session.clone(),
+            event_frame(&fixture.sub_id, successor),
+        ));
+        let prepared = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::MaterializeReplaceableSuccessor(prepared) => Some(*prepared),
+                _ => None,
+            })
+            .expect("the old request prepares one successor");
+        let key = fixture
+            .core
+            .semantic_source_requests
+            .keys()
+            .next()
+            .cloned()
+            .expect("the finite source request is current");
+        let mut replacement = fixture.core.semantic_source_requests[&key].clone();
+        replacement.request.request_revision += 1;
+        fixture
+            .core
+            .semantic_source_requests
+            .insert(key.clone(), replacement.clone());
+        fixture.core.semantic_successor_requests.insert(
+            key.clone(),
+            SemanticSuccessorRequestState::Running { in_flight: 1 },
+        );
+
+        let PreparedReplaceableSuccessor { call, continuation } = prepared;
+        let completed = fixture
+            .core
+            .complete_replaceable_successor_materialization(continuation, call.execute());
+        assert!(completed.is_empty());
+        assert_eq!(
+            fixture.core.semantic_source_requests.get(&key),
+            Some(&replacement)
+        );
+        assert!(matches!(
+            fixture.core.semantic_successor_requests.get(&key),
+            Some(SemanticSuccessorRequestState::Running { in_flight: 1 })
+        ));
+        let unchanged = fixture
+            .core
+            .store
+            .replaceable_operation_snapshot(&coordinate(&fixture.author))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            unchanged.current.source_revision.evidence().qualified,
+            QualifiedSource::Event { event_id, .. } if event_id == fixture.base.id
+        ));
+    }
+
+    #[test]
+    fn finite_terminal_counts_every_candidate_and_newest_successor_wins() {
+        let mut fixture = finite_successor_fixture();
+        let older = source(&fixture.author, 20, "older candidate");
+        let newer = source(&fixture.author, 30, "newer candidate");
+        let effects = fixture.core.handle(EngineMsg::RelayFrames(vec![
+            (
+                fixture.handle,
+                fixture.session.clone(),
+                event_frame(&fixture.sub_id, older),
+            ),
+            (
+                fixture.handle,
+                fixture.session.clone(),
+                event_frame(&fixture.sub_id, newer.clone()),
+            ),
+            (
+                fixture.handle,
+                fixture.session.clone(),
+                eose_frame(&fixture.sub_id),
+            ),
+        ]));
+        let mut prepared = prepared_successors(effects).into_iter();
+        let first = prepared.next().expect("older candidate prepares");
+        let second = prepared.next().expect("newer candidate prepares");
+        assert!(prepared.next().is_none());
+        assert!(matches!(
+            fixture.core.semantic_successor_requests.values().next(),
+            Some(SemanticSuccessorRequestState::TerminalDeferred {
+                in_flight: 2,
+                terminal: SemanticSourceTerminal::Eose,
+            })
+        ));
+
+        let PreparedReplaceableSuccessor { call, continuation } = second;
+        fixture
+            .core
+            .complete_replaceable_successor_materialization(continuation, call.execute());
+        assert!(matches!(
+            fixture.core.semantic_successor_requests.values().next(),
+            Some(SemanticSuccessorRequestState::TerminalDeferred { in_flight: 1, .. })
+        ));
+        assert!(matches!(
+            member_state(&fixture.core, &coordinate(&fixture.author), &fixture.relay,),
+            SemanticSourceMemberState::Open(_)
+        ));
+
+        let PreparedReplaceableSuccessor { call, continuation } = first;
+        let retry = fixture
+            .core
+            .complete_replaceable_successor_materialization(continuation, call.execute());
+        let [retry] = prepared_successors(retry).try_into().unwrap_or_else(
+            |retry: Vec<PreparedReplaceableSuccessor>| {
+                panic!(
+                    "the stale older candidate must prepare one retry, got {}",
+                    retry.len()
+                )
+            },
+        );
+        assert!(matches!(
+            fixture.core.semantic_successor_requests.values().next(),
+            Some(SemanticSuccessorRequestState::TerminalDeferred { in_flight: 1, .. })
+        ));
+        let PreparedReplaceableSuccessor { call, continuation } = retry;
+        fixture
+            .core
+            .complete_replaceable_successor_materialization(continuation, call.execute());
+        assert!(matches!(
+            member_state(&fixture.core, &coordinate(&fixture.author), &fixture.relay,),
+            SemanticSourceMemberState::Settled { .. }
+        ));
+        let installed = fixture
+            .core
+            .store
+            .replaceable_operation_snapshot(&coordinate(&fixture.author))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            installed.current.source_revision.evidence().qualified,
+            QualifiedSource::Event { event_id, .. } if event_id == newer.id
+        ));
+    }
+
+    #[test]
+    fn successor_retries_after_operation_advance_and_keeps_every_operation() {
+        let mut fixture = finite_successor_fixture();
+        let successor = source(&fixture.author, 20, "successor after operation advance");
+        let effects = fixture.core.handle(EngineMsg::RelayFrame(
+            fixture.handle,
+            fixture.session.clone(),
+            event_frame(&fixture.sub_id, successor.clone()),
+        ));
+        let [prepared] = prepared_successors(effects).try_into().unwrap_or_else(
+            |prepared: Vec<PreparedReplaceableSuccessor>| {
+                panic!("one successor must prepare, got {}", prepared.len())
+            },
+        );
+
+        let second_person = Keys::generate().public_key();
+        let current_id = fixture
+            .core
+            .store
+            .replaceable_operation_snapshot(&coordinate(&fixture.author))
+            .unwrap()
+            .unwrap()
+            .current
+            .generation
+            .unwrap()
+            .materialization
+            .event_id;
+        let current = fixture
+            .core
+            .store
+            .query(&nostr::Filter::new().id(current_id))
+            .unwrap()
+            .pop()
+            .unwrap()
+            .event;
+        let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
+            INSTANCE,
+            UnsignedEvent::from(current.clone()),
+            UnsignedEvent::from(current),
+            nmp_grammar::ReplaceableSourcePolicy::Finite {
+                relays: BTreeSet::from([fixture.relay.clone()]),
+                access: AccessContext::Public,
+            },
+            second_person.to_bytes().to_vec(),
+        )
+        .unwrap();
+        let advanced = fixture.core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(payload),
+            routing: WriteRouting::Explicit(vec![fixture.relay.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        assert!(advanced
+            .iter()
+            .any(|effect| matches!(effect, Effect::WriteAccepted(..))));
+
+        let PreparedReplaceableSuccessor { call, continuation } = prepared;
+        let retry = fixture
+            .core
+            .complete_replaceable_successor_materialization(continuation, call.execute());
+        let [retry] = prepared_successors(retry).try_into().unwrap_or_else(
+            |retry: Vec<PreparedReplaceableSuccessor>| {
+                panic!(
+                    "operation advance must prepare one retry, got {}",
+                    retry.len()
+                )
+            },
+        );
+        let PreparedReplaceableSuccessor { call, continuation } = retry;
+        fixture
+            .core
+            .complete_replaceable_successor_materialization(continuation, call.execute());
+
+        let snapshot = fixture
+            .core
+            .store
+            .replaceable_operation_snapshot(&coordinate(&fixture.author))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            snapshot.current.source_revision.evidence().qualified,
+            QualifiedSource::Event { event_id, .. } if event_id == successor.id
+        ));
+        let event_id = snapshot
+            .current
+            .generation
+            .unwrap()
+            .materialization
+            .event_id;
+        let installed = fixture
+            .core
+            .store
+            .query(&nostr::Filter::new().id(event_id))
+            .unwrap()
+            .pop()
+            .unwrap()
+            .event;
+        for person in [fixture.person, second_person] {
+            assert!(installed
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == ["p", &person.to_hex()]));
+        }
+    }
+
+    #[test]
+    fn replaced_registration_discards_in_flight_successor_completion() {
+        let mut fixture = finite_successor_fixture();
+        let successor = source(&fixture.author, 20, "stale registration successor");
+        let effects = fixture.core.handle(EngineMsg::RelayFrame(
+            fixture.handle,
+            fixture.session.clone(),
+            event_frame(&fixture.sub_id, successor),
+        ));
+        let [prepared] = prepared_successors(effects).try_into().unwrap_or_else(
+            |prepared: Vec<PreparedReplaceableSuccessor>| {
+                panic!("one successor must prepare, got {}", prepared.len())
+            },
+        );
+        register(&mut fixture.core);
+
+        let PreparedReplaceableSuccessor { call, continuation } = prepared;
+        let completed = fixture
+            .core
+            .complete_replaceable_successor_materialization(continuation, call.execute());
+        assert!(completed
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))));
+        let unchanged = fixture
+            .core
+            .store
+            .replaceable_operation_snapshot(&coordinate(&fixture.author))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            unchanged.current.source_revision.evidence().qualified,
+            QualifiedSource::Event { event_id, .. } if event_id == fixture.base.id
+        ));
+        assert!(fixture.core.semantic_successor_requests.is_empty());
+    }
+
+    #[test]
+    fn stale_successor_install_falls_back_to_the_exact_ordinary_observation() {
+        let mut fixture = finite_successor_fixture();
+        let successor = source(&fixture.author, 20, "fallback successor");
+        let effects = fixture.core.handle(EngineMsg::RelayFrame(
+            fixture.handle,
+            fixture.session.clone(),
+            event_frame(&fixture.sub_id, successor.clone()),
+        ));
+        let [prepared] = prepared_successors(effects).try_into().unwrap_or_else(
+            |prepared: Vec<PreparedReplaceableSuccessor>| {
+                panic!("one successor must prepare, got {}", prepared.len())
+            },
+        );
+        let competing = source(&fixture.author, 15, "competing ordinary winner");
+        fixture
+            .core
+            .store
+            .insert(
+                competing,
+                RelayObserved::new(fixture.relay.clone(), Timestamp::from(15u64)),
+            )
+            .unwrap();
+        eose(
+            &mut fixture.core,
+            fixture.handle,
+            fixture.session.clone(),
+            &fixture.sub_id,
+        );
+        assert!(matches!(
+            member_state(&fixture.core, &coordinate(&fixture.author), &fixture.relay,),
+            SemanticSourceMemberState::Open(_)
+        ));
+
+        let PreparedReplaceableSuccessor { call, continuation } = prepared;
+        let completed = fixture
+            .core
+            .complete_replaceable_successor_materialization(continuation, call.execute());
+        let ordinary_committed = completed
+            .iter()
+            .position(|effect| {
+                matches!(
+                    effect,
+                    Effect::UpdateCommittedObservations { .. } | Effect::EmitRows(..)
+                )
+            })
+            .expect("the exact ordinary observation commits");
+        let source_retired = completed
+            .iter()
+            .position(|effect| {
+                matches!(effect, Effect::Wire(delta) if delta.ops.iter().any(|(_, ops)| {
+                    ops.iter().any(|op| {
+                        matches!(op, WireOp::Close(sub_id) if sub_id == &fixture.sub_id)
+                    })
+                }))
+            })
+            .expect("the settled finite source retires its exact wire request");
+        assert!(
+            ordinary_committed < source_retired,
+            "ordinary fallback must commit before source settlement retires the request: {completed:#?}"
+        );
+        let snapshot = fixture
+            .core
+            .store
+            .replaceable_operation_snapshot(&coordinate(&fixture.author))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            snapshot.current.source_revision.evidence().qualified,
+            QualifiedSource::Event { event_id, .. } if event_id == fixture.base.id
+        ));
+        let winner = fixture
+            .core
+            .store
+            .query(
+                &nostr::Filter::new()
+                    .kind(Kind::ContactList)
+                    .author(fixture.author.public_key()),
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(winner.event.id, successor.id);
+        assert_eq!(winner.event.content, "fallback successor");
+        assert!(matches!(
+            member_state(&fixture.core, &coordinate(&fixture.author), &fixture.relay,),
+            SemanticSourceMemberState::Settled { .. }
+        ));
     }
 
     /// Issue #1481's complete falsifier: each declared relay owns its exact

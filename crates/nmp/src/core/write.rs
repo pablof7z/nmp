@@ -6,11 +6,14 @@
 use super::*;
 use nmp_grammar::ThreadPosition;
 use nostr::nips::nip01::Coordinate;
+use std::sync::Arc;
 
 mod replaceable_operation;
+pub use replaceable_operation::PreparedReplaceableSuccessor;
 pub(crate) use replaceable_operation::{
     PreparedReplaceableMaterialization, PublishPreparation, ReplaceableMaterializationCall,
     ReplaceableMaterializationContinuation, ReplaceableMaterializationOutcome,
+    ReplaceableSuccessorContinuation,
 };
 
 fn public_retry_cause(cause: PublishQueueTransientCause) -> Option<RetryCause> {
@@ -2448,7 +2451,12 @@ impl EngineCore {
         &mut self,
         source: SignedEvent,
         observed: RelayObserved,
-        owned_request: Option<&super::semantic_sources::OwnedSemanticSourceRequest>,
+        candidate: Option<CommittedObservationCandidate>,
+        attribution: Option<(RelaySessionKey, String)>,
+        owned_request: Option<&(
+            super::semantic_sources::SemanticSourceRequestKey,
+            super::semantic_sources::OwnedSemanticSourceRequest,
+        )>,
         effects: &mut Vec<Effect>,
     ) -> bool {
         let kind = source.kind.as_u16();
@@ -2501,32 +2509,35 @@ impl EngineCore {
                 }
             }
         }
-        if let nmp_store::SemanticSourcePolicy::Finite(round) = &snapshot.source_policy {
-            let Some(owned) = owned_request else {
-                // An active finite resource exclusively owns its coordinate.
-                // A matching event from an unrelated query must not replace
-                // the optimistic canonical generation through ordinary
-                // ingest, and it has no authority to become a successor.
-                return true;
+        let source_request =
+            if let nmp_store::SemanticSourcePolicy::Finite(round) = &snapshot.source_policy {
+                let Some((key, owned)) = owned_request else {
+                    // An active finite resource exclusively owns its coordinate.
+                    // A matching event from an unrelated query must not replace
+                    // the optimistic canonical generation through ordinary
+                    // ingest, and it has no authority to become a successor.
+                    return true;
+                };
+                let request_is_current = owned.coordinate == coordinate
+                    && owned.request.round == round.id
+                    && matches!(
+                        round.sources.get(&owned.request.source),
+                        Some(nmp_store::SemanticSourceMemberState::Open(current))
+                            if current == &owned.request
+                    );
+                if !request_is_current {
+                    return true;
+                }
+                Some((key.clone(), owned.clone()))
+            } else {
+                None
             };
-            let request_is_current = owned.coordinate == coordinate
-                && owned.request.round == round.id
-                && matches!(
-                    round.sources.get(&owned.request.source),
-                    Some(nmp_store::SemanticSourceMemberState::Open(current))
-                        if current == &owned.request
-                );
-            if !request_is_current {
-                return true;
-            }
-        }
         let members = snapshot
             .current
             .generation
             .as_ref()
             .map(|generation| generation.members.iter().copied().collect::<Vec<_>>())
             .unwrap_or_default();
-        let mut member_receipts = Vec::with_capacity(members.len());
         for member in &members {
             let Some(receipt) = self.intent_receipts.get(member).copied() else {
                 self.degrade_store(
@@ -2555,7 +2566,6 @@ impl EngineCore {
                 );
                 return true;
             }
-            member_receipts.push((*member, receipt));
         }
         let Some(registration) = self
             .replaceable_materializers
@@ -2568,31 +2578,200 @@ impl EngineCore {
             effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
             return true;
         };
+        let instance = registration.instance;
+        let program = ReplayProgramId(registration.program);
+        let format = ReplayFormatId(registration.format);
+        let materializer = registration.materializer.clone();
         let source_unsigned = UnsignedEvent::from(source.clone());
         let operations = snapshot
             .operations
             .iter()
-            .map(|operation| ReplaceableMaterializerOperation::new(operation.plan.bytes()))
+            .map(|operation| operation.plan.bytes().to_vec())
             .collect::<Vec<_>>();
-        let builder = match registration.materializer.materialize(
-            &source_unsigned,
-            &source_unsigned,
-            &operations,
-        ) {
-            Ok(builder) => builder,
-            Err(_) => {
-                effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+        if let Some((key, _)) = source_request.as_ref() {
+            if !self.begin_semantic_successor_request(key) {
                 return true;
             }
+        }
+        effects.push(Effect::MaterializeReplaceableSuccessor(Box::new(
+            PreparedReplaceableSuccessor {
+                call: ReplaceableMaterializationCall::new(
+                    materializer.clone(),
+                    source_unsigned.clone(),
+                    source_unsigned,
+                    operations,
+                ),
+                continuation: ReplaceableSuccessorContinuation {
+                    instance,
+                    program,
+                    format,
+                    materializer,
+                    coordinate,
+                    fence: Self::replaceable_materialization_fence(Some(&snapshot)),
+                    observation: (source, observed, candidate, attribution),
+                    source_request,
+                },
+            },
+        )));
+        true
+    }
+
+    pub(crate) fn complete_replaceable_successor_materialization(
+        &mut self,
+        continuation: ReplaceableSuccessorContinuation,
+        outcome: ReplaceableMaterializationOutcome,
+    ) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        self.complete_replaceable_successor_materialization_inner(
+            continuation,
+            outcome,
+            &mut effects,
+        );
+        self.consume_semantic_source_effects(effects)
+    }
+
+    fn complete_replaceable_successor_materialization_inner(
+        &mut self,
+        mut continuation: ReplaceableSuccessorContinuation,
+        outcome: ReplaceableMaterializationOutcome,
+        effects: &mut Vec<Effect>,
+    ) {
+        if let Some((key, owned)) = continuation.source_request.as_ref() {
+            if !self.semantic_source_request_is_current(key, owned) {
+                return;
+            }
+        }
+        let registration_is_current = self
+            .replaceable_materializers
+            .get(&continuation.instance)
+            .is_some_and(|registration| {
+                registration.program == continuation.program.0
+                    && registration.format == continuation.format.0
+                    && Arc::ptr_eq(&registration.materializer, &continuation.materializer)
+            });
+        if !registration_is_current {
+            effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+            self.finish_replaceable_successor_request(&continuation, effects);
+            return;
+        }
+        if matches!(
+            outcome,
+            ReplaceableMaterializationOutcome::ThreadUnavailable(_)
+        ) {
+            effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+            self.finish_replaceable_successor_request(&continuation, effects);
+            return;
+        }
+
+        let snapshot = match self
+            .store
+            .replaceable_operation_snapshot(&continuation.coordinate)
+        {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => {
+                self.fallback_replaceable_successor(continuation, effects);
+                return;
+            }
+            Err(error) => {
+                self.degrade_store(error, effects);
+                self.finish_replaceable_successor_request(&continuation, effects);
+                return;
+            }
         };
-        if builder.kind != coordinate.kind
+        if snapshot.operations.iter().any(|operation| {
+            operation.program != continuation.program || operation.format != continuation.format
+        }) {
+            effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+            self.finish_replaceable_successor_request(&continuation, effects);
+            return;
+        }
+        let current_fence = Self::replaceable_materialization_fence(Some(&snapshot));
+        if current_fence != continuation.fence {
+            let source = UnsignedEvent::from(continuation.observation.0.clone());
+            let operations = snapshot
+                .operations
+                .iter()
+                .map(|operation| operation.plan.bytes().to_vec())
+                .collect();
+            continuation.fence = current_fence;
+            effects.push(Effect::MaterializeReplaceableSuccessor(Box::new(
+                PreparedReplaceableSuccessor {
+                    call: ReplaceableMaterializationCall::new(
+                        continuation.materializer.clone(),
+                        source.clone(),
+                        source,
+                        operations,
+                    ),
+                    continuation,
+                },
+            )));
+            return;
+        }
+
+        let builder = match outcome {
+            ReplaceableMaterializationOutcome::Materialized(builder) => builder,
+            ReplaceableMaterializationOutcome::Refused(_)
+            | ReplaceableMaterializationOutcome::Panicked => {
+                effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
+                self.finish_replaceable_successor_request(&continuation, effects);
+                return;
+            }
+            ReplaceableMaterializationOutcome::ThreadUnavailable(_) => {
+                unreachable!("thread refusal returned before successor fence validation")
+            }
+        };
+        if builder.kind != continuation.coordinate.kind
             || nostr::Tags::from_list(builder.tags.clone())
                 .identifier()
                 .unwrap_or("")
-                != coordinate.identifier
+                != continuation.coordinate.identifier
         {
-            return true;
+            self.finish_replaceable_successor_request(&continuation, effects);
+            return;
         }
+
+        let members = snapshot
+            .current
+            .generation
+            .as_ref()
+            .map(|generation| generation.members.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut member_receipts = Vec::with_capacity(members.len());
+        for member in &members {
+            let Some(receipt) = self.intent_receipts.get(member).copied() else {
+                self.degrade_store(
+                    nmp_store::PersistenceError::invariant(
+                        "active semantic member is missing its runtime receipt",
+                    ),
+                    effects,
+                );
+                self.finish_replaceable_successor_request(&continuation, effects);
+                return;
+            };
+            let Some(pending) = self.pending.get(&receipt) else {
+                self.degrade_store(
+                    nmp_store::PersistenceError::invariant(
+                        "active semantic member is missing its runtime pending write",
+                    ),
+                    effects,
+                );
+                self.finish_replaceable_successor_request(&continuation, effects);
+                return;
+            };
+            if pending.intent_id != *member {
+                self.degrade_store(
+                    nmp_store::PersistenceError::invariant(
+                        "semantic runtime receipt points at another intent",
+                    ),
+                    effects,
+                );
+                self.finish_replaceable_successor_request(&continuation, effects);
+                return;
+            }
+            member_receipts.push((*member, receipt));
+        }
+
+        let (source, observed, _, _) = &continuation.observation;
         let operation_time = snapshot
             .operations
             .iter()
@@ -2600,7 +2779,8 @@ impl EngineCore {
             .max()
             .unwrap_or(0);
         let Some(source_time) = source.created_at.as_secs().checked_add(1) else {
-            return true;
+            self.finish_replaceable_successor_request(&continuation, effects);
+            return;
         };
         let Some(prior_time) = snapshot
             .current
@@ -2609,7 +2789,8 @@ impl EngineCore {
             .map(|generation| generation.created_at.as_secs().checked_add(1))
             .unwrap_or(Some(0))
         else {
-            return true;
+            self.finish_replaceable_successor_request(&continuation, effects);
+            return;
         };
         let mut event = UnsignedEvent::new(
             source.pubkey,
@@ -2639,14 +2820,14 @@ impl EngineCore {
             })
             .unwrap_or_else(|| Self::routing_snapshot(&WriteRouting::Auto));
         let mut seen = BTreeMap::new();
-        seen.insert(observed.relay, observed.at);
+        seen.insert(observed.relay.clone(), observed.at);
         let install = SemanticSourceInstall {
             source: nmp_store::StoredEvent {
-                event: source,
+                event: source.clone(),
                 provenance: nmp_store::Provenance { seen, local: None },
             },
             successor: SemanticRematerialize {
-                coordinate: coordinate.clone(),
+                coordinate: continuation.coordinate.clone(),
                 expected_source_revision: snapshot.current.source_revision.clone(),
                 expected_program_digest: snapshot.current.program_digest,
                 expected_current_materialization: snapshot
@@ -2676,7 +2857,8 @@ impl EngineCore {
             Ok(installed) => installed,
             Err(error) => {
                 self.degrade_store(error, effects);
-                return true;
+                self.finish_replaceable_successor_request(&continuation, effects);
+                return;
             }
         };
         let nmp_resolver::SemanticInstallResult { outcome, committed } = installed;
@@ -2684,10 +2866,16 @@ impl EngineCore {
             current, installed, ..
         } = outcome
         else {
-            return !matches!(outcome, nmp_store::SemanticInstallOutcome::Stale);
+            if matches!(outcome, nmp_store::SemanticInstallOutcome::Stale) {
+                self.fallback_replaceable_successor(continuation, effects);
+            } else {
+                self.finish_replaceable_successor_request(&continuation, effects);
+            }
+            return;
         };
         let Some(generation) = current.generation.as_ref() else {
-            return true;
+            self.finish_replaceable_successor_request(&continuation, effects);
+            return;
         };
         let Some(delivery_owner) = super::semantic_delivery::MaterializationDeliveryOwner::new(
             generation.materialization,
@@ -2699,13 +2887,14 @@ impl EngineCore {
                 ),
                 effects,
             );
-            return true;
+            self.finish_replaceable_successor_request(&continuation, effects);
+            return;
         };
         debug_assert_eq!(delivery_owner.materialization(), generation.materialization);
         debug_assert_eq!(delivery_owner.members().count(), generation.members.len());
         let target =
             PendingWriteTarget::ReplaceableOperation(Box::new(ReplaceableMaterializationTarget {
-                coordinate,
+                coordinate: continuation.coordinate.clone(),
                 expected_source_revision: current.source_revision,
                 expected_program_digest: current.program_digest,
                 expected_materialization: generation.materialization.materialization_id,
@@ -2754,7 +2943,35 @@ impl EngineCore {
             ));
         }
         self.apply_committed_mutation(committed, effects);
-        true
+        self.finish_replaceable_successor_request(&continuation, effects);
+    }
+
+    fn fallback_replaceable_successor(
+        &mut self,
+        continuation: ReplaceableSuccessorContinuation,
+        effects: &mut Vec<Effect>,
+    ) {
+        let source_request = continuation.source_request.clone();
+        self.ingest_ordinary_relay_observations(vec![continuation.observation], effects);
+        if let Some((key, owned)) = source_request.as_ref() {
+            if !self.semantic_source_request_is_current(key, owned) {
+                return;
+            }
+            self.finish_semantic_successor_request(key, effects);
+        }
+    }
+
+    fn finish_replaceable_successor_request(
+        &mut self,
+        continuation: &ReplaceableSuccessorContinuation,
+        effects: &mut Vec<Effect>,
+    ) {
+        if let Some((key, owned)) = continuation.source_request.as_ref() {
+            if !self.semantic_source_request_is_current(key, owned) {
+                return;
+            }
+            self.finish_semantic_successor_request(key, effects);
+        }
     }
 
     /// `Publish` (issues #2/#3 U3): enter durable/at-most-once writes through
