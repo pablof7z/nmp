@@ -202,6 +202,8 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:id=WRITES-REPLACEABLE-EDIT-022
   # nmp:status=built
   # nmp:evidence=rust:nmp::source_session_replacement_wakes_every_signed_successor_destination
+  # nmp:evidence=rust:nmp::shared_second_generation_is_once_per_relay_and_replays_without_settling
+  # nmp:evidence=rust:nmp-store::qualified_source_and_complete_successor_survive_redb_reopen
   # nmp:falsifier=Re-bootstrap current E2 lanes against retained terminal E1 attempt history; recovery refuses the valid successor lanes and both destinations remain Waiting(NotConnected).
   @acceptance
   Scenario: A signed successor survives predecessor session replacement

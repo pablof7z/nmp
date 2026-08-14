@@ -274,6 +274,10 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
             .await,
         "relay 1 must independently witness the first generation"
     );
+    let first_relays = BTreeSet::from([relay_one.url.clone()]);
+    let first_facts =
+        wait_for_generation_relay_facts(&first.statuses, first_current.id(), &first_relays);
+    assert_no_settled_fact(&first_facts);
     let second = engine
         .publish(WriteIntent {
             payload: materializer
