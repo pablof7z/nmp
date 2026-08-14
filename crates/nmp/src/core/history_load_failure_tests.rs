@@ -867,18 +867,39 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
 #[test]
 fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
     let existing_author = Keys::generate().public_key();
-    let candidate_author = Keys::generate().public_key();
+    let candidate_keys = Keys::generate();
+    let candidate_author = candidate_keys.public_key();
     let existing_relay = RelayUrl::parse("wss://history-open-existing.example").unwrap();
     let candidate_relay = RelayUrl::parse("wss://history-open-candidate.example").unwrap();
+    let directory = tempfile::tempdir().expect("canonical corruption directory");
+    let path = directory.path().join("history-projection-corruption.redb");
+    let (corrupt_id, healthy_id) = {
+        let corrupt = event(&candidate_keys, 2, 1_000);
+        let corrupt_id = corrupt.id;
+        let healthy = event(&candidate_keys, 3, 1_001);
+        let healthy_id = healthy.id;
+        let mut store = RedbStore::open(&path).expect("create persistent Redb fixture");
+        store
+            .insert(
+                corrupt,
+                RelayObserved::new(candidate_relay.clone(), Timestamp::from(1_001u64)),
+            )
+            .expect("seed candidate canonical event");
+        store
+            .insert(
+                healthy,
+                RelayObserved::new(candidate_relay.clone(), Timestamp::from(1_002u64)),
+            )
+            .expect("seed disjoint healthy event");
+        (corrupt_id, healthy_id)
+    };
+    testing::corrupt_canonical_event(&path, corrupt_id)
+        .expect("store-owned canonical-event corruption");
     let facts = FixtureRoutingFacts::new()
         .with_outbound_routes(existing_author, [existing_relay])
         .with_outbound_routes(candidate_author, [candidate_relay]);
-    let control = StoreFailureControl::default();
     let mut core = EngineCore::new_with_fixture_routing_facts(
-        ControlledFailureStore::new(
-            RedbStore::temporary().expect("temporary Redb store"),
-            control.clone(),
-        ),
+        RedbStore::open(&path).expect("reopen corrupted Redb fixture"),
         facts,
         1,
     );
@@ -895,22 +916,23 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
     let baseline_compiles = core.router_compiles.get();
     let baseline_history = snapshot(&core, existing_id);
 
-    control.fail_query("candidate history projection failed");
-    let effects = match core.open_history_observation(
+    let (effects, diagnostic) = match core.open_history_observation(
         HistoryQuery::new(routed_query(candidate_author, 2), 1, 2),
         Timestamp::from(0u64),
     ) {
         ObservationOpen::Refused { reason, effects } => {
-            assert!(reason.contains("candidate history projection failed"));
-            effects
+            let store_error = reason
+                .strip_prefix("canonical history projection failed: ")
+                .expect("candidate refusal names the history projection boundary");
+            assert!(store_error.contains("decode canonical event view"));
+            (effects, store_error.to_owned())
         }
-        ObservationOpen::Opened { .. } => panic!("injected projection failure was ignored"),
+        ObservationOpen::Opened { .. } => {
+            panic!("corrupt candidate history projection was ignored")
+        }
     };
 
-    assert_only_refusal_diagnostic(
-        &effects,
-        "durable-store persistence failure: candidate history projection failed",
-    );
+    assert_only_refusal_diagnostic(&effects, &diagnostic);
     assert_eq!(core.observation_ownership_census(), baseline_census);
     assert_eq!(core.active_demand(), baseline_demand);
     assert_plan_unchanged(core.router.plan(), &baseline_plan);
@@ -925,13 +947,20 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
         "existing history rows, evidence, and ownership stay byte-identical"
     );
 
-    assert!(matches!(
-        core.open_history_observation(
-            HistoryQuery::new(routed_query(candidate_author, 2), 1, 2),
-            Timestamp::from(0u64),
-        ),
-        ObservationOpen::Opened { .. }
-    ));
+    let healthy_query = LiveQuery::from_filter(Filter {
+        authors: Some(Binding::Literal(BTreeSet::from(
+            [candidate_author.to_hex()],
+        ))),
+        ids: Some(Binding::Literal(BTreeSet::from([healthy_id.to_hex()]))),
+        kinds: Some(BTreeSet::from([3])),
+        ..Filter::default()
+    });
+    if let ObservationOpen::Refused { reason, .. } = core.open_history_observation(
+        HistoryQuery::new(healthy_query, 1, 2),
+        Timestamp::from(0u64),
+    ) {
+        panic!("disjoint same-author history projection refused: {reason}");
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
