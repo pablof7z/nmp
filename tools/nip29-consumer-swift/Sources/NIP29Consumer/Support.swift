@@ -136,7 +136,7 @@ func hasContent(_ batch: RowBatch, _ content: String, sourceCount: Int) -> Bool 
 /// publish has four independent fates and this asks about exactly one.
 func acked(_ statuses: [WriteFact], relay: String) -> Bool {
     statuses.contains {
-        if case .relay(let candidate, .published) = $0 { return candidate == relay }
+        if case .relay(_, let candidate, .published) = $0 { return candidate == relay }
         return false
     }
 }
@@ -146,7 +146,7 @@ func acked(_ statuses: [WriteFact], relay: String) -> Bool {
 /// different repair.
 func rejected(_ statuses: [WriteFact], relay: String) -> Bool {
     statuses.contains {
-        if case .relay(let candidate, .rejected) = $0 { return candidate == relay }
+        if case .relay(_, let candidate, .rejected) = $0 { return candidate == relay }
         return false
     }
 }
