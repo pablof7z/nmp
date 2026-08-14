@@ -1,7 +1,7 @@
 //! Store-owned corruption fixtures for tests outside this crate.
 //!
-//! Callers name a receipt, attempt prefix, route key, or intent. They do not
-//! name a Redb table.
+//! Callers name a receipt, attempt, route key, or intent. They do not name a
+//! Redb table.
 
 use std::path::Path;
 
@@ -9,12 +9,20 @@ use nostr::{EventId, RelayUrl};
 use redb::{Database, ReadableTable, TableDefinition};
 
 use super::ingest_txn::GovernedWrite;
+use super::publish_queue_codec::{
+    codec_error, deadline_key, decode_deadline, decode_lane, lane_key,
+};
 use super::schema::{
     event_row_key, persist_err, COVERAGE, EVENTS, EVENT_IDS, PUBLISH_QUEUE_ATTEMPTS,
-    PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_ROUTE_REVISIONS,
+    PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_RECEIPTS,
+    PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
 use super::RedbStore;
-use crate::{AcceptOutcome, CoverageKey, PersistenceError, PersistenceFault};
+use crate::{
+    AcceptOutcome, CoverageKey, PersistenceError, PersistenceFault, PublishQueueAttempt,
+    PublishQueueAttemptOutcome, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
+    PublishQueueLaneState,
+};
 
 /// Commit one real event acceptance, close that exact Redb generation, and
 /// hide the committed outcome behind a typed I/O failure. This test-owned
@@ -79,6 +87,90 @@ pub fn corrupt_first_publish_queue_attempt(
 /// Overwrite the first intent row.
 pub fn corrupt_first_publish_queue_intent(path: &Path) -> Result<(), PersistenceError> {
     corrupt_first_row(path, PUBLISH_QUEUE_INTENTS, &[])
+}
+
+/// Overwrite the ordered deadline row owned by one exact live attempt.
+///
+/// The caller names NMP's typed `(intent, relay, ordinal)` evidence. Relay
+/// surrogates, lane keys, deadline keys, and raw table names remain owned by
+/// this store fixture. The store must be closed before this offline mutation.
+pub fn corrupt_publish_queue_deadline(
+    path: &Path,
+    attempt: &PublishQueueAttempt,
+) -> Result<(), PersistenceError> {
+    if attempt.outcome != PublishQueueAttemptOutcome::Started {
+        return Err(PersistenceError::invariant(
+            "deadline fixture attempt is not live",
+        ));
+    }
+
+    let db = Database::open(path).map_err(persist_err)?;
+    let tx = db.begin_write().map_err(persist_err)?;
+    let relay_id = {
+        let relay_ids = tx
+            .open_table(PUBLISH_QUEUE_RELAY_IDS)
+            .map_err(persist_err)?;
+        let relay_id = relay_ids
+            .get(attempt.relay.as_str().as_bytes())
+            .map_err(persist_err)?
+            .map(|guard| u32::from_be_bytes(*guard.value()))
+            .ok_or_else(|| PersistenceError::invariant("deadline fixture relay is not interned"))?;
+        relay_id
+    };
+    let (key, lane_revision) = {
+        let lanes = tx.open_table(PUBLISH_QUEUE_LANES).map_err(persist_err)?;
+        let storage_key = lane_key(attempt.intent_id, relay_id);
+        let encoded = lanes
+            .get(&storage_key)
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_vec())
+            .ok_or_else(|| PersistenceError::invariant("deadline fixture lane is missing"))?;
+        let (event_id, revision, last_ordinal, state) =
+            decode_lane(&encoded).map_err(|error| codec_error("deadline fixture lane", error))?;
+        if event_id != attempt.event.id || last_ordinal != attempt.ordinal {
+            return Err(PersistenceError::invariant(
+                "deadline fixture attempt does not own the current lane",
+            ));
+        }
+        let deadline = match state {
+            PublishQueueLaneState::InFlight {
+                ordinal,
+                phase: PublishQueueInFlightPhase::AwaitingAck { deadline },
+            } if ordinal == attempt.ordinal => deadline,
+            _ => {
+                return Err(PersistenceError::invariant(
+                    "deadline fixture lane is not awaiting this attempt's acknowledgement",
+                ))
+            }
+        };
+        (
+            deadline_key(deadline, attempt.intent_id, relay_id),
+            revision,
+        )
+    };
+    {
+        let mut deadlines = tx
+            .open_table(PUBLISH_QUEUE_DEADLINES)
+            .map_err(persist_err)?;
+        let mut encoded = deadlines
+            .get(&key)
+            .map_err(persist_err)?
+            .map(|guard| guard.value().to_vec())
+            .ok_or_else(|| PersistenceError::invariant("deadline fixture row is missing"))?;
+        let decoded = decode_deadline(&encoded)
+            .map_err(|error| codec_error("deadline fixture row", error))?;
+        if decoded != (lane_revision, PublishQueueDeadlineKind::AckTimeout) {
+            return Err(PersistenceError::invariant(
+                "deadline fixture row does not match the awaiting-ack lane",
+            ));
+        }
+        encoded[4] = 200;
+        deadlines
+            .insert(&key, encoded.as_slice())
+            .map_err(persist_err)?;
+    }
+    tx.commit().map_err(persist_err)?;
+    Ok(())
 }
 
 /// Insert one undecodable route-revision row at `key`.
