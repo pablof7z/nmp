@@ -1,6 +1,6 @@
 //! Benchmark-only Fjall adapter for the governed relay-ingest policy.
 //!
-//! This is deliberately not an `EventStore` implementation. It proves that
+//! This is deliberately not a production NMP store. It proves that
 //! the real policy in `ingest`/`mutation` can execute against a second atomic
 //! transaction engine before NMP accepts the much larger query, coverage,
 //! delivery-recovery, packaging, and migration surface tracked by #629.

@@ -1134,7 +1134,7 @@ mod tests {
     use nmp_grammar::LiveQuery;
     use nmp_grammar::{Binding, Demand, Derived, Filter, Freshness, Selector, SourceAuthority};
     use nmp_router::FixtureRoutingFacts;
-    use nmp_store::{EventStore, RedbStore, RelayObserved};
+    use nmp_store::{RedbStore, RelayObserved};
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     fn articles_by_follows() -> LiveQuery {

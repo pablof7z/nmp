@@ -292,7 +292,7 @@ impl Reconciler {
     /// Open a new session seeded with `local_ids` — this side's current
     /// holdings for the filter being reconciled (`(created_at, EventId)`
     /// pairs, exactly what `EngineCore` reads back from its own store via
-    /// `EventStore::query`). Returns the session plus the hex
+    /// `RedbStore::query`). Returns the session plus the hex
     /// `initial_message` to place in the outbound `NEG-OPEN`.
     pub fn open(local_ids: &[(u64, EventId)]) -> (Self, String) {
         let mut storage = NegentropyStorageVector::with_capacity(local_ids.len());

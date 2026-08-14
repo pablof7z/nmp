@@ -16,7 +16,7 @@ mod outbox_resolver_tests {
 
     use crate::core::write::RouteAnswer;
     use nmp_router::FixtureRoutingFacts;
-    use nmp_store::{EventStore, RedbStore, RelayObserved};
+    use nmp_store::{RedbStore, RelayObserved};
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     fn relay(name: &str) -> RelayUrl {

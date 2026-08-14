@@ -324,7 +324,7 @@ impl RedbStore {
     /// This is the ephemeral construction path for tests and for an
     /// [`nmp::EngineConfig`](https://docs.rs/nmp) with no store path. It is
     /// still the production Redb implementation: there is no in-memory
-    /// `EventStore`, compatibility alias, or alternate semantic owner.
+    /// store, compatibility alias, or alternate semantic owner.
     pub fn temporary() -> Result<Self, RedbStoreOpenError> {
         let directory = tempfile::tempdir()
             .map_err(|source| RedbStoreOpenError::TemporaryDirectoryFailed { source })?;

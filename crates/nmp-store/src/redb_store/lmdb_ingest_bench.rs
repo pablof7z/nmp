@@ -1,6 +1,6 @@
 //! Benchmark-only synchronous LMDB adapter for issue #658.
 //!
-//! This is deliberately narrower than an [`crate::EventStore`] backend. It
+//! This is deliberately narrower than the production [`crate::RedbStore`]. It
 //! reuses the production governed-ingest policy and every portable event and
 //! packed-postings codec, but exposes no app-facing storage surface. LMDB is
 //! opened with its synchronous defaults: no `MDB_NOSYNC`, `MDB_NOMETASYNC`,
@@ -33,7 +33,7 @@ use super::query::{
 use super::schema::{observation_key, observation_relay_key};
 use super::schema::{EventKey, RelayKey};
 use super::{
-    binary_event, EventStore, LocalOrigin, PersistenceError, Provenance, RelayObserved,
+    binary_event, LocalOrigin, PersistenceError, Provenance, RelayObserved,
     StoreBenchProcessCounters, StoredEvent, StoredEventView,
 };
 

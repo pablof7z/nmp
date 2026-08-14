@@ -4,9 +4,9 @@
 //!
 //! This module holds data + the *pure*, store-independent parts of the
 //! algorithm (reading already-cached values, diffing atom sets, walking the
-//! tree in construction order). Everything that needs the event store
+//! tree in construction order). Everything that needs the store
 //! (initial evaluation, re-querying on recompute) lives in `engine.rs`,
-//! which owns both a `Graph` and an `EventStore`.
+//! which owns the `Graph` and receives an explicit `RedbStore` borrow.
 
 use std::collections::{BTreeSet, HashMap};
 

@@ -40,7 +40,7 @@ use nmp_grammar::{
     LiveQuery, LiveQueryError, SourceAuthority,
 };
 use nmp_router::{FixtureRoutingFacts, WireOp};
-use nmp_store::{testing, CoverageInterval, EventStore, RedbStore, RelayObserved};
+use nmp_store::{testing, CoverageInterval, RedbStore, RelayObserved};
 use nostr::{EventId, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
 
 const KIND: u16 = 39_000;

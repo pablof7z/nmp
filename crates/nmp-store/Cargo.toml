@@ -36,8 +36,8 @@ required-features = ["bench-instrumentation"]
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
-# Redb is the one complete `EventStore` implementation. It is a pure-Rust
-# embedded ACID key-value store with no C toolchain or build script.
+# Redb is NMP's one complete store. It is a pure-Rust embedded ACID key-value
+# store with no C toolchain or build script.
 redb = "4.1"
 fjall = { version = "=3.1.6", optional = true }
 # Native-only LMDB ceiling adapter for #658. This remains benchmark-gated:

@@ -1,4 +1,4 @@
-//! The `EventStore` contract suite. Every test runs against an isolated
+//! The `RedbStore` contract suite. Every test runs against an isolated
 //! filesystem-backed Redb store. Covers M1's dedup/supersession semantics
 //! (preserved unchanged), provenance merge (ledger #5, plan §5 test 8),
 //! coverage record/get/merge (the Fable ruling), and claim-based GC with
@@ -406,7 +406,7 @@ fn query_returns_only_current_winners_never_superseded() {
     });
 }
 
-/// #124: `EventStore::query`'s own doc states the current contract
+/// #124: `RedbStore::query`'s own doc states the current contract
 /// precisely -- `filter.limit` is NOT consulted locally, deliberately (see
 /// that doc for why: honoring it requires an ordering decision reserved
 /// for #9's Collection Tier-A gate). This pins that CURRENT contract

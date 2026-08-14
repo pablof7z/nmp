@@ -3,7 +3,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp_grammar::{Binding, Filter};
-use nmp_store::{EventStore, RedbStore, RelayObserved};
+use nmp_store::{RedbStore, RelayObserved};
 use nostr::{Keys, Kind};
 
 use super::*;
