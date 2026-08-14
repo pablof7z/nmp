@@ -1212,7 +1212,8 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
     let relay = RelayUrl::parse("wss://finish-failure.example").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
     let mut core = EngineCore::new_with_fixture_routing_facts(
-        FailOnceCompensationStore::failing_attempt_finish(),
+        RedbStore::temporary_with_failed_lane_attempt_finish()
+            .expect("temporary Redb lane-finish failure fixture"),
         dir,
         10,
     );

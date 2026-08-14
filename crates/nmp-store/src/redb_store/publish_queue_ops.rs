@@ -1503,6 +1503,12 @@ pub(super) fn finish_lane_attempt(
             )?
         }
     };
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if std::mem::take(&mut store.fail_next_lane_attempt_finish) {
+        return Err(PersistenceError::invariant(
+            "injected attempt finish failure",
+        ));
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::FinishAttemptBeforeCommit);
     commit_prepared(write_txn, lane)
