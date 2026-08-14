@@ -3811,6 +3811,19 @@ impl<S: EventStore> EngineCore<S> {
 
 #[cfg(any(test, feature = "test-instrumentation"))]
 impl EngineCore<nmp_store::RedbStore> {
+    /// Execute the runtime's existing requested Redb reconstruction sequence
+    /// without exposing its two internal lifecycle doors independently.
+    #[doc(hidden)]
+    pub fn recover_requested_redb_store_for_test(
+        &mut self,
+    ) -> Result<Option<(PersistenceFault, Vec<Effect>)>, PersistenceError> {
+        let Some(fault) = self.take_store_recovery_request() else {
+            return Ok(None);
+        };
+        self.recover_store_after_failure()
+            .map(|effects| Some((fault, effects)))
+    }
+
     /// Test-only access to the concrete store-door count used by the relay
     /// worker scheduling falsifiers.
     #[doc(hidden)]
