@@ -3099,9 +3099,11 @@ impl<S: EventStore> EngineCore<S> {
         let LocalAcceptResult { outcome, committed } = match self.resolver.accept_local(accept) {
             Ok(result) => result,
             Err(error) => {
-                return self.refuse_publish(PublishError::PersistenceFailed {
+                let mut effects = self.refuse_publish(PublishError::PersistenceFailed {
                     reason: error.to_string(),
                 });
+                self.degrade_store(error, &mut effects);
+                return effects;
             }
         };
         let (intent_id, receipt_id, current, installed) = match outcome {
@@ -3473,9 +3475,11 @@ impl<S: EventStore> EngineCore<S> {
                 // Rule 1: recording anything at all needs the disk that just
                 // refused. There is no queue entry to fail into.
                 Err(err) => {
-                    return self.refuse_publish(PublishError::PersistenceFailed {
+                    let mut effects = self.refuse_publish(PublishError::PersistenceFailed {
                         reason: err.to_string(),
-                    })
+                    });
+                    self.degrade_store(err, &mut effects);
+                    return effects;
                 }
             };
             let Some(intent_id) = outcome.journaled_intent_id() else {
