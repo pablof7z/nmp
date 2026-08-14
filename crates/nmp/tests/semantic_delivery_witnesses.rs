@@ -835,6 +835,59 @@ async fn relay_source_successors_resume_current_delivery_and_remain_continuing_a
     assert_eq!(queue[0].event_id, e2.id);
     assert!(queue[0].outcome.is_none());
 
+    let _restarted_subscription = restarted
+        .observe(
+            pinned_contact_lists(source_relays, author.public_key()),
+            None,
+        )
+        .expect("source observation reopens");
+    let latest = contact_list(&author, initial_time + 10, "relay-two-latest", &[]);
+    relay_two.disconnect().await;
+    relay_two = ScriptedRelay::start_on_port(relay_two_port, &RelayConfig::default()).await;
+    relay_two.seed_signed_event(&latest).await;
+    let (e3_unsigned, e3_completion) = restarted_signer_rx
+        .recv_timeout(SETTLE)
+        .expect("later qualified source creates E3");
+    let e3_unsigned = to_nostr_unsigned(e3_unsigned);
+    assert_eq!(e3_unsigned.content, latest.content);
+    let e3 = e3_unsigned.sign_with_keys(&author).expect("E3 signs");
+    e3_completion
+        .resolve(Ok(to_signer_event(e3.clone())))
+        .expect("E3 completion remains live");
+    for relay in [&relay_one, &relay_two] {
+        assert!(
+            relay
+                .wait_wire_event_id_count(&e3.id.to_hex(), 1, SETTLE)
+                .await,
+            "continuing operation publishes E3 to {}; wire={:?}; queue={:?}",
+            relay.url,
+            relay.wire_record(),
+            restarted.publish_queue(None, u8::MAX)
+        );
+        relay
+            .wait_wire_quiet(Duration::from_millis(250), SETTLE)
+            .await;
+        assert_eq!(
+            relay
+                .wire_record()
+                .event_ids
+                .iter()
+                .filter(|id| *id == &e3.id.to_hex())
+                .count(),
+            1,
+            "E3 publishes exactly once to {}",
+            relay.url
+        );
+    }
+    let e3_facts = wait_for_generation_relay_facts(&statuses, e3.id, &expected_relays);
+    assert_no_settled_fact(&e3_facts);
+    let queue = restarted
+        .publish_queue(None, u8::MAX)
+        .expect("continuing receipt remains inspectable after E3");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].event_id, e3.id);
+    assert!(queue[0].outcome.is_none());
+
     restarted.shutdown();
     relay_one.shutdown();
     relay_two.shutdown();
