@@ -3809,6 +3809,23 @@ impl<S: EventStore> EngineCore<S> {
     }
 }
 
+#[cfg(any(test, feature = "test-instrumentation"))]
+impl EngineCore<nmp_store::RedbStore> {
+    /// Test-only access to the concrete store-door count used by the relay
+    /// worker scheduling falsifiers.
+    #[doc(hidden)]
+    pub fn reset_publish_queue_lane_recovery_reads(&self) {
+        self.resolver
+            .store()
+            .reset_publish_queue_lane_recovery_reads();
+    }
+
+    #[doc(hidden)]
+    pub fn publish_queue_lane_recovery_reads(&self) -> u64 {
+        self.resolver.store().publish_queue_lane_recovery_reads()
+    }
+}
+
 #[cfg(feature = "bench-instrumentation")]
 impl EngineCore<nmp_store::RedbStore> {
     /// Reset reducer lifecycle counters independently from Redb's row-work
