@@ -88,7 +88,11 @@ Exercise the product-relevant subset:
 - an unacked `RelayState::Sent` is never treated as terminal and never offers blind retry;
 - pre-acceptance failure leaves no durable row/receipt;
 - `Ok` from publish is acceptance, so a returned handle names a write in custody; NIP-22 uses an ordinary `WriteIntent` with no second lifecycle, and NIP-29's `Group::publish` returns the same ordinary receipt stream;
-- `cancel` before signing commits `NotSent(Cancelled)` and refuses with a typed `CancelWriteError` afterwards; `publishQueue()` shows a signer-parked write, and `cancel` + `removePublishQueueEntry` genuinely removes it;
+- `cancel` before signing commits `NotSent(Cancelled)` and refuses with a typed `CancelWriteError` afterwards; a bounded `publishQueue(afterReceiptID:limit:)` page shows a write parked on an unavailable signing provider, and `cancel` + `removePublishQueueEntry` genuinely removes it;
+- the queue read is paged, not exhaustive: cursor + `limit` return a stable ordering with no entry skipped or repeated across pages, and `publishQueue(forEventID:)` returns every open receipt owning identical event bytes rather than one of them;
+- `result()` reduces to the promised `ReceiptResult`, preserving each destination's last state on a mixed publish/reject rather than a Boolean, and reports `ClosedWithoutOutcome`/`ReplayUnavailable` instead of inventing a terminal;
+- a relay fact's `event_id` identifies the exact bytes it is evidence about, so a receipt spanning successor generations never attributes one generation's relay evidence to another;
+- `SigningState::InFlight` and `AwaitingSigner` stay distinguishable end to end, since only the second is the app's cancel-and-remove obligation;
 - a correlation token persisted before publish reattaches the same write after simulated process loss;
 - process restart reattaches the same receipt and frozen intent;
 - restart replays the durable `WriteFact` history in finite pages — `RelayWaiting::NotConnected`/`NeedsAuth`/`BackingOff`/`PersistenceStalled`, `Sent`, and terminal relay states — and reports lag as the typed `FactStreamLagged` rather than dropping frames;
