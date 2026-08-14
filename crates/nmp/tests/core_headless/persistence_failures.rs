@@ -3,21 +3,21 @@ use nmp_store::testing;
 
 // ---- fallible persistence doors and recovery indexing ------------------
 //
-// A fault-injecting `EventStore` retained only for peek failures that cannot
-// yet be expressed by the concrete Redb fixture. Relay-observation I/O and
-// projection corruption use Redb's real lifecycle below.
+// A fault-injecting `EventStore` retained only for coverage and publish-queue
+// deadline peeks that cannot yet be expressed by the concrete Redb fixture.
+// Relay-observation I/O and projection corruption use Redb's real lifecycle
+// below.
 pub(super) struct FailIngestStore {
     inner: RedbStore,
-    /// #763's two peeks and the deadline read whose error the caller used to
-    /// erase. Sticky (not one-shot) because these model a store that has
-    /// gone away rather than a single failed operation, and because the
-    /// falsifiers below need to heal them explicitly to prove the engine
-    /// comes back.
+    /// #763's coverage and publish-queue deadline peeks. Sticky (not one-shot)
+    /// because these model a store that has gone away rather than a single
+    /// failed operation, and because the falsifiers below need to heal them
+    /// explicitly to prove the engine comes back.
     fail_peeks: Rc<Cell<bool>>,
 }
 
 impl FailIngestStore {
-    /// Healthy in every door except the three #763 reads, which refuse while
+    /// Healthy in every door except the two #763 peeks, which refuse while
     /// `fail_peeks` is set.
     fn peek_armed(fail_peeks: Rc<Cell<bool>>) -> Self {
         Self {
@@ -65,10 +65,7 @@ impl EventStore for FailIngestStore {
         self.inner.expire_due(now)
     }
     fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        match self.peek_failure() {
-            Some(error) => Err(error),
-            None => self.inner.next_expiration(),
-        }
+        self.inner.next_expiration()
     }
     fn record_coverage(
         &mut self,
@@ -1715,26 +1712,20 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
 
 // ---- #763: the deadline and coverage peeks -----------------------------
 
-/// #763 falsifier: a failing deadline peek is a value the driver can act on,
+/// #763 falsifier: a failing expiration peek is a value the driver can act on,
 /// not a panic and not a false `None`.
 ///
 /// `EngineCore::next_deadline` is what the runtime loop arms its wait from,
-/// on the embedder's own thread. Two separate erasures met there: the
-/// expiration peek could not carry failure at all (it panicked), and the
-/// delivery peek's failure was discarded by `.ok().flatten()`, which parked
-/// the engine with a durable due obligation and nothing recording why. Both
-/// now leave as `Err`, and `Ok(None)` means only honest absence.
+/// on the embedder's own thread. A closed Redb generation must leave that door
+/// as a typed failure; `Ok(None)` means only honest absence.
 #[test]
 fn a_failing_store_read_makes_the_next_deadline_a_typed_error_not_a_false_none() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
-    let faults = Rc::new(Cell::new(false));
-    let mut core = EngineCore::new_with_fixture_routing_facts(
-        FailIngestStore::peek_armed(Rc::clone(&faults)),
-        dir,
-        10,
-    );
+    let store = RedbStore::temporary_with_observation_precommit_io()
+        .expect("temporary Redb observation-I/O fixture");
+    let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
 
     // Honest absence from a healthy store: nothing expiring, nothing due.
     assert_eq!(
@@ -1743,26 +1734,52 @@ fn a_failing_store_read_makes_the_next_deadline_a_typed_error_not_a_false_none()
         "a fresh core genuinely has no deadline"
     );
 
-    faults.set(true);
-    let error = core
-        .next_deadline()
-        .expect_err("a store read that cannot answer must not be reported as `no deadline`");
-    assert_ne!(
-        error.fault(),
-        PersistenceFault::Invariant,
-        "a read failure is a condition, not a bug in the caller: {}",
-        error.message()
-    );
-
-    // Still alive, and the failure was a condition rather than a state: the
-    // reducer keeps handling messages and answers normally once healthy.
-    faults.set(false);
-    let _ = core.handle(EngineMsg::Tick(Timestamp::from(1u64)));
-    assert_eq!(core.next_deadline().expect("the peek answers again"), None);
     let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &author.public_key().to_hex(),
     )));
+    let _ = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+    ));
+    let failed = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        public_session(&relay),
+        event_frame(
+            "s",
+            nmp_resolver::testkit::kind1(&author, "close Redb generation", 1_000),
+        ),
+    ));
+    assert!(
+        failed.iter().any(
+            |effect| matches!(effect, Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.is_some())
+        ),
+        "the real observation I/O refusal must degrade the store: {failed:?}"
+    );
+
+    let error = core
+        .next_deadline()
+        .expect_err("the closed Redb generation must not be reported as `no deadline`");
+    assert_eq!(
+        error.fault(),
+        PersistenceFault::Latched,
+        "the deadline read must preserve the real closed-handle fault: {}",
+        error.message()
+    );
+
+    let _ = recover_after_observation_io(&mut core);
+    assert_eq!(
+        core.next_deadline()
+            .expect("the reconstructed Redb generation answers"),
+        None,
+        "the same deadline door is healthy after reconstruction"
+    );
 }
 
 /// #763 under deferred relay admission: the cache seed is accepted before a
