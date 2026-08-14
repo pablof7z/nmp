@@ -38,7 +38,7 @@ use nmp_grammar::{
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_router::FixtureRoutingFacts;
-use nmp_store::{EventStore, RedbStore, RelayObserved};
+use nmp_store::{RedbStore, RelayObserved};
 use nmp_transport::PoolConfig;
 use nostr::filter::MatchEventOptions;
 use nostr::{

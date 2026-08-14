@@ -11,7 +11,7 @@ use nmp_grammar::LiveQuery;
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter as QueryFilter, SourceAuthority,
 };
-use nmp_store::{coverage_key, CoverageInterval, EventStore, RedbStore, RelayObserved};
+use nmp_store::{coverage_key, CoverageInterval, RedbStore, RelayObserved};
 use nmp_transport::PoolConfig;
 use nostr::{EventBuilder, EventId, Filter, Keys, Kind, RelayUrl, Timestamp};
 

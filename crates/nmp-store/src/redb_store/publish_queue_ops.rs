@@ -37,7 +37,6 @@ use super::{
     ReceiptState, RelayUrl, Timestamp,
 };
 use crate::terminal_retention::{wall_clock_now, TerminalRetentionLimits};
-use crate::EventStore;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
 /// Replay every still-open intent (#3 §2.3), fallible end to end (#790).
