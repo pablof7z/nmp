@@ -38,11 +38,17 @@ operation deliberately requires `Some(base)`; the generic `None` form does not
 silently grant it first-list creation policy.
 
 The store compares that expected base with the current winner inside the same
-acceptance transaction, before allocating an intent or receipt id and before
-changing the canonical row. A mismatch refuses the acceptance atomically and
-surfaces `WriteStatus::ReplaceableConflict { expected, actual }`. It never
-silently rebases the draft, and a precondition attached to a regular
-non-replaceable event fails closed.
+acceptance transaction, before allocating a journaled intent and its receipt id
+and before changing the canonical row. A mismatch returns
+`AcceptOutcome::Refused(RefuseReason::ReplaceableBaseChanged { expected,
+actual })` atomically. The reducer then takes that semantic refusal into
+receipt-only custody: `accept_refused` allocates one durable receipt id and
+the receipt stream ends with
+`WriteOutcome::Refused(RefuseReason::ReplaceableBaseChanged { expected,
+actual })`. There is no accepted intent, optimistic event, signer request,
+route, delivery work, or retry obligation. It never silently rebases the
+draft, and a precondition attached to a regular non-replaceable event fails
+closed.
 
 This mechanism closes the local read/accept race. It does not turn EOSE or a
 watermark into global completeness: the protocol operation separately owns
@@ -369,7 +375,8 @@ Required proofs include:
 - different `d` coordinates remain independent; a started attempt retains
   only bounded `Superseded` safety evidence and never preserves retry work;
 - an exact-base guarded replacement is accepted, while a concurrent winner
-  produces a typed conflict with no intent, receipt, or pending-row residue;
+  produces one typed terminal receipt-only refusal with no accepted intent,
+  journal row, pending event, or downstream work;
 - all relays rejecting a signed event leaves the signed row intact;
 - transport reconnect cannot duplicate durable buffering ownership;
 - at `max_relays = 1`, an ordinary public route-discovery query plus a durable

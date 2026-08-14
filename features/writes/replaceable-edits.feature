@@ -226,8 +226,9 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:id=WRITES-REPLACEABLE-EDIT-002
   # nmp:status=built
   # nmp:evidence=rust:nmp-store::replaceable_base_precondition_rejects_a_concurrent_winner_atomically
+  # nmp:evidence=rust:nmp-store::a_refused_write_is_taken_into_custody_as_one_permanently_failed_receipt
   # nmp:evidence=rust:nmp::stale_replaceable_edit_is_refused_into_custody_keeping_both_event_ids
-  # nmp:falsifier=Overwrite a winner that changed after the app read it or lose either competing event id; the atomic store or receipt proof fails.
+  # nmp:falsifier=Overwrite the changed winner, drop receipt-only custody, lose either competing event id, or create signing/routing/delivery work; the atomic store, durable receipt, core, or BDD proof fails.
   Scenario: A concurrent edit that moved the winner is refused, not overwritten
     # The headline. Two devices editing the same list is the ordinary case,
     # not the exotic one, and the wrong outcome here is not an error -- it is
@@ -238,7 +239,7 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     Then the write is refused with a replaceable conflict
     And the conflict names "3bfc269594ef649228e9a74bab00f042efc91d5acc6fbee31a382e80d42388fe" as expected and "fb04dcb6970e4c3d1873de51fd5a50d7bb46b3383113602665c350ec40b5f990" as actual
     And the stored winner is still "fb04dcb6970e4c3d1873de51fd5a50d7bb46b3383113602665c350ec40b5f990"
-    And nothing was journaled and no event id was allocated
+    And the refused write remains one terminal receipt with no signing, routing, delivery, or retry work
     And "wss://hub.example" received nothing
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-003
