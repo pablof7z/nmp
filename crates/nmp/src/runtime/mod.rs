@@ -82,7 +82,7 @@ use nmp_signer::{
     PendingSignerOp, SignerOp, SignerPublicKey, SignerSignedEvent, SignerSignedEventParts,
     SignerUnsignedEvent, SigningCapability,
 };
-use nmp_store::EventStore;
+use nmp_store::RedbStore;
 #[cfg(test)]
 use nostr::RelayMessage;
 use nostr::{
@@ -475,12 +475,7 @@ impl ReceiptDeliveryRegistry {
         }
     }
 
-    fn deliver(
-        &mut self,
-        core: &mut EngineCore<impl EventStore>,
-        id: ReceiptId,
-        status: WriteFact,
-    ) {
+    fn deliver(&mut self, core: &mut EngineCore<RedbStore>, id: ReceiptId, status: WriteFact) {
         let Some(deliveries) = self.by_receipt.get_mut(&id) else {
             return;
         };
@@ -502,7 +497,7 @@ impl ReceiptDeliveryRegistry {
     /// Drop terminal producers only after the complete reducer batch has
     /// been delivered, so multiple terminal replay facts from one command
     /// cannot close the FIFO after the first fact.
-    fn finish_batch(&mut self, core: &EngineCore<impl EventStore>) {
+    fn finish_batch(&mut self, core: &EngineCore<RedbStore>) {
         self.by_receipt.retain(|id, _| core.receipt_is_live(*id));
     }
 
@@ -524,7 +519,7 @@ fn arm_receipt_delivery_close(
 }
 
 fn deliver_receipt_replay_page(
-    core: &EngineCore<impl EventStore>,
+    core: &EngineCore<RedbStore>,
     deliveries: &mut ReceiptDeliveryRegistry,
     id: ReceiptId,
     sender: FifoSender<WriteFact>,
@@ -1577,14 +1572,11 @@ impl EngineThread {
     /// (zero accounts, read-only) — matching a logged-out launch (M4 §5);
     /// the caller registers accounts afterward via [`Handle::add_signer`] and
     /// picks one via [`Handle::set_current_account`].
-    pub fn spawn<S>(
-        store: S,
+    pub fn spawn(
+        store: RedbStore,
         cap: usize,
         pool_config: PoolConfig,
-    ) -> Result<(Self, Handle), EngineThreadError>
-    where
-        S: EventStore + Send + 'static,
-    {
+    ) -> Result<(Self, Handle), EngineThreadError> {
         Self::spawn_with_runtime_config(store, cap, pool_config, RuntimeConfig::default())
     }
 
@@ -1593,15 +1585,12 @@ impl EngineThread {
     /// This exists for deterministic falsifiers. Production assembly owns
     /// the private mutable fact store and uses [`Self::spawn`].
     #[doc(hidden)]
-    pub fn spawn_with_fixture_routing_facts<S>(
-        store: S,
+    pub fn spawn_with_fixture_routing_facts(
+        store: RedbStore,
         facts: nmp_router::FixtureRoutingFacts,
         cap: usize,
         pool_config: PoolConfig,
-    ) -> Result<(Self, Handle), EngineThreadError>
-    where
-        S: EventStore + Send + 'static,
-    {
+    ) -> Result<(Self, Handle), EngineThreadError> {
         Self::spawn_with_routing_facts_and_runtime_config(
             store,
             crate::core::RoutingFactStore::from_fixture(facts),
@@ -1612,15 +1601,12 @@ impl EngineThread {
         )
     }
 
-    pub fn spawn_with_runtime_config<S>(
-        store: S,
+    pub fn spawn_with_runtime_config(
+        store: RedbStore,
         cap: usize,
         pool_config: PoolConfig,
         runtime_config: RuntimeConfig,
-    ) -> Result<(Self, Handle), EngineThreadError>
-    where
-        S: EventStore + Send + 'static,
-    {
+    ) -> Result<(Self, Handle), EngineThreadError> {
         Self::spawn_with_routing_facts_and_runtime_config(
             store,
             crate::core::RoutingFactStore::default(),
@@ -1631,17 +1617,14 @@ impl EngineThread {
         )
     }
 
-    pub(crate) fn spawn_with_routing_facts_and_runtime_config<S>(
-        store: S,
+    pub(crate) fn spawn_with_routing_facts_and_runtime_config(
+        store: RedbStore,
         routing_facts: crate::core::RoutingFactStore,
         cap: usize,
         mut pool_config: PoolConfig,
         runtime_config: RuntimeConfig,
         initial_session: RestoredSession,
-    ) -> Result<(Self, Handle), EngineThreadError>
-    where
-        S: EventStore + Send + 'static,
-    {
+    ) -> Result<(Self, Handle), EngineThreadError> {
         // #704: the ONE engine-owned adapter runtime. A fixed 2-worker
         // multi-thread tokio runtime hosts every adapter task; each worker
         // thread start bumps the process-wide OS-thread counter. Build failure
@@ -3516,16 +3499,14 @@ mod store_recovery_driver_tests {
 /// deadline re-arms naturally on the next iteration; there is no polling or
 /// sleeper. `None` blocks on plain `recv()`. A timeout fires only the due
 /// owners, then recomputes the minimum.
-fn engine_loop<S>(
-    store: S,
+fn engine_loop(
+    store: RedbStore,
     routing_facts: crate::core::RoutingFactStore,
     cap: usize,
     initial_session: RestoredSession,
     pool_runtime: EnginePoolRuntime,
     wiring: EngineWiring<'_>,
-) where
-    S: EventStore,
-{
+) {
     let EngineWiring {
         clock,
         cmd_rx,
@@ -5180,8 +5161,8 @@ fn engine_loop<S>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn reduce_and_dispatch_committed_observations<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn reduce_and_dispatch_committed_observations(
+    core: &mut EngineCore<RedbStore>,
     frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
     pool: &Pool,
     row_channels: &mut HashMap<ObservationId, RowsSender>,
@@ -5241,8 +5222,8 @@ fn reduce_and_dispatch_committed_observations<S: EventStore>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn reduce_and_dispatch_relay_frames<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn reduce_and_dispatch_relay_frames(
+    core: &mut EngineCore<RedbStore>,
     frames: Vec<(nmp_transport::RelayHandle, RelaySessionKey, RelayFrame)>,
     pool: &Pool,
     row_channels: &mut HashMap<ObservationId, RowsSender>,
@@ -5289,8 +5270,8 @@ fn reduce_and_dispatch_relay_frames<S: EventStore>(
 // Deliberately mirrors `dispatch_effects`' reviewed runtime destinations and
 // adds only the reducer reference needed for exact ownership reconciliation.
 #[allow(clippy::too_many_arguments)]
-fn dispatch_core_effects<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn dispatch_core_effects(
+    core: &mut EngineCore<RedbStore>,
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<ObservationId, RowsSender>,
@@ -5340,7 +5321,7 @@ fn dispatch_core_effects<S: EventStore>(
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch_relay_open_failure(
-    core: &mut EngineCore<impl EventStore>,
+    core: &mut EngineCore<RedbStore>,
     session: RelaySessionKey,
     error: nmp_transport::RelayOpenError,
     pool: &Pool,
@@ -5464,7 +5445,7 @@ fn ensure_write_effect_session(
 /// advances public reads; protected reads park until the exact AUTH OK.
 /// Every NMP read worker keeps an empty transport preamble because reducer
 /// replay is the single generation-aware owner.
-fn retry_required_relay_workers<S: EventStore>(core: &EngineCore<S>, pool: &Pool) {
+fn retry_required_relay_workers(core: &EngineCore<RedbStore>, pool: &Pool) {
     let Some(required) = core.relay_worker_requirements() else {
         return;
     };
@@ -5496,7 +5477,7 @@ fn retry_required_relay_workers<S: EventStore>(core: &EngineCore<S>, pool: &Pool
 // cannot acquire hidden mutable state.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_effects(
-    core: &mut EngineCore<impl EventStore>,
+    core: &mut EngineCore<RedbStore>,
     effects: Vec<Effect>,
     pool: &Pool,
     row_channels: &mut HashMap<ObservationId, RowsSender>,
@@ -5524,7 +5505,7 @@ fn dispatch_effects(
 // at the one-effect boundary where its ownership is audited.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_effect(
-    core: &mut EngineCore<impl EventStore>,
+    core: &mut EngineCore<RedbStore>,
     effect: Effect,
     pool: &Pool,
     row_channels: &mut HashMap<ObservationId, RowsSender>,
