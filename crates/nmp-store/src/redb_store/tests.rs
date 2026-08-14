@@ -503,6 +503,71 @@ fn configured_lane_start_failure_rolls_back_the_precommit_transaction() {
 }
 
 #[test]
+fn configured_lane_bootstrap_failure_rolls_back_and_is_consumed_once() {
+    let keys = nostr::Keys::generate();
+    let first = RelayUrl::parse("wss://blocked-lane-bootstrap-a.example").unwrap();
+    let second = RelayUrl::parse("wss://blocked-lane-bootstrap-b.example").unwrap();
+    let expected_relays = BTreeSet::from([first, second]);
+    let mut store = RedbStore::temporary_with_failed_lane_bootstrap()
+        .expect("temporary Redb lane-bootstrap failure fixture");
+    let (intent, signed) = accepted_signed(&mut store, &keys, "bootstrap once", 1_000);
+    assert!(
+        store
+            .bootstrap_publish_queue_lanes(intent)
+            .expect("route-less lane bootstrap is a healthy no-op")
+            .is_empty(),
+        "a route-less bootstrap must not stage lanes or consume the configured failure"
+    );
+    let route = store
+        .record_route_revision(intent, expected_relays.clone())
+        .expect("route revision commits before lane bootstrap");
+
+    let error = store
+        .bootstrap_publish_queue_lanes(intent)
+        .expect_err("construction-armed lane bootstrap must fail before commit");
+    assert_eq!(
+        error.to_string(),
+        "durable-store persistence failure: injected lane bootstrap failure"
+    );
+    assert_eq!(
+        store.recover_route_revisions(intent).unwrap(),
+        vec![route],
+        "the independently committed route survives the refused bootstrap"
+    );
+    assert!(
+        store
+            .recover_publish_queue_lanes(intent)
+            .unwrap()
+            .is_empty(),
+        "the refused transaction persists no lane"
+    );
+
+    let lanes = store
+        .bootstrap_publish_queue_lanes(intent)
+        .expect("the same store retries after consuming the one-shot refusal");
+    assert_eq!(lanes.len(), expected_relays.len());
+    assert_eq!(
+        lanes
+            .iter()
+            .map(|lane| lane.key.relay.clone())
+            .collect::<BTreeSet<_>>(),
+        expected_relays
+    );
+    for lane in &lanes {
+        assert_eq!(lane.key.intent_id, intent);
+        assert_eq!(lane.key.event_id, signed.id);
+        assert_eq!(lane.revision, 1);
+        assert_eq!(lane.last_ordinal, 0);
+        assert_eq!(lane.state, PublishQueueLaneState::WaitingConnection);
+    }
+    assert_eq!(
+        store.recover_publish_queue_lanes(intent).unwrap(),
+        lanes,
+        "the same-store retry commits exactly the returned lane set"
+    );
+}
+
+#[test]
 fn configured_lane_handoff_failure_rolls_back_and_is_consumed_once() {
     let keys = nostr::Keys::generate();
     let relay = RelayUrl::parse("wss://blocked-lane-handoff.example").unwrap();
