@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use nmp_store::{EventStore, PersistenceFault, RedbStore};
+use nmp_store::{testing, EventStore, RedbStore};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, Timestamp};
 
 use crate::lane_fault_store::{FaultyLaneStore, LaneFaults};
@@ -295,25 +295,29 @@ fn an_unresolved_bootstrap_keeps_retaining_and_backs_off() {
     let author = Keys::generate();
     let relay_a = RelayUrl::parse("wss://bootstrap-retain-a.example.com").unwrap();
     let relay_b = RelayUrl::parse("wss://bootstrap-retain-b.example.com").unwrap();
-    let faults = LaneFaults::default();
-    faults.fail_bootstrap(PersistenceFault::Io);
-    let mut core = EngineCore::new(
-        FaultyLaneStore::new(
-            RedbStore::temporary().expect("temporary Redb store"),
-            faults.clone(),
-        ),
-        10,
-    );
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("bootstrap-retain.redb");
+    let (receipt, intent_id) = {
+        let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
+        let (receipt, signed, _) =
+            publish_narrow(&mut core, &author, &[relay_a.clone(), relay_b.clone()], 703);
+        deliver_ok(&mut core, &author, &relay_a, 0, &signed);
+        assert!(core.pending.contains_key(&receipt));
+        (receipt, core.pending[&receipt].intent_id)
+    };
+    testing::corrupt_first_publish_queue_attempt(&path, &intent_id.0.to_be_bytes())
+        .expect("store-owned persistent attempt corruption");
 
-    let (receipt, _, _) =
-        publish_narrow(&mut core, &author, &[relay_a.clone(), relay_b.clone()], 703);
+    let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
+    core.recover_on_boot();
     let expected = BTreeSet::from([
         session_for(&relay_a, &author),
         session_for(&relay_b, &author),
     ]);
+    assert_eq!(core.lane_bootstrap_retries[&receipt].failures, 1);
 
     let mut previous = Timestamp::from(0u64);
-    for _ in 0..4 {
+    for expected_failures in 2..=5 {
         let due = core
             .next_deadline()
             .expect("deadline peek")
@@ -329,11 +333,11 @@ fn an_unresolved_bootstrap_keeps_retaining_and_backs_off() {
             "an unresolved bootstrap must keep retaining every candidate"
         );
         assert!(core.pending.contains_key(&receipt));
+        assert_eq!(
+            core.lane_bootstrap_retries[&receipt].failures, expected_failures,
+            "each due tick must actually re-attempt the bootstrap"
+        );
     }
-    assert!(
-        faults.bootstrap_calls() >= 5,
-        "each due tick must actually re-attempt the bootstrap"
-    );
 }
 
 /// A `recover_route_revisions` read error at boot cannot be allowed to
