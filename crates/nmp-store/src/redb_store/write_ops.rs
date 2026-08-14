@@ -1306,6 +1306,10 @@ pub(super) fn compensate_write_with_state(
         wall_clock_now(),
         TerminalRetentionLimits::PRODUCTION,
     )?;
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if std::mem::take(&mut store.fail_next_compensation_with_state) {
+        return Err(PersistenceError::invariant("injected compensation failure"));
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::CompensateBeforeCommit);
     write.commit_prepared(outcome)

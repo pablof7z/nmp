@@ -965,7 +965,9 @@ fn terminal_signer_errors_compensate_the_write() {
 #[test]
 fn compensation_persistence_failure_is_nonterminal_and_retryable() {
     let a = Keys::generate();
-    let mut core = EngineCore::new(FailOnceCompensationStore::new(), 10);
+    let store = RedbStore::temporary_with_failed_compensation_with_state()
+        .expect("temporary Redb compensation-failure fixture");
+    let mut core = EngineCore::new(store, 10);
     activate(&mut core, &a);
     core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
@@ -1016,7 +1018,9 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
 #[test]
 fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_retry() {
     let a = Keys::generate();
-    let mut core = EngineCore::new(FailOnceCompensationStore::new(), 10);
+    let store = RedbStore::temporary_with_failed_compensation_with_state()
+        .expect("temporary Redb compensation-failure fixture");
+    let mut core = EngineCore::new(store, 10);
     activate(&mut core, &a);
     core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
