@@ -613,8 +613,8 @@ struct PendingInitialPublication {
 }
 
 enum PendingReplaceableMaterialization {
-    Initial(PendingInitialPublication),
-    Successor(ReplaceableSuccessorContinuation),
+    Initial(Box<PendingInitialPublication>),
+    Successor(Box<ReplaceableSuccessorContinuation>),
 }
 
 fn spawn_replaceable_materialization(
@@ -4135,12 +4135,14 @@ fn engine_loop(
                     let core::PreparedReplaceableMaterialization { call, continuation } = *prepared;
                     pending_replaceable_materializations.insert(
                         id,
-                        PendingReplaceableMaterialization::Initial(PendingInitialPublication {
-                            continuation,
-                            sender,
-                            registration,
-                            reply,
-                        }),
+                        PendingReplaceableMaterialization::Initial(Box::new(
+                            PendingInitialPublication {
+                                continuation,
+                                sender,
+                                registration,
+                                reply,
+                            },
+                        )),
                     );
                     if let Err(reason) =
                         spawn_replaceable_materialization(self_inbox.clone(), id, call)
@@ -4163,7 +4165,7 @@ fn engine_loop(
                             sender,
                             registration,
                             reply,
-                        } = pending;
+                        } = *pending;
                         match core
                             .complete_body_complete_replaceable_operation(continuation, outcome)
                         {
@@ -4187,14 +4189,14 @@ fn engine_loop(
                                     *prepared;
                                 pending_replaceable_materializations.insert(
                                     id,
-                                    PendingReplaceableMaterialization::Initial(
+                                    PendingReplaceableMaterialization::Initial(Box::new(
                                         PendingInitialPublication {
                                             continuation,
                                             sender,
                                             registration,
                                             reply,
                                         },
-                                    ),
+                                    )),
                                 );
                                 if let Err(reason) =
                                     spawn_replaceable_materialization(self_inbox.clone(), id, call)
@@ -4213,7 +4215,7 @@ fn engine_loop(
                     }
                     PendingReplaceableMaterialization::Successor(continuation) => {
                         let effects = core
-                            .complete_replaceable_successor_materialization(continuation, outcome);
+                            .complete_replaceable_successor_materialization(*continuation, outcome);
                         dispatch_core_effects(
                             &mut core,
                             effects,
@@ -4234,7 +4236,7 @@ fn engine_loop(
                     next_replaceable_materialization_id.wrapping_add(1).max(1);
                 pending_replaceable_materializations.insert(
                     id,
-                    PendingReplaceableMaterialization::Successor(continuation),
+                    PendingReplaceableMaterialization::Successor(Box::new(continuation)),
                 );
                 if let Err(reason) = spawn_replaceable_materialization(self_inbox.clone(), id, call)
                 {

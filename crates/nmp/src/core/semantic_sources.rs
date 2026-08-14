@@ -163,12 +163,12 @@ impl EngineCore {
         let retired_requests = self
             .semantic_source_requests
             .iter()
-            .filter_map(|(key, request)| {
-                (request.coordinate == owner.coordinate
+            .filter(|(_, request)| {
+                request.coordinate == owner.coordinate
                     && request.request.round == owner.round
-                    && request.request.source == owner.source)
-                    .then(|| key.clone())
+                    && request.request.source == owner.source
             })
+            .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         for key in retired_requests {
             self.semantic_source_requests.remove(&key);
