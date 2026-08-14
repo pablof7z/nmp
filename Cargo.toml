@@ -29,7 +29,6 @@ members = [
     "crates/nmp-ffi",
     "crates/nmp-bdd",
     "crates/nmp-parity",
-    "crates/nmp-nip51",
     "crates/nmp-nip02",
     "crates/nmp-nip65",
     "crates/nmp-nip65-consumer-check",
@@ -101,7 +100,6 @@ nmp-local-signer = { path = "crates/nmp-local-signer" }
 nmp = { path = "crates/nmp" }
 nmp-ffi = { path = "crates/nmp-ffi" }
 nmp-bdd = { path = "crates/nmp-bdd" }
-nmp-nip51 = { path = "crates/nmp-nip51" }
 nmp-nip02 = { path = "crates/nmp-nip02" }
 nmp-nip65 = { path = "crates/nmp-nip65" }
 nmp-nip29 = { path = "crates/nmp-nip29" }

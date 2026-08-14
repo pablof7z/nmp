@@ -1,4 +1,4 @@
-//! The current account's kind:10009 live-query constructor (#108).
+//! The current account's kind:10009 Simple-groups-list query (#108/#1551).
 
 use std::collections::BTreeSet;
 
@@ -13,9 +13,9 @@ use nmp_grammar::{Binding, Demand, Filter, IdentityField};
 ///
 /// Signed-out (no active pubkey) resolves this to zero atoms through the
 /// ordinary `Reactive(ActivePubkey)` empty-resolution path (#106) -- no
-/// special case needed here; `crates/nmp/tests/nip51_headless.rs` proves
+/// special case needed here; `crates/nmp/tests/nip29_group_list_headless.rs` proves
 /// that signed-out/reroot/reconstruct behavior end to end.
-pub fn current_account_demand() -> Demand {
+pub fn current_account_group_list_demand() -> Demand {
     Demand::from_filter(Filter {
         kinds: Some(BTreeSet::from([10009u16])),
         authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
@@ -30,7 +30,7 @@ mod tests {
 
     #[test]
     fn current_account_demand_uses_reactive_authors_and_author_outboxes_default() {
-        let demand = current_account_demand();
+        let demand = current_account_group_list_demand();
         assert_eq!(demand.selection.kinds, Some(BTreeSet::from([10009u16])));
         assert_eq!(
             demand.selection.authors,

@@ -60,7 +60,7 @@ and presentation. Core owns neither a home feed nor kind:1 preference.
 ## 5. NIP-29 group management
 
 ```swift
-let list = parseSimpleGroupsListTolerant(row)          // NIP-51 kind:10009
+let list = parseSimpleGroupsListTolerant(row)          // NIP-51 Simple groups via NIP-29 capability
 let selected = list.items[0]                           // app-owned selection
 let scope = try NMPRelayScope.on([selected.hostRelay]) // named once -- NIP-29
 let group = scope.group(selected.groupID)
@@ -69,12 +69,11 @@ let receipt = try group.addUser(
 )
 ```
 
-The remembered group/host list is NIP-51 kind `10009`: NIP-51 owns that schema,
-codec, and decode result outright. NIP-29 owns only its exact group metadata,
-membership, role, and moderation schemas, reconstruction, relay-scope
-authority, and semantic operations. It claims neither kind `10009` nor generic
-NIP-51 relay sets such as kind `30002` — and it does not re-project NIP-51's
-decoded value under NIP-29 names either (#858). A group can live on more than
+The remembered group/host list is NIP-51 kind `10009`. `nmp-nip29` exposes its
+observational decode as part of NMP's remembered-groups product capability;
+NIP-29 owns its group metadata, membership, role, moderation schemas,
+relay-scope authority, and semantic operations. The decode does not authorize a
+host or route, and no second projection wraps it. A group can live on more than
 one relay; the app names the relay set once and never passes a host to an
 individual operation. The app selects one entry and hands the exact fields a
 NIP-29 operation needs.

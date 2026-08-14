@@ -663,6 +663,12 @@ paragraph above in two ways worth recording:**
   `routing-and-ownership.md` §4.2's status ledger and layer-3 semantics
   clarification).
 
+**2026-08-14 correction (#1551):** the separate `nmp-nip51` component is
+deleted. NIP-51 still defines kind:10009; its group-list value now lives in
+`nmp-nip29` as part of NMP's NIP-29 product capability, remains observational
+only, and grants no signature, routing, or mutation authority. The earlier
+paragraph is retained as history, not current package or ownership guidance.
+
 ---
 
 ## 5. Known-gaps & issues that fold in vs stay separate

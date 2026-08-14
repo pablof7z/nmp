@@ -59,6 +59,10 @@ use crate::engine::Engine;
 pub use group::{Group, GroupPublishError};
 pub use groups::Groups;
 pub use nmp_nip29::GroupContextError;
+pub use nmp_nip29::{
+    current_account_group_list_demand, parse_simple_groups_list_from_raw_tags_tolerant,
+    parse_simple_groups_list_tolerant, SimpleGroupEntry, SimpleGroupsList,
+};
 pub use nmp_nip29::{GroupUser, GroupUsersError};
 pub use predicate::{
     admin_list_includes, all, any_of, groups_whose_record_matches, member_list_includes, GroupIds,

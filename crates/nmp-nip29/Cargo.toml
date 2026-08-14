@@ -5,13 +5,10 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# #858: nmp-nip29 does not depend on nmp-nip51 AT ALL. #63's ownership
-# boundary once read as "nip29 consumes nip51's typed output"; the only thing
-# it actually did with that output was rename its fields, so the wrapper is
-# gone and the dependency edge with it. An app decodes kind:10009 with
-# nmp-nip51 and hands the exact fields it selected (a host RelayUrl, a
-# group_id) to this crate's constructors. No router/resolver/engine
-# dependency in the default feature set, same discipline as nmp-nip51.
+# #1551: NIP-51 defines kind:10009; `nmp-nip29` exposes NMP's observational
+# value and query beside the group vocabulary that consumes it. It remains a
+# pure `nostr` + `nmp-grammar` package: no router, resolver, engine, signer, or
+# write dependency.
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true

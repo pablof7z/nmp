@@ -1,4 +1,7 @@
-//! Kind:10009 -- NIP-51's Simple groups list (#63/#108). A thin, TOLERANT,
+//! kind:10009 -- NIP-51's Simple groups list, exposed by the `nmp-nip29`
+//! product capability
+//! (#63/#108/#1551). This module lives in the NIP-29 product capability; that
+//! packaging choice does not change which protocol defines the event.
 //! read-only codec over `nostr::Event`'s own `Tag`/`Tags` accessors
 //! (rust-nostr has no kind:10009 helper of its own -- unlike NIP-19's bech32
 //! module, there is no existing implementation to adapt here; memory rule
@@ -72,7 +75,7 @@ pub struct SimpleGroupsList {
 /// whatever the caller hands it, and its result is data with no authority
 /// attached (#863). The `_tolerant` suffix is the name-level statement of
 /// that; it is enforced mechanically by
-/// `scripts/check-nip51-no-derived-authority.sh`.
+/// `scripts/check-nip29-group-list-ownership.sh`.
 pub fn parse_simple_groups_list_tolerant(event: &Event) -> SimpleGroupsList {
     parse_simple_groups_list_from_raw_tags_tolerant(
         event.tags.iter().map(|tag| tag.as_slice()),
@@ -307,7 +310,7 @@ mod tests {
         assert_eq!(
             parse_simple_groups_list_tolerant(&signed),
             from_fabricated,
-            "a parsed Simple-groups list is data; it never encodes provenance"
+            "parsing depends only on the supplied event fields"
         );
     }
 }

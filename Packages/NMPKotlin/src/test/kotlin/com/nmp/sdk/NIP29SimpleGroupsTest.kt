@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 
-class NIP51Test {
+class NIP29SimpleGroupsTest {
     private fun fabricatedRow(kind: UShort): Row =
         Row(
             id = "caller-chosen-id",
@@ -42,8 +42,8 @@ class NIP51Test {
     }
 
     @Test
-    fun currentAccountDemandTargetsKind10009() {
-        val demand = currentAccountDemand()
+    fun currentAccountGroupListDemandTargetsKind10009() {
+        val demand = currentAccountGroupListDemand()
         assertEquals(listOf<UShort>(10009u), demand.selection.kinds)
     }
 
@@ -52,8 +52,8 @@ class NIP51Test {
      *
      * #858's Kotlin falsifier too, updated for #1033: the selected
      * [SimpleGroupEntry] feeds NIP-29's host-scoped door
-     * ([NMPRelayScope.on]/[NMPRelayScope.group]) directly, with no
-     * NIP-29-owned copy of the NIP-51 value in between. */
+     * ([NMPRelayScope.on]/[NMPRelayScope.group]) directly, with no NIP-29
+     * group-reference copy of the NIP-51 value in between. */
     @Test
     fun groupBrowsingStillTakesAnExplicitlySuppliedHost() {
         val list = parseSimpleGroupsListTolerant(fabricatedRow(10009u))
