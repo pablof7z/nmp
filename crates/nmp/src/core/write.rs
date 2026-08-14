@@ -8,6 +8,10 @@ use nmp_grammar::ThreadPosition;
 use nostr::nips::nip01::Coordinate;
 
 mod replaceable_operation;
+pub(crate) use replaceable_operation::{
+    PreparedReplaceableMaterialization, PublishPreparation, ReplaceableMaterializationCall,
+    ReplaceableMaterializationContinuation, ReplaceableMaterializationOutcome,
+};
 
 fn public_retry_cause(cause: PublishQueueTransientCause) -> Option<RetryCause> {
     match cause {
@@ -2789,6 +2793,87 @@ impl EngineCore {
     /// capability parks durably as `AwaitingCapability` rather than failing
     /// or drifting.
     pub(super) fn on_publish(&mut self, intent: WriteIntent) -> Vec<Effect> {
+        let mut preparation = self.prepare_publish(intent);
+        loop {
+            match preparation {
+                PublishPreparation::Complete(effects) => return effects,
+                PublishPreparation::Materialize(prepared) => {
+                    let PreparedReplaceableMaterialization { call, continuation } = *prepared;
+                    let outcome =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call.execute()))
+                            .unwrap_or(ReplaceableMaterializationOutcome::Panicked);
+                    preparation =
+                        self.complete_body_complete_replaceable_operation(continuation, outcome);
+                }
+            }
+        }
+    }
+
+    // A repeated durable correlation is a finite replay of the existing
+    // obligation, not a second write. Keep that replay distinct from a new
+    // live fact so runtime can prime only this publisher's fresh mailbox
+    // before it joins live delivery. An `Accepted` receipt has no replay fact
+    // by design: the successful return is its acceptance fact, so an empty
+    // attached page is valid at the ambiguous commit boundary (#1362).
+    //
+    // Only an exact pre-signed retry may finish an interrupted promotion.
+    // Divergent, recomposed, invalid, and capability-produced payloads retain
+    // correlation's normal discard semantics.
+    fn replay_correlated_publish(
+        &mut self,
+        token: &nmp_grammar::CorrelationToken,
+        signed: Option<&SignedEvent>,
+    ) -> Result<Option<Vec<Effect>>, PublishError> {
+        let Some(existing_receipt_id) =
+            self.store
+                .lookup_correlation(token.as_ref())
+                .map_err(|error| PublishError::PersistenceFailed {
+                    reason: error.to_string(),
+                })?
+        else {
+            return Ok(None);
+        };
+
+        let receipt_id = ReceiptId(existing_receipt_id);
+        let page = self.reattach_receipt(receipt_id);
+        if page.outcome == ReattachOutcome::Attached {
+            let mut effects = Vec::new();
+            // An ambiguous failure can commit acceptance before a pre-signed
+            // payload reaches `on_signed`. Recovery keeps that row honestly
+            // Pending, but an exact retry carrying the same verified bytes
+            // can finish the interrupted promotion on this same receipt.
+            if let Some(event) = signed {
+                let resumes_interrupted_promotion =
+                    self.pending.get(&receipt_id).is_some_and(|pending| {
+                        !pending.already_signed
+                            && Self::validate_signed_template(&pending.frozen, event).is_ok()
+                    });
+                if resumes_interrupted_promotion {
+                    self.on_signed(receipt_id, event.clone(), &mut effects);
+                }
+            }
+            effects.push(Effect::ReplayReceipt(receipt_id, page));
+            return Ok(Some(effects));
+        }
+
+        // Never mask a corrupt retained identity behind fabricated
+        // acceptance.
+        let status = match page.outcome {
+            ReattachOutcome::Attached => unreachable!("handled above"),
+            ReattachOutcome::NotFound => PublishError::PersistenceFailed {
+                reason: "correlation token resolved to a receipt id the store can no longer find"
+                    .to_string(),
+            },
+            ReattachOutcome::RetainedButUnreadable => PublishError::PersistenceFailed {
+                reason: "correlation token resolved to a retained but unreadable receipt"
+                    .to_string(),
+            },
+        };
+        debug_assert!(page.facts.is_empty());
+        Err(status)
+    }
+
+    pub(crate) fn prepare_publish(&mut self, intent: WriteIntent) -> PublishPreparation {
         let WriteIntent {
             payload,
             routing,
@@ -2803,7 +2888,9 @@ impl EngineCore {
         // because sending a write to relays the caller did not choose is the
         // failure this refusal exists to prevent.
         if matches!(&routing, WriteRouting::Explicit(relays) if relays.is_empty()) {
-            return self.refuse_publish(PublishError::EmptyExplicitRoute);
+            return PublishPreparation::Complete(
+                self.refuse_publish(PublishError::EmptyExplicitRoute),
+            );
         }
 
         // #591: a token that already resolves to a previously-accepted
@@ -2813,75 +2900,26 @@ impl EngineCore {
         // as a body comparison (a legitimately re-composed draft with a
         // fresh `created_at` is the exact scenario the token exists for).
         // The lookup runs inside this single-threaded reducer step, before
-        // any store mutation for THIS call -- TOCTOU-free by construction
-        // (no concurrent `&mut self` call can be interleaved).
+        // any store mutation for THIS call. A body-complete operation repeats
+        // this same door after its detached capability call because other
+        // reducer commands can advance while that call is in flight.
         if let Some(token) = &correlation {
-            match self.store.lookup_correlation(token.as_ref()) {
-                Ok(Some(existing_receipt_id)) => {
-                    let receipt_id = ReceiptId(existing_receipt_id);
-                    let page = self.reattach_receipt(receipt_id);
-                    // A repeated durable correlation is a finite replay of
-                    // the existing obligation, not a second write. Keep that
-                    // replay distinct from a new live fact so runtime can
-                    // prime only this publisher's fresh mailbox before it
-                    // joins live delivery. A receipt still in `Accepted` has
-                    // no replay fact by design: the successful return from
-                    // this call is its acceptance fact, so an empty attached
-                    // page is both valid and required at the ambiguous commit
-                    // boundary (#1362).
-                    if page.outcome == ReattachOutcome::Attached {
-                        let mut effects = Vec::new();
-                        // An ambiguous failure can commit acceptance before a
-                        // pre-signed payload reaches `on_signed`. Recovery
-                        // keeps that row honestly Pending, but an exact retry
-                        // carrying the same verified bytes can finish the
-                        // interrupted promotion on this same receipt.
-                        // Divergent, recomposed, or invalid payloads retain
-                        // correlation's normal discard semantics.
-                        if let WritePayload::Signed(event) = &payload {
-                            let resumes_interrupted_promotion =
-                                self.pending.get(&receipt_id).is_some_and(|pending| {
-                                    !pending.already_signed
-                                        && Self::validate_signed_template(&pending.frozen, event)
-                                            .is_ok()
-                                });
-                            if resumes_interrupted_promotion {
-                                self.on_signed(receipt_id, event.clone(), &mut effects);
-                            }
-                        }
-                        effects.push(Effect::ReplayReceipt(receipt_id, page));
-                        return effects;
-                    }
-                    // Review (#591, PR #604 finding 1): never mask a corrupt
-                    // retained identity behind fabricated acceptance.
-                    let status = match page.outcome {
-                        ReattachOutcome::Attached => unreachable!("handled above"),
-                        ReattachOutcome::NotFound => PublishError::PersistenceFailed {
-                            reason:
-                                "correlation token resolved to a receipt id the store can no longer find"
-                                    .to_string(),
-                        },
-                        ReattachOutcome::RetainedButUnreadable => PublishError::PersistenceFailed {
-                            reason: "correlation token resolved to a retained but unreadable receipt"
-                                .to_string(),
-                        },
-                    };
-                    debug_assert!(page.facts.is_empty());
-                    let _ = page;
-                    return self.refuse_publish(status);
-                }
+            let signed = match &payload {
+                WritePayload::Signed(event) => Some(event),
+                _ => None,
+            };
+            match self.replay_correlated_publish(token, signed) {
+                Ok(Some(effects)) => return PublishPreparation::Complete(effects),
                 Ok(None) => {}
-                Err(err) => {
-                    return self.refuse_publish(PublishError::PersistenceFailed {
-                        reason: err.to_string(),
-                    })
+                Err(error) => {
+                    return PublishPreparation::Complete(self.refuse_publish(error));
                 }
             }
         }
 
         let payload = match payload {
             WritePayload::ReplaceableOperation(operation) => {
-                return self.on_body_complete_replaceable_operation(
+                return self.prepare_body_complete_replaceable_operation(
                     operation,
                     routing,
                     identity,
@@ -2915,9 +2953,9 @@ impl EngineCore {
             WritePayload::ReplaceableOperation(_) => unreachable!("handled above"),
         };
         if payload_kind == nostr::Kind::Authentication {
-            return self.refuse_publish(PublishError::ReservedKind {
+            return PublishPreparation::Complete(self.refuse_publish(PublishError::ReservedKind {
                 kind: payload_kind.as_u16(),
-            });
+            }));
         }
 
         let signing_pubkey = match &payload {
@@ -2935,7 +2973,11 @@ impl EngineCore {
                 // is pinned, so nothing may park.
                 Identity::Active => match self.active_pubkey {
                     Some(active) => active,
-                    None => return self.refuse_publish(PublishError::NoCurrentAccount),
+                    None => {
+                        return PublishPreparation::Complete(
+                            self.refuse_publish(PublishError::NoCurrentAccount),
+                        )
+                    }
                 },
             },
             // Already-signed payloads are verified verbatim and never ask a
@@ -2945,10 +2987,12 @@ impl EngineCore {
             // contradiction and fails closed before acceptance (#47).
             WritePayload::Signed(event) => match identity {
                 Identity::Explicit(pk) if pk != event.pubkey => {
-                    return self.refuse_publish(PublishError::IdentityContradictsSignedAuthor {
-                        identity: pk,
-                        author: event.pubkey,
-                    });
+                    return PublishPreparation::Complete(self.refuse_publish(
+                        PublishError::IdentityContradictsSignedAuthor {
+                            identity: pk,
+                            author: event.pubkey,
+                        },
+                    ));
                 }
                 Identity::Explicit(_) | Identity::Active => event.pubkey,
             },
@@ -2957,9 +3001,11 @@ impl EngineCore {
 
         if let WritePayload::Signed(event) = &payload {
             if let Err(err) = event.verify() {
-                return self.refuse_publish(PublishError::SignatureInvalid {
-                    reason: err.to_string(),
-                });
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::SignatureInvalid {
+                        reason: err.to_string(),
+                    },
+                ));
             }
         }
 
@@ -2998,7 +3044,7 @@ impl EngineCore {
                             reason: err.to_string(),
                         });
                         self.degrade_store(err, &mut effects);
-                        return effects;
+                        return PublishPreparation::Complete(effects);
                     }
                 };
             let Some(intent_id) = outcome.journaled_intent_id() else {
@@ -3006,7 +3052,9 @@ impl EngineCore {
                     unreachable!("only Refused omits journal ids")
                 };
                 if reason == nmp_store::RefuseReason::AlreadyExpired {
-                    return self.refuse_publish(PublishError::AlreadyExpired);
+                    return PublishPreparation::Complete(
+                        self.refuse_publish(PublishError::AlreadyExpired),
+                    );
                 }
                 // CUSTODY. The store was working and said no, which is an
                 // answer the app is entitled to read back — so the refusal
@@ -3015,25 +3063,27 @@ impl EngineCore {
                 // both event ids, which is what lets an app fetch what is
                 // actually there, reapply the user's change and resubmit
                 // without ever troubling them.
-                return match self.store.accept_refused(frozen.id, signing_pubkey, reason) {
-                    Ok(receipt_id) => {
-                        let id = ReceiptId(receipt_id);
-                        vec![
-                            // The refusal never reached the CAS that could
-                            // have restamped anything, so the body this froze
-                            // is the body custody holds — and it is exactly
-                            // what `accept_refused` retained above.
-                            Effect::WriteAccepted(id, frozen.id),
-                            Effect::EmitReceipt(
-                                id,
-                                WriteFact::Outcome(WriteOutcome::Refused(reason)),
-                            ),
-                        ]
-                    }
-                    Err(err) => self.refuse_publish(PublishError::PersistenceFailed {
-                        reason: err.to_string(),
-                    }),
-                };
+                return PublishPreparation::Complete(
+                    match self.store.accept_refused(frozen.id, signing_pubkey, reason) {
+                        Ok(receipt_id) => {
+                            let id = ReceiptId(receipt_id);
+                            vec![
+                                // The refusal never reached the CAS that could
+                                // have restamped anything, so the body this froze
+                                // is the body custody holds — and it is exactly
+                                // what `accept_refused` retained above.
+                                Effect::WriteAccepted(id, frozen.id),
+                                Effect::EmitReceipt(
+                                    id,
+                                    WriteFact::Outcome(WriteOutcome::Refused(reason)),
+                                ),
+                            ]
+                        }
+                        Err(err) => self.refuse_publish(PublishError::PersistenceFailed {
+                            reason: err.to_string(),
+                        }),
+                    },
+                );
             };
             let receipt_id = outcome
                 .journaled_receipt_id()
@@ -3180,7 +3230,7 @@ impl EngineCore {
             }
             WritePayload::ReplaceableOperation(_) => unreachable!("handled above"),
         }
-        effects
+        PublishPreparation::Complete(effects)
     }
 
     /// `SignerCompleted` (plan §3.4 step 2 continuation): the runtime's

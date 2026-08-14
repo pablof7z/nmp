@@ -210,23 +210,25 @@ pub use session::{
     SessionSnapshot, SigningAvailability,
 };
 
-/// Monotonic count of real NMP-owned OS threads spawned this process (#680
-/// falsifier instrumentation). The thread-scaling falsifier asserts opening
-/// many observations leaves this delta at 0: an observation is a lightweight
-/// `Arc`+waker, never an OS thread. Doc-hidden test instrumentation, not part
-/// of the public API.
+/// Monotonic count of real OS threads NMP spawned through its instrumented
+/// paths (#680 falsifier instrumentation). This includes joined engine-owned
+/// workers and detached calls into registered application/capability code.
+/// The thread-scaling falsifier asserts opening many observations leaves this
+/// delta at 0: an observation is a lightweight `Arc`+waker, never an OS
+/// thread. Doc-hidden test instrumentation, not part of the public API.
 #[doc(hidden)]
 #[must_use]
 pub fn nmp_threads_spawned() -> u64 {
     nmp_transport::thread_census::nmp_threads_spawned()
 }
 
-/// The number of real NMP-owned OS threads currently ALIVE (#704 review
+/// The number of instrumented OS threads currently ALIVE (#704 review
 /// falsifier instrumentation). Unlike [`nmp_threads_spawned`] (monotonic), this
-/// gauge decrements when a thread exits, so a teardown falsifier can assert it
-/// returns to baseline after sessions are dropped and the engine is shut down —
-/// proving no orphaned worker survives cancellation/drop/shutdown. Doc-hidden
-/// test instrumentation, not part of the public API.
+/// gauge decrements when a thread exits. Engine shutdown joins engine-owned
+/// workers, but deliberately does not join a detached call into registered
+/// application/capability code; a test must release or finish that foreign
+/// callback before expecting the whole-process gauge to return to baseline.
+/// Doc-hidden test instrumentation, not part of the public API.
 #[doc(hidden)]
 #[must_use]
 pub fn nmp_threads_live() -> u64 {

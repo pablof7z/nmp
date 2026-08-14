@@ -1,13 +1,13 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::io::{Read, Write};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
 use super::*;
 use crate::publish_queue::{NotSentReason, SigningState, WriteFact, WriteOutcome};
 use crate::{Row, RowDelta, RowSignature};
-use nostr::Keys;
+use nostr::{Keys, Tag};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn private_key_bytes(keys: &Keys) -> [u8; 32] {
@@ -32,6 +32,135 @@ fn receive_added_row(subscription: &Subscription, event_id: EventId) -> crate::R
             return row;
         }
     }
+}
+
+struct FirstCallBlockingPeopleMaterializer {
+    calls: Arc<AtomicUsize>,
+    first_entered: mpsc::Sender<usize>,
+    first_release: Mutex<mpsc::Receiver<()>>,
+    first_exited: mpsc::Sender<()>,
+}
+
+impl crate::ReplaceableMaterializer for FirstCallBlockingPeopleMaterializer {
+    fn materialize(
+        &self,
+        _source: &UnsignedEvent,
+        current: &UnsignedEvent,
+        operations: &[crate::ReplaceableMaterializerOperation<'_>],
+    ) -> Result<nmp_grammar::EventBuilder, crate::ReplaceableMaterializerRefusal> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == 1 {
+            self.first_entered
+                .send(call)
+                .expect("the barrier witness remains alive");
+            self.first_release
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .recv()
+                .expect("the test releases the first capability call");
+        }
+
+        let result = add_people(current, operations);
+        if call == 1 && result.is_ok() {
+            let _ = self.first_exited.send(());
+        }
+        result
+    }
+}
+
+struct AddPeopleMaterializer;
+
+impl crate::ReplaceableMaterializer for AddPeopleMaterializer {
+    fn materialize(
+        &self,
+        _source: &UnsignedEvent,
+        current: &UnsignedEvent,
+        operations: &[crate::ReplaceableMaterializerOperation<'_>],
+    ) -> Result<nmp_grammar::EventBuilder, crate::ReplaceableMaterializerRefusal> {
+        add_people(current, operations)
+    }
+}
+
+fn add_people(
+    current: &UnsignedEvent,
+    operations: &[crate::ReplaceableMaterializerOperation<'_>],
+) -> Result<nmp_grammar::EventBuilder, crate::ReplaceableMaterializerRefusal> {
+    let mut tags = current.tags.clone().to_vec();
+    for operation in operations {
+        let person = PublicKey::from_slice(operation.bytes()).map_err(|error| {
+            crate::ReplaceableMaterializerRefusal {
+                reason: error.to_string(),
+            }
+        })?;
+        if !tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["p", person.to_hex().as_str()])
+        {
+            tags.push(Tag::public_key(person));
+        }
+    }
+    Ok(nmp_grammar::EventBuilder {
+        kind: current.kind,
+        tags,
+        content: current.content.clone(),
+        created_at: None,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+enum InitialMaterializerFailure {
+    Refusal,
+    Panic,
+    InvalidCoordinate,
+}
+
+impl crate::ReplaceableMaterializer for InitialMaterializerFailure {
+    fn materialize(
+        &self,
+        _source: &UnsignedEvent,
+        current: &UnsignedEvent,
+        _operations: &[crate::ReplaceableMaterializerOperation<'_>],
+    ) -> Result<nmp_grammar::EventBuilder, crate::ReplaceableMaterializerRefusal> {
+        match self {
+            Self::Refusal => Err(crate::ReplaceableMaterializerRefusal {
+                reason: "fixture refusal".to_string(),
+            }),
+            Self::Panic => panic!("fixture panic"),
+            Self::InvalidCoordinate => Ok(nmp_grammar::EventBuilder {
+                kind: Kind::TextNote,
+                tags: current.tags.clone().to_vec(),
+                content: current.content.clone(),
+                created_at: None,
+            }),
+        }
+    }
+}
+
+fn replaceable_contact_intent(
+    registration: &crate::RegisteredReplaceableMaterializer,
+    base: &Row,
+    person: PublicKey,
+    destination: RelayUrl,
+) -> WriteIntent {
+    WriteIntent {
+        payload: registration
+            .operation(
+                base,
+                nmp_grammar::ReplaceableSourcePolicy::Continuing,
+                person.to_bytes().to_vec(),
+            )
+            .expect("the signed base mints one operation"),
+        routing: WriteRouting::Explicit(vec![destination]),
+        identity: Identity::Explicit(base.pubkey()),
+        correlation: None,
+    }
+}
+
+fn contact_row_contains(row: &Row, person: PublicKey) -> bool {
+    let expected = person.to_hex();
+    row.tags()
+        .iter()
+        .any(|tag| tag.as_slice() == ["p", expected.as_str()])
 }
 
 #[test]
@@ -2153,6 +2282,593 @@ fn every_verb_fails_closed_after_shutdown() {
         correlation: None,
     });
     assert_eq!(publish_result.err(), Some(EngineError::EngineClosed));
+}
+
+#[test]
+fn blocked_initial_materializer_does_not_block_engine_work_or_shutdown() {
+    let directory = tempfile::tempdir().expect("persistent test directory");
+    let config = EngineConfig {
+        store_path: Some(
+            directory
+                .path()
+                .join("blocked-initial-materializer.redb")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        ..EngineConfig::default()
+    };
+    let engine = Arc::new(Engine::new(config.clone()).expect("engine must build"));
+    let author = Keys::generate();
+    engine
+        .add_private_key_account(&private_key_bytes(&author), true)
+        .expect("author is available");
+    let base_event = nostr::EventBuilder::new(Kind::ContactList, "base")
+        .custom_created_at(Timestamp::from(1))
+        .sign_with_keys(&author)
+        .expect("base is signed");
+    let base = Row::from_relay_event(base_event, BTreeSet::new());
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (exited_tx, exited_rx) = mpsc::channel();
+    let registration = engine
+        .add_replaceable_materializer(
+            [11; 16],
+            [12; 16],
+            FirstCallBlockingPeopleMaterializer {
+                calls: Arc::clone(&calls),
+                first_entered: entered_tx,
+                first_release: Mutex::new(release_rx),
+                first_exited: exited_tx,
+            },
+        )
+        .expect("materializer registers");
+    let destination = RelayUrl::parse("wss://blocked-operation.example").unwrap();
+    let token = "blocked-initial-materializer-shutdown".to_string();
+    let mut intent = replaceable_contact_intent(
+        &registration,
+        &base,
+        Keys::generate().public_key(),
+        destination.clone(),
+    );
+    intent.correlation = Some(
+        nmp_grammar::CorrelationToken::try_from(token.as_str())
+            .expect("the shutdown fixture token is valid"),
+    );
+    let (publish_done_tx, publish_done_rx) = mpsc::channel();
+    let publisher_engine = Arc::clone(&engine);
+    let publisher = std::thread::spawn(move || {
+        let outcome = publisher_engine.publish(intent).err();
+        publish_done_tx
+            .send(outcome)
+            .expect("the test receives the publisher result");
+    });
+    assert_eq!(
+        entered_rx.recv_timeout(std::time::Duration::from_secs(5)),
+        Ok(1),
+        "the first capability call reaches the deterministic barrier"
+    );
+
+    let ordinary = nostr::EventBuilder::new(Kind::Custom(9999), "ordinary while blocked")
+        .custom_created_at(Timestamp::from(2))
+        .sign_with_keys(&author)
+        .expect("ordinary event is signed");
+    let ordinary_id = ordinary.id;
+    let (ordinary_done_tx, ordinary_done_rx) = mpsc::channel();
+    let ordinary_engine = Arc::clone(&engine);
+    let ordinary_destination = destination.clone();
+    let ordinary_author = author.public_key();
+    let ordinary_worker = std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let observation = ordinary_engine
+                .observe(probe_query(), None)
+                .map_err(|error| format!("ordinary observation setup failed: {error:?}"))?;
+            observation
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|error| format!("ordinary opening frame failed: {error:?}"))?;
+            let receipt = ordinary_engine
+                .publish(WriteIntent {
+                    payload: WritePayload::Signed(ordinary),
+                    routing: WriteRouting::Explicit(vec![ordinary_destination]),
+                    identity: Identity::Explicit(ordinary_author),
+                    correlation: None,
+                })
+                .map_err(|error| format!("ordinary publication failed: {error:?}"))?;
+            let observed = receive_added_row(&observation, ordinary_id);
+            if observed.id() != ordinary_id {
+                return Err(format!(
+                    "ordinary observation returned {}, expected {ordinary_id}",
+                    observed.id()
+                ));
+            }
+            Ok(receipt.id)
+        }));
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(_) => Err("ordinary observe/publish worker panicked".to_string()),
+        };
+        let _ = ordinary_done_tx.send(outcome);
+    });
+    let ordinary_result = ordinary_done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    let ordinary_receipt_id = match ordinary_result {
+        Ok(Ok(receipt_id)) => {
+            ordinary_worker
+                .join()
+                .expect("the completed ordinary worker joins cleanly");
+            receipt_id
+        }
+        failure => {
+            let _ = release_tx.send(());
+            let _ = exited_rx.recv_timeout(std::time::Duration::from_secs(5));
+            let _ = ordinary_done_rx.recv_timeout(std::time::Duration::from_secs(5));
+            ordinary_worker
+                .join()
+                .expect("the released ordinary worker joins during cleanup");
+            let _ = publish_done_rx.recv_timeout(std::time::Duration::from_secs(5));
+            publisher
+                .join()
+                .expect("the released capability publisher joins during cleanup");
+            engine.shutdown();
+            panic!(
+                "ordinary observation/publication did not complete while capability work was blocked: {failure:?}"
+            );
+        }
+    };
+
+    let (shutdown_done_tx, shutdown_done_rx) = mpsc::channel();
+    let shutdown_engine = Arc::clone(&engine);
+    let shutdown = std::thread::spawn(move || {
+        shutdown_engine.shutdown();
+        shutdown_done_tx
+            .send(())
+            .expect("the test receives shutdown completion");
+    });
+    shutdown_done_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("shutdown completes without joining the blocked capability");
+    assert_eq!(
+        publish_done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the blocked publisher is drained"),
+        Some(EngineError::EngineClosed)
+    );
+    publisher.join().expect("publisher thread exits cleanly");
+    shutdown.join().expect("shutdown thread exits cleanly");
+
+    release_tx
+        .send(())
+        .expect("the detached capability is released for test cleanup");
+    exited_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the detached capability thread exits after release");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    drop(engine);
+    let reopened = Engine::new(config).expect("the exact persistent store reopens");
+    let queue = reopened
+        .publish_queue(None, u8::MAX)
+        .expect("recovered queue is readable");
+    assert_eq!(
+        queue.len(),
+        1,
+        "shutdown retained only the unrelated publication, never the blocked operation"
+    );
+    assert_eq!(queue[0].receipt_id, ordinary_receipt_id);
+    assert_eq!(
+        reopened
+            .publish_queue_for_event(ordinary_id, None, u8::MAX)
+            .expect("ordinary event lookup")
+            .len(),
+        1
+    );
+    let contact_lists = reopened
+        .observe(
+            LiveQuery::from_filter(nmp_grammar::Filter {
+                kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
+                ..nmp_grammar::Filter::default()
+            }),
+            None,
+        )
+        .expect("post-shutdown contact-list observation opens");
+    let opening = contact_lists
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("post-shutdown observation receives its opening frame");
+    assert!(
+        opening.deltas.iter().all(|delta| delta.row().is_none()),
+        "the blocked operation left no optimistic row across reopen"
+    );
+    assert!(matches!(
+        reopened
+            .reattach_by_correlation(token)
+            .expect("the reopened correlation lookup remains readable"),
+        ReceiptReattachment::NotFound
+    ));
+    reopened.shutdown();
+}
+
+#[test]
+fn blocked_initial_materializer_replays_a_retry_token_claimed_while_in_flight() {
+    let engine = Arc::new(Engine::new(EngineConfig::default()).expect("engine must build"));
+    let author = Keys::generate();
+    engine
+        .add_private_key_account(&private_key_bytes(&author), true)
+        .expect("author is available");
+    let base_event = nostr::EventBuilder::new(Kind::ContactList, "base")
+        .custom_created_at(Timestamp::from(1))
+        .sign_with_keys(&author)
+        .expect("base is signed");
+    let destination = RelayUrl::parse("wss://correlation-race.example").unwrap();
+    engine
+        .publish(WriteIntent {
+            payload: WritePayload::Signed(base_event.clone()),
+            routing: WriteRouting::Explicit(vec![destination.clone()]),
+            identity: Identity::Explicit(author.public_key()),
+            correlation: None,
+        })
+        .expect("the source enters ordinary NMP custody");
+    let queue_len_before = engine
+        .publish_queue(None, u8::MAX)
+        .expect("baseline queue remains readable")
+        .len();
+    let base = Row::from_relay_event(base_event, BTreeSet::new());
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (exited_tx, exited_rx) = mpsc::channel();
+    let registration = engine
+        .add_replaceable_materializer(
+            [13; 16],
+            [14; 16],
+            FirstCallBlockingPeopleMaterializer {
+                calls: Arc::clone(&calls),
+                first_entered: entered_tx,
+                first_release: Mutex::new(release_rx),
+                first_exited: exited_tx,
+            },
+        )
+        .expect("materializer registers");
+    let token = nmp_grammar::CorrelationToken::try_from("blocked-operation-correlation").unwrap();
+    let mut delayed_intent = replaceable_contact_intent(
+        &registration,
+        &base,
+        Keys::generate().public_key(),
+        destination.clone(),
+    );
+    delayed_intent.correlation = Some(token.clone());
+    let delayed_engine = Arc::clone(&engine);
+    let delayed = std::thread::spawn(move || {
+        delayed_engine
+            .publish(delayed_intent)
+            .map(|receipt| receipt.id)
+    });
+    assert_eq!(
+        entered_rx.recv_timeout(std::time::Duration::from_secs(5)),
+        Ok(1),
+        "the first publish remains outside custody at the barrier"
+    );
+
+    let ordinary = nostr::EventBuilder::new(Kind::Custom(9999), "token claimant")
+        .custom_created_at(Timestamp::from(2))
+        .sign_with_keys(&author)
+        .expect("ordinary event is signed");
+    let claimed = engine
+        .publish(WriteIntent {
+            payload: WritePayload::Signed(ordinary.clone()),
+            routing: WriteRouting::Explicit(vec![destination]),
+            identity: Identity::Explicit(author.public_key()),
+            correlation: Some(token),
+        })
+        .expect("the retry token is claimed while the capability is blocked");
+
+    release_tx
+        .send(())
+        .expect("the delayed capability is released");
+    exited_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the delayed capability exits");
+    let replayed_id = delayed
+        .join()
+        .expect("delayed publisher exits")
+        .expect("delayed publisher reattaches the claimed token");
+    assert_eq!(
+        replayed_id, claimed.id,
+        "both callers receive the one receipt owned by the retry token"
+    );
+    let queue = engine
+        .publish_queue(None, u8::MAX)
+        .expect("queue remains readable");
+    assert_eq!(
+        queue.len(),
+        queue_len_before + 1,
+        "one retry token creates one additional obligation"
+    );
+    let claimed_entry = queue
+        .iter()
+        .find(|entry| entry.receipt_id == claimed.id)
+        .expect("the claimed receipt remains in the queue");
+    assert_eq!(claimed_entry.event_id, ordinary.id);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "correlation replay does not invoke the capability again"
+    );
+    engine.shutdown();
+}
+
+#[test]
+fn stale_initial_materializer_completion_retries_against_durable_truth() {
+    let engine = Arc::new(Engine::new(EngineConfig::default()).expect("engine must build"));
+    let author = Keys::generate();
+    engine
+        .add_private_key_account(&private_key_bytes(&author), true)
+        .expect("author is available");
+    let base_event = nostr::EventBuilder::new(Kind::ContactList, "base")
+        .custom_created_at(Timestamp::from(1))
+        .sign_with_keys(&author)
+        .expect("base is signed");
+    let base = Row::from_relay_event(base_event.clone(), BTreeSet::new());
+    let destination = RelayUrl::parse("wss://concurrent-operations.example").unwrap();
+    engine
+        .publish(WriteIntent {
+            payload: WritePayload::Signed(base_event),
+            routing: WriteRouting::Explicit(vec![destination.clone()]),
+            identity: Identity::Explicit(author.public_key()),
+            correlation: None,
+        })
+        .expect("the original source enters ordinary NMP custody");
+    let queue_len_before_operations = engine
+        .publish_queue(None, u8::MAX)
+        .expect("baseline publish queue")
+        .len();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (exited_tx, _exited_rx) = mpsc::channel();
+    let registration = engine
+        .add_replaceable_materializer(
+            [21; 16],
+            [22; 16],
+            FirstCallBlockingPeopleMaterializer {
+                calls: Arc::clone(&calls),
+                first_entered: entered_tx,
+                first_release: Mutex::new(release_rx),
+                first_exited: exited_tx,
+            },
+        )
+        .expect("materializer registers");
+    let first_person = Keys::generate().public_key();
+    let second_person = Keys::generate().public_key();
+
+    let first_intent =
+        replaceable_contact_intent(&registration, &base, first_person, destination.clone());
+    let first_engine = Arc::clone(&engine);
+    let first_publisher = std::thread::spawn(move || {
+        first_engine
+            .publish(first_intent)
+            .map(|receipt| receipt.event_id)
+    });
+    assert_eq!(
+        entered_rx.recv_timeout(std::time::Duration::from_secs(5)),
+        Ok(1),
+        "the first materialization remains in flight"
+    );
+
+    let second = engine
+        .publish(replaceable_contact_intent(
+            &registration,
+            &base,
+            second_person,
+            destination,
+        ))
+        .expect("the second operation enters custody while the first call is blocked");
+    release_tx
+        .send(())
+        .expect("the first stale completion is released");
+    let final_event_id = first_publisher
+        .join()
+        .expect("first publisher thread exits")
+        .expect("the stale operation retries and enters custody");
+
+    assert_ne!(
+        second.event_id, final_event_id,
+        "the retry materializes a successor rather than accepting stale bytes"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "first stale call, concurrent accepted call, and one retry are the complete execution"
+    );
+    let observation = engine
+        .observe(
+            LiveQuery::from_filter(nmp_grammar::Filter {
+                kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
+                ..nmp_grammar::Filter::default()
+            }),
+            None,
+        )
+        .expect("current contact-list observation opens");
+    let row = receive_added_row(&observation, final_event_id);
+    assert!(
+        contact_row_contains(&row, first_person),
+        "the retried operation survives"
+    );
+    assert!(
+        contact_row_contains(&row, second_person),
+        "the concurrently accepted operation survives"
+    );
+    assert_eq!(
+        engine
+            .publish_queue(None, u8::MAX)
+            .expect("accepted operation inventory")
+            .len(),
+        queue_len_before_operations + 2,
+        "one durable receipt exists per user action, not per callback attempt"
+    );
+    engine.shutdown();
+}
+
+#[test]
+fn initial_materializer_failures_leave_no_acceptance_residue() {
+    for (slot, failure, expected) in [
+        (31u8, InitialMaterializerFailure::Refusal, "fixture refusal"),
+        (
+            41,
+            InitialMaterializerFailure::Panic,
+            "replaceable materializer panicked",
+        ),
+        (
+            51,
+            InitialMaterializerFailure::InvalidCoordinate,
+            "materializer changed the replaceable coordinate",
+        ),
+    ] {
+        let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+        let author = Keys::generate();
+        engine
+            .add_private_key_account(&private_key_bytes(&author), true)
+            .expect("author is available");
+        let base_event = nostr::EventBuilder::new(Kind::ContactList, "base")
+            .custom_created_at(Timestamp::from(1))
+            .sign_with_keys(&author)
+            .expect("base is signed");
+        let base = Row::from_relay_event(base_event, BTreeSet::new());
+        let registration = engine
+            .add_replaceable_materializer([slot; 16], [slot + 1; 16], failure)
+            .expect("materializer registers");
+        let token = format!("initial-materializer-failure-{slot}");
+        let mut intent = replaceable_contact_intent(
+            &registration,
+            &base,
+            Keys::generate().public_key(),
+            RelayUrl::parse("wss://initial-refusal.example").unwrap(),
+        );
+        intent.correlation = Some(
+            nmp_grammar::CorrelationToken::try_from(token.as_str())
+                .expect("the failure fixture token is valid"),
+        );
+        let error = engine
+            .publish(intent)
+            .err()
+            .expect("failure mode refuses publication");
+        assert!(
+            matches!(&error, EngineError::PublishRefused { reason } if reason.contains(expected)),
+            "{failure:?} must remain a typed pre-custody refusal: {error:?}"
+        );
+        assert!(
+            engine
+                .publish_queue(None, u8::MAX)
+                .expect("queue remains readable")
+                .is_empty(),
+            "{failure:?} must create no receipt, signing, routing, delivery, or correlation state"
+        );
+        let observation = engine
+            .observe(
+                LiveQuery::from_filter(nmp_grammar::Filter {
+                    kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
+                    ..nmp_grammar::Filter::default()
+                }),
+                None,
+            )
+            .expect("post-refusal observation opens");
+        let opening = observation
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("post-refusal observation receives its opening frame");
+        assert!(
+            opening.deltas.iter().all(|delta| delta.row().is_none()),
+            "{failure:?} must create no optimistic row"
+        );
+        assert!(matches!(
+            engine
+                .reattach_by_correlation(token)
+                .expect("the correlation lookup remains readable"),
+            ReceiptReattachment::NotFound
+        ));
+        engine.shutdown();
+    }
+}
+
+#[test]
+fn replacing_registration_while_initial_materializer_is_blocked_refuses_without_residue() {
+    let engine = Arc::new(Engine::new(EngineConfig::default()).expect("engine must build"));
+    let author = Keys::generate();
+    engine
+        .add_private_key_account(&private_key_bytes(&author), true)
+        .expect("author is available");
+    let base_event = nostr::EventBuilder::new(Kind::ContactList, "base")
+        .custom_created_at(Timestamp::from(1))
+        .sign_with_keys(&author)
+        .expect("base is signed");
+    let base = Row::from_relay_event(base_event, BTreeSet::new());
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (exited_tx, exited_rx) = mpsc::channel();
+    let registration = engine
+        .add_replaceable_materializer(
+            [61; 16],
+            [62; 16],
+            FirstCallBlockingPeopleMaterializer {
+                calls,
+                first_entered: entered_tx,
+                first_release: Mutex::new(release_rx),
+                first_exited: exited_tx,
+            },
+        )
+        .expect("first materializer registers");
+    let token = "replaced-initial-materializer".to_string();
+    let mut intent = replaceable_contact_intent(
+        &registration,
+        &base,
+        Keys::generate().public_key(),
+        RelayUrl::parse("wss://registration-replacement.example").unwrap(),
+    );
+    intent.correlation = Some(
+        nmp_grammar::CorrelationToken::try_from(token.as_str())
+            .expect("the replacement fixture token is valid"),
+    );
+    let publisher_engine = Arc::clone(&engine);
+    let publisher = std::thread::spawn(move || publisher_engine.publish(intent).err());
+    assert_eq!(
+        entered_rx.recv_timeout(std::time::Duration::from_secs(5)),
+        Ok(1),
+        "the old registration is executing"
+    );
+
+    let _replacement = engine
+        .add_replaceable_materializer([61; 16], [62; 16], AddPeopleMaterializer)
+        .expect("same program and format replace the first registration");
+    release_tx
+        .send(())
+        .expect("release the now-stale capability call");
+    exited_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("stale capability thread exits");
+    let error = publisher
+        .join()
+        .expect("publisher thread exits")
+        .expect("retired registration refuses publication");
+    assert!(
+        matches!(&error, EngineError::PublishRefused { reason } if reason.contains("registration is not active")),
+        "the retired installation cannot enter custody: {error:?}"
+    );
+    assert!(
+        engine
+            .publish_queue(None, u8::MAX)
+            .expect("queue remains readable")
+            .is_empty(),
+        "registration replacement leaves no receipt or dependent durable work"
+    );
+    assert!(matches!(
+        engine
+            .reattach_by_correlation(token)
+            .expect("the correlation lookup remains readable"),
+        ReceiptReattachment::NotFound
+    ));
+    engine.shutdown();
 }
 
 /// A second, concurrent `shutdown` racing the first must still only

@@ -157,7 +157,18 @@ impl Engine {
     /// RESTATE it: naming anybody else cannot resolve, so this call refuses
     /// it and takes nothing into custody.
     pub fn publish(&self, intent: WriteIntent) -> Result<ReceiptStream, EngineError> {
-        self.with_handle(|handle| handle.publish(intent))?
+        let handle = {
+            let guard = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            match &*guard {
+                Some(inner) => inner.handle.clone(),
+                None => return Err(EngineError::EngineClosed),
+            }
+        };
+        handle
+            .publish(intent)
             .map_err(EngineError::from_publish_error)
     }
 

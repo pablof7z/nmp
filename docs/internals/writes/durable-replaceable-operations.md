@@ -642,6 +642,28 @@ signature-pending condition as an ordinary unsigned event. Later source-driven
 work may replace it with a complete successor, but an accepted receipt never
 transitions to a bodyless state.
 
+Preparing that first complete body may call capability code, but the call does
+not own NMP's state thread. NMP copies only the immutable source and current
+events, ordered operation bytes, capability identity, and the durable versions
+needed to recognize a stale answer. A purpose-specific detached thread runs
+the capability without a store, resolver, receipt, routing handle, or mutable
+engine state. The state thread remains free to accept ordinary publications,
+advance observations, and shut down.
+
+When the capability returns, NMP checks the capability installation and the
+durable source, current event, and operation set again before taking custody.
+If any of them changed, the old answer is discarded and the candidate is
+rebuilt from current durable truth under the same publication call. A refusal,
+panic, invalid event, or thread-start failure remains a pre-custody refusal
+with the same zero-residue rule above.
+
+The app's `publish` call still waits for acceptance or refusal, but it does not
+hold the facade's lifecycle lock while waiting. Shutdown drains that waiting
+call with `EngineClosed` and does not join a capability thread that may never
+return. A late result after shutdown has no owner and is ignored. This narrow
+boundary deliberately adds no timeout, worker pool, scheduler interface, or
+general callback framework.
+
 ### 5.4 Ambiguous acceptance after a storage failure
 
 If the durable transaction may have committed but the caller receives an I/O
