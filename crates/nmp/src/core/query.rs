@@ -3659,14 +3659,14 @@ impl EngineCore {
     /// N MOST RECENT matching rows -- `created_at` DESC, ties broken by event
     /// `id` ASC (bytewise), the NIP-01 canonical newest-first order -- NOT
     /// every cached match. The authoritative cap lives HERE, at the handle
-    /// projection, deliberately NOT in `EventStore::query` (which must keep
+    /// projection, deliberately NOT in `RedbStore::query` (which must keep
     /// returning every current match: unlimited Derived-node recompute,
     /// negentropy, and ingest callers rely on its FULL match set. Explicitly
     /// limited Derived nodes use `query_newest` at their own projection seam;
     /// that is a separate NIP-01 event-selection operation, not a mutation of
     /// `query()`'s complete-set contract.
     /// For this projection alone, each root atom may be pre-bounded through
-    /// `EventStore::query_newest`; taking N newest from each atom is exact
+    /// `RedbStore::query_newest`; taking N newest from each atom is exact
     /// because a row outside one atom's top N already has N newer witnesses
     /// in that same atom. The final merged/deduped set is still capped ONCE,
     /// per NIP-01 per-subscription `limit` (see [`effective_row_limit`]).
@@ -3683,7 +3683,7 @@ impl EngineCore {
     /// shape unchanged); evidence is computed over `subtree_atoms` (#12: the
     /// query's FULL subtree, interior `Derived` atoms included). Each row
     /// carries its provenance (#105: `StoredEvent::provenance`, already
-    /// merged/persisted by `EventStore::insert`'s dedup path) rather than
+    /// merged/persisted by `RedbStore::insert`'s dedup path) rather than
     /// discarding it -- the mechanism already exists in `nmp-store`; this is
     /// only its honest projection.
     ///

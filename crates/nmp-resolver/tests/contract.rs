@@ -18,7 +18,7 @@ use nmp_resolver::testkit::{
 use nmp_resolver::{
     Engine, HandleId, QueryHandle, ResolutionNodeKind, ResolvedValue, SubscribeOutcome,
 };
-use nmp_store::{EventStore, RedbStore, RelayObserved};
+use nmp_store::{RedbStore, RelayObserved};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
 fn opened(outcome: SubscribeOutcome) -> (QueryHandle, DemandDelta) {

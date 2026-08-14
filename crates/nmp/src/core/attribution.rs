@@ -10,8 +10,8 @@
 //!
 //! This is a plain data structure with no I/O and no access to the store or
 //! router — `EngineCore` (`core/mod.rs`) is the one place both exist
-//! together, and it is the one that actually calls `EventStore::
-//! record_coverage` with the shape this module hands back.
+//! together, and it is the one that actually calls
+//! `RedbStore::record_coverage` with the shape this module hands back.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 

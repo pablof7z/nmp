@@ -16,7 +16,7 @@ use nmp::mechanism::core::{HistoryQuery, RowDelta};
 use nmp::mechanism::runtime::{EngineThread, HistoryReceiver, RowsMsg, RowsReceiver};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
-use nmp_store::{EventStore, RedbStore};
+use nmp_store::RedbStore;
 use nmp_transport::PoolConfig;
 use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
 use serde::{Deserialize, Serialize};

@@ -1,6 +1,6 @@
 //! Benchmark-only reduced writers for issue #618's store-cost decomposition.
 //!
-//! These variants deliberately do not implement [`crate::EventStore`] and are
+//! These variants deliberately do not implement the complete NMP store and are
 //! available only behind `bench-instrumentation`. They reuse the production
 //! portable encoder, table definitions, observation layout, ordered-index key
 //! builders, tag-key builder, and cardinality-key builders. They are evidence

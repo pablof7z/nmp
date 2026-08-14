@@ -277,7 +277,7 @@ pub struct DiagnosticsSnapshot {
     /// merely trimmed by its budget is NOT counted here: it is present in
     /// `relays` with a non-zero `subscriptions_refused`.
     pub sessions_refused_by_subscription_budget: u64,
-    /// `Some(message)` once an ingest/read [`nmp_store::EventStore`] door has
+    /// `Some(message)` once an ingest/read [`nmp_store::RedbStore`] door has
     /// returned a [`nmp_store::PersistenceError`] (issue #122): the local
     /// cache has degraded to read-only and stopped accepting fresh
     /// ingest/reads. `None` while persistence is healthy. Read-only, off the

@@ -64,7 +64,7 @@ printf '%s\n' "$completion_calls" |
   grep -qF 'crates/nmp/src/core/query.rs:' ||
   fail "NIP-77 completion no longer uses persist_attributed_completion"
 
-# Only the shared helper may cross the EventStore coverage-write boundary.
+# Only the shared helper may cross the RedbStore coverage-write boundary.
 coverage_calls=$(
   # shellcheck disable=SC2086
   printf '%s\n' "$production_core" |
@@ -76,7 +76,7 @@ coverage_count=$(
 )
 [[ $coverage_count -eq 1 ]] || {
   printf '%s\n' "$coverage_calls"
-  fail "expected one production EventStore coverage-write call, found $coverage_count"
+  fail "expected one production RedbStore coverage-write call, found $coverage_count"
 }
 printf '%s\n' "$coverage_calls" |
   grep -qF 'crates/nmp/src/core/query.rs:' ||

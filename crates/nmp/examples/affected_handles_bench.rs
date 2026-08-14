@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use nmp::mechanism::core::{EngineCore, EngineMsg};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, IndexedTagName, RelaySessionKey};
-use nmp_store::{EventStore, RedbStore, RelayObserved};
+use nmp_store::{RedbStore, RelayObserved};
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{
     Event, EventBuilder, JsonUtil, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Tag,
