@@ -763,7 +763,8 @@ mod semantic_successor_tests {
             .replaceable_operation_snapshot(&coordinate)
             .unwrap()
             .unwrap();
-        let nmp_store::SemanticSourcePolicy::Finite(retained_round) = retained.source_policy else {
+        let nmp_store::SemanticSourcePolicy::Finite(retained_round) = &retained.source_policy
+        else {
             panic!("the second operation changed the finite source lifetime");
         };
         assert_eq!(retained_round.id, opened.round);
@@ -807,12 +808,30 @@ mod semantic_successor_tests {
             },
         ] {
             let refused = refuse_changed_policy(changed_policy);
-            assert!(refused.iter().any(|effect| matches!(
-                effect,
-                Effect::PublishFailed(PublishError::ReplaceableOperationRefused { reason })
-                    if reason.contains("IncompatibleSourcePolicy")
-            )));
+            let [Effect::PublishFailed(PublishError::ReplaceableOperationRefused { reason })] =
+                refused.as_slice()
+            else {
+                panic!("policy mismatch must emit exactly one pre-custody refusal: {refused:#?}");
+            };
+            assert_eq!(
+                reason,
+                &nmp_store::SemanticRefusal::IncompatibleSourcePolicy.to_string()
+            );
         }
+        let after_refusals = core
+            .store
+            .replaceable_operation_snapshot(&coordinate)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after_refusals.operations.len(),
+            retained.operations.len(),
+            "policy refusals must not append durable operations"
+        );
+        assert_eq!(
+            after_refusals, retained,
+            "policy refusals must leave the semantic snapshot and finite round unchanged"
+        );
     }
 
     #[test]
