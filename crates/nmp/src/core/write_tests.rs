@@ -492,16 +492,16 @@ mod receipt_allocator_tests {
         let a = RelayUrl::parse("wss://chosen-a.example").unwrap();
         let b = RelayUrl::parse("wss://chosen-b.example").unwrap();
 
-        let auto = EngineCore::<RedbStore>::routing_snapshot(&WriteRouting::Auto);
+        let auto = EngineCore::routing_snapshot(&WriteRouting::Auto);
         assert_eq!(auto, "auto", "Auto stores a label, never a relay set");
         assert!(matches!(
-            EngineCore::<RedbStore>::parse_routing_snapshot(&auto),
+            EngineCore::parse_routing_snapshot(&auto),
             Some(WriteRouting::Auto)
         ));
 
         let route = WriteRouting::Explicit(vec![b.clone(), a.clone()]);
-        let snapshot = EngineCore::<RedbStore>::routing_snapshot(&route);
-        let restored = EngineCore::<RedbStore>::parse_routing_snapshot(&snapshot)
+        let snapshot = EngineCore::routing_snapshot(&route);
+        let restored = EngineCore::parse_routing_snapshot(&snapshot)
             .expect("a valid explicit snapshot must remain readable");
         let WriteRouting::Explicit(relays) = restored else {
             panic!("snapshot restored the wrong routing variant")

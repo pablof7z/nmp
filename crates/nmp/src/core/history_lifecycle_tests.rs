@@ -41,7 +41,7 @@ mod history_mutation_tests {
         events: &[SignedEvent],
         kinds: BTreeSet<u16>,
         relay: &RelayUrl,
-    ) -> (EngineCore<RedbStore>, HistorySessionId) {
+    ) -> (EngineCore, HistorySessionId) {
         let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert_batch(
@@ -78,7 +78,7 @@ mod history_mutation_tests {
         (core, id)
     }
 
-    fn ordered_ids<S: EventStore>(core: &EngineCore<S>, id: HistorySessionId) -> Vec<EventId> {
+    fn ordered_ids(core: &EngineCore, id: HistorySessionId) -> Vec<EventId> {
         core.histories[&id]
             .order
             .iter()
@@ -86,8 +86,8 @@ mod history_mutation_tests {
             .collect()
     }
 
-    fn ingest<S: EventStore>(
-        core: &mut EngineCore<S>,
+    fn ingest(
+        core: &mut EngineCore,
         event: SignedEvent,
         relay: RelayUrl,
         observed_at: u64,

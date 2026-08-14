@@ -5,7 +5,7 @@
 
 use super::*;
 
-impl<S: EventStore> EngineCore<S> {
+impl EngineCore {
     pub(crate) fn open_history_observation(
         &mut self,
         query: HistoryQuery,

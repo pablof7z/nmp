@@ -10,7 +10,7 @@ fn neg_err_frame(sub: &str) -> RelayFrame {
     })
 }
 
-fn connect_and_prove_nip77<S: EventStore>(core: &mut EngineCore<S>, relay: &RelayUrl) {
+fn connect_and_prove_nip77(core: &mut EngineCore, relay: &RelayUrl) {
     let effects = connect(core, 0, relay);
     let (probe_attempt, probe_sub) = effects
         .iter()
@@ -181,8 +181,8 @@ fn refused_fact_targets(effects: &[Effect]) -> BTreeSet<(ObservationId, String)>
 /// Any headless test that later expects the reconciliation to settle therefore
 /// has to place the frame the way production does -- the same discipline
 /// `on_wire_request_handoff` already imposes on an ordinary REQ.
-fn accept_neg_open<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn accept_neg_open(
+    core: &mut EngineCore,
     slot: u32,
     neg_sub_id: &SubId,
     opened: &[Effect],
@@ -202,8 +202,8 @@ fn accept_neg_open<S: EventStore>(
 /// Drive a real server-side negentropy responder until the reducer opens the
 /// id-targeted missing-event REQ. This keeps the failure test below on the
 /// real reconciliation protocol rather than fabricating its internal state.
-fn finish_neg_with_remote_event<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn finish_neg_with_remote_event(
+    core: &mut EngineCore,
     slot: u32,
     relay: &RelayUrl,
     neg_sub_id: &SubId,

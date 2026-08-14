@@ -18,7 +18,7 @@ use nmp_store::RedbStore;
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{EventBuilder, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp};
 
-fn new_core(dir: FixtureRoutingFacts) -> EngineCore<RedbStore> {
+fn new_core(dir: FixtureRoutingFacts) -> EngineCore {
     EngineCore::new_with_fixture_routing_facts(
         RedbStore::temporary().expect("temporary Redb store"),
         dir,
@@ -34,7 +34,7 @@ fn literal_query(kinds: &[u16], author_hex: &str) -> LiveQuery {
     })
 }
 
-fn connect(core: &mut EngineCore<RedbStore>, slot: u32, url: &RelayUrl) -> Vec<Effect> {
+fn connect(core: &mut EngineCore, slot: u32, url: &RelayUrl) -> Vec<Effect> {
     core.handle(EngineMsg::RelayConnected(
         RelayHandle {
             slot,

@@ -9,7 +9,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use nmp_store::RedbStore;
 use nmp_transport::Pool;
 
 use super::diagnostics_channel::LatestSender;
@@ -59,7 +58,7 @@ impl DiagnosticsDeliveryState {
     }
 }
 
-pub(super) fn snapshot_with_pool(core: &EngineCore<RedbStore>, pool: &Pool) -> DiagnosticsSnapshot {
+pub(super) fn snapshot_with_pool(core: &EngineCore, pool: &Pool) -> DiagnosticsSnapshot {
     let mut snapshot = core.diagnostics_snapshot();
     snapshot.sessions_rejected_over_cap = snapshot
         .sessions_rejected_over_cap
@@ -93,7 +92,7 @@ pub(super) fn seed_observer(
 }
 
 pub(super) fn flush_due(
-    core: &EngineCore<RedbStore>,
+    core: &EngineCore,
     pool: &Pool,
     channels: &HashMap<u64, LatestSender<DiagnosticsSnapshot>>,
     state: &RefCell<DiagnosticsDeliveryState>,

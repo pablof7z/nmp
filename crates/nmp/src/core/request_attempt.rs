@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use nmp_grammar::{ConcreteFilter, DescriptorHash, RelaySessionKey};
 use nmp_router::{SubId, WireDelta, WireOp};
-use nmp_store::{CoverageKey, EventStore};
+use nmp_store::CoverageKey;
 use nostr::Timestamp;
 
 use super::{
@@ -138,7 +138,7 @@ impl RequestAttemptPurpose {
     }
 }
 
-impl<S: EventStore> EngineCore<S> {
+impl EngineCore {
     pub(super) fn extend_request_attempt_metadata(
         &mut self,
         update: &nmp_router::RequestMetadataUpdate,

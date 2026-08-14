@@ -3,7 +3,7 @@ use nmp_store::testing;
 
 // ---- fallible persistence doors and recovery indexing ------------------
 
-pub(super) fn recover_after_observation_io(core: &mut EngineCore<RedbStore>) -> Vec<Effect> {
+pub(super) fn recover_after_observation_io(core: &mut EngineCore) -> Vec<Effect> {
     let (fault, effects) = core
         .recover_requested_redb_store_for_test()
         .expect("the same Redb target reconstructs")

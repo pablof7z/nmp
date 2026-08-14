@@ -58,7 +58,7 @@ fn signer_session(relay: &RelayUrl, signer: PublicKey) -> RelaySessionKey {
 /// Complete the canonical NIP-42 handshake for one exact connected session.
 /// The returned effects are the matching AUTH `OK` wake.
 fn authenticate(
-    core: &mut EngineCore<RedbStore>,
+    core: &mut EngineCore,
     handle: RelayHandle,
     session: &RelaySessionKey,
     signer: &Keys,
@@ -548,7 +548,7 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
         core.handle(EngineMsg::RelayConnected(h2, s2.clone()));
         authenticate(&mut core, h1, &s1, &keys);
         authenticate(&mut core, h2, &s2, &keys);
-        let publish = |core: &mut EngineCore<RedbStore>| {
+        let publish = |core: &mut EngineCore| {
             core.handle(EngineMsg::Publish(WriteIntent {
                 payload: WritePayload::Signed(event.clone()),
                 routing: WriteRouting::Auto,

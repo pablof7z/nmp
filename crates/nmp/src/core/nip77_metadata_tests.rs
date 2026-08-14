@@ -8,7 +8,7 @@ use nmp_store::{coverage_key, RedbStore};
 use nostr::EventId;
 
 struct Fixture {
-    core: EngineCore<RedbStore>,
+    core: EngineCore,
     relay: RelayUrl,
     session: RelaySessionKey,
     plan_sub_id: SubId,

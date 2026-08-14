@@ -60,8 +60,8 @@ fn signed_note(keys: &Keys, kind: u16, created_at: u64, content: &str) -> nostr:
 /// Publish an already-signed event over an explicit route -- exactly what
 /// `Group::publish_signed` and any `Explicit` app publish do, with no signer
 /// round trip in the way of the acceptance moment being observed.
-fn publish_signed_explicit<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn publish_signed_explicit(
+    core: &mut EngineCore,
     event: nostr::Event,
     relays: impl IntoIterator<Item = RelayUrl>,
 ) -> (ReceiptId, Vec<Effect>) {
@@ -137,8 +137,8 @@ impl Projected {
 }
 
 /// One host's own per-relay verdict on the write.
-fn verdict<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn verdict(
+    core: &mut EngineCore,
     slot: u32,
     relay: &RelayUrl,
     event: &nostr::Event,
@@ -156,10 +156,7 @@ fn verdict<S: EventStore>(
 }
 
 /// Open a handle and fold its initial snapshot in one step.
-fn open<S: EventStore>(
-    core: &mut EngineCore<S>,
-    query: LiveQuery,
-) -> (ObservationId, Projected, Vec<Effect>) {
+fn open(core: &mut EngineCore, query: LiveQuery) -> (ObservationId, Projected, Vec<Effect>) {
     let effects = core.handle_and_flush(EngineMsg::Subscribe(query));
     let handle = subscribed_handle(&effects);
     let mut projected = Projected::default();

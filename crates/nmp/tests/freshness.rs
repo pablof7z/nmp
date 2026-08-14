@@ -126,7 +126,7 @@ fn seeded_nested_store(keys: &Keys, inner_relay: &RelayUrl) -> RedbStore {
     store
 }
 
-fn core(store: RedbStore, keys: &Keys, relay: &RelayUrl) -> EngineCore<RedbStore> {
+fn core(store: RedbStore, keys: &Keys, relay: &RelayUrl) -> EngineCore {
     EngineCore::new_with_fixture_routing_facts(
         store,
         FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [relay.clone()]),
@@ -138,7 +138,7 @@ fn core_with_relays(
     store: RedbStore,
     keys: &Keys,
     relays: impl IntoIterator<Item = RelayUrl>,
-) -> EngineCore<RedbStore> {
+) -> EngineCore {
     EngineCore::new_with_fixture_routing_facts(
         store,
         FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), relays),
@@ -146,11 +146,7 @@ fn core_with_relays(
     )
 }
 
-fn subscribe<S: EventStore>(
-    core: &mut EngineCore<S>,
-    query: LiveQuery,
-    admission_at: u64,
-) -> Vec<Effect> {
+fn subscribe(core: &mut EngineCore, query: LiveQuery, admission_at: u64) -> Vec<Effect> {
     let mut effects = core.handle(EngineMsg::Subscribe(query));
     effects.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(admission_at))));
     effects
@@ -241,7 +237,7 @@ fn initial(effects: &[Effect]) -> (ObservationId, Vec<RowDelta>, Vec<Acquisition
     (id, rows, evidence)
 }
 
-fn record<S: EventStore>(store: &mut S, atom: &ContextualAtom, relay: &RelayUrl, through: u64) {
+fn record(store: &mut RedbStore, atom: &ContextualAtom, relay: &RelayUrl, through: u64) {
     store
         .record_coverage(&[(
             atom.clone(),
@@ -251,7 +247,7 @@ fn record<S: EventStore>(store: &mut S, atom: &ContextualAtom, relay: &RelayUrl,
         .unwrap();
 }
 
-fn tick<S: EventStore>(core: &mut EngineCore<S>, now: u64) {
+fn tick(core: &mut EngineCore, now: u64) {
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(now)));
 }
 
