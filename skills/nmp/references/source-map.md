@@ -68,7 +68,9 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-nip29/Cargo.toml`
 - Source: `crates/nmp-nip29/src/lib.rs`
 - Source: `crates/nmp-nip29/src/context.rs`
+- Source: `crates/nmp-nip29/src/group_list.rs`
 - Source: `crates/nmp-nip29/src/operations.rs`
+- Source: `crates/nmp-nip29/src/simple_groups.rs`
 - Source: `crates/nmp-nip73/src/lib.rs`
 - Source: `crates/nmp-signer/src/op.rs`
 - Source: `crates/nmp-content/src/document.rs`
