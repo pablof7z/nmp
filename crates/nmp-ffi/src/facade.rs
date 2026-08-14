@@ -22,10 +22,8 @@ use std::sync::Arc;
 
 use crate::auth::{FfiAuthPolicyAdapter, FfiAuthPolicyCallback, FfiAuthPolicyRegistration};
 use crate::convert::{
-    cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, parse_event_id, parse_pubkey,
-    publish_queue_entry_to_ffi, publish_queue_error_to_ffi, relay_information_error_kind,
-    remove_queue_entry_error_to_ffi, sign_event_request_from_ffi, sign_event_start_error,
-    write_intent_from_ffi, FfiError,
+    parse_pubkey, relay_information_error_kind, sign_event_request_from_ffi,
+    sign_event_start_error, FfiError,
 };
 #[cfg(test)]
 use crate::convert::{FfiRequestRowsError, FfiRowPullError};
@@ -34,13 +32,14 @@ use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
 use crate::session::{
     FfiPrivateKey, FfiPublicKey, FfiSessionAccount, FfiSessionPayload, FfiSessionSnapshot,
 };
+#[cfg(test)]
 use crate::types::{
-    FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiPublishQueueEntry,
-    FfiPublishQueueError, FfiReceiptReattachment, FfiRelayInformation,
-    FfiRelayInformationCachePolicy, FfiRelayInformationDocument, FfiRelayInformationFreshness,
-    FfiRelayInformationLimitations, FfiRemoveQueueEntryError, FfiSignEventRequest, FfiWriteIntent,
+    FfiCancelWriteError, FfiCancelWriteOutcome, FfiReceiptReattachment, FfiWriteIntent,
 };
-use nmp::ReceiptReattachment;
+use crate::types::{
+    FfiRelayInformation, FfiRelayInformationCachePolicy, FfiRelayInformationDocument,
+    FfiRelayInformationFreshness, FfiRelayInformationLimitations, FfiSignEventRequest,
+};
 
 /// Start a follow/unfollow action and expose its status stream (#680/#704). A
 /// valid target starts an async action task on the shared runtime; an
@@ -387,154 +386,6 @@ impl NmpEngine {
             cancel,
             result: receiver.into_async(),
         }))
-    }
-
-    /// Enqueue a write (#680). The returned [`NmpReceiptStream`] exposes the
-    /// stable receipt id ([`NmpReceiptStream::id`]) and streams every
-    /// `WriteFact` this intent ever reaches (ledger #9 -- enqueue is not
-    /// converged; the first value is never a terminal for a durable/
-    /// at-most-once intent) via `async fn next()`. A caller-supplied `Signed`
-    /// payload that fails verification is no longer a synchronous error here
-    /// (that guarantee moved to `nmp-engine::core::EngineCore::on_publish`'s
-    /// acceptance boundary, Unit A0/#56, so it holds for every entry point) --
-    /// it refuses THIS CALL as `FfiError::PublishRefused`, taking nothing
-    /// into custody, so no receipt, no stream and no queue entry exist for
-    /// it. Exhaustion of the pre-acceptance correlation namespace is the
-    /// same shape: a typed `FfiError` and no receipt id.
-    pub fn publish(&self, intent: FfiWriteIntent) -> Result<Arc<NmpReceiptStream>, FfiError> {
-        let write_intent = write_intent_from_ffi(intent)?;
-        #[cfg(feature = "nip65")]
-        if matches!(write_intent.routing, nmp::WriteRouting::Auto)
-            && self.automatic_routing == AutomaticRoutingAssembly::Unavailable
-        {
-            return Err(FfiError::AutomaticRoutingUnavailable);
-        }
-        let receipt = self.engine.publish(write_intent)?;
-        Ok(NmpReceiptStream::new(self.engine.clone(), receipt))
-    }
-
-    /// Attach to a retained receipt without collapsing corrupt durable
-    /// evidence into the same result as an unknown id (#680). The `Attached`
-    /// variant carries an [`NmpReceiptStream`] that transparently traverses
-    /// durable `WriteFact` facts in finite pages and streams onward,
-    /// delivered pull-based via `async fn next()`.
-    pub fn reattach_receipt(&self, receipt_id: u64) -> Result<FfiReceiptReattachment, FfiError> {
-        let result = self.engine.reattach_receipt(nmp::ReceiptId(receipt_id))?;
-        Ok(match result {
-            ReceiptReattachment::Attached {
-                id,
-                statuses,
-                next_cursor,
-            } => FfiReceiptReattachment::Attached {
-                stream: NmpReceiptStream::from_reattachment(
-                    self.engine.clone(),
-                    id,
-                    statuses,
-                    next_cursor,
-                ),
-            },
-            ReceiptReattachment::NotFound => FfiReceiptReattachment::NotFound,
-            ReceiptReattachment::RetainedButUnreadable => {
-                FfiReceiptReattachment::RetainedButUnreadable
-            }
-        })
-    }
-
-    /// #591: recover a receipt after a crash that happened BEFORE the app
-    /// could durably persist the receipt id `publish`
-    /// returned -- looked up by the caller's own crash-safe correlation
-    /// token instead. Otherwise identical to [`Self::reattach_receipt`],
-    /// except the caller cannot already know the receipt id (that is
-    /// exactly what a token recovers) -- `FfiCorrelationReattachment.
-    /// receipt_id` carries it back, `Some` iff `outcome == Attached`.
-    pub fn reattach_by_correlation(
-        &self,
-        correlation: String,
-    ) -> Result<FfiCorrelationReattachment, FfiError> {
-        let result = self.engine.reattach_by_correlation(correlation)?;
-        let receipt_id = match &result {
-            ReceiptReattachment::Attached { id, .. } => Some(id.0),
-            ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => None,
-        };
-        let outcome = match result {
-            ReceiptReattachment::Attached {
-                id,
-                statuses,
-                next_cursor,
-            } => FfiReceiptReattachment::Attached {
-                stream: NmpReceiptStream::from_reattachment(
-                    self.engine.clone(),
-                    id,
-                    statuses,
-                    next_cursor,
-                ),
-            },
-            ReceiptReattachment::NotFound => FfiReceiptReattachment::NotFound,
-            ReceiptReattachment::RetainedButUnreadable => {
-                FfiReceiptReattachment::RetainedButUnreadable
-            }
-        };
-        Ok(FfiCorrelationReattachment {
-            outcome,
-            receipt_id,
-        })
-    }
-
-    /// Read the app's own publish queue back (#1039).
-    ///
-    /// INSPECTION, never waiting: this returns what NMP knows right now and
-    /// never blocks on settlement.
-    pub fn publish_queue(
-        &self,
-        after_receipt_id: Option<u64>,
-        limit: u8,
-    ) -> Result<Vec<FfiPublishQueueEntry>, FfiPublishQueueError> {
-        self.engine
-            .publish_queue(after_receipt_id.map(nmp::ReceiptId), limit)
-            .map(|entries| entries.iter().map(publish_queue_entry_to_ffi).collect())
-            .map_err(publish_queue_error_to_ffi)
-    }
-
-    /// Read one bounded page of currently open obligations for the exact
-    /// event id carried by a query row (#903).
-    pub fn publish_queue_for_event(
-        &self,
-        event_id: String,
-        after_receipt_id: Option<u64>,
-        limit: u8,
-    ) -> Result<Vec<FfiPublishQueueEntry>, FfiPublishQueueError> {
-        let event_id =
-            parse_event_id(&event_id).map_err(|error| FfiPublishQueueError::InvalidEventId {
-                reason: error.to_string(),
-            })?;
-        self.engine
-            .publish_queue_for_event(event_id, after_receipt_id.map(nmp::ReceiptId), limit)
-            .map(|entries| entries.iter().map(publish_queue_entry_to_ffi).collect())
-            .map_err(publish_queue_error_to_ffi)
-    }
-
-    /// Forget one queue entry (#1039). How a write parked forever on a
-    /// missing signer, or a permanently-failed refused entry, ever ends —
-    /// the parked one through `cancel_write` first, which ends the obligation
-    /// and compensates the optimistic row, leaving the terminal receipt this
-    /// door then forgets. An entry whose obligation is still open is refused.
-    pub fn remove_publish_queue_entry(
-        &self,
-        receipt_id: u64,
-    ) -> Result<(), FfiRemoveQueueEntryError> {
-        self.engine
-            .remove_publish_queue_entry(nmp::ReceiptId(receipt_id))
-            .map_err(remove_queue_entry_error_to_ffi)
-    }
-
-    /// Explicitly cancel one accepted unsigned write. A successful outcome
-    /// means the matching durable terminal fact was delivered to receipt
-    /// observers.
-    pub fn cancel(&self, receipt_id: u64) -> Result<FfiCancelWriteOutcome, FfiCancelWriteError> {
-        self.engine
-            .cancel(nmp::ReceiptId(receipt_id))
-            .map(cancel_write_outcome_to_ffi)
-            .map_err(cancel_write_error_to_ffi)
     }
 
     /// Open a live diagnostics stream (#680) -- "the acceptance test rendered

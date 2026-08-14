@@ -200,7 +200,7 @@ scoping choice, unless explicitly documented as platform-specific.
 **Real example — NIP-02 Following absent from Kotlin (issue #493).** The
 NIP-02 following surface shipped fully for Swift (`Packages/NMP/Sources/NMP/Following.swift`,
 391 lines) and in the Rust FFI (`crates/nmp-ffi/src/nip02.rs`,
-`crates/nmp-ffi/src/facade.rs:489-531`) but **zero** matching Kotlin surface
+`crates/nmp-ffi/src/facade.rs:423-452`) but **zero** matching Kotlin surface
 existed — silently breaking the claimed Rust/UniFFI/Swift/Kotlin parity for
 the largest single instance of this class the #485 sweep found.
 
