@@ -356,6 +356,19 @@ impl EngineCore {
             correlation,
             fence,
         } = continuation;
+        // The first correlation lookup happened before this capability call
+        // left the reducer. Another publish can enter custody while the call
+        // is blocked, so repeat the exact replay door before consulting stale
+        // callback output or accepting a second obligation.
+        if let Some(token) = correlation.as_ref() {
+            match self.replay_correlated_publish(token, None) {
+                Ok(Some(effects)) => return PublishPreparation::Complete(effects),
+                Ok(None) => {}
+                Err(error) => {
+                    return PublishPreparation::Complete(self.refuse_publish(error));
+                }
+            }
+        }
         let Some(registration) = self.replaceable_materializers.get(&instance) else {
             return PublishPreparation::Complete(self.refuse_publish(
                 PublishError::ReplaceableOperationRefused {

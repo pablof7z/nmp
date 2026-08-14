@@ -67,9 +67,10 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:id=WRITES-REPLACEABLE-EDIT-024
   # nmp:status=built
   # nmp:evidence=rust:nmp::blocked_initial_materializer_does_not_block_engine_work_or_shutdown
+  # nmp:evidence=rust:nmp::blocked_initial_materializer_replays_a_retry_token_claimed_while_in_flight
   # nmp:evidence=rust:nmp::stale_initial_materializer_completion_retries_against_durable_truth
   # nmp:evidence=rust:nmp::initial_materializer_failures_leave_no_acceptance_residue
-  # nmp:falsifier=Keep capability preparation on the engine thread or behind the facade lock; the barrier prevents ordinary work or shutdown from completing, or a stale answer enters custody and loses one concurrent action.
+  # nmp:falsifier=Keep capability preparation on the engine thread or behind the facade lock; the barrier prevents ordinary work or shutdown from completing, a stale answer enters custody and loses one concurrent action, or an in-flight operation accepts a retry token already claimed by another write.
   @acceptance
   Scenario: Preparing a capability operation cannot freeze the engine before custody
     Given a configured capability has begun preparing a complete replacement
