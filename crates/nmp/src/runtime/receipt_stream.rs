@@ -300,10 +300,13 @@ impl Handle {
     /// `Ephemeral` also yields receipt facts, but owns no publish queue
     /// obligation or query-visible pending row.
     ///
-    /// This synchronous round trip waits only for the local crash-atomic
-    /// acceptance door, never for signing, routing, network I/O, or ACKs.
-    /// If no pre-acceptance correlation id remains, this returns a typed
-    /// error before any stream or identity is fabricated.
+    /// This synchronous round trip waits for the local crash-atomic
+    /// acceptance door. A replayable operation may first wait for its
+    /// configured capability to produce a complete candidate on a detached
+    /// call thread; that wait owns neither the engine state thread nor the
+    /// facade lifecycle lock. It never waits for signing, routing, network
+    /// I/O, or ACKs. If shutdown or another pre-acceptance refusal wins, this
+    /// returns a typed error before any stream or identity is fabricated.
     pub fn publish(&self, intent: WriteIntent) -> Result<ReceiptStream, PublishError> {
         let (tx, rx) = fifo_channel();
         let registration = ReceiptDeliveryRegistration::new();
@@ -315,10 +318,10 @@ impl Handle {
                 registration: registration.clone(),
                 reply: reply_tx,
             })
-            .expect("nmp-engine: publish called after shutdown");
+            .map_err(|_| PublishError::EngineShuttingDown)?;
         let (id, event_id) = reply_rx
             .recv()
-            .expect("nmp-engine: engine dropped publish receipt reply")?;
+            .map_err(|_| PublishError::EngineShuttingDown)??;
         arm_receipt_delivery_close(&rx, self.inbox.clone(), id, registration);
         Ok(ReceiptStream {
             id,

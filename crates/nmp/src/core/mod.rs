@@ -69,6 +69,10 @@ mod semantic_sources;
 #[cfg(test)]
 mod transport_tests;
 mod write;
+pub(crate) use write::{
+    PreparedReplaceableMaterialization, PublishPreparation, ReplaceableMaterializationCall,
+    ReplaceableMaterializationContinuation, ReplaceableMaterializationOutcome,
+};
 #[cfg(test)]
 mod write_tests;
 

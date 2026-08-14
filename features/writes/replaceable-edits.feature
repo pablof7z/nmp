@@ -64,6 +64,23 @@ Feature: A replaceable edit says which version it replaces, and is checked again
     Then publishing is refused with a typed configuration error
     And NMP retains no receipt, write intent, optimistic row, signing work, route, delivery work, or correlation
 
+  # nmp:id=WRITES-REPLACEABLE-EDIT-024
+  # nmp:status=built
+  # nmp:evidence=rust:nmp::blocked_initial_materializer_does_not_block_engine_work_or_shutdown
+  # nmp:evidence=rust:nmp::stale_initial_materializer_completion_retries_against_durable_truth
+  # nmp:evidence=rust:nmp::initial_materializer_failures_leave_no_acceptance_residue
+  # nmp:falsifier=Keep capability preparation on the engine thread or behind the facade lock; the barrier prevents ordinary work or shutdown from completing, or a stale answer enters custody and loses one concurrent action.
+  @acceptance
+  Scenario: Preparing a capability operation cannot freeze the engine before custody
+    Given a configured capability has begun preparing a complete replacement
+    And that capability remains blocked before the operation enters custody
+    When I open an ordinary observation and publish an unrelated event
+    Then the observation and ordinary publication complete while the capability remains blocked
+    When I shut down NMP without releasing the capability
+    Then shutdown completes
+    And the blocked publication reports that the engine closed
+    And NMP retains no receipt, write intent, optimistic row, signing work, route, delivery work, or correlation for the blocked operation
+
   # The encrypted content is opaque to an operation that owns only a public
   # tag. Its presence does not turn that operation into a crypto operation.
 
