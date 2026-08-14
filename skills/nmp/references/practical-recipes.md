@@ -41,7 +41,7 @@ Use `homeAuthors` in the content filter with `.authorOutboxes`. The self-union i
 
 Goal: show identity metadata and authored content without creating an app cache or hidden join.
 
-1. Decode the route input with the platform's public Nostr-entity decoder when it may be `npub`, `nprofile`, or a `nostr:` URI. Reject unsupported entity shapes explicitly.
+1. Decode the route input with the platform's public Nostr-entity decoder when it may be `npub`, `nprofile`, or a `nostr:` URI. Reject unsupported entity shapes explicitly. That decode is the user boundary and the only place these spellings appear: what crosses into NMP is the decoded key, and no filter field, demand, engine argument, or app model below the boundary holds a bech32 string. Re-encode only to show a human.
 2. Open a replaceable metadata query and the content query as separate live demands. Each owns its source evidence and cancellation.
 3. Parse row content with `parseNostrContent` when you want source ranges and resolved locators; otherwise parse raw event content in app-owned presentation code. Parsing is pure and owns nothing.
 4. Keep one current profile projection for display, but do not persist it as an authority beside NMP's canonical store.
@@ -180,7 +180,7 @@ Swift has `observeFollowing`, `follow`, `unfollow`, and the `NMPFollowing` resou
 
 Do not set `isFollowing = true` on tap. Render action progress separately until the live following snapshot changes. A missing reconciled contact list is an explicit refusal: ordinary follow must not create a first kind-3 list containing only one contact. Product onboarding must handle first-list creation as a distinct capability/workflow.
 
-Both wrappers expose `observeFollowing`/`follow`/`unfollow` on `NMPEngine` when the `nip02` ("following") capability is in the app's `.nmp.toml`; without it the whole family is absent at compile time. Only the SwiftUI `NMPFollowing` observable object is Swift-specific, and it ships in this repository's qualification package rather than the prepared Apple product. Terminal failures arrive as `FollowActionStatus.Failed` carrying a `FollowActionFailure` — `NoContactList`, `SignedOut`, `AccountChanged`, `AcquisitionTimedOut`, `CachedOnly`, `SourceUnavailable`, and the rest are distinct outcomes, not one error. Do not import generated FFI types or reproduce contact-list editing in application code.
+Both wrappers expose `observeFollowing`/`follow`/`unfollow` on `NMPEngine` when the `nip02` ("following") capability is in the app's `.nmp.toml`; without it the whole family is absent at compile time. Only the Combine `NMPFollowing` `ObservableObject` is Swift-specific, and it ships with that same capability. The `NMPFollowButton` view over it is `NMPUI`, which is repo-only. Terminal failures arrive as `FollowActionStatus.Failed` carrying a `FollowActionFailure` — `NoContactList`, `SignedOut`, `AccountChanged`, `AcquisitionTimedOut`, `CachedOnly`, `SourceUnavailable`, and the rest are distinct outcomes, not one error. Do not import generated FFI types or reproduce contact-list editing in application code.
 
 ## Durable publishing and restart
 
