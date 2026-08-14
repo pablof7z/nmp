@@ -6,13 +6,6 @@
 
 use super::*;
 
-type AttributedRelayObservation = (
-    SignedEvent,
-    RelayObserved,
-    Option<CommittedObservationCandidate>,
-    Option<(RelaySessionKey, String)>,
-);
-
 impl EngineCore {
     // ---- transport wiring (slot bookkeeping only — C owns the pool) -----
 
@@ -1302,6 +1295,25 @@ impl EngineCore {
                 .collect(),
             effects,
         );
+        // Headless core tests historically observed the complete ingest turn.
+        // Runtime tests exercise the real detached execution path; keep this
+        // private test/benchmark door synchronous so existing reducer tests do
+        // not silently stop at the newly explicit runtime effect.
+        let mut pending = VecDeque::from(std::mem::take(effects));
+        let mut completed = Vec::new();
+        while let Some(effect) = pending.pop_front() {
+            match effect {
+                Effect::MaterializeReplaceableSuccessor(prepared) => {
+                    let PreparedReplaceableSuccessor { call, continuation } = *prepared;
+                    pending.extend(self.complete_replaceable_successor_materialization(
+                        continuation,
+                        call.execute(),
+                    ));
+                }
+                other => completed.push(other),
+            }
+        }
+        *effects = completed;
     }
 
     fn ingest_relay_observations(
@@ -1327,6 +1339,23 @@ impl EngineCore {
         events: Vec<AttributedRelayObservation>,
         effects: &mut Vec<Effect>,
     ) {
+        self.ingest_relay_observations_governed(events, effects, true);
+    }
+
+    pub(super) fn ingest_ordinary_relay_observations(
+        &mut self,
+        events: Vec<AttributedRelayObservation>,
+        effects: &mut Vec<Effect>,
+    ) {
+        self.ingest_relay_observations_governed(events, effects, false);
+    }
+
+    fn ingest_relay_observations_governed(
+        &mut self,
+        events: Vec<AttributedRelayObservation>,
+        effects: &mut Vec<Effect>,
+        prepare_semantic_successors: bool,
+    ) {
         if events.is_empty() {
             return;
         }
@@ -1337,20 +1366,26 @@ impl EngineCore {
         // Active semantic resources own their source/effective transition.
         // Consume those events through the one atomic store door before the
         // ordinary ingest path can make a raw relay source canonical.
-        let events = events
-            .into_iter()
-            .filter(|(event, observed, _, attribution)| {
-                let owned_request = attribution.as_ref().and_then(|(session, wire_sub_id)| {
-                    self.semantic_source_request_for_wire(session, wire_sub_id)
-                });
-                !self.install_semantic_source_successor(
-                    event.clone(),
-                    observed.clone(),
-                    owned_request.as_ref(),
-                    effects,
-                )
-            })
-            .collect::<Vec<_>>();
+        let events = if prepare_semantic_successors {
+            events
+                .into_iter()
+                .filter(|(event, observed, candidate, attribution)| {
+                    let owned_request = attribution.as_ref().and_then(|(session, wire_sub_id)| {
+                        self.semantic_source_request_with_key_for_wire(session, wire_sub_id)
+                    });
+                    !self.install_semantic_source_successor(
+                        event.clone(),
+                        observed.clone(),
+                        *candidate,
+                        attribution.clone(),
+                        owned_request.as_ref(),
+                        effects,
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            events
+        };
         if events.is_empty() {
             return;
         }
@@ -1705,6 +1740,8 @@ impl EngineCore {
             }
             RelayMessage::EndOfStoredEvents(sub_id) => {
                 let wire_id = sub_id.as_str();
+                let semantic_source_key =
+                    self.semantic_source_request_key_for_wire(&session, wire_id);
                 // Resolve before consuming the snapshot. The resolved typed
                 // id routes the same EOSE into the NIP-77 handoff/repair
                 // state machine after ordinary coverage attribution.
@@ -1728,6 +1765,16 @@ impl EngineCore {
                 let terminal_demands = if let Some(send) =
                     completed_send.filter(|_| !opens_neg && settled)
                 {
+                    if let Some(key) = semantic_source_key {
+                        // Close successor admission before this batch can
+                        // reduce a later EVENT for the same exact request.
+                        // The matching observation fact below applies the
+                        // durable terminal only after in-flight work ends.
+                        self.defer_semantic_source_terminal(
+                            key,
+                            nmp_store::SemanticSourceTerminal::Eose,
+                        );
+                    }
                     self.emit_request_settled(send, self.clock, RequestTerminal::Eose, &mut effects)
                 } else if let Some(send) = completed_send.filter(|_| !opens_neg) {
                     self.retire_request_evidence(send)
@@ -1766,10 +1813,10 @@ impl EngineCore {
                         self.abandon_sub(&resolved);
                         match request {
                             TemporaryReq::MissingIds {
+                                plan_sub_id,
                                 neg_sub_id,
                                 attribution_send,
                                 completed_at,
-                                ..
                             } => {
                                 let committed_coverage = self.credit_neg_coverage(
                                     &neg_sub_id,
@@ -1779,6 +1826,15 @@ impl EngineCore {
                                     &mut effects,
                                 );
                                 let terminal_demands = if committed_coverage.is_some() {
+                                    // The missing-id EOSE completes the
+                                    // retained NEG question. Close successor
+                                    // admission before this RelayFrames turn
+                                    // can reduce another EVENT for the same
+                                    // exact finite request.
+                                    self.defer_owned_semantic_source_terminal(
+                                        (session.clone(), plan_sub_id),
+                                        nmp_store::SemanticSourceTerminal::Eose,
+                                    );
                                     self.emit_request_settled(
                                         attribution_send,
                                         completed_at,
@@ -1868,17 +1924,20 @@ impl EngineCore {
                 subscription_id,
                 message,
             } => {
+                let reason = message.into_owned();
+                if let Some(key) =
+                    self.semantic_source_request_key_for_wire(&session, subscription_id.as_str())
+                {
+                    self.defer_semantic_source_terminal(
+                        key,
+                        nmp_store::SemanticSourceTerminal::Failed(reason.clone()),
+                    );
+                }
                 if let Some(sub_id) = self
                     .attribution
                     .sub_id_for_wire(&session, subscription_id.as_str())
                 {
-                    self.close_requests_for_sub(
-                        &session,
-                        handle,
-                        &sub_id,
-                        message.into_owned(),
-                        &mut effects,
-                    );
+                    self.close_requests_for_sub(&session, handle, &sub_id, reason, &mut effects);
                 }
             }
             RelayMessage::NegMsg {
