@@ -8,9 +8,11 @@
 //! [`comment_intent`] write operation, instead of each binding the mechanism
 //! crate independently and having to keep two owners aligned by convention.
 //!
-//! The crate is engine-free by construction -- [`comment_intent`] takes its
-//! author and timestamp explicitly and never reads an ambient current account --
-//! so nothing here needs the engine to compose a comment. What it returns is an
+//! The crate is engine-free by construction -- [`comment_intent`] states no
+//! author or timestamp itself; it builds a draft on the ordinary default
+//! identity and routing every write has, which the engine resolves and stamps
+//! at acceptance -- so nothing here needs the engine to compose a comment.
+//! What it returns is an
 //! ordinary [`crate::WriteIntent`] (#907), published through the same
 //! `Engine::publish` lifecycle as every other write; NIP-22 owns no separate
 //! correlation, take-once, signing, routing, receipt, or retry machinery.

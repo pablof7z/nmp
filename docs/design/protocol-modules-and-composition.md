@@ -64,10 +64,13 @@ Responsibilities remain separate:
 - Core validates the final draft, resolves the chosen signer, signs exactly
   once, persists it, and publishes it.
 
-Current implementation status (#838): `nmp-nip29` ships the pure
-draft-to-`GroupPublication` contextualization seam and `nmp-nipc7` separately
-ships kind:9/`q` construction. The engine/native publication step in the
-illustration above is still a required composition proof, not a shipped API.
+Current implementation status: `nmp-nipc7` ships kind:9/`q` construction
+(#838), and NIP-29 group publication is a shipped API. `nip29::Group` in the
+`nmp` facade mints both halves of a group's traffic -- a read `Demand` and a
+complete `WriteIntent` (`h` row appended before signing, routing pinned to the
+group's host) -- and hands the intent to the same `Engine::publish` door every
+other write uses (#977, #1011). The illustration above is not literal API
+syntax, but the composition proof it stood in for is complete.
 
 Upload failure and Nostr publication failure are distinct results. NIP-29's
 contextual publication does not transfer schema ownership of the photo to
@@ -126,12 +129,15 @@ protocol-specific publication overload would create a second owner of the
 same write.
 
 #838 removed NIP-29's former `FfiComposedWriteIntent` / `GroupSendIntent` and
-`publishComposed` path. `nmp-nip29` now returns the pure
-`GroupPublication` value described above, while the engine and native SDKs
-have no single-host publication route for it. Completing that composition
-remains #824 work: it must preserve the contextualized event and selected host
-without reintroducing a forgeable raw relay override, parallel write noun, or
-second publication lifecycle.
+`publishComposed` path and replaced it with the pure `GroupPublication`
+value. #977/#1011 later deleted `GroupPublication`, `contextualize_group_event`,
+and `crates/nmp-nip29/src/publication.rs` outright -- no alias, no
+deprecation -- and replaced them with `nip29::Group` in the `nmp` facade: an
+identity value that mints both halves of a group's traffic, a read `Demand`
+and a complete `WriteIntent`, and hands the intent to the same
+`Engine::publish` door every other write uses. That single-host publication
+route is complete: no forgeable raw relay override, no parallel write noun,
+and no second publication lifecycle.
 
 ## 7. Falsification
 
