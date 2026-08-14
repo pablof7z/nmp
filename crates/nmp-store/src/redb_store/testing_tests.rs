@@ -5,14 +5,15 @@
 
 use std::path::Path;
 
-use nostr::EventId;
+use nostr::{EventId, RelayUrl};
 use redb::{Database, ReadableTable, TableDefinition};
 
 use super::schema::{
-    event_row_key, persist_err, EVENTS, EVENT_IDS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_INTENTS,
-    PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_ROUTE_REVISIONS,
+    event_row_key, persist_err, COVERAGE, EVENTS, EVENT_IDS, PUBLISH_QUEUE_ATTEMPTS,
+    PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
-use crate::PersistenceError;
+use super::RedbStore;
+use crate::{CoverageKey, PersistenceError};
 
 fn corrupt_first_row<const N: usize>(
     path: &Path,
@@ -100,6 +101,32 @@ pub fn corrupt_canonical_event(path: &Path, event_id: EventId) -> Result<(), Per
                 event_row_key(event_key).as_slice(),
                 b"NMPE-truncated".as_slice(),
             )
+            .map_err(persist_err)?;
+    }
+    tx.commit().map_err(persist_err)?;
+    Ok(())
+}
+
+/// Overwrite the coverage row named by `key` and `relay` with undecodable JSON.
+pub fn corrupt_coverage(
+    path: &Path,
+    key: CoverageKey,
+    relay: &RelayUrl,
+) -> Result<(), PersistenceError> {
+    let db = Database::open(path).map_err(persist_err)?;
+    let tx = db.begin_write().map_err(persist_err)?;
+    let row_key = RedbStore::coverage_row_key(key, relay);
+    {
+        let mut coverage = tx.open_table(COVERAGE).map_err(persist_err)?;
+        if coverage
+            .get(row_key.as_str())
+            .map_err(persist_err)?
+            .is_none()
+        {
+            return Err(PersistenceError::invariant("coverage row fixture"));
+        }
+        coverage
+            .insert(row_key.as_str(), "{ not a coverage row")
             .map_err(persist_err)?;
     }
     tx.commit().map_err(persist_err)?;

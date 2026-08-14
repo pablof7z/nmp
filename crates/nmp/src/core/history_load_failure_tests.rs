@@ -18,10 +18,6 @@ use super::*;
 enum StoreFailure {
     Query(String),
     NewestBefore(String),
-    Coverage {
-        message: String,
-        successes_before_failure: usize,
-    },
     CoverageWrite(String),
 }
 
@@ -35,13 +31,6 @@ impl StoreFailureControl {
 
     fn fail_newest_before(&self, message: &str) {
         *self.0.lock().unwrap() = Some(StoreFailure::NewestBefore(message.to_owned()));
-    }
-
-    fn fail_coverage_after(&self, successes_before_failure: usize, message: &str) {
-        *self.0.lock().unwrap() = Some(StoreFailure::Coverage {
-            message: message.to_owned(),
-            successes_before_failure,
-        });
     }
 
     pub(super) fn fail_coverage_write(&self, message: &str) {
@@ -82,25 +71,6 @@ impl StoreFailureControl {
         } else {
             None
         }
-    }
-
-    fn take_coverage_failure(&self) -> Option<PersistenceError> {
-        let mut failure = self.0.lock().unwrap();
-        let Some(StoreFailure::Coverage {
-            successes_before_failure,
-            ..
-        }) = failure.as_mut()
-        else {
-            return None;
-        };
-        if *successes_before_failure > 0 {
-            *successes_before_failure -= 1;
-            return None;
-        }
-        let Some(StoreFailure::Coverage { message, .. }) = failure.take() else {
-            unreachable!()
-        };
-        Some(PersistenceError::invariant(message))
     }
 }
 
@@ -181,9 +151,6 @@ impl EventStore for ControlledFailureStore {
         key: CoverageKey,
         relay: &RelayUrl,
     ) -> Result<Option<CoverageInterval>, PersistenceError> {
-        if let Some(error) = self.control.take_coverage_failure() {
-            return Err(error);
-        }
         self.inner.get_coverage(key, relay)
     }
 
@@ -519,7 +486,8 @@ fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
 
 #[test]
 fn opening_freshness_refusal_leaves_no_candidate_request_target_index() {
-    let control = StoreFailureControl::default();
+    let directory = tempfile::tempdir().expect("coverage corruption directory");
+    let path = directory.path().join("opening-freshness-corruption.redb");
     let relay = RelayUrl::parse("wss://request-target-refusal.example").unwrap();
     let filter = Filter {
         kinds: Some(BTreeSet::from([1])),
@@ -540,28 +508,35 @@ fn opening_freshness_refusal_leaves_no_candidate_request_target_index() {
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
-    let mut store = RedbStore::temporary().expect("temporary Redb store");
-    store
-        .record_coverage(&[(
-            atom,
-            relay,
-            CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
-        )])
-        .unwrap();
-    let mut core = EngineCore::new(ControlledFailureStore::new(store, control.clone()), 20);
+    let coverage_key = nmp_store::coverage_key(&atom);
+    {
+        let mut store = RedbStore::open(&path).expect("create persistent Redb fixture");
+        store
+            .record_coverage(&[(
+                atom,
+                relay.clone(),
+                CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
+            )])
+            .expect("seed coverage row");
+    }
+    testing::corrupt_coverage(&path, coverage_key, &relay)
+        .expect("store-owned coverage corruption");
+    let mut core = EngineCore::new(
+        RedbStore::open(&path).expect("reopen corrupted Redb fixture"),
+        20,
+    );
     core.handle(EngineMsg::Tick(Timestamp::from(100u64)));
     // MaxAge now uses this one read for both its freshness decision and the
-    // opening frame. Fail that sole authority and prove the candidate graph
+    // opening frame. Corrupt that sole authority and prove the candidate graph
     // unwinds before any request-target ownership can escape.
-    control.fail_coverage_after(0, "opening evidence coverage failed");
 
     let refusal = core.open_observation(LiveQuery::single(demand), Timestamp::from(100u64));
     match refusal {
         ObservationOpen::Refused { reason, .. } => assert!(
-            reason.contains("opening evidence coverage failed"),
+            reason.contains("decode coverage row"),
             "unexpected refusal: {reason}"
         ),
-        ObservationOpen::Opened { .. } => panic!("injected coverage failure was ignored"),
+        ObservationOpen::Opened { .. } => panic!("corrupt coverage row was ignored"),
     }
     assert_eq!(
         core.bench_ownership_census(),
