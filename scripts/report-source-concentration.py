@@ -703,9 +703,35 @@ def render_single(file_reports: List[FileReport], rel_path: str) -> str:
     return "\n".join(lines)
 
 
+HELP_TEXT = """\
+usage: report-source-concentration.sh [--full] [--file <path>]
+
+Report production/test/documentation/generated line counts per tracked .rs
+file and per root-workspace Cargo package (#1561): review triggers at
+500/1,000/1,500 non-test lines per file, and a flag for packages under
+~250 production lines. A report, not a gate -- the exit code reports only
+a tool-level failure, never a crossed threshold.
+
+This runs on demand, not on every PR: numbers from your own branch, run
+right now, are fresher and more trustworthy for a decomposition review
+(#1496 and friends) than anything a historical CI log could show, and a
+non-blocking check nobody is required to open would just be ceremony.
+Run it yourself before/during that kind of work.
+
+  (no flags)     per-package totals + every file crossing a trigger
+  --full         also list every tracked .rs file, flagged or not
+  --file <path>  exact counts for one file (repo-relative path)
+  -h, --help     this text
+"""
+
+
 def main(argv: List[str]) -> int:
+    if any(a in ("-h", "--help") for a in argv):
+        print(HELP_TEXT, end="")
+        return 0
+
     if not argv:
-        print("usage: report-source-concentration.py <root> [--full] [--file <path>]", file=sys.stderr)
+        print("usage: report-source-concentration.py <root> [--full] [--file <path>] [--help]", file=sys.stderr)
         return 2
 
     root_arg = argv[0]
