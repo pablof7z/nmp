@@ -8,11 +8,7 @@ fn waiting_connection_attempt_is_anchored_to_connect_time_without_maintenance() 
     let relay = RelayUrl::parse("wss://waiting-connection-clock.example.com").unwrap();
     let old_time = Timestamp::from(100u64);
     let connect_time = Timestamp::from(10_000u64);
-    let faults = LaneFaults::default();
-    let store = FaultyLaneStore::new(
-        RedbStore::temporary().expect("temporary Redb store"),
-        faults.clone(),
-    );
+    let store = RedbStore::temporary().expect("temporary Redb store");
     let mut core = EngineCore::new(store, 10);
     core.advance_clock(old_time);
 
@@ -44,5 +40,5 @@ fn waiting_connection_attempt_is_anchored_to_connect_time_without_maintenance() 
         .expect("attempt-detail recovery");
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].started_at, Some(connect_time));
-    assert_eq!(faults.maintenance_sweeps(), 0);
+    assert_eq!(core.maintenance_turn_count(), 0);
 }
