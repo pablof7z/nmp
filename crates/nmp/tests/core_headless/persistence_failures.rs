@@ -3,21 +3,20 @@ use nmp_store::testing;
 
 // ---- fallible persistence doors and recovery indexing ------------------
 //
-// A fault-injecting `EventStore` retained only for coverage and publish-queue
-// deadline peeks that cannot yet be expressed by the concrete Redb fixture.
-// Relay-observation I/O and projection corruption use Redb's real lifecycle
-// below.
+// A fault-injecting `EventStore` retained only for coverage peeks that cannot
+// yet be expressed by the concrete Redb fixture. Relay-observation I/O and
+// durable-row corruption use Redb's real lifecycle below.
 pub(super) struct FailIngestStore {
     inner: RedbStore,
-    /// #763's coverage and publish-queue deadline peeks. Sticky (not one-shot)
-    /// because these model a store that has gone away rather than a single
-    /// failed operation, and because the falsifiers below need to heal them
-    /// explicitly to prove the engine comes back.
+    /// #763's coverage peeks. Sticky (not one-shot) because these model a
+    /// store that has gone away rather than a single failed operation, and
+    /// because the falsifiers below need to heal them explicitly to prove the
+    /// engine comes back.
     fail_peeks: Rc<Cell<bool>>,
 }
 
 impl FailIngestStore {
-    /// Healthy in every door except the two #763 peeks, which refuse while
+    /// Healthy in every door except #763's coverage peek, which refuses while
     /// `fail_peeks` is set.
     fn peek_armed(fail_peeks: Rc<Cell<bool>>) -> Self {
         Self {
@@ -153,16 +152,8 @@ impl EventStore for FailIngestStore {
     ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
         self.inner.recover_attempts(intent_id)
     }
-    /// Delegated explicitly rather than left on the trait default (which is
-    /// `Err("delivery deadlines unsupported")`): `EngineCore::next_deadline`
-    /// no longer erases this door's failure with `.ok().flatten()` (#763),
-    /// so a double that wants to model a healthy delivery plane has to
-    /// actually answer here. Armed by the same `fail_peeks` switch.
     fn next_publish_queue_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        match self.peek_failure() {
-            Some(error) => Err(error),
-            None => self.inner.next_publish_queue_deadline(),
-        }
+        self.inner.next_publish_queue_deadline()
     }
     delegate_publish_queue_door!(inner);
 }
@@ -1779,6 +1770,103 @@ fn a_failing_store_read_makes_the_next_deadline_a_typed_error_not_a_false_none()
             .expect("the reconstructed Redb generation answers"),
         None,
         "the same deadline door is healthy after reconstruction"
+    );
+}
+
+/// #763 delivery falsifier: a corrupt durable delivery deadline is a typed
+/// read failure, never false absence that parks the runtime forever.
+#[test]
+fn a_failing_publish_queue_deadline_read_is_a_typed_error_not_a_false_none() {
+    let directory = tempfile::tempdir().expect("delivery deadline directory");
+    let path = directory.path().join("delivery-deadline-corruption.redb");
+    let keys = Keys::generate();
+    let relay = RelayUrl::parse("wss://delivery-deadline-corruption.example").unwrap();
+    let deadline = Timestamp::from(1_033u64);
+    let attempt = {
+        let mut store = RedbStore::open(&path).expect("open persistent Redb fixture");
+        let signed = nostr::EventBuilder::new(Kind::TextNote, "delivery deadline")
+            .custom_created_at(Timestamp::from(1_000u64))
+            .sign_with_keys(&keys)
+            .expect("sign fixture event");
+        let frozen = nostr::Event::new(
+            signed.id,
+            signed.pubkey,
+            signed.created_at,
+            signed.kind,
+            signed.tags.clone(),
+            signed.content.clone(),
+            nmp_store::sentinel_signature(),
+        );
+        let accepted = store
+            .accept_write(AcceptWrite {
+                payload: nmp_store::AcceptWritePayload::Event {
+                    frozen: Box::new(frozen),
+                    replaceable_base: None,
+                    monotonic_stamp: false,
+                    routing: "delivery-deadline-proof".into(),
+                    sig_state: nmp_store::IntentSigState::Pending,
+                },
+                expected_pubkey: keys.public_key(),
+                signing_identity_ref: "delivery-deadline-proof".into(),
+                accepted_at: Timestamp::from(1_000u64),
+                correlation: None,
+            })
+            .expect("accept fixture intent");
+        let intent = accepted.journaled_intent_id().expect("journaled intent");
+        store
+            .promote_signed(
+                nmp_store::PromotionTarget::Event(intent),
+                nmp_store::VerifiedSignature::verify(&signed).expect("verify fixture signature"),
+            )
+            .expect("promote fixture intent");
+        store
+            .record_route_revision(intent, BTreeSet::from([relay]))
+            .expect("record route");
+        let lane = store
+            .bootstrap_publish_queue_lanes(intent)
+            .expect("bootstrap lane")
+            .remove(0);
+        let eligible = store
+            .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(1_001u64))
+            .expect("make lane eligible");
+        let (attempt, started) = store
+            .start_lane_attempt(
+                &eligible.key,
+                eligible.revision,
+                signed,
+                Timestamp::from(1_002u64),
+            )
+            .expect("start attempt");
+        store
+            .record_lane_handoff(
+                &started.key,
+                started.revision,
+                started.last_ordinal,
+                nmp_store::PublishQueueAttemptHandoff {
+                    at: Timestamp::from(1_003u64),
+                    result: nmp_store::HandoffEvidence::Written,
+                },
+                nmp_store::PublishQueuePostHandoffState::AwaitingAck { deadline },
+            )
+            .expect("record awaiting-ack handoff");
+        assert_eq!(store.next_expiration().unwrap(), None);
+        assert_eq!(store.next_publish_queue_deadline().unwrap(), Some(deadline));
+        attempt
+    };
+
+    testing::corrupt_publish_queue_deadline(&path, &attempt)
+        .expect("corrupt the exact ordered deadline row");
+    let store = RedbStore::open(&path).expect("reopen corrupted fixture");
+    assert_eq!(store.next_expiration().unwrap(), None);
+    let core = EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10);
+    let error = core
+        .next_deadline()
+        .expect_err("the corrupt delivery deadline must not become false absence");
+    assert_eq!(error.fault(), PersistenceFault::Invariant);
+    assert!(
+        error.message().contains("decode publish queue deadline"),
+        "the exact deadline codec owns the error: {}",
+        error.message()
     );
 }
 

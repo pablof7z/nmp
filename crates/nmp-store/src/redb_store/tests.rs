@@ -649,6 +649,83 @@ fn configured_lane_handoff_failure_rolls_back_and_is_consumed_once() {
 }
 
 #[test]
+fn corrupt_publish_queue_deadline_targets_exact_awaiting_ack_attempt() {
+    let directory = tempfile::tempdir().expect("deadline corruption directory");
+    let path = directory.path().join("delivery-deadline-corruption.redb");
+    let keys = nostr::Keys::generate();
+    let relay = RelayUrl::parse("wss://deadline-corruption.example").unwrap();
+    let deadline = Timestamp::from(1_033u64);
+    let (intent, attempt, handed_off) = {
+        let mut store = RedbStore::open(&path).expect("open persistent Redb fixture");
+        let (intent, signed) = accepted_signed(&mut store, &keys, "deadline corruption", 1_000);
+        store
+            .record_route_revision(intent, BTreeSet::from([relay]))
+            .unwrap();
+        let lane = store
+            .bootstrap_publish_queue_lanes(intent)
+            .unwrap()
+            .remove(0);
+        let eligible = store
+            .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(1_001u64))
+            .unwrap();
+        let (attempt, started) = store
+            .start_lane_attempt(
+                &eligible.key,
+                eligible.revision,
+                signed,
+                Timestamp::from(1_002u64),
+            )
+            .unwrap();
+        let handed_off = store
+            .record_lane_handoff(
+                &started.key,
+                started.revision,
+                started.last_ordinal,
+                PublishQueueAttemptHandoff {
+                    at: Timestamp::from(1_003u64),
+                    result: crate::HandoffEvidence::Written,
+                },
+                PublishQueuePostHandoffState::AwaitingAck { deadline },
+            )
+            .unwrap();
+        assert_eq!(store.next_expiration().unwrap(), None);
+        assert_eq!(store.next_publish_queue_deadline().unwrap(), Some(deadline));
+        (intent, attempt, handed_off)
+    };
+
+    let mut wrong_attempt = attempt.clone();
+    wrong_attempt.ordinal += 1;
+    let error = testing::corrupt_publish_queue_deadline(&path, &wrong_attempt)
+        .expect_err("a different attempt ordinal must not name the deadline row");
+    assert_eq!(error.fault(), PersistenceFault::Invariant);
+    {
+        let store = RedbStore::open(&path).expect("wrong target leaves store readable");
+        assert_eq!(store.next_expiration().unwrap(), None);
+        assert_eq!(store.next_publish_queue_deadline().unwrap(), Some(deadline));
+    }
+
+    testing::corrupt_publish_queue_deadline(&path, &attempt)
+        .expect("corrupt the exact ordered deadline row");
+    let store = RedbStore::open(&path).expect("reopen corrupted fixture");
+    assert_eq!(store.next_expiration().unwrap(), None);
+    assert_eq!(store.recover_attempts(intent).unwrap(), vec![attempt]);
+    assert_eq!(
+        store.recover_publish_queue_lanes(intent).unwrap(),
+        vec![handed_off]
+    );
+    let error = store
+        .next_publish_queue_deadline()
+        .expect_err("the corrupt deadline value must not become false absence");
+    assert_eq!(error.fault(), PersistenceFault::Invariant);
+    assert_eq!(error.durability(), DurabilityOutcome::Absent);
+    assert!(
+        error.message().contains("decode publish queue deadline"),
+        "the exact deadline codec owns the error: {}",
+        error.message()
+    );
+}
+
+#[test]
 fn configured_query_newest_before_failure_is_consumed_once() {
     let keys = nostr::Keys::generate();
     let relay = RelayUrl::parse("wss://query-newest-before-failure.example").unwrap();
