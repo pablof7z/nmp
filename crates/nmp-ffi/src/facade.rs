@@ -22,13 +22,12 @@ use std::sync::{Arc, Mutex};
 
 use crate::auth::{FfiAuthPolicyAdapter, FfiAuthPolicyCallback, FfiAuthPolicyRegistration};
 use crate::convert::{
-    cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, diagnostics_snapshot_to_ffi,
-    filter_from_ffi, frame_to_ffi, live_query_from_ffi, parse_event_id, parse_pubkey,
-    publish_queue_entry_to_ffi, publish_queue_error_to_ffi, receipt_result_to_ffi,
-    relay_information_error_kind, remove_queue_entry_error_to_ffi, sign_event_failure,
-    sign_event_request_from_ffi, sign_event_start_error, signed_event_to_ffi, window_from_ffi,
-    write_intent_from_ffi, write_status_to_ffi, FfiError, FfiRequestRowsError, FfiRowPullError,
-    WriteStatusRef,
+    cancel_write_error_to_ffi, cancel_write_outcome_to_ffi, filter_from_ffi, frame_to_ffi,
+    live_query_from_ffi, parse_event_id, parse_pubkey, publish_queue_entry_to_ffi,
+    publish_queue_error_to_ffi, receipt_result_to_ffi, relay_information_error_kind,
+    remove_queue_entry_error_to_ffi, sign_event_failure, sign_event_request_from_ffi,
+    sign_event_start_error, signed_event_to_ffi, window_from_ffi, write_intent_from_ffi,
+    write_status_to_ffi, FfiError, FfiRequestRowsError, FfiRowPullError, WriteStatusRef,
 };
 #[cfg(feature = "nip02")]
 use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
@@ -36,9 +35,9 @@ use crate::session::{
     FfiPrivateKey, FfiPublicKey, FfiSessionAccount, FfiSessionPayload, FfiSessionSnapshot,
 };
 use crate::types::{
-    FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiDiagnosticsSnapshot,
-    FfiFilter, FfiFrame, FfiLiveQuery, FfiPublishQueueEntry, FfiPublishQueueError,
-    FfiReceiptReattachment, FfiReceiptResult, FfiRelayInformation, FfiRelayInformationCachePolicy,
+    FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiFilter, FfiFrame,
+    FfiLiveQuery, FfiPublishQueueEntry, FfiPublishQueueError, FfiReceiptReattachment,
+    FfiReceiptResult, FfiRelayInformation, FfiRelayInformationCachePolicy,
     FfiRelayInformationDocument, FfiRelayInformationFreshness, FfiRelayInformationLimitations,
     FfiRemoveQueueEntryError, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiWindow,
     FfiWriteFact, FfiWriteIntent,
@@ -1083,40 +1082,8 @@ impl Drop for ReceiveGuard {
     }
 }
 
-/// The app-facing pull-based handle to a live diagnostics stream (returned by
-/// [`NmpEngine::observe_diagnostics`], #680). Same discipline as
-/// [`NmpRowStream`] — await [`Self::next`], `Drop`/[`Self::cancel`] withdraw.
-#[derive(uniffi::Object)]
-pub struct NmpDiagnosticsStream {
-    inner: nmp::AsyncDiagnosticsSubscription,
-}
-
-#[uniffi::export]
-impl NmpDiagnosticsStream {
-    /// Await the next [`FfiDiagnosticsSnapshot`] — the current snapshot on the
-    /// first call, a fresh one on every coverage change afterward, or `None`
-    /// once the stream is withdrawn. [`FfiError::ConcurrentNext`] on an
-    /// overlapping call.
-    pub async fn next(&self) -> Result<Option<FfiDiagnosticsSnapshot>, FfiError> {
-        match self.inner.next().await {
-            Ok(Some(snapshot)) => Ok(Some(diagnostics_snapshot_to_ffi(snapshot))),
-            Ok(None) => Ok(None),
-            Err(_) => Err(FfiError::ConcurrentNext),
-        }
-    }
-
-    /// Withdraw this diagnostics observer now, rather than waiting for `Drop`.
-    /// Safe to call more than once; safe to never call at all.
-    pub fn cancel(&self) {
-        self.inner.cancel();
-    }
-}
-
-impl Drop for NmpDiagnosticsStream {
-    fn drop(&mut self) {
-        self.inner.cancel();
-    }
-}
+mod diagnostics_stream;
+pub use diagnostics_stream::NmpDiagnosticsStream;
 
 /// The app-facing pull-based receipt stream (returned by [`NmpEngine::publish`]
 /// and the `Attached` reattachment, #680). It
