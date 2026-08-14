@@ -23,8 +23,10 @@ boundary records:
   replaceable/addressable winner, retired with retained receipt facts;
 - initial route/retry state that is already known.
 
-If that transaction fails, the caller receives an acceptance error and no
-pending row becomes visible. `Accepted` never means merely queued in memory.
+If the call returns an error, the caller receives no `Accepted` answer. An I/O
+error has unknown durability: reconstruction and correlation lookup may reveal
+that the transaction committed one pending row. `Accepted` never means merely
+queued in memory.
 
 ### Guarded whole-value replacement
 

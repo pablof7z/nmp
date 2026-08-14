@@ -379,9 +379,10 @@ pub(crate) fn restamped(frozen: &Event, created_at: Timestamp) -> Event {
 }
 
 /// A durable-persistence failure at the acceptance boundary
-/// (`docs/design/durable-write-signing-and-retry.md` §1: "If that
-/// transaction fails, the caller receives an acceptance error and no
-/// pending row becomes visible" — architecture review correction).
+/// (`docs/design/durable-write-signing-and-retry.md` §1): a returned `Err`
+/// gives the caller an acceptance error, never an `Accepted` answer. For I/O,
+/// durability remains unknown until reconstruction: correlation lookup may
+/// reveal one committed pending row.
 /// Realistic runtime failures (disk full, I/O error) at `accept_write`/
 /// `accept_refused`/`promote_signed`/`compensate_write` must never panic
 /// the embedding app. Neither may a *persisted row that does not decode*
@@ -2123,12 +2124,12 @@ pub trait EventStore {
     /// issue #2's immediate-delete promise extends to local compositions,
     /// not only the relay echo) — see `AcceptOutcome::Kind5Processed`.
     ///
-    /// Fallible (architecture review correction,
-    /// `docs/design/durable-write-signing-and-retry.md` §1: "if that
-    /// transaction fails, the caller receives an acceptance error and no
-    /// pending row becomes visible"): a realistic persistence failure
-    /// (disk full, I/O error) returns `Err` rather than panicking the
-    /// embedding app. As of issue #122 the ingest/read doors above
+    /// Fallible (architecture review correction): a realistic persistence
+    /// failure (disk full, I/O error) returns `Err` rather than panicking the
+    /// embedding app. That result carries no `Accepted` answer, but I/O has
+    /// unknown durability: reconstruction and correlation lookup may reveal
+    /// that the transaction committed one fully journaled pending row. As of
+    /// issue #122 the ingest/read doors above
     /// (`insert`/`query`/`remove`/`expire_due`/`record_coverage`/`gc`) are
     /// fallible on the same footing; only serde/logic invariant violations
     /// (a corrupt persisted row) remain `.expect()`-on-invariant by design.
