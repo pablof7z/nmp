@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey};
 use nmp_router::{RelayPlan, SubId, WireReq};
-use nmp_store::{coverage_claim_atoms, coverage_key, EventStore, PersistenceError};
+use nmp_store::{coverage_claim_atoms, coverage_key, EventStore, PersistenceError, RedbStore};
 use nostr::{RelayUrl, Timestamp};
 
 /// Compact acquisition evidence for one query snapshot, scoped to THIS
@@ -209,8 +209,8 @@ pub enum ShortfallFact {
     LocalLimit { atom: ConcreteFilter },
 }
 
-pub(crate) struct AcquisitionEvidenceContext<'a, S> {
-    pub(crate) store: &'a S,
+pub(crate) struct AcquisitionEvidenceContext<'a> {
+    pub(crate) store: &'a RedbStore,
     pub(crate) connected: &'a BTreeSet<RelaySessionKey>,
     pub(crate) auth_status: &'a BTreeMap<RelaySessionKey, SourceStatus>,
     pub(crate) ever_connected: &'a BTreeSet<RelaySessionKey>,
@@ -261,10 +261,10 @@ pub(crate) struct AcquisitionEvidenceContext<'a, S> {
 ///   same all-or-nothing scoping `reconciled_through` uses, so one unfinished
 ///   request on a session is never hidden by a finished sibling (#1235).
 /// - Sources are returned sorted by session key for deterministic equality.
-pub(crate) fn acquisition_evidence<S: EventStore>(
+pub(crate) fn acquisition_evidence(
     subtree_atoms: &BTreeSet<ContextualAtom>,
     plan: &RelayPlan,
-    context: AcquisitionEvidenceContext<'_, S>,
+    context: AcquisitionEvidenceContext<'_>,
 ) -> Result<AcquisitionEvidence, PersistenceError> {
     let AcquisitionEvidenceContext {
         store,

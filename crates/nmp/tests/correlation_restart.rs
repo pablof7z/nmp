@@ -359,7 +359,7 @@ fn signer_session(relay: &RelayUrl, signer: PublicKey) -> RelaySessionKey {
 }
 
 fn authenticate(
-    core: &mut EngineCore<RedbStore>,
+    core: &mut EngineCore,
     handle: RelayHandle,
     session: &RelaySessionKey,
     signer: &Keys,

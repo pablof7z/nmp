@@ -737,7 +737,7 @@ struct HistorySnapshot {
     history_by_handle: HashMap<HandleId, HistorySessionId>,
 }
 
-fn snapshot(core: &EngineCore<RedbStore>, id: HistorySessionId) -> HistorySnapshot {
+fn snapshot(core: &EngineCore, id: HistorySessionId) -> HistorySnapshot {
     let state = &core.histories[&id];
     assert!(state.pending_load.is_none());
     HistorySnapshot {
@@ -810,7 +810,7 @@ fn literal_history_query() -> HistoryQuery {
 
 /// The oldest retained row's second: the boundary an advance would fetch
 /// behind. Derived from state now that windows carry no continuation token.
-fn boundary_second(core: &EngineCore<RedbStore>, id: HistorySessionId) -> u64 {
+fn boundary_second(core: &EngineCore, id: HistorySessionId) -> u64 {
     core.histories[&id]
         .last_rows
         .values()
@@ -823,7 +823,7 @@ fn open_history(
     store: RedbStore,
     query: HistoryQuery,
     active_pubkey: Option<PublicKey>,
-) -> (EngineCore<RedbStore>, HistorySessionId) {
+) -> (EngineCore, HistorySessionId) {
     let mut core = EngineCore::new(store, 20);
     if let Some(active_pubkey) = active_pubkey {
         core.handle(EngineMsg::SetActivePubkey(Some(active_pubkey)));
@@ -840,7 +840,7 @@ fn open_history(
 }
 
 fn assert_failed_load(
-    core: &EngineCore<RedbStore>,
+    core: &EngineCore,
     id: HistorySessionId,
     before: &HistorySnapshot,
     effects: &[Effect],
@@ -868,7 +868,7 @@ fn assert_failed_load(
     assert_eq!(&snapshot(core, id), before, "rollback must be exact");
 }
 
-fn derived_fixture() -> (tempfile::TempDir, EngineCore<RedbStore>, HistorySessionId) {
+fn derived_fixture() -> (tempfile::TempDir, EngineCore, HistorySessionId) {
     let me = Keys::generate();
     let followed = Keys::generate();
     let relay = RelayUrl::parse("wss://history-read-failure.example").unwrap();
@@ -902,7 +902,7 @@ fn derived_fixture() -> (tempfile::TempDir, EngineCore<RedbStore>, HistorySessio
     (directory, core, id)
 }
 
-fn latch_redb_generation_without_core_diagnostics(core: &mut EngineCore<RedbStore>) {
+fn latch_redb_generation_without_core_diagnostics(core: &mut EngineCore) {
     let keys = Keys::generate();
     let accepted = event(&keys, 1, 1_500);
     let error = match core

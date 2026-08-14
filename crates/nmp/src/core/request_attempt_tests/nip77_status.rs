@@ -3,7 +3,7 @@
 use super::*;
 
 struct Nip77StatusFixture {
-    core: EngineCore<RedbStore>,
+    core: EngineCore,
     session: RelaySessionKey,
     handle: TransportRelayHandle,
     observation: ObservationId,

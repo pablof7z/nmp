@@ -1,7 +1,7 @@
 use nmp_grammar::{AccessContext, ConcreteFilter, DescriptorHash, IdentityField, RelaySessionKey};
 use nmp_resolver::{HandleId, ResolutionNodeKind, ResolvedValue};
 use nmp_router::SubId;
-use nmp_store::{CoverageInterval, EventStore};
+use nmp_store::CoverageInterval;
 use nmp_transport::RelayHandle as TransportRelayHandle;
 use nostr::{RelayUrl, Timestamp};
 use std::collections::{BTreeMap, BTreeSet};
@@ -266,7 +266,7 @@ fn filter_fingerprint(filters: &[ConcreteFilter]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-impl<S: EventStore> EngineCore<S> {
+impl EngineCore {
     pub(super) fn record_observed_request(
         &mut self,
         request: RequestSend<'_>,
@@ -1134,7 +1134,7 @@ mod tests {
     use nmp_grammar::LiveQuery;
     use nmp_grammar::{Binding, Demand, Derived, Filter, Freshness, Selector, SourceAuthority};
     use nmp_router::FixtureRoutingFacts;
-    use nmp_store::{RedbStore, RelayObserved};
+    use nmp_store::{EventStore, RedbStore, RelayObserved};
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     fn articles_by_follows() -> LiveQuery {

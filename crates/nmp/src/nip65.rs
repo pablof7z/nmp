@@ -52,9 +52,9 @@ impl RuntimeAssembly {
         }
     }
 
-    pub(crate) fn sync<S: nmp_store::EventStore>(
+    pub(crate) fn sync(
         &mut self,
-        core: &mut EngineCore<S>,
+        core: &mut EngineCore,
         needs: BTreeSet<PublicKey>,
     ) -> Vec<Effect> {
         if self.coordinator.authors() == &needs {
@@ -77,9 +77,9 @@ impl RuntimeAssembly {
         effects
     }
 
-    pub(crate) fn consume_rows<S: nmp_store::EventStore>(
+    pub(crate) fn consume_rows(
         &mut self,
-        core: &mut EngineCore<S>,
+        core: &mut EngineCore,
         handle: ObservationId,
         rows: &[RowDelta],
     ) -> Option<Vec<Effect>> {
@@ -101,9 +101,9 @@ impl RuntimeAssembly {
         Some(apply_updates(core, updates))
     }
 
-    pub(crate) fn consume_evidence<S: nmp_store::EventStore>(
+    pub(crate) fn consume_evidence(
         &mut self,
-        core: &mut EngineCore<S>,
+        core: &mut EngineCore,
         handle: ObservationId,
         evidence: &[ObservationEvidence],
     ) -> Option<Vec<Effect>> {
@@ -124,10 +124,7 @@ fn author_routes(routes: ParsedAuthorRoutes) -> nmp_router::AuthorRoutes {
     nmp_router::AuthorRoutes::new(routes.outbound, routes.inbound)
 }
 
-fn apply_updates<S: nmp_store::EventStore>(
-    core: &mut EngineCore<S>,
-    updates: Vec<CoordinatorUpdate>,
-) -> Vec<Effect> {
+fn apply_updates(core: &mut EngineCore, updates: Vec<CoordinatorUpdate>) -> Vec<Effect> {
     let mut effects = Vec::new();
     for update in updates {
         match update {
@@ -156,7 +153,7 @@ mod tests {
         AccessContext, Binding, Filter, Identity, RelaySessionKey, WriteIntent, WritePayload,
         WriteRouting,
     };
-    use nmp_store::{EventStore, RedbStore};
+    use nmp_store::RedbStore;
     use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};
     use nostr::{EventBuilder, EventId, Keys, Kind, RelayMessage, Tag, Timestamp};
 
@@ -168,8 +165,8 @@ mod tests {
         RelayUrl::parse(&format!("ws://127.0.0.1:{port}")).expect("valid test relay")
     }
 
-    fn publish_auto<S: EventStore>(
-        core: &mut EngineCore<S>,
+    fn publish_auto(
+        core: &mut EngineCore,
         author: &Keys,
         created_at: u64,
         content: &str,
@@ -212,8 +209,8 @@ mod tests {
     /// the reason is replayed off the same reducer memory a live resolution
     /// writes, so an app that restarts and reattaches learns the same thing
     /// it would have learned by holding the stream open.
-    fn assert_parked_on_unknown_route<S: EventStore>(
-        core: &mut EngineCore<S>,
+    fn assert_parked_on_unknown_route(
+        core: &mut EngineCore,
         receipt: ReceiptId,
         awaited: &PublicKey,
     ) {

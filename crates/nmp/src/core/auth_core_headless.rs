@@ -13,7 +13,7 @@ const POLICY: AuthCapabilityInstance = AuthCapabilityInstance(41);
 const SIGNER: AuthCapabilityInstance = AuthCapabilityInstance(42);
 
 struct Fixture {
-    core: EngineCore<RedbStore>,
+    core: EngineCore,
     keys: Keys,
     session: RelaySessionKey,
     handle: RelayHandle,
@@ -1325,7 +1325,7 @@ fn auth_required_closed_revokes_ready_and_restricted_closed_is_denied() {
         .contains_key(&fixture.session));
     assert!(matches!(auth_phase(&fixture), AuthSessionPhase::Denied));
     assert_eq!(
-        EngineCore::<RedbStore>::auth_source_status(&fixture.core.auth_sessions[&fixture.session]),
+        EngineCore::auth_source_status(&fixture.core.auth_sessions[&fixture.session]),
         SourceStatus::AuthDenied
     );
 

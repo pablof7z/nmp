@@ -129,8 +129,8 @@ struct StepCount {
 /// Drive the same exact local-acceptance boundary as the runtime, then append
 /// its effects after the offered REQs. A byte-changing successor is therefore
 /// visible as `REQ(new)` followed by `CLOSE(old)`, never as a same-id rewrite.
-fn accept_requests<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn accept_requests(
+    core: &mut EngineCore,
     handles: &BTreeMap<RelaySessionKey, RelayHandle>,
     offered: &[Effect],
 ) -> Vec<Effect> {
@@ -160,8 +160,8 @@ fn accept_requests<S: EventStore>(
         .collect()
 }
 
-fn record_accepted_step<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn record_accepted_step(
+    core: &mut EngineCore,
     handles: &BTreeMap<RelaySessionKey, RelayHandle>,
     ledger: &mut WireLedger,
     label: &str,
@@ -285,7 +285,7 @@ impl WireLedger {
 // ---- scenario scaffolding ----------------------------------------------
 
 struct Study {
-    core: EngineCore<RedbStore>,
+    core: EngineCore,
     handles: BTreeMap<RelaySessionKey, RelayHandle>,
     me: Keys,
     group_author: Keys,

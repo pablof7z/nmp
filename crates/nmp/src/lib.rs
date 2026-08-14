@@ -378,11 +378,7 @@ pub use nmp_signer::{
 
 // The concrete mechanism types are internal by default (#52's "internal or
 // explicitly unstable"). `Engine::from_parts` needs `PoolConfig` in a
-// caller's signature, while `EventStore` remains available to the inner
-// core/resolver test seams that are still generic during #1495's contraction.
-// Both stay behind the unstable hatch. This is an in-workspace/test exception
-// (`nmp-bdd`), not a supported application extension point.
-#[cfg(feature = "unstable-mechanism")]
-pub use nmp_store::EventStore;
+// caller's signature. This is an in-workspace/test exception (`nmp-bdd`), not
+// a supported application extension point.
 #[cfg(feature = "unstable-mechanism")]
 pub use nmp_transport::PoolConfig;

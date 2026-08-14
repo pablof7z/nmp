@@ -26,8 +26,8 @@ fn session_for(relay: &RelayUrl, author: &Keys) -> RelaySessionKey {
 
 /// Accept and sign one durable narrow write, returning the effects the
 /// signer completion produced.
-fn publish_narrow<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn publish_narrow(
+    core: &mut EngineCore,
     author: &Keys,
     relays: &[RelayUrl],
     created_at: u64,
@@ -63,8 +63,8 @@ fn publish_narrow<S: EventStore>(
 }
 
 /// Drive one relay all the way to a durable OK ack.
-fn deliver_ok<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn deliver_ok(
+    core: &mut EngineCore,
     author: &Keys,
     relay: &RelayUrl,
     slot: u32,
@@ -96,7 +96,7 @@ fn deliver_ok<S: EventStore>(
 
 /// The canonical answer, rebuilt from durable rows rather than read out of
 /// the projection under test.
-fn durable_worker_oracle<S: EventStore>(core: &EngineCore<S>) -> BTreeSet<RelaySessionKey> {
+fn durable_worker_oracle(core: &EngineCore) -> BTreeSet<RelaySessionKey> {
     let mut expected: BTreeSet<_> = core
         .attempt_correlations
         .values()

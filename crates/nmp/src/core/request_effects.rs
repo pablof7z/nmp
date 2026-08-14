@@ -4,7 +4,6 @@ use std::{collections::BTreeMap, ops::Deref};
 
 use nmp_grammar::{ConcreteFilter, DescriptorHash, RelaySessionKey};
 use nmp_router::{SubId, WireDelta, WireOp, WireReq};
-use nmp_store::EventStore;
 
 use super::{EngineCore, RequestAttemptId};
 
@@ -75,7 +74,7 @@ impl PartialEq<Vec<WireReq>> for AttemptedReplay {
     }
 }
 
-impl<S: EventStore> EngineCore<S> {
+impl EngineCore {
     pub(super) fn attempted_wire_delta(&self, delta: WireDelta) -> AttemptedWireDelta {
         let mut attempts = BTreeMap::new();
         for (session, ops) in &delta.ops {

@@ -272,8 +272,8 @@ fn print_samples(prefix: &str, samples: &Samples) {
 }
 
 fn measure(
-    core: &mut EngineCore<RedbStore>,
-    mutation: impl FnOnce(&mut EngineCore<RedbStore>) -> Vec<Effect>,
+    core: &mut EngineCore,
+    mutation: impl FnOnce(&mut EngineCore) -> Vec<Effect>,
 ) -> (Vec<Effect>, Duration, u64, (u64, u64, u64)) {
     core.bench_reset_query_work();
     let allocations_before = ALLOCATION_OPS.load(Ordering::Relaxed);

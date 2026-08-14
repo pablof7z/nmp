@@ -609,7 +609,7 @@ fn derived_inner_agnostic_cache_accepts_rows_from_any_provenance_before_limit() 
     );
 }
 
-fn derived_scalar_values(engine: &Engine<RedbStore>, handle: HandleId) -> BTreeSet<String> {
+fn derived_scalar_values(engine: &Engine, handle: HandleId) -> BTreeSet<String> {
     engine
         .resolution_snapshot(handle)
         .into_iter()

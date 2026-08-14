@@ -34,7 +34,7 @@ pub(super) struct OwnedSemanticSourceRequest {
     pub(super) request: SemanticSourceRequest,
 }
 
-impl<S: EventStore> EngineCore<S> {
+impl EngineCore {
     pub(super) fn owns_semantic_source_demand(
         &self,
         demands: &BTreeSet<nmp_router::DemandKey>,
@@ -534,7 +534,7 @@ mod tests {
             .expect("source fixture signs")
     }
 
-    fn register(core: &mut EngineCore<RedbStore>) {
+    fn register(core: &mut EngineCore) {
         core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
             instance: INSTANCE,
             program: PROGRAM,
@@ -579,7 +579,7 @@ mod tests {
     }
 
     fn eose(
-        core: &mut EngineCore<RedbStore>,
+        core: &mut EngineCore,
         handle: TransportRelayHandle,
         session: RelaySessionKey,
         sub_id: &SubId,
@@ -594,7 +594,7 @@ mod tests {
     }
 
     fn send_event(
-        core: &mut EngineCore<RedbStore>,
+        core: &mut EngineCore,
         handle: TransportRelayHandle,
         session: RelaySessionKey,
         sub_id: &SubId,
@@ -611,7 +611,7 @@ mod tests {
     }
 
     fn member_state(
-        core: &EngineCore<RedbStore>,
+        core: &EngineCore,
         coordinate: &Coordinate,
         relay: &RelayUrl,
     ) -> SemanticSourceMemberState {

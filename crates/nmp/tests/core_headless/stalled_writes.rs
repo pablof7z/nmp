@@ -23,13 +23,13 @@ fn empty_directory() -> FixtureRoutingFacts {
     FixtureRoutingFacts::new()
 }
 
-fn stalled<S: EventStore>(core: &EngineCore<S>) -> Vec<StalledWrite> {
+fn stalled(core: &EngineCore) -> Vec<StalledWrite> {
     core.diagnostics_snapshot().stalled_writes
 }
 
 /// Publish `builder` and hand its signer request back signed.
-fn publish_signed<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn publish_signed(
+    core: &mut EngineCore,
     author: &Keys,
     builder: nmp_grammar::EventBuilder,
     routing: WriteRouting,

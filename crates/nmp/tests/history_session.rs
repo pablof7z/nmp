@@ -36,7 +36,7 @@ fn query(keys: &Keys, page_size: usize, max_rows: usize) -> HistoryQuery {
     )
 }
 
-fn seeded(count: usize) -> (EngineCore<RedbStore>, Keys, RelayUrl, Vec<Event>) {
+fn seeded(count: usize) -> (EngineCore, Keys, RelayUrl, Vec<Event>) {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://history.example").unwrap();
     let mut events: Vec<_> = (0..count)
@@ -62,7 +62,7 @@ fn seeded(count: usize) -> (EngineCore<RedbStore>, Keys, RelayUrl, Vec<Event>) {
     )
 }
 
-fn handle_and_flush(core: &mut EngineCore<RedbStore>, message: EngineMsg) -> Vec<Effect> {
+fn handle_and_flush(core: &mut EngineCore, message: EngineMsg) -> Vec<Effect> {
     let mut effects = core.handle(message);
     effects.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
     effects

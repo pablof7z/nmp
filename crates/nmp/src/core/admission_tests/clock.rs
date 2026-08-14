@@ -1,11 +1,11 @@
 use std::borrow::Cow;
 
 use super::*;
-use nmp_store::{EventStore, RedbStore};
+use nmp_store::RedbStore;
 use nostr::SubscriptionId;
 
-fn prove_nip77<S: EventStore>(
-    core: &mut EngineCore<S>,
+fn prove_nip77(
+    core: &mut EngineCore,
     relay: &RelayUrl,
     transport: TransportRelayHandle,
     now: Timestamp,
