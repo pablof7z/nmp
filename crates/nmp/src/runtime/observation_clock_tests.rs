@@ -8,7 +8,6 @@ use nostr::{Keys, Kind, RelayUrl, Timestamp};
 
 use super::*;
 use crate::core::HistoryQuery;
-use crate::lane_fault_store::{FaultyLaneStore, LaneFaults};
 
 fn query(author: &Keys, freshness: Freshness) -> LiveQuery {
     let mut demand = Demand::from_filter(Filter {
@@ -22,22 +21,13 @@ fn query(author: &Keys, freshness: Freshness) -> LiveQuery {
     LiveQuery::single(demand)
 }
 
-fn runtime(store: RedbStore, faults: LaneFaults) -> (EngineThread, Handle) {
-    EngineThread::spawn(
-        FaultyLaneStore::new(store, faults),
-        4,
-        PoolConfig::default(),
-    )
-    .expect("engine construction")
+fn runtime(store: RedbStore) -> (EngineThread, Handle) {
+    EngineThread::spawn(store, 4, PoolConfig::default()).expect("engine construction")
 }
 
 #[test]
 fn many_live_and_cache_only_opens_run_zero_maintenance_sweeps() {
-    let faults = LaneFaults::default();
-    let (thread, handle) = runtime(
-        RedbStore::temporary().expect("temporary Redb store"),
-        faults.clone(),
-    );
+    let (thread, handle) = runtime(RedbStore::temporary().expect("temporary Redb store"));
     let author = Keys::generate();
     let mut observations = Vec::new();
 
@@ -59,7 +49,7 @@ fn many_live_and_cache_only_opens_run_zero_maintenance_sweeps() {
             .expect("history observation opens")
     });
 
-    assert_eq!(faults.maintenance_sweeps(), 0);
+    assert_eq!(handle.maintenance_turn_count(), 0);
     drop(observations);
     drop(history_observations);
     handle.shutdown();
@@ -84,8 +74,7 @@ fn due_deadline_runs_before_a_simultaneously_ready_command() {
         .insert(event, RelayObserved::new(relay, base))
         .expect("seed expiring event");
 
-    let faults = LaneFaults::default();
-    let (thread, handle) = runtime(store, faults.clone());
+    let (thread, handle) = runtime(store);
     let clock = thread.clock();
     clock.set(base);
     let (_observation, rows) = handle
@@ -118,9 +107,9 @@ fn due_deadline_runs_before_a_simultaneously_ready_command() {
     assert!(retracted
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == event_id)));
-    assert_eq!(faults.maintenance_sweeps(), 2);
 
     let _ = release_tx.send(());
+    assert_eq!(handle.maintenance_turn_count(), 2);
     handle.shutdown();
     thread.join();
 }
@@ -143,8 +132,7 @@ fn explicit_tick_at_a_due_deadline_runs_maintenance_once() {
         .insert(event, RelayObserved::new(relay, base))
         .expect("seed expiring event");
 
-    let faults = LaneFaults::default();
-    let (thread, handle) = runtime(store, faults.clone());
+    let (thread, handle) = runtime(store);
     let clock = thread.clock();
     clock.set(base);
     let (_observation, rows) = handle
@@ -161,7 +149,7 @@ fn explicit_tick_at_a_due_deadline_runs_maintenance_once() {
     assert!(retracted
         .iter()
         .any(|delta| matches!(delta, RowDelta::Removed(id) if *id == event_id)));
-    assert_eq!(faults.maintenance_sweeps(), 2);
+    assert_eq!(handle.maintenance_turn_count(), 2);
 
     handle.shutdown();
     thread.join();

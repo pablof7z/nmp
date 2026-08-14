@@ -696,6 +696,10 @@ enum Cmd {
         id: ReceiptId,
         reply: Sender<usize>,
     },
+    #[cfg(test)]
+    MaintenanceTurnCount {
+        reply: Sender<u64>,
+    },
     #[cfg(any(test, feature = "bench-instrumentation"))]
     ObservationOwnershipCensus {
         reply: Sender<ObservationOwnershipCensus>,
@@ -4020,6 +4024,10 @@ fn engine_loop<S>(
                 Cmd::ReceiptDeliveryCount { id, reply } => {
                     let _ = reply.send(receipt_deliveries.borrow().count(id));
                 }
+                #[cfg(test)]
+                Cmd::MaintenanceTurnCount { reply } => {
+                    let _ = reply.send(core.maintenance_turn_count());
+                }
                 #[cfg(any(test, feature = "bench-instrumentation"))]
                 Cmd::ObservationOwnershipCensus { reply } => {
                     let core_census = core.observation_ownership_census();
@@ -4762,6 +4770,10 @@ fn engine_loop<S>(
             #[cfg(test)]
             Cmd::ReceiptDeliveryCount { id, reply } => {
                 let _ = reply.send(receipt_deliveries.borrow().count(id));
+            }
+            #[cfg(test)]
+            Cmd::MaintenanceTurnCount { reply } => {
+                let _ = reply.send(core.maintenance_turn_count());
             }
             #[cfg(any(test, feature = "bench-instrumentation"))]
             Cmd::ObservationOwnershipCensus { reply } => {
@@ -6950,6 +6962,17 @@ impl Handle {
         reply_rx
             .recv()
             .expect("nmp-engine: engine dropped receipt delivery census reply")
+    }
+
+    #[cfg(test)]
+    fn maintenance_turn_count(&self) -> u64 {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.inbox
+            .send(Cmd::MaintenanceTurnCount { reply: reply_tx })
+            .expect("nmp-engine: maintenance-turn count called after shutdown");
+        reply_rx
+            .recv()
+            .expect("nmp-engine: engine dropped maintenance-turn count reply")
     }
 
     #[cfg(any(test, feature = "bench-instrumentation"))]

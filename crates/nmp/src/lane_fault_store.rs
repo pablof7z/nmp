@@ -45,7 +45,6 @@ pub(crate) struct LaneFaultState {
     /// refusal that heals immediately still consumes the lane's only exit.
     handoff_once: Option<PersistenceFault>,
     bootstrap_calls: u32,
-    maintenance_sweeps: u32,
     /// Commit the next acceptance into the inner oracle, then report the
     /// originating I/O failure and latch every subsequent store read. This
     /// models redb's genuinely ambiguous commit boundary.
@@ -114,11 +113,6 @@ impl LaneFaults {
 
     pub(crate) fn bootstrap_calls(&self) -> u32 {
         self.0.lock().unwrap().bootstrap_calls
-    }
-
-    #[cfg(test)]
-    pub(crate) fn maintenance_sweeps(&self) -> u32 {
-        self.0.lock().unwrap().maintenance_sweeps
     }
 
     fn take_bootstrap_failure(&self) -> Option<PersistenceError> {
@@ -370,11 +364,6 @@ impl<S: EventStore> EventStore for FaultyLaneStore<S> {
     }
 
     fn expire_due(&mut self, now: Timestamp) -> Result<Vec<StoredEvent>, PersistenceError> {
-        #[cfg(test)]
-        {
-            let mut state = self.faults.0.lock().unwrap();
-            state.maintenance_sweeps = state.maintenance_sweeps.saturating_add(1);
-        }
         self.inner.expire_due(now)
     }
     fn next_expiration(&self) -> Result<Option<Timestamp>, PersistenceError> {

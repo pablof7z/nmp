@@ -2321,6 +2321,8 @@ pub struct EngineCore<S: EventStore> {
     /// ownership, attempt correlations, or a reattachable live delivery.
     quarantined_auth_receipts: HashMap<ReceiptId, QuarantinedWrite>,
     clock: Timestamp,
+    #[cfg(test)]
+    maintenance_turns: u64,
     active_pubkey: Option<PublicKey>,
     /// Publish queue (§3.4 / VISION §7 ledger #6/#9). `pending` is keyed by
     /// `ReceiptId` from `Publish` through to the last terminal per-relay
@@ -2690,6 +2692,8 @@ impl<S: EventStore> EngineCore<S> {
             next_auth_operation: Some(1),
             quarantined_auth_receipts: HashMap::new(),
             clock: Timestamp::from(0u64),
+            #[cfg(test)]
+            maintenance_turns: 0,
             active_pubkey: None,
             pending: HashMap::new(),
             last_author_route_needs: BTreeSet::new(),
@@ -3445,6 +3449,10 @@ impl<S: EventStore> EngineCore<S> {
     /// tested here against a synthetic clock regardless of who calls this
     /// -- the runtime driver is a caller, not part of the mechanism.
     pub fn tick(&mut self, now: Timestamp) -> Vec<Effect> {
+        #[cfg(test)]
+        {
+            self.maintenance_turns = self.maintenance_turns.saturating_add(1);
+        }
         self.clock = now;
         let mut effects = Vec::new();
         self.retry_scheduler_blocked = false;
@@ -3528,6 +3536,11 @@ impl<S: EventStore> EngineCore<S> {
         }
 
         effects
+    }
+
+    #[cfg(test)]
+    pub(crate) fn maintenance_turn_count(&self) -> u64 {
+        self.maintenance_turns
     }
 
     /// Advance reducer wall-clock truth without executing any deadline work.
