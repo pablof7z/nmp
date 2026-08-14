@@ -1,7 +1,8 @@
 # Redb semantic and recovery qualification
 
 Issue #699 established the semantic trace. Issue #1427 removed the duplicate
-store implementation: Redb is now the only complete `EventStore` backend.
+store implementation: NMP and its test suites now use Redb for the complete
+durable-store contract.
 
 ## Authority and recovery contract
 
@@ -41,9 +42,9 @@ identity alone would not be portability evidence.
 
 ## What the trace proves
 
-The test-only trace runs one exact-byte fixture through `EventStore`, without
-reading Redb tables or file bytes. Its independently spelled operations and
-expected outcomes cover:
+The test-only trace runs one exact-byte fixture through a temporary Redb store's
+typed semantic operations, without reading Redb tables or file bytes. Its
+independently spelled operations and expected outcomes cover:
 
 - duplicate ingest and relay-provenance growth;
 - replaceable and addressable conflicts;
@@ -72,8 +73,8 @@ content, atomicity, and ordering evidence.
 
 ## Future replacement sequence
 
-No candidate is an `EventStore` implementation in the current architecture.
-Before a future replacement decision:
+No candidate implements NMP's complete durable-store contract in the current
+architecture. Before a future replacement decision:
 
 1. Evaluate Fjall through the complete semantic path, then fully settle and
    account for compaction and other deferred maintenance.

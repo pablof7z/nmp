@@ -22,7 +22,7 @@ use nmp_store::{
 };
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
 
-fn with_store(body: impl FnOnce(&mut dyn EventStore)) {
+fn with_store(body: impl FnOnce(&mut RedbStore)) {
     let mut store = RedbStore::temporary().expect("temporary Redb store");
     body(&mut store);
 }
@@ -67,7 +67,7 @@ fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) ->
     }
 }
 
-fn do_accept(store: &mut dyn EventStore, request: AcceptWrite) -> AcceptOutcome {
+fn do_accept(store: &mut RedbStore, request: AcceptWrite) -> AcceptOutcome {
     store
         .accept_write(request)
         .expect("accept_write persistence")
