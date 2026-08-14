@@ -503,6 +503,86 @@ fn configured_lane_start_failure_rolls_back_the_precommit_transaction() {
 }
 
 #[test]
+fn configured_lane_handoff_failure_rolls_back_and_is_consumed_once() {
+    let keys = nostr::Keys::generate();
+    let relay = RelayUrl::parse("wss://blocked-lane-handoff.example").unwrap();
+    let mut store = RedbStore::temporary_with_failed_lane_handoff()
+        .expect("temporary Redb handoff-failure fixture");
+    let (intent, signed) = accepted_signed(&mut store, &keys, "blocked handoff", 1_000);
+    store
+        .record_route_revision(intent, BTreeSet::from([relay]))
+        .unwrap();
+    let lane = store
+        .bootstrap_publish_queue_lanes(intent)
+        .unwrap()
+        .remove(0);
+    let eligible = store
+        .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(1_001u64))
+        .unwrap();
+    let (_, started) = store
+        .start_lane_attempt(
+            &eligible.key,
+            eligible.revision,
+            signed,
+            Timestamp::from(1_002u64),
+        )
+        .unwrap();
+    let before_details = store.recover_attempt_details(intent).unwrap();
+    let handoff = PublishQueueAttemptHandoff {
+        at: Timestamp::from(1_003u64),
+        result: crate::HandoffEvidence::Written,
+    };
+    let deadline = Timestamp::from(1_033u64);
+
+    let error = store
+        .record_lane_handoff(
+            &started.key,
+            started.revision,
+            started.last_ordinal,
+            handoff.clone(),
+            PublishQueuePostHandoffState::AwaitingAck { deadline },
+        )
+        .expect_err("construction-armed handoff must fail before commit");
+    assert_eq!(
+        error.to_string(),
+        "durable-store persistence failure: injected lane handoff failure"
+    );
+    assert_eq!(
+        store.recover_publish_queue_lanes(intent).unwrap(),
+        vec![started.clone()],
+        "the refused transaction leaves the lane awaiting the same handoff"
+    );
+    assert_eq!(
+        store.recover_attempt_details(intent).unwrap(),
+        before_details,
+        "the refused transaction persists no handoff evidence"
+    );
+    assert_eq!(store.next_publish_queue_deadline().unwrap(), None);
+
+    let handed_off = store
+        .record_lane_handoff(
+            &started.key,
+            started.revision,
+            started.last_ordinal,
+            handoff.clone(),
+            PublishQueuePostHandoffState::AwaitingAck { deadline },
+        )
+        .expect("the same store retries after consuming the one-shot refusal");
+    assert!(matches!(
+        handed_off.state,
+        PublishQueueLaneState::InFlight {
+            phase: PublishQueueInFlightPhase::AwaitingAck { deadline: actual },
+            ..
+        } if actual == deadline
+    ));
+    assert_eq!(
+        store.recover_attempt_details(intent).unwrap()[0].handoff,
+        Some(handoff)
+    );
+    assert_eq!(store.next_publish_queue_deadline().unwrap(), Some(deadline));
+}
+
+#[test]
 fn configured_query_newest_before_failure_is_consumed_once() {
     let keys = nostr::Keys::generate();
     let relay = RelayUrl::parse("wss://query-newest-before-failure.example").unwrap();

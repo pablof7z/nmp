@@ -1402,6 +1402,10 @@ pub(super) fn record_lane_handoff(
             .map_err(persist_err)?;
         lane
     };
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if std::mem::take(&mut store.fail_next_lane_handoff) {
+        return Err(PersistenceError::invariant("injected lane handoff failure"));
+    }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::LaneHandoffBeforeCommit);
     commit_prepared(write_txn, lane)
