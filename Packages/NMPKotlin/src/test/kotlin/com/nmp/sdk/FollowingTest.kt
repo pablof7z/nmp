@@ -44,13 +44,10 @@ class FollowingTest {
         runBlocking {
             NMPEngine(config()).use { engine ->
                 val action = engine.follow(TARGET)
-                val statuses = withTimeoutOrNull(3_000) { action.status.take(2).toList() }
+                val statuses = withTimeoutOrNull(3_000) { action.status.take(1).toList() }
 
                 assertEquals(
-                    listOf(
-                        FollowActionStatus.Acquiring,
-                        FollowActionStatus.Failed(FollowActionFailure.SignedOut),
-                    ),
+                    listOf(FollowActionStatus.Failed(FollowActionFailure.SignedOut)),
                     statuses,
                 )
             }

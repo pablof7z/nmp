@@ -44,7 +44,7 @@ These infrastructure failures have distinct direct-Rust doors:
 
 - `Engine::new` reports `EngineError::EngineStartFailed` when the engine itself cannot be constructed; no ordinary operation raises it. Store and relay-URL problems are their own variants.
 - An ordinary or windowed `Engine::observe` reports `EngineError::ObservationUnavailable` only when store degradation prevents its initial canonical projection from opening. Relay connection/worker failure remains acquisition evidence. Window and `LiveQuery` validation refuse through their own variants. No OS thread is consumed per observation, and there is no worker/task-capacity refusal.
-- `nmp_nip02::set_following` returns `FollowAction`, not `Result`. It has no capacity or thread refusal; a genuine terminal failure surfaces through `FollowAction::recv` as `FollowActionStatus::Failed` with a `FollowActionFailure` variant.
+- `nmp_nip02::set_following` returns `Result<ReceiptStream, FollowActionFailure>`. Success is the ordinary durable receipt stream; signed-out, closed-engine, and pre-custody receipt failures are returned directly. It has no separate acquisition worker, retry lifecycle, capacity refusal, or thread refusal.
 
 These are typed operational failures, not interchangeable error cases, a hidden task queue, panics, or timeouts. Every observer/action/signer path runs as an async task on the shared engine runtime, so ordinary concurrent operations simply make progress.
 

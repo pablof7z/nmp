@@ -25,9 +25,9 @@ final class FollowingTests: XCTestCase {
         defer { engine.shutdown() }
 
         let action = try engine.follow(Self.target)
-        let statuses = await Self.firstStatuses(from: action, count: 2)
+        let statuses = await Self.firstStatuses(from: action, count: 1)
 
-        XCTAssertEqual(statuses, [.acquiring, .failed(.signedOut)])
+        XCTAssertEqual(statuses, [.failed(.signedOut)])
     }
 
     func testInvalidTargetIsTypedActionStateNotANativeException() async throws {

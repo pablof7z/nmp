@@ -283,16 +283,18 @@ var body: some View {
 ```
 
 `NMPFollowing` observes the current account's canonical NIP-02 relationship and
-copies NMP's closed availability/action state onto the main actor. The button
+copies NMP's availability and ordinary receipt state onto the main actor. The button
 owns only styling, accessibility, and its reduced-motion-aware confirmation
-animation. Its tap invokes `following.toggle()`; all acquisition, kind:3
-preservation, exact-base conflict detection, signing, author-outbox routing,
-and receipt handling remain in NMP.
+animation. Its tap invokes `following.toggle()`; kind:3 preservation,
+first-value creation, later-source replay, signing, author-outbox routing, and
+receipt handling remain in NMP.
 
 The production state vocabulary distinguishes signed out, acquiring, ready,
-cached-only, and source-unavailable from following/not-following/unknown. The
-button is enabled only for an established ready relationship and never
-optimistically flips a local Boolean.
+cached-only, and source-unavailable from following/not-following/unknown. That
+availability describes the observation; it does not gate the operation. The
+button is enabled for a known relationship under the current account,
+including cached-only and explicit no-list state, and never optimistically
+flips a local Boolean.
 
 Apps with their own component can skip `NMPFollowing` and consume the simple
 engine action directly:
@@ -300,14 +302,14 @@ engine action directly:
 ```swift
 let action = engine.follow(pubkey) // or engine.unfollow(pubkey)
 for await status in action.status {
-    // acquiring, noChange, receipt facts, or typed failure
+    // ordinary receipt facts, or immediate typed failure
 }
 ```
 
-Malformed target, signed-out state, acquisition failure, conflict, and relay
-outcomes all arrive as action state; `follow` itself does not throw. See
-[Editing replaceable state safely](15-editing-replaceable.md) for the
-source-scoped base contract.
+Malformed target, signed-out state, engine closure, and receipt unavailability
+arrive as typed failure; successful actions project ordinary write facts. See
+[Editing replaceable state safely](15-editing-replaceable.md) for the retained
+operation and later-source replay contract.
 
 ## Ready-made component catalog
 

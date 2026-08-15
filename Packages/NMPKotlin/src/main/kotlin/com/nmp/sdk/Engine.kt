@@ -179,13 +179,13 @@ class NMPEngine(
      * conflation/teardown discipline. */
     fun observeFollowing(target: String): Flow<FollowingSnapshot> = observeFollowing(ffi, target)
 
-    /** The simple NMP-owned follow action. It returns immediately with a
-     * stream covering acquisition, no-op, atomic conflict, signing,
-     * routing, and relay receipt states. */
+    /** Apply one follow through NMP's ordinary durable write path. The thin
+     * action stream reports the accepted receipt or one typed pre-custody
+     * failure; signing, routing, delivery, and restart replay belong to that
+     * ordinary receipt. */
     fun follow(target: String): FollowAction = follow(ffi, target)
 
-    /** The inverse of [follow], with the same acquisition, compare-and-swap,
-     * signer, routing, and receipt guarantees. */
+    /** The inverse of [follow], with the same ordinary receipt ownership. */
     fun unfollow(target: String): FollowAction = unfollow(ffi, target)
     // nmp-native:endif
 

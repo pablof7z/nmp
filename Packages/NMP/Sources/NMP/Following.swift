@@ -15,10 +15,9 @@ public enum NMPFollowRelationship: Sendable, Hashable {
     }
 }
 
-/// Whether NMP's NIP-02 action can safely compose a whole-list replacement
-/// from the current source-scoped snapshot. `.ready` is explicitly about
-/// every source in the current plan; it is not a claim that Nostr is
-/// globally complete.
+/// Source evidence for the live relationship projection. It does not gate
+/// follow/unfollow: NMP can write cached state or create the first list while
+/// relay truth is incomplete. `.ready` is not global Nostr completeness.
 public enum NMPFollowAvailability: Sendable, Hashable {
     case signedOut
     case acquiring
@@ -84,13 +83,6 @@ public struct NMPFollowingSnapshot: Sendable, Hashable {
 public enum NMPFollowActionFailure: Sendable, Hashable {
     case invalidTarget(String)
     case signedOut
-    case accountChanged
-    case acquisitionTimedOut
-    case noContactList
-    case cachedOnly
-    case sourceUnavailable
-    case baseHasWrongKind
-    case invalidGeneratedTag
     case engineClosed
     case receiptUnavailable
 
@@ -98,13 +90,6 @@ public enum NMPFollowActionFailure: Sendable, Hashable {
         switch ffi {
         case .invalidTarget(let got): self = .invalidTarget(got)
         case .signedOut: self = .signedOut
-        case .accountChanged: self = .accountChanged
-        case .acquisitionTimedOut: self = .acquisitionTimedOut
-        case .noContactList: self = .noContactList
-        case .cachedOnly: self = .cachedOnly
-        case .sourceUnavailable: self = .sourceUnavailable
-        case .baseHasWrongKind: self = .baseHasWrongKind
-        case .invalidGeneratedTag: self = .invalidGeneratedTag
         case .engineClosed: self = .engineClosed
         case .receiptUnavailable: self = .receiptUnavailable
         }
@@ -112,17 +97,11 @@ public enum NMPFollowActionFailure: Sendable, Hashable {
 }
 
 public enum NMPFollowActionStatus: Sendable, Hashable {
-    case acquiring
-    case noChange(following: Bool)
     case receipt(id: UInt64, status: WriteFact)
     case failed(NMPFollowActionFailure)
 
     init(_ ffi: FfiFollowActionStatus) {
         switch ffi {
-        case .acquiring:
-            self = .acquiring
-        case .noChange(let following):
-            self = .noChange(following: following)
         case .receipt(let receiptID, let status):
             self = .receipt(id: receiptID, status: WriteFact(status))
         case .failed(let failure):
@@ -167,10 +146,9 @@ public struct NMPFollowingObservation: AsyncSequence, Sendable {
     }
 }
 
-/// The NMP-owned follow/unfollow action as a pull-based `AsyncSequence` over
-/// `NmpFollowActionStream` (#680). Statuses are FIFO facts (acquisition,
-/// no-op, atomic conflict, signing, routing, relay receipt), so they are
-/// delivered un-coalesced and un-buffered-drop, in order.
+/// A thin pull-based projection of the ordinary write receipt created by one
+/// typed follow/unfollow action. Successful actions contain only canonical
+/// `WriteFact`s; immediate typed refusal is the sole non-receipt case.
 public struct NMPFollowAction: AsyncSequence, Sendable {
     public typealias Element = NMPFollowActionStatus
 
@@ -208,10 +186,9 @@ extension NMPEngine {
         try NMPFollowingObservation(engine: ffi, target: target)
     }
 
-    /// The simple NMP-owned follow action. It refuses before starting when
-    /// this engine has no automatic-route provider; otherwise it returns a
-    /// stream covering acquisition, no-op, atomic conflict, signing, routing,
-    /// and relay receipt states.
+    /// Submit one durable NIP-02 operation. NMP applies it immediately to the
+    /// best cached contact list, or to NIP-02's complete empty list when no
+    /// source exists, and reapplies it if a newer relay source arrives.
     public func follow(_ target: String) throws -> NMPFollowAction {
         try NMPFollowAction(handle: nmpRethrowing {
             try ffi.follow(target: target)
@@ -261,27 +238,9 @@ public final class NMPFollowing: ObservableObject {
     }
 
     public var canToggle: Bool {
-        snapshot.availability == .ready
+        snapshot.currentPubkey != nil
             && snapshot.relationship != .unknown
             && !isActing
-    }
-
-    /// Presentation state derived from NMP's typed action stream. This is
-    /// intent pending an explicit second tap, never optimistic follow truth.
-    public var offersAnotherAttempt: Bool {
-        guard desiredFollowing != nil, let actionStatus else { return false }
-        switch actionStatus {
-        case .failed(.acquisitionTimedOut),
-             .failed(.cachedOnly),
-             .failed(.sourceUnavailable),
-             // A stale base is the one write failure a second tap can fix:
-             // the queue entry keeps both event ids, so re-reading the
-             // current list and reapplying the change is a real retry.
-             .receipt(_, .outcome(.refused(.replaceableBaseChanged))):
-            return true
-        default:
-            return false
-        }
     }
 
     public func follow() {
@@ -301,15 +260,11 @@ public final class NMPFollowing: ObservableObject {
         }
     }
 
-    /// The single action a connected control forwards. Retry policy remains
-    /// beside the NMP action/resource rather than inside a SwiftUI view.
+    /// The single action a connected control forwards. NMP retains and
+    /// reapplies the operation; the UI owns no stale-base retry policy.
     public func performPrimaryAction() {
         guard canToggle else { return }
-        if offersAnotherAttempt, let desiredFollowing {
-            start(desiredFollowing: desiredFollowing)
-        } else {
-            toggle()
-        }
+        toggle()
     }
 
     private func start(desiredFollowing: Bool) {
@@ -324,7 +279,7 @@ public final class NMPFollowing: ObservableObject {
         }
         self.desiredFollowing = desiredFollowing
         self.isActing = true
-        self.actionStatus = .acquiring
+        self.actionStatus = nil
         actionTask?.cancel()
         actionTask = Task { [weak self] in
             do {
@@ -342,28 +297,17 @@ public final class NMPFollowing: ObservableObject {
     private func accept(_ status: NMPFollowActionStatus) {
         actionStatus = status
         switch status {
-        case .noChange:
-            isActing = false
-            desiredFollowing = nil
-        case .failed(.acquisitionTimedOut),
-             .failed(.cachedOnly),
-             .failed(.sourceUnavailable):
-            isActing = false
         case .failed:
             isActing = false
             desiredFollowing = nil
         case .receipt(_, let fact):
-            if case .outcome(.refused(.replaceableBaseChanged)) = fact {
-                isActing = false
-            } else if case .outcome(.refused) = fact {
+            if case .outcome(.refused) = fact {
                 isActing = false
                 desiredFollowing = nil
             } else if case .signing(.refused) = fact {
                 isActing = false
                 desiredFollowing = nil
             }
-        case .acquiring:
-            break
         }
     }
 

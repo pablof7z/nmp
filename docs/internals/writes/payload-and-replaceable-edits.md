@@ -104,59 +104,30 @@ against the network remain possible and are the protocol's nature, not a gap
 in the CAS. What the CAS guarantees is that the *local* store never silently
 clobbers a base the composer didn't see.
 
-## 3. Replaceable edits get BETTER — DESIGNED
+## 3. Replaceable semantic operations remove the stale-base seam — BUILT
 
-This is the section that justifies the design beyond taste. A replaceable
-event's timestamp must be strictly greater than the event it replaces, or
-relays and peers will keep serving the loser. Today, that monotonicity is
-enforced by the *composer*, against a base the *caller* holds — and both are
-the wrong party.
+A replaceable event must outrank the value it replaces. A caller-side
+read/compose/publish loop cannot choose that timestamp reliably because a
+newer source can arrive between any two steps.
 
-**Today — BUILT:** `nmp-nip02::compose_follow_change`
-(`crates/nmp-nip02/src/edit.rs:82-90`) stamps the edit's `created_at` as:
-`now` if the caller's clock is ahead of the base, else `base.created_at + 1`
-(with `ComposeFollowError::TimestampExhausted` if that increment overflows).
-It also refuses a base authored by anyone else
-(`ComposeFollowError::BaseHasWrongAuthor`, `edit.rs:55-57`). Both moves are
-correct given the constraint they operate under — a pure composer must stamp
-*something*, and all it has is the caller's clock and the caller's base. But
-the base the caller holds may be stale by the time acceptance runs. The CAS
-(`expected_base`) catches the staleness and refuses — correctly, but the
-composer's carefully-computed timestamp was computed against the wrong row,
-and on retry the whole compose-stamp-publish cycle reruns. The timestamp
-authority and the atomicity authority are different components, and the
-seam between them is exactly where the retry loop lives.
+`ReplaceableOperation` moves the operation, not a prebuilt event, into durable
+custody. The registered capability receives NMP's current source and current
+pending generation, returns a complete `EventBuilder`, and leaves timestamp
+authority with the engine. NIP-02 therefore records “follow Alice” rather than
+“publish this kind:3 built from event X”.
 
-**Designed:** the builder carries no `created_at` (the ordinary case), and
-the ENGINE stamps at acceptance:
+When no source exists, only a capability that implements
+`materialize_default` can produce a first value. NIP-02 supplies exactly one
+complete empty kind:3 for the frozen author and then applies its versioned
+operation. This is a capability policy, not a cache-miss or relay-absence
+claim.
 
-```
-created_at = max(clock, current_winner.created_at + 1)
-```
-
-computed against the very row the acceptance transaction is atomically
-CAS-ing. Monotonicity moves to the only place that *knows the winner* — the
-inside of the transaction that checks `expected_base`. The stamp can never be
-computed against a stale base, because the row it reads is the row the CAS
-holds; a stale base fails the precondition before any stamp matters.
-
-Consequently, two compose-time error variants die naturally — both exist on
-master today (`crates/nmp-nip02/src/edit.rs:20` and `:22`) and both are
-casualties of the seam, not of the domain:
-
-- **`BaseHasWrongAuthor`** dies because the composer no longer takes an
-  author at all — there is nothing to compare the base against at compose
-  time. What replaces it is stronger and later: see §4.
-- **`TimestampExhausted`** dies because the engine owns the stamp; the
-  composer no longer computes a timestamp that could exhaust. (The
-  theoretical `u64` overflow at acceptance is the engine's to refuse, in the
-  same class as any other acceptance-time refusal — not a per-composer error
-  variant duplicated into every protocol crate.)
-
-The generalization is the real payoff: every future replaceable composer
-(`nip65` relay lists, profile edits, any addressable kind) inherits correct
-monotonicity for free, instead of each crate reimplementing the
-`max(now, base+1)` dance and each getting its own `TimestampExhausted`.
+When a newer relay event arrives, the engine invokes the same materializer
+over that source, preserves the same durable operation/receipt identity, and
+publishes a successor generation. No app-side retry loop or duplicated
+timestamp/error vocabulary exists. Future protocol capabilities inherit this
+ownership shape while still defining their own source requirement,
+first-value policy, and preservation rules.
 
 ## 4. The CAS coordinate, and the foreign-base failure — DESIGNED
 
@@ -224,18 +195,17 @@ place. Verified on master:
   `UnsignedReplaceableEdit` mirror and never was.
 - Replaceable edits cross the boundary solely as **fused semantic methods**:
   `NmpEngine::follow` / `NmpEngine::unfollow`
-  (`crates/nmp-ffi/src/facade.rs:375` and `:381`), each documented as "the
-  complete NIP-02 action: it waits for the module's source-evidence policy,
-  preserves the exact kind:3 base, atomically guards that base, signs,
-  routes, and streams the durable receipt. The native button owns none of
-  those steps."
+  (`crates/nmp-ffi/src/facade.rs`). They submit a registered semantic
+  operation, materialize it over the best current source or NIP-02's complete
+  empty first value, retain it for later-source replay, and project the
+  ordinary receipt. The native button owns none of those steps.
 
 So the boundary rule — **a payload never crosses FFI; only a fused semantic
 method does** — is an EXISTING precedent, not something this design invents.
-The Swift/Kotlin surface never learns that a CAS precondition exists; it
-learns `follow(target)`. Under the redesign this stays exactly as true:
-`FfiWritePayload` becomes `{ Event, Signed }`, and `ReplaceableEdit` remains
-representable only through the doors that own its policy.
+The Swift/Kotlin surface never learns a source id, operation encoding, or
+materialization callback; it learns `follow(target)`. `FfiWritePayload`
+remains `{ Event, Signed }`, and semantic replacement remains representable
+only through doors that own its policy.
 
 The precedent is what justifies the NIP-29 group-publish projection by
 analogy (`nip29/group-publication.md`): Pablo's ruling —
@@ -272,15 +242,11 @@ drop the precondition, or stamp the wrong author — the exact regression class
   engine must not silently "fix" it (present-then-changed stays impossible,
   `writes/event-builder.md` §3); guardrail-versus-restriction policy says let
   it through and keep the failure observable, not forbidden.
-- **Composer migration.** `compose_follow_change` stops taking `author` and
-  `now`, returns a `ReplaceableEdit` payload built from the base's tags, and
-  keeps only the errors that are genuinely compositional
-  (`BaseHasWrongKind`, `InvalidGeneratedTag` — both survive, both really are
-  about the base's content rather than the seam). Its `NoChange` proof
-  ("already follows") is unaffected.
-- **Receipts.**
-  `WriteOutcome::Refused(RefuseReason::ReplaceableBaseChanged { .. })` is
-  already a terminal receipt-stream fact; under fused methods it is the app's
-  signal to re-read and re-derive. No new status is needed, and none should be
-  added — one conflict door, whatever the staleness's cause (raced edit,
-  foreign base, crossed replacement from another device).
+- **NIP-02 migration.** The exact-base composer and its acquisition/retry
+  action are deleted. `FollowWrites` mints a versioned operation through its
+  engine-issued registration. The engine materializes it against the current
+  source, preserves unowned fields, and automatically reapplies it when a
+  newer source wins.
+- **Receipts.** Successful follow/unfollow exposes the ordinary receipt
+  directly. Successor generations remain attached to the same receipt; there
+  is no second action status machine or stale-base retry signal.

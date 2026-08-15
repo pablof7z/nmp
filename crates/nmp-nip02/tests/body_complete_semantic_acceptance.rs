@@ -10,7 +10,7 @@ use nmp::{
     ReplaceableMaterializer, ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, Row,
     RowDelta, RowSignature, SigningState, WriteIntent, WriteRouting,
 };
-use nmp_nip02::{register_follow_writes, ComposeFollowResult, FollowChange};
+use nmp_nip02::{register_follow_writes, set_following, FollowActionFailure, FollowChange};
 use nmp_store::{RedbStore, RelayObserved};
 use nostr::{EventBuilder, EventId, Keys, Kind, RelayUrl, Timestamp};
 
@@ -75,13 +75,6 @@ fn wait_for_current(
     }
 }
 
-fn intent(result: ComposeFollowResult) -> nmp::WriteIntent {
-    match result {
-        ComposeFollowResult::Publish(intent) => *intent,
-        ComposeFollowResult::NoChange => panic!("fixture operation must change the list"),
-    }
-}
-
 #[test]
 fn alice_then_bob_keep_two_receipts_and_one_complete_pending_event() {
     let author = Keys::generate();
@@ -125,22 +118,11 @@ fn alice_then_bob_keep_two_receipts_and_one_complete_pending_event() {
         )
         .expect("query opens");
 
-    let original = row(&base);
-    let first = engine
-        .publish(intent(
-            writes
-                .compose(&original, alice, FollowChange::Follow)
-                .expect("Alice operation is body-complete"),
-        ))
+    let first = set_following(&engine, &writes, alice, FollowChange::Follow)
         .expect("Alice enters ordinary custody");
-    let alice_row = wait_for_current(&subscription, first.event_id, &[alice]);
+    let _alice_row = wait_for_current(&subscription, first.event_id, &[alice]);
 
-    let second = engine
-        .publish(intent(
-            writes
-                .compose(&alice_row, bob, FollowChange::Follow)
-                .expect("Bob operation is body-complete over current pending state"),
-        ))
+    let second = set_following(&engine, &writes, bob, FollowChange::Follow)
         .expect("Bob gets a second ordinary receipt");
     let bob_row = wait_for_current(&subscription, second.event_id, &[alice, bob]);
 
@@ -281,25 +263,21 @@ fn invalidated_registration_and_materializer_refusal_leave_no_custody() {
     engine
         .add_public_key_account(author.public_key(), true)
         .expect("author is current");
-    let original = row(&base);
-
     let stale = register_follow_writes(&engine).expect("first registration installs");
-    let stale_intent = intent(
-        stale
-            .compose(&original, alice, FollowChange::Follow)
-            .expect("old handle composes before replacement"),
-    );
     let _replacement = register_follow_writes(&engine).expect("replacement installs");
-    let stale_error = match engine.publish(stale_intent) {
-        Ok(_) => panic!("stale handle must be refused"),
-        Err(error) => error,
-    };
-    assert!(stale_error.to_string().contains("not active"));
+    assert!(
+        matches!(
+            set_following(&engine, &stale, alice, FollowChange::Follow),
+            Err(FollowActionFailure::ReceiptUnavailable)
+        ),
+        "a stale NIP-02 capability is refused before custody"
+    );
     assert!(engine
         .publish_queue(None, 10)
         .expect("queue reads")
         .is_empty());
 
+    let original = row(&base);
     let refusing = engine
         .add_replaceable_materializer(*b"refuse-program00", *b"refuse-format-v1", AlwaysRefuse)
         .expect("refusing implementation registers");

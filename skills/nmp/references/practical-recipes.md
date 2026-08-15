@@ -173,14 +173,15 @@ Goal: make a follow control reflect canonical contact-list state rather than opt
 
 Swift has `observeFollowing`, `follow`, `unfollow`, and the `NMPFollowing` resource. The action:
 
-- acquires the existing contact-list base;
+- freezes the selected author and submits one durable operation immediately;
+- uses the best cached contact list, or NIP-02's complete empty first value;
 - preserves fields and tags it does not own;
-- publishes a guarded replaceable edit; and
-- streams acquisition, receipt, no-change, or typed failure facts.
+- reapplies the operation when newer relay truth arrives; and
+- projects the ordinary receipt facts.
 
-Do not set `isFollowing = true` on tap. Render action progress separately until the live following snapshot changes. A missing reconciled contact list is an explicit refusal: ordinary follow must not create a first kind-3 list containing only one contact. Product onboarding must handle first-list creation as a distinct capability/workflow.
+Do not set `isFollowing = true` on tap. Render action progress separately until the live following snapshot changes. Observation availability is source evidence, not permission to write: a known cached relationship and the explicit no-list state are actionable. The no-list case creates one complete kind:3 under NIP-02's capability policy; it is not a global relay-absence claim.
 
-With the `nip02` ("following") capability in the app's `.nmp.toml`, Swift exposes `observeFollowing`/`follow`/`unfollow` on `NMPEngine`; Kotlin exposes top-level `observeFollowing(engine, target)` / `follow(engine, target)` / `unfollow(engine, target)` functions. Without the capability the whole family is absent at compile time. Only the Combine `NMPFollowing` `ObservableObject` is Swift-specific, and it ships with that same capability. The `NMPFollowButton` view over it is `NMPUI`, which is repo-only. Terminal failures arrive as `FollowActionStatus.Failed` carrying a `FollowActionFailure` — `NoContactList`, `SignedOut`, `AccountChanged`, `AcquisitionTimedOut`, `CachedOnly`, `SourceUnavailable`, and the rest are distinct outcomes, not one error. Do not import generated FFI types or reproduce contact-list editing in application code.
+With the `nip02` ("following") capability in the app's `.nmp.toml`, Swift exposes `observeFollowing`/`follow`/`unfollow` on `NMPEngine`; Kotlin exposes top-level `observeFollowing(engine, target)` / `follow(engine, target)` / `unfollow(engine, target)` functions. Without the capability the whole family is absent at compile time. Only the Combine `NMPFollowing` `ObservableObject` is Swift-specific, and it ships with that same capability. The `NMPFollowButton` view over it is `NMPUI`, which is repo-only. Successful actions carry only ordinary receipt facts. Immediate `FollowActionFailure` is limited to malformed target, signed-out state, engine closure, and receipt unavailability. Do not import generated FFI types or reproduce contact-list editing in application code.
 
 ## Durable publishing and restart
 
