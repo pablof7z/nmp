@@ -7,7 +7,7 @@
 use nmp::mechanism::core::{EngineCore, EngineMsg};
 use nmp_grammar::ContextualAtom;
 use nmp_grammar::LiveQuery;
-use nmp_router::FixtureRoutingFacts;
+use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::RedbStore;
 use nostr::{Keys, RelayUrl};
 

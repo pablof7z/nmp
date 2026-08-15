@@ -11,8 +11,9 @@
 //! measurement) that wire the real resolver into the router.
 //!
 //! Module layout:
-//! - `facts` — the closed neutral route vocabulary, the read-only
-//!   `RoutingFacts` view, and static test facts.
+//! - `facts` — the closed neutral route vocabulary and the read-only
+//!   `RoutingFacts` view. Static test facts live in the separate
+//!   `nmp-router-testkit` dev-dependency crate (#1667), never here.
 //! - `budget` — `CompileBudget`: the whole-demand relay ceiling plus each
 //!   relay's own advertised NIP-11 limits, the bounds `compile` plans within.
 //! - `route` — atom classification (outbox vs pinned) + candidate assembly +
@@ -59,8 +60,7 @@ pub use coalesce::{
 pub use deliver::deliver;
 pub use diag::{Diagnostics, RelayDiagnostics};
 pub use facts::{
-    test_relay, AuthorRouteState, AuthorRoutes, FixtureRoutingFacts, Lane, LanedRelay, PublicKey,
-    RelayUrl, RoutingFacts,
+    AuthorRouteState, AuthorRoutes, Lane, LanedRelay, PublicKey, RelayUrl, RoutingFacts,
 };
 pub use ownership::{
     AdmissionOutcome, AdmissionPreview, AdmissionPreviewWork, AdmissionWork, CompileOutcome,

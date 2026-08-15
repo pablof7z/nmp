@@ -343,7 +343,7 @@ impl Engine {
     #[doc(hidden)]
     pub fn from_parts_with_fixture_routing_facts(
         store: RedbStore,
-        facts: nmp_router::FixtureRoutingFacts,
+        facts: nmp_router_testkit::FixtureRoutingFacts,
         cap: usize,
         pool_config: PoolConfig,
     ) -> Result<Self, EngineError> {
@@ -367,7 +367,7 @@ impl Engine {
     #[doc(hidden)]
     pub fn from_parts_with_fixture_routing_facts_and_nip65_sources(
         store: RedbStore,
-        facts: nmp_router::FixtureRoutingFacts,
+        facts: nmp_router_testkit::FixtureRoutingFacts,
         nip65_sources: Vec<RelayUrl>,
         cap: usize,
         pool_config: PoolConfig,

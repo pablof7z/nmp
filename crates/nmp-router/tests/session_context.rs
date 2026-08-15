@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use nmp_grammar::{
     AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey, SourceAuthority,
 };
-use nmp_router::{test_relay, FixtureRoutingFacts, Router, RuleRegistry};
+use nmp_router::{Router, RuleRegistry};
+use nmp_router_testkit::{test_relay, FixtureRoutingFacts};
 use nostr::Keys;
 
 #[test]

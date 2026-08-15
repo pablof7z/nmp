@@ -39,7 +39,8 @@ use nmp_grammar::{
     AccessContext, Binding, CacheMode, ContextualAtom, Demand, Filter, Freshness, IdentityField,
     LiveQuery, LiveQueryError, SourceAuthority,
 };
-use nmp_router::{FixtureRoutingFacts, WireOp};
+use nmp_router::WireOp;
+use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::{testing, CoverageInterval, RedbStore, RelayObserved};
 use nostr::{EventId, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
 

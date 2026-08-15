@@ -25,6 +25,12 @@ nmp-grammar.workspace = true
 nmp-store.workspace = true
 nmp-resolver.workspace = true
 nmp-router.workspace = true
+# Production dependency, not dev: `spawn_engine` (src/world/staging.rs)
+# builds the static neutral fact snapshot this crate's REAL engine spawns
+# over. `nmp-bdd` is itself only ever a dev-dependency of other crates, so
+# the fixture type stays out of `nmp-router`'s own shipped surface (#1667)
+# while remaining reachable here, where it belongs.
+nmp-router-testkit.workspace = true
 nmp-transport.workspace = true
 nmp-local-signer.workspace = true
 nmp-signer.workspace = true

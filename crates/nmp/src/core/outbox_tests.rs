@@ -15,7 +15,7 @@ mod outbox_resolver_tests {
     use super::*;
 
     use crate::core::write::RouteAnswer;
-    use nmp_router::FixtureRoutingFacts;
+    use nmp_router_testkit::FixtureRoutingFacts;
     use nmp_store::{RedbStore, RelayObserved};
     use nostr::{EventBuilder, Keys, Kind, Tag};
 

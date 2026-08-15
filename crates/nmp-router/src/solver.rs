@@ -165,8 +165,10 @@ pub fn solve(input: &CoverageInput) -> Coverage {
 mod tests {
     use nostr::Keys;
 
+    use nmp_router_testkit::test_relay;
+
     use super::*;
-    use crate::facts::{test_relay, Lane};
+    use crate::facts::Lane;
 
     fn authors(count: usize) -> Vec<PublicKey> {
         (0..count).map(|_| Keys::generate().public_key()).collect()

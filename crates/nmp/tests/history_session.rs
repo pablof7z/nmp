@@ -6,7 +6,8 @@ use nmp::mechanism::core::{
 };
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter};
-use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
+use nmp_router::{SubId, WireOp};
+use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::{RedbStore, RelayObserved};
 use nostr::{Event, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
 
