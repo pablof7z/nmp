@@ -2758,7 +2758,7 @@ impl EngineCore {
             relay_open_failures: BTreeMap::new(),
             transport_degraded: None,
             retry_scheduler_blocked: false,
-            max_publish_attempts: crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS,
+            max_publish_attempts: crate::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
             #[cfg(any(test, feature = "bench-instrumentation"))]
             projection_store_queries: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -2843,7 +2843,7 @@ impl EngineCore {
     #[must_use]
     pub fn with_max_publish_attempts(mut self, max_publish_attempts: u64) -> Self {
         self.max_publish_attempts = if max_publish_attempts == 0 {
-            crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS
+            crate::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS
         } else {
             max_publish_attempts
         };
