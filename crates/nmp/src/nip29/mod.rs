@@ -15,7 +15,7 @@
 //! # Why the door lives here and not in `nmp-nip29`
 //!
 //! `nmp-nip29` is engine-free by construction -- `nostr` + `nmp-grammar`, no
-//! core, no mechanism (`scripts/check-nip29-ownership.sh`). It owns NIP-29's
+//! core, no mechanism. It owns NIP-29's
 //! schema, its tag/predicate semantics, its editors and its signed-event
 //! validation, and it returns only validated semantic values. It never
 //! imports, constructs, stores or returns a [`WriteIntent`](crate::WriteIntent).

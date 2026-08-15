@@ -48,11 +48,9 @@
 //! engine, query, receipt, signer and typed write value it mirrors is
 //! sourced through `nmp`'s own re-exports (#52 Unit B), including the
 //! NIP-22 comment vocabulary, which it reaches by enabling the facade's
-//! `nip22` feature rather than by a second edge to `nmp-nip22`.
-//! `scripts/check-ffi-facade-boundary.sh` is the mechanism that keeps that
-//! true. `nmp-nip29` (see [`nip29`]'s own doc) and `nmp-blossom` (#555, see
-//! [`blossom`]'s) are the opt-in protocol
-//! dependencies projected by this boundary.
+//! `nip22` feature rather than by a second edge to `nmp-nip22`. `nmp-nip29`
+//! (see [`nip29`]'s own doc) and `nmp-blossom` (#555, see [`blossom`]'s) are
+//! the opt-in protocol dependencies projected by this boundary.
 
 #[cfg(feature = "asset")]
 pub mod asset;

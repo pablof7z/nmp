@@ -151,66 +151,68 @@ ownership) stays removed.
 
 ### 3.3 The gate clause with a dead premise
 
-`scripts/check-nip29-ownership.sh` enforces #838's conclusion with a ban
-whose comment states its premise outright (`check-nip29-ownership.sh:90-92`):
+The deleted NIP-29 ownership check script enforced #838's conclusion with a
+ban whose comment stated its premise outright:
 
 > With no supported NIP-29 write operation, the universal write plane must
 > not retain a speculative single-host route.
 
-and greps `HostAuthority|PinnedHost` across grammar/nmp/ffi
-(`check-nip29-ownership.sh:103-108`), plus requires the legacy
-`pinned-host-hex` snapshot spelling to survive exactly once, in the restart
-falsifier that proves an old obligation is retained unreadable
-(`check-nip29-ownership.sh:94-101`,
-`crates/nmp/tests/durable_accepted_restart.rs`).
+and grepped `HostAuthority|PinnedHost` across grammar/nmp/ffi, plus required
+the legacy `pinned-host-hex` snapshot spelling to survive exactly once, in
+the restart falsifier that proves an old obligation is retained unreadable
+(`crates/nmp/tests/durable_accepted_restart.rs`).
 
-The premise is now dead: there IS a supported NIP-29 write operation, and
-the write plane deliberately carries a general single-relay route. The
-`HostAuthority|PinnedHost` clause and its comment are deleted with the
-design — those names must simply never return (§2), and a grep for names
-nobody proposes is not a tripwire, it is sediment. **What replaces it is
-positive pins on what the reversal must NOT have loosened:**
+The premise was already dead by the time the whole script was deleted along
+with the rest of the CI-era scripts: there IS a supported NIP-29 write
+operation, and the write plane deliberately carries a general single-relay
+route. The `HostAuthority|PinnedHost` clause and its comment are gone with the
+script — those names must simply never return (§2). **The positive pins on
+what the reversal must NOT have loosened are, as of this writing, unproven by
+any mechanism:**
 
 - group publication crosses the app API only through the `Group` door —
   the app never spells `Explicit([host])` for a group and never touches `h`
   (`nip29/group-publication.md`);
-- `nmp-nip29` still cannot depend on the engine crates (the ownership half
-  of the gate survives untouched);
+- `nmp-nip29` still cannot depend on the engine crates (this was the
+  ownership half of the gate);
 - `Explicit` is verbatim, widen-free, and refuses empty pre-acceptance
   (ledger #6's structure, §1).
 
-The rest of the gate — chat-schema ownership, `previous` minting, the
-removed native API — is untouched by routing and stays.
+The rest of what the gate checked — chat-schema ownership, `previous`
+minting, the removed native API — went with it; none of it is checked by any
+mechanism anymore.
 
 ### 3.4 Who owns the tombstones now (#1105)
 
-`check-nip29-ownership.sh` carried the routing-vocabulary clause for one
-release as a name-only grep over three Rust source trees plus the two SDK
-sources. That was never enough for what §1–§4 claim: a grep proves a name is
-absent, not that the surviving vocabulary is exactly two words, and it did
-not scan `GroupHost` or `AuthorRelayList` at all — the two never-built names
-this document tombstones hardest.
+The deleted NIP-29 ownership check script carried the routing-vocabulary
+clause for one release as a name-only grep over three Rust source trees plus
+the two SDK sources. That was never enough for what §1–§4 claim: a grep
+proves a name is absent, not that the surviving vocabulary is exactly two
+words, and it did not scan `GroupHost` or `AuthorRelayList` at all — the two
+never-built names this document tombstones hardest.
 
-`scripts/check-routing-vocabulary.sh` (#1105) owns the whole contract, for
-the whole domain, in one place:
+A dedicated routing-vocabulary check script (#1105) then owned the whole
+contract, for the whole domain, in one place:
 
 - **cardinality by enumeration, per projection** — the `nmp-grammar` enum, the
   `nmp-ffi` mirror, BOTH public FFI conversion directions, the Swift enum and
   the Kotlin sealed class each declare exactly `Auto` and `Explicit`. Because
   the sets are exact, "it names no NIP and no strategy" needs no rule of its
   own: there is no third name left to be one. A third word appearing on ONE
-  SDK — the failure a Rust-only test cannot see — is caught here;
+  SDK — the failure a Rust-only test cannot see — was caught here;
 - **every retired spelling**, including `GroupHost` and `AuthorRelayList`,
   absent from every tree an app or SDK can reach, with the failure message
   naming the replacement (`Auto`, or `Explicit` minted by whichever crate);
 - **the group door** — no group write operation takes a relay or a routing
   value, stated as a signature.
 
-The gate has its own falsifier, `scripts/test-check-routing-vocabulary.sh`,
-which restores a retired spelling and adds a third variant to each projection in
-turn and requires each mutation to go red. The runtime half — the app
-supplies content only, the host alone receives, the author's discovered
-outbox is never contacted — is
+It had its own falsifier script, which restored a retired spelling and added
+a third variant to each projection in turn and required each mutation to go
+red. Both scripts are deleted along with the rest of the CI-era scripts, so
+this cardinality/vocabulary contract
+is currently unproven by any mechanism. The runtime half — the app supplies
+content only, the host alone receives, the author's discovered outbox is
+never contacted — remains proved by
 `crates/nmp/tests/group_publication_door.rs`, because no static check can
 observe a delivery.
 

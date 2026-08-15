@@ -7,7 +7,7 @@
 //! route, no engine, no signer and no intent: the app-facing door that
 //! retains a scope and mints an opaque write lives in the `nmp` facade
 //! (`nmp::nip29`), which is what keeps this crate's dependencies at exactly
-//! `nostr` + `nmp-grammar` (`scripts/check-nip29-ownership.sh`).
+//! `nostr` + `nmp-grammar`.
 //!
 //! Everything here is KIND-BLIND. It reads no kind, branches on no kind, and
 //! privileges none: NIP-29 permits any kind to carry an `h` and live in a

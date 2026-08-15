@@ -13,8 +13,7 @@
 //! a run ("no group write operation accepts a relay"). Absence of a parameter
 //! is not observable from any execution -- a scenario that never passed a
 //! relay proves nothing about whether it could have -- so those read the
-//! door's own declaration, which is the same evidence
-//! `scripts/check-nip29-ownership.sh` uses.
+//! door's own declaration directly.
 //!
 //! The families below split by the DOMAIN each claim is about, the same seam
 //! [`super`] itself uses: what reached which host, how the route was chosen and

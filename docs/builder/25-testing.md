@@ -170,18 +170,12 @@ The root `rust-toolchain.toml` pins an exact dated nightly, not the moving
 `nightly` alias. The exact host-independent `rustc`, Cargo, Clippy, and
 rustfmt version strings live in `tools/rust-toolchain-versions.env`.
 
-Run both toolchain falsifiers from a fresh checkout:
-
-```sh
-bash scripts/check-rust-toolchain.sh
-bash scripts/test-rust-toolchain.sh
-```
-
-The first command is the same assertion CI runs. The second mutates fixtures
-and proves that a floating nightly, a root/toolchain mismatch, a selected
-toolchain mismatch, version drift, or a missing required component is refused.
-A toolchain bump is therefore an explicit reviewed change to the root pin,
-toolchain pin, and version oracle.
+The scripts that used to falsify this pin (asserting no floating nightly, no
+root/toolchain mismatch, no selected-toolchain mismatch, no version drift, and
+no missing required component) are deleted along with the rest of the CI-era
+scripts, and there is no CI. A toolchain bump is currently unproven by any
+mechanism; keeping the root pin, toolchain pin, and version oracle in
+agreement relies on manual review.
 
 ## Suggested test matrix
 

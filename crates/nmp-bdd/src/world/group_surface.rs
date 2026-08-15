@@ -1,13 +1,11 @@
-//! The group door's DECLARED shape, and the gate that enforces it.
+//! The group door's DECLARED shape.
 //!
 //! Split from [`super::groups`] because it answers a different KIND of
 //! question. Everything there is about what a run did; everything here is
 //! about what the door could ever do -- "no group write operation accepts a
 //! relay" is not observable from any execution, because a scenario that never
 //! passed a relay proves nothing about whether it could have. The only witness
-//! for the absence of a parameter is the declaration itself, which is also
-//! exactly what `scripts/check-nip29-ownership.sh` reads, so the scenarios and
-//! the gate agree on their evidence by construction.
+//! for the absence of a parameter is the declaration itself.
 //!
 //! #1033 split the door across two files with no `GroupOperations` trait left
 //! anywhere: `crates/nmp/src/nip29/group.rs` declares `Group`'s inherent read
@@ -31,9 +29,7 @@ use super::NmpWorld;
 /// a composer ("no group write operation accepts a relay", "the group exposes
 /// no composer for kind 9"). Absence is not observable from a run: a scenario
 /// that never passed a relay proves nothing about whether it could have. The
-/// only witness is the door's own declaration, which is also exactly what
-/// `scripts/check-nip29-ownership.sh` reads -- so the scenario and the gate
-/// agree on their evidence by construction.
+/// only witness is the door's own declaration.
 #[derive(Debug, Default, Clone)]
 pub struct GroupSurface {
     /// Every `pub fn` signature declared on `Group`'s own inherent impl.

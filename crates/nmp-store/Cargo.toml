@@ -11,10 +11,12 @@ publish.workspace = true
 test-instrumentation = []
 # Opt-in counters for evidence binaries. Kept out of production builds so the
 # query hot path pays no atomic-increment cost merely to support benchmarks.
-# Being absent from every production build is not being absent from every
-# build: .github/workflows/optional-features.yml compiles and tests this
-# feature on every pull request (#1268), because a feature no job enables is a
-# feature nothing can hold to the standard the rest of the crate is held to.
+# Being absent from every production build must not mean being absent from
+# every build entirely (#1268): a feature nothing ever compiles and tests is
+# a feature nothing can hold to the standard the rest of the crate is held
+# to. There is currently no automated build that compiles and tests this
+# feature; build and test it explicitly (`cargo test -p nmp-store --features
+# bench-instrumentation`) when touching it.
 bench-instrumentation = ["dep:fjall", "dep:heed"]
 
 [[example]]

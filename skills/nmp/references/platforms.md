@@ -107,7 +107,7 @@ nmp prepare --output Generated/NMP
 
 Consume the JVM output as a Gradle composite build — `includeBuild("Generated/NMP/kotlin-jvm")` and `implementation("com.nmp:nmp-kotlin:0.0.0")`. The local coordinate is deterministic and is not a published Maven version.
 
-The Android product is real: `nmp prepare --product android` materializes the same feature-selected `com.nmp.sdk` sources, generated UniFFI binding, and `libnmp_ffi.so` slices into a release AAR plus a local Maven repository. It is API 26+, compile SDK 35, NDK 27.2.12479018, with exactly `arm64-v8a` and `x86_64`. Applications import only `com.nmp.sdk`; `uniffi.nmp_ffi` is implementation plumbing. The catalog-pinned side-by-side NDK is authoritative — `NMP_ANDROID_NDK_HOME` may name that exact revision, and a runner's generic `ANDROID_NDK_HOME` cannot silently select another. `.github/workflows/android-emulator.yml` qualifies the generated artifact as an external API-35 application. There is still no NIP-55 Android intent-based signing.
+The Android product is real: `nmp prepare --product android` materializes the same feature-selected `com.nmp.sdk` sources, generated UniFFI binding, and `libnmp_ffi.so` slices into a release AAR plus a local Maven repository. It is API 26+, compile SDK 35, NDK 27.2.12479018, with exactly `arm64-v8a` and `x86_64`. Applications import only `com.nmp.sdk`; `uniffi.nmp_ffi` is implementation plumbing. The catalog-pinned side-by-side NDK is authoritative — `NMP_ANDROID_NDK_HOME` may name that exact revision, and a runner's generic `ANDROID_NDK_HOME` cannot silently select another. There is still no NIP-55 Android intent-based signing.
 
 Rebuilding this repository's own desktop-JVM qualification project is separate machinery, not the app workflow:
 
