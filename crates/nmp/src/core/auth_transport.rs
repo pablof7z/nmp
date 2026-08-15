@@ -1667,6 +1667,11 @@ impl EngineCore {
                         .or_default()
                         .entry(event.kind.as_u16())
                         .or_insert(0) += 1;
+                    // Counted before ingest decides anything (#1630): the
+                    // relay's bounded answer is what proves absence, and a
+                    // frame this engine goes on to reject still filled a slot
+                    // in it.
+                    self.record_returned_frame(&session, subscription_id.as_str(), &event);
                     #[cfg(feature = "bench-instrumentation")]
                     crate::ingest_attribution::relay_frame_diagnostics_count(
                         phase_started.elapsed(),
@@ -1727,6 +1732,9 @@ impl EngineCore {
                     .or_default()
                     .entry(event.kind.as_u16())
                     .or_insert(0) += 1;
+                // See the batched EVENT arm: the count is what the RELAY
+                // returned, taken before ingest can reject anything (#1630).
+                self.record_returned_frame(&session, subscription_id.as_str(), &event);
                 let observed = RelayObserved::new(session.relay.clone(), self.clock);
                 self.ingest_relay_observations(
                     vec![(

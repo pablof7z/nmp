@@ -1798,6 +1798,7 @@ impl EngineCore {
             }
         }
         self.live_wire_requests.remove(&key);
+        self.forget_returned_frames(&key.0, &key.1);
     }
 
     /// A session dropped. Every attributed request on it is dead; replay
@@ -1822,6 +1823,7 @@ impl EngineCore {
         }
         self.live_wire_requests
             .retain(|(candidate, _), _| candidate != session);
+        self.forget_session_returned_frames(session);
     }
 
     /// Whether the exact accepted wire subscription is already live.

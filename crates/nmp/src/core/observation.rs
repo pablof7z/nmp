@@ -496,6 +496,10 @@ impl EngineCore {
                         &mut effects,
                     );
                 }
+                // A replacement REQ reuses this key and asks a different
+                // question. Its predecessor's returned-frame count says
+                // nothing about the new one, so the ledger starts empty.
+                self.forget_returned_frames(&request.session, &request.sub_id);
                 self.live_wire_requests.insert(
                     (request.session.clone(), request.sub_id.clone()),
                     LiveWireRequest {
@@ -696,10 +700,17 @@ impl EngineCore {
         reason: String,
         effects: &mut Vec<Effect>,
     ) {
-        self.live_wire_requests
-            .retain(|(request_session, _), request| {
-                request_session != session || request.handle != handle
-            });
+        let dropped: Vec<_> = self
+            .live_wire_requests
+            .iter()
+            .filter(|(key, request)| &key.0 == session && request.handle == handle)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for (session, sub_id) in dropped {
+            self.live_wire_requests
+                .remove(&(session.clone(), sub_id.clone()));
+            self.forget_returned_frames(&session, &sub_id);
+        }
         let revisions: Vec<_> = self
             .active_request_evidence
             .iter()
@@ -745,6 +756,7 @@ impl EngineCore {
             .is_some_and(|request| request.handle == handle)
         {
             self.live_wire_requests.remove(&key);
+            self.forget_returned_frames(session, sub_id);
         }
         let revisions: Vec<_> = self
             .active_request_revisions_by_sub

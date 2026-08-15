@@ -39,6 +39,9 @@ mod auth_core_headless;
 mod auth_transport;
 #[cfg(test)]
 mod auth_transport_tests;
+mod coordinate_reuse;
+#[cfg(test)]
+mod coordinate_reuse_tests;
 mod diagnostics;
 mod evidence;
 #[cfg(test)]
@@ -435,6 +438,8 @@ fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
 }
 
 use attribution::{AttributionSendId, AttributionState, CompletedAttribution, EventFailureTarget};
+pub use coordinate_reuse::CoordinateCoverage;
+use coordinate_reuse::ReturnedFrames;
 use diagnostics::{stalled_write_id, STALLED_WRITE_DETAIL_LIMIT};
 pub use diagnostics::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
@@ -1408,6 +1413,10 @@ pub struct CoreOwnershipCensus {
     pub active_execution_owners: usize,
     pub active_execution_owner_keys: usize,
     pub live_wire_owners: usize,
+    /// Per-request returned-frame ledgers (#1630). Counted here so a ledger
+    /// that outlives the request it belongs to fails the census, exactly like
+    /// every other per-request owner.
+    pub returned_frame_ledgers: usize,
     pub pending_request_claim_transfer_jobs: usize,
     pub pending_request_claim_transfer_claims: usize,
     pub attribution_inflight_subs: usize,
@@ -2279,6 +2288,11 @@ pub struct EngineCore {
     /// evidence, this survives EOSE because EOSE settles a request without
     /// closing its subscription.
     live_wire_requests: HashMap<(RelaySessionKey, SubId), LiveWireRequest>,
+    /// What each accepted wire request has received from its relay (#1630):
+    /// how many EVENT frames were returned, and which coordinates were among
+    /// them. Process-local, minted with the accepted request and dropped with
+    /// it, so a restart forgets every witness and repeats the ordinary check.
+    returned_frames: HashMap<(RelaySessionKey, SubId), ReturnedFrames>,
     /// Hidden ordinary live-query owners for unfinished finite semantic
     /// source members. The observation id is the exact bridge from router
     /// request evidence back to the durable source round.
@@ -2587,6 +2601,11 @@ pub struct EngineCore {
     freshness_plan_request_entries_visited: Cell<u64>,
     #[cfg(any(test, feature = "bench-instrumentation"))]
     freshness_coalesce_pair_attempts: Cell<u64>,
+    /// How many coordinate coverage checks could NOT be answered from an
+    /// already-open request and therefore cost a REQ (#1630). Every reuse
+    /// path leaves it alone, so losing reuse is a number that moves.
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    coordinate_reuse_new_reqs: Cell<u64>,
     #[cfg(any(test, feature = "bench-instrumentation"))]
     request_target_demand_keys_touched: Cell<u64>,
     #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -2708,6 +2727,7 @@ impl EngineCore {
             active_request_evidence: HashMap::new(),
             active_request_revisions_by_sub: HashMap::new(),
             live_wire_requests: HashMap::new(),
+            returned_frames: HashMap::new(),
             semantic_source_observations: HashMap::new(),
             semantic_source_requests: HashMap::new(),
             semantic_successor_requests: HashMap::new(),
@@ -2794,6 +2814,8 @@ impl EngineCore {
             freshness_plan_request_entries_visited: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
             freshness_coalesce_pair_attempts: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            coordinate_reuse_new_reqs: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
             request_target_demand_keys_touched: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -3097,6 +3119,7 @@ impl EngineCore {
             active_execution_owners: self.active_request_evidence.len(),
             active_execution_owner_keys: self.active_request_revisions_by_sub.len(),
             live_wire_owners: self.live_wire_requests.len(),
+            returned_frame_ledgers: self.returned_frames.len(),
             pending_request_claim_transfer_jobs: self.pending_request_claim_transfers.len(),
             pending_request_claim_transfer_claims: self
                 .pending_request_claim_transfers
