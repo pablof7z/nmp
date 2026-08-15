@@ -41,12 +41,14 @@ use nmp_ffi::types::{
     FfiRowDelta, FfiShortfallFact, FfiSigningState, FfiSourceStatus, FfiStalledWriteStage,
     FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
+use nmp_grammar::{AccessContext, Demand, Derived, Selector, SourceAuthority};
 use nmp_nip02::{
     observe_following, register_follow_writes, set_following, FollowAvailability, FollowChange,
     FollowObservation, FollowRelationship, FollowSnapshot,
 };
+use nmp_store::{RedbStore, RelayObserved};
 use nostr::PublicKey;
-use nostr::{JsonUtil, Keys, Kind, Tag};
+use nostr::{EventBuilder, JsonUtil, Keys, Kind, RelayUrl, Tag};
 
 const WAIT: Duration = Duration::from_secs(10);
 const SOURCE_ANCHOR_KIND: u16 = 9_997;
@@ -1427,6 +1429,121 @@ fn apply_ffi_deltas(rows: &mut BTreeMap<String, NormRow>, deltas: Vec<FfiRowDelt
             FfiRowDelta::Removed { id } => {
                 rows.remove(&id);
             }
+        }
+    }
+}
+
+fn pinned_contact_list(author: PublicKey, relay: RelayUrl) -> Demand {
+    Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
+            authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
+            ..Filter::default()
+        },
+        SourceAuthority::Pinned(BTreeSet::from([relay])),
+        AccessContext::Public,
+    )
+    .expect("the contact-list source is pinned to one relay")
+}
+
+fn pinned_follow_feed(author: PublicKey, relay: RelayUrl) -> LiveQuery {
+    let following = pinned_contact_list(author, relay.clone());
+    let relays = BTreeSet::from([relay]);
+    let feed = Demand::new(
+        Filter {
+            kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner: following,
+                project: Selector::Tag("p".to_string()),
+            }))),
+            ..Filter::default()
+        },
+        SourceAuthority::Pinned(relays),
+        AccessContext::Public,
+    )
+    .expect("the derived feed is pinned to the same relay");
+    LiveQuery::single(feed)
+}
+
+fn wait_for_ffi_contact_list(
+    rx: &mpsc::Receiver<(Vec<FfiRowDelta>, Vec<FfiAcquisitionEvidence>)>,
+    rows: &mut BTreeMap<String, NormRow>,
+    relay: &str,
+    expected_authors: &BTreeSet<String>,
+    expected_content: &str,
+    required_unrelated_tag: &[String],
+    label: &str,
+) -> String {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (deltas, _evidence) = rx.recv_timeout(remaining).unwrap_or_else(|error| {
+            let current = rows
+                .values()
+                .filter(|row| row.kind == Kind::ContactList.as_u16())
+                .map(|row| (row.content.clone(), row.tags.clone()))
+                .collect::<Vec<_>>();
+            panic!(
+                "{label} did not settle within the total {WAIT:?} bound: {error}; \
+                 expected_authors={expected_authors:?}; current={current:?}"
+            )
+        });
+        apply_ffi_deltas(rows, deltas, relay);
+        let contact_lists = rows
+            .values()
+            .filter(|row| row.kind == Kind::ContactList.as_u16())
+            .collect::<Vec<_>>();
+        if contact_lists.len() != 1 {
+            continue;
+        }
+        let row = contact_lists[0];
+        let authors = row
+            .tags
+            .iter()
+            .filter(|tag| tag.first().is_some_and(|cell| cell == "p"))
+            .filter_map(|tag| tag.get(1).cloned())
+            .collect::<BTreeSet<_>>();
+        if authors == *expected_authors
+            && row.content == expected_content
+            && row
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == required_unrelated_tag)
+        {
+            return row.id.clone();
+        }
+    }
+}
+
+fn wait_for_ffi_note_authors(
+    rx: &mpsc::Receiver<(Vec<FfiRowDelta>, Vec<FfiAcquisitionEvidence>)>,
+    rows: &mut BTreeMap<String, NormRow>,
+    relay: &str,
+    expected: &BTreeSet<String>,
+    label: &str,
+) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (deltas, _evidence) = rx.recv_timeout(remaining).unwrap_or_else(|error| {
+            let current = rows
+                .values()
+                .filter(|row| row.kind == Kind::TextNote.as_u16())
+                .map(|row| row.pubkey.clone())
+                .collect::<BTreeSet<_>>();
+            panic!(
+                "{label} did not settle within the total {WAIT:?} bound: {error}; \
+                 expected={expected:?}; current={current:?}"
+            )
+        });
+        apply_ffi_deltas(rows, deltas, relay);
+        let authors = rows
+            .values()
+            .filter(|row| row.kind == Kind::TextNote.as_u16())
+            .map(|row| row.pubkey.clone())
+            .collect::<BTreeSet<_>>();
+        if &authors == expected {
+            return;
         }
     }
 }
@@ -4068,6 +4185,296 @@ async fn first_follow_survives_restart_and_replays_over_later_nip02_truth() {
 
     reopened.shutdown();
     reopened_observation.cancel();
+    relay.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn offline_follow_recomputes_derived_feed_before_later_source_rebase() {
+    let mut relay = ScriptedRelay::start(&RelayConfig {
+        hold_query_kind: Some(Kind::ContactList.as_u16()),
+        ..RelayConfig::default()
+    })
+    .await;
+    let relay_port = relay.port();
+    let relay_url = relay.url.clone();
+    let author = fixed_keys();
+    let original = (0..5).map(|_| Keys::generate()).collect::<Vec<_>>();
+    let target = Keys::generate();
+    let remote_additions = (0..3).map(|_| Keys::generate()).collect::<Vec<_>>();
+    let directory = tempfile::tempdir().expect("derived-follow fixture directory");
+    let store_path = directory.path().join("nip02-derived-follow.redb");
+
+    let cached_unrelated = Tag::parse(["x", "cached-owned"]).expect("unrelated cached tag parses");
+    let cached_contact = EventBuilder::new(Kind::ContactList, "cached contact content")
+        .tags(
+            original
+                .iter()
+                .map(|keys| Tag::public_key(keys.public_key()))
+                .chain(std::iter::once(cached_unrelated.clone())),
+        )
+        .custom_created_at(Timestamp::from(1_800_000_000))
+        .sign_with_keys(&author)
+        .expect("cached contact list signs");
+    {
+        let mut store = RedbStore::open(&store_path).expect("derived-follow store opens");
+        store
+            .insert(
+                cached_contact,
+                RelayObserved::new(relay_url.clone(), Timestamp::from(1_800_000_001)),
+            )
+            .expect("cached contact list is source-observed");
+        for (index, keys) in original
+            .iter()
+            .chain(std::iter::once(&target))
+            .chain(remote_additions.iter())
+            .enumerate()
+        {
+            let note = EventBuilder::new(Kind::TextNote, format!("note-{index}"))
+                .custom_created_at(Timestamp::from(1_800_000_100 + index as u64))
+                .sign_with_keys(keys)
+                .expect("cached note signs");
+            store
+                .insert(
+                    note,
+                    RelayObserved::new(
+                        relay_url.clone(),
+                        Timestamp::from(1_800_000_200 + index as u64),
+                    ),
+                )
+                .expect("cached note is source-observed");
+        }
+    }
+
+    let engine = new_ffi_engine(NmpEngineConfig {
+        store_path: Some(store_path.to_string_lossy().into_owned()),
+        app_relays: vec![relay_url.to_string()],
+        fallback_relays: vec![],
+        ..ffi_outbox_routing_config()
+    })
+    .expect("persistent native NIP-02 engine opens");
+    engine
+        .add_public_key_account(ffi_public_key(author.public_key()), true)
+        .expect("NIP-02 author registers without a signer");
+    let contact_list = engine
+        .observe_query(
+            nmp_ffi::convert::live_query_to_ffi(LiveQuery::single(pinned_contact_list(
+                author.public_key(),
+                relay_url.clone(),
+            ))),
+            None,
+        )
+        .expect("contact-list observation opens");
+    let contact_rx = bridge_rows(&contact_list);
+    let mut contact_rows = BTreeMap::new();
+    assert!(
+        relay
+            .wait_query_for_kind(Kind::ContactList.as_u16(), Duration::from_secs(30))
+            .await,
+        "the relay never received the held contact-list request"
+    );
+    let feed = engine
+        .observe_query(
+            nmp_ffi::convert::live_query_to_ffi(pinned_follow_feed(
+                author.public_key(),
+                relay_url.clone(),
+            )),
+            None,
+        )
+        .expect("derived follow feed opens");
+    let feed_rx = bridge_rows(&feed);
+    let mut feed_rows = BTreeMap::new();
+    let original_authors = original
+        .iter()
+        .map(|keys| keys.public_key().to_hex())
+        .collect::<BTreeSet<_>>();
+    wait_for_ffi_contact_list(
+        &contact_rx,
+        &mut contact_rows,
+        relay_url.as_str(),
+        &original_authors,
+        "cached contact content",
+        cached_unrelated.as_slice(),
+        "cached contact list",
+    );
+    wait_for_ffi_note_authors(
+        &feed_rx,
+        &mut feed_rows,
+        relay_url.as_str(),
+        &original_authors,
+        "cached derived feed",
+    );
+    relay.disconnect().await;
+    let action = engine
+        .follow(target.public_key().to_hex())
+        .expect("offline follow enters ordinary custody");
+    let action_rx = bridge_follow_actions(&action);
+    let receipt_id = match recv_before(&action_rx, Instant::now() + WAIT, "follow receipt") {
+        FfiFollowActionStatus::Receipt { receipt_id, .. } => receipt_id,
+        FfiFollowActionStatus::Failed { failure } => {
+            panic!("offline follow was refused: {failure:?}")
+        }
+    };
+    let mut after_follow = original_authors.clone();
+    after_follow.insert(target.public_key().to_hex());
+    wait_for_ffi_contact_list(
+        &contact_rx,
+        &mut contact_rows,
+        relay_url.as_str(),
+        &after_follow,
+        "cached contact content",
+        cached_unrelated.as_slice(),
+        "pending-follow contact list",
+    );
+    wait_for_ffi_note_authors(
+        &feed_rx,
+        &mut feed_rows,
+        relay_url.as_str(),
+        &after_follow,
+        "pending-follow derived feed",
+    );
+    let initial_queue = engine.publish_queue(None, u8::MAX).unwrap();
+    assert_eq!(initial_queue.len(), 1);
+    assert_eq!(initial_queue[0].receipt_id, receipt_id);
+    let initial_event_id = initial_queue[0].event_id.clone();
+
+    contact_list.cancel();
+    feed.cancel();
+    engine.shutdown();
+    drop(action);
+    drop(contact_list);
+    drop(feed);
+    drop(engine);
+
+    let engine = new_ffi_engine(NmpEngineConfig {
+        store_path: Some(store_path.to_string_lossy().into_owned()),
+        app_relays: vec![relay_url.to_string()],
+        fallback_relays: vec![],
+        ..ffi_outbox_routing_config()
+    })
+    .expect("persistent native NIP-02 engine reopens");
+    engine
+        .add_public_key_account(ffi_public_key(author.public_key()), true)
+        .expect("NIP-02 author reattaches without a signer");
+    assert!(
+        matches!(
+            engine
+                .reattach_receipt(receipt_id)
+                .expect("offline-follow receipt reattaches after restart"),
+            FfiReceiptReattachment::Attached { .. }
+        ),
+        "the ordinary receipt must survive the offline engine restart"
+    );
+    relay = ScriptedRelay::start_on_port(
+        relay_port,
+        &RelayConfig {
+            hold_query_kind: Some(Kind::ContactList.as_u16()),
+            ..RelayConfig::default()
+        },
+    )
+    .await;
+    assert_eq!(relay.url, relay_url);
+    let contact_list = engine
+        .observe_query(
+            nmp_ffi::convert::live_query_to_ffi(LiveQuery::single(pinned_contact_list(
+                author.public_key(),
+                relay_url.clone(),
+            ))),
+            None,
+        )
+        .expect("reopened contact-list observation opens");
+    let contact_rx = bridge_rows(&contact_list);
+    let mut contact_rows = BTreeMap::new();
+    let feed = engine
+        .observe_query(
+            nmp_ffi::convert::live_query_to_ffi(pinned_follow_feed(
+                author.public_key(),
+                relay_url.clone(),
+            )),
+            None,
+        )
+        .expect("reopened derived follow feed opens");
+    let feed_rx = bridge_rows(&feed);
+    let mut feed_rows = BTreeMap::new();
+    let preserved_unrelated =
+        Tag::parse(["x", "relay-owned", "extra"]).expect("unrelated relay tag parses");
+    let remote_source = EventBuilder::new(Kind::ContactList, "relay-owned content")
+        .tags(
+            original[..4]
+                .iter()
+                .chain(remote_additions.iter())
+                .map(|keys| Tag::public_key(keys.public_key()))
+                .chain(std::iter::once(preserved_unrelated.clone())),
+        )
+        .custom_created_at(Timestamp::from(1_800_000_010))
+        .sign_with_keys(&author)
+        .expect("later relay contact list signs");
+    assert!(
+        relay
+            .wait_query_for_kind(Kind::ContactList.as_u16(), Duration::from_secs(30))
+            .await,
+        "the reopened engine never sent the finite contact-list request; connections={}, contacts={}, wire={:?}",
+        relay.connection_count(),
+        relay.contact_count(),
+        relay.wire_record()
+    );
+    relay.seed_signed_event(&remote_source).await;
+    relay.release_queries();
+
+    let expected_rebased = original[..4]
+        .iter()
+        .chain(std::iter::once(&target))
+        .chain(remote_additions.iter())
+        .map(|keys| keys.public_key().to_hex())
+        .collect::<BTreeSet<_>>();
+    let rebased_row_id = wait_for_ffi_contact_list(
+        &contact_rx,
+        &mut contact_rows,
+        relay_url.as_str(),
+        &expected_rebased,
+        "relay-owned content",
+        preserved_unrelated.as_slice(),
+        "source-rebased contact list",
+    );
+    assert!(
+        contact_rows.values().all(|row| {
+            row.kind != Kind::ContactList.as_u16()
+                || !row
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_slice() == cached_unrelated.as_slice())
+        }),
+        "the rebased row must replace stale cached metadata rather than unioning it"
+    );
+    wait_for_ffi_note_authors(
+        &feed_rx,
+        &mut feed_rows,
+        relay_url.as_str(),
+        &expected_rebased,
+        "source-rebased derived feed",
+    );
+
+    let queue = engine.publish_queue(None, u8::MAX).unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].receipt_id, receipt_id);
+    assert_eq!(
+        queue[0].event_id, rebased_row_id,
+        "the original receipt must own the exact successor visible to queries"
+    );
+    assert_ne!(
+        queue[0].event_id, initial_event_id,
+        "later source truth installs one new pending generation under the same receipt"
+    );
+    assert!(
+        relay.admitted_events().is_empty(),
+        "a public-key-only account proves query visibility before signing or publication"
+    );
+
+    contact_list.cancel();
+    feed.cancel();
+    engine.shutdown();
+    drop(contact_list);
+    drop(feed);
+    drop(engine);
     relay.shutdown();
 }
 
