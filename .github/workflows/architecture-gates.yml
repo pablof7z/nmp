@@ -177,7 +177,7 @@ jobs:
           persist-credentials: false
 
       - name: Refuse runtime registration, per-call spawn, panic translation, completion maps
-        run: bash scripts/check-no-detached-materializer.sh
+        run: scripts/check-no-detached-materializer.sh
 
   no-compatibility-surface:
     name: No compatibility surface
