@@ -97,6 +97,10 @@ jobs:
           tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/$go_asset"
           export PATH="$RUNNER_TEMP/nak-bin:$RUNNER_TEMP/go/bin:$PATH"
           go version
+          # Falsify the fixture immediately before the capstone relies on it:
+          # a harness that misreports would make the evidence below worthless.
+          # This is the only job that provisions `nak`, which the harness needs.
+          bash scripts/test-nip29-consumer-harness.sh
           NMP_NIP29_HARNESS_BACKEND=host \
           NMP_NIP29_SKIP_SWIFT_FFI_BUILD=1 \
             tools/nip29-consumer-swift/run-capstone.sh \
