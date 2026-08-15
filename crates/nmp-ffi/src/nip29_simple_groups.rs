@@ -7,10 +7,9 @@
 //! result is plain data: `parse_simple_groups_list_tolerant` names that in
 //! the API itself, and [`FfiSimpleGroupsList`] documents it in the type.
 //!
-//! Deliberately absent, and mechanically kept absent by
-//! `scripts/check-nip29-surfaces.sh`: any observation-qualified
-//! `Observed*` wrapper, projection-error family, frame-proof projector, or
-//! other protocol-specific witness. Group-list reading stays the ordinary
+//! Deliberately absent: any observation-qualified `Observed*` wrapper,
+//! projection-error family, frame-proof projector, or other
+//! protocol-specific witness. Group-list reading stays the ordinary
 //! `LiveQuery`/`FfiDemand` noun ([`current_account_group_list_demand`]). The
 //! typed add/remove methods below compile private operation bytes through the
 //! Rust-owned durable semantic-write machinery and return the ordinary

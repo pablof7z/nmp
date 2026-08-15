@@ -184,10 +184,5 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMPAndroid/build.gradle.kts`
 - Source: `scripts/build-swift-xcframework.sh`
 - Source: `scripts/build-kotlin-jvm.sh`
-- Source: `scripts/dependency-direction-policy.json`
-- Source: `scripts/check-nip29-ownership.sh`
-- Source: `.github/workflows/architecture-gates.yml`
-- Source: `.github/workflows/android-emulator.yml`
-- Source: `.github/workflows/macos-qualification.yml`
 
 Use public declarations and tests as current API truth. Use `docs/VISION.md` for intended invariants and `docs/known-gaps.md`/the bug-class ledger for proof status. Comments inside mechanism code can explain design but do not create a consumer API.

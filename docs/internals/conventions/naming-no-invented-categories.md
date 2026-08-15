@@ -57,15 +57,17 @@ there was nothing for a schema to be "foreign" *to*. The adjective was the
 bug.
 
 **What happened, concretely:** 13 sites across
-`crates/nmp-nip29/src/{lib,publication}.rs` and
-`scripts/check-nip29-ownership.sh` carried the term — doc headers, function
-docs, fixture strings, a test name, and the ownership gate's greps. All fixed
-and merged as PR #960 (master `b99f9d41`). Verified on this tree: a grep for
-`foreign` over those two paths now returns **nothing**. The test is now
-`draft_kind_and_schema_survive_except_for_appended_h`
-(`crates/nmp-nip29/src/publication.rs:98`), and the gate's `grep -qF`
-references that exact name (`scripts/check-nip29-ownership.sh:59`) — test and
-gate changed together, because the gate pins the test's name literally.
+`crates/nmp-nip29/src/{lib,publication}.rs` and the ownership check script
+carried the term — doc headers, function docs, fixture strings, a test name,
+and the ownership check's own greps. All fixed and merged as PR #960 (master
+`b99f9d41`). Verified on this tree: a grep for `foreign` over
+`crates/nmp-nip29/src/{lib,publication}.rs` now returns **nothing**. The test
+is now `draft_kind_and_schema_survive_except_for_appended_h`
+(`crates/nmp-nip29/src/publication.rs:98`). At the time, the check's `grep
+-qF` referenced that exact name — test and check changed together, because
+the check pinned the test's name literally. That check script, and every
+other CI-era check script, is since deleted; the ownership rule it enforced
+is currently unproven by any mechanism.
 
 **What was deliberately NOT touched, and why:**
 
