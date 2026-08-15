@@ -527,8 +527,6 @@ pub enum RetractReason {
     Rejected,
     /// Removed by a verified kind:5 deletion from the event's own author.
     Deleted,
-    /// Removed because its NIP-40 `expiration` deadline passed.
-    Expired,
 }
 
 /// Journal-level signature state of an `PUBLISH_QUEUE_INTENTS` row (Fable
@@ -1360,10 +1358,6 @@ pub(crate) fn handoff_may_have_occurred(handoff: Option<&PublishQueueAttemptHand
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishQueuePostHandoffState {
     WaitingConnection,
-    WaitingAuth,
-    Eligible {
-        since: Timestamp,
-    },
     AwaitingAck {
         deadline: Timestamp,
     },

@@ -38,7 +38,7 @@ use crate::core::ReceiptId;
 #[cfg(test)]
 use crate::runtime::ReceiptReattachment;
 #[cfg(any(test, feature = "test-instrumentation"))]
-use crate::runtime::SignerRegistration;
+use crate::runtime::{AddSignerError, SignerRegistration};
 use crate::runtime::{EngineThread, Handle, RuntimeConfig, SignEventError, SignEventOperation};
 #[cfg(test)]
 use crate::subscription::{Subscription, Window};
@@ -145,12 +145,12 @@ impl Engine {
     pub fn install_test_signing_capability<Sig>(
         &self,
         signer: Sig,
-    ) -> Result<SignerRegistration, EngineError>
+    ) -> Result<SignerRegistration, AddSignerError>
     where
         Sig: nmp_signer::SigningCapability + Send + Sync + 'static,
     {
-        self.with_handle(|handle| handle.add_signer(signer))?
-            .map_err(EngineError::from_add_signer_error)
+        self.with_handle(|handle| handle.add_signer(signer))
+            .unwrap_or(Err(AddSignerError::EngineShuttingDown))
     }
 
     /// Destructively remove one closed persistent engine store.

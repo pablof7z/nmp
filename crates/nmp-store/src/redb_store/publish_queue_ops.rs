@@ -1366,10 +1366,6 @@ pub(super) fn record_lane_handoff(
             PublishQueuePostHandoffState::WaitingConnection => {
                 PublishQueueLaneState::WaitingConnection
             }
-            PublishQueuePostHandoffState::WaitingAuth => PublishQueueLaneState::WaitingAuth,
-            PublishQueuePostHandoffState::Eligible { since } => {
-                PublishQueueLaneState::Eligible { since }
-            }
             PublishQueuePostHandoffState::AwaitingAck { deadline } => {
                 PublishQueueLaneState::InFlight {
                     ordinal,

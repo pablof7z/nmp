@@ -4,7 +4,6 @@
 //! publishing the operation ever requires `nmp-grammar` or a transport/store
 //! mechanism crate, this crate stops compiling.
 
-use nmp::nip65::Nip65Operations;
 use nmp::{Engine, EngineError, PublicKey, ReceiptStream, RelayUrl};
 use nmp_nip65::{BootstrapRelayList, BootstrapRelayListError, RelayListEntry, RelayUsage};
 

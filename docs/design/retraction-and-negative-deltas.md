@@ -84,7 +84,7 @@ fn next_expiration(&self) -> Option<Timestamp>;
 fn remove(&mut self, id: EventId, reason: RetractReason) -> Option<StoredEvent>;
 ```
 
-`RetractReason { Rejected, Deleted, Expired }` exists so diagnostics can count
+`RetractReason { Rejected, Deleted }` exists so diagnostics can count
 retractions per cause and so `remove` is self-documentingly *not* a general delete API.
 None of this is app-facing: the app never holds the store; the two-noun surface
 (`Handle`/FFI) gains nothing. Ledger #1's mechanism ("no public index/storage setter")
