@@ -534,11 +534,6 @@ async fn draft_carries_h(w: &mut NmpWorld, value: String) {
     w.draft_add_tag("h", &value);
 }
 
-#[given(regex = r#"^that event (?:already )?carries a previous tag$"#)]
-async fn draft_carries_previous(w: &mut NmpWorld) {
-    w.draft_add_tag("previous", "deadbeef");
-}
-
 // The outbox family lives next door for the same reason `then/` is a
 // directory: this catalog is shared by every feature, and one family's whole
 // vocabulary is readable on its own only when it has a name. See

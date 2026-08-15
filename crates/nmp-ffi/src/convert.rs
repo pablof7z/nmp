@@ -375,11 +375,6 @@ pub enum FfiError {
     /// source of that row.
     #[cfg(feature = "nip29")]
     GroupCallerSuppliedContextConstraint,
-    /// #1033 (`nmp::nip29::GroupContextError::CallerSuppliedTimeline`
-    /// mirror). An unsigned draft already carried a `previous` row, which
-    /// the group never mints and never accepts from a caller.
-    #[cfg(feature = "nip29")]
-    GroupCallerSuppliedTimeline,
     /// #1281 (`nmp::nip29::GroupContextError::NoGroupNamed` mirror).
     /// `FfiRelayScope::groups` was called with no group id at all. An event
     /// with no `h` row is not in a group, so there is nothing to
@@ -473,9 +468,6 @@ impl From<nmp::nip29::GroupContextError> for FfiError {
             }
             nmp::nip29::GroupContextError::CallerSuppliedContextConstraint => {
                 Self::GroupCallerSuppliedContextConstraint
-            }
-            nmp::nip29::GroupContextError::CallerSuppliedTimeline => {
-                Self::GroupCallerSuppliedTimeline
             }
             nmp::nip29::GroupContextError::NoGroupNamed => Self::EmptyGroupSet,
             nmp::nip29::GroupContextError::MissingContext { expected } => {
@@ -951,12 +943,6 @@ impl std::fmt::Display for FfiError {
             Self::GroupCallerSuppliedContextConstraint => write!(
                 f,
                 "the '#h' constraint belongs to the group, not to the caller's selection"
-            ),
-            #[cfg(feature = "nip29")]
-            Self::GroupCallerSuppliedTimeline => write!(
-                f,
-                "the 'previous' tag belongs to the group, not to the caller, and the group \
-                 never mints one"
             ),
             #[cfg(feature = "nip29")]
             Self::EmptyGroupSet => write!(
