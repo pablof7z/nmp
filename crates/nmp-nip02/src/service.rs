@@ -401,8 +401,12 @@ mod tests {
 
     #[test]
     fn signed_out_action_fails_typed_without_a_write() {
-        let engine = Engine::new(EngineConfig::default()).unwrap();
-        let writes = crate::register_follow_writes(&engine).unwrap();
+        let engine = Engine::new_with_capabilities(
+            EngineConfig::default(),
+            vec![crate::follow_capability()],
+        )
+        .unwrap();
+        let writes = crate::follow_writes();
         let failure = set_following(
             &engine,
             &writes,
@@ -417,12 +421,16 @@ mod tests {
 
     #[test]
     fn logged_in_without_sources_accepts_the_capability_default() {
-        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let engine = Engine::new_with_capabilities(
+            EngineConfig::default(),
+            vec![crate::follow_capability()],
+        )
+        .unwrap();
         let author = Keys::generate();
         engine
             .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
             .unwrap();
-        let writes = crate::register_follow_writes(&engine).unwrap();
+        let writes = crate::follow_writes();
         let receipt = set_following(
             &engine,
             &writes,
@@ -440,12 +448,16 @@ mod tests {
 
     #[test]
     fn account_switch_after_action_cannot_retarget_the_frozen_author() {
-        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let engine = Engine::new_with_capabilities(
+            EngineConfig::default(),
+            vec![crate::follow_capability()],
+        )
+        .unwrap();
         let author = Keys::generate().public_key();
         let later_account = Keys::generate().public_key();
         engine.add_public_key_account(author, true).unwrap();
         engine.add_public_key_account(later_account, false).unwrap();
-        let writes = crate::register_follow_writes(&engine).unwrap();
+        let writes = crate::follow_writes();
 
         let receipt = set_following(
             &engine,

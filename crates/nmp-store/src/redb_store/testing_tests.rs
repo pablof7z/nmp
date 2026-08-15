@@ -4,6 +4,8 @@
 //! not name a Redb table.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use nostr::{EventId, RelayUrl};
 use redb::{Database, ReadableTable, TableDefinition};
@@ -23,6 +25,63 @@ use crate::{
     PublishQueueAttemptOutcome, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
     PublishQueueLaneState,
 };
+
+/// Exact call-count witness for the transaction boundary at trusted
+/// capability entry. It prevents a no-op probe from making the runtime test
+/// pass vacuously.
+pub struct MaterializerEntryTransactionProbe {
+    remaining: Arc<AtomicU64>,
+}
+
+impl MaterializerEntryTransactionProbe {
+    pub fn assert_exhausted(&self) {
+        assert_eq!(
+            self.remaining.load(Ordering::Acquire),
+            0,
+            "not every expected materializer entry crossed the Redb transaction probe"
+        );
+    }
+}
+
+/// Arm one real Redb store for an exact number of materializer entries.
+pub fn arm_materializer_entry_transaction_probe(
+    store: &mut RedbStore,
+    expected_entries: u64,
+) -> MaterializerEntryTransactionProbe {
+    assert!(expected_entries > 0, "the probe must expect a real entry");
+    assert!(
+        store.materializer_entry_probe.is_none(),
+        "the materializer-entry probe is construction-owned"
+    );
+    let remaining = Arc::new(AtomicU64::new(expected_entries));
+    store.materializer_entry_probe = Some(remaining.clone());
+    MaterializerEntryTransactionProbe { remaining }
+}
+
+/// Assert that no Redb read or write transaction is alive at the exact point
+/// where trusted capability code begins.
+pub fn assert_materializer_entry_has_no_open_transaction(store: &mut RedbStore) {
+    let Some(remaining) = store.materializer_entry_probe.as_ref().cloned() else {
+        return;
+    };
+    let database = store
+        .db
+        .as_mut()
+        .expect("the materializer-entry probe requires an open Redb handle");
+    match database.check_integrity() {
+        Ok(true) => {}
+        Ok(false) => panic!("Redb integrity check reported an invalid database"),
+        Err(redb::DatabaseError::TransactionInProgress) => {
+            panic!("materializer entered while a Redb transaction was open")
+        }
+        Err(error) => panic!("Redb materializer-entry check failed: {error}"),
+    }
+    remaining
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            count.checked_sub(1)
+        })
+        .expect("more materializer entries occurred than the test armed");
+}
 
 /// Create a nonempty physical store with no NMP schema marker.
 ///
@@ -259,4 +318,49 @@ pub fn corrupt_coverage(
     }
     tx.commit().map_err(persist_err)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod materializer_entry_transaction_probe_tests {
+    use super::*;
+    use redb::ReadableDatabase;
+
+    #[test]
+    fn probe_refuses_a_live_read_transaction() {
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
+        let _probe = arm_materializer_entry_transaction_probe(&mut store, 1);
+        let read = store
+            .db
+            .as_ref()
+            .expect("open Redb handle")
+            .begin_read()
+            .expect("read transaction");
+
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_materializer_entry_has_no_open_transaction(&mut store);
+        }));
+        assert!(refused.is_err(), "a live Redb read transaction must refuse");
+        drop(read);
+    }
+
+    #[test]
+    fn probe_refuses_a_live_write_transaction() {
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
+        let _probe = arm_materializer_entry_transaction_probe(&mut store, 1);
+        let write = store
+            .db
+            .as_ref()
+            .expect("open Redb handle")
+            .begin_write()
+            .expect("write transaction");
+
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_materializer_entry_has_no_open_transaction(&mut store);
+        }));
+        assert!(
+            refused.is_err(),
+            "a live Redb write transaction must refuse"
+        );
+        drop(write);
+    }
 }

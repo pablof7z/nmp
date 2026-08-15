@@ -94,6 +94,16 @@ public enum NMPError: Error, Sendable, Equatable {
     /// engine-start infrastructure failure. Never raised by an ordinary
     /// operation (#704).
     case engineStartFailed(component: String, reason: String)
+    /// Construction named a store that retains a replaceable operation whose
+    /// compiled program/format is absent from this engine. No engine started
+    /// and the store was not mutated.
+    ///
+    /// `programHex`/`formatHex` are the two 16-byte compiled-capability
+    /// identifiers as canonical lowercase hex (32 characters each). They are
+    /// opaque identities to compare and show -- never a public key or an
+    /// event id, so nothing here is bech32-able. The same spelling and the
+    /// same rendering as Kotlin's `NMPError.MissingReplaceableCapability`.
+    case missingReplaceableCapability(programHex: String, formatHex: String)
     /// A windowed `observe` could not open its canonical history projection
     /// because the store degraded during setup. This is the case's sole
     /// production meaning; relay connection/worker failure remains ordinary
@@ -284,6 +294,11 @@ public enum NMPError: Error, Sendable, Equatable {
         case .StoreStillOpen(let path): self = .storeStillOpen(path)
         case .EngineStartFailed(let component, let reason):
             self = .engineStartFailed(component: component, reason: reason)
+        case .MissingReplaceableCapability(let program, let format):
+            self = .missingReplaceableCapability(
+                programHex: canonicalLowercaseHex(program),
+                formatHex: canonicalLowercaseHex(format)
+            )
         case .ObservationUnavailable(let reason):
             self = .observationUnavailable(reason: reason)
         case .ConcurrentNext: self = .concurrentNext
@@ -352,6 +367,13 @@ public enum NMPError: Error, Sendable, Equatable {
         // nmp-native:endif
         }
     }
+}
+
+/// Canonical lowercase hex for an opaque byte identity the FFI hands over as
+/// raw bytes. The exact spelling `NMPError.kt`'s `canonicalLowercaseHex`
+/// produces for the same bytes: one identity, one rendering, both SDKs.
+private func canonicalLowercaseHex(_ bytes: Data) -> String {
+    bytes.map { String(format: "%02x", $0) }.joined()
 }
 
 extension NMPError: LocalizedError {
@@ -434,6 +456,8 @@ extension NMPError: LocalizedError {
             "Persistent store is still open: \(path)"
         case .engineStartFailed(let component, let reason):
             "Engine could not start (\(component)): \(reason)"
+        case .missingReplaceableCapability:
+            "Store retains replaceable operations for a missing compiled capability"
         case .observationUnavailable(let reason):
             "Observation could not be established: \(reason)"
         case .concurrentNext:

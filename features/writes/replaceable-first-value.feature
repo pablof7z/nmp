@@ -10,7 +10,7 @@ Feature: A capability can define the first complete value without claiming relay
   # nmp:status=built
   # nmp:evidence=rust:nmp::capability_default_survives_restart_and_replays_over_later_source
   # nmp:evidence=rust:nmp-store::capability_default_marker_and_unresolved_source_survive_redb_reopen
-  # nmp:falsifier=Treat the capability default as qualified relay absence or fail to retain its starting mode; the store reopen witness loses the unresolved marker and the public successor can no longer preserve the operation and receipt over later relay truth.
+  # nmp:falsifier=Disable boot reconciliation after inserting a newer relay source into the closed Redb store; reopen exposes the raw source or loses the original receipts instead of publishing one complete successor that preserves both retained operations.
   @acceptance
   Scenario: A capability creates the first value without pretending the network proved absence
     Given no relay event is known for a replaceable coordinate
@@ -18,7 +18,8 @@ Feature: A capability can define the first complete value without claiming relay
     Then one complete replacement enters ordinary custody immediately
     And its source evidence remains unresolved rather than absent
     And restart preserves that complete generation and the same receipt
-    When a relay later supplies a value for the same coordinate
+    When a relay value is durably observed while the engine is closed
+    And NMP reopens without another capability action
     Then NMP reapplies the retained operation over the relay value
     And the successor preserves fields the capability operation does not own
     And the same mechanism works for ordinary and parameterized coordinates

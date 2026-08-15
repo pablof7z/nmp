@@ -11,19 +11,6 @@ pub(crate) struct PreparedReplaceableMaterialization {
     pub(crate) continuation: ReplaceableMaterializationContinuation,
 }
 
-pub struct PreparedReplaceableSuccessor {
-    pub(crate) call: ReplaceableMaterializationCall,
-    pub(crate) continuation: ReplaceableSuccessorContinuation,
-}
-
-impl std::fmt::Debug for PreparedReplaceableSuccessor {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PreparedReplaceableSuccessor")
-            .finish_non_exhaustive()
-    }
-}
-
 pub(crate) struct ReplaceableMaterializationCall {
     materializer: Arc<dyn crate::ReplaceableMaterializer>,
     input: ReplaceableMaterializationInput,
@@ -43,12 +30,9 @@ enum ReplaceableMaterializationInput {
 pub(crate) enum ReplaceableMaterializationOutcome {
     Materialized(nmp_grammar::EventBuilder),
     Refused(String),
-    Panicked,
-    ThreadUnavailable(String),
 }
 
 pub(crate) struct ReplaceableMaterializationContinuation {
-    instance: [u8; 16],
     program: ReplayProgramId,
     format: ReplayFormatId,
     materializer: Arc<dyn crate::ReplaceableMaterializer>,
@@ -63,18 +47,11 @@ pub(crate) struct ReplaceableMaterializationContinuation {
     canonical_source_id: Option<EventId>,
 }
 
-pub(crate) struct ReplaceableSuccessorContinuation {
-    pub(super) instance: [u8; 16],
+pub(super) struct ReplaceableSuccessorInput {
     pub(super) program: ReplayProgramId,
     pub(super) format: ReplayFormatId,
-    pub(super) materializer: Arc<dyn crate::ReplaceableMaterializer>,
     pub(super) coordinate: Coordinate,
-    pub(super) fence: ReplaceableMaterializationFence,
     pub(super) observation: AttributedRelayObservation,
-    pub(super) source_request: Option<(
-        super::super::semantic_sources::SemanticSourceRequestKey,
-        super::super::semantic_sources::OwnedSemanticSourceRequest,
-    )>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -102,7 +79,7 @@ impl ReplaceableMaterializationCall {
         }
     }
 
-    pub(crate) fn execute(self) -> ReplaceableMaterializationOutcome {
+    fn execute(self) -> ReplaceableMaterializationOutcome {
         let operations = self
             .operations
             .iter()
@@ -124,6 +101,25 @@ impl ReplaceableMaterializationCall {
 }
 
 impl EngineCore {
+    /// The single entry point for trusted capability code. Every caller has
+    /// already read the durable snapshot it needs and closed that Redb
+    /// transaction; the pure transformation runs here with nothing open, and
+    /// the caller reopens one short compare-and-commit transaction afterwards.
+    ///
+    /// `execute` is private to this module so that this is the *only* way to
+    /// reach a materializer. That is what keeps the #1624 transaction
+    /// falsifier honest: a new call site cannot quietly grow its own entry
+    /// that skips the assertion, which is exactly how the headless
+    /// `on_publish` path went uninstrumented while the runtime path did not.
+    pub(crate) fn run_replaceable_materialization(
+        &mut self,
+        call: ReplaceableMaterializationCall,
+    ) -> ReplaceableMaterializationOutcome {
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        nmp_store::testing::assert_materializer_entry_has_no_open_transaction(&mut self.store);
+        call.execute()
+    }
+
     pub(super) fn prepare_body_complete_replaceable_operation(
         &mut self,
         operation: nmp_grammar::ReplaceableOperation,
@@ -131,17 +127,17 @@ impl EngineCore {
         identity: Identity,
         correlation: Option<nmp_grammar::CorrelationToken>,
     ) -> PublishPreparation {
-        let (instance, start, declared_source_policy, operation_bytes) =
+        let (program, format, start, declared_source_policy, operation_bytes) =
             operation.into_registered_parts();
-        let Some(registration) = self.replaceable_materializers.get(&instance) else {
+        let Some(registration) = self.replaceable_materializers.get(&(program, format)) else {
             return PublishPreparation::Complete(self.refuse_publish(
                 PublishError::ReplaceableOperationRefused {
-                    reason: "replaceable materializer registration is not active".to_string(),
+                    reason: "replaceable materializer is not configured".to_string(),
                 },
             ));
         };
-        let program = ReplayProgramId(registration.program);
-        let format = ReplayFormatId(registration.format);
+        let program = ReplayProgramId(program);
+        let format = ReplayFormatId(format);
         let materializer = registration.materializer.clone();
 
         let existing_author = match &start {
@@ -294,7 +290,6 @@ impl EngineCore {
                 operations: replay_operations,
             },
             continuation: ReplaceableMaterializationContinuation {
-                instance,
                 program,
                 format,
                 materializer,
@@ -314,7 +309,6 @@ impl EngineCore {
     #[allow(clippy::too_many_arguments)]
     fn retry_body_complete_replaceable_operation(
         &mut self,
-        instance: [u8; 16],
         program: ReplayProgramId,
         format: ReplayFormatId,
         materializer: Arc<dyn crate::ReplaceableMaterializer>,
@@ -379,7 +373,6 @@ impl EngineCore {
                 operations,
             },
             continuation: ReplaceableMaterializationContinuation {
-                instance,
                 program,
                 format,
                 materializer,
@@ -540,7 +533,6 @@ impl EngineCore {
         outcome: ReplaceableMaterializationOutcome,
     ) -> PublishPreparation {
         let ReplaceableMaterializationContinuation {
-            instance,
             program,
             format,
             materializer,
@@ -567,33 +559,20 @@ impl EngineCore {
                 }
             }
         }
-        let Some(registration) = self.replaceable_materializers.get(&instance) else {
+        let Some(registration) = self.replaceable_materializers.get(&(program.0, format.0)) else {
             return PublishPreparation::Complete(self.refuse_publish(
                 PublishError::ReplaceableOperationRefused {
-                    reason: "replaceable materializer registration is not active".to_string(),
+                    reason: "replaceable materializer is not configured".to_string(),
                 },
             ));
         };
-        if registration.program != program.0
-            || registration.format != format.0
-            || !Arc::ptr_eq(&registration.materializer, &materializer)
-        {
+        if !Arc::ptr_eq(&registration.materializer, &materializer) {
             return PublishPreparation::Complete(self.refuse_publish(
                 PublishError::ReplaceableOperationRefused {
-                    reason: "replaceable materializer registration was replaced".to_string(),
+                    reason: "replaceable materializer is not configured".to_string(),
                 },
             ));
         }
-        let outcome = match outcome {
-            ReplaceableMaterializationOutcome::ThreadUnavailable(reason) => {
-                return PublishPreparation::Complete(self.refuse_publish(
-                    PublishError::ReplaceableOperationRefused {
-                        reason: format!("replaceable materializer thread unavailable: {reason}"),
-                    },
-                ));
-            }
-            outcome => outcome,
-        };
         let snapshot = match self.store.replaceable_operation_snapshot(&coordinate) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -619,7 +598,6 @@ impl EngineCore {
             || Self::replaceable_materialization_fence(snapshot.as_ref()) != fence
         {
             return self.retry_body_complete_replaceable_operation(
-                instance,
                 program,
                 format,
                 materializer,
@@ -639,16 +617,6 @@ impl EngineCore {
                 return PublishPreparation::Complete(
                     self.refuse_publish(PublishError::ReplaceableOperationRefused { reason }),
                 );
-            }
-            ReplaceableMaterializationOutcome::Panicked => {
-                return PublishPreparation::Complete(self.refuse_publish(
-                    PublishError::ReplaceableOperationRefused {
-                        reason: "replaceable materializer panicked".to_string(),
-                    },
-                ));
-            }
-            ReplaceableMaterializationOutcome::ThreadUnavailable(_) => {
-                unreachable!("thread unavailability returned before durable fence checks")
             }
         };
         if builder.kind != coordinate.kind

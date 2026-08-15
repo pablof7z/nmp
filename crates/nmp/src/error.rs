@@ -75,6 +75,16 @@ pub enum EngineError {
     /// engine-start (`Engine::new`) failure only — it never surfaces from an
     /// ordinary operation (#704).
     EngineStartFailed { component: String, reason: String },
+    /// Construction named a store that retains a replaceable operation whose
+    /// compiled program/format is absent from the supplied capability set.
+    /// No engine was started and the store was not mutated.
+    MissingReplaceableCapability { program: [u8; 16], format: [u8; 16] },
+    /// Construction named two capabilities for the same compiled
+    /// (program, format) pair. Capability identity is (program, format); a
+    /// second implementation for the same pair is not a replacement (there is
+    /// no replacement lifecycle after #1624), it is a construction error. No
+    /// engine was started and the store was not mutated.
+    DuplicateReplaceableCapability { program: [u8; 16], format: [u8; 16] },
     /// An ordinary or windowed [`Engine::observe`](crate::Engine::observe)
     /// could not open its initial canonical projection because the store
     /// degraded during setup. The failed open leaves no observation owner.
@@ -162,6 +172,22 @@ impl std::fmt::Display for EngineError {
             Self::EngineStartFailed { component, reason } => {
                 write!(f, "engine could not start ({component}): {reason}")
             }
+            Self::MissingReplaceableCapability { program, format } => {
+                write!(
+                    f,
+                    "store retains replaceable operations for missing compiled capability program {:02x?} format {:02x?}",
+                    program,
+                    format
+                )
+            }
+            Self::DuplicateReplaceableCapability { program, format } => {
+                write!(
+                    f,
+                    "duplicate compiled capability for program {:02x?} format {:02x?}: identity is (program, format), not a replacement",
+                    program,
+                    format
+                )
+            }
             Self::ObservationUnavailable { reason } => {
                 write!(f, "observation could not be established: {reason}")
             }
@@ -212,6 +238,9 @@ impl EngineError {
                     reason,
                 }
             }
+            crate::runtime::EngineThreadError::MissingReplaceableCapability { program, format } => {
+                Self::MissingReplaceableCapability { program, format }
+            }
             // The runtime's finite shutdown drain (#8 U4) refuses new work
             // with a typed engine-level error; at this facade it is the same
             // closed-engine fact `EngineClosed` already names.
@@ -241,6 +270,9 @@ impl EngineError {
                         "configured max_relays {relay_limit} cannot represent its finite retirement envelope"
                     ),
                 }
+            }
+            crate::runtime::EngineThreadError::MissingReplaceableCapability { program, format } => {
+                Self::MissingReplaceableCapability { program, format }
             }
             crate::runtime::EngineThreadError::EngineShuttingDown => Self::EngineClosed,
         }

@@ -286,15 +286,26 @@ impl NmpEngine {
     ) -> Result<Arc<Self>, FfiError> {
         #[cfg(feature = "nip65")]
         let automatic_routing = AutomaticRoutingAssembly::from_config(&config)?;
+        #[allow(unused_mut)]
+        let mut capabilities = vec![
+            #[cfg(feature = "nip02")]
+            nmp_nip02::follow_capability(),
+            #[cfg(feature = "nip29")]
+            nmp::nip29::group_list_capability(),
+        ];
         let engine = Arc::new(match session_payload {
-            Some(payload) => nmp::Engine::new_with_session(config.into(), payload.payload())
-                .map_err(FfiError::from)?,
-            None => nmp::Engine::new(config.into())?,
+            Some(payload) => nmp::Engine::new_with_session_and_capabilities(
+                config.into(),
+                payload.payload(),
+                capabilities,
+            )
+            .map_err(FfiError::from)?,
+            None => nmp::Engine::new_with_capabilities(config.into(), capabilities)?,
         });
         #[cfg(feature = "nip02")]
-        let follow_writes = nmp_nip02::register_follow_writes(&engine)?;
+        let follow_writes = nmp_nip02::follow_writes();
         #[cfg(feature = "nip29")]
-        let group_list_writes = nmp::nip29::register_group_list_writes(&engine)?;
+        let group_list_writes = nmp::nip29::group_list_writes();
         Ok(Arc::new(Self {
             engine,
             #[cfg(feature = "nip02")]
@@ -600,7 +611,7 @@ impl NmpEngine {
         }
         Ok(start_following_action(
             self.engine.clone(),
-            self.follow_writes.clone(),
+            self.follow_writes,
             target,
             nmp_nip02::FollowChange::Follow,
         ))
@@ -614,7 +625,7 @@ impl NmpEngine {
         }
         Ok(start_following_action(
             self.engine.clone(),
-            self.follow_writes.clone(),
+            self.follow_writes,
             target,
             nmp_nip02::FollowChange::Unfollow,
         ))

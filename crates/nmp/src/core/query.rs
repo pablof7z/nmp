@@ -2581,9 +2581,10 @@ impl EngineCore {
                 // EVENT in the same RelayFrames turn can be reduced. The
                 // observation fact emitted below still owns durable
                 // settlement after every already-running successor ends.
-                self.defer_owned_semantic_source_terminal(
+                self.settle_owned_semantic_source_terminal(
                     semantic_source_key,
                     nmp_store::SemanticSourceTerminal::Eose,
+                    effects,
                 );
                 self.emit_request_settled(
                     attribution_send,
