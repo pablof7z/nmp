@@ -66,6 +66,14 @@ fn test_pool_config() -> PoolConfig {
     }
 }
 
+fn test_verifier() -> nmp_transport::Verifier {
+    nmp_transport::Verifier::new(
+        nmp_transport::VerifyConfig::default(),
+        std::sync::Arc::new(nmp_transport::NullKnownSig),
+    )
+    .expect("test verifier construction must succeed")
+}
+
 /// A port nothing listens on: every dial fails at once with `ECONNREFUSED`,
 /// which is not a permanent failure, so the slot stays `Connecting` and
 /// `Pool::send` keeps handing frames to the worker.
@@ -191,7 +199,7 @@ fn a_reconnecting_worker_retains_a_bounded_ordinary_outbound_envelope() {
     let url = nostr::RelayUrl::parse(&format!("ws://127.0.0.1:{}", dead_port()))
         .expect("parse relay url");
     let (tx, rx) = mpsc::channel::<PoolEvent>();
-    let pool = Pool::new(test_pool_config(), tx).expect("test pool construction");
+    let pool = Pool::new(test_pool_config(), test_verifier(), tx).expect("test pool construction");
     let handle = pool.ensure_open(&url).expect("admitted");
 
     let retained = saturate_reconnecting_worker(&pool, handle, &rx, RETAINED_CEILING_BYTES);
@@ -233,7 +241,7 @@ fn a_connected_peer_that_never_reads_cannot_grow_the_process() {
     let url =
         nostr::RelayUrl::parse(&format!("ws://127.0.0.1:{port}")).expect("parse slow relay url");
     let (tx, rx) = mpsc::channel::<PoolEvent>();
-    let pool = Pool::new(test_pool_config(), tx).expect("test pool construction");
+    let pool = Pool::new(test_pool_config(), test_verifier(), tx).expect("test pool construction");
     let handle = pool.ensure_open(&url).expect("admitted");
 
     let accepted = spam_ordinary_frames(&pool, handle, RETAINED_CEILING_BYTES);

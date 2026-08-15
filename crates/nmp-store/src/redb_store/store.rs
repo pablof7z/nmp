@@ -41,10 +41,9 @@ use super::{
     PublishQueueLane, PublishQueueLaneKey, PublishQueueLaneState, RedbStoreOpenError, RelayUrl,
     RequiredLockedFileBackend, StoreOwnership, StoredEvent, StoredEventView, Timestamp,
 };
+use nostr::secp256k1::schnorr::Signature;
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
-#[cfg(any(test, feature = "test-instrumentation"))]
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// NMP's complete durable-store implementation. One Redb database, MVCC, ACID.
 /// Persistent stores open a caller-selected path; isolated engines and tests
@@ -79,12 +78,51 @@ pub(super) enum RedbCrashPoint {
     GcAfterCommit,
 }
 
+/// A shared durable reader cut from a [`RedbStore`] for the verify gate's
+/// durable dedup-by-id (#1677). Holds a clone of the store's shared
+/// `Arc<Database>` cell, so it never borrows the store and survives the
+/// engine's exclusive ownership. redb is MVCC, so this reader does not
+/// block the writer. On a fault-recovery reopen the store takes the cell
+/// (under the same lock) before dropping the old `Database`, so an in-flight
+/// verify read cannot keep the old handle alive past the reopen.
+///
+/// `known_signature` is the one door: the stored known-good signature for
+/// an id, or `None` (unknown id, missing row, a still-pending local draft
+/// carrying the sentinel signature, or a transiently closed cell during
+/// reopen).
+pub struct StoreSigReader {
+    pub(super) shared: Arc<Mutex<Option<Arc<Database>>>>,
+}
+
+impl StoreSigReader {
+    /// The known-good signature for an already-ingested event id, if any.
+    /// A pending local draft (sentinel signature) returns `None` so the
+    /// real signed delivery is still admitted. A closed cell (during
+    /// reopen) or a read error returns `None` — the candidate falls through
+    /// to schnorr. This door is non-fatal by design.
+    pub fn known_signature(&self, id: &EventId) -> Option<Signature> {
+        let shared = self.shared.lock().ok()?;
+        let db = shared.as_ref()?;
+        super::event_ops::known_signature_from_db(db, id)
+            .ok()
+            .flatten()
+    }
+}
+
 pub struct RedbStore {
     /// `None` is the closed half of the recovery state machine: the poisoned
     /// redb handle has been dropped, while `_ownership` still fences this
     /// canonical pathname. Only `reopen_after_failure` installs the next
     /// generation.
-    pub(super) db: Option<Database>,
+    pub(super) db: Option<Arc<Database>>,
+    /// The verify gate's durable-dedup read seam (#1677). A shared, updatable
+    /// cell of the live `Arc<Database>`, cloned into every `StoreSigReader`.
+    /// The store installs the handle here on open and replaces it on
+    /// [`Self::reopen_after_failure`]; the verifier reads through it under the
+    /// lock so a reopen cannot drop the old `Database` while a verify read is
+    /// in flight. On the hot path this Mutex is uncontended (the store touches
+    /// it only at open/reopen).
+    pub(super) shared_db: Arc<Mutex<Option<Arc<Database>>>>,
     // Field order is load-bearing: Rust drops `db` before this ownership
     // token, so no process can open or reset the target until this database
     // handle has finished closing.
@@ -485,7 +523,7 @@ impl RedbStore {
     }
 
     pub(super) fn database(&self) -> Result<&Database, PersistenceError> {
-        self.db.as_ref().ok_or_else(|| {
+        self.db.as_deref().ok_or_else(|| {
             PersistenceError::new(
                 crate::PersistenceFault::Latched,
                 "durable database handle is closed for reconstruction",
@@ -493,10 +531,23 @@ impl RedbStore {
         })
     }
 
+    /// Share the durable database handle with an out-of-band reader —
+    /// the verify gate's durable dedup-by-id (#1677). The returned
+    /// [`StoreSigReader`] holds its own `Arc<Database>` and opens its own
+    /// read transactions, so it never borrows the store and outlives the
+    /// engine's exclusive ownership of the `RedbStore` it was cut from.
+    /// redb is MVCC: a concurrent reader on a shared handle does not block
+    /// the engine's writer and is never blocked by it.
+    pub fn share_sig_reader(&self) -> Result<StoreSigReader, PersistenceError> {
+        Ok(StoreSigReader {
+            shared: Arc::clone(&self.shared_db),
+        })
+    }
+
     #[cfg(test)]
     pub(super) fn raw_database(&self) -> &Database {
         self.db
-            .as_ref()
+            .as_deref()
             .expect("test inspected a store while its database handle was closed")
     }
 
@@ -522,6 +573,14 @@ impl RedbStore {
         // hard-link alias has a distinct sidecar; the required target-inode
         // lock below makes that race resolve to one owner (and a typed reopen
         // refusal for the other), never two live database generations.
+        //
+        // The verify gate's `StoreSigReader` reads through `shared_db` under
+        // its lock; taking the cell here blocks any in-flight verify read
+        // from keeping the old Database alive, so the drop below fully
+        // releases redb's handle before the reopen (#1677).
+        if let Ok(mut shared) = self.shared_db.lock() {
+            let _ = shared.take();
+        }
         drop(self.db.take());
 
         let backend =
@@ -536,6 +595,10 @@ impl RedbStore {
             .lock()
             .map_err(|_| PersistenceError::invariant("delivery relay cache poisoned"))?
             .clear();
+        let db = Arc::new(db);
+        if let Ok(mut shared) = self.shared_db.lock() {
+            *shared = Some(Arc::clone(&db));
+        }
         self.db = Some(db);
         super::publish_queue_ops::maintain_terminal_receipts(self)?;
         Ok(())
@@ -914,8 +977,10 @@ impl RedbStore {
             write_txn.commit()?;
             _open_write_transactions += 1;
         }
+        let db = Arc::new(db);
         let mut store = Self {
-            db: Some(db),
+            db: Some(Arc::clone(&db)),
+            shared_db: Arc::new(Mutex::new(Some(db))),
             _ownership: ownership,
             temporary_directory: None,
             publish_queue_relays: Mutex::new(PublishQueueRelayCache::default()),

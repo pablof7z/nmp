@@ -21,6 +21,21 @@ use super::{
 #[cfg(test)]
 use nostr::{Timestamp, UnsignedEvent};
 
+/// Engine-side adapter that closes the verify gate's durable-dedup seam over
+/// the store (#1677). It wraps a [`nmp_store::StoreSigReader`] — a shared
+/// `Arc<Database>` cut from the store at engine construction — so the trust
+/// gate can byte-compare a relay-replayed id against the stored known-good
+/// signature without borrowing the engine's `RedbStore` and without a
+/// schnorr check. A store read error is non-fatal here: it returns `None`
+/// and the candidate falls through to schnorr.
+struct StoreKnownSig(nmp_store::StoreSigReader);
+
+impl nmp_transport::KnownSig for StoreKnownSig {
+    fn known_signature(&self, id: &nostr::EventId) -> Option<nostr::secp256k1::schnorr::Signature> {
+        self.0.known_signature(id)
+    }
+}
+
 /// One dedicated engine OS thread (§2 position 2) plus the pool and AUTH
 /// release bridge threads that feed it. Returned alongside the [`Handle`]
 /// the app actually uses; kept around only so a caller (chiefly tests) can
@@ -357,11 +372,29 @@ impl EngineThread {
         let (pool_evt_tx, pool_evt_rx) =
             cb::bounded::<PoolEvent>(pool_config.event_sink_queue_capacity.max(1));
         let (pool_stop_tx, pool_stop_rx) = cb::bounded::<()>(0);
+        // #1677: the engine owns the trust gate. It cuts a durable sig reader
+        // from the store (a shared `Arc<Database>`, MVCC — no writer block)
+        // and builds the verifier before `Pool::new`. The store is still
+        // moved into the engine thread below; the reader is independent.
+        let known_sig: Arc<dyn nmp_transport::KnownSig> =
+            Arc::new(StoreKnownSig(store.share_sig_reader().map_err(
+                |error| EngineThreadError::ThreadUnavailable {
+                    component: "verifier".to_string(),
+                    reason: error.to_string(),
+                },
+            )?));
+        let verifier =
+            nmp_transport::Verifier::new(nmp_transport::VerifyConfig::default(), known_sig)
+                .map_err(|error| EngineThreadError::ThreadUnavailable {
+                    component: "verifier".to_string(),
+                    reason: error.to_string(),
+                })?;
         // The pool's OWN mio worker threads + translator thread are interior
         // to `Pool` (harvested, HARVEST-justified in nmp-transport's own
         // docs) — this crate never touches mio/tungstenite directly.
         let pool = match Pool::new(
             pool_config,
+            verifier,
             EnginePoolSink {
                 events: pool_evt_tx,
                 stopping: pool_stop_rx.clone(),
