@@ -154,7 +154,7 @@ libc = { version = "0.2", optional = true }
 # consumer links is unchanged.
 # `nip29_group_list_headless.rs` proves the kind:10009 demand against a real
 # engine through the same `nmp::nip29` path an app uses.
-nmp = { path = ".", features = ["nip29", "nip65", "test-instrumentation"] }
+nmp = { path = ".", features = ["nip29", "nip65", "test-instrumentation", "unstable-mechanism"] }
 nmp-test-support.workspace = true
 nmp-store = { workspace = true, features = ["test-instrumentation"] }
 cucumber = "0.21"
