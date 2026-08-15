@@ -242,6 +242,16 @@ impl ReplaceableMaterializer for AlwaysRefuse {
             reason: "fixture refusal".to_string(),
         })
     }
+
+    fn materialize_default(
+        &self,
+        _coordinate: &nostr::nips::nip01::Coordinate,
+        _operations: &[ReplaceableMaterializerOperation<'_>],
+    ) -> Result<nmp::EventBuilder, ReplaceableMaterializerRefusal> {
+        Err(ReplaceableMaterializerRefusal {
+            reason: "fixture refusal".to_string(),
+        })
+    }
 }
 
 #[test]

@@ -235,9 +235,12 @@ pubkey P. Evidence and relay responses obtained under different access
 contexts are not interchangeable merely because the relay URL is the same.
 
 A **source revision** is the exact source-evidence snapshot used for one
-materialization: the selected event id or qualified absence, plus enough plan
-identity to reject a result computed after that evidence changes. It is not a
-server-assigned version number.
+materialization: unresolved source work, the selected event id, or qualified
+absence, plus enough plan identity to reject a result computed after that
+evidence changes. An unresolved revision may support a complete local value
+only when the configured capability explicitly supplies its empty starting
+value; it is not relay evidence. A source revision is not a server-assigned
+version number.
 
 It is not a claim that the event is the global Nostr head. Nostr has no global
 head. It means only that the event is current among the evidence the selected
@@ -796,7 +799,13 @@ The system also keeps these states distinct:
 - a cached base is provisionally usable under an availability-first policy.
 
 Creating the first event at a coordinate is capability policy. “Nothing is
-cached” cannot silently become proof of an empty source.
+cached” cannot silently become proof of an empty source. A configured
+capability may nevertheless construct its complete empty value and apply an
+operation before source work settles. NMP records that generation against an
+explicit capability-default requirement and an unresolved source revision.
+The generation is immediately usable and durable, while a later relay event
+still advances the source revision and causes the retained operation to replay
+over real source bytes. No generic kind switch defines the empty value.
 
 ### 7.3 Source facts arrive progressively
 
