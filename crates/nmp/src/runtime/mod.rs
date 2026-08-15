@@ -447,14 +447,20 @@ struct SignerRegistry {
     pending_writes: RefCell<HashMap<(ReceiptId, u64), PendingWriteCancel>>,
 }
 
-/// The engine thread's single owner for identity-session membership, current
-/// selection, and operational signing-provider availability. Every public session
-/// mutation is one command turn against this value.
+/// The engine thread's single owner for identity-session membership and
+/// operational signing-provider availability. Every public session mutation is
+/// one command turn against this value.
+///
+/// It deliberately stores no current-account field (#1657). `EngineCore` holds
+/// the one copy, and every read here takes it as `core.active_pubkey()`. The
+/// two used to be written by adjacent statements at six sites with nothing
+/// typing the pairing, so deleting either half still compiled while the
+/// sign-event author check read one copy and reactive re-rooting read the
+/// other.
 #[derive(Default)]
 struct RuntimeSessionState {
     signers: SignerRegistry,
     accounts: HashMap<PublicKey, Option<SessionProvider>>,
-    current_pubkey: Option<PublicKey>,
 }
 
 impl std::ops::Deref for RuntimeSessionState {
@@ -481,7 +487,9 @@ impl RuntimeSessionState {
         self.accounts.contains_key(&public_key)
     }
 
-    fn snapshot(&self) -> SessionSnapshot {
+    /// `current` is the reducer's one copy, passed in rather than stored
+    /// (#1657); this value owns the account set, not the selection into it.
+    fn snapshot(&self, current: Option<PublicKey>) -> SessionSnapshot {
         let mut accounts = self
             .accounts
             .iter()
@@ -502,11 +510,11 @@ impl RuntimeSessionState {
         accounts.sort_by_key(|account| account.public_key.to_bytes());
         SessionSnapshot {
             accounts,
-            current_pubkey: self.current_pubkey,
+            current_pubkey: current,
         }
     }
 
-    fn export_sources(&self) -> RuntimeSessionExportSources {
+    fn export_sources(&self, current: Option<PublicKey>) -> RuntimeSessionExportSources {
         let providers = self
             .accounts
             .iter()
@@ -518,7 +526,7 @@ impl RuntimeSessionState {
             })
             .collect();
         RuntimeSessionExportSources {
-            snapshot: self.snapshot(),
+            snapshot: self.snapshot(current),
             providers,
         }
     }
@@ -2149,10 +2157,7 @@ fn engine_loop(
     let mut diag_channels: HashMap<u64, LatestSender<DiagnosticsSnapshot>> = HashMap::new();
     let mut next_diag_id: u64 = 0;
     let mut auth_instances = auth::AuthCapabilityInstances::default();
-    let mut registry = RuntimeSessionState {
-        current_pubkey: initial_session.current_pubkey,
-        ..RuntimeSessionState::default()
-    };
+    let mut registry = RuntimeSessionState::default();
     for account in initial_session.accounts {
         match account.signer {
             Some(signer) => {
@@ -2199,8 +2204,13 @@ fn engine_loop(
     // a recovered parked write observes its provider and current selection on
     // the very first recovery effect; there is no externally visible empty-
     // session turn and no post-start restore command.
+    //
+    // The selection comes straight from the decoded payload (#1657). It used to
+    // be stored on `registry` first and read back here, which made the runtime
+    // authoritative at boot and the reducer authoritative afterwards, with
+    // nothing expressing the handover.
     let initial_selection_effects =
-        core.handle(EngineMsg::SetActivePubkey(registry.current_pubkey));
+        core.handle(EngineMsg::SetActivePubkey(initial_session.current_pubkey));
     dispatch_core_effects(
         &mut core,
         initial_selection_effects,
@@ -2511,13 +2521,13 @@ fn engine_loop(
                     let _ = reply.send(Err(AddSignerError::EngineShuttingDown));
                 }
                 Cmd::SessionSnapshot { reply } => {
-                    let _ = reply.send(registry.snapshot());
+                    let _ = reply.send(registry.snapshot(core.active_pubkey()));
                 }
                 Cmd::SessionExportSources { reply } => {
-                    let _ = reply.send(registry.export_sources());
+                    let _ = reply.send(registry.export_sources(core.active_pubkey()));
                 }
                 Cmd::CurrentSessionPubkey { reply } => {
-                    let _ = reply.send(registry.current_pubkey);
+                    let _ = reply.send(core.active_pubkey());
                 }
                 Cmd::AddPublicKeyAccount {
                     public_key, reply, ..
@@ -2878,13 +2888,13 @@ fn engine_loop(
                 let _ = reply.send(());
             }
             Cmd::SessionSnapshot { reply } => {
-                let _ = reply.send(registry.snapshot());
+                let _ = reply.send(registry.snapshot(core.active_pubkey()));
             }
             Cmd::SessionExportSources { reply } => {
-                let _ = reply.send(registry.export_sources());
+                let _ = reply.send(registry.export_sources(core.active_pubkey()));
             }
             Cmd::CurrentSessionPubkey { reply } => {
-                let _ = reply.send(registry.current_pubkey);
+                let _ = reply.send(core.active_pubkey());
             }
             Cmd::AddPrivateKeyAccount {
                 signer,
@@ -2925,7 +2935,6 @@ fn engine_loop(
                 }
                 effects.extend(core.handle(EngineMsg::SignerAttached(public_key)));
                 if make_current {
-                    registry.current_pubkey = Some(public_key);
                     effects.extend(core.handle(EngineMsg::SetActivePubkey(Some(public_key))));
                 }
                 dispatch_core_effects(
@@ -2951,7 +2960,6 @@ fn engine_loop(
             } => {
                 registry.accounts.entry(public_key).or_insert(None);
                 if make_current {
-                    registry.current_pubkey = Some(public_key);
                     let effects = core.handle(EngineMsg::SetActivePubkey(Some(public_key)));
                     dispatch_core_effects(
                         &mut core,
@@ -2966,7 +2974,7 @@ fn engine_loop(
                 }
                 let _ = reply.send(
                     registry
-                        .snapshot()
+                        .snapshot(core.active_pubkey())
                         .accounts
                         .into_iter()
                         .find(|account| account.public_key == public_key)
@@ -2976,7 +2984,6 @@ fn engine_loop(
             Cmd::MakeCurrentAccount { public_key, reply } => {
                 let found = registry.contains_account(public_key);
                 if found {
-                    registry.current_pubkey = Some(public_key);
                     let effects = core.handle(EngineMsg::SetActivePubkey(Some(public_key)));
                     dispatch_core_effects(
                         &mut core,
@@ -3007,8 +3014,7 @@ fn engine_loop(
                         instance,
                     )));
                 }
-                if registry.current_pubkey == Some(public_key) {
-                    registry.current_pubkey = None;
+                if core.active_pubkey() == Some(public_key) {
                     effects.extend(core.handle(EngineMsg::SetActivePubkey(None)));
                 }
                 dispatch_core_effects(
@@ -3026,7 +3032,6 @@ fn engine_loop(
             Cmd::ClearSession { reply } => {
                 let removed = registry.drain_instances();
                 registry.accounts.clear();
-                registry.current_pubkey = None;
                 let mut effects = core.handle(EngineMsg::SetActivePubkey(None));
                 for (public_key, instance) in removed {
                     auth_tasks.borrow_mut().cancel_capability(
@@ -3189,11 +3194,14 @@ fn engine_loop(
                 reply,
             } => {
                 // The owner's one inward edge, spelled out: the selected
-                // author is the session's state, the signing capability is the
-                // signer registry's, and neither is reached through
-                // `RuntimeSessionState`'s `Deref`.
+                // author is the reducer's one current-account copy (#1657),
+                // the signing capability is the signer registry's, and
+                // neither is reached through `RuntimeSessionState`'s `Deref`.
+                // This read and the `Identity::Active` resolution inside the
+                // reducer are now the same value, not two copies that a
+                // missed assignment could split.
                 active_sign_events.admit(
-                    registry.current_pubkey,
+                    core.active_pubkey(),
                     registry.signer_registry(),
                     sign_event::CompletionWiring {
                         runtime: runtime_handle,
@@ -3715,7 +3723,6 @@ fn engine_loop(
                 // P3: current identity is a reactive read input. Accepted
                 // writes separately pin their exact author at acceptance.
                 let effects = core.handle(EngineMsg::SetActivePubkey(pk));
-                registry.current_pubkey = pk;
                 dispatch_core_effects(
                     &mut core,
                     effects,

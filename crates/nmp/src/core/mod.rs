@@ -3807,6 +3807,18 @@ impl EngineCore {
         vec![Effect::EmitDiagnostics(self.diagnostics_snapshot())]
     }
 
+    /// The current account, for the runtime's own reads (#1657).
+    ///
+    /// This is the one stored copy. The reducer must hold it because it
+    /// resolves `Identity::Active` and re-roots reactive bindings from pure
+    /// `&mut self` code that cannot reach the runtime's account registry, and
+    /// because `EngineCore` is exercised headlessly with no runtime in
+    /// existence at all. `RuntimeSessionState` therefore keeps no second
+    /// copy: it owns the account set and asks here for the selection.
+    pub(crate) fn active_pubkey(&self) -> Option<PublicKey> {
+        self.active_pubkey
+    }
+
     fn on_set_active_pubkey(&mut self, pk: Option<PublicKey>) -> Vec<Effect> {
         self.active_pubkey = pk;
         let mut effects = Vec::new();
