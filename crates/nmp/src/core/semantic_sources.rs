@@ -239,12 +239,41 @@ impl EngineCore {
                         transport_generation,
                         request_revision,
                     };
-                    if self.semantic_source_requests.values().any(|owned| {
-                        owned.coordinate == owner.coordinate
-                            && owned.request.round == owner.round
-                            && owned.request.source == owner.source
-                    }) {
-                        continue;
+                    let existing_key =
+                        self.semantic_source_requests
+                            .iter()
+                            .find_map(|(key, owned)| {
+                                (owned.coordinate == owner.coordinate
+                                    && owned.request.round == owner.round
+                                    && owned.request.source == owner.source)
+                                    .then(|| key.clone())
+                            });
+                    if let Some(existing_key) = existing_key {
+                        let existing = self.semantic_source_requests[&existing_key].clone();
+                        if existing.request == request {
+                            continue;
+                        }
+                        // A later accepted request replaces process/transport
+                        // ownership, but only after any in-flight successor
+                        // prepared against the old identity has completed; a
+                        // running successor must keep its exact request so it
+                        // can finish or fall back.
+                        let in_flight = self
+                            .semantic_successor_requests
+                            .get(&existing_key)
+                            .map(|state| match state {
+                                SemanticSuccessorRequestState::Running { in_flight } => *in_flight,
+                                SemanticSuccessorRequestState::TerminalDeferred {
+                                    in_flight,
+                                    ..
+                                } => *in_flight,
+                            })
+                            .unwrap_or(0);
+                        if in_flight > 0 {
+                            continue;
+                        }
+                        self.semantic_source_requests.remove(&existing_key);
+                        self.semantic_successor_requests.remove(&existing_key);
                     }
                     match self.store.advance_replaceable_source_round(
                         &owner.coordinate,
@@ -670,7 +699,6 @@ mod tests {
 
     use super::*;
 
-    const INSTANCE: [u8; 16] = [41; 16];
     const PROGRAM: [u8; 16] = [42; 16];
     const FORMAT: [u8; 16] = [43; 16];
 
@@ -724,8 +752,7 @@ mod tests {
     }
 
     fn register(core: &mut EngineCore) {
-        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
-            instance: INSTANCE,
+        core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
             program: PROGRAM,
             format: FORMAT,
             materializer: Arc::new(AddPerson),
@@ -882,7 +909,8 @@ mod tests {
         register(&mut core);
         core.handle(EngineMsg::RelayConnected(handle, session.clone()));
         let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
-            INSTANCE,
+            PROGRAM,
+            FORMAT,
             UnsignedEvent::from(base.clone()),
             UnsignedEvent::from(base.clone()),
             nmp_grammar::ReplaceableSourcePolicy::Finite {
@@ -1067,6 +1095,68 @@ mod tests {
             installed.current.source_revision.evidence().qualified,
             QualifiedSource::Event { event_id, .. } if event_id == successor.id
         ));
+    }
+
+    #[test]
+    fn successor_completed_before_eose_still_settles_the_finite_round() {
+        let mut fixture = finite_successor_fixture();
+        let successor = source(&fixture.author, 20, "successor before eose");
+        let effects = fixture.core.handle(EngineMsg::RelayFrame(
+            fixture.handle,
+            fixture.session.clone(),
+            event_frame(&fixture.sub_id, successor.clone()),
+        ));
+        let [prepared] = prepared_successors(effects).try_into().unwrap_or_else(
+            |prepared: Vec<PreparedReplaceableSuccessor>| {
+                panic!("one successor must prepare, got {}", prepared.len())
+            },
+        );
+        let key = fixture
+            .core
+            .semantic_source_requests
+            .keys()
+            .next()
+            .cloned()
+            .expect("the finite source request is current");
+        let owned_before = fixture.core.semantic_source_requests[&key].clone();
+
+        let PreparedReplaceableSuccessor { call, continuation } = prepared;
+        fixture
+            .core
+            .complete_replaceable_successor_materialization(continuation, call.execute());
+        assert!(matches!(
+            fixture.core.store.replaceable_operation_snapshot(&coordinate(&fixture.author))
+                .unwrap()
+                .unwrap()
+                .current
+                .source_revision
+                .evidence()
+                .qualified,
+            QualifiedSource::Event { event_id, .. } if event_id == successor.id
+        ));
+        assert_eq!(
+            fixture.core.semantic_source_requests.get(&key),
+            Some(&owned_before),
+            "completing the successor before EOSE must keep the same finite request identity"
+        );
+        assert!(matches!(
+            member_state(&fixture.core, &coordinate(&fixture.author), &fixture.relay,),
+            SemanticSourceMemberState::Open(_)
+        ));
+
+        eose(
+            &mut fixture.core,
+            fixture.handle,
+            fixture.session.clone(),
+            &fixture.sub_id,
+        );
+        assert!(
+            matches!(
+                member_state(&fixture.core, &coordinate(&fixture.author), &fixture.relay,),
+                SemanticSourceMemberState::Settled { .. }
+            ),
+            "EOSE after an already-applied successor must still close the finite source round"
+        );
     }
 
     #[test]
@@ -1406,7 +1496,8 @@ mod tests {
             .unwrap()
             .event;
         let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
-            INSTANCE,
+            PROGRAM,
+            FORMAT,
             UnsignedEvent::from(current.clone()),
             UnsignedEvent::from(current),
             nmp_grammar::ReplaceableSourcePolicy::Finite {
@@ -1642,7 +1733,8 @@ mod tests {
         core.handle(EngineMsg::RelayConnected(handle_one, session_one.clone()));
         core.handle(EngineMsg::RelayConnected(handle_two, session_two.clone()));
         let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
-            INSTANCE,
+            PROGRAM,
+            FORMAT,
             UnsignedEvent::from(base.clone()),
             UnsignedEvent::from(base),
             nmp_grammar::ReplaceableSourcePolicy::Finite {

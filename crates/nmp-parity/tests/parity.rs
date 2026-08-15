@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp::nip29::{
-    add_group_to_list, add_relay_in_use, register_group_list_writes, SimpleGroupEntry,
+    add_group_to_list, add_relay_in_use, group_list_capability, group_list_writes, SimpleGroupEntry,
 };
 use nmp::{
     AcquisitionEvidence, AuthDenialSource, AuthPhase, Binding, CancelWriteOutcome,
@@ -43,8 +43,8 @@ use nmp_ffi::types::{
 };
 use nmp_grammar::{AccessContext, Demand, Derived, Selector, SourceAuthority};
 use nmp_nip02::{
-    observe_following, register_follow_writes, set_following, FollowAvailability, FollowChange,
-    FollowObservation, FollowRelationship, FollowSnapshot,
+    follow_capability, follow_writes, observe_following, set_following, FollowAvailability,
+    FollowChange, FollowObservation, FollowRelationship, FollowSnapshot,
 };
 use nmp_store::{RedbStore, RelayObserved};
 use nostr::PublicKey;
@@ -2387,16 +2387,19 @@ async fn run_direct_follow_scenario(
 ) -> FollowScenarioOutcome {
     let relay = setup_follow_relay(author, existing).await;
     let engine = Arc::new(
-        Engine::new(EngineConfig {
-            app_relays: vec![relay.url.to_string()],
-            ..direct_outbox_routing_config()
-        })
+        Engine::new_with_capabilities(
+            EngineConfig {
+                app_relays: vec![relay.url.to_string()],
+                ..direct_outbox_routing_config()
+            },
+            vec![follow_capability()],
+        )
         .expect("direct follow engine must construct"),
     );
     let _account = engine
         .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
         .expect("direct follow account must register");
-    let writes = register_follow_writes(&engine).expect("NIP-02 capability must register once");
+    let writes = follow_writes();
 
     let observation = observe_following(engine.clone(), target.public_key())
         .expect("direct following observation must open");
@@ -2523,16 +2526,19 @@ async fn run_direct_missing_contact_list(
 ) {
     let relay = ScriptedRelay::start(&RelayConfig::default()).await;
     let engine = Arc::new(
-        Engine::new(EngineConfig {
-            app_relays: vec![relay.url.to_string()],
-            ..direct_outbox_routing_config()
-        })
+        Engine::new_with_capabilities(
+            EngineConfig {
+                app_relays: vec![relay.url.to_string()],
+                ..direct_outbox_routing_config()
+            },
+            vec![follow_capability()],
+        )
         .expect("direct missing-list engine must construct"),
     );
     let _account = engine
         .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
         .expect("direct missing-list account must register");
-    let writes = register_follow_writes(&engine).expect("NIP-02 capability must register once");
+    let writes = follow_writes();
 
     let observation = observe_following(engine.clone(), target.public_key())
         .expect("direct missing-list observation must open");
@@ -4576,15 +4582,18 @@ async fn run_direct_group_list_scenario(author: &Keys) -> GroupListActionOutcome
         .seed_relay_list(author, &[outbox.url.to_string()], &[], QUERY_CREATED_AT)
         .await;
     let relay_in_use = "wss://relay-in-use.example";
-    let engine = Engine::new(EngineConfig {
-        indexer_relays: vec![indexer.url.to_string()],
-        ..EngineConfig::default()
-    })
+    let engine = Engine::new_with_capabilities(
+        EngineConfig {
+            indexer_relays: vec![indexer.url.to_string()],
+            ..EngineConfig::default()
+        },
+        vec![group_list_capability()],
+    )
     .expect("direct NIP-29 engine constructs");
     engine
         .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
         .expect("direct NIP-29 author registers");
-    let writes = register_group_list_writes(&engine).expect("NIP-29 materializer registers");
+    let writes = group_list_writes();
 
     let add_group = collect_direct_follow_action(
         add_group_to_list(

@@ -126,6 +126,11 @@ sealed class NMPError(message: String) : Exception(message) {
      * operation (#704). */
     data class EngineStartFailed(val component: String, val reason: String) :
         NMPError("engine could not start ($component): $reason")
+    /** Construction named a store that retains a replaceable operation whose
+     * compiled program/format is absent from this engine. No engine started
+     * and the store was not mutated. */
+    data class MissingReplaceableCapability(val program: ByteArray, val format: ByteArray) :
+        NMPError("store retains replaceable operations for a missing compiled capability")
     /** A windowed `observe` could not open its canonical history projection
      * because the store degraded during setup. This is the case's sole
      * production meaning; relay connection/worker failure remains ordinary
@@ -405,6 +410,8 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.StoreResetFailed -> StoreResetFailed(ffi.reason)
                 is FfiException.StoreStillOpen -> StoreStillOpen(ffi.path)
                 is FfiException.EngineStartFailed -> EngineStartFailed(ffi.component, ffi.reason)
+                is FfiException.MissingReplaceableCapability ->
+                    MissingReplaceableCapability(ffi.program, ffi.format)
                 is FfiException.ObservationUnavailable -> ObservationUnavailable(ffi.reason)
                 is FfiException.ConcurrentNext -> ConcurrentNext
                 is FfiException.FactStreamLagged -> FactStreamLagged(ffi.receiptId)

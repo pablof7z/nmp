@@ -94,6 +94,10 @@ public enum NMPError: Error, Sendable, Equatable {
     /// engine-start infrastructure failure. Never raised by an ordinary
     /// operation (#704).
     case engineStartFailed(component: String, reason: String)
+    /// Construction named a store that retains a replaceable operation whose
+    /// compiled program/format is absent from this engine. No engine started
+    /// and the store was not mutated.
+    case missingReplaceableCapability(program: Data, format: Data)
     /// A windowed `observe` could not open its canonical history projection
     /// because the store degraded during setup. This is the case's sole
     /// production meaning; relay connection/worker failure remains ordinary
@@ -284,6 +288,8 @@ public enum NMPError: Error, Sendable, Equatable {
         case .StoreStillOpen(let path): self = .storeStillOpen(path)
         case .EngineStartFailed(let component, let reason):
             self = .engineStartFailed(component: component, reason: reason)
+        case .MissingReplaceableCapability(let program, let format):
+            self = .missingReplaceableCapability(program: program, format: format)
         case .ObservationUnavailable(let reason):
             self = .observationUnavailable(reason: reason)
         case .ConcurrentNext: self = .concurrentNext
@@ -434,6 +440,8 @@ extension NMPError: LocalizedError {
             "Persistent store is still open: \(path)"
         case .engineStartFailed(let component, let reason):
             "Engine could not start (\(component)): \(reason)"
+        case .missingReplaceableCapability:
+            "Store retains replaceable operations for a missing compiled capability"
         case .observationUnavailable(let reason):
             "Observation could not be established: \(reason)"
         case .concurrentNext:

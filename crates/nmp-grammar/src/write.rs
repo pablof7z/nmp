@@ -168,14 +168,15 @@ const MAX_REPLACEABLE_OPERATION_BYTES: usize = 64 * 1024;
 ///
 /// This type is public only because it is carried by the closed
 /// [`WritePayload`] enum. Its fields have no public accessors and the NMP
-/// facade does not re-export it. A supported caller receives an unforgeable
-/// registration handle from the engine and asks that handle to mint the
-/// payload; `publish()` rejects an unknown registration instance before
-/// custody. Capability helpers therefore cannot state replay-program ids,
-/// contributor membership, or a candidate body themselves. They do declare
-/// the closed continuing/finite source policy that the engine will own.
+/// facade does not re-export it. A supported caller receives a handle bound
+/// to one compiled program/format and asks that handle to mint the payload;
+/// `publish()` rejects an unknown program/format before custody. Capability
+/// helpers therefore cannot state contributor membership or a candidate body
+/// themselves. They do declare the closed continuing/finite source policy
+/// that the engine will own.
 pub struct ReplaceableOperation {
-    registration_instance: [u8; 16],
+    program: [u8; 16],
+    format: [u8; 16],
     start: ReplaceableOperationStart,
     source_policy: ReplaceableSourcePolicy,
     operation: Vec<u8>,
@@ -213,16 +214,17 @@ pub enum ReplaceableSourcePolicy {
 }
 
 impl ReplaceableOperation {
-    /// Mechanism-only constructor used by the facade's registered handle.
+    /// Mechanism-only constructor used by the facade's compiled-capability handle.
     ///
     /// It is intentionally hidden from documentation rather than offered as
     /// a supported construction door. Knowing this function still grants no
-    /// authority: the random registration instance must be live in the exact
-    /// engine receiving the intent, and `publish()` validates that fact before
+    /// authority: the named program/format must be supplied before the
+    /// receiving engine starts, and `publish()` validates that fact before
     /// invoking capability code or writing anything.
     #[doc(hidden)]
     pub fn from_registered_parts(
-        registration_instance: [u8; 16],
+        program: [u8; 16],
+        format: [u8; 16],
         original_source: UnsignedEvent,
         current: UnsignedEvent,
         source_policy: ReplaceableSourcePolicy,
@@ -242,7 +244,8 @@ impl ReplaceableOperation {
         }
         validate_replaceable_operation(&source_policy, &operation)?;
         Ok(Self {
-            registration_instance,
+            program,
+            format,
             start: ReplaceableOperationStart::Existing {
                 original_source: Box::new(original_source),
                 current: Box::new(current),
@@ -260,7 +263,8 @@ impl ReplaceableOperation {
     /// before custody.
     #[doc(hidden)]
     pub fn from_registered_default_parts(
-        registration_instance: [u8; 16],
+        program: [u8; 16],
+        format: [u8; 16],
         kind: Kind,
         identifier: String,
         source_policy: ReplaceableSourcePolicy,
@@ -274,7 +278,8 @@ impl ReplaceableOperation {
         }
         validate_replaceable_operation(&source_policy, &operation)?;
         Ok(Self {
-            registration_instance,
+            program,
+            format,
             start: ReplaceableOperationStart::CapabilityDefault { kind, identifier },
             source_policy,
             operation,
@@ -288,12 +293,14 @@ impl ReplaceableOperation {
         self,
     ) -> (
         [u8; 16],
+        [u8; 16],
         ReplaceableOperationStart,
         ReplaceableSourcePolicy,
         Vec<u8>,
     ) {
         (
-            self.registration_instance,
+            self.program,
+            self.format,
             self.start,
             self.source_policy,
             self.operation,
@@ -735,6 +742,7 @@ mod tests {
         assert!(matches!(
             ReplaceableOperation::from_registered_parts(
                 [1; 16],
+                [2; 16],
                 UnsignedEvent::from(source.clone()),
                 UnsignedEvent::from(source),
                 ReplaceableSourcePolicy::Finite {
@@ -752,6 +760,7 @@ mod tests {
         assert!(matches!(
             ReplaceableOperation::from_registered_default_parts(
                 [8; 16],
+                [9; 16],
                 Kind::ContactList,
                 "aliases-contact-list".to_string(),
                 ReplaceableSourcePolicy::Continuing,
@@ -762,6 +771,7 @@ mod tests {
         assert!(matches!(
             ReplaceableOperation::from_registered_default_parts(
                 [8; 16],
+                [9; 16],
                 Kind::TextNote,
                 String::new(),
                 ReplaceableSourcePolicy::Continuing,
@@ -771,6 +781,7 @@ mod tests {
         ));
         let empty_identifier = ReplaceableOperation::from_registered_default_parts(
             [8; 16],
+            [9; 16],
             Kind::from(30_001u16),
             String::new(),
             ReplaceableSourcePolicy::Continuing,
@@ -778,20 +789,22 @@ mod tests {
         )
         .expect("an addressable coordinate may use its canonical empty identifier");
         assert!(matches!(
-            empty_identifier.into_registered_parts().1,
+            empty_identifier.into_registered_parts().2,
             ReplaceableOperationStart::CapabilityDefault { kind, identifier }
                 if kind == Kind::from(30_001u16) && identifier.is_empty()
         ));
         let operation = ReplaceableOperation::from_registered_default_parts(
             [9; 16],
+            [10; 16],
             Kind::from(30_001u16),
             "bookmarks".to_string(),
             ReplaceableSourcePolicy::Continuing,
             vec![7, 8],
         )
         .expect("a capability default operation is valid without an author or source event");
-        let (instance, start, policy, bytes) = operation.into_registered_parts();
-        assert_eq!(instance, [9; 16]);
+        let (program, format, start, policy, bytes) = operation.into_registered_parts();
+        assert_eq!(program, [9; 16]);
+        assert_eq!(format, [10; 16]);
         assert!(matches!(
             start,
             ReplaceableOperationStart::CapabilityDefault { kind, identifier }

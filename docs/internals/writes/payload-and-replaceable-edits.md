@@ -243,10 +243,10 @@ drop the precondition, or stamp the wrong author — the exact regression class
   `writes/event-builder.md` §3); guardrail-versus-restriction policy says let
   it through and keep the failure observable, not forbidden.
 - **NIP-02 migration.** The exact-base composer and its acquisition/retry
-  action are deleted. `FollowWrites` mints a versioned operation through its
-  engine-issued registration. The engine materializes it against the current
-  source, preserves unowned fields, and automatically reapplies it when a
-  newer source wins.
+  action are deleted. `FollowWrites` mints a versioned operation through the
+  compiled program/format supplied at engine construction. The engine
+  materializes it against the current source, preserves unowned fields, and
+  automatically reapplies it when a newer source wins.
 - **Receipts.** Successful follow/unfollow exposes the ordinary receipt
   directly. Successor generations remain attached to the same receipt; there
   is no second action status machine or stale-base retry signal.

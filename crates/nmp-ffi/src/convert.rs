@@ -194,6 +194,13 @@ pub enum FfiError {
         component: String,
         reason: String,
     },
+    /// Construction named a store that retains a replaceable operation whose
+    /// compiled program/format is absent from this engine. No engine started
+    /// and the store was not mutated.
+    MissingReplaceableCapability {
+        program: Vec<u8>,
+        format: Vec<u8>,
+    },
     /// A windowed `observe` could not open its canonical store projection (the
     /// store degraded while establishing the history session). This is the ONLY
     /// thing it means (#704 review): a concrete store-projection failure, NEVER
@@ -621,6 +628,27 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::EngineStartFailed { component, reason } => {
                 Self::EngineStartFailed { component, reason }
             }
+            nmp::EngineError::MissingReplaceableCapability { program, format } => {
+                Self::MissingReplaceableCapability {
+                    program: program.to_vec(),
+                    format: format.to_vec(),
+                }
+            }
+            // Unreachable from FFI: the facade assembles one fixed capability
+            // list with unique (program, format) pairs and exposes no
+            // capability input, so a duplicate pair can only arise from a
+            // direct Rust `Engine::new_with_capabilities` call. Map to the
+            // generic start-failed error rather than adding an unreachable
+            // typed FFI variant (Reachability Gate).
+            nmp::EngineError::DuplicateReplaceableCapability { program, format } => {
+                Self::EngineStartFailed {
+                    component: "replaceable capability".to_string(),
+                    reason: format!(
+                        "duplicate compiled capability for program {:02x?} format {:02x?}",
+                        program, format
+                    ),
+                }
+            }
             nmp::EngineError::ObservationUnavailable { reason } => {
                 Self::ObservationUnavailable { reason }
             }
@@ -694,6 +722,12 @@ impl From<nmp::SessionRestoreError> for FfiError {
             nmp::SessionRestoreError::CapabilityRegistryFull { limit } => {
                 Self::AuthCapabilityRegistryFull {
                     limit: limit as u64,
+                }
+            }
+            nmp::SessionRestoreError::MissingReplaceableCapability { program, format } => {
+                Self::MissingReplaceableCapability {
+                    program: program.to_vec(),
+                    format: format.to_vec(),
                 }
             }
             nmp::SessionRestoreError::EngineStartFailed { reason } => Self::EngineStartFailed {
@@ -821,6 +855,12 @@ impl std::fmt::Display for FfiError {
             }
             Self::EngineStartFailed { component, reason } => {
                 write!(f, "engine could not start ({component}): {reason}")
+            }
+            Self::MissingReplaceableCapability { program, format } => {
+                write!(
+                    f,
+                    "store retains replaceable operations for missing compiled capability program {program:02x?} format {format:02x?}"
+                )
             }
             Self::ObservationUnavailable { reason } => {
                 write!(f, "observation could not be established: {reason}")
@@ -4153,6 +4193,17 @@ fn engine_start_failure_preserves_component_and_reason_across_ffi() {
         FfiError::EngineStartFailed {
             component: "signature verifier".to_string(),
             reason: "Resource temporarily unavailable".to_string(),
+        }
+    );
+    let missing = FfiError::from(nmp::EngineError::MissingReplaceableCapability {
+        program: [1; 16],
+        format: [2; 16],
+    });
+    assert_eq!(
+        missing,
+        FfiError::MissingReplaceableCapability {
+            program: vec![1; 16],
+            format: vec![2; 16],
         }
     );
 }

@@ -646,26 +646,23 @@ work may replace it with a complete successor, but an accepted receipt never
 transitions to a bodyless state.
 
 Preparing that first complete body may call capability code, but the call does
-not own NMP's state thread. NMP copies only the immutable source and current
-events, ordered operation bytes, capability identity, and the durable versions
-needed to recognize a stale answer. A purpose-specific detached thread runs
-the capability without a store, resolver, receipt, routing handle, or mutable
-engine state. The state thread remains free to accept ordinary publications,
-advance observations, and shut down.
+not run inside a Redb transaction. NMP copies only the immutable source and
+current events, ordered operation bytes, capability identity, and the durable
+versions needed to recognize a stale answer. The compiled capability then runs
+directly as ordinary trusted product code: no store, resolver, receipt,
+routing handle, or mutable engine state is available to it.
 
-When the capability returns, NMP checks the capability installation and the
-durable source, current event, and operation set again before taking custody.
-If any of them changed, the old answer is discarded and the candidate is
-rebuilt from current durable truth under the same publication call. A refusal,
-panic, invalid event, or thread-start failure remains a pre-custody refusal
-with the same zero-residue rule above.
+When the capability returns, NMP checks the durable source, current event, and
+operation set again before taking custody. If any of them changed, the old
+answer is discarded and the candidate is rebuilt from current durable truth
+under the same publication call. A typed refusal or invalid event remains a
+pre-custody refusal with the same zero-residue rule above. A panic or hang is
+an ordinary bug in NMP or its compiled capability and is not translated into
+a write refusal.
 
-The app's `publish` call still waits for acceptance or refusal, but it does not
-hold the facade's lifecycle lock while waiting. Shutdown drains that waiting
-call with `EngineClosed` and does not join a capability thread that may never
-return. A late result after shutdown has no owner and is ignored. This narrow
-boundary deliberately adds no timeout, worker pool, scheduler interface, or
-general callback framework.
+The complete enabled implementation set is supplied before store recovery.
+There is no after-start registration, replacement, detached thread, panic
+containment, completion command, or blocked-callback shutdown contract.
 
 ### 5.4 Ambiguous acceptance after a storage failure
 
@@ -2057,40 +2054,35 @@ reruns the encoder merely because the process restarted.
 
 ### 22.4 Execute capability code outside store locks
 
-Application-selected capability code may be slow, fail, or panic. It must not
-run while the durable database transaction or engine's serialized state owner
-is held.
+Compiled capability code is ordinary trusted product code. It must not run
+while a Redb transaction is open.
 
-Initial candidate preparation runs before the acceptance transaction. Later
-source-driven successor preparation uses the same off-lock discipline. The
-successor flow is:
+Initial candidate preparation runs after a short durable snapshot is copied
+and that read transaction is closed. Later source-driven successor
+preparation uses the same off-lock discipline. The successor flow is:
 
 ```text
 1. Point-read the target's exact source revision, current generation,
    compact operation program, and program digest.
-2. Schedule the materializer on a bounded executor.
-3. Run capability code outside persistence locks.
-4. Return the candidate result to the engine.
-5. In one short transaction, compare the exact source revision, current
+2. Close the read transaction.
+3. Run the compiled capability directly.
+4. In one short transaction, compare the exact source revision, current
    generation, program digest, and requested successor identity.
-6. Commit only if every fence still matches; otherwise discard the stale
-   result and reschedule from current state.
+5. Commit only if every fence still matches; otherwise discard the stale
+   result and rebuild from current state.
 ```
 
 A receipt id alone is never a sufficient fence because the same receipt may
 survive several generations.
 
-Configured materializers are trusted application code, not a sandbox boundary.
-Catching a Rust panic cannot contain process abort, unsafe memory corruption,
-unbounded allocation, or an infinite loop. Executor capacity, cooperative
-cancellation, deadlines, shutdown, and native callback lifetime therefore need
-explicit policy and falsifiers before this mechanism can be production
-architecture.
+Configured materializers are trusted compiled product code, not a sandbox
+boundary. A panic or hang is an ordinary in-process bug and must be fixed
+there. NMP does not add a second runtime, timeout, cancellation framework, or
+panic translation around that call.
 
-For the initial call, panic, invalid output, refusal, or required-capability
-unavailability leaves zero acceptance residue. Bounded execution machinery may
-be needed for successors, but it must not add missing-handler or bodyless
-receipt states.
+For the initial call, typed refusal, invalid output, or a missing compiled
+program/format at construction leaves zero acceptance residue. Later refusal
+leaves the previous complete generation intact.
 
 ### 22.5 Durable state shape
 

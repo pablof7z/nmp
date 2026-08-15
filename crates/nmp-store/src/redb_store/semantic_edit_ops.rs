@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, PublicKey, Timestamp};
@@ -781,6 +781,24 @@ pub(super) fn accept(
     #[cfg(test)]
     store.crash_if(super::store::RedbCrashPoint::SemanticAcceptBeforeCommit);
     write.commit_prepared(outcome)
+}
+
+pub(super) fn required_programs(
+    store: &RedbStore,
+) -> Result<Vec<(crate::ReplayProgramId, crate::ReplayFormatId)>, PersistenceError> {
+    let read = store.database()?.begin_read().map_err(persist_err)?;
+    let operations = match read.open_table(SEMANTIC_OPERATIONS) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+        Err(error) => return Err(persist_err(error)),
+    };
+    let mut required = BTreeSet::new();
+    for row in operations.iter().map_err(persist_err)? {
+        let (_key, value) = row.map_err(persist_err)?;
+        let operation = decode_operation(value.value())?;
+        required.insert((operation.program, operation.format));
+    }
+    Ok(required.into_iter().collect())
 }
 
 pub(super) fn snapshot(
