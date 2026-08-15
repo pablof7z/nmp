@@ -13,7 +13,7 @@ use nmp_grammar::Demand;
 use std::collections::BTreeSet;
 
 use nmp_grammar::{Binding, Filter};
-use nmp_resolver::testkit::Harness;
+use nmp_resolver_testkit::Harness;
 use nostr::Keys;
 
 use nmp_router::{Router, RuleRegistry, WireOp};

@@ -480,7 +480,7 @@ fn negentropy_local_snapshot_is_scoped_to_the_reconciling_relay() {
         neg_msg_frame(&wire_sub_string(&relay_b_probe), "6100"),
     ));
 
-    let shared = nmp_resolver::testkit::kind1(
+    let shared = nmp_resolver_testkit::kind1(
         &original_author,
         "same verified event exists at both relays",
         100,
@@ -842,7 +842,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     // compliance. If a relay overdelivers a stored event before EOSE, the
     // canonical ingest path accepts/deduplicates it, while the limited EOSE
     // remains poisoned for coverage.
-    let overdelivered = nmp_resolver::testkit::kind1(&b, "relay ignored limit zero", 1);
+    let overdelivered = nmp_resolver_testkit::kind1(&b, "relay ignored limit zero", 1);
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -903,7 +903,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     // holdings, but has not completed. A newly-published event whose own
     // timestamp is old still arrives through the already-active live REQ;
     // a `since: now` tail would have lost it.
-    let boundary = nmp_resolver::testkit::kind1(&b, "published during NEG", 1);
+    let boundary = nmp_resolver_testkit::kind1(&b, "published during NEG", 1);
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -924,7 +924,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     // NEG must not settle until that exact id returns through the ordinary
     // backfill EVENT + EOSE path.
     use ::negentropy::{Id as NegId, Negentropy as RawNegentropy, NegentropyStorageVector};
-    let missing = nmp_resolver::testkit::kind1(&b, "missing at NEG snapshot", 2);
+    let missing = nmp_resolver_testkit::kind1(&b, "missing at NEG snapshot", 2);
     let mut relay_storage = NegentropyStorageVector::new();
     relay_storage
         .insert(
@@ -1167,7 +1167,7 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         .expect("candidate EOSE opens the real NEG session");
     accept_neg_open(&mut core, 0, &neg_sub_id, &opened);
 
-    let missing = nmp_resolver::testkit::kind1(&b, "missing from local store", 100);
+    let missing = nmp_resolver_testkit::kind1(&b, "missing from local store", 100);
     let (backfill, backfill_filter, backfill_attempt) =
         finish_neg_with_remote_event(&mut core, 0, &relay, &neg_sub_id, &initial_hex, &missing);
     core.on_wire_request_handoff(RequestHandoffOutcome::Refused {

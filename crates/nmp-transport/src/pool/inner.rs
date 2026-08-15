@@ -1618,7 +1618,7 @@ mod tests {
     }
 
     /// Test-only helper: a properly signed kind:1 event (mirrors
-    /// `nmp_resolver::testkit::kind1`, duplicated here rather than pulled in
+    /// `nmp_resolver_testkit::kind1`, duplicated here rather than pulled in
     /// as a dependency -- `nmp-transport` depends on no other NMP crate).
     fn nmp_resolver_test_event(keys: &nostr::Keys, content: &str) -> nostr::Event {
         nostr::EventBuilder::new(nostr::Kind::TextNote, content)

@@ -163,6 +163,7 @@ libc = { version = "0.2", optional = true }
 # their only in-workspace callers.
 nmp = { path = ".", features = ["nip29", "nip65", "test-instrumentation", "unstable-mechanism"] }
 nmp-test-support.workspace = true
+nmp-resolver-testkit.workspace = true
 nmp-router-testkit.workspace = true
 nmp-store = { workspace = true, features = ["test-instrumentation"] }
 cucumber = "0.21"
