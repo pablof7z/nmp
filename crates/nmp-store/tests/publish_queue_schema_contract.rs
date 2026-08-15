@@ -3,7 +3,7 @@
 //! Two claims live here, and both are falsifiable by a one-line edit to
 //! `schema.rs`:
 //!
-//! 1. A fresh store creates EXACTLY the 30 production tables, named exactly
+//! 1. A fresh store creates EXACTLY the 29 production tables, named exactly
 //!    as listed below. The old spelling of the publish queue (`outbox_*`,
 //!    then `delivery_*`) is gone, not aliased, and so is every tree #1248
 //!    folded into a neighbour's key space.
@@ -36,7 +36,7 @@ const PUBLISH_QUEUE_META: TableDefinition<&[u8], &[u8]> =
 /// What is left is: does this need a DIFFERENT LEADING SORT DIMENSION than its
 /// neighbour, or is it a GENUINELY DISTINCT KEY SPACE? If neither, it is a
 /// column, and it belongs in its neighbour's key space.
-const PRODUCTION_TABLES: [&str; 30] = [
+const PRODUCTION_TABLES: [&str; 29] = [
     "addr_index",
     "coverage",
     "event_ids",
@@ -58,8 +58,7 @@ const PRODUCTION_TABLES: [&str; 30] = [
     "publish_queue_relay_ids",
     "publish_queue_relays",
     "publish_queue_route_revisions",
-    "publish_queue_suppress_by_addr",
-    "publish_queue_suppress_by_id",
+    "publish_queue_suppress",
     "relay_ids",
     "relays",
     "semantic_materialization_high_water",
@@ -73,7 +72,7 @@ const PRODUCTION_TABLES: [&str; 30] = [
 /// again: each was a column of a key space a neighbour already owned, or a
 /// scalar row that never needed a tree, and re-creating one under the same
 /// epoch would resurrect a layout nothing reads.
-const FOLDED_AWAY_TABLES: [&str; 16] = [
+const FOLDED_AWAY_TABLES: [&str; 18] = [
     "addr_tombstones",
     "event_local",
     "event_observations",
@@ -86,6 +85,8 @@ const FOLDED_AWAY_TABLES: [&str; 16] = [
     "postings_meta",
     "postings_run_by_min",
     "postings_run_meta",
+    "publish_queue_suppress_by_addr",
+    "publish_queue_suppress_by_id",
     "relay_keys",
     "relay_meta",
     "relay_refs",

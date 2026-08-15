@@ -401,11 +401,7 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
     for id in &candidate_ids {
         let visible = match txn.canonical.load_by_id(id)? {
             None => false,
-            Some((_key, se)) => !is_suppressed_in_txn(
-                &txn.publish_queue_suppress_by_id,
-                &txn.publish_queue_suppress_by_addr,
-                &se.event,
-            )?,
+            Some((_key, se)) => !is_suppressed_in_txn(&txn.publish_queue_suppress, &se.event)?,
         };
         visible_before.insert(*id, visible);
     }
@@ -413,7 +409,7 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
     let mut claims = Vec::new();
     for target_id in target_ids {
         let key = id_claim_key(&target_id, &deleting.pubkey);
-        add_claimant_in_txn(&mut txn.publish_queue_suppress_by_id, &key, intent_id)?;
+        add_claimant_in_txn(&mut txn.publish_queue_suppress, &key, intent_id)?;
         claims.push(SuppressClaimRecord::Id {
             target: target_id,
             claiming_author: deleting.pubkey,
@@ -431,7 +427,7 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
         };
         let key_bytes = key.to_redb_key().into_bytes();
         add_addr_claimant_in_txn(
-            &mut txn.publish_queue_suppress_by_addr,
+            &mut txn.publish_queue_suppress,
             &key_bytes,
             intent_id,
             deleting.created_at,
@@ -449,11 +445,7 @@ pub(super) fn process_kind5_deletions_provisional_in_txn(
             continue;
         }
         if let Some((_key, se)) = txn.canonical.load_by_id(&id)? {
-            if is_suppressed_in_txn(
-                &txn.publish_queue_suppress_by_id,
-                &txn.publish_queue_suppress_by_addr,
-                &se.event,
-            )? {
+            if is_suppressed_in_txn(&txn.publish_queue_suppress, &se.event)? {
                 hidden.push(se);
             }
         }

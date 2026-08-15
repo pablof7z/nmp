@@ -16,10 +16,10 @@ use super::schema::{
     PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT,
     PUBLISH_QUEUE_DISPLACED, PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS,
     PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_RELAYS,
-    PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS, PUBLISH_QUEUE_SUPPRESS_BY_ADDR,
-    PUBLISH_QUEUE_SUPPRESS_BY_ID, REDB_CACHE_BYTES, RELAYS, RELAY_IDS, SCHEMA_VERSION,
-    SCHEMA_VERSION_KEY, SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS,
-    SEMANTIC_RESOURCES, STORE_META, TOMBSTONES,
+    PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS, PUBLISH_QUEUE_SUPPRESS,
+    REDB_CACHE_BYTES, RELAYS, RELAY_IDS, SCHEMA_VERSION, SCHEMA_VERSION_KEY,
+    SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS, SEMANTIC_RESOURCES, STORE_META,
+    TOMBSTONES,
 };
 #[cfg(any(
     test,
@@ -895,8 +895,7 @@ impl RedbStore {
                     encode_meta_u64(PUBLISH_QUEUE_CODEC_VERSION).as_slice(),
                 )?;
                 write_txn.open_table(PUBLISH_QUEUE_KIND5_CLAIMS)?;
-                write_txn.open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID)?;
-                write_txn.open_table(PUBLISH_QUEUE_SUPPRESS_BY_ADDR)?;
+                write_txn.open_table(PUBLISH_QUEUE_SUPPRESS)?;
                 write_txn.open_table(PUBLISH_QUEUE_RECEIPTS)?;
                 write_txn.open_table(PUBLISH_QUEUE_CORRELATIONS)?;
                 write_txn.open_table(PUBLISH_QUEUE_RELAYS)?;
@@ -1201,18 +1200,10 @@ impl RedbStore {
     ) -> Result<Vec<EventId>, PersistenceError> {
         let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
         let event_ids = read_txn.open_table(EVENT_IDS).map_err(persist_err)?;
-        let publish_queue_suppress_by_id = read_txn
-            .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID)
+        let publish_queue_suppress = read_txn
+            .open_table(PUBLISH_QUEUE_SUPPRESS)
             .map_err(persist_err)?;
-        let publish_queue_suppress_by_addr = read_txn
-            .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ADDR)
-            .map_err(persist_err)?;
-        let suppression_possible = !publish_queue_suppress_by_id
-            .is_empty()
-            .map_err(persist_err)?
-            || !publish_queue_suppress_by_addr
-                .is_empty()
-                .map_err(persist_err)?;
+        let suppression_possible = !publish_queue_suppress.is_empty().map_err(persist_err)?;
         let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
         let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
         let prepared_filter = PreparedFilter::new(filter);
@@ -1259,11 +1250,7 @@ impl RedbStore {
                         "materialize canonical event {event_key}: {error:?}"
                     ))
                 })?;
-                if is_suppressed_in_txn(
-                    &publish_queue_suppress_by_id,
-                    &publish_queue_suppress_by_addr,
-                    &event,
-                )? {
+                if is_suppressed_in_txn(&publish_queue_suppress, &event)? {
                     return Ok(None);
                 }
             }
@@ -1316,11 +1303,8 @@ impl RedbStore {
         let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
         let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
         let relay_ids = read_txn.open_table(RELAY_IDS).map_err(persist_err)?;
-        let publish_queue_suppress_by_id = read_txn
-            .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID)
-            .map_err(persist_err)?;
-        let publish_queue_suppress_by_addr = read_txn
-            .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ADDR)
+        let publish_queue_suppress = read_txn
+            .open_table(PUBLISH_QUEUE_SUPPRESS)
             .map_err(persist_err)?;
         let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
         let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
@@ -1399,11 +1383,7 @@ impl RedbStore {
                 &relays,
                 &mut relay_cache,
             )?;
-            if is_suppressed_in_txn(
-                &publish_queue_suppress_by_id,
-                &publish_queue_suppress_by_addr,
-                &stored.event,
-            )? {
+            if is_suppressed_in_txn(&publish_queue_suppress, &stored.event)? {
                 return Ok(None);
             }
             Ok(Some(stored))

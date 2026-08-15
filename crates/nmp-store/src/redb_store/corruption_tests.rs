@@ -682,13 +682,12 @@ fn accept_reports_a_corrupt_suppression_claimant_set() {
             .accept_write(accept_of(frozen_from(&deletion)))
             .expect("accept deletion");
     }
-    let key = first_fixed_key(&fixture, PUBLISH_QUEUE_SUPPRESS_BY_ID);
-    rewrite_fixed_row(
+    let key = first_bytes_key(
         &fixture,
-        PUBLISH_QUEUE_SUPPRESS_BY_ID,
-        &key,
-        b"NMPS-truncated",
+        PUBLISH_QUEUE_SUPPRESS,
+        &[PUBLISH_QUEUE_SUPPRESS_ID],
     );
+    rewrite_bytes_row(&fixture, PUBLISH_QUEUE_SUPPRESS, &key, b"NMPS-truncated");
 
     let mut store = fixture.open();
     let second = EventBuilder::new(Kind::EventDeletion, "")

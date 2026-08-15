@@ -10,9 +10,9 @@ use super::canonical::CanonicalWriteTables;
 use super::postings_store::crash_if_postings;
 use super::postings_store::PostingsBatch;
 use super::schema::{
-    persist_err, EventKey, ADDR_INDEX, EXPIRATION_INDEX, PUBLISH_QUEUE_DISPLACED,
-    PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS,
-    PUBLISH_QUEUE_SUPPRESS_BY_ADDR, PUBLISH_QUEUE_SUPPRESS_BY_ID, TOMBSTONES,
+    addr_suppress_key, id_suppress_key, persist_err, EventKey, ADDR_INDEX, EXPIRATION_INDEX,
+    PUBLISH_QUEUE_DISPLACED, PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_META,
+    PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_SUPPRESS, TOMBSTONES,
 };
 #[cfg(feature = "bench-instrumentation")]
 use super::store::BenchmarkDurability;
@@ -174,8 +174,7 @@ pub(super) struct RedbIngestTxn<'txn, 'batch> {
     pub(super) publish_queue_meta: redb::Table<'txn, &'static [u8], &'static [u8]>,
     pub(super) publish_queue_displaced: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
     pub(super) publish_queue_kind5_claims: redb::Table<'txn, &'static [u8; 8], &'static [u8]>,
-    pub(super) publish_queue_suppress_by_id: redb::Table<'txn, &'static [u8; 64], &'static [u8]>,
-    pub(super) publish_queue_suppress_by_addr: redb::Table<'txn, &'static [u8], &'static [u8]>,
+    pub(super) publish_queue_suppress: redb::Table<'txn, &'static [u8], &'static [u8]>,
     postings: &'batch mut PostingsBatch,
 }
 
@@ -206,11 +205,8 @@ impl<'txn, 'batch> RedbIngestTxn<'txn, 'batch> {
             publish_queue_kind5_claims: write_txn
                 .open_table(PUBLISH_QUEUE_KIND5_CLAIMS)
                 .map_err(persist_err)?,
-            publish_queue_suppress_by_id: write_txn
-                .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID)
-                .map_err(persist_err)?,
-            publish_queue_suppress_by_addr: write_txn
-                .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ADDR)
+            publish_queue_suppress: write_txn
+                .open_table(PUBLISH_QUEUE_SUPPRESS)
                 .map_err(persist_err)?,
             postings,
         })
@@ -342,12 +338,15 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
                 .get(fixed_key::<8>(key, "delivery kind:5 key")?)
                 .map_err(persist_err)?,
             GovernedPublishQueueMap::SuppressById => self
-                .publish_queue_suppress_by_id
-                .get(fixed_key::<64>(key, "delivery id-suppression key")?)
+                .publish_queue_suppress
+                .get(
+                    id_suppress_key(fixed_key::<64>(key, "delivery id-suppression key")?)
+                        .as_slice(),
+                )
                 .map_err(persist_err)?,
             GovernedPublishQueueMap::SuppressByAddr => self
-                .publish_queue_suppress_by_addr
-                .get(key)
+                .publish_queue_suppress
+                .get(addr_suppress_key(key).as_slice())
                 .map_err(persist_err)?,
         };
         Ok(value.map(|guard| guard.value().to_vec()))
@@ -369,12 +368,13 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
             GovernedPublishQueueMap::Kind5Claims => self
                 .publish_queue_kind5_claims
                 .insert(fixed_key::<8>(key, "delivery kind:5 key")?, value),
-            GovernedPublishQueueMap::SuppressById => self
-                .publish_queue_suppress_by_id
-                .insert(fixed_key::<64>(key, "delivery id-suppression key")?, value),
-            GovernedPublishQueueMap::SuppressByAddr => {
-                self.publish_queue_suppress_by_addr.insert(key, value)
-            }
+            GovernedPublishQueueMap::SuppressById => self.publish_queue_suppress.insert(
+                id_suppress_key(fixed_key::<64>(key, "delivery id-suppression key")?).as_slice(),
+                value,
+            ),
+            GovernedPublishQueueMap::SuppressByAddr => self
+                .publish_queue_suppress
+                .insert(addr_suppress_key(key).as_slice(), value),
         }
         .map_err(persist_err)?;
         Ok(())
@@ -399,12 +399,15 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
                 .remove(fixed_key::<8>(key, "delivery kind:5 key")?)
                 .map_err(persist_err)?,
             GovernedPublishQueueMap::SuppressById => self
-                .publish_queue_suppress_by_id
-                .remove(fixed_key::<64>(key, "delivery id-suppression key")?)
+                .publish_queue_suppress
+                .remove(
+                    id_suppress_key(fixed_key::<64>(key, "delivery id-suppression key")?)
+                        .as_slice(),
+                )
                 .map_err(persist_err)?,
             GovernedPublishQueueMap::SuppressByAddr => self
-                .publish_queue_suppress_by_addr
-                .remove(key)
+                .publish_queue_suppress
+                .remove(addr_suppress_key(key).as_slice())
                 .map_err(persist_err)?,
         };
         Ok(value.map(|guard| guard.value().to_vec()))
