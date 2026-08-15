@@ -26,6 +26,16 @@
 # Self-test with a real mutated fixture, run from the SAME functions this
 # script exposes: scripts/test-nip29-kind-blindness.sh.
 #
+# #1653 absorbed `scripts/check-nip29-ownership.sh`'s own kind-9/chat-schema
+# decoy-name ban here (its former `:116-126`). That version truncated its scan
+# at the file's FIRST `#[cfg(test)]` marker via a plain `awk .../{exit}`,
+# reading only the first 313 of `context.rs`'s 896 lines -- a real item placed
+# after that marker, in a file that legitimately has test fixtures near its
+# top, was invisible to it. `check_no_owned_decoy_names` below reuses this
+# script's own brace-depth-aware `non_test_source`, already proven correct by
+# `scripts/test-nip29-kind-blindness.sh`'s RED-2/RED-5/GREEN cases, instead of
+# a second, weaker text-truncation rule.
+#
 # #1074 evidence for PROTOCOL-KINDBLINDNESS-001..005
 # (features/groups/kind-blindness.feature).
 set -euo pipefail
@@ -92,7 +102,13 @@ non_test_source() {
 check_owned_kind_literals() {
   local src_dir=$1 file literal found_foreign=0
   for file in "$src_dir/operations.rs" "$src_dir/discovery.rs"; do
-    [[ -f $file ]] || continue
+    # #1653 (hole 3): a renamed or moved owning file must fail closed, not
+    # be silently skipped. A bare `continue` here let `mv discovery.rs
+    # disc.rs` plus a foreign kind constant in the renamed file pass
+    # undetected -- this loop is the ONLY place that enumerates kind
+    # literals against the allow-list, so its silent absence was a hole,
+    # not a graceful degradation.
+    [[ -f $file ]] || fail "expected NIP-29 kind-owning source is missing: $file"
     while IFS= read -r literal; do
       [[ -n $literal ]] || continue
       if ! is_allowed "$literal"; then
@@ -133,10 +149,33 @@ check_no_kind_reads_outside_ownership() {
   ((found == 0)) || fail "a kind-blind file references Kind or .kind -- a kind branch or a new kind-reading surface appeared"
 }
 
+# Check C (#1653, absorbed from the former check-nip29-ownership.sh:116-126):
+# no file in the crate may re-acquire kind:9/chat-schema ownership by NAME,
+# even a name that never resolves to a numeric literal Check A or B would
+# catch -- a constant called CHAT_KIND, a `compose_chat`/`GroupReply`
+# function, or the kind-30315-adjacent status-row pairing NIP-C7 owns.
+# `non_test_source` (not a truncating scan) is what makes this correct on a
+# file with fixtures ABOVE its own logic, not only below it.
+check_no_owned_decoy_names() {
+  local src_dir=$1 file found=0
+  for file in "$src_dir"/*.rs; do
+    [[ -f $file ]] || continue
+    local hit
+    hit=$(non_test_source "$file" |
+      grep -nE 'CHAT_KIND|Kind::from\(9\)|=[[:space:]]*9;|compose_chat|GroupReply|recipient_pubkeys|group_content_demand|\[9[^0-9]+30315\]' || true)
+    if [[ -n $hit ]]; then
+      printf '%s:\n%s\n' "$file" "$hit" >&2
+      found=1
+    fi
+  done
+  ((found == 0)) || fail "NIP-29 re-acquired chat/content-schema ownership it does not have"
+}
+
 SRC_DIR=${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/crates/nmp-nip29/src}
 [[ -d $SRC_DIR ]] || fail "no such NIP-29 source directory: $SRC_DIR"
 
 check_owned_kind_literals "$SRC_DIR"
 check_no_kind_reads_outside_ownership "$SRC_DIR"
+check_no_owned_decoy_names "$SRC_DIR"
 
 echo "nip29-kind-blindness: ok"
