@@ -1607,7 +1607,6 @@ pub enum Effect {
     /// registered capability's live availability before sending the ordinary
     /// `SignerAttached` event, closing that cross-thread ordering race.
     RearmSignerIfAvailable(PublicKey),
-    RequestDecrypt(EventId, PublicKey, String),
     /// Delivery: publish `event` to `relay` (plan §3.4's "`Effect::Wire`
     /// publish REQ/EVENT per relay", re-cut as its OWN effect rather than a
     /// `nmp_router::WireOp` variant — `WireOp`/`WireDelta` are read-

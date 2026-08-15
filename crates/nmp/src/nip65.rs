@@ -20,16 +20,9 @@ pub use nmp_nip65::{
     CoordinatorUpdate, ParsedAuthorRoutes, RelayListEntry, RelayUsage, RELAY_LIST_KIND,
 };
 
-/// Engine binding for the pure bootstrap value.
-pub trait Nip65Operations {
-    fn publish_relay_list_bootstrap(
-        &self,
-        request: BootstrapRelayList,
-    ) -> Result<ReceiptStream, EngineError>;
-}
-
-impl Nip65Operations for Engine {
-    fn publish_relay_list_bootstrap(
+impl Engine {
+    /// Engine binding for the pure bootstrap value.
+    pub fn publish_relay_list_bootstrap(
         &self,
         request: BootstrapRelayList,
     ) -> Result<ReceiptStream, EngineError> {

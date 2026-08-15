@@ -360,8 +360,8 @@ mod root_scope_tests {
     }
 
     /// It has no author and no thread, so no modifier can change what it
-    /// emits -- there is nothing for `without_author`, `without_self` or a
-    /// relay hint to act on.
+    /// emits -- there is nothing for `without_author` or a relay hint to act
+    /// on.
     #[test]
     fn an_external_content_id_has_nothing_for_a_modifier_to_change() {
         let episode = Nip73::podcast_episode("guid-1").unwrap();

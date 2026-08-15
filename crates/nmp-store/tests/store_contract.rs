@@ -1336,7 +1336,7 @@ fn refused_event_is_never_stored() {
             .iter()
             .any(|se| se.event.id == expired_id));
         assert!(store
-            .remove(expired_id, RetractReason::Expired)
+            .remove(expired_id, RetractReason::Deleted)
             .unwrap()
             .is_none());
     });
