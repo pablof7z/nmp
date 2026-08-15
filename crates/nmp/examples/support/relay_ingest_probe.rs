@@ -708,7 +708,6 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         max_engine_batch_wait: engine_batch_wait,
         reconnect_delay_initial: Some(Duration::from_secs(3600)),
         reconnect_jitter_max: Some(Duration::ZERO),
-        ..PoolConfig::default()
     };
     let store = if config.redb_nondurable_diagnostic {
         #[cfg(feature = "bench-instrumentation")]

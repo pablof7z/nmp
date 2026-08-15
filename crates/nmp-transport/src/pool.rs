@@ -53,149 +53,6 @@ pub fn configure_diagnostic_preparsed_ceiling(
     frame::configure_diagnostic_preparsed_ceiling(subscription_id, events);
 }
 
-#[cfg(feature = "bench-instrumentation")]
-struct ReconnectPreambleSnapshotBarrierInner {
-    relay: String,
-    state: Mutex<ReconnectPreambleSnapshotBarrierState>,
-    changed: std::sync::Condvar,
-}
-
-#[cfg(feature = "bench-instrumentation")]
-#[derive(Default)]
-struct ReconnectPreambleSnapshotBarrierState {
-    reconnect_delay_controlled: bool,
-    observed: bool,
-    released: bool,
-}
-
-#[cfg(feature = "bench-instrumentation")]
-static RECONNECT_PREAMBLE_SNAPSHOT_BARRIER: std::sync::OnceLock<
-    Mutex<Option<Arc<ReconnectPreambleSnapshotBarrierInner>>>,
-> = std::sync::OnceLock::new();
-
-/// Deterministic falsifier instrumentation: control the next reconnect for
-/// `relay` by removing its production backoff+jitter delay, then pause the
-/// worker after it snapshots the reconnect preamble but before it can emit
-/// `Connected` or write that snapshot.
-#[cfg(feature = "bench-instrumentation")]
-#[doc(hidden)]
-pub struct ReconnectPreambleSnapshotBarrier {
-    inner: Arc<ReconnectPreambleSnapshotBarrierInner>,
-}
-
-#[cfg(feature = "bench-instrumentation")]
-impl ReconnectPreambleSnapshotBarrier {
-    pub fn reconnect_delay_was_controlled(&self) -> bool {
-        self.inner
-            .state
-            .lock()
-            .map(|state| state.reconnect_delay_controlled)
-            .unwrap_or(false)
-    }
-
-    pub fn wait_until_observed(&self, timeout: Duration) -> bool {
-        let Ok(state) = self.inner.state.lock() else {
-            return false;
-        };
-        self.inner
-            .changed
-            .wait_timeout_while(state, timeout, |state| !state.observed)
-            .map(|(state, _)| state.observed)
-            .unwrap_or(false)
-    }
-
-    pub fn release(&self) {
-        if let Ok(mut state) = self.inner.state.lock() {
-            state.released = true;
-            self.inner.changed.notify_all();
-        }
-    }
-}
-
-#[cfg(feature = "bench-instrumentation")]
-impl Drop for ReconnectPreambleSnapshotBarrier {
-    fn drop(&mut self) {
-        self.release();
-        let registry = RECONNECT_PREAMBLE_SNAPSHOT_BARRIER.get_or_init(Default::default);
-        if let Ok(mut installed) = registry.lock() {
-            if installed
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &self.inner))
-            {
-                installed.take();
-            }
-        }
-    }
-}
-
-#[cfg(feature = "bench-instrumentation")]
-#[doc(hidden)]
-pub fn install_reconnect_preamble_snapshot_barrier(
-    relay: &RelayUrl,
-) -> ReconnectPreambleSnapshotBarrier {
-    let inner = Arc::new(ReconnectPreambleSnapshotBarrierInner {
-        relay: relay.as_str().to_string(),
-        state: Mutex::new(ReconnectPreambleSnapshotBarrierState::default()),
-        changed: std::sync::Condvar::new(),
-    });
-    let registry = RECONNECT_PREAMBLE_SNAPSHOT_BARRIER.get_or_init(Default::default);
-    let mut installed = registry
-        .lock()
-        .expect("reconnect-preamble snapshot barrier registry lock");
-    assert!(
-        installed.is_none(),
-        "only one reconnect-preamble snapshot barrier may be installed"
-    );
-    *installed = Some(Arc::clone(&inner));
-    ReconnectPreambleSnapshotBarrier { inner }
-}
-
-#[cfg(feature = "bench-instrumentation")]
-fn control_reconnect_delay(relay: &RelayUrl, requested: Duration) -> Duration {
-    let registry = RECONNECT_PREAMBLE_SNAPSHOT_BARRIER.get_or_init(Default::default);
-    let barrier = registry
-        .lock()
-        .ok()
-        .and_then(|installed| installed.as_ref().cloned());
-    let Some(barrier) = barrier.filter(|barrier| barrier.relay == relay.as_str()) else {
-        return requested;
-    };
-    let Ok(mut state) = barrier.state.lock() else {
-        return requested;
-    };
-    if state.reconnect_delay_controlled {
-        return requested;
-    }
-    state.reconnect_delay_controlled = true;
-    Duration::ZERO
-}
-
-#[cfg(feature = "bench-instrumentation")]
-fn pause_after_reconnect_preamble_snapshot(relay: &RelayUrl) {
-    let registry = RECONNECT_PREAMBLE_SNAPSHOT_BARRIER.get_or_init(Default::default);
-    let barrier = registry
-        .lock()
-        .ok()
-        .and_then(|installed| installed.as_ref().cloned());
-    let Some(barrier) = barrier.filter(|barrier| barrier.relay == relay.as_str()) else {
-        return;
-    };
-    let Ok(mut state) = barrier.state.lock() else {
-        return;
-    };
-    if state.observed {
-        return;
-    }
-    state.observed = true;
-    barrier.changed.notify_all();
-    while !state.released {
-        let Ok(next) = barrier.changed.wait(state) else {
-            return;
-        };
-        state = next;
-    }
-}
-
 /// Safe default for the single engine/transport relay ceiling. Zero is
 /// normalized to this value as well, so legacy/default construction cannot
 /// silently re-enable unbounded worker growth.
@@ -610,8 +467,6 @@ pub enum DisconnectReason {
     /// this slot, which would otherwise busy-loop against a relay that keeps
     /// saying no.
     PermanentlyFailed,
-    /// `Pool::shutdown` tore down every worker in the pool.
-    ShuttingDown,
 }
 
 /// Events the pool pushes to its [`PoolEventSink`]. Reconnect always mints
@@ -769,13 +624,6 @@ pub struct PoolConfig {
     /// frames after receiving the first one. Control frames and lifecycle
     /// events always end the batch immediately.
     pub max_engine_batch_wait: Duration,
-    /// Override for the keepalive idle threshold; `None` uses the
-    /// production default ([`crate::keepalive::KEEPALIVE_IDLE_THRESHOLD`]).
-    /// Tests on millisecond budgets pass a small value.
-    pub keepalive_idle: Option<Duration>,
-    /// Override for the keepalive pong timeout; `None` uses the production
-    /// default ([`crate::keepalive::KEEPALIVE_PONG_TIMEOUT`]).
-    pub keepalive_pong_timeout: Option<Duration>,
     /// Override for the initial reconnect backoff delay; `None` uses the
     /// production default ([`crate::backoff::RECONNECT_DELAY_INITIAL`]).
     /// Integration tests that force a reconnect pass a small value so the
@@ -816,8 +664,6 @@ impl Default for PoolConfig {
             // latency on an isolated EVENT. Representative ingest and exact
             // replay both improve at this value; larger waits regress again.
             max_engine_batch_wait: Duration::from_micros(200),
-            keepalive_idle: None,
-            keepalive_pong_timeout: None,
             reconnect_delay_initial: None,
             reconnect_jitter_max: None,
         }
@@ -1048,29 +894,20 @@ impl Pool {
         }
     }
 
-    /// Close every live worker whose URL is absent from `required` and
-    /// return each synchronous disconnect fact. This is the release half of
-    /// the finite admission contract: a caller that owns the exact current
-    /// relay-demand set can free obsolete slots before opening replacement
-    /// relays, while retaining every read or write lane that is still live.
+    /// Release every live physical session absent from the exact caller-owned
+    /// session set. This is the release half of the finite admission
+    /// contract: a caller that owns the exact current relay-demand set can
+    /// free obsolete slots before opening replacement relays, while retaining
+    /// every read or write lane that is still live.
     ///
     /// The pool does not infer demand from traffic. The engine supplies the
     /// authoritative union of its current read plan and nonterminal write
     /// lanes, so transport cannot accidentally evict an in-flight write or
     /// keep historical read workers forever.
-    pub fn close_unrequired(&self, required: &BTreeSet<RelayUrl>) -> Vec<PoolEvent> {
-        let required = required
-            .iter()
-            .cloned()
-            .map(RelaySessionKey::public)
-            .collect();
-        self.close_unrequired_sessions(&required, BTreeMap::new())
-    }
-
-    /// Release every live physical session absent from the exact caller-owned
-    /// session set. Caller-supplied final connection-scoped text frames are
-    /// flushed on their exact current generations before retirement;
-    /// transport never interprets the text.
+    ///
+    /// Caller-supplied final connection-scoped text frames are flushed on
+    /// their exact current generations before retirement; transport never
+    /// interprets the text.
     pub fn close_unrequired_sessions(
         &self,
         required: &BTreeSet<RelaySessionKey>,

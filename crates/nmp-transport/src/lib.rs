@@ -42,10 +42,7 @@ pub mod thread_census;
 pub use handle::RelayHandle;
 pub use health::{ConnState, RelayHealth};
 #[cfg(feature = "bench-instrumentation")]
-pub use pool::{
-    configure_diagnostic_duplicate_ceiling, configure_diagnostic_preparsed_ceiling,
-    install_reconnect_preamble_snapshot_barrier, ReconnectPreambleSnapshotBarrier,
-};
+pub use pool::{configure_diagnostic_duplicate_ceiling, configure_diagnostic_preparsed_ceiling};
 pub use pool::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
     CommittedObservationPublication, DisconnectReason, DurableSendOutcome, EphemeralOperation,

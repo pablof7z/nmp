@@ -397,14 +397,8 @@ impl PoolInner {
         worker_id: u32,
         session: &RelaySessionKey,
     ) -> Result<WorkerHandle, RelayOpenError> {
-        let idle = self
-            .config
-            .keepalive_idle
-            .unwrap_or(crate::keepalive::KEEPALIVE_IDLE_THRESHOLD);
-        let pong_timeout = self
-            .config
-            .keepalive_pong_timeout
-            .unwrap_or(crate::keepalive::KEEPALIVE_PONG_TIMEOUT);
+        let idle = crate::keepalive::KEEPALIVE_IDLE_THRESHOLD;
+        let pong_timeout = crate::keepalive::KEEPALIVE_PONG_TIMEOUT;
         let reconnect_delay_initial = self
             .config
             .reconnect_delay_initial
