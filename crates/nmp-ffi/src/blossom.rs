@@ -2204,9 +2204,9 @@ mod tests {
         }
     }
 
-    /// Invariant (#555, Reachability Gate, adversarial-review finding):
-    /// the boundary-machinery variants with no Rust-core counterpart are
-    /// constructible and distinct on EVERY operation taxonomy --
+    /// Invariant (#555, adversarial-review finding): the boundary-machinery
+    /// variants with no Rust-core counterpart must stay reachable, not dead
+    /// surface -- they are constructible and distinct on EVERY operation taxonomy --
     /// `InvalidServerUrl` reaches mirror/delete/list through the real
     /// operations (upload's is proven above), and
     /// `RuntimeUnavailable`/`ClientBuild`, which only real runtime or

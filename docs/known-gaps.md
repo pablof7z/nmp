@@ -554,11 +554,9 @@ about current code:
 
 ## Process / tooling
 
-- **Cross-SDK parity (architecture review gate 5) has no mechanical check
-  (#1637).** The invariant — an app on one platform must not silently lose an
-  operation the other two have — is real and still owned by gate 5
-  (`AGENTS.md`, `docs/design/architecture-review-gates.md`); the mechanism is
-  not. The previous SDK-parity check script compared lowercase word bags
+- **Cross-SDK parity has no mechanical check (#1637).** The invariant — an app
+  on one platform must not silently lose an operation the other two have — is
+  real; the mechanism is not. The previous SDK-parity check script compared lowercase word bags
   over whole files, including comments and string literals, and passed a
   Swift SDK reduced to one comment-only file with the entire NIP-02 follow API
   deleted. Mutation testing found it had no falsifier, so it and its

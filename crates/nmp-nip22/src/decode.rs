@@ -23,7 +23,7 @@ pub struct DecodedComment {
 }
 
 /// [`decode_comment`]'s typed rejection. Exhaustive; every variant is
-/// constructed by a test (Reachability Gate).
+/// constructed by a test, so none is dead surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommentDecodeError {
     /// The event's `kind` was not 1111.
