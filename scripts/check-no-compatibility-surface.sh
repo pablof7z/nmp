@@ -19,6 +19,12 @@
 #               compatibility with OUR OWN retired surface; it does not ban
 #               reading someone else's bytes once, on the way in.
 #
+# The native SDK trees are not scanned either. A Rust attribute cannot appear
+# in them -- `git ls-files -- 'Packages/*.rs'` is empty, and those trees hold
+# only Swift and Kotlin, which spell the marker `@available(*, deprecated)`
+# and `@Deprecated`. A `--include='*.rs'` grep over `Packages/` could never
+# match on any input, so it reported "ok" for a property it had not tested.
+#
 # Distinguishing those cases needs judgement, so review owns them. This gate
 # owns the part that does not: a declared deprecation.
 set -euo pipefail
@@ -38,14 +44,6 @@ found=$(grep -RIn --include='*.rs' -E '#\[[[:space:]]*deprecated' crates/ || tru
 if [[ -n $found ]]; then
   printf '%s\n' "$found"
   fail "a deprecation marker appeared -- delete the old spelling instead"
-fi
-
-# A deprecation cannot hide behind a re-export rename either.
-found=$(grep -RIn --include='*.rs' -E '#\[[[:space:]]*deprecated' \
-  Packages/NMP/Sources Packages/NMPKotlin/src 2>/dev/null || true)
-if [[ -n $found ]]; then
-  printf '%s\n' "$found"
-  fail "a deprecation marker appeared in a native SDK surface"
 fi
 
 echo "no-compatibility-surface: ok"

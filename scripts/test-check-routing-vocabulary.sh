@@ -26,6 +26,12 @@ fail() {
   exit 1
 }
 
+# The fixture is a real git repository because the gate reads its tombstone
+# corpus from git rather than from the working tree (#1334). A plain
+# directory would make every run below fail on "the tracked corpus could not
+# be read" instead of on the mutation, which would prove nothing. `-f`
+# overrides any global excludes file, so a developer's personal ignore rules
+# cannot silently narrow the fixture corpus.
 reset_fixture() {
   rm -rf "$FIXTURE"
   local path
@@ -33,6 +39,8 @@ reset_fixture() {
     mkdir -p "$FIXTURE/${path%/*}"
     cp "$ROOT/$path" "$FIXTURE/$path"
   done
+  git -C "$FIXTURE" init -q
+  git -C "$FIXTURE" add -A -f
 }
 
 # In-place edit that works the same on macOS and GNU sed.
