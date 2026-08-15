@@ -107,8 +107,8 @@ receiver-side transform (`PendingRows::into_message` / history `reconcile` /
 ### Termination states (two, not one bool)
 
 Cancellation is a distinct terminal from producer teardown, so the slot carries
-a three-state `SlotState { Open, ProducerGone, Cancelled }` (an enum, per the
-Bool-Lifecycle gate), not a `closed` bool:
+a three-state `SlotState { Open, ProducerGone, Cancelled }` — an enum, not a
+`closed` bool that would conflate the two terminal states:
 
 - **`ProducerGone`** (sender `Drop` — natural teardown / engine shutdown):
   deliver any pending value *first*, then `None`. Preserves the existing

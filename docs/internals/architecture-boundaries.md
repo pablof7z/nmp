@@ -122,7 +122,8 @@ Keep transaction orchestration direct and narrow; extract the calculation
 ## Ownership rules
 
 - **One owner per lifecycle, retry, queue, resource and connection.** Two owners
-  of one property is the defect the Noun Gate exists to catch.
+  of one property is a design defect, not a style preference (`AGENTS.md`
+  standing conventions).
 - **The runtime executes; the semantic owner decides.** The runtime owns
   threads, sessions, cancellation, scheduling and delivery. It does not acquire
   policy merely because data passes through it.
