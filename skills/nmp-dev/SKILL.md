@@ -45,7 +45,7 @@ testing](references/testing/INDEX.md).
   protection is removed.
 - Apply every standing convention in `AGENTS.md`, including [no hidden runtime
   flags](../../docs/internals/conventions/no-hidden-runtime-feature-flags.md).
-- Run all six architecture gates in proportion to the diff.
+- Apply `AGENTS.md`'s standing conventions in proportion to the diff. There is no PR-review checklist to run by eye — the repo deleted that ceremony; the conventions are design-time rules, and a violation is a defect to fix, not a box to check.
 - When behavior shared across layers changes, update every affected layer in
   the same change: Rust, storage, diagnostics, FFI, Swift, Kotlin, docs, tests,
   validation scripts, and evidence metadata. Do not keep the old path for
@@ -70,7 +70,7 @@ testing](references/testing/INDEX.md).
 
 ## Finish
 
-- Review the diff against the issue and six gates.
+- Review the diff against the issue and `AGENTS.md`'s standing conventions.
 - Report the commands run, what they proved, and any live or platform checks
   not run.
 - Close completed issues. Otherwise post branch, worktree, blocker, and next

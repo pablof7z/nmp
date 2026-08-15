@@ -60,7 +60,7 @@ Repository merge gate after targeted loops:
 cargo test --workspace
 ```
 
-Follow repository CI and `AGENTS.md`; do not substitute the merge gate for fast touched-crate iteration.
+This repo runs no CI; `cargo test --workspace` is a gate an agent or reviewer runs by hand before merging, per `AGENTS.md`. Do not substitute it for fast touched-crate iteration.
 
 ## Query falsifiers
 
@@ -138,7 +138,7 @@ Stress repeated query, diagnostics, follow, signer, and receipt-attachment open/
 - use disposable identities and non-sensitive content;
 - never print secrets or invitation URIs;
 - report relay unavailability as environmental evidence, not a product pass;
-- keep live smoke separate from deterministic CI; and
+- keep live smoke separate from the deterministic local test run; and
 - inspect the running consumer result, not only command exit status.
 
 Complete the [verification record asset](../assets/verification-record.md) so the handoff separates proved, observed, skipped, and unproved claims.
