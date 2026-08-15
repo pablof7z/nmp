@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Declared before any external command runs. `nak` is the one that matters:
+# only the first phase runs against the fake `nak` this script installs, and
+# the seed-readback phase drives the real harness, which needs the real
+# binary. Without this the script gets several seconds into a passing run
+# before failing, and passes outright on a developer machine that happens to
+# have `nak` while failing on a runner that does not.
+SCRIPT_PATH=${BASH_SOURCE[0]}
+SCRIPT_DIR=${SCRIPT_PATH%/*}
+[[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
+source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
+require_commands git jq mktemp nak || exit 2
+
 ROOT=$(git rev-parse --show-toplevel)
 HARNESS="$ROOT/tools/nip29-consumer-harness/harness.sh"
 TEMP_ROOT=$(mktemp -d)

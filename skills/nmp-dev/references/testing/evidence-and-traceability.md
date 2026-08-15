@@ -21,7 +21,7 @@ Examples:
 ```text
 # nmp:evidence=rust:nmp-router::literal_demand_remains_pinned
 # nmp:evidence=swift:NmpTests::receipt_reconstructs_after_restart
-# nmp:evidence=script:repository::scripts/check-schema-ownership.sh
+# nmp:evidence=script:repository::scripts/check-routing-vocabulary.sh
 ```
 
 Use stable check names, not line numbers. Each non-live locator must identify
