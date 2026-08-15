@@ -80,32 +80,23 @@ public struct NMPFollowingSnapshot: Sendable, Hashable {
     }
 }
 
-public enum NMPFollowActionFailure: Sendable, Hashable {
-    case invalidTarget(String)
+/// A typed follow/unfollow action was refused before ordinary receipt
+/// custody. `invalidTarget` is the one refusal this boundary adds: `target`
+/// crosses FFI as a caller-typed hex string.
+public enum FollowActionError: Error, Sendable, Equatable {
+    case invalidTarget(got: String)
+    case automaticRoutingUnavailable
     case signedOut
     case engineClosed
-    case receiptUnavailable
+    case publishRefused(reason: String)
 
-    init(_ ffi: FfiFollowActionFailure) {
+    init(_ ffi: FfiFollowActionError) {
         switch ffi {
-        case .invalidTarget(let got): self = .invalidTarget(got)
-        case .signedOut: self = .signedOut
-        case .engineClosed: self = .engineClosed
-        case .receiptUnavailable: self = .receiptUnavailable
-        }
-    }
-}
-
-public enum NMPFollowActionStatus: Sendable, Hashable {
-    case receipt(id: UInt64, status: WriteFact)
-    case failed(NMPFollowActionFailure)
-
-    init(_ ffi: FfiFollowActionStatus) {
-        switch ffi {
-        case .receipt(let receiptID, let status):
-            self = .receipt(id: receiptID, status: WriteFact(status))
-        case .failed(let failure):
-            self = .failed(NMPFollowActionFailure(failure))
+        case .InvalidTarget(let got): self = .invalidTarget(got: got)
+        case .AutomaticRoutingUnavailable: self = .automaticRoutingUnavailable
+        case .SignedOut: self = .signedOut
+        case .EngineClosed: self = .engineClosed
+        case .PublishRefused(let reason): self = .publishRefused(reason: reason)
         }
     }
 }
@@ -146,39 +137,6 @@ public struct NMPFollowingObservation: AsyncSequence, Sendable {
     }
 }
 
-/// A thin pull-based projection of the ordinary write receipt created by one
-/// typed follow/unfollow action. Successful actions contain only canonical
-/// `WriteFact`s; immediate typed refusal is the sole non-receipt case.
-public struct NMPFollowAction: AsyncSequence, Sendable {
-    public typealias Element = NMPFollowActionStatus
-
-    private let handle: NmpFollowActionStream
-    private let iteratorGate = NMPPullIteratorGate()
-
-    init(handle: NmpFollowActionStream) {
-        self.handle = handle
-    }
-
-    public func makeAsyncIterator() -> Iterator {
-        let core = NMPPullIteratorCore(handle: handle, iteratorGate: iteratorGate) { status in
-            NMPFollowActionStatus(status)
-        }
-        return Iterator(core: core)
-    }
-
-    public struct Iterator: AsyncIteratorProtocol {
-        let core: NMPPullIteratorCore<NmpFollowActionStream, NMPFollowActionStatus>
-
-        public mutating func next() async throws -> NMPFollowActionStatus? {
-            try await core.next()
-        }
-    }
-
-    public func cancel() {
-        handle.cancel()
-    }
-}
-
 extension NMPEngine {
     /// Observe whether the current account follows `target`. This is NMP's
     /// protocol projection, not an app-maintained boolean.
@@ -186,19 +144,28 @@ extension NMPEngine {
         try NMPFollowingObservation(engine: ffi, target: target)
     }
 
-    /// Submit one durable NIP-02 operation. NMP applies it immediately to the
-    /// best cached contact list, or to NIP-02's complete empty list when no
-    /// source exists, and reapplies it if a newer relay source arrives.
-    public func follow(_ target: String) throws -> NMPFollowAction {
-        try NMPFollowAction(handle: nmpRethrowing {
-            try ffi.follow(target: target)
-        })
+    /// Ask NMP to follow `target` through the ordinary durable write and
+    /// receipt lifecycle. NMP applies it immediately to the best cached
+    /// contact list, or to NIP-02's complete empty list when no source
+    /// exists, and reapplies it if a newer relay source arrives. Either a
+    /// truthful immediate `FollowActionError`, or the same `Receipt` every
+    /// other write returns.
+    public func follow(_ target: String) throws -> Receipt {
+        try followReceipt { try ffi.follow(target: target) }
     }
 
-    public func unfollow(_ target: String) throws -> NMPFollowAction {
-        try NMPFollowAction(handle: nmpRethrowing {
-            try ffi.unfollow(target: target)
-        })
+    /// The inverse of `follow(_:)`, with the same durable operation and
+    /// ordinary receipt guarantees.
+    public func unfollow(_ target: String) throws -> Receipt {
+        try followReceipt { try ffi.unfollow(target: target) }
+    }
+
+    private func followReceipt(_ action: () throws -> NmpReceiptStream) throws -> Receipt {
+        do {
+            return Receipt(handle: try action())
+        } catch let error as FfiFollowActionError {
+            throw FollowActionError(error)
+        }
     }
 }
 
@@ -210,7 +177,7 @@ public final class NMPFollowing: ObservableObject {
     public let target: String
 
     @Published public private(set) var snapshot: NMPFollowingSnapshot
-    @Published public private(set) var actionStatus: NMPFollowActionStatus?
+    @Published public private(set) var actionStatus: WriteFact?
     @Published public private(set) var isActing = false
 
     private let engine: NMPEngine
@@ -269,10 +236,12 @@ public final class NMPFollowing: ObservableObject {
 
     private func start(desiredFollowing: Bool) {
         guard !isActing else { return }
-        let action: NMPFollowAction
+        let receipt: Receipt
         do {
-            action = try (desiredFollowing ? engine.follow(target) : engine.unfollow(target))
+            receipt = try (desiredFollowing ? engine.follow(target) : engine.unfollow(target))
         } catch {
+            // A truthful immediate refusal (FollowActionError): nothing
+            // entered custody, so there is no stream to follow.
             self.desiredFollowing = nil
             self.isActing = false
             return
@@ -283,31 +252,25 @@ public final class NMPFollowing: ObservableObject {
         actionTask?.cancel()
         actionTask = Task { [weak self] in
             do {
-                for try await status in action {
+                for try await fact in receipt.status {
                     guard !Task.isCancelled else { return }
-                    self?.accept(status)
+                    self?.accept(fact)
                 }
             } catch {
-                // The action stream ended abnormally; leave the last delivered
+                // The receipt stream ended abnormally; leave the last delivered
                 // status in place (no capacity error exists to surface, #680).
             }
         }
     }
 
-    private func accept(_ status: NMPFollowActionStatus) {
-        actionStatus = status
-        switch status {
-        case .failed:
+    private func accept(_ fact: WriteFact) {
+        actionStatus = fact
+        if case .outcome(.refused) = fact {
             isActing = false
             desiredFollowing = nil
-        case .receipt(_, let fact):
-            if case .outcome(.refused) = fact {
-                isActing = false
-                desiredFollowing = nil
-            } else if case .signing(.refused) = fact {
-                isActing = false
-                desiredFollowing = nil
-            }
+        } else if case .signing(.refused) = fact {
+            isActing = false
+            desiredFollowing = nil
         }
     }
 

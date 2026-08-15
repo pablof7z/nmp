@@ -1,18 +1,16 @@
 // Kotlin/JVM mirror of FollowingTests.swift: construction/mapping-level
-// proofs only, no live relay needed -- signed-out projection and typed
-// action failures are both synchronous-from-the-engine's-perspective
-// states, exactly like the Swift suite.
+// proofs only, no live relay needed. #1640: every pre-custody refusal is now
+// a synchronous exception from `follow`/`unfollow` itself, exactly like the
+// Swift suite -- there is no follow-only action/status stream to collect
+// before observing it.
 package com.nmp.sdk
 
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.take
-import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
-import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 
@@ -39,45 +37,33 @@ class FollowingTest {
             }
         }
 
+    /** #1640: a signed-out follow is a truthful immediate refusal -- there is
+     * no receipt, and therefore no stream, to observe it through. */
     @Test
-    fun followIsAnNMPActionWithTypedSignedOutFailure() =
-        runBlocking {
-            NMPEngine(config()).use { engine ->
-                val action = engine.follow(TARGET)
-                val statuses = withTimeoutOrNull(3_000) { action.status.take(1).toList() }
-
-                assertEquals(
-                    listOf(FollowActionStatus.Failed(FollowActionFailure.SignedOut)),
-                    statuses,
-                )
-            }
+    fun signedOutFollowRefusesBeforeReceiptCustody() {
+        NMPEngine(config()).use { engine ->
+            val error = assertThrows(FollowActionError::class.java) { engine.follow(TARGET) }
+            assertEquals(FollowActionError.SignedOut, error)
         }
+    }
 
+    /** #1640: an unparseable target refuses synchronously, exactly like every
+     * other pre-custody refusal -- there is no separate typed-action-state
+     * channel for it to hide in. */
     @Test
-    fun invalidTargetIsTypedActionStateNotANativeException() =
-        runBlocking {
-            NMPEngine(config()).use { engine ->
-                val action = engine.follow("not-a-pubkey")
-                val statuses = withTimeoutOrNull(3_000) { action.status.take(1).toList() }
-
-                assertEquals(
-                    listOf(
-                        FollowActionStatus.Failed(FollowActionFailure.InvalidTarget("not-a-pubkey")),
-                    ),
-                    statuses,
-                )
-            }
-        }
-
-    @Test
-    fun providerlessFollowRefusesBeforeTheActionStarts() {
-        NMPEngine(NMPConfig()).use { engine ->
-            val action = engine.follow(TARGET)
+    fun invalidTargetRefusesBeforeReceiptCustody() {
+        NMPEngine(config()).use { engine ->
             val error =
-                assertThrows(NMPError::class.java) {
-                    runBlocking { action.status.first() }
-                }
-            assertSame(NMPError.AutomaticRoutingUnavailable, error)
+                assertThrows(FollowActionError::class.java) { engine.follow("not-a-pubkey") }
+            assertEquals(FollowActionError.InvalidTarget("not-a-pubkey"), error)
+        }
+    }
+
+    @Test
+    fun providerlessFollowRefusesBeforeReceiptCustody() {
+        NMPEngine(NMPConfig()).use { engine ->
+            val error = assertThrows(FollowActionError::class.java) { engine.follow(TARGET) }
+            assertEquals(FollowActionError.AutomaticRoutingUnavailable, error)
         }
     }
 

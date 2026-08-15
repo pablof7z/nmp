@@ -202,7 +202,10 @@ fn providerless_follow_refuses_before_the_action_starts_or_leaves_residue() {
         .add_private_key_account(ffi_private_key(&author), true)
         .expect("the native account registers");
     let result = engine.follow(nostr::Keys::generate().public_key().to_hex());
-    assert!(matches!(result, Err(FfiError::AutomaticRoutingUnavailable)));
+    assert!(matches!(
+        result,
+        Err(crate::nip02::FfiFollowActionError::AutomaticRoutingUnavailable)
+    ));
     assert!(engine.publish_queue(None, u8::MAX).unwrap().is_empty());
     engine.shutdown();
 }

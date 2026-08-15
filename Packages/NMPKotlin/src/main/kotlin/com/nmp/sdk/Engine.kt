@@ -179,14 +179,12 @@ class NMPEngine(
      * conflation/teardown discipline. */
     fun observeFollowing(target: String): Flow<FollowingSnapshot> = observeFollowing(ffi, target)
 
-    /** Apply one follow through NMP's ordinary durable write path. The thin
-     * action stream reports the accepted receipt or one typed pre-custody
-     * failure; signing, routing, delivery, and restart replay belong to that
-     * ordinary receipt. */
-    fun follow(target: String): FollowAction = follow(ffi, target)
-
-    /** The inverse of [follow], with the same ordinary receipt ownership. */
-    fun unfollow(target: String): FollowAction = unfollow(ffi, target)
+    // `follow`/`unfollow` are pure extension functions on `NMPEngine` in
+    // `Following.kt` (mirroring `addGroupToList`/etc. in
+    // `NIP29SimpleGroups.kt`), not redeclared here: they return the ordinary
+    // [Receipt], not a follow-only action/status type, so there is nothing
+    // for a class member to forward to besides what extension resolution
+    // already provides.
     // nmp-native:endif
 
     /** Acquire one NIP-11 representation through the shared engine cache. */
