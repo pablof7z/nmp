@@ -307,8 +307,9 @@ pub fn sentinel_signature() -> Signature {
 /// still replace the sentinel, flip every co-owner to `Signed`, drop the
 /// displaced recovery stash, and — for a pending kind:5 draft — turn
 /// provisional suppression claims into PERMANENT tombstones. That is the
-/// convention-only failure class `docs/bug-class-ledger.md:3-5` rules out,
-/// and the precondition the Destructive-API Gate requires be typed.
+/// convention-only failure class `docs/bug-class-ledger.md:3-5` rules out —
+/// exactly the kind of precondition that must be enforced by a type, never
+/// by a doc comment alone.
 ///
 /// The fields are private and [`Self::verify`] is the only constructor, so
 /// the value cannot exist unless one verification succeeded. `Event::verify`

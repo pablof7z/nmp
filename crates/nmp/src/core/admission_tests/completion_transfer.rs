@@ -187,6 +187,7 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
                         Timestamp::from(200),
                     )),
                 },
+                returns: Default::default(),
             },
         );
         core.apply_request_metadata_updates(
@@ -274,6 +275,7 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
                 slot: 79,
                 generation: 1,
             },
+            returns: Default::default(),
             stored_events: super::observation::StoredEvents::Finished {
                 request_revision: 1,
                 committed_interval: Some(CoverageInterval::new(

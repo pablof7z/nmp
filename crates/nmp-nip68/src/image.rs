@@ -27,7 +27,7 @@ pub struct ImageDim {
 }
 
 /// [`ImageDim::parse`]'s failure modes. Exhaustive; every variant is
-/// constructed by the unit tests below (Reachability Gate).
+/// constructed by the unit tests below, so none is dead surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageDimError {
     /// No lowercase `x` separator at all -- e.g. `"3024"` or `"3024X4032"`
@@ -301,7 +301,7 @@ mod tests {
 
     /// Invariant (#558): `dim` wire form is strict `WIDTHxHEIGHT` -- the
     /// `dim_wire_format_is_strict_widthxheight` falsifier. Each rejection
-    /// constructs a distinct `ImageDimError` variant (Reachability Gate).
+    /// constructs a distinct `ImageDimError` variant, so none is dead surface.
     #[test]
     fn dim_parse_is_strict_and_round_trips() {
         let dim = ImageDim::parse("3024x4032").expect("valid dim");

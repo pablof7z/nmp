@@ -6,8 +6,7 @@
 // any kind, any signature, no sources. So the parser is deliberately
 // tolerant and its result is deliberately plain data. There is no
 // observation-qualified wrapper, projection-error family, or frame proof
-// here, and `scripts/check-nip29-surfaces.sh` fails the build if
-// one is reintroduced.
+// here, and none should be reintroduced.
 //
 // Reading kind:10009 stays the ordinary demand/observation noun
 // (`currentAccountGroupListDemand()`, below). Typed add/remove methods compile

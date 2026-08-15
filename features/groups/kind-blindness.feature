@@ -5,8 +5,7 @@ Feature: A group publishes every kind identically
   Declaring a fixed content catalogue was a measured defect (#838); this
   invariant is what prevents it coming back in a new spelling.
 
-  Traces to docs/internals/nip29/group-publication.md sections 4 and 7, and to
-  scripts/check-nip29-kind-blindness.sh.
+  Traces to docs/internals/nip29/group-publication.md sections 4 and 7.
 
   Background:
     Given the group "photographers" hosted by relay "wss://relay.groups.example"
@@ -17,8 +16,6 @@ Feature: A group publishes every kind identically
   # nmp:status=built
   # nmp:evidence=rust:nmp-nip29::contextualize_takes_the_identical_path_for_every_kind_familiar_or_not
   # nmp:evidence=rust:nmp-nip29::a_read_branch_imposes_no_kind_catalogue_over_arbitrary_app_selections
-  # nmp:evidence=script:repository::scripts/check-nip29-kind-blindness.sh
-  # nmp:falsifier=making contextualize or group_demand_at inspect, filter, or special-case any one kind in the table (9021 NIP-29's own, 7/30315 other NIPs', 44815/20/1 unrecognised) makes contextualize_takes_the_identical_path_for_every_kind_familiar_or_not or a_read_branch_imposes_no_kind_catalogue_over_arbitrary_app_selections see a wrong tag set, a refusal, or a kind-dependent result for that one row while the others stay unaffected; adding any `Kind`/`.kind` reference to context.rs to implement such a branch independently makes check-nip29-kind-blindness.sh fail closed
   #
   # #1245 added the one selection the read door does refuse: NIP-29's three
   # relay-signed records, which do not carry an h row at all and so cannot
@@ -62,9 +59,6 @@ Feature: A group publishes every kind identically
 
   # nmp:id=PROTOCOL-KINDBLINDNESS-003
   # nmp:status=built
-  # nmp:evidence=script:repository::scripts/check-nip29-kind-blindness.sh
-  # nmp:evidence=script:repository::scripts/check-nip29-surfaces.sh
-  # nmp:falsifier=defining a kind-9-valued constant or a Kind::from(9) call anywhere in crates/nmp-nip29/src/operations.rs or discovery.rs makes check-nip29-kind-blindness.sh's owned-kind-literal enumeration see a value outside NIP-29's own 9000-9022/39000-39002 set and fail closed; a CHAT_KIND/compose_chat/GroupReply decoy name anywhere in crates/nmp-nip29/src makes check-nip29-kind-blindness.sh's decoy-name scan fail; adding a chat- or reaction-shaped composer function name to any of the four platform surfaces makes check-nip29-surfaces.sh's decoy scan fail. C7's independent kind:9 ownership (crates/nmp-nipc7) is scripts/check-nip29-ownership.sh's existing, unduplicated evidence (`bash`-invoked, not a separate CI lane) and is not re-cited here.
   @nip29
   Scenario: Kind 9 is not the group's kind
     When I publish an event of kind 9 with content "first light" through the group

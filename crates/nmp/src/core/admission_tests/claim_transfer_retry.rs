@@ -64,6 +64,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
                 request_revision: 9,
                 committed_interval: Some(generation),
             },
+            returns: Default::default(),
         },
     );
 

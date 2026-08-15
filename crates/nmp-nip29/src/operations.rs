@@ -14,8 +14,7 @@
 //! whatever contextualizes a draft for a selected group host -- not here.
 //! That keeps this module engine-free: it composes NIP-29's schema, it does
 //! not route or sign (`crates/nmp-nip29/Cargo.toml` depends on exactly
-//! `nostr` + `nmp-grammar`, enforced by
-//! `scripts/check-nip29-ownership.sh:30-33`).
+//! `nostr` + `nmp-grammar`).
 //!
 //! `update-pin-list` (kind 9010) is deliberately not composed here: its
 //! tag shape ("zero or more `e` or `a` tags") does not pin down what a typed

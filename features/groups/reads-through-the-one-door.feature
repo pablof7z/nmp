@@ -32,8 +32,6 @@ Feature: Reading a group goes through the one read door
 
   # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-002
   # nmp:status=built
-  # nmp:evidence=script:repository::scripts/check-nip29-surfaces.sh
-  # nmp:falsifier=Give a group or relay-scope value a read lifecycle of its own on any of the surfaces this script scans -- open a socket, hold a relay pool, add a reconnect or retry loop beside the projection, or stop routing the records observation through the engine's own subscription -- and check-nip29-surfaces.sh fails with "a group value grew a read lifecycle of its own" or "no longer opens the engine's own subscription". #1233 narrowed this from banning the WORD observe: that banned the group-records projection along with the defect, and the defect it is aimed at is a parallel lifecycle onto the same mechanism, not a typed reader over it. #1653 moved this claim's mechanism here from the deleted scripts/check-nip29-read-door.sh, which had its own top-level workflow file; the check itself is unchanged in substance, only relocated and ported from a hardcoded facade-file array to a glob that also covers groups.rs.
   @nip29
   Scenario: A group owns no way of its own to reach a relay
     When I inspect the group's read surface

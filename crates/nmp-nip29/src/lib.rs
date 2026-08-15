@@ -28,8 +28,7 @@
 //! facade, because that door must retain a relay scope AND mint the one
 //! opaque write intent, and a lower crate cannot do the second without
 //! importing the write plane. The dependency therefore runs
-//! `nmp -> nmp-nip29` and never the other way
-//! (`scripts/check-nip29-ownership.sh`).
+//! `nmp -> nmp-nip29` and never the other way.
 //!
 //! # One host per value
 //!

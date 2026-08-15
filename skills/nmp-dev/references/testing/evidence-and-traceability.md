@@ -1,14 +1,15 @@
 # Evidence and traceability
 
-Every `built` scenario needs executable evidence that proves its promise. The
-required checks must run in CI and distinguish situations that should behave
-differently. Deliberately reintroducing the named bug must make them fail.
-Nearby green checks do not count.
+Every `built` scenario needs executable evidence that proves its promise.
+There is no CI: the required checks must be runnable on demand and must
+distinguish situations that should behave differently. Deliberately
+reintroducing the named bug must make them fail. Nearby green checks do not
+count.
 
 ## Locators
 
-A locator is a metadata line that names a test, validation script, or live CI
-job. Use one for each check the scenario depends on:
+A locator is a metadata line that names a test, validation script, or live
+integration run. Use one for each check the scenario depends on:
 
 ```text
 # nmp:evidence=<kind>:<owner>::<target>
@@ -21,15 +22,16 @@ Examples:
 ```text
 # nmp:evidence=rust:nmp-router::literal_demand_remains_pinned
 # nmp:evidence=swift:NmpTests::receipt_reconstructs_after_restart
-# nmp:evidence=script:repository::scripts/check-routing-vocabulary.sh
 ```
 
 Use stable check names, not line numbers. Each non-live locator must identify
-exactly one enabled test or validation script in a required CI job. An ignored,
+exactly one enabled test or validation script that actually runs. An ignored,
 conditionally compiled, manual-only, masked, ambiguous, symlink-backed, or
-similarly named check does not qualify. A `live` locator names an enabled CI job
-that runs against a real service. It may add field evidence but cannot replace
-a repeatable check.
+similarly named check does not qualify. Nothing runs these checks
+automatically, so a locator is honest only if a reviewer actually ran the
+named check before marking the scenario `built`. A `live` locator names a run
+against a real service. It may add field evidence but cannot replace a
+repeatable check.
 
 List every layer needed to prove the public promise. One property or model test
 may support several scenarios when it genuinely distinguishes them. Do not
@@ -91,10 +93,13 @@ An acceptance test may call internal components only to set up inputs, and each
 such call needs a specific reason. The transitional `nmp-bdd` runner does not
 prove behavior through the public API.
 
-`tools/behavior-traceability` checks metadata, unique IDs, open issues,
-locators, required CI jobs, inherited tags, Gherkin, and changes from base to
-head. It checks that the records are connected; it cannot decide whether the
-tests prove the stated behavior.
+A detached checker crate used to check metadata, unique IDs, open
+issues, locators, required CI jobs, inherited tags, Gherkin, and changes from
+base to head. That crate and the CI that ran it are deleted along with the
+rest of the CI-era tooling, so nothing now mechanically verifies that these
+records are connected. Even when it existed, it could not decide whether the
+tests prove the stated behavior — that judgment call has always belonged to
+the reviewer, and it is now the only check left.
 
 For each evidence locator, ask: **could the named bug still exist while this
 evidence passes?**
