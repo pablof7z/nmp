@@ -31,3 +31,19 @@ Feature: NIP-02 follow actions are durable semantic writes
     And NMP reapplies the retained follow over that relay value without another app action
     And relay-owned content, contacts, hints, petnames, and unrelated tags survive
     And the successor remains owned by the original receipt
+
+  # nmp:id=PROTOCOL-NIP02-FOLLOW-003
+  # nmp:status=built
+  # nmp:evidence=parity:nmp-parity::offline_follow_recomputes_derived_feed_before_later_source_rebase
+  # nmp:falsifier=Skip resolver reaction to the committed pending row; the followed author's cached note never enters the already-open derived feed before the relay answers.
+  Scenario: An offline follow immediately changes a feed derived from the contact list
+    Given the cached contact list follows five authors and their notes are cached
+    And the contact-list relay has not answered the current request
+    When the app follows a sixth author whose note is cached
+    Then the already-open derived feed immediately includes the sixth author's note
+    When the engine restarts before the relay provides newer truth
+    Then the original receipt reattaches without another follow action
+    When later relay truth adds three authors and removes one cached author
+    Then the same pending follow is replayed over that relay truth
+    And the derived feed keeps the follow, adds those three authors, and removes that one author
+    And the original receipt owns the reconciled successor

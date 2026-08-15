@@ -2082,6 +2082,7 @@ dependencies = [
  "nmp-grammar",
  "nmp-nip02",
  "nmp-nip22",
+ "nmp-store",
  "nmp-test-support",
  "nostr 0.44.4",
  "tempfile",

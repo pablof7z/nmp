@@ -79,6 +79,12 @@ pub struct RelayConfig {
     /// for the causal EOSE it claims has already happened, rather than
     /// passing because a local relay happened to answer immediately.
     pub query_delay: Option<Duration>,
+    /// Hold queries naming this exact kind after recording them but before
+    /// the relay serves stored events or EOSE. Other query kinds continue.
+    /// [`ScriptedRelay::release_queries`] permanently opens the gate. This
+    /// is a causal fixture control for seed-after-request tests; unlike
+    /// [`Self::query_delay`], it never asks wall-clock time to prove ordering.
+    pub hold_query_kind: Option<u16>,
     /// NIP-42 write gating (`LocalRelayBuilderNip42::write()`). Verified
     /// behavior of `LocalRelay` 0.45.0-alpha.3 in this mode: it does NOT
     /// challenge on connect; on an unauthenticated EVENT it sends
@@ -178,11 +184,11 @@ struct QueryLog {
 }
 
 impl QueryLog {
-    fn record(&self, query: &nostr_relay_builder::prelude::Filter) {
+    fn record(&self, query: &nostr_relay_builder::prelude::Filter) -> Vec<u16> {
         let value = serde_json::to_value(query)
             .expect("nmp-bdd: scripted relay query must serialize for observation");
         let Some(kinds) = value.get("kinds").and_then(serde_json::Value::as_array) else {
-            return;
+            return Vec::new();
         };
         let kinds = kinds
             .iter()
@@ -190,18 +196,19 @@ impl QueryLog {
             .map(|kind| kind as u16)
             .collect::<Vec<_>>();
         if kinds.is_empty() {
-            return;
+            return kinds;
         }
         {
             let mut counts = self
                 .by_kind
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            for kind in kinds {
-                *counts.entry(kind).or_default() += 1;
+            for kind in &kinds {
+                *counts.entry(*kind).or_default() += 1;
             }
         }
         self.notify.notify_waiters();
+        kinds
     }
 
     fn count(&self, kind: u16) -> u64 {
@@ -236,6 +243,27 @@ impl QueryLog {
 
     async fn wait_query_for_kind(&self, kind: u16, timeout: Duration) -> bool {
         self.wait_query_count_for_kind(kind, 1, timeout).await
+    }
+}
+
+#[derive(Debug)]
+struct QueryGate {
+    semaphore: tokio::sync::Semaphore,
+}
+
+impl QueryGate {
+    fn closed() -> Self {
+        Self {
+            semaphore: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    async fn wait(&self) {
+        let _released = self.semaphore.acquire().await;
+    }
+
+    fn release(&self) {
+        self.semaphore.close();
     }
 }
 
@@ -836,6 +864,7 @@ pub struct ScriptedRelay {
     connection_owner: Option<ConnectionOwner>,
     contacted: Arc<ContactLog>,
     queries: Arc<QueryLog>,
+    query_gate: Option<Arc<QueryGate>>,
     wire: Arc<WireLog>,
     connections: Arc<AtomicU64>,
     admitted: Arc<Mutex<Vec<nostr::Event>>>,
@@ -862,6 +891,9 @@ impl ScriptedRelay {
         let contacted = Arc::new(ContactLog::default());
         let admitted: Arc<Mutex<Vec<nostr::Event>>> = Arc::new(Mutex::new(Vec::new()));
         let queries = Arc::new(QueryLog::default());
+        let query_gate = config
+            .hold_query_kind
+            .map(|kind| (kind, Arc::new(QueryGate::closed())));
         let wire = Arc::new(WireLog::default());
         let backend_port = free_port();
 
@@ -877,6 +909,7 @@ impl ScriptedRelay {
             .query_policy(LoggingQueryPolicy {
                 contacted: contacted.clone(),
                 queries: queries.clone(),
+                gate: query_gate.clone(),
                 reject: config.reject_queries,
                 delay: config.query_delay,
             });
@@ -922,6 +955,7 @@ impl ScriptedRelay {
             connection_owner: Some(connection_owner),
             contacted,
             queries,
+            query_gate: query_gate.map(|(_, gate)| gate),
             wire,
             connections,
             admitted,
@@ -1143,6 +1177,16 @@ impl ScriptedRelay {
             .await
     }
 
+    /// Permanently release queries held by [`RelayConfig::hold_query_kind`].
+    /// Panics when the relay was not configured with that explicit fixture
+    /// gate so a test cannot accidentally claim a release it never owned.
+    pub fn release_queries(&self) {
+        self.query_gate
+            .as_ref()
+            .expect("nmp-test-support: query gate was not configured")
+            .release();
+    }
+
     /// Every `REQ`/`CLOSE` this relay's client has sent so far, decoded from
     /// the raw socket bytes -- subscription ids included. Panics if the
     /// decoder ever failed to account for a frame (see [`WireLog::snapshot`]):
@@ -1339,6 +1383,7 @@ impl WritePolicy for LoggingWritePolicy {
 struct LoggingQueryPolicy {
     contacted: Arc<ContactLog>,
     queries: Arc<QueryLog>,
+    gate: Option<(u16, Arc<QueryGate>)>,
     reject: bool,
     delay: Option<Duration>,
 }
@@ -1350,10 +1395,17 @@ impl QueryPolicy for LoggingQueryPolicy {
         _addr: &'a SocketAddr,
     ) -> nostr_relay_builder::prelude::BoxedFuture<'a, QueryPolicyResult> {
         self.contacted.record();
-        self.queries.record(query);
+        let kinds = self.queries.record(query);
         let reject = self.reject;
         let delay = self.delay;
+        let gate = self
+            .gate
+            .as_ref()
+            .and_then(|(kind, gate)| kinds.contains(kind).then(|| Arc::clone(gate)));
         Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.wait().await;
+            }
             if let Some(delay) = delay {
                 tokio::time::sleep(delay).await;
             }
@@ -1606,7 +1658,7 @@ mod tests {
             .kind(nostr_relay_builder::prelude::Kind::from(target_kind));
 
         let already_recorded = QueryLog::default();
-        already_recorded.record(&target);
+        let _ = already_recorded.record(&target);
         assert!(
             already_recorded
                 .wait_query_for_kind(target_kind, Duration::from_millis(1))
@@ -1615,15 +1667,15 @@ mod tests {
         );
 
         let delayed = Arc::new(QueryLog::default());
-        delayed.record(&target);
+        let _ = delayed.record(&target);
         let recorder = {
             let delayed = Arc::clone(&delayed);
             tokio::spawn(async move {
                 let unrelated = nostr_relay_builder::prelude::Filter::new()
                     .kind(nostr_relay_builder::prelude::Kind::from(1u16));
-                delayed.record(&unrelated);
+                let _ = delayed.record(&unrelated);
                 tokio::time::sleep(Duration::from_millis(10)).await;
-                delayed.record(&target);
+                let _ = delayed.record(&target);
             })
         };
         assert!(
@@ -1638,5 +1690,90 @@ mod tests {
             "an unrelated query notification cannot satisfy the exact count wait"
         );
         recorder.await.expect("query recorder task must not panic");
+    }
+
+    /// The causal seed-after-request fixture must stop a recorded query until
+    /// its owner explicitly releases it. Removing `gate.wait()` makes the
+    /// pre-release `try_recv` succeed and fails this test; closing the gate
+    /// also releases every future waiter, so no notification can be lost.
+    #[tokio::test]
+    async fn query_gate_blocks_until_one_permanent_release() {
+        let gate = Arc::new(QueryGate::closed());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
+        let waiter = {
+            let gate = Arc::clone(&gate);
+            tokio::spawn(async move {
+                entered_tx.send(()).expect("test owner receives entry");
+                gate.wait().await;
+                done_tx.send(()).expect("test owner receives release");
+            })
+        };
+
+        entered_rx.await.expect("waiter reached the gate");
+        assert!(
+            matches!(
+                done_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "a held query cannot complete before explicit release"
+        );
+        gate.release();
+        done_rx.await.expect("release wakes the blocked query");
+        waiter.await.expect("query waiter must not panic");
+
+        tokio::time::timeout(Duration::from_millis(200), gate.wait())
+            .await
+            .expect("release is permanent for later queries");
+    }
+
+    /// A targeted query gate must not let an unrelated earlier REQ block the
+    /// exact request the scenario is waiting to seed. This is polled
+    /// directly: kind 1 is ready, kind 3 is pending, and the same kind-3
+    /// future becomes ready only after release. Gating every query makes the
+    /// first assertion fail, reproducing the hosted #1626 failure.
+    #[test]
+    fn query_gate_holds_only_the_configured_kind() {
+        let gate = Arc::new(QueryGate::closed());
+        let policy = LoggingQueryPolicy {
+            contacted: Arc::new(ContactLog::default()),
+            queries: Arc::new(QueryLog::default()),
+            gate: Some((3, Arc::clone(&gate))),
+            reject: false,
+            delay: None,
+        };
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 1));
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+
+        let mut unrelated = nostr_relay_builder::prelude::Filter::new()
+            .kind(nostr_relay_builder::prelude::Kind::from(1u16));
+        let mut unrelated_future = policy.admit_query(&mut unrelated, &addr);
+        assert!(
+            matches!(
+                std::future::Future::poll(unrelated_future.as_mut(), &mut context),
+                std::task::Poll::Ready(_)
+            ),
+            "an unrelated query must pass the targeted gate"
+        );
+
+        let mut target = nostr_relay_builder::prelude::Filter::new()
+            .kind(nostr_relay_builder::prelude::Kind::from(3u16));
+        let mut target_future = policy.admit_query(&mut target, &addr);
+        assert!(
+            matches!(
+                std::future::Future::poll(target_future.as_mut(), &mut context),
+                std::task::Poll::Pending
+            ),
+            "the configured query kind must remain held"
+        );
+        gate.release();
+        assert!(
+            matches!(
+                std::future::Future::poll(target_future.as_mut(), &mut context),
+                std::task::Poll::Ready(_)
+            ),
+            "explicit release must admit the held query"
+        );
     }
 }
