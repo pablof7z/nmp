@@ -76,16 +76,22 @@ knowing before you cite either.
 committed store mutation returns the exact set of affected handles, and only
 those handles' observations are recomputed; an incremental row algebra handles
 them, falling back to a full re-read for one observation only when it cannot.
-Nothing scans the full observation set. This is the shape to copy.
+This is the shape to copy.
 
-**Reactive-input change is not.** An active-account switch or an AUTH
+Two ordinary-ingest routes still reach the broad sweep, and the code says so
+in its own words — the dominant path is exact, not every path. A row that
+changes resolved demand (a contact list feeding a `Derived` query, a relay
+list, a NIP-51 list) recompiles; and a relay copy satisfying a local pending
+write — the echo of your own publish — refreshes every observation. Cite the
+precise path as the shape to copy, not as a description of all ingest.
+
+**Reactive-input change is not precise.** An active-account switch or an AUTH
 transition reaches for a flat sweep over every live observation and history,
 reopening the store for each, and relies on a downstream diff to suppress the
-resulting no-op effects. On the account-switch path the sweep currently runs
-*twice*. No wrong data reaches an app — this is unnecessary work, not a
-correctness bug — but it scales with the number of open observations and with
-relay-driven AUTH activity. **#1646** owns it. Do not cite NMP as uniformly
-dependency-precise until it closes.
+resulting no-op effects. No wrong data reaches an app — this is unnecessary
+work, not a correctness bug — but it scales with the number of open
+observations and with relay-driven AUTH activity. **#1646** owns it. Do not
+cite NMP as uniformly dependency-precise until it closes.
 
 ## Transaction and effect rules
 
