@@ -92,7 +92,9 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - ✅ Verbatim publish of externally pre-signed events
 
 **Protocol modules** (opt-in — core stays kind-agnostic)
-- ✅ NIP-02 following — canonical kind:3, guarded tag-preserving follow/unfollow, on **Swift + Kotlin**
+- ✅ NIP-02 following — durable tag-preserving follow/unfollow over cached,
+  first-value, and later relay source truth, with one ordinary receipt on
+  **Swift + Kotlin**
 - ✅ NIP-65 Rust module — engine-free values validate and compose the first
   kind:10002; the optional `nmp/nip65` facade publishes it through the ordinary
   tracked write door and privately assembles automatic route discovery. Swift
