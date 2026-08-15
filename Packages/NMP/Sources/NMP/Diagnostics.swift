@@ -114,6 +114,11 @@ public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
 
 /// One bounded exact-session AUTH diagnostics record. The raw challenge and
 /// opaque capability-instance identities remain engine-private.
+///
+/// `phase` is the sole owner of the AUTH lifecycle: "transport accepted the
+/// AUTH event" is `.awaitingRelayAck` or `.ready`, and "the relay's OK was
+/// correlated" is `.ready`. No boolean restates either -- a second owner is
+/// a second thing that can disagree with the first.
 public struct AuthDiagnostics: Sendable, Hashable {
     public let relay: String
     public let access: NMPAccessContext
@@ -124,8 +129,6 @@ public struct AuthDiagnostics: Sendable, Hashable {
     public let policyBound: Bool
     public let signerBound: Bool
     public let authEventID: String?
-    public let sendHandoffAccepted: Bool
-    public let relayOKAccepted: Bool
 
     init(_ ffi: FfiAuthDiagnostics) {
         relay = ffi.relay
@@ -137,8 +140,6 @@ public struct AuthDiagnostics: Sendable, Hashable {
         policyBound = ffi.policyBound
         signerBound = ffi.signerBound
         authEventID = ffi.authEventId
-        sendHandoffAccepted = ffi.sendHandoffAccepted
-        relayOKAccepted = ffi.relayOkAccepted
     }
 }
 
