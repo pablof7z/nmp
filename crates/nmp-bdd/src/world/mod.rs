@@ -469,7 +469,9 @@ pub struct NmpWorld {
     /// Relays that are bound (so they have a URL) and then severed, so a
     /// connection to them is refused: `Given relay "R" cannot connect`.
     unreachable_relays: BTreeSet<String>,
-    /// What `scripts/check-nip29-ownership.sh` said, and whether it passed.
+    /// What `scripts/check-nip29-kind-blindness.sh` said, and whether it
+    /// passed (#1653 repointed this from `check-nip29-ownership.sh`, which
+    /// used to own the kind-9/chat-schema decoy-name ban this exercises).
     gate_outcome: Option<(bool, String)>,
 
     // ---- stalled writes (`world::stalled`) ------------------------------
