@@ -537,9 +537,9 @@ about current code:
   whatever the relay held, the relay then serves NMP's value, and no
   successor can rebuild the entries that were only in the relay's copy. The
   relay-session-death case is NOT this one; that is released explicitly on
-  disconnect and re-asked on the session that replaces it. #1631's stop point
-  names the fix — teach the shared query owner (#1630) to answer in this
-  state — and until it does, this window is open. (2) The coverage question is asked on the relay's
+  disconnect and re-asked on the session that replaces it. **#1683** owns the
+  fix, against #1630's door rather than the write path, per #1631's own stop
+  point; until it lands, this window is open. (2) The coverage question is asked on the relay's
   authenticated session only when AUTH already completed for it, and on the
   ordinary public session otherwise; a relay that serves an authenticated
   reader a different list than a public one can still be overwritten. (3) The

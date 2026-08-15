@@ -462,11 +462,17 @@ impl EngineCore {
             // NMP's value, so the newer list it held is gone and no successor
             // can rebuild it.
             //
-            // Sending is chosen, and it is the one deliberate hole in the
-            // gate. #1631's own stop point names the real fix -- if ordinary
-            // query coverage cannot express the relay-current result, fix the
-            // shared query owner in #1630 rather than working around it here
-            // -- and `docs/known-gaps.md` records the window.
+            // Sending is chosen, because pre-#1631 EVERY semantic publish
+            // went out with no coordinate check at all: this leaves a
+            // measured minority unchecked where master leaves all of them,
+            // while parking would introduce a new liveness defect. It is
+            // still the one deliberate hole in the gate.
+            //
+            // #1683 closes it, against #1630's door rather than here --
+            // #1631's stop point is explicit that a coverage question the
+            // shared query owner cannot express is fixed in that owner, not
+            // worked around at the call site. `docs/known-gaps.md` records
+            // the window.
             CoordinateCoverage::Uncovered => {
                 if already_asked && !self.wire_admission_needed() {
                     self.release_coordinate_coverage(receipt, relay);
