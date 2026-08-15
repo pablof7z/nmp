@@ -67,6 +67,9 @@ jobs:
       - name: Refuse success when a checker dependency is absent
         run: bash scripts/test-check-tool-requirements.sh
 
+      - name: Refuse success when the NIP-29 consumer harness misreports
+        run: bash scripts/test-nip29-consumer-harness.sh
+
   # #879: NIP-19/NIP-21 decoding preserves exact authored locator data and
   # must never regain engine, acquisition-policy, or compatibility-planner
   # ownership.
