@@ -71,7 +71,6 @@ pub(super) enum RedbCrashPoint {
     SemanticAcceptBeforeCommit,
     SemanticRematerializeBeforeCommit,
     SemanticSourceInstallBeforeCommit,
-    SemanticSourceRoundBeforeCommit,
     SemanticCohortCloseBeforeCommit,
     SemanticPromoteBeforeCommit,
     CoverageBeforeCommit,

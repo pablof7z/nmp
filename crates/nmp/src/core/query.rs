@@ -1044,9 +1044,8 @@ impl EngineCore {
                         // the unauthenticated socket and proves nothing
                         // about an authenticated session's view.
                         let broad = filter.limit.is_none();
-                        let semantic_source = self.owns_semantic_source_demand(&owner_demands);
                         match (
-                            broad && !semantic_source && session.access == AccessContext::Public,
+                            broad && session.access == AccessContext::Public,
                             self.prober.probed(&session.relay),
                         ) {
                             (true, Some(probed)) => {
@@ -2486,7 +2485,7 @@ impl EngineCore {
                 self.neg_session_fallback_to_req(sub_id, session, &mut effects);
             }
         }
-        self.consume_semantic_source_effects(effects)
+        effects
     }
 
     /// Drive one inbound `NEG-MSG` round for `sub_id`'s live session, if any
@@ -2568,7 +2567,6 @@ impl EngineCore {
             attribution_send,
             ..
         } = session;
-        let semantic_source_key = (RelaySessionKey::public(relay.clone()), plan_sub_id.clone());
         let completed_at = self.clock;
         effects.push(Effect::NegClose(relay.clone(), sub_id.clone()));
 
@@ -2576,16 +2574,6 @@ impl EngineCore {
             let committed_coverage =
                 self.credit_neg_coverage(&sub_id, attribution_send, completed_at, &relay, effects);
             let terminal_demands = if committed_coverage.is_some() {
-                // NEG-DONE is the terminal edge for this exact finite
-                // request. Close successor admission now, before a later
-                // EVENT in the same RelayFrames turn can be reduced. The
-                // observation fact emitted below still owns durable
-                // settlement after every already-running successor ends.
-                self.settle_owned_semantic_source_terminal(
-                    semantic_source_key,
-                    nmp_store::SemanticSourceTerminal::Eose,
-                    effects,
-                );
                 self.emit_request_settled(
                     attribution_send,
                     completed_at,

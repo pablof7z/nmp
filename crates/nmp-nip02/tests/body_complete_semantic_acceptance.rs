@@ -308,7 +308,7 @@ fn invalidated_registration_and_materializer_refusal_leave_no_custody() {
     )
     .handle();
     let payload = refusing
-        .operation(&original, nmp::ReplaceableSourcePolicy::Continuing, vec![1])
+        .operation(&original, vec![1])
         .expect("registration-bound payload composes");
     let refusal = match engine.publish(WriteIntent {
         payload,

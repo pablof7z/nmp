@@ -437,7 +437,7 @@ impl EngineCore {
             &evidence_demands,
             &mut effects,
         );
-        self.consume_semantic_source_effects(effects)
+        effects
     }
 
     pub(super) fn consume_wire_request_handoff(

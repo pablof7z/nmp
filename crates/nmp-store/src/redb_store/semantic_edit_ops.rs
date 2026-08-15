@@ -5,11 +5,10 @@ use nostr::{Event, PublicKey, Timestamp};
 use redb::{ReadableDatabase, ReadableTable};
 
 use crate::semantic_edit::{
-    advance_source_round, plan_accept, plan_rematerialize, plan_source_install, recovered,
-    validate_resource_state, SemanticAccept, SemanticCohortClose, SemanticCohortCloseOutcome,
+    plan_accept, plan_rematerialize, plan_source_install, recovered, validate_resource_state,
+    SemanticAccept, SemanticCohortClose, SemanticCohortCloseOutcome,
     SemanticDestinationPlanClosure, SemanticInstallOutcome, SemanticOperation,
-    SemanticRematerialize, SemanticResourceState, SemanticSourceInstall, SemanticSourcePolicy,
-    SemanticSourceRoundFact, SemanticSourceRoundOutcome, SemanticTransitionPlan,
+    SemanticRematerialize, SemanticResourceState, SemanticSourceInstall, SemanticTransitionPlan,
 };
 use crate::{
     AcceptOutcome, IntentId, LocalOrigin, PersistenceError, PromoteOutcome, Provenance,
@@ -820,39 +819,6 @@ pub(super) fn snapshot(
     Ok(load_resource_from_tables(&resources, &operations, coordinate)?.map(recovered))
 }
 
-pub(super) fn advance_source_round_fact(
-    store: &mut RedbStore,
-    coordinate: &Coordinate,
-    fact: SemanticSourceRoundFact,
-) -> Result<SemanticSourceRoundOutcome, PersistenceError> {
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
-    let outcome = {
-        let mut resources = write_txn
-            .open_table(SEMANTIC_RESOURCES)
-            .map_err(persist_err)?;
-        let operations = write_txn
-            .open_table(SEMANTIC_OPERATIONS)
-            .map_err(persist_err)?;
-        let Some(mut state) = load_resource_from_tables(&resources, &operations, coordinate)?
-        else {
-            return Ok(SemanticSourceRoundOutcome::Stale);
-        };
-        let outcome = advance_source_round(&mut state, fact);
-        if outcome == SemanticSourceRoundOutcome::Advanced {
-            validate_resource_state(&state)?;
-            let encoded = encode_resource(&state)?;
-            let key = coordinate_key(coordinate)?;
-            resources
-                .insert(key.as_slice(), encoded.as_slice())
-                .map_err(persist_err)?;
-        }
-        outcome
-    };
-    #[cfg(test)]
-    store.crash_if(super::store::RedbCrashPoint::SemanticSourceRoundBeforeCommit);
-    super::commit::commit_prepared(write_txn, outcome)
-}
-
 pub(super) fn close_cohort(
     store: &mut RedbStore,
     close: SemanticCohortClose,
@@ -874,12 +840,6 @@ pub(super) fn close_cohort(
                 != close.expected_program_digest
         {
             return Ok(SemanticCohortCloseOutcome::Stale);
-        }
-        let SemanticSourcePolicy::Finite(round) = &state.source_policy else {
-            return Ok(SemanticCohortCloseOutcome::SourceRoundOpen);
-        };
-        if !round.is_closed() {
-            return Ok(SemanticCohortCloseOutcome::SourceRoundOpen);
         }
         let Some(generation) = state.generation.as_ref() else {
             return Ok(SemanticCohortCloseOutcome::DestinationOpen);

@@ -37,10 +37,9 @@
 use super::*;
 use crate::{
     RegisteredReplaceableMaterializer, ReplaceableMaterializer, ReplaceableMaterializerOperation,
-    ReplaceableMaterializerRefusal, ReplaceableSourcePolicy,
+    ReplaceableMaterializerRefusal,
 };
 use nostr::{Keys, Kind, RelayMessage, RelayUrl};
-use std::sync::Arc;
 
 /// Mirrors NIP-02's `FollowMaterializer` shape closely enough to exercise the
 /// same generic-mechanism path (`Kind::ContactList`, opaque operation bytes,
@@ -85,21 +84,20 @@ fn session_for(relay: &RelayUrl, author: &Keys) -> RelaySessionKey {
     RelaySessionKey::new(relay.clone(), AccessContext::Nip42(author.public_key()))
 }
 
-/// One capability install per `EngineCore`; `instance` only needs to be
+/// One capability install per `EngineCore`; `program` only needs to be
 /// unique per install, never per operation.
 fn install_capability(
     core: &mut EngineCore,
-    instance: [u8; 16],
+    program: [u8; 16],
 ) -> RegisteredReplaceableMaterializer {
-    core.add_replaceable_materializer(
-        crate::replaceable_materializer::ReplaceableMaterializerRegistration {
-            instance,
-            program: *b"nmp1406-falsify1",
-            format: *b"nmp1406-falsify2",
-            materializer: Arc::new(TinyContactListMaterializer),
-        },
+    let spec = crate::ReplaceableMaterializerSpec::new(
+        program,
+        *b"nmp1406-falsify2",
+        TinyContactListMaterializer,
     );
-    RegisteredReplaceableMaterializer { instance }
+    let handle = spec.handle();
+    core.install_replaceable_materializer(spec.into_registration());
+    handle
 }
 
 /// One accepted+signed member intent's receipt, plus enough to find it again
@@ -141,7 +139,6 @@ fn arm_generation(
             .first_value_operation(
                 Kind::ContactList,
                 String::new(),
-                ReplaceableSourcePolicy::Continuing,
                 vec![slot as u8, member as u8, 0],
             )
             .expect("first-value operation builds");

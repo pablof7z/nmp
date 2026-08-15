@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Engine, EngineError, ReceiptStream, RegisteredReplaceableMaterializer, ReplaceableMaterializer,
     ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec,
-    ReplaceableSourcePolicy,
 };
 
 use super::SimpleGroupEntry;
@@ -145,7 +144,6 @@ fn publish_operation(
         .first_value_operation(
             GROUP_LIST_KIND,
             String::new(),
-            ReplaceableSourcePolicy::Continuing,
             operation,
         )
         .map_err(|_| GroupListActionError::ReceiptUnavailable)?;

@@ -741,8 +741,7 @@ impl EngineCore {
                 // lane it has is trivially terminal, and closing on that
                 // would delete the exact obligation the queue rewriter is
                 // waiting to complete. Nothing auto-abandons.
-                !matches!(pending.target, PendingWriteTarget::ReplaceableOperation(_))
-                    && pending.route_complete
+                pending.route_complete
                     && pending.route_blocked_relays.is_empty()
                     && pending.lane_projection.can_close()
             })
@@ -762,6 +761,88 @@ impl EngineCore {
             id,
             WriteFact::Outcome(WriteOutcome::Settled),
         ));
+    }
+
+    /// Ask the existing atomic store door to close the complete cohort.
+    ///
+    /// Settlement for a semantic write is a COHORT fact, not a receipt fact.
+    /// N contributing intents share one materialized generation and only the
+    /// owner -- `generation.members.first()` -- holds routes and lanes; the
+    /// other N-1 hold none. Routing them through the ordinary receipt path
+    /// above would settle those N-1 immediately and wrongly, because a member
+    /// with zero lanes trivially satisfies `lane_projection.can_close()`.
+    /// They close together in one redb transaction that also compacts the
+    /// replay program and deletes the resource row, or not at all.
+    ///
+    /// The predicate is exactly the ordinary one, read off the owner: routing
+    /// closed and every lane of the current generation terminal. The store
+    /// revalidates every route/lane fact itself; the reducer only supplies the
+    /// current CAS witnesses and then removes the volatile receipt owners
+    /// after a committed close.
+    pub(super) fn try_close_semantic_cohort(
+        &mut self,
+        coordinate: &Coordinate,
+        effects: &mut Vec<Effect>,
+    ) {
+        let snapshot = match self.store.replaceable_operation_snapshot(coordinate) {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return,
+            Err(error) => {
+                self.degrade_store(error, effects);
+                return;
+            }
+        };
+        let Some(generation) = snapshot.current.generation.as_ref() else {
+            return;
+        };
+        let Some(owner_intent) = generation.members.first().copied() else {
+            return;
+        };
+        let Some(owner_receipt) = self.intent_receipts.get(&owner_intent).copied() else {
+            return;
+        };
+        let Some(pending) = self.pending.get(&owner_receipt) else {
+            return;
+        };
+        if !pending.route_complete
+            || !pending.route_blocked_relays.is_empty()
+            || !pending.lane_projection.can_close()
+        {
+            return;
+        }
+        let destination = if pending.durable_routes.is_empty() {
+            nmp_store::SemanticDestinationPlanClosure::NoDestinations
+        } else {
+            nmp_store::SemanticDestinationPlanClosure::AllCurrentDestinationsTerminal
+        };
+        let close = nmp_store::SemanticCohortClose {
+            coordinate: coordinate.clone(),
+            expected_source_revision: snapshot.current.source_revision,
+            expected_program_digest: snapshot.current.program_digest,
+            expected_materialization: generation.materialization,
+            destination,
+        };
+        match self.store.close_replaceable_operation_cohort(close) {
+            Ok(nmp_store::SemanticCohortCloseOutcome::Closed { members }) => {
+                for member in members {
+                    let Some(receipt) = self.intent_receipts.get(&member).copied() else {
+                        continue;
+                    };
+                    if let Some(pending) = self.pending.remove(&receipt) {
+                        self.forget_pending_indexes(receipt, &pending);
+                    }
+                    effects.push(Effect::EmitReceipt(
+                        receipt,
+                        WriteFact::Outcome(WriteOutcome::Settled),
+                    ));
+                }
+            }
+            Ok(
+                nmp_store::SemanticCohortCloseOutcome::DestinationOpen
+                | nmp_store::SemanticCohortCloseOutcome::Stale,
+            ) => {}
+            Err(error) => self.degrade_store(error, effects),
+        }
     }
 
     #[cfg(test)]
@@ -1421,18 +1502,7 @@ impl EngineCore {
             let Some(source) = self.store.query_newest(&filter, 1)?.into_iter().next() else {
                 continue;
             };
-            let source_is_qualified = match &snapshot.source_policy {
-                nmp_store::SemanticSourcePolicy::Continuing => !source.provenance.seen.is_empty(),
-                nmp_store::SemanticSourcePolicy::Finite(round) => {
-                    source.provenance.seen.keys().any(|relay| {
-                        round
-                            .sources
-                            .keys()
-                            .any(|candidate| &candidate.relay == relay)
-                    })
-                }
-            };
-            if !source_is_qualified {
+            if source.provenance.seen.is_empty() {
                 continue;
             }
 
@@ -1956,10 +2026,14 @@ impl EngineCore {
         let (rows, totals) = self.stalled_write_projection();
         self.cached_stalled_writes = rows;
         self.cached_stalled_write_totals = totals;
+        // A process can die after its last lane went terminal but before the
+        // cohort close committed. Recovery re-asks for every semantic
+        // coordinate it rebuilt; the store's exact-generation CAS makes a
+        // premature ask a no-op.
         for coordinate in recovered_semantic_coordinates {
-            self.sync_semantic_source_owners(&coordinate, &mut effects);
+            self.try_close_semantic_cohort(&coordinate, &mut effects);
         }
-        self.consume_semantic_source_effects(effects)
+        effects
     }
 
     /// Drive one intent's freshly established lane set back into ordinary
@@ -2675,10 +2749,6 @@ impl EngineCore {
         observed: RelayObserved,
         candidate: Option<CommittedObservationCandidate>,
         attribution: Option<(RelaySessionKey, String)>,
-        owned_request: Option<&(
-            super::semantic_sources::SemanticSourceRequestKey,
-            super::semantic_sources::OwnedSemanticSourceRequest,
-        )>,
         effects: &mut Vec<Effect>,
     ) -> bool {
         let kind = source.kind.as_u16();
@@ -2729,25 +2799,6 @@ impl EngineCore {
                     // evidence, not a new semantic base.
                     return true;
                 }
-            }
-        }
-        if let nmp_store::SemanticSourcePolicy::Finite(round) = &snapshot.source_policy {
-            let Some((_, owned)) = owned_request else {
-                // An active finite resource exclusively owns its coordinate.
-                // A matching event from an unrelated query must not replace
-                // the optimistic canonical generation through ordinary
-                // ingest, and it has no authority to become a successor.
-                return true;
-            };
-            let request_is_current = owned.coordinate == coordinate
-                && owned.request.round == round.id
-                && matches!(
-                    round.sources.get(&owned.request.source),
-                    Some(nmp_store::SemanticSourceMemberState::Open(current))
-                        if current == &owned.request
-                );
-            if !request_is_current {
-                return true;
             }
         }
         let members = snapshot

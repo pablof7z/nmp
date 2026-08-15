@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use nmp::{
     AccessContext, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReceiptReattachment,
     RelayState, ReplaceableMaterializer, ReplaceableMaterializerOperation,
-    ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec, ReplaceableSourcePolicy, Row,
+    ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec, Row,
     RowDelta, RowSignature, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,
     SigningCapability, SigningState, SourceAuthority, WriteFact, WriteIntent, WriteOutcome,
     WriteRouting,
@@ -371,10 +371,6 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
             .first_value_operation(
                 Kind::ContactList,
                 String::new(),
-                ReplaceableSourcePolicy::Finite {
-                    relays: BTreeSet::from([source_url.clone()]),
-                    access: AccessContext::Public,
-                },
                 alice.to_bytes().to_vec(),
             )
             .expect("capability default operation is complete"),
@@ -429,10 +425,6 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
             payload: materializer
                 .operation(
                     &initial,
-                    ReplaceableSourcePolicy::Finite {
-                        relays: BTreeSet::from([source_url.clone()]),
-                        access: AccessContext::Public,
-                    },
                     carol.to_bytes().to_vec(),
                 )
                 .expect("a later operation composes over the local generation"),
@@ -558,10 +550,6 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
                 .first_value_operation(
                     parameterized_kind,
                     "bookmarks".to_string(),
-                    ReplaceableSourcePolicy::Finite {
-                        relays: BTreeSet::from([source_url.clone()]),
-                        access: AccessContext::Public,
-                    },
                     alice.to_bytes().to_vec(),
                 )
                 .expect("parameterized default operation is complete"),
@@ -625,7 +613,6 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
             payload: materializer
                 .operation(
                     &base_row,
-                    ReplaceableSourcePolicy::Continuing,
                     alice.to_bytes().to_vec(),
                 )
                 .expect("first operation is complete"),
@@ -650,7 +637,6 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
             payload: materializer
                 .operation(
                     &first_current,
-                    ReplaceableSourcePolicy::Continuing,
                     bob.to_bytes().to_vec(),
                 )
                 .expect("second operation composes over current"),
@@ -816,7 +802,6 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
             payload: materializer
                 .operation(
                     &base_row,
-                    ReplaceableSourcePolicy::Continuing,
                     alice.to_bytes().to_vec(),
                 )
                 .expect("first operation is complete"),
@@ -831,7 +816,6 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
             payload: materializer
                 .operation(
                     &first_current,
-                    ReplaceableSourcePolicy::Continuing,
                     bob.public_key().to_bytes().to_vec(),
                 )
                 .expect("second operation composes over current"),
@@ -953,7 +937,6 @@ async fn source_session_replacement_wakes_every_signed_successor_destination() {
             payload: materializer
                 .operation(
                     &base_row,
-                    ReplaceableSourcePolicy::Continuing,
                     alice.to_bytes().to_vec(),
                 )
                 .expect("the body-complete operation composes"),
@@ -1074,7 +1057,6 @@ async fn relay_source_successors_resume_current_delivery_and_remain_continuing_a
             payload: materializer
                 .operation(
                     &base_row,
-                    ReplaceableSourcePolicy::Continuing,
                     alice.to_bytes().to_vec(),
                 )
                 .expect("body-complete operation composes"),

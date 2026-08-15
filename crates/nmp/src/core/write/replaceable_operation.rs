@@ -37,7 +37,6 @@ pub(crate) struct ReplaceableMaterializationContinuation {
     format: ReplayFormatId,
     materializer: Arc<dyn crate::ReplaceableMaterializer>,
     start: nmp_grammar::ReplaceableOperationStart,
-    declared_source_policy: nmp_grammar::ReplaceableSourcePolicy,
     operation_bytes: Vec<u8>,
     signing_pubkey: PublicKey,
     coordinate: Coordinate,
@@ -127,8 +126,7 @@ impl EngineCore {
         identity: Identity,
         correlation: Option<nmp_grammar::CorrelationToken>,
     ) -> PublishPreparation {
-        let (program, format, start, declared_source_policy, operation_bytes) =
-            operation.into_registered_parts();
+        let (program, format, start, operation_bytes) = operation.into_registered_parts();
         let Some(registration) = self.replaceable_materializers.get(&(program, format)) else {
             return PublishPreparation::Complete(self.refuse_publish(
                 PublishError::ReplaceableOperationRefused {
@@ -262,7 +260,7 @@ impl EngineCore {
             .unwrap_or_default();
         replay_operations.push(operation_bytes.clone());
         let canonical_source =
-            match self.canonical_replaceable_source(&coordinate, &declared_source_policy) {
+            match self.canonical_replaceable_source(&coordinate) {
                 Ok(source) => source,
                 Err(error) => {
                     return PublishPreparation::Complete(self.refuse_publish(
@@ -294,7 +292,6 @@ impl EngineCore {
                 format,
                 materializer,
                 start,
-                declared_source_policy,
                 operation_bytes,
                 signing_pubkey,
                 coordinate,
@@ -313,7 +310,6 @@ impl EngineCore {
         format: ReplayFormatId,
         materializer: Arc<dyn crate::ReplaceableMaterializer>,
         start: nmp_grammar::ReplaceableOperationStart,
-        declared_source_policy: nmp_grammar::ReplaceableSourcePolicy,
         operation_bytes: Vec<u8>,
         signing_pubkey: PublicKey,
         coordinate: Coordinate,
@@ -345,7 +341,7 @@ impl EngineCore {
             .unwrap_or_default();
         operations.push(operation_bytes.clone());
         let canonical_source =
-            match self.canonical_replaceable_source(&coordinate, &declared_source_policy) {
+            match self.canonical_replaceable_source(&coordinate) {
                 Ok(source) => source,
                 Err(error) => {
                     return PublishPreparation::Complete(self.refuse_publish(
@@ -377,7 +373,6 @@ impl EngineCore {
                 format,
                 materializer,
                 start,
-                declared_source_policy,
                 operation_bytes,
                 signing_pubkey,
                 coordinate,
@@ -491,10 +486,17 @@ impl EngineCore {
         }
     }
 
+    /// The newest stored value for the coordinate that some relay has
+    /// actually been seen to carry.
+    ///
+    /// Relay provenance is the whole qualification: a locally constructed row
+    /// with no `seen` entry is not a source. Whether that value is current
+    /// *at the relay this write is about to publish to* is a coverage
+    /// question the ordinary query owner answers (#1630), not one this
+    /// acceptance-time read can express.
     fn canonical_replaceable_source(
         &self,
         coordinate: &Coordinate,
-        source_policy: &nmp_grammar::ReplaceableSourcePolicy,
     ) -> Result<Option<nmp_store::StoredEvent>, nmp_store::PersistenceError> {
         let mut filter = nostr::Filter::new()
             .kind(coordinate.kind)
@@ -507,16 +509,7 @@ impl EngineCore {
             .query_newest(&filter, 1)?
             .into_iter()
             .next()
-            .filter(|stored| match source_policy {
-                nmp_grammar::ReplaceableSourcePolicy::Continuing => {
-                    !stored.provenance.seen.is_empty()
-                }
-                nmp_grammar::ReplaceableSourcePolicy::Finite { relays, .. } => stored
-                    .provenance
-                    .seen
-                    .keys()
-                    .any(|relay| relays.contains(relay)),
-            }))
+            .filter(|stored| !stored.provenance.seen.is_empty()))
     }
 
     pub(crate) fn complete_body_complete_replaceable_operation(
@@ -537,7 +530,6 @@ impl EngineCore {
             format,
             materializer,
             start,
-            declared_source_policy,
             operation_bytes,
             signing_pubkey,
             coordinate,
@@ -584,7 +576,7 @@ impl EngineCore {
             }
         };
         let canonical_source =
-            match self.canonical_replaceable_source(&coordinate, &declared_source_policy) {
+            match self.canonical_replaceable_source(&coordinate) {
                 Ok(source) => source,
                 Err(error) => {
                     return PublishPreparation::Complete(self.refuse_publish(
@@ -602,7 +594,6 @@ impl EngineCore {
                 format,
                 materializer,
                 start,
-                declared_source_policy,
                 operation_bytes,
                 signing_pubkey,
                 coordinate,
@@ -645,26 +636,10 @@ impl EngineCore {
             *blake3::hash(&[b"nmp-exact-source-v1".as_slice(), program.0.as_slice()].concat())
                 .as_bytes(),
         );
-        let source_access = match &declared_source_policy {
-            nmp_grammar::ReplaceableSourcePolicy::Continuing
-            | nmp_grammar::ReplaceableSourcePolicy::Finite {
-                access: AccessContext::Public,
-                ..
-            } => AccessContextId(
-                *blake3::hash(&[b"nmp-public-source-v1".as_slice(), format.0.as_slice()].concat())
-                    .as_bytes(),
-            ),
-            nmp_grammar::ReplaceableSourcePolicy::Finite {
-                access: AccessContext::Nip42(pubkey),
-                ..
-            } => {
-                let mut hasher = blake3::Hasher::new();
-                hasher.update(b"nmp-source-access-v1");
-                hasher.update(&[1]);
-                hasher.update(pubkey.as_bytes());
-                AccessContextId(*hasher.finalize().as_bytes())
-            }
-        };
+        let source_access = AccessContextId(
+            *blake3::hash(&[b"nmp-public-source-v1".as_slice(), format.0.as_slice()].concat())
+                .as_bytes(),
+        );
         let source = snapshot
             .as_ref()
             .map(|snapshot| snapshot.current.source_revision.evidence().clone())
@@ -794,59 +769,6 @@ impl EngineCore {
             .as_ref()
             .map(|snapshot| snapshot.operations.iter().map(|op| op.intent_id).collect())
             .unwrap_or_default();
-        let source_policy = match (snapshot.as_ref(), declared_source_policy) {
-            (Some(snapshot), nmp_grammar::ReplaceableSourcePolicy::Continuing)
-                if matches!(
-                    snapshot.source_policy,
-                    nmp_store::SemanticSourcePolicy::Continuing
-                ) =>
-            {
-                snapshot.source_policy.clone()
-            }
-            (Some(snapshot), nmp_grammar::ReplaceableSourcePolicy::Finite { relays, access })
-                if matches!(&snapshot.source_policy, nmp_store::SemanticSourcePolicy::Finite(round)
-                    if round.sources.keys().cloned().collect::<BTreeSet<_>>()
-                        == relays.iter().cloned().map(|relay| nmp_store::SemanticSource::new(relay, access)).collect()) =>
-            {
-                snapshot.source_policy.clone()
-            }
-            (Some(_), _) => {
-                return PublishPreparation::Complete(self.refuse_publish(
-                    PublishError::ReplaceableOperationRefused {
-                        reason: nmp_store::SemanticRefusal::IncompatibleSourcePolicy.to_string(),
-                    },
-                ));
-            }
-            (None, nmp_grammar::ReplaceableSourcePolicy::Continuing) => {
-                nmp_store::SemanticSourcePolicy::Continuing
-            }
-            (None, nmp_grammar::ReplaceableSourcePolicy::Finite { relays, access }) => {
-                let mut hasher = blake3::Hasher::new();
-                hasher.update(b"nmp-finite-source-round-v1");
-                hasher.update(&coordinate.kind.as_u16().to_be_bytes());
-                hasher.update(coordinate.public_key.as_bytes());
-                hasher.update(&(coordinate.identifier.len() as u64).to_be_bytes());
-                hasher.update(coordinate.identifier.as_bytes());
-                hasher.update(source_plan.0.as_slice());
-                hasher.update(source_access.0.as_slice());
-                for relay in &relays {
-                    let relay = relay.as_str().as_bytes();
-                    hasher.update(&(relay.len() as u64).to_be_bytes());
-                    hasher.update(relay);
-                }
-                let sources = relays
-                    .into_iter()
-                    .map(|relay| nmp_store::SemanticSource::new(relay, access))
-                    .collect();
-                nmp_store::SemanticSourcePolicy::Finite(
-                    nmp_store::FiniteSemanticSourceRound::new(
-                        nmp_store::SourceRoundId(*hasher.finalize().as_bytes()),
-                        sources,
-                    )
-                    .expect("registered operation rejects an empty finite source set"),
-                )
-            }
-        };
         let accept = AcceptWrite {
             payload: AcceptWritePayload::ReplaceableOperation(Box::new(SemanticAccept {
                 coordinate: coordinate.clone(),
@@ -857,7 +779,6 @@ impl EngineCore {
                 expected_current_materialization: expected_materialization,
                 starting_source,
                 source,
-                source_policy,
                 source_event,
                 plan,
                 materialized: Some(MaterializationCandidate {
@@ -1012,7 +933,6 @@ impl EngineCore {
             }
         }
         self.apply_committed_mutation(committed, &mut effects);
-        self.sync_semantic_source_owners(&coordinate, &mut effects);
         PublishPreparation::Complete(effects)
     }
 }

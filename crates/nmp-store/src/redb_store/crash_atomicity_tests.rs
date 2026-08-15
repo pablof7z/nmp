@@ -167,7 +167,6 @@ fn semantic_accept_write() -> AcceptWrite {
                 source: crate::StartingSource::Absent,
             },
             source: semantic_source(),
-            source_policy: crate::SemanticSourcePolicy::Continuing,
             source_event: None,
             plan: crate::SemanticPlan::new(1, vec![42]).unwrap(),
             materialized: None,
@@ -254,7 +253,6 @@ fn seed_qualified_semantic_generation(store: &mut RedbStore) -> (u64, EventId, E
                         source: crate::StartingSource::Event(source.id),
                     },
                     source: evidence,
-                    source_policy: crate::SemanticSourcePolicy::Continuing,
                     source_event: Some(stored),
                     plan: crate::SemanticPlan::new(1, vec![42]).unwrap(),
                     materialized: Some(crate::MaterializationCandidate {
@@ -1126,28 +1124,13 @@ fn semantic_shared_promotion_is_crash_atomic() {
 }
 
 #[test]
-fn finite_source_round_closes_every_semantic_receipt_and_compacts_the_program() {
+fn terminal_destinations_close_every_semantic_receipt_and_compact_the_program() {
     let (_dir, path) = fixture();
     let relay_one = RelayUrl::parse(RELAY).unwrap();
-    let relay_two = RelayUrl::parse(RELAY_TWO).unwrap();
-    let source_one =
-        crate::SemanticSource::new(relay_one.clone(), nmp_grammar::AccessContext::Public);
-    let source_two = crate::SemanticSource::new(relay_two, nmp_grammar::AccessContext::Public);
-    let round_id = crate::SourceRoundId([11; 32]);
-    let round = crate::FiniteSemanticSourceRound::new(
-        round_id,
-        BTreeSet::from([source_one.clone(), source_two.clone()]),
-    )
-    .unwrap();
 
     let (receipt_a, receipt_b, intent_a, intent_b, close, stale_install) = {
         let mut store = RedbStore::open(&path).unwrap();
-        let mut first_write = semantic_accept_write();
-        let crate::AcceptWritePayload::ReplaceableOperation(first) = &mut first_write.payload
-        else {
-            unreachable!()
-        };
-        first.source_policy = crate::SemanticSourcePolicy::Finite(round);
+        let first_write = semantic_accept_write();
         let first = store.accept_write(first_write).unwrap();
         let intent_a = first.journaled_intent_id().unwrap();
         let receipt_a = first.journaled_receipt_id().unwrap();
@@ -1164,7 +1147,6 @@ fn finite_source_round_closes_every_semantic_receipt_and_compacts_the_program() 
         second.expected_source_revision = Some(snapshot.current.source_revision.clone());
         second.expected_program_digest = Some(snapshot.current.program_digest);
         second.contributing_operations = vec![intent_a];
-        second.source_policy = snapshot.source_policy.clone();
         second.plan = crate::SemanticPlan::new(1, vec![43]).unwrap();
         second_write.accepted_at = Timestamp::from(1_001);
         let second = store.accept_write(second_write).unwrap();
@@ -1204,30 +1186,6 @@ fn finite_source_round_closes_every_semantic_receipt_and_compacts_the_program() 
         ));
         let (target, verified) = semantic_promotion_target(&store);
         store.promote_signed(target, verified).unwrap();
-
-        for (source, generation, revision) in [(source_one, 1, 1), (source_two, 1, 2)] {
-            let request = crate::SemanticSourceRequest {
-                round: round_id,
-                source,
-                transport_generation: generation,
-                request_revision: revision,
-            };
-            store
-                .advance_replaceable_source_round(
-                    &semantic_coordinate(),
-                    crate::SemanticSourceRoundFact::RequestOpened(request.clone()),
-                )
-                .unwrap();
-            store
-                .advance_replaceable_source_round(
-                    &semantic_coordinate(),
-                    crate::SemanticSourceRoundFact::RequestSettled {
-                        request,
-                        terminal: crate::SemanticSourceTerminal::Eose,
-                    },
-                )
-                .unwrap();
-        }
 
         let snapshot = store
             .replaceable_operation_snapshot(&semantic_coordinate())

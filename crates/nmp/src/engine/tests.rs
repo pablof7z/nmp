@@ -158,7 +158,6 @@ fn replaceable_contact_intent(
         payload: registration
             .operation(
                 base,
-                nmp_grammar::ReplaceableSourcePolicy::Continuing,
                 person.to_bytes().to_vec(),
             )
             .expect("the signed base mints one operation"),
@@ -2515,7 +2514,6 @@ fn missing_compiled_capability_refuses_open_and_leaves_the_store_unchanged() {
                     .first_value_operation(
                         Kind::ContactList,
                         String::new(),
-                        nmp_grammar::ReplaceableSourcePolicy::Continuing,
                         alice.to_bytes().to_vec(),
                     )
                     .expect("the first-value follow is complete"),
@@ -2636,7 +2634,6 @@ fn repeated_materializations_do_not_change_the_process_thread_count_inner() {
                 .first_value_operation(
                     Kind::ContactList,
                     String::new(),
-                    nmp_grammar::ReplaceableSourcePolicy::Continuing,
                     Keys::generate().public_key().to_bytes().to_vec(),
                 )
                 .expect("the first-value follow is complete"),
@@ -2691,7 +2688,6 @@ fn repeated_materializations_do_not_change_the_process_thread_count_inner() {
         [88; 16],
         UnsignedEvent::from(base.clone()),
         UnsignedEvent::from(base),
-        nmp_grammar::ReplaceableSourcePolicy::Continuing,
         Keys::generate().public_key().to_bytes().to_vec(),
     )
     .expect("successor fixture operation is valid");

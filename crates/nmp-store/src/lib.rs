@@ -106,15 +106,14 @@ pub use redb_store::{
     StoreBenchProcessCounters, StoreBenchVariant,
 };
 pub use semantic_edit::{
-    AccessContextId, FiniteSemanticSourceRound, MaterializationCandidate, MaterializationId,
-    OperationResolution, OperationSourceRequirement, PendingMaterializationState, QualifiedSource,
+    AccessContextId, MaterializationCandidate, MaterializationId, OperationResolution,
+    OperationSourceRequirement, PendingMaterializationState, QualifiedSource,
     RecoveredSemanticResource, ReplayFormatId, ReplayProgramId, ResolvedOperation, SemanticAccept,
     SemanticCohortClose, SemanticCohortCloseOutcome, SemanticCurrentState,
     SemanticDestinationPlanClosure, SemanticGeneration, SemanticInstallOutcome, SemanticOperation,
-    SemanticPlan, SemanticProgramDigest, SemanticRefusal, SemanticRematerialize, SemanticSource,
-    SemanticSourceInstall, SemanticSourceMemberState, SemanticSourcePolicy, SemanticSourceRequest,
-    SemanticSourceRoundFact, SemanticSourceRoundOutcome, SemanticSourceTerminal, SourceEvidence,
-    SourcePlanId, SourceRevision, SourceRoundId, StartingSource, StartingSourceRequirement,
+    SemanticPlan, SemanticProgramDigest, SemanticRefusal, SemanticRematerialize,
+    SemanticSourceInstall, SourceEvidence, SourcePlanId, SourceRevision, StartingSource,
+    StartingSourceRequirement,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
