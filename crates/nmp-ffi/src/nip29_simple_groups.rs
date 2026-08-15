@@ -33,13 +33,17 @@ use crate::facade::{NmpEngine, NmpReceiptStream};
 use crate::types::{FfiDemand, FfiRow, FfiSimpleGroupEntry, FfiSimpleGroupsList};
 
 /// A typed group-list action was refused before ordinary receipt custody.
+/// `EngineClosed` and `PublishRefused` name exactly what
+/// [`nmp::nip29::GroupListActionError`] itself can carry -- there is no
+/// separate group-list-only fiction standing in for a receipt that failed to
+/// materialize for no named reason.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum FfiGroupListActionError {
     InvalidRelayUrl { got: String },
     AutomaticRoutingUnavailable,
     SignedOut,
     EngineClosed,
-    ReceiptUnavailable,
+    PublishRefused { reason: String },
 }
 
 impl std::fmt::Display for FfiGroupListActionError {
@@ -51,9 +55,7 @@ impl std::fmt::Display for FfiGroupListActionError {
             }
             Self::SignedOut => f.write_str("no current account is selected"),
             Self::EngineClosed => f.write_str("the engine is closed"),
-            Self::ReceiptUnavailable => {
-                f.write_str("the group-list operation was refused before receipt custody")
-            }
+            Self::PublishRefused { reason } => write!(f, "{reason}"),
         }
     }
 }
@@ -65,7 +67,9 @@ impl From<nmp::nip29::GroupListActionError> for FfiGroupListActionError {
         match error {
             nmp::nip29::GroupListActionError::SignedOut => Self::SignedOut,
             nmp::nip29::GroupListActionError::EngineClosed => Self::EngineClosed,
-            nmp::nip29::GroupListActionError::ReceiptUnavailable => Self::ReceiptUnavailable,
+            nmp::nip29::GroupListActionError::PublishRefused { reason } => {
+                Self::PublishRefused { reason }
+            }
         }
     }
 }

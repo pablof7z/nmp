@@ -25,10 +25,6 @@ use crate::discovery::JOIN_KEY_TAG;
 
 /// The row NIP-29 owns: which group an event belongs to.
 const CONTEXT_TAG: char = 'h';
-/// Reserved, never emitted, never accepted from a caller. `previous` remains
-/// unimplemented until a host-scoped, group-scoped, author-aware live-window
-/// capability can mint it without caller tuples or silent truncation (#838).
-const RESERVED_TIMELINE_TAG: &str = "previous";
 
 /// Typed refusal from group contextualization. Every variant is a caller
 /// error at the door -- none of them is a relay rejection, and none of them
@@ -45,8 +41,6 @@ pub enum GroupContextError {
     /// source of `h`, so a caller's own constraint is refused rather than
     /// silently overwritten (which would answer a question nobody asked).
     CallerSuppliedContextConstraint,
-    /// An unsigned draft arrived already carrying a `previous` row.
-    CallerSuppliedTimeline,
     /// A group-content read selection named one of NIP-29's own relay-signed
     /// group records (39000/39001/39002).
     ///
@@ -107,11 +101,6 @@ impl std::fmt::Display for GroupContextError {
                 f,
                 "the '#{CONTEXT_TAG}' constraint belongs to the group, not to the caller's \
                  selection"
-            ),
-            Self::CallerSuppliedTimeline => write!(
-                f,
-                "the '{RESERVED_TIMELINE_TAG}' tag belongs to the group, not to the caller, \
-                 and the group never mints one"
             ),
             Self::RecordsAreNotContextScoped { kinds } => {
                 let kinds: Vec<String> = kinds.iter().map(u16::to_string).collect();
@@ -220,12 +209,10 @@ pub fn contextualize(
         "the door proves its group set is nonempty before contextualizing"
     );
     for tag in &builder.tags {
-        match tag.as_slice().first().map(String::as_str) {
-            Some(name) if name == CONTEXT_TAG.to_string() => {
-                return Err(GroupContextError::CallerSuppliedContext)
+        if let Some(name) = tag.as_slice().first().map(String::as_str) {
+            if name == CONTEXT_TAG.to_string() {
+                return Err(GroupContextError::CallerSuppliedContext);
             }
-            Some(RESERVED_TIMELINE_TAG) => return Err(GroupContextError::CallerSuppliedTimeline),
-            _ => {}
         }
     }
     Ok(group_ids.iter().fold(builder, |builder, group_id| {
@@ -363,10 +350,6 @@ mod tests {
         .expect("fixture keys sign cleanly")
     }
 
-    fn timeline_tag() -> Tag {
-        Tag::parse([RESERVED_TIMELINE_TAG, "deadbeef"]).expect("a two-value row is well-formed")
-    }
-
     /// PROTOCOL-KINDBLINDNESS-001 (write half) and PROTOCOL-KINDBLINDNESS-004
     /// (direct half): a table of kinds NIP-29 itself defines (9021), kinds
     /// other NIPs define (7, 30315), and a kind nothing defines at all
@@ -427,19 +410,6 @@ mod tests {
         );
     }
 
-    /// PROTOCOL-APPSUPPLIEDCONTEXTREFUSED-005: the unsigned door never
-    /// INVENTS a `previous` row of its own, on any path, for any draft. This
-    /// is a claim about the unsigned semantic-composition door only -- it
-    /// does not claim there is no way anywhere in the repository for an
-    /// already-signed event to carry a tag shaped like `previous`; the
-    /// pre-signed path (`validate_context`) validates only `h` and preserves
-    /// whatever the caller already signed verbatim.
-    #[test]
-    fn the_unsigned_door_never_invents_a_previous_tag() {
-        let built = contextualize(&one(GROUP), EventBuilder::new(Kind::from(30023u16))).unwrap();
-        assert_eq!(rows(&built), vec![vec!["h".to_string(), GROUP.to_string()]]);
-    }
-
     #[test]
     fn a_c7_q_reply_survives_without_nip29_interpreting_it() {
         let parent = EventId::from_slice(&[7; 32]).unwrap();
@@ -475,43 +445,6 @@ mod tests {
         assert_eq!(
             contextualize(&one(GROUP), draft).err(),
             Some(GroupContextError::CallerSuppliedContext)
-        );
-    }
-
-    /// PROTOCOL-APPSUPPLIEDCONTEXTREFUSED-003.
-    #[test]
-    fn a_caller_supplied_previous_is_refused() {
-        let draft = EventBuilder::new(Kind::from(9u16)).tag(timeline_tag());
-        assert_eq!(
-            contextualize(&one(GROUP), draft).err(),
-            Some(GroupContextError::CallerSuppliedTimeline)
-        );
-    }
-
-    /// PROTOCOL-APPSUPPLIEDCONTEXTREFUSED-004: a draft carrying BOTH an `h`
-    /// and a `previous` row is refused on whichever tag the caller wrote
-    /// FIRST, never silently trimmed down to one. This is a genuine
-    /// precedence claim, not a fixed "h always wins" shortcut: reversing the
-    /// caller's own tag order reverses which typed error comes back.
-    #[test]
-    fn combined_h_and_previous_is_refused_deterministically_on_whichever_tag_came_first() {
-        let h_first = EventBuilder::new(Kind::from(9u16))
-            .tag(Tag::parse(["h", GROUP]).unwrap())
-            .tag(timeline_tag());
-        assert_eq!(
-            contextualize(&one(GROUP), h_first).err(),
-            Some(GroupContextError::CallerSuppliedContext),
-            "h was the caller's first tag, so the refusal names h, not previous"
-        );
-
-        let previous_first = EventBuilder::new(Kind::from(9u16))
-            .tag(timeline_tag())
-            .tag(Tag::parse(["h", GROUP]).unwrap());
-        assert_eq!(
-            contextualize(&one(GROUP), previous_first).err(),
-            Some(GroupContextError::CallerSuppliedTimeline),
-            "previous was the caller's first tag, so the refusal names previous, not h -- \
-             precedence follows the caller's own tag order, not a fixed check order"
         );
     }
 
@@ -686,9 +619,9 @@ mod tests {
         assert_eq!(context_rows(&forwards), vec!["a", "b", "c"]);
     }
 
-    /// The ownership refusals do not weaken at the larger arity: a caller's
+    /// The ownership refusal does not weaken at the larger arity: a caller's
     /// own `h` is still refused whichever of the named rooms it happens to
-    /// name, and a `previous` row still is too.
+    /// name.
     #[test]
     fn a_caller_supplied_row_is_refused_at_the_several_group_arity_too() {
         let groups = many([GROUP, "darkroom"]);
@@ -708,14 +641,6 @@ mod tests {
             .err(),
             Some(GroupContextError::CallerSuppliedContext),
             "the refusal is about who owns the row, not about which value it held"
-        );
-        assert_eq!(
-            contextualize(
-                &groups,
-                EventBuilder::new(Kind::from(9u16)).tag(timeline_tag())
-            )
-            .err(),
-            Some(GroupContextError::CallerSuppliedTimeline)
         );
     }
 

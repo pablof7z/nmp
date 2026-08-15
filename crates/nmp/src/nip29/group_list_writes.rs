@@ -34,11 +34,16 @@ pub struct GroupListWrites {
 }
 
 /// Why a typed group-list action was refused before ordinary write custody.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `EngineClosed` and `PublishRefused` name exactly what
+/// [`crate::Engine::publish`] itself can return for this call
+/// ([`EngineError`] has no other reachable variant here); there is no
+/// separate group-list-only fiction standing in for a receipt that failed to
+/// materialize for no named reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupListActionError {
     SignedOut,
     EngineClosed,
-    ReceiptUnavailable,
+    PublishRefused { reason: String },
 }
 
 impl std::fmt::Display for GroupListActionError {
@@ -46,9 +51,7 @@ impl std::fmt::Display for GroupListActionError {
         match self {
             Self::SignedOut => f.write_str("no current account is selected"),
             Self::EngineClosed => f.write_str("the engine is closed"),
-            Self::ReceiptUnavailable => {
-                f.write_str("the group-list operation was refused before receipt custody")
-            }
+            Self::PublishRefused { reason } => write!(f, "{reason}"),
         }
     }
 }
@@ -137,12 +140,14 @@ fn publish_operation(
             .ok_or(GroupListActionError::SignedOut)?,
         Err(_) => return Err(GroupListActionError::EngineClosed),
     };
-    let operation =
-        encode_operation(&operation).map_err(|_| GroupListActionError::ReceiptUnavailable)?;
+    let operation = encode_operation(&operation);
     let payload = writes
         .registration
         .first_value_operation(GROUP_LIST_KIND, String::new(), operation)
-        .map_err(|_| GroupListActionError::ReceiptUnavailable)?;
+        .expect(
+            "Kind::Custom(10009) with an empty identifier and a fixed non-empty JSON operation \
+             is always accepted",
+        );
     engine
         .publish(WriteIntent {
             payload,
@@ -152,7 +157,9 @@ fn publish_operation(
         })
         .map_err(|error| match error {
             EngineError::EngineClosed => GroupListActionError::EngineClosed,
-            _ => GroupListActionError::ReceiptUnavailable,
+            other => GroupListActionError::PublishRefused {
+                reason: other.to_string(),
+            },
         })
 }
 
@@ -202,7 +209,14 @@ enum WireAction {
     },
 }
 
-fn encode_operation(operation: &GroupListOperation) -> Result<Vec<u8>, serde_json::Error> {
+/// Infallible: `WireOperation`/`WireAction` are plain structs/enums over
+/// `String`/`Option<String>` fields with a derived `Serialize` -- no map with
+/// non-string keys, no custom serializer that can fail, no non-finite float.
+/// `serde_json::to_vec` cannot refuse this type, only a value it does not
+/// have (see the `serde_json::Error` variants: they name a map key, a
+/// recursion limit, or a custom `Serialize::serialize` refusal, none of
+/// which this shape can produce).
+fn encode_operation(operation: &GroupListOperation) -> Vec<u8> {
     let action = match operation {
         GroupListOperation::AddGroup {
             group_id,
@@ -231,6 +245,7 @@ fn encode_operation(operation: &GroupListOperation) -> Result<Vec<u8>, serde_jso
         version: GROUP_LIST_OPERATION_VERSION,
         action,
     })
+    .expect("WireOperation's derived Serialize over String/Option<String> fields cannot fail")
 }
 
 fn decode_operation(bytes: &[u8]) -> Result<GroupListOperation, String> {
@@ -391,7 +406,7 @@ mod tests {
     use nostr::Keys;
 
     fn operation(value: GroupListOperation) -> Vec<u8> {
-        encode_operation(&value).unwrap()
+        encode_operation(&value)
     }
 
     fn operation_ref(bytes: &[u8]) -> ReplaceableMaterializerOperation<'_> {
@@ -486,7 +501,7 @@ mod tests {
             host_relay: RelayUrl::parse("wss://relay.example").unwrap(),
             name: Some("Room".to_string()),
         };
-        let bytes = encode_operation(&operation).unwrap();
+        let bytes = encode_operation(&operation);
         assert_eq!(decode_operation(&bytes), Ok(operation));
         assert!(decode_operation(
             br#"{"version":2,"action":{"type":"add_relay","relay":"wss://relay.example"}}"#
@@ -528,6 +543,42 @@ mod tests {
             engine.publish_queue(None, 10).unwrap()[0].receipt_id,
             receipt.id
         );
+        engine.shutdown();
+    }
+
+    /// Proves `PublishRefused` is real, not invented: an engine constructed
+    /// without [`group_list_capability`] registered refuses at accept time
+    /// with the engine's own honest reason (the compiled program/format is
+    /// unknown to it), forwarded verbatim rather than folded into a
+    /// group-list-only fiction.
+    ///
+    /// `Engine::new` will not reproduce this: it auto-includes
+    /// `group_list_capability()` in its default capability set whenever the
+    /// `nip29` feature is compiled in (`default_capabilities`), unlike
+    /// NIP-02's `follow_capability`, which is never auto-included. An empty
+    /// explicit capability set is the one construction that leaves the
+    /// compiled program/format genuinely unknown to the engine.
+    #[test]
+    fn unregistered_capability_is_refused_with_the_engines_own_reason() {
+        let engine = Engine::new_with_capabilities(crate::EngineConfig::default(), vec![]).unwrap();
+        engine
+            .add_private_key_account(&Keys::generate().secret_key().to_secret_bytes(), true)
+            .unwrap();
+        let writes = group_list_writes();
+        let group = SimpleGroupEntry {
+            group_id: "room".to_string(),
+            host_relay: RelayUrl::parse("wss://host.example").unwrap(),
+            name: None,
+        };
+        assert!(
+            matches!(
+                add_group_to_list(&engine, &writes, group),
+                Err(GroupListActionError::PublishRefused { .. })
+            ),
+            "an unconfigured NIP-29 group-list capability is refused before custody, \
+             with the engine's own real refusal reason -- not a group-list-only fiction"
+        );
+        assert!(engine.publish_queue(None, 10).unwrap().is_empty());
         engine.shutdown();
     }
 }

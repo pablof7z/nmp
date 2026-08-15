@@ -207,9 +207,6 @@ public enum NMPError: Error, Sendable, Equatable {
     /// #1033: a read selection handed to `NMPGroup.read` already constrained
     /// `#h`. The retained group id is the sole semantic source of that row.
     case groupCallerSuppliedContextConstraint
-    /// #1033: a read selection handed to `NMPGroup.read` already declared a
-    /// `since`/`until`/`limit` timeline bound the group door itself owns.
-    case groupCallerSuppliedTimeline
     /// #1281: `NMPRelayScope.groups(_:)` was given no group id at all. An
     /// event with no `h` row is not in a group, so there is nothing to
     /// contextualize and no honest route to mint.
@@ -345,7 +342,6 @@ public enum NMPError: Error, Sendable, Equatable {
         case .GroupCallerSuppliedContext: self = .groupCallerSuppliedContext
         case .GroupCallerSuppliedContextConstraint:
             self = .groupCallerSuppliedContextConstraint
-        case .GroupCallerSuppliedTimeline: self = .groupCallerSuppliedTimeline
         case .EmptyGroupSet: self = .emptyGroupSet
         case .GroupContextMissing(let expected): self = .groupContextMissing(expected: expected)
         case .GroupContextMismatched(let found, let expected):
@@ -525,8 +521,6 @@ extension NMPError: LocalizedError {
             "A group write must not carry its own h tag; the group's retained id is the sole source of that tag"
         case .groupCallerSuppliedContextConstraint:
             "A group read selection must not already constrain #h; the group's retained id is the sole source of that row"
-        case .groupCallerSuppliedTimeline:
-            "A group read selection must not already declare since/until/limit; the group door owns that bound"
         case .emptyGroupSet:
             "A group write must name at least one group; an event with no h row is not in a group at all"
         case .groupContextMissing(let expected):
