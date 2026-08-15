@@ -111,9 +111,10 @@ read/compose/publish loop cannot choose that timestamp reliably because a
 newer source can arrive between any two steps.
 
 `ReplaceableOperation` moves the operation, not a prebuilt event, into durable
-custody. The registered capability receives NMP's current source and current
-pending generation, returns a complete `EventBuilder`, and leaves timestamp
-authority with the engine. NIP-02 therefore records “follow Alice” rather than
+custody. The compiled capability — supplied at `Engine::new` before the state
+owner starts store recovery — receives NMP's current source and current pending
+generation, returns a complete `EventBuilder`, and leaves timestamp authority
+with the engine. NIP-02 therefore records “follow Alice” rather than
 “publish this kind:3 built from event X”.
 
 When no source exists, only a capability that implements
@@ -195,15 +196,15 @@ place. Verified on master:
   `UnsignedReplaceableEdit` mirror and never was.
 - Replaceable edits cross the boundary solely as **fused semantic methods**:
   `NmpEngine::follow` / `NmpEngine::unfollow`
-  (`crates/nmp-ffi/src/facade.rs`). They submit a registered semantic
+  (`crates/nmp-ffi/src/facade.rs`). They submit a durable semantic
   operation, materialize it over the best current source or NIP-02's complete
   empty first value, retain it for later-source replay, and project the
   ordinary receipt. The native button owns none of those steps.
 
 So the boundary rule — **a payload never crosses FFI; only a fused semantic
 method does** — is an EXISTING precedent, not something this design invents.
-The Swift/Kotlin surface never learns a source id, operation encoding, or
-materialization callback; it learns `follow(target)`. `FfiWritePayload`
+The Swift/Kotlin surface never learns a source id or operation encoding; it
+learns `follow(target)`. `FfiWritePayload`
 remains `{ Event, Signed }`, and semantic replacement remains representable
 only through doors that own its policy.
 
@@ -243,10 +244,10 @@ drop the precondition, or stamp the wrong author — the exact regression class
   `writes/event-builder.md` §3); guardrail-versus-restriction policy says let
   it through and keep the failure observable, not forbidden.
 - **NIP-02 migration.** The exact-base composer and its acquisition/retry
-  action are deleted. `FollowWrites` mints a versioned operation through its
-  engine-issued registration. The engine materializes it against the current
-  source, preserves unowned fields, and automatically reapplies it when a
-  newer source wins.
+  action are deleted. `FollowWrites` mints a versioned operation through the
+  compiled program/format supplied at engine construction. The engine
+  materializes it against the current source, preserves unowned fields, and
+  automatically reapplies it when a newer source wins.
 - **Receipts.** Successful follow/unfollow exposes the ordinary receipt
   directly. Successor generations remain attached to the same receipt; there
   is no second action status machine or stale-base retry signal.

@@ -435,6 +435,15 @@ impl RedbStore {
     pub fn gc(&mut self, claims: &GcRetentionSet) -> Result<GcReport, PersistenceError> {
         event_ops::gc(self, claims)
     }
+
+    /// Distinct compiled program/format identities retained by active
+    /// replaceable operations. Engine construction uses this before recovery
+    /// so a missing implementation can refuse open with the store unchanged.
+    pub fn required_replaceable_programs(
+        &self,
+    ) -> Result<Vec<(crate::ReplayProgramId, crate::ReplayFormatId)>, PersistenceError> {
+        semantic_edit_ops::required_programs(self)
+    }
 }
 
 impl RedbStore {

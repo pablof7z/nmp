@@ -1,7 +1,7 @@
 use nmp::{
-    Engine, EventBuilder, Identity, RegisteredReplaceableMaterializer, ReplaceableMaterializer,
-    ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, ReplaceableSourcePolicy, Row,
-    WriteIntent, WriteRouting,
+    EventBuilder, Identity, RegisteredReplaceableMaterializer, ReplaceableMaterializer,
+    ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec,
+    ReplaceableSourcePolicy, Row, WriteIntent, WriteRouting,
 };
 use nostr::{Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
@@ -17,23 +17,29 @@ const FOLLOW_FORMAT: [u8; 16] = *b"nip02-follow-v01";
 const FOLLOW_OPERATION_VERSION: u8 = 1;
 const FOLLOW_OPERATION_LEN: usize = 34;
 
-/// Registration-bound NIP-02 write composer.
+/// Compiled NIP-02 write composer.
 ///
-/// The value can be obtained only by configuring the matching materializer
-/// on an engine. It exposes typed follow/unfollow composition, not replay ids,
-/// opaque bytes, source authority, or contributor membership.
-#[derive(Clone)]
+/// The handle names only this crate's program/format. Publishing through an
+/// engine that was not constructed with [`follow_capability`] is refused
+/// before custody. It exposes typed follow/unfollow composition, not replay
+/// ids, opaque bytes, source authority, or contributor membership.
+#[derive(Clone, Copy)]
 pub struct FollowWrites {
     registration: RegisteredReplaceableMaterializer,
 }
 
-/// Configure NIP-02's synchronous materializer before composing operations.
-/// A missing implementation can therefore never become retained waiting
-/// work: without this returned value there is no supported operation door.
-pub fn register_follow_writes(engine: &Engine) -> Result<FollowWrites, nmp::EngineError> {
-    engine
-        .add_replaceable_materializer(FOLLOW_PROGRAM, FOLLOW_FORMAT, FollowMaterializer)
-        .map(|registration| FollowWrites { registration })
+/// The compiled NIP-02 capability that must be supplied before engine recovery.
+#[must_use]
+pub fn follow_capability() -> ReplaceableMaterializerSpec {
+    ReplaceableMaterializerSpec::new(FOLLOW_PROGRAM, FOLLOW_FORMAT, FollowMaterializer)
+}
+
+/// Typed NIP-02 write constructor bound to [`follow_capability`].
+#[must_use]
+pub fn follow_writes() -> FollowWrites {
+    FollowWrites {
+        registration: follow_capability().handle(),
+    }
 }
 
 impl FollowWrites {

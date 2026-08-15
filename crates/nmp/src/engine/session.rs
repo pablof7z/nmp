@@ -5,6 +5,21 @@ use super::Engine;
 use crate::config::EngineConfig;
 use crate::error::EngineError;
 
+/// Map an `Engine::new_with_initial_session` failure to a session-restore
+/// error, preserving the typed missing-capability refusal so FFI reopen
+/// surfaces it as `MissingReplaceableCapability` rather than a generic
+/// start-failed string (#1624).
+fn map_session_start_error(error: EngineError) -> crate::SessionRestoreError {
+    match error {
+        EngineError::MissingReplaceableCapability { program, format } => {
+            crate::SessionRestoreError::MissingReplaceableCapability { program, format }
+        }
+        other => crate::SessionRestoreError::EngineStartFailed {
+            reason: other.to_string(),
+        },
+    }
+}
+
 fn session_mutation_from_add_signer(
     error: crate::runtime::AddSignerError,
 ) -> crate::SessionMutationError {
@@ -70,11 +85,26 @@ impl Engine {
                 limit: config.max_auth_capabilities,
             });
         }
-        Self::new_with_initial_session(config, restored).map_err(|error| {
-            crate::SessionRestoreError::EngineStartFailed {
-                reason: error.to_string(),
-            }
-        })
+        Self::new_with_initial_session(config, restored, super::default_capabilities())
+            .map_err(map_session_start_error)
+    }
+
+    /// Restore a session into an engine whose compiled replaceable
+    /// capabilities are already assembled.
+    pub fn new_with_session_and_capabilities(
+        config: EngineConfig,
+        payload: crate::SessionPayload,
+        capabilities: Vec<crate::ReplaceableMaterializerSpec>,
+    ) -> Result<Self, crate::SessionRestoreError> {
+        let restored = crate::session::decode(&payload)?;
+        let provider_count = restored.provider_count();
+        if provider_count > config.max_auth_capabilities {
+            return Err(crate::SessionRestoreError::CapabilityRegistryFull {
+                limit: config.max_auth_capabilities,
+            });
+        }
+        Self::new_with_initial_session(config, restored, capabilities)
+            .map_err(map_session_start_error)
     }
 
     pub fn session(&self) -> Result<crate::SessionSnapshot, EngineError> {

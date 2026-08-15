@@ -53,21 +53,22 @@ pub trait ReplaceableMaterializer: Send + Sync + 'static {
 }
 
 pub(crate) struct ReplaceableMaterializerRegistration {
-    pub(crate) instance: [u8; 16],
     pub(crate) program: [u8; 16],
     pub(crate) format: [u8; 16],
     pub(crate) materializer: Arc<dyn ReplaceableMaterializer>,
 }
 
-/// Registration-bound constructor for the ordinary write payload. The caller
-/// chooses the closed source lifetime policy; the engine owns its execution.
+/// Constructor for the ordinary write payload bound to one compiled
+/// program/format. The caller chooses the closed source lifetime policy; the
+/// engine owns its execution.
 ///
-/// This handle carries the exact engine installation identity. Publishing its
-/// payload through another engine, or after replacement, is refused before
-/// custody.
-#[derive(Clone)]
+/// This handle names only the compiled capability identity supplied before
+/// engine construction. Publishing its payload through an engine that does
+/// not include that program/format is refused before custody.
+#[derive(Clone, Copy)]
 pub struct RegisteredReplaceableMaterializer {
-    pub(crate) instance: [u8; 16],
+    pub(crate) program: [u8; 16],
+    pub(crate) format: [u8; 16],
 }
 
 impl RegisteredReplaceableMaterializer {
@@ -82,7 +83,8 @@ impl RegisteredReplaceableMaterializer {
             .verify_id()
             .map_err(|_| ReplaceableOperationError::CurrentInvalid)?;
         nmp_grammar::ReplaceableOperation::from_registered_parts(
-            self.instance,
+            self.program,
+            self.format,
             current.body.clone(),
             current.body.clone(),
             source_policy,
@@ -104,12 +106,50 @@ impl RegisteredReplaceableMaterializer {
         operation: Vec<u8>,
     ) -> Result<WritePayload, ReplaceableOperationError> {
         nmp_grammar::ReplaceableOperation::from_registered_default_parts(
-            self.instance,
+            self.program,
+            self.format,
             kind,
             identifier,
             source_policy,
             operation,
         )
         .map(WritePayload::ReplaceableOperation)
+    }
+}
+
+/// One compiled capability implementation supplied before engine recovery.
+pub struct ReplaceableMaterializerSpec {
+    pub(crate) program: [u8; 16],
+    pub(crate) format: [u8; 16],
+    pub(crate) materializer: Arc<dyn ReplaceableMaterializer>,
+}
+
+impl ReplaceableMaterializerSpec {
+    #[must_use]
+    pub fn new<M>(program: [u8; 16], format: [u8; 16], materializer: M) -> Self
+    where
+        M: ReplaceableMaterializer,
+    {
+        Self {
+            program,
+            format,
+            materializer: Arc::new(materializer),
+        }
+    }
+
+    #[must_use]
+    pub fn handle(&self) -> RegisteredReplaceableMaterializer {
+        RegisteredReplaceableMaterializer {
+            program: self.program,
+            format: self.format,
+        }
+    }
+
+    pub(crate) fn into_registration(self) -> ReplaceableMaterializerRegistration {
+        ReplaceableMaterializerRegistration {
+            program: self.program,
+            format: self.format,
+            materializer: self.materializer,
+        }
     }
 }
