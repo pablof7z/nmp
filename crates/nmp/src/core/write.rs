@@ -440,20 +440,33 @@ impl EngineCore {
                 self.semantic_publish_coverage_parked.insert(key);
                 false
             }
-            // Nothing covers the coordinate. If this lane has not asked yet,
-            // the door just opened its one REQ and the lane waits for it.
+            // Nothing in the ordinary query owner's LIVE bookkeeping covers
+            // the coordinate. That is not the same as "this relay is
+            // unknown": #1630's door deliberately reads only live-wire-request
+            // evidence, which a reconnect or a restart empties while the
+            // durable record of what each relay was seen to carry survives.
             //
-            // If it HAS asked and there is still nothing outstanding -- no
-            // live request, none awaiting handoff, and nothing left in
-            // admission for one to be minted from -- then the question this
-            // lane asked is not going to be answered: the request it opened
-            // was dropped or superseded by a relay session that went away.
-            // The lane sends rather than waiting forever. This is the one
-            // deliberate hole in the gate, and it is deliberate because the
-            // alternative is a write that can never leave. It is bounded:
-            // the lane always asks first, and it only proceeds after the
-            // reducer can see that its own question has no outstanding
-            // request behind it.
+            // Measured shape when this fires (traced across the semantic
+            // delivery witnesses): the relay's read session is CONNECTED and
+            // this lane's observation is ALIVE, yet the resolver minted no
+            // request for its demand and none is pending admission. The
+            // session-death case is not this one -- that is released by
+            // `release_coordinate_coverage_for_relay` and re-asked on the
+            // session that replaces it.
+            //
+            // Why the resolver declines to ask is not established here, and
+            // this comment does not guess. What IS established is the cost of
+            // each choice. Parking is a follow that can never leave. Sending
+            // is a follow published over a base this relay may have
+            // superseded, and that loss is TERMINAL: the relay then serves
+            // NMP's value, so the newer list it held is gone and no successor
+            // can rebuild it.
+            //
+            // Sending is chosen, and it is the one deliberate hole in the
+            // gate. #1631's own stop point names the real fix -- if ordinary
+            // query coverage cannot express the relay-current result, fix the
+            // shared query owner in #1630 rather than working around it here
+            // -- and `docs/known-gaps.md` records the window.
             CoordinateCoverage::Uncovered => {
                 if already_asked && !self.wire_admission_needed() {
                     self.release_coordinate_coverage(receipt, relay);

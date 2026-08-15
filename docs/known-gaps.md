@@ -525,12 +525,21 @@ about current code:
   finished over all of time under a fixed 500-returned-frame bound with a
   committed coverage interval, or an exact coordinate request already
   outstanding. Nothing is persisted and nothing is cached per caller, so a
-  restart simply repeats the check. Three honest limits. (1) A lane that has
-  asked and finds nothing outstanding behind its own question — its request
-  dropped or superseded when a relay session went away — sends rather than
-  waiting, because the alternative is a write that can never leave. The gate
-  therefore narrows the window in which a delta overwrites a newer list; it
-  does not close it. (2) The coverage question is asked on the relay's
+  restart simply repeats the check. Three honest limits. (1) **A lane that has
+  asked and finds nothing outstanding behind its own question sends anyway,
+  and if that relay held a newer list the loss is terminal.** The measured
+  shape of this state is: the relay's read session is connected, the lane's
+  own coordinate observation is alive, and yet the resolver has minted no
+  request for its demand and none is pending admission. Why the resolver
+  declines to ask in that state is not established. The lane sends rather
+  than parking forever, because a follow that can never leave is also a
+  defect — but this is a real hole, not a narrowing: the publish overwrites
+  whatever the relay held, the relay then serves NMP's value, and no
+  successor can rebuild the entries that were only in the relay's copy. The
+  relay-session-death case is NOT this one; that is released explicitly on
+  disconnect and re-asked on the session that replaces it. #1631's stop point
+  names the fix — teach the shared query owner (#1630) to answer in this
+  state — and until it does, this window is open. (2) The coverage question is asked on the relay's
   authenticated session only when AUTH already completed for it, and on the
   ordinary public session otherwise; a relay that serves an authenticated
   reader a different list than a public one can still be overwritten. (3) The
