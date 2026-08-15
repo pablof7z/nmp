@@ -577,7 +577,7 @@ mod semantic_successor_tests {
         ReplaceableMaterializer, ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal,
         ReplaceableMaterializerRegistration,
     };
-    use nmp_store::{EventStore, RedbStore, RelayObserved};
+    use nmp_store::{RedbStore, RelayObserved};
     use nostr::nips::nip01::Coordinate;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use std::sync::Arc;

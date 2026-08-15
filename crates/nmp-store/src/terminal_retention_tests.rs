@@ -5,7 +5,7 @@ use nostr::{Event, EventBuilder, Keys, Kind, Timestamp};
 
 use crate::terminal_retention::TerminalRetentionLimits;
 use crate::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, EventStore, IntentSigState,
+    sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, IntentSigState,
     PublishQueueReceipt, PublishQueueReceiptPayload, ReceiptState, RedbStore, RefuseReason,
     RemoveQueueEntryOutcome,
 };

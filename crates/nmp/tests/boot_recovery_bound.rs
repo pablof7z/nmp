@@ -14,7 +14,7 @@
 
 use nmp::mechanism::core::{EngineCore, EngineMsg};
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
-use nmp_store::{EventStore, PublishQueueLane, PublishQueueLaneState, RedbStore};
+use nmp_store::{PublishQueueLane, PublishQueueLaneState, RedbStore};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 
 /// One pre-signed durable write, so population never needs a signer round

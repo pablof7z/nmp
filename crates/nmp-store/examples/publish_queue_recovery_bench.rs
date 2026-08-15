@@ -18,8 +18,8 @@ use std::time::Instant;
 
 use nmp_grammar::CorrelationToken;
 use nmp_store::{
-    sentinel_signature, AcceptWrite, AcceptWritePayload, EventStore, HandoffEvidence,
-    IntentSigState, PromotionTarget, PublishQueueAttemptHandoff, PublishQueuePostHandoffState,
+    sentinel_signature, AcceptWrite, AcceptWritePayload, HandoffEvidence, IntentSigState,
+    PromotionTarget, PublishQueueAttemptHandoff, PublishQueuePostHandoffState,
     PublishQueueReceiptPayload, PublishQueueWork, RedbStore, VerifiedSignature,
 };
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};

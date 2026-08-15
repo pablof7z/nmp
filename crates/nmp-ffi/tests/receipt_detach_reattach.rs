@@ -22,7 +22,7 @@ use nmp_ffi::types::{
     FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
 use nmp_store::{
-    AcceptWrite, AcceptWritePayload, EventStore, HandoffEvidence, IntentSigState, PromotionTarget,
+    AcceptWrite, AcceptWritePayload, HandoffEvidence, IntentSigState, PromotionTarget,
     PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueLaneKey,
     PublishQueuePostHandoffState, PublishQueueTransientCause, VerifiedSignature,
 };
