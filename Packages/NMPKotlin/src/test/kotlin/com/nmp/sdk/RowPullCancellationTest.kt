@@ -251,6 +251,12 @@ class RowPullCancellationTest {
     private class ScriptedRowFlowEngine(
         private val stream: NmpRowStream,
     ) : NmpEngineInterface {
+        override fun `addGroupToList`(
+            `groupId`: String,
+            `hostRelay`: String,
+            `name`: String?,
+        ): NmpReceiptStream = unusedByThisFalsifier()
+
         override fun `addPrivateKeyAccount`(
             `privateKey`: FfiPrivateKey,
             `makeCurrent`: Boolean,
@@ -265,6 +271,8 @@ class RowPullCancellationTest {
             `expectedPublicKey`: String,
             `callback`: FfiAuthPolicyCallback,
         ): FfiAuthPolicyRegistration = unusedByThisFalsifier()
+
+        override fun `addRelayInUse`(`relay`: String): NmpReceiptStream = unusedByThisFalsifier()
 
         override fun `cancel`(`receiptId`: ULong): FfiCancelWriteOutcome = unusedByThisFalsifier()
 
@@ -314,8 +322,15 @@ class RowPullCancellationTest {
         override fun `removeAccount`(`account`: FfiSessionAccount): Boolean =
             unusedByThisFalsifier()
 
+        override fun `removeGroupFromList`(
+            `groupId`: String,
+            `hostRelay`: String,
+        ): NmpReceiptStream = unusedByThisFalsifier()
+
         override fun `removeAuthPolicy`(`registration`: FfiAuthPolicyRegistration): Boolean =
             unusedByThisFalsifier()
+
+        override fun `removeRelayInUse`(`relay`: String): NmpReceiptStream = unusedByThisFalsifier()
 
         override fun `session`(): FfiSessionSnapshot = unusedByThisFalsifier()
 

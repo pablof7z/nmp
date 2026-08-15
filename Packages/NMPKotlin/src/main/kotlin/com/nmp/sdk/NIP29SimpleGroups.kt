@@ -10,8 +10,10 @@
 // one is reintroduced.
 //
 // Reading kind:10009 stays the ordinary demand/observation noun
-// (`currentAccountGroupListDemand()`, below). Browsing a NIP-29 group still takes an
-// explicit, caller-supplied relay set -- see `NMPRelayScope.on`.
+// (`currentAccountGroupListDemand()`, below). Typed add/remove methods compile
+// through Rust's durable semantic operation and return the ordinary [Receipt].
+// Browsing a NIP-29 group still takes an explicit, caller-supplied relay set --
+// see `NMPRelayScope.on`.
 //
 // [SimpleGroupsList] is also the ONE native shape a decoded kind:10009 list
 // takes (#858). The NIP-29-facing wrapper family that used to sit beside it
@@ -21,6 +23,7 @@
 package com.nmp.sdk
 
 import uniffi.nmp_ffi.FfiRow
+import uniffi.nmp_ffi.FfiGroupListActionException
 import uniffi.nmp_ffi.FfiSimpleGroupEntry
 import uniffi.nmp_ffi.FfiSimpleGroupsList
 import uniffi.nmp_ffi.currentAccountGroupListDemand as ffiCurrentAccountGroupListDemand
@@ -68,6 +71,32 @@ data class SimpleGroupsList(
     }
 }
 
+/** A typed group-list action was refused before ordinary receipt custody. */
+sealed class GroupListActionError(message: String) : Exception(message) {
+    data class InvalidRelayUrl(val got: String) :
+        GroupListActionError("invalid relay URL: $got")
+
+    data object AutomaticRoutingUnavailable :
+        GroupListActionError("automatic author/outbox routing is not configured")
+
+    data object SignedOut : GroupListActionError("no current account is selected")
+    data object EngineClosed : GroupListActionError("the engine is closed")
+    data object ReceiptUnavailable :
+        GroupListActionError("the group-list operation was refused before receipt custody")
+
+    companion object {
+        internal fun from(error: FfiGroupListActionException): GroupListActionError =
+            when (error) {
+                is FfiGroupListActionException.InvalidRelayUrl -> InvalidRelayUrl(error.got)
+                is FfiGroupListActionException.AutomaticRoutingUnavailable ->
+                    AutomaticRoutingUnavailable
+                is FfiGroupListActionException.SignedOut -> SignedOut
+                is FfiGroupListActionException.EngineClosed -> EngineClosed
+                is FfiGroupListActionException.ReceiptUnavailable -> ReceiptUnavailable
+            }
+    }
+}
+
 /** The signed-in account's Simple-groups-list demand (#108): `kinds:
  * [10009]`, `AuthorOutboxes + Public`. Signed-out (no current account)
  * resolves to zero rows through the ordinary reactive-binding empty-
@@ -96,3 +125,35 @@ fun parseSimpleGroupsListTolerant(row: Row): SimpleGroupsList {
         )
     return SimpleGroupsList.from(ffiParseSimpleGroupsListTolerant(ffiRow))
 }
+
+/** Add one exact `(group id, canonical host)` identity through the ordinary
+ * durable receipt. The host carried by the list is not a publish route. */
+fun NMPEngine.addGroupToList(
+    groupId: String,
+    hostRelay: String,
+    name: String? = null,
+): Receipt =
+    groupListReceipt { ffi.addGroupToList(groupId, hostRelay, name) }
+
+/** Remove every valid public group tag with this exact identity. */
+fun NMPEngine.removeGroupFromList(
+    groupId: String,
+    hostRelay: String,
+): Receipt =
+    groupListReceipt { ffi.removeGroupFromList(groupId, hostRelay) }
+
+/** Add one canonical relay-in-use tag without changing group tags. */
+fun NMPEngine.addRelayInUse(relay: String): Receipt =
+    groupListReceipt { ffi.addRelayInUse(relay) }
+
+/** Remove every valid equivalent relay-in-use tag without changing group
+ * tags or malformed evidence. */
+fun NMPEngine.removeRelayInUse(relay: String): Receipt =
+    groupListReceipt { ffi.removeRelayInUse(relay) }
+
+private fun NMPEngine.groupListReceipt(action: () -> uniffi.nmp_ffi.NmpReceiptStream): Receipt =
+    try {
+        receiptFrom(action())
+    } catch (error: FfiGroupListActionException) {
+        throw GroupListActionError.from(error)
+    }

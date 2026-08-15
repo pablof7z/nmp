@@ -133,6 +133,21 @@ Rust, FFI and both native SDKs project the full read-and-write door
 in Swift and Kotlin). The native record read is spelled `observeRecords` on
 both the scope and the group.
 
+The signed-in account's remembered-group list is a separate kind:10009 value.
+Read it with `current_account_group_list_demand` / native
+`currentAccountGroupListDemand` and parse a row observationally with
+`parse_simple_groups_list_tolerant`; parser output grants no mutation or
+routing authority. Typed mutations are `add_group_to_list`,
+`remove_group_from_list`, `add_relay_in_use`, and `remove_relay_in_use`
+(`addGroupToList`, `removeGroupFromList`, `addRelayInUse`, and
+`removeRelayInUse` natively). They return the ordinary receipt, work from an
+empty first value, and durably reapply the same operation when a newer
+kind:10009 source arrives. A saved group's identity is its group id plus
+canonical host relay: adding it never rewrites an existing display name, and
+removing it preserves same-id groups on other hosts, malformed/private data,
+unrelated tags, content, and ordering. A host recorded inside kind:10009 is
+data only; these writes use the selected author's ordinary outbox routing.
+
 `nmp-nipc7` independently owns pure kind:9 chat, and its replies emit `e`, not
 `q` — a kind:9 must not become a NIP-22 comment, because NIP-29 clients fetch
 only kind 9. It composes schema only: no mentions, no notification `p` rows, no
