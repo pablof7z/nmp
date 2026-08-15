@@ -654,218 +654,6 @@ mod semantic_successor_tests {
     }
 
     #[test]
-    fn finite_source_policy_reuses_advanced_round_and_refuses_every_policy_change() {
-        let author = Keys::generate();
-        let person = Keys::generate().public_key();
-        let source_relay = RelayUrl::parse("wss://semantic-source.example").unwrap();
-        let relay_a = RelayUrl::parse("wss://finite-a.example").unwrap();
-        let relay_b = RelayUrl::parse("wss://finite-b.example").unwrap();
-        let base = source(&author, 1, "base", &[]);
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("finite-source-policy.redb");
-        let mut store = RedbStore::open(&path).unwrap();
-        store
-            .insert(
-                base.clone(),
-                RelayObserved::new(source_relay, Timestamp::from(1)),
-            )
-            .unwrap();
-        let mut core = EngineCore::new(store, 10);
-        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
-        core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
-            program: [6; 16],
-            format: [7; 16],
-            materializer: Arc::new(AddPeople),
-        });
-        let original = UnsignedEvent::from(base.clone());
-        let finite_relays = BTreeSet::from([relay_a.clone(), relay_b.clone()]);
-        let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
-            [6; 16],
-            [7; 16],
-            original.clone(),
-            original.clone(),
-            nmp_grammar::ReplaceableSourcePolicy::Finite {
-                relays: finite_relays.clone(),
-                access: AccessContext::Public,
-            },
-            person.to_bytes().to_vec(),
-        )
-        .unwrap();
-        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::ReplaceableOperation(payload),
-            routing: WriteRouting::Explicit(vec![relay_a.clone()]),
-            identity: Identity::Active,
-            correlation: None,
-        }));
-        let current_id = accepted
-            .iter()
-            .find_map(|effect| match effect {
-                Effect::WriteAccepted(_, event_id) => Some(*event_id),
-                _ => None,
-            })
-            .expect("finite operation enters custody");
-        let coordinate = Coordinate {
-            kind: Kind::ContactList,
-            public_key: author.public_key(),
-            identifier: String::new(),
-        };
-        drop(core);
-
-        let mut reopened = RedbStore::open(&path).unwrap();
-        let recovered = reopened
-            .replaceable_operation_snapshot(&coordinate)
-            .unwrap()
-            .unwrap();
-        let nmp_store::SemanticSourcePolicy::Finite(round) = recovered.source_policy else {
-            panic!("finite declaration recovered as continuing");
-        };
-        assert_eq!(
-            round.sources.clone(),
-            finite_relays
-                .iter()
-                .cloned()
-                .map(|relay| {
-                    (
-                        nmp_store::SemanticSource::new(relay, AccessContext::Public),
-                        nmp_store::SemanticSourceMemberState::Pending,
-                    )
-                })
-                .collect::<BTreeMap<_, _>>(),
-            "the durable round must contain exactly the declared relay/access members"
-        );
-        let opened = nmp_store::SemanticSourceRequest {
-            round: round.id,
-            source: nmp_store::SemanticSource::new(relay_a.clone(), AccessContext::Public),
-            transport_generation: 1,
-            request_revision: 1,
-        };
-        assert_eq!(
-            reopened
-                .advance_replaceable_source_round(
-                    &coordinate,
-                    nmp_store::SemanticSourceRoundFact::RequestOpened(opened.clone()),
-                )
-                .unwrap(),
-            nmp_store::SemanticSourceRoundOutcome::Advanced
-        );
-
-        let mut core = EngineCore::new(reopened, 10);
-        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
-        core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
-            program: [6; 16],
-            format: [7; 16],
-            materializer: Arc::new(AddPeople),
-        });
-        let current = core
-            .store
-            .query(&nostr::Filter::new().id(current_id))
-            .unwrap()
-            .pop()
-            .unwrap();
-        let current_unsigned = UnsignedEvent::from(current.event);
-        let same_finite = nmp_grammar::ReplaceableOperation::from_registered_parts(
-            [6; 16],
-            [7; 16],
-            current_unsigned.clone(),
-            current_unsigned,
-            nmp_grammar::ReplaceableSourcePolicy::Finite {
-                relays: finite_relays.clone(),
-                access: AccessContext::Public,
-            },
-            Keys::generate().public_key().to_bytes().to_vec(),
-        )
-        .unwrap();
-        let accepted_again = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::ReplaceableOperation(same_finite),
-            routing: WriteRouting::Explicit(vec![relay_b.clone()]),
-            identity: Identity::Active,
-            correlation: None,
-        }));
-        let current_id = accepted_again
-            .iter()
-            .find_map(|effect| match effect {
-                Effect::WriteAccepted(_, event_id) => Some(*event_id),
-                _ => None,
-            })
-            .expect("the same finite declaration reuses the advanced durable round");
-        let retained = core
-            .store
-            .replaceable_operation_snapshot(&coordinate)
-            .unwrap()
-            .unwrap();
-        let nmp_store::SemanticSourcePolicy::Finite(retained_round) = &retained.source_policy
-        else {
-            panic!("the second operation changed the finite source lifetime");
-        };
-        assert_eq!(retained_round.id, opened.round);
-        assert_eq!(
-            retained_round.sources.get(&opened.source),
-            Some(&nmp_store::SemanticSourceMemberState::Open(opened.clone())),
-            "accepting another operation must not reset durable request evidence"
-        );
-        let mut refuse_changed_policy = |source_policy: nmp_grammar::ReplaceableSourcePolicy| {
-            let current = core
-                .store
-                .query(&nostr::Filter::new().id(current_id))
-                .unwrap()
-                .pop()
-                .unwrap();
-            let current_unsigned = UnsignedEvent::from(current.event);
-            let changed = nmp_grammar::ReplaceableOperation::from_registered_parts(
-                [6; 16],
-                [7; 16],
-                current_unsigned.clone(),
-                current_unsigned,
-                source_policy,
-                Keys::generate().public_key().to_bytes().to_vec(),
-            )
-            .unwrap();
-            core.handle(EngineMsg::Publish(WriteIntent {
-                payload: WritePayload::ReplaceableOperation(changed),
-                routing: WriteRouting::Explicit(vec![relay_b.clone()]),
-                identity: Identity::Active,
-                correlation: None,
-            }))
-        };
-        for changed_policy in [
-            nmp_grammar::ReplaceableSourcePolicy::Continuing,
-            nmp_grammar::ReplaceableSourcePolicy::Finite {
-                relays: BTreeSet::from([relay_a]),
-                access: AccessContext::Public,
-            },
-            nmp_grammar::ReplaceableSourcePolicy::Finite {
-                relays: finite_relays,
-                access: AccessContext::Nip42(author.public_key()),
-            },
-        ] {
-            let refused = refuse_changed_policy(changed_policy);
-            let [Effect::PublishFailed(PublishError::ReplaceableOperationRefused { reason })] =
-                refused.as_slice()
-            else {
-                panic!("policy mismatch must emit exactly one pre-custody refusal: {refused:#?}");
-            };
-            assert_eq!(
-                reason,
-                &nmp_store::SemanticRefusal::IncompatibleSourcePolicy.to_string()
-            );
-        }
-        let after_refusals = core
-            .store
-            .replaceable_operation_snapshot(&coordinate)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            after_refusals.operations.len(),
-            retained.operations.len(),
-            "policy refusals must not append durable operations"
-        );
-        assert_eq!(
-            after_refusals, retained,
-            "policy refusals must leave the semantic snapshot and finite round unchanged"
-        );
-    }
-
-    #[test]
     fn capability_default_fallback_uses_a_preexisting_canonical_source() {
         let author = Keys::generate();
         let existing_person = Keys::generate().public_key();
@@ -892,10 +680,6 @@ mod semantic_successor_tests {
             [10; 16],
             Kind::ContactList,
             String::new(),
-            nmp_grammar::ReplaceableSourcePolicy::Finite {
-                relays: BTreeSet::from([source_relay]),
-                access: AccessContext::Public,
-            },
             added_person.to_bytes().to_vec(),
         )
         .expect("the first-value fallback names a valid replaceable coordinate");
@@ -993,7 +777,6 @@ mod semantic_successor_tests {
                 [7; 16],
                 original.clone(),
                 current.clone(),
-                nmp_grammar::ReplaceableSourcePolicy::Continuing,
                 person.to_bytes().to_vec(),
             )
             .unwrap();
@@ -1045,8 +828,16 @@ mod semantic_successor_tests {
                 slot: u32::try_from(slot).unwrap(),
                 generation: 1,
             };
+            let read_session = RelaySessionKey::public(destination.clone());
+            let read_handle = TransportRelayHandle {
+                slot: u32::try_from(slot).unwrap().saturating_add(32),
+                generation: 1,
+            };
+            core.handle(EngineMsg::RelayConnected(read_handle, read_session.clone()));
             core.handle(EngineMsg::RelayConnected(handle, session.clone()));
-            let released = core.handle(EngineMsg::AuthProbeReleased(handle, session.clone()));
+            let parked = core.handle(EngineMsg::AuthProbeReleased(handle, session.clone()));
+            let released =
+                core.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
             let correlation = released
                 .iter()
                 .find_map(|effect| match effect {
@@ -1059,11 +850,20 @@ mod semantic_successor_tests {
                 })
                 .expect("E1 starts on every destination");
             core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written));
-            core.handle(EngineMsg::RelayFrame(
-                handle,
-                session.clone(),
-                RelayFrame::from(nostr::RelayMessage::ok(e1_signed.id, true, "saved")),
-            ));
+            // Only the first destination acknowledges. #1631 ends active
+            // semantic work the moment routing is closed and EVERY lane of
+            // the current generation is terminal, so acknowledging both here
+            // would settle the cohort and delete the very receipts this test
+            // is about to prove a successor rides. One destination still
+            // outstanding is also the exact shape of the epic's own
+            // scenario: r1 published, r2 has not.
+            if destination == &destination_a {
+                core.handle(EngineMsg::RelayFrame(
+                    handle,
+                    session.clone(),
+                    RelayFrame::from(nostr::RelayMessage::ok(e1_signed.id, true, "saved")),
+                ));
+            }
             core.handle(EngineMsg::RelayDisconnected(
                 handle,
                 session,
@@ -1269,7 +1069,6 @@ mod semantic_successor_tests {
             [7; 16],
             original,
             UnsignedEvent::from(first_successor.event.clone()),
-            nmp_grammar::ReplaceableSourcePolicy::Continuing,
             erin.to_bytes().to_vec(),
         )
         .unwrap();
@@ -1432,7 +1231,6 @@ mod semantic_successor_tests {
             [17; 16],
             original.clone(),
             original,
-            nmp_grammar::ReplaceableSourcePolicy::Continuing,
             person.to_bytes().to_vec(),
         )
         .unwrap();
@@ -1473,8 +1271,16 @@ mod semantic_successor_tests {
             .collect::<Vec<_>>();
         let mut e1_correlations = BTreeMap::new();
         for ((handle, session), relay) in handles.iter().zip(&sessions).zip(&destinations) {
+            let read_session = RelaySessionKey::public(relay.clone());
+            let read_handle = TransportRelayHandle {
+                slot: handle.slot.saturating_add(32),
+                generation: 1,
+            };
+            core.handle(EngineMsg::RelayConnected(read_handle, read_session.clone()));
             core.handle(EngineMsg::RelayConnected(*handle, session.clone()));
-            let released = core.handle(EngineMsg::AuthProbeReleased(*handle, session.clone()));
+            let parked = core.handle(EngineMsg::AuthProbeReleased(*handle, session.clone()));
+            let released =
+                core.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
             let correlation = released
                 .iter()
                 .find_map(|effect| match effect {
@@ -1569,6 +1375,25 @@ mod semantic_successor_tests {
             e2_generation,
             Ok(e2.clone()),
         ));
+        // E2 is a new generation, so every lane asks the per-relay
+        // coordinate question again before it may take an attempt (#1631).
+        let read_sessions = handles
+            .iter()
+            .zip(&destinations)
+            .map(|(handle, relay)| {
+                (
+                    TransportRelayHandle {
+                        slot: handle.slot.saturating_add(32),
+                        generation: 1,
+                    },
+                    RelaySessionKey::public(relay.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let e2_answered = core.answer_coordinate_coverage_for_test(&read_sessions, &e2_started);
+        let mut combined = e2_started;
+        combined.extend(e2_answered);
+        let e2_started = combined;
         assert_eq!(
             e2_started
                 .iter()

@@ -504,20 +504,9 @@ impl RedbStore {
         semantic_edit_ops::install_source(self, install)
     }
 
-    /// Persist one typed request lifecycle fact owned by an exact finite
-    /// semantic source round. Unrelated rounds, sources, or request identities
-    /// are reported stale without mutation.
-    pub fn advance_replaceable_source_round(
-        &mut self,
-        coordinate: &nostr::nips::nip01::Coordinate,
-        fact: crate::SemanticSourceRoundFact,
-    ) -> Result<crate::SemanticSourceRoundOutcome, PersistenceError> {
-        semantic_edit_ops::advance_source_round_fact(self, coordinate, fact)
-    }
-
     /// Atomically close every contributing intent/receipt and compact its
-    /// semantic program after the store verifies the exact finite source round
-    /// and current destination generation are both terminal.
+    /// semantic program after the store verifies the current destination
+    /// generation is terminal under the exact-generation CAS witnesses.
     pub fn close_replaceable_operation_cohort(
         &mut self,
         close: crate::SemanticCohortClose,

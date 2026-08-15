@@ -515,27 +515,41 @@ about current code:
   Kotlin do not yet expose this vocabulary. Issue #718 remains open until those
   projections and their cross-SDK falsifiers land.
 
-- **Replaceable-coordinate query reuse is built; it has no production caller
-  yet, and one class of dropped relay frame is still invisible to it
-  (#1630, #1631, #1668).** `EngineCore::coordinate_coverage` /
-  `open_coordinate_observation` answer "does this relay session already
-  prove a current value for this coordinate" from ordinary live-wire-request
-  bookkeeping alone: a covering request that already delivered the
-  coordinate, a covering request that finished over all of time under a
-  fixed 500-returned-frame bound with a committed coverage interval, or an
-  exact coordinate request already outstanding. Nothing is persisted and
-  nothing is cached per caller, so a restart simply repeats the check. Two
-  honest limits. (1) #1631 is what gates the per-relay semantic-delta
-  publish on this path and deletes the source-policy machinery that asks the
-  same question with its own hidden REQ; until it lands, the decision half of
-  the module is exercised only by its falsifiers. (2) The 500-frame bound is
-  fixed rather than read from a relay's advertised NIP-11 `default_limit`
-  (#744 owns that), and it counts frames at the reducer's own frame doors.
-  Every unattributable frame the reducer can see erases that count, but
-  `nmp-transport` drops a text frame it cannot parse with no engine-visible
-  signal at all, so a relay that both truncates at the bound and emits an
-  undecodable frame could have a truncated answer read as complete. #1668
-  owns closing that.
+- **The per-relay coordinate gate can be bypassed when its own question goes
+  unanswered, and one class of dropped relay frame is still invisible to it
+  (#1630, #1631, #1668).** Before a semantic delta generation takes a publish
+  attempt, `schedule_ready` asks `EngineCore::open_coordinate_observation`
+  whether that relay session already proves a current value for the
+  coordinate, reusing ordinary live-wire-request bookkeeping: a covering
+  request that already delivered the coordinate, a covering request that
+  finished over all of time under a fixed 500-returned-frame bound with a
+  committed coverage interval, or an exact coordinate request already
+  outstanding. Nothing is persisted and nothing is cached per caller, so a
+  restart simply repeats the check. Three honest limits. (1) **A lane that has
+  asked and finds nothing outstanding behind its own question sends anyway,
+  and if that relay held a newer list the loss is terminal.** The measured
+  shape of this state is: the relay's read session is connected, the lane's
+  own coordinate observation is alive, and yet the resolver has minted no
+  request for its demand and none is pending admission. Why the resolver
+  declines to ask in that state is not established. The lane sends rather
+  than parking forever, because a follow that can never leave is also a
+  defect — but this is a real hole, not a narrowing: the publish overwrites
+  whatever the relay held, the relay then serves NMP's value, and no
+  successor can rebuild the entries that were only in the relay's copy. The
+  relay-session-death case is NOT this one; that is released explicitly on
+  disconnect and re-asked on the session that replaces it. **#1683** owns the
+  fix, against #1630's door rather than the write path, per #1631's own stop
+  point; until it lands, this window is open. (2) The coverage question is asked on the relay's
+  authenticated session only when AUTH already completed for it, and on the
+  ordinary public session otherwise; a relay that serves an authenticated
+  reader a different list than a public one can still be overwritten. (3) The
+  500-frame bound is fixed rather than read from a relay's advertised NIP-11
+  `default_limit` (#744 owns that), and it counts frames at the reducer's own
+  frame doors. Every unattributable frame the reducer can see erases that
+  count, but `nmp-transport` drops a text frame it cannot parse with no
+  engine-visible signal at all, so a relay that both truncates at the bound
+  and emits an undecodable frame could have a truncated answer read as
+  complete. #1668 owns closing that.
 
 ## Security hardening deferred
 

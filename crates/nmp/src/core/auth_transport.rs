@@ -1043,6 +1043,12 @@ impl EngineCore {
                 format!("transport disconnected: {reason:?}"),
                 &mut effects,
             );
+            // A coordinate answer is a fact about one relay SESSION, and any
+            // question still outstanding on this one died with the socket.
+            // Releasing it here rather than waiting for the publish
+            // scheduler to notice is what keeps a lane from parking forever
+            // on a request that can no longer be answered.
+            self.release_coordinate_coverage_for_relay(&session.relay);
             // AUTH truth is a property of the exact connection generation
             // that earned it (#8) — it dies with the socket, unconditionally,
             // for every disconnect reason: the epoch is cancelled, protected
@@ -1351,15 +1357,11 @@ impl EngineCore {
             events
                 .into_iter()
                 .filter(|(event, observed, candidate, attribution)| {
-                    let owned_request = attribution.as_ref().and_then(|(session, wire_sub_id)| {
-                        self.semantic_source_request_with_key_for_wire(session, wire_sub_id)
-                    });
                     !self.install_semantic_source_successor(
                         event.clone(),
                         observed.clone(),
                         *candidate,
                         attribution.clone(),
-                        owned_request.as_ref(),
                         effects,
                     )
                 })
@@ -1753,8 +1755,6 @@ impl EngineCore {
             }
             RelayMessage::EndOfStoredEvents(sub_id) => {
                 let wire_id = sub_id.as_str();
-                let semantic_source_key =
-                    self.semantic_source_request_key_for_wire(&session, wire_id);
                 // Resolve before consuming the snapshot. The resolved typed
                 // id routes the same EOSE into the NIP-77 handoff/repair
                 // state machine after ordinary coverage attribution.
@@ -1778,16 +1778,6 @@ impl EngineCore {
                 let terminal_demands = if let Some(send) =
                     completed_send.filter(|_| !opens_neg && settled)
                 {
-                    if let Some(key) = semantic_source_key {
-                        // Settle the exact source request before this batch
-                        // can reduce a later EVENT for it. Materialization is
-                        // synchronous, so no separate completion owner exists.
-                        self.settle_owned_semantic_source_terminal(
-                            key,
-                            nmp_store::SemanticSourceTerminal::Eose,
-                            &mut effects,
-                        );
-                    }
                     self.emit_request_settled(send, self.clock, RequestTerminal::Eose, &mut effects)
                 } else if let Some(send) = completed_send.filter(|_| !opens_neg) {
                     self.retire_request_evidence(send)
@@ -1826,7 +1816,7 @@ impl EngineCore {
                         self.abandon_sub(&resolved);
                         match request {
                             TemporaryReq::MissingIds {
-                                plan_sub_id,
+                                plan_sub_id: _,
                                 neg_sub_id,
                                 attribution_send,
                                 completed_at,
@@ -1839,16 +1829,6 @@ impl EngineCore {
                                     &mut effects,
                                 );
                                 let terminal_demands = if committed_coverage.is_some() {
-                                    // The missing-id EOSE completes the
-                                    // retained NEG question. Close successor
-                                    // admission before this RelayFrames turn
-                                    // can reduce another EVENT for the same
-                                    // exact finite request.
-                                    self.settle_owned_semantic_source_terminal(
-                                        (session.clone(), plan_sub_id),
-                                        nmp_store::SemanticSourceTerminal::Eose,
-                                        &mut effects,
-                                    );
                                     self.emit_request_settled(
                                         attribution_send,
                                         completed_at,
@@ -1939,15 +1919,6 @@ impl EngineCore {
                 message,
             } => {
                 let reason = message.into_owned();
-                if let Some(key) =
-                    self.semantic_source_request_key_for_wire(&session, subscription_id.as_str())
-                {
-                    self.settle_owned_semantic_source_terminal(
-                        key,
-                        nmp_store::SemanticSourceTerminal::Failed(reason.clone()),
-                        &mut effects,
-                    );
-                }
                 if let Some(sub_id) = self
                     .attribution
                     .sub_id_for_wire(&session, subscription_id.as_str())

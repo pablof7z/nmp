@@ -10,13 +10,9 @@
 //! Hard break, no compatibility alias: every caller in the workspace moved
 //! to `nmp_grammar::{WriteIntent, ...}` in the same change.
 
-use std::collections::BTreeSet;
-
 use nostr::{
     Event as SignedEvent, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent,
 };
-
-use crate::AccessContext;
 
 /// Everything an app must say to publish an event, and everything it MAY
 /// say. The kind is the one thing NMP cannot invent, so the kind is the one
@@ -172,13 +168,11 @@ const MAX_REPLACEABLE_OPERATION_BYTES: usize = 64 * 1024;
 /// to one compiled program/format and asks that handle to mint the payload;
 /// `publish()` rejects an unknown program/format before custody. Capability
 /// helpers therefore cannot state contributor membership or a candidate body
-/// themselves. They do declare the closed continuing/finite source policy
-/// that the engine will own.
+/// themselves.
 pub struct ReplaceableOperation {
     program: [u8; 16],
     format: [u8; 16],
     start: ReplaceableOperationStart,
-    source_policy: ReplaceableSourcePolicy,
     operation: Vec<u8>,
 }
 
@@ -201,18 +195,6 @@ pub enum ReplaceableOperationStart {
     },
 }
 
-/// How long a replayable operation continues accepting newer source events.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplaceableSourcePolicy {
-    /// Keep reconciling newer qualified sources; this policy is nonterminal.
-    Continuing,
-    /// Reconcile only while the exact declared relay round remains open.
-    Finite {
-        relays: BTreeSet<RelayUrl>,
-        access: AccessContext,
-    },
-}
-
 impl ReplaceableOperation {
     /// Mechanism-only constructor used by the facade's compiled-capability handle.
     ///
@@ -227,7 +209,6 @@ impl ReplaceableOperation {
         format: [u8; 16],
         original_source: UnsignedEvent,
         current: UnsignedEvent,
-        source_policy: ReplaceableSourcePolicy,
         operation: Vec<u8>,
     ) -> Result<Self, ReplaceableOperationError> {
         original_source
@@ -242,7 +223,7 @@ impl ReplaceableOperation {
         {
             return Err(ReplaceableOperationError::CoordinateChanged);
         }
-        validate_replaceable_operation(&source_policy, &operation)?;
+        validate_replaceable_operation(&operation)?;
         Ok(Self {
             program,
             format,
@@ -250,7 +231,6 @@ impl ReplaceableOperation {
                 original_source: Box::new(original_source),
                 current: Box::new(current),
             },
-            source_policy,
             operation,
         })
     }
@@ -267,7 +247,6 @@ impl ReplaceableOperation {
         format: [u8; 16],
         kind: Kind,
         identifier: String,
-        source_policy: ReplaceableSourcePolicy,
         operation: Vec<u8>,
     ) -> Result<Self, ReplaceableOperationError> {
         if !kind.is_replaceable() && !kind.is_addressable() {
@@ -276,12 +255,11 @@ impl ReplaceableOperation {
         if !kind.is_addressable() && !identifier.is_empty() {
             return Err(ReplaceableOperationError::NonAddressableIdentifier);
         }
-        validate_replaceable_operation(&source_policy, &operation)?;
+        validate_replaceable_operation(&operation)?;
         Ok(Self {
             program,
             format,
             start: ReplaceableOperationStart::CapabilityDefault { kind, identifier },
-            source_policy,
             operation,
         })
     }
@@ -289,40 +267,17 @@ impl ReplaceableOperation {
     /// Mechanism-only decomposition at the generic engine boundary. No
     /// supported facade or protocol helper exposes this method.
     #[doc(hidden)]
-    pub fn into_registered_parts(
-        self,
-    ) -> (
-        [u8; 16],
-        [u8; 16],
-        ReplaceableOperationStart,
-        ReplaceableSourcePolicy,
-        Vec<u8>,
-    ) {
-        (
-            self.program,
-            self.format,
-            self.start,
-            self.source_policy,
-            self.operation,
-        )
+    pub fn into_registered_parts(self) -> ([u8; 16], [u8; 16], ReplaceableOperationStart, Vec<u8>) {
+        (self.program, self.format, self.start, self.operation)
     }
 }
 
-fn validate_replaceable_operation(
-    source_policy: &ReplaceableSourcePolicy,
-    operation: &[u8],
-) -> Result<(), ReplaceableOperationError> {
+fn validate_replaceable_operation(operation: &[u8]) -> Result<(), ReplaceableOperationError> {
     if operation.is_empty() {
         return Err(ReplaceableOperationError::OperationEmpty);
     }
     if operation.len() > MAX_REPLACEABLE_OPERATION_BYTES {
         return Err(ReplaceableOperationError::OperationTooLarge);
-    }
-    if matches!(
-        source_policy,
-        ReplaceableSourcePolicy::Finite { relays, .. } if relays.is_empty()
-    ) {
-        return Err(ReplaceableOperationError::FiniteSourcesEmpty);
     }
     Ok(())
 }
@@ -334,7 +289,6 @@ pub enum ReplaceableOperationError {
     CoordinateChanged,
     InvalidCoordinate,
     NonAddressableIdentifier,
-    FiniteSourcesEmpty,
     OperationEmpty,
     OperationTooLarge,
 }
@@ -350,9 +304,6 @@ impl std::fmt::Display for ReplaceableOperationError {
             }
             Self::NonAddressableIdentifier => {
                 "only an addressable replaceable coordinate may carry an identifier"
-            }
-            Self::FiniteSourcesEmpty => {
-                "finite replaceable source policy requires at least one relay"
             }
             Self::OperationEmpty => "replaceable operation must not be empty",
             Self::OperationTooLarge => "replaceable operation exceeds the 65536-byte bound",
@@ -733,29 +684,6 @@ mod tests {
     }
 
     #[test]
-    fn finite_replaceable_source_policy_requires_a_relay() {
-        let keys = nostr::Keys::generate();
-        let source = nostr::EventBuilder::new(Kind::ContactList, "")
-            .custom_created_at(Timestamp::from(1))
-            .sign_with_keys(&keys)
-            .unwrap();
-        assert!(matches!(
-            ReplaceableOperation::from_registered_parts(
-                [1; 16],
-                [2; 16],
-                UnsignedEvent::from(source.clone()),
-                UnsignedEvent::from(source),
-                ReplaceableSourcePolicy::Finite {
-                    relays: BTreeSet::new(),
-                    access: AccessContext::Public,
-                },
-                vec![1],
-            ),
-            Err(ReplaceableOperationError::FiniteSourcesEmpty)
-        ));
-    }
-
-    #[test]
     fn capability_default_freezes_only_kind_and_identifier() {
         assert!(matches!(
             ReplaceableOperation::from_registered_default_parts(
@@ -763,7 +691,6 @@ mod tests {
                 [9; 16],
                 Kind::ContactList,
                 "aliases-contact-list".to_string(),
-                ReplaceableSourcePolicy::Continuing,
                 vec![6],
             ),
             Err(ReplaceableOperationError::NonAddressableIdentifier)
@@ -774,7 +701,6 @@ mod tests {
                 [9; 16],
                 Kind::TextNote,
                 String::new(),
-                ReplaceableSourcePolicy::Continuing,
                 vec![6],
             ),
             Err(ReplaceableOperationError::InvalidCoordinate)
@@ -784,7 +710,6 @@ mod tests {
             [9; 16],
             Kind::from(30_001u16),
             String::new(),
-            ReplaceableSourcePolicy::Continuing,
             vec![6],
         )
         .expect("an addressable coordinate may use its canonical empty identifier");
@@ -798,11 +723,10 @@ mod tests {
             [10; 16],
             Kind::from(30_001u16),
             "bookmarks".to_string(),
-            ReplaceableSourcePolicy::Continuing,
             vec![7, 8],
         )
         .expect("a capability default operation is valid without an author or source event");
-        let (program, format, start, policy, bytes) = operation.into_registered_parts();
+        let (program, format, start, bytes) = operation.into_registered_parts();
         assert_eq!(program, [9; 16]);
         assert_eq!(format, [10; 16]);
         assert!(matches!(
@@ -810,7 +734,6 @@ mod tests {
             ReplaceableOperationStart::CapabilityDefault { kind, identifier }
                 if kind == Kind::from(30_001u16) && identifier == "bookmarks"
         ));
-        assert_eq!(policy, ReplaceableSourcePolicy::Continuing);
         assert_eq!(bytes, vec![7, 8]);
     }
 }

@@ -12,10 +12,9 @@ use std::time::{Duration, Instant};
 use nmp::{
     AccessContext, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReceiptReattachment,
     RelayState, ReplaceableMaterializer, ReplaceableMaterializerOperation,
-    ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec, ReplaceableSourcePolicy, Row,
-    RowDelta, RowSignature, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,
-    SigningCapability, SigningState, SourceAuthority, WriteFact, WriteIntent, WriteOutcome,
-    WriteRouting,
+    ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec, Row, RowDelta, RowSignature,
+    SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
+    SigningState, SourceAuthority, WriteFact, WriteIntent, WriteOutcome, WriteRouting,
 };
 use nmp_signer::PendingSignerSender;
 use nmp_store::{InsertOutcome, RedbStore, RelayObserved};
@@ -262,7 +261,7 @@ fn wait_for_generation_relay_facts(
         );
         let fact = statuses.recv_timeout(remaining).unwrap_or_else(|error| {
             panic!(
-                "continuing receipt remains attached while waiting for {event_id}; \
+                "receipt remains attached while waiting for {event_id}; \
                      error={error:?}; saw={facts:?}; published={published:?}"
             )
         });
@@ -276,22 +275,49 @@ fn wait_for_generation_relay_facts(
             }
             _ => {}
         }
-        assert!(
-            !matches!(fact, WriteFact::Outcome(WriteOutcome::Settled)),
-            "a continuing semantic receipt settled after destination completion"
-        );
+        // Settlement is terminal and implies every routed lane already
+        // reached a terminal state, so it ends the wait rather than
+        // extending it past the end of the stream.
+        let settled = matches!(fact, WriteFact::Outcome(WriteOutcome::Settled));
         facts.push(fact);
+        if settled {
+            break;
+        }
     }
     facts
 }
 
-fn assert_no_settled_fact(facts: &[WriteFact]) {
+/// Assert one receipt is still open because a destination it is routed to
+/// has not answered.
+///
+/// This is a NAMED reason, not the old blanket "a semantic receipt never
+/// settles": #1631 ends active semantic work exactly when routing is closed
+/// and every lane of the current generation is terminal. A routed relay that
+/// is not running has no terminal lane, so the obligation is genuinely
+/// outstanding.
+fn assert_open_pending_unreachable_destination(facts: &[WriteFact]) {
     assert!(
         facts
             .iter()
             .all(|fact| !matches!(fact, WriteFact::Outcome(WriteOutcome::Settled))),
-        "a continuing semantic receipt settled: {facts:?}"
+        "a receipt with an unreachable routed destination settled: {facts:?}"
     );
+}
+
+/// One routed destination that will never answer: a relay started only long
+/// enough to claim a port, then stopped.
+///
+/// #1631 ends active semantic work when routing is closed and every lane of
+/// the current generation is terminal. A test about SUCCESSORS or about a
+/// generation shared by several receipts needs its cohort to stay open while
+/// it makes its point, and an unreachable destination is the honest way to
+/// keep it open -- it is exactly the epic's own scenario, where r1 publishes
+/// and r2 is offline.
+async fn unreachable_destination() -> nostr::RelayUrl {
+    let relay = ScriptedRelay::start(&RelayConfig::default()).await;
+    let url = relay.url.clone();
+    relay.shutdown();
+    url
 }
 
 fn attached_statuses(
@@ -308,10 +334,10 @@ fn wait_for_settled(statuses: &nmp::mechanism::runtime::FifoReceiver<WriteFact>)
     let deadline = Instant::now() + SETTLE;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        assert!(!remaining.is_zero(), "finite receipt did not settle");
+        assert!(!remaining.is_zero(), "receipt did not settle");
         let fact = statuses
             .recv_timeout(remaining)
-            .expect("finite receipt remains attached until settlement");
+            .expect("receipt remains attached until settlement");
         if matches!(fact, WriteFact::Outcome(WriteOutcome::Settled)) {
             return;
         }
@@ -368,15 +394,7 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
     );
     let first_intent = WriteIntent {
         payload: materializer
-            .first_value_operation(
-                Kind::ContactList,
-                String::new(),
-                ReplaceableSourcePolicy::Finite {
-                    relays: BTreeSet::from([source_url.clone()]),
-                    access: AccessContext::Public,
-                },
-                alice.to_bytes().to_vec(),
-            )
+            .first_value_operation(Kind::ContactList, String::new(), alice.to_bytes().to_vec())
             .expect("capability default operation is complete"),
         routing: WriteRouting::Explicit(vec![destination.url.clone()]),
         identity: Identity::Active,
@@ -427,14 +445,7 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
     let second_receipt = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &initial,
-                    ReplaceableSourcePolicy::Finite {
-                        relays: BTreeSet::from([source_url.clone()]),
-                        access: AccessContext::Public,
-                    },
-                    carol.to_bytes().to_vec(),
-                )
+                .operation(&initial, carol.to_bytes().to_vec())
                 .expect("a later operation composes over the local generation"),
             routing: WriteRouting::Explicit(vec![destination.url.clone()]),
             identity: Identity::Active,
@@ -558,10 +569,6 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
                 .first_value_operation(
                     parameterized_kind,
                     "bookmarks".to_string(),
-                    ReplaceableSourcePolicy::Finite {
-                        relays: BTreeSet::from([source_url.clone()]),
-                        access: AccessContext::Public,
-                    },
                     alice.to_bytes().to_vec(),
                 )
                 .expect("parameterized default operation is complete"),
@@ -587,10 +594,83 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
     destination.shutdown();
 }
 
+/// #1631's headline behavior, driven through the door an APP uses: publish,
+/// a real relay, a real `OK`, and the receipt says so.
+///
+/// This deliberately enters through `Engine::publish` and a live websocket
+/// rather than calling the store's cohort-close function, because the bug
+/// this replaces lived precisely in the gap between the two -- the store
+/// function worked and nothing on earth reached it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn shared_second_generation_is_once_per_relay_and_replays_without_settling() {
+async fn a_delivered_semantic_write_settles_its_receipt() {
+    let relay = ScriptedRelay::start(&RelayConfig::default()).await;
+    let author = Keys::generate();
+    let alice = Keys::generate().public_key();
+    let base = contact_list(
+        &author,
+        Timestamp::now().as_secs().saturating_sub(10),
+        "base",
+        &[],
+    );
+    relay.seed_signed_event(&base).await;
+
+    let spec = ReplaceableMaterializerSpec::new([46; 16], [47; 16], AddPeople);
+    let materializer = spec.handle();
+    let engine =
+        Engine::new_with_capabilities(EngineConfig::default(), vec![spec]).expect("engine opens");
+    engine
+        .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
+        .expect("local author account registers");
+    let subscription = engine
+        .observe(
+            pinned_contact_lists([relay.url.clone()], author.public_key()),
+            None,
+        )
+        .expect("contact list observation opens");
+    let mut rows = BTreeMap::new();
+    let base_row = wait_for_row(&subscription, &mut rows, |row| row.id() == base.id);
+
+    let receipt = engine
+        .publish(WriteIntent {
+            payload: materializer
+                .operation(&base_row, alice.to_bytes().to_vec())
+                .expect("the operation is complete"),
+            routing: WriteRouting::Explicit(vec![relay.url.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        })
+        .expect("the operation enters custody");
+    let generation = wait_for_row(&subscription, &mut rows, |row| row.id() == receipt.event_id);
+    assert!(
+        relay
+            .wait_wire_event_id_count(&generation.id().to_hex(), 1, SETTLE)
+            .await,
+        "the generation reaches its one destination"
+    );
+    wait_for_settled(&receipt.statuses);
+
+    let queue = engine
+        .publish_queue(None, u8::MAX)
+        .expect("publish queue remains readable");
+    assert_eq!(
+        queue
+            .iter()
+            .filter(|entry| entry.receipt_id == receipt.id)
+            .map(|entry| entry.outcome.clone())
+            .collect::<Vec<_>>(),
+        vec![Some(WriteOutcome::Settled)],
+        "the settled obligation reports its outcome once: {queue:?}"
+    );
+
+    engine.shutdown();
+    relay.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_second_generation_is_once_per_relay_and_replays_while_a_destination_is_down() {
     let relay_one = ScriptedRelay::start(&RelayConfig::default()).await;
     let relay_two = ScriptedRelay::start(&RelayConfig::default()).await;
+    let offline = unreachable_destination().await;
     let author = Keys::generate();
     let alice = Keys::generate().public_key();
     let bob = Keys::generate().public_key();
@@ -623,13 +703,9 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
     let first = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &base_row,
-                    ReplaceableSourcePolicy::Continuing,
-                    alice.to_bytes().to_vec(),
-                )
+                .operation(&base_row, alice.to_bytes().to_vec())
                 .expect("first operation is complete"),
-            routing: WriteRouting::Explicit(vec![relay_one.url.clone()]),
+            routing: WriteRouting::Explicit(vec![relay_one.url.clone(), offline.clone()]),
             identity: Identity::Active,
             correlation: None,
         })
@@ -644,17 +720,17 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
     let first_relays = BTreeSet::from([relay_one.url.clone()]);
     let first_facts =
         wait_for_generation_relay_facts(&first.statuses, first_current.id(), &first_relays);
-    assert_no_settled_fact(&first_facts);
+    assert_open_pending_unreachable_destination(&first_facts);
     let second = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &first_current,
-                    ReplaceableSourcePolicy::Continuing,
-                    bob.to_bytes().to_vec(),
-                )
+                .operation(&first_current, bob.to_bytes().to_vec())
                 .expect("second operation composes over current"),
-            routing: WriteRouting::Explicit(vec![relay_one.url.clone(), relay_two.url.clone()]),
+            routing: WriteRouting::Explicit(vec![
+                relay_one.url.clone(),
+                relay_two.url.clone(),
+                offline.clone(),
+            ]),
             identity: Identity::Active,
             correlation: None,
         })
@@ -695,7 +771,7 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
             )),
             "every contributing live receipt must observe E2 signing: {facts:?}"
         );
-        assert_no_settled_fact(&facts);
+        assert_open_pending_unreachable_destination(&facts);
         assert!(facts.iter().all(|fact| {
             !matches!(fact, WriteFact::Relay { event_id, .. } if *event_id != first_current.id() && *event_id != e2.id())
         }));
@@ -708,12 +784,16 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
         before_restart.iter().all(|entry| {
             entry.event_id == e2.id()
                 && entry.outcome.is_none()
-                && entry
-                    .relay_states
-                    .iter()
-                    .all(|(_, state)| matches!(state, RelayState::Published))
+                && entry.relay_states.iter().all(|(relay, state)| {
+                    if relay == &offline {
+                        matches!(state, RelayState::Waiting(_))
+                    } else {
+                        matches!(state, RelayState::Published)
+                    }
+                })
         }),
-        "both continuing receipts remain open over terminal E2 relay facts: {before_restart:?}"
+        "both receipts stay open on the unreachable destination after E2 reached every \
+         reachable one: {before_restart:?}"
     );
 
     let first_id = first.id;
@@ -746,7 +826,7 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
                 "predecessor evidence remains historical and event-qualified: {replay:?}"
             );
         }
-        assert_no_settled_fact(&replay);
+        assert_open_pending_unreachable_destination(&replay);
     }
     let after_restart = restarted
         .publish_queue(None, u8::MAX)
@@ -756,12 +836,16 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
         after_restart.iter().all(|entry| {
             entry.event_id == e2.id()
                 && entry.outcome.is_none()
-                && entry
-                    .relay_states
-                    .iter()
-                    .all(|(_, state)| matches!(state, RelayState::Published))
+                && entry.relay_states.iter().all(|(relay, state)| {
+                    if relay == &offline {
+                        matches!(state, RelayState::Waiting(_))
+                    } else {
+                        matches!(state, RelayState::Published)
+                    }
+                })
         }),
-        "restart preserves two open receipts over terminal E2 relay facts: {after_restart:?}"
+        "restart preserves two receipts still owed one unreachable destination: \
+         {after_restart:?}"
     );
     restarted.shutdown();
     relay_one.shutdown();
@@ -814,11 +898,7 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
     let first = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &base_row,
-                    ReplaceableSourcePolicy::Continuing,
-                    alice.to_bytes().to_vec(),
-                )
+                .operation(&base_row, alice.to_bytes().to_vec())
                 .expect("first operation is complete"),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
@@ -829,11 +909,7 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
     let second = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &first_current,
-                    ReplaceableSourcePolicy::Continuing,
-                    bob.public_key().to_bytes().to_vec(),
-                )
+                .operation(&first_current, bob.public_key().to_bytes().to_vec())
                 .expect("second operation composes over current"),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
@@ -920,6 +996,7 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn source_session_replacement_wakes_every_signed_successor_destination() {
+    let offline = unreachable_destination().await;
     let relay_one = ScriptedRelay::start(&RelayConfig::default()).await;
     let mut relay_two = ScriptedRelay::start(&RelayConfig::default()).await;
     let relay_two_url = relay_two.url.clone();
@@ -933,8 +1010,17 @@ async fn source_session_replacement_wakes_every_signed_successor_destination() {
 
     let spec = ReplaceableMaterializerSpec::new([26; 16], [27; 16], AddPeople);
     let materializer = spec.handle();
-    let engine =
-        Engine::new_with_capabilities(EngineConfig::default(), vec![spec]).expect("engine opens");
+    let engine = Engine::new_with_capabilities(
+        EngineConfig {
+            // Six physical sessions live here (#8 splits read and write
+            // per relay), and the unreachable destination holds two of
+            // them in reconnect backoff for the whole test.
+            max_relays: 32,
+            ..EngineConfig::default()
+        },
+        vec![spec],
+    )
+    .expect("engine opens");
     engine
         .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
         .expect("local author account registers");
@@ -951,13 +1037,15 @@ async fn source_session_replacement_wakes_every_signed_successor_destination() {
     let receipt = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &base_row,
-                    ReplaceableSourcePolicy::Continuing,
-                    alice.to_bytes().to_vec(),
-                )
+                .operation(&base_row, alice.to_bytes().to_vec())
                 .expect("the body-complete operation composes"),
-            routing: WriteRouting::Explicit(source_relays.to_vec()),
+            routing: WriteRouting::Explicit(
+                source_relays
+                    .iter()
+                    .cloned()
+                    .chain([offline.clone()])
+                    .collect(),
+            ),
             identity: Identity::Active,
             correlation: None,
         })
@@ -973,7 +1061,7 @@ async fn source_session_replacement_wakes_every_signed_successor_destination() {
             relay.url
         );
     }
-    assert_no_settled_fact(&wait_for_generation_relay_facts(
+    assert_open_pending_unreachable_destination(&wait_for_generation_relay_facts(
         &receipt.statuses,
         e1.id(),
         &relays,
@@ -1029,7 +1117,8 @@ async fn source_session_replacement_wakes_every_signed_successor_destination() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn relay_source_successors_resume_current_delivery_and_remain_continuing_after_restart() {
+async fn relay_source_successors_resume_current_delivery_and_stay_open_after_restart() {
+    let offline = unreachable_destination().await;
     let relay_one = ScriptedRelay::start(&RelayConfig::default()).await;
     let mut relay_two = ScriptedRelay::start(&RelayConfig::default()).await;
     let relay_two_url = relay_two.url.clone();
@@ -1044,6 +1133,10 @@ async fn relay_source_successors_resume_current_delivery_and_remain_continuing_a
     let store_path = directory.path().join("semantic-successor-restart.redb");
     let config = || EngineConfig {
         store_path: Some(store_path.to_string_lossy().into_owned()),
+        // Six physical sessions live here (#8 splits read and write per
+        // relay), and the unreachable destination holds two of them in
+        // reconnect backoff for the whole test.
+        max_relays: 32,
         ..EngineConfig::default()
     };
     let (first_signer_tx, first_signer_rx) = mpsc::channel();
@@ -1072,13 +1165,15 @@ async fn relay_source_successors_resume_current_delivery_and_remain_continuing_a
     let receipt = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &base_row,
-                    ReplaceableSourcePolicy::Continuing,
-                    alice.to_bytes().to_vec(),
-                )
+                .operation(&base_row, alice.to_bytes().to_vec())
                 .expect("body-complete operation composes"),
-            routing: WriteRouting::Explicit(source_relays.to_vec()),
+            routing: WriteRouting::Explicit(
+                source_relays
+                    .iter()
+                    .cloned()
+                    .chain([offline.clone()])
+                    .collect(),
+            ),
             identity: Identity::Active,
             correlation: None,
         })
@@ -1189,7 +1284,7 @@ async fn relay_source_successors_resume_current_delivery_and_remain_continuing_a
         fact,
         WriteFact::Relay { event_id, .. } if *event_id == e1.id
     )));
-    assert_no_settled_fact(&e2_facts);
+    assert_open_pending_unreachable_destination(&e2_facts);
     for (relay, prior_e1_count) in [(&relay_one, e1_counts[0]), (&relay_two, e1_counts[1])] {
         assert_eq!(
             relay
@@ -1256,7 +1351,7 @@ async fn relay_source_successors_resume_current_delivery_and_remain_continuing_a
         );
     }
     let e3_facts = wait_for_generation_relay_facts(&statuses, e3.id, &expected_relays);
-    assert_no_settled_fact(&e3_facts);
+    assert_open_pending_unreachable_destination(&e3_facts);
     let queue = restarted
         .publish_queue(None, u8::MAX)
         .expect("continuing receipt remains inspectable after E3");

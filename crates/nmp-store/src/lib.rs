@@ -106,15 +106,14 @@ pub use redb_store::{
     StoreBenchProcessCounters, StoreBenchVariant,
 };
 pub use semantic_edit::{
-    AccessContextId, FiniteSemanticSourceRound, MaterializationCandidate, MaterializationId,
-    OperationResolution, OperationSourceRequirement, PendingMaterializationState, QualifiedSource,
+    AccessContextId, MaterializationCandidate, MaterializationId, OperationResolution,
+    OperationSourceRequirement, PendingMaterializationState, QualifiedSource,
     RecoveredSemanticResource, ReplayFormatId, ReplayProgramId, ResolvedOperation, SemanticAccept,
     SemanticCohortClose, SemanticCohortCloseOutcome, SemanticCurrentState,
     SemanticDestinationPlanClosure, SemanticGeneration, SemanticInstallOutcome, SemanticOperation,
-    SemanticPlan, SemanticProgramDigest, SemanticRefusal, SemanticRematerialize, SemanticSource,
-    SemanticSourceInstall, SemanticSourceMemberState, SemanticSourcePolicy, SemanticSourceRequest,
-    SemanticSourceRoundFact, SemanticSourceRoundOutcome, SemanticSourceTerminal, SourceEvidence,
-    SourcePlanId, SourceRevision, SourceRoundId, StartingSource, StartingSourceRequirement,
+    SemanticPlan, SemanticProgramDigest, SemanticRefusal, SemanticRematerialize,
+    SemanticSourceInstall, SourceEvidence, SourcePlanId, SourceRevision, StartingSource,
+    StartingSourceRequirement,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -1107,7 +1106,14 @@ pub enum ReplaceableOperationReceiptState {
     Contributing {
         current: Option<MaterializationReceipt>,
     },
-    Settled,
+    /// Closed by the cohort, naming the generation it settled.
+    ///
+    /// The reference survives the close because a settled receipt is still
+    /// enumerable in the publish queue, and an obligation that cannot say
+    /// which event it delivered is not a report of anything.
+    Settled {
+        materialization: MaterializationRef,
+    },
     Resolved,
     Cancelled,
     Refused(String),

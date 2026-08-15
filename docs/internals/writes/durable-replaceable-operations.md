@@ -831,7 +831,7 @@ a previous event or qualified absence. Every such revision is handled through
 the same replay rule while accepted operations remain active:
 
 1. validate any event source as real signed data for the target coordinate and
-   validate absence/withdrawal under the exact source policy;
+   validate absence/withdrawal against the coordinate's own evidence;
 2. select the resulting event, previous winner, or qualified absence under the
    scoped NIP-01 and deletion/expiry rules;
 3. replay the compact contributing operations over it;
@@ -1453,12 +1453,12 @@ the same.
 A receipt is open while NMP still owns meaningful source, materialization,
 signing, routing, or delivery work for the operation.
 
-A materialization finishing all of its relay work is not automatically the
-same as the semantic operation becoming terminal. The operation can remain
-active under a declared source policy that still permits a newer qualified
-base and successor. Conversely, a bounded one-shot policy may close both once
-its source and destination plans are terminal. The policy must say which case
-applies.
+A semantic operation is terminal exactly when its routing is closed and every
+lane of its CURRENT generation is terminal. Nothing else keeps it alive: there
+is no separate source lifetime to consult, and a later qualified base can only
+create a successor while some routed lane is still outstanding. A generation
+whose relay work is finished while another routed destination has not answered
+is not terminal, because that destination's lane is not.
 
 ### 14.1 Relay acceptance is progressive evidence, not the whole result
 
@@ -1479,26 +1479,21 @@ bounded give-up result. The aggregate result reports the exact mixture; it does
 not reduce it to a misleading global success boolean.
 
 A closed destination plan with no admissible destination never satisfies
-publication successfully by vacuous truth. If the semantic source plan is also
-closed, it terminates as `NoDestination`—a not-sent outcome carrying the
-routing refusals or absence that caused it. If a deliberately continuing
-source plan remains open, the receipt instead stays open with an explicit
-“current generation has no destination” fact: a later source revision may
-change preserved tags and therefore the route of a successor.
+publication successfully by vacuous truth. It terminates as `NoDestination`—a
+not-sent outcome carrying the routing refusals or absence that caused it.
 
 Delivery terminality does not retract a valid signed local event:
 
 | Delivery result | Receipt | Effective query value | Retained semantic work and later sources |
 |---|---|---|---|
-| Some destinations accept; others reject or give up | Exact per-relay facts; current generation's delivery is terminal when every destination is terminal | Keep the signed local materialization visible | Under a closed one-shot source policy, compact the replay program after terminal operation outcomes and never reopen it; under an explicitly continuing source policy, keep the operation active for a possible successor |
-| Every nonempty destination rejects or gives up | Same truthful aggregate; never call it global success | Keep the signed local materialization because relay refusal does not invalidate its signature or body | Same one-shot-versus-continuing source-policy distinction; later source revisions act only while the operation deliberately remains active |
-| Destination and semantic source plans both close while the destination set is empty | Terminal `NoDestination`, with no sent or accepted claim | Keep the last valid local materialization visible | Close this publication request; retain bounded receipt evidence, compact terminal semantic work, and never resurrect it merely because routing/configuration or source evidence changes later |
-| Current destination plan is empty but a deliberately continuing semantic source plan is still open | Remain open; report that the current generation has no destination, never success | Keep the last valid local materialization visible | A later qualified source revision may create a successor whose preserved fields imply different destinations; route/configuration changes alone follow the explicit route-revision policy |
+| Some destinations accept; others reject or give up | Exact per-relay facts; current generation's delivery is terminal when every destination is terminal | Keep the signed local materialization visible | Once routing is closed and every lane is terminal, every contributing receipt settles atomically and the replay program is compacted; while any routed lane is still outstanding, a later qualified source may create one successor |
+| Every nonempty destination rejects or gives up | Same truthful aggregate; never call it global success | Keep the signed local materialization because relay refusal does not invalidate its signature or body | A given-up lane is terminal, so the same rule applies: the cohort settles rather than waiting for a source that can no longer change anything |
+| Destination plan closes while the destination set is empty | Terminal `NoDestination`, with no sent or accepted claim | Keep the last valid local materialization visible | Close this publication request; retain bounded receipt evidence, compact terminal semantic work, and never resurrect it merely because routing/configuration or source evidence changes later |
 | Materialization never becomes validly signed | Signer/crypto outcome from §12.4, not a delivery result | Compensate to qualified source state or a value rebuilt from remaining operations | Never create relay work for invalid or absent signed bytes |
 
 If the product later wants to retry after `NoDestination` or after a closed
 one-shot failure, it submits a new write request after changing the relevant
-route or source policy. The old receipt remains an immutable explanation of
+route. The old receipt remains an immutable explanation of
 what happened.
 
 ### 14.2 No mandatory readback terminal
@@ -1743,12 +1738,15 @@ Once a generation may have crossed a transport handoff, its historical fact
 cannot be erased as though it never existed. Full predecessor bodies, timers,
 and retry ownership may still be retired; only bounded evidence remains.
 
-Over an infinitely long reconciliation policy with infinitely many genuine
-source changes, total lifetime network work can also be infinite. The system
-can bound concurrent work, retained state, rate, and the declared lifetime of
-an obligation; it cannot promise a finite historical total while deliberately
-remaining active forever. The final source policy must therefore choose a
-lifetime or budget and expose when it ends.
+Total lifetime network work is bounded by the routed lanes of the current
+generation: once they are all terminal the operation settles and its replay
+program is deleted, so no further successor can be built from it. What is NOT
+bounded is how many successors a permanently reachable relay can trigger
+BEFORE those lanes go terminal — a relay that keeps producing genuinely newer
+values while another routed destination never answers can keep rebasing the
+same obligation. #1380 and #1631 both list a timeout or give-up policy for a
+permanently unreachable relay as an explicit non-goal and a separate product
+decision, so that bound is deliberately unstated here rather than invented.
 
 When old delivery history is pruned under retention policy, inspection must
 carry an explicit “earlier evidence pruned” boundary or retained summary.
@@ -2319,8 +2317,8 @@ These questions are material and must remain visible:
 6. What clock owns an operation's logical time, and how are equal or
    future-skewed local operation times handled without trusting an app-supplied
    event timestamp?
-7. How does a source policy distinguish first-resource creation from
-   unresolved absence for each capability?
+7. How does a capability distinguish first-resource creation from unresolved
+   absence?
 8. Does the final unsigned payload structurally refuse blind replaceable and
    addressable builders, requiring a capability-owned exact or replayable
    operation, while preserving verbatim externally pre-signed publication?
