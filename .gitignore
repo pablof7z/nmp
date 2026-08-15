@@ -7,7 +7,15 @@
 # staged by an ordinary `git add -A`, including a 723 MiB `libnmp_ffi.a`, and
 # GitHub answered the push with HTTP 500 three times before anyone looked past
 # "network error". The glob covers the whole family.
+#
+# The anchor was then its own second incident: `tools/` holds five DETACHED
+# Cargo workspaces (behavior-traceability, nip29-consumer, the three pinned
+# fjall probes plus their harness). Each builds its own nested `target/`,
+# which a root-anchored rule cannot see, so running the traceability checker
+# locally and staging with `git add -A` put 99 build artifacts into a
+# one-line feature-file PR. Same bug class, one directory deeper.
 /target*
+**/target*/
 **/*.rs.bk
 __pycache__/
 *.pyc
