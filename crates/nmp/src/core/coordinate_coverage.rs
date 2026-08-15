@@ -517,7 +517,7 @@ mod tests {
     use std::borrow::Cow;
 
     use nmp_grammar::AccessContext;
-    use nmp_router::test_relay;
+    use nmp_router_testkit::test_relay;
     use nmp_store::RedbStore;
     use nmp_transport::{RelayFrame, RelayHandle as TransportRelayHandle};
     use nostr::{EventBuilder, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId};
