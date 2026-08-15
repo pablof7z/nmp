@@ -141,11 +141,7 @@ fn publish_operation(
         encode_operation(&operation).map_err(|_| GroupListActionError::ReceiptUnavailable)?;
     let payload = writes
         .registration
-        .first_value_operation(
-            GROUP_LIST_KIND,
-            String::new(),
-            operation,
-        )
+        .first_value_operation(GROUP_LIST_KIND, String::new(), operation)
         .map_err(|_| GroupListActionError::ReceiptUnavailable)?;
     engine
         .publish(WriteIntent {

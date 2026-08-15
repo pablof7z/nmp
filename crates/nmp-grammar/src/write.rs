@@ -10,11 +10,9 @@
 //! Hard break, no compatibility alias: every caller in the workspace moved
 //! to `nmp_grammar::{WriteIntent, ...}` in the same change.
 
-
 use nostr::{
     Event as SignedEvent, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent,
 };
-
 
 /// Everything an app must say to publish an event, and everything it MAY
 /// say. The kind is the one thing NMP cannot invent, so the kind is the one
@@ -269,9 +267,7 @@ impl ReplaceableOperation {
     /// Mechanism-only decomposition at the generic engine boundary. No
     /// supported facade or protocol helper exposes this method.
     #[doc(hidden)]
-    pub fn into_registered_parts(
-        self,
-    ) -> ([u8; 16], [u8; 16], ReplaceableOperationStart, Vec<u8>) {
+    pub fn into_registered_parts(self) -> ([u8; 16], [u8; 16], ReplaceableOperationStart, Vec<u8>) {
         (self.program, self.format, self.start, self.operation)
     }
 }

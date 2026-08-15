@@ -259,17 +259,16 @@ impl EngineCore {
             })
             .unwrap_or_default();
         replay_operations.push(operation_bytes.clone());
-        let canonical_source =
-            match self.canonical_replaceable_source(&coordinate) {
-                Ok(source) => source,
-                Err(error) => {
-                    return PublishPreparation::Complete(self.refuse_publish(
-                        PublishError::PersistenceFailed {
-                            reason: error.to_string(),
-                        },
-                    ));
-                }
-            };
+        let canonical_source = match self.canonical_replaceable_source(&coordinate) {
+            Ok(source) => source,
+            Err(error) => {
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::PersistenceFailed {
+                        reason: error.to_string(),
+                    },
+                ));
+            }
+        };
         let input = match self.replaceable_materialization_input(
             &start,
             &coordinate,
@@ -340,17 +339,16 @@ impl EngineCore {
             })
             .unwrap_or_default();
         operations.push(operation_bytes.clone());
-        let canonical_source =
-            match self.canonical_replaceable_source(&coordinate) {
-                Ok(source) => source,
-                Err(error) => {
-                    return PublishPreparation::Complete(self.refuse_publish(
-                        PublishError::PersistenceFailed {
-                            reason: error.to_string(),
-                        },
-                    ));
-                }
-            };
+        let canonical_source = match self.canonical_replaceable_source(&coordinate) {
+            Ok(source) => source,
+            Err(error) => {
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::PersistenceFailed {
+                        reason: error.to_string(),
+                    },
+                ));
+            }
+        };
         let input = match self.replaceable_materialization_input(
             &start,
             &coordinate,
@@ -575,17 +573,16 @@ impl EngineCore {
                 ));
             }
         };
-        let canonical_source =
-            match self.canonical_replaceable_source(&coordinate) {
-                Ok(source) => source,
-                Err(error) => {
-                    return PublishPreparation::Complete(self.refuse_publish(
-                        PublishError::PersistenceFailed {
-                            reason: error.to_string(),
-                        },
-                    ));
-                }
-            };
+        let canonical_source = match self.canonical_replaceable_source(&coordinate) {
+            Ok(source) => source,
+            Err(error) => {
+                return PublishPreparation::Complete(self.refuse_publish(
+                    PublishError::PersistenceFailed {
+                        reason: error.to_string(),
+                    },
+                ));
+            }
+        };
         if canonical_source.as_ref().map(|stored| stored.event.id) != canonical_source_id
             || Self::replaceable_materialization_fence(snapshot.as_ref()) != fence
         {

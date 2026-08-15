@@ -12,10 +12,9 @@ use std::time::{Duration, Instant};
 use nmp::{
     AccessContext, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReceiptReattachment,
     RelayState, ReplaceableMaterializer, ReplaceableMaterializerOperation,
-    ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec, Row,
-    RowDelta, RowSignature, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,
-    SigningCapability, SigningState, SourceAuthority, WriteFact, WriteIntent, WriteOutcome,
-    WriteRouting,
+    ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec, Row, RowDelta, RowSignature,
+    SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
+    SigningState, SourceAuthority, WriteFact, WriteIntent, WriteOutcome, WriteRouting,
 };
 use nmp_signer::PendingSignerSender;
 use nmp_store::{InsertOutcome, RedbStore, RelayObserved};
@@ -335,10 +334,10 @@ fn wait_for_settled(statuses: &nmp::mechanism::runtime::FifoReceiver<WriteFact>)
     let deadline = Instant::now() + SETTLE;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        assert!(!remaining.is_zero(), "finite receipt did not settle");
+        assert!(!remaining.is_zero(), "receipt did not settle");
         let fact = statuses
             .recv_timeout(remaining)
-            .expect("finite receipt remains attached until settlement");
+            .expect("receipt remains attached until settlement");
         if matches!(fact, WriteFact::Outcome(WriteOutcome::Settled)) {
             return;
         }
@@ -395,11 +394,7 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
     );
     let first_intent = WriteIntent {
         payload: materializer
-            .first_value_operation(
-                Kind::ContactList,
-                String::new(),
-                alice.to_bytes().to_vec(),
-            )
+            .first_value_operation(Kind::ContactList, String::new(), alice.to_bytes().to_vec())
             .expect("capability default operation is complete"),
         routing: WriteRouting::Explicit(vec![destination.url.clone()]),
         identity: Identity::Active,
@@ -450,10 +445,7 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
     let second_receipt = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &initial,
-                    carol.to_bytes().to_vec(),
-                )
+                .operation(&initial, carol.to_bytes().to_vec())
                 .expect("a later operation composes over the local generation"),
             routing: WriteRouting::Explicit(vec![destination.url.clone()]),
             identity: Identity::Active,
@@ -602,6 +594,78 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
     destination.shutdown();
 }
 
+/// #1631's headline behavior, driven through the door an APP uses: publish,
+/// a real relay, a real `OK`, and the receipt says so.
+///
+/// This deliberately enters through `Engine::publish` and a live websocket
+/// rather than calling the store's cohort-close function, because the bug
+/// this replaces lived precisely in the gap between the two -- the store
+/// function worked and nothing on earth reached it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delivered_semantic_write_settles_its_receipt() {
+    let relay = ScriptedRelay::start(&RelayConfig::default()).await;
+    let author = Keys::generate();
+    let alice = Keys::generate().public_key();
+    let base = contact_list(
+        &author,
+        Timestamp::now().as_secs().saturating_sub(10),
+        "base",
+        &[],
+    );
+    relay.seed_signed_event(&base).await;
+
+    let spec = ReplaceableMaterializerSpec::new([46; 16], [47; 16], AddPeople);
+    let materializer = spec.handle();
+    let engine =
+        Engine::new_with_capabilities(EngineConfig::default(), vec![spec]).expect("engine opens");
+    engine
+        .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
+        .expect("local author account registers");
+    let subscription = engine
+        .observe(
+            pinned_contact_lists([relay.url.clone()], author.public_key()),
+            None,
+        )
+        .expect("contact list observation opens");
+    let mut rows = BTreeMap::new();
+    let base_row = wait_for_row(&subscription, &mut rows, |row| row.id() == base.id);
+
+    let receipt = engine
+        .publish(WriteIntent {
+            payload: materializer
+                .operation(&base_row, alice.to_bytes().to_vec())
+                .expect("the operation is complete"),
+            routing: WriteRouting::Explicit(vec![relay.url.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        })
+        .expect("the operation enters custody");
+    let generation = wait_for_row(&subscription, &mut rows, |row| row.id() == receipt.event_id);
+    assert!(
+        relay
+            .wait_wire_event_id_count(&generation.id().to_hex(), 1, SETTLE)
+            .await,
+        "the generation reaches its one destination"
+    );
+    wait_for_settled(&receipt.statuses);
+
+    let queue = engine
+        .publish_queue(None, u8::MAX)
+        .expect("publish queue remains readable");
+    assert_eq!(
+        queue
+            .iter()
+            .filter(|entry| entry.receipt_id == receipt.id)
+            .map(|entry| entry.outcome.clone())
+            .collect::<Vec<_>>(),
+        vec![Some(WriteOutcome::Settled)],
+        "the settled obligation reports its outcome once: {queue:?}"
+    );
+
+    engine.shutdown();
+    relay.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shared_second_generation_is_once_per_relay_and_replays_while_a_destination_is_down() {
     let relay_one = ScriptedRelay::start(&RelayConfig::default()).await;
@@ -639,10 +703,7 @@ async fn shared_second_generation_is_once_per_relay_and_replays_while_a_destinat
     let first = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &base_row,
-                    alice.to_bytes().to_vec(),
-                )
+                .operation(&base_row, alice.to_bytes().to_vec())
                 .expect("first operation is complete"),
             routing: WriteRouting::Explicit(vec![relay_one.url.clone(), offline.clone()]),
             identity: Identity::Active,
@@ -663,10 +724,7 @@ async fn shared_second_generation_is_once_per_relay_and_replays_while_a_destinat
     let second = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &first_current,
-                    bob.to_bytes().to_vec(),
-                )
+                .operation(&first_current, bob.to_bytes().to_vec())
                 .expect("second operation composes over current"),
             routing: WriteRouting::Explicit(vec![
                 relay_one.url.clone(),
@@ -840,10 +898,7 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
     let first = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &base_row,
-                    alice.to_bytes().to_vec(),
-                )
+                .operation(&base_row, alice.to_bytes().to_vec())
                 .expect("first operation is complete"),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
@@ -854,10 +909,7 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
     let second = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &first_current,
-                    bob.public_key().to_bytes().to_vec(),
-                )
+                .operation(&first_current, bob.public_key().to_bytes().to_vec())
                 .expect("second operation composes over current"),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
@@ -958,18 +1010,17 @@ async fn source_session_replacement_wakes_every_signed_successor_destination() {
 
     let spec = ReplaceableMaterializerSpec::new([26; 16], [27; 16], AddPeople);
     let materializer = spec.handle();
-    let engine =
-        Engine::new_with_capabilities(
-            EngineConfig {
-                // Six physical sessions live here (#8 splits read and write
-                // per relay), and the unreachable destination holds two of
-                // them in reconnect backoff for the whole test.
-                max_relays: 32,
-                ..EngineConfig::default()
-            },
-            vec![spec],
-        )
-        .expect("engine opens");
+    let engine = Engine::new_with_capabilities(
+        EngineConfig {
+            // Six physical sessions live here (#8 splits read and write
+            // per relay), and the unreachable destination holds two of
+            // them in reconnect backoff for the whole test.
+            max_relays: 32,
+            ..EngineConfig::default()
+        },
+        vec![spec],
+    )
+    .expect("engine opens");
     engine
         .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
         .expect("local author account registers");
@@ -986,10 +1037,7 @@ async fn source_session_replacement_wakes_every_signed_successor_destination() {
     let receipt = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &base_row,
-                    alice.to_bytes().to_vec(),
-                )
+                .operation(&base_row, alice.to_bytes().to_vec())
                 .expect("the body-complete operation composes"),
             routing: WriteRouting::Explicit(
                 source_relays
@@ -1117,10 +1165,7 @@ async fn relay_source_successors_resume_current_delivery_and_stay_open_after_res
     let receipt = engine
         .publish(WriteIntent {
             payload: materializer
-                .operation(
-                    &base_row,
-                    alice.to_bytes().to_vec(),
-                )
+                .operation(&base_row, alice.to_bytes().to_vec())
                 .expect("body-complete operation composes"),
             routing: WriteRouting::Explicit(
                 source_relays

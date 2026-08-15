@@ -836,8 +836,8 @@ mod semantic_successor_tests {
             core.handle(EngineMsg::RelayConnected(read_handle, read_session.clone()));
             core.handle(EngineMsg::RelayConnected(handle, session.clone()));
             let parked = core.handle(EngineMsg::AuthProbeReleased(handle, session.clone()));
-            let released = core
-                .answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
+            let released =
+                core.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
             let correlation = released
                 .iter()
                 .find_map(|effect| match effect {
@@ -1279,8 +1279,8 @@ mod semantic_successor_tests {
             core.handle(EngineMsg::RelayConnected(read_handle, read_session.clone()));
             core.handle(EngineMsg::RelayConnected(*handle, session.clone()));
             let parked = core.handle(EngineMsg::AuthProbeReleased(*handle, session.clone()));
-            let released = core
-                .answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
+            let released =
+                core.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
             let correlation = released
                 .iter()
                 .find_map(|effect| match effect {

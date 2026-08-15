@@ -190,10 +190,7 @@ fn arm_generation(
         slot: read_slot,
         generation: 1,
     };
-    core.handle(EngineMsg::RelayConnected(
-        read_handle,
-        read_session.clone(),
-    ));
+    core.handle(EngineMsg::RelayConnected(read_handle, read_session.clone()));
     core.handle(EngineMsg::RelayConnected(handle, session.clone()));
     let parked = core.handle(EngineMsg::AuthProbeReleased(handle, session.clone()));
     assert!(
@@ -203,7 +200,8 @@ fn arm_generation(
         "a delta generation must not reach the relay before the relay's own \
          current value for the coordinate is known"
     );
-    let scheduled = core.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
+    let scheduled =
+        core.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
     let (correlation, event_id) = scheduled
         .iter()
         .find_map(|effect| match effect {

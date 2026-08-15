@@ -422,7 +422,8 @@ impl EngineCore {
             self.open_coordinate_observation(coordinate, session, effects)
         };
         if let Some(observation) = opened {
-            self.semantic_publish_coverage.insert(key.clone(), observation);
+            self.semantic_publish_coverage
+                .insert(key.clone(), observation);
         }
         match coverage {
             CoordinateCoverage::Witnessed { .. } | CoordinateCoverage::ProvenAbsent => {
@@ -1050,7 +1051,9 @@ impl EngineCore {
         for (handle, session) in sessions {
             let mut sub_ids = Vec::new();
             for effect in opened.iter().chain(flushed.iter()) {
-                let Effect::Wire(delta) = effect else { continue };
+                let Effect::Wire(delta) = effect else {
+                    continue;
+                };
                 for (candidate, ops) in &delta.ops {
                     if candidate != session {
                         continue;
@@ -1413,15 +1416,15 @@ impl EngineCore {
             // that holds a NEWER list would overwrite that list with one
             // derived from an older base. A complete-event write carries no
             // such base and skips the check entirely.
-            if let Some(coordinate) = self
-                .pending
-                .get(&id)
-                .and_then(|pending| match &pending.target {
-                    PendingWriteTarget::ReplaceableOperation(target) => {
-                        Some(target.coordinate.clone())
-                    }
-                    PendingWriteTarget::Event => None,
-                })
+            if let Some(coordinate) =
+                self.pending
+                    .get(&id)
+                    .and_then(|pending| match &pending.target {
+                        PendingWriteTarget::ReplaceableOperation(target) => {
+                            Some(target.coordinate.clone())
+                        }
+                        PendingWriteTarget::Event => None,
+                    })
             {
                 // Which view of the relay to ask for. The AUTH gate above
                 // has already established one of exactly two things about

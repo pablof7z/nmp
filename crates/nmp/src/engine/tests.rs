@@ -156,10 +156,7 @@ fn replaceable_contact_intent(
 ) -> WriteIntent {
     WriteIntent {
         payload: registration
-            .operation(
-                base,
-                person.to_bytes().to_vec(),
-            )
+            .operation(base, person.to_bytes().to_vec())
             .expect("the signed base mints one operation"),
         routing: WriteRouting::Explicit(vec![destination]),
         identity: Identity::Explicit(base.pubkey()),
