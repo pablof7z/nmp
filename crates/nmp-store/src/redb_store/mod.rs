@@ -41,6 +41,7 @@ use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom};
+use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event, EventId, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp};
 use redb::{Database, ReadableTable, TableDefinition};
 #[cfg(test)]
@@ -136,7 +137,7 @@ pub(crate) use store::with_required_database_init_test_hook;
 pub use store::OrderedEventReadPause;
 #[cfg(test)]
 use store::RedbCrashPoint;
-pub use store::RedbStore;
+pub use store::{RedbStore, StoreSigReader};
 mod event_ops;
 mod ingest;
 pub(crate) mod publish_queue_ops;
@@ -236,6 +237,14 @@ impl RedbStore {
         limit: usize,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
         event_ops::query_newest(self, filter, limit)
+    }
+
+    /// The known-good signature for an already-ingested event id, if any
+    /// (#1677 durable verify dedup). A narrow point read: decodes only the
+    /// signature column. A pending local draft (sentinel signature) returns
+    /// `None` so the real signed delivery is still admitted.
+    pub fn known_signature(&self, id: &EventId) -> Result<Option<Signature>, PersistenceError> {
+        event_ops::known_signature(self, id)
     }
 
     /// Return only the canonical ids from [`Self::query_newest`].

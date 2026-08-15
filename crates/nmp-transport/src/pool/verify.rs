@@ -1,23 +1,34 @@
-//! Persistent ingest-time signature verification workers.
+//! Persistent ingest-time signature verification workers + durable dedup.
 //!
-//! Parsing and relay-frame policy live at the translator boundary. This module
-//! deliberately accepts already-parsed [`Event`] values so the same parse can
-//! be reused by routing, caching, and persistence. The translator recomputes
-//! each candidate's event id once before dispatch; these workers perform only
-//! the schnorr half, avoiding a second content/tag hash. Native targets keep a
-//! bounded set of workers alive for the lifetime of the pool; each worker owns
-//! one secp256k1 verification context and reuses it for every event. That avoids
-//! per-burst thread creation and gives each worker a context-local verification
-//! hot path. wasm32 has the same ordered API but verifies deterministically on
-//! the calling thread.
+//! See the crate-level doc for the trust-gate placement rationale. This
+//! module owns:
+//!
+//! - the in-memory `VerifiedEventCache` LRU of verified `(id, sig)` pairs;
+//! - the durable dedup-by-id through [`KnownSig`] (a known id is a
+//!   signature byte-compare against the stored known-good signature — no
+//!   schnorr);
+//! - the candidate-by-pair dedup within one burst (identical unknown
+//!   `(id, sig)` pairs share ONE schnorr check, but every input still gets
+//!   its own verdict);
+//! - the persistent native verifier workers (one secp256k1 context each,
+//!   bounded queues, worker-replacement-on-death, fail-closed
+//!   [`Verdict::RejectUnavailable`], `Drop` join) and the wasm32 sequential
+//!   path.
+//!
+//! [`Verifier::schnorr_verifications`] is the falsifier for the
+//! durable-dedup invariant: durable and LRU hits never reach a worker, so a
+//! cold-start replay of already-ingested ids performs zero schnorr checks.
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use nostr::secp256k1::schnorr::Signature;
 use nostr::Event;
+use nostr::EventId;
 
-use super::spawn::ThreadSpawner;
+use super::spawn::{system_spawner, ThreadSpawner};
 use super::{ThreadRole, ThreadSpawnError};
-use crate::health::RelayHealth;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -27,41 +38,268 @@ use std::thread::JoinHandle;
 #[cfg(target_arch = "wasm32")]
 use nostr::secp256k1::{Secp256k1, VerifyOnly};
 
-/// Default number of queued verification tasks per native worker.
+/// Small fixed verifier set owned by one engine. Signature verification is
+/// CPU-bound and fed through bounded queues; copying host parallelism into
+/// every engine multiplied OS threads without imposing a process budget.
+pub const DEFAULT_VERIFIER_WORKERS: usize = 2;
+
+/// Hard ceiling for an explicitly configured per-engine verifier pool.
+/// The default remains deliberately small; embedders opting into a wider
+/// pool still cannot create an unbounded number of OS threads.
+pub const MAX_VERIFIER_WORKERS: usize = 16;
+
+/// Upper bound for the host-aware verifier width selected by
+/// [`VerifyConfig::default`]. Explicit configurations may still request up
+/// to [`MAX_VERIFIER_WORKERS`].
+pub const MAX_DEFAULT_VERIFIER_WORKERS: usize = 8;
+
+/// Durable dedup-by-id seam. Returns the known-good signature for an
+/// already-ingested event id, if any. Wired at the engine with a
+/// store-backed impl; [`NullKnownSig`] always returns `None`.
 ///
-/// The bounded queues apply backpressure to the translator instead of letting
-/// a relay burst allocate an unbounded backlog. A queue belongs to one worker,
-/// so no mutex is needed around task receipt or the worker's secp context.
-/// Persistent, bounded signature-verification executor.
-///
-/// Results returned by [`VerifierPool::verify_batch`] always correspond to the
-/// input order even though native workers may complete out of order. Dropping
-/// the pool drains accepted work, asks every worker to stop, and joins every
-/// thread.
-pub(super) struct VerifierPool {
-    #[cfg(not(target_arch = "wasm32"))]
-    workers: Vec<Option<Worker>>,
-    #[cfg(not(target_arch = "wasm32"))]
-    next_worker: usize,
-    #[cfg(not(target_arch = "wasm32"))]
-    queue_capacity: usize,
-    #[cfg(not(target_arch = "wasm32"))]
-    spawner: Arc<dyn ThreadSpawner>,
-    #[cfg(target_arch = "wasm32")]
-    secp: Secp256k1<VerifyOnly>,
+/// `nmp-transport` does NOT depend on `nmp-store`: this trait is the one
+/// closing layer that lets the trust gate read durable identity without
+/// pulling the store into the bottom wire layer.
+pub trait KnownSig: Send + Sync {
+    fn known_signature(&self, id: &EventId) -> Option<Signature>;
 }
 
-/// Fail-closed result for one verification task.
+/// Test/default impl: no durable knowledge (every id is a candidate).
+pub struct NullKnownSig;
+impl KnownSig for NullKnownSig {
+    fn known_signature(&self, _id: &EventId) -> Option<Signature> {
+        None
+    }
+}
+
+/// The trust decision for one already-parsed, id-valid, non-stale event.
 ///
-/// `Unavailable` is deliberately distinct from a bad signature: an internal
-/// worker failure must drop the affected event and become visible as relay
-/// health, but must not falsely accuse the relay of cryptographic misbehavior.
+/// `RejectUnavailable` is deliberately distinct from `RejectMisbehavior`: an
+/// internal verifier-worker failure must drop the affected event and surface
+/// as relay health, but must not falsely accuse the relay of cryptographic
+/// misbehavior. Transport maps `RejectMisbehavior`/`RejectUnavailable` onto
+/// `RelayHealth` accounting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum VerificationOutcome {
+pub enum Verdict {
+    Accept,
+    RejectMisbehavior,
+    RejectUnavailable,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VerifyConfig {
+    pub workers: usize,
+    pub queue_capacity: usize,
+    pub lru_capacity: usize,
+}
+
+impl Default for VerifyConfig {
+    fn default() -> Self {
+        let workers = std::thread::available_parallelism()
+            .map_or(DEFAULT_VERIFIER_WORKERS, usize::from)
+            .div_ceil(2)
+            .clamp(DEFAULT_VERIFIER_WORKERS, MAX_DEFAULT_VERIFIER_WORKERS);
+        Self {
+            workers,
+            queue_capacity: 64,
+            lru_capacity: 131_072,
+        }
+    }
+}
+
+/// Fail-closed internal result of one worker schnorr check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerificationOutcome {
     Valid,
     Invalid,
     Unavailable,
 }
+
+/// In-memory LRU of verified `(id, sig)` pairs. A hit is a signature
+/// byte-compare (no schnorr, no durable read). Eviction only causes later
+/// re-verification; it never changes policy.
+struct VerifiedEventCache {
+    capacity: usize,
+    signatures: HashMap<EventId, Signature>,
+    insertion_order: VecDeque<EventId>,
+}
+
+impl VerifiedEventCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            signatures: HashMap::with_capacity(capacity),
+            insertion_order: VecDeque::with_capacity(capacity),
+        }
+    }
+
+    fn get(&self, id: &EventId) -> Option<Signature> {
+        self.signatures.get(id).copied()
+    }
+
+    fn insert(&mut self, id: EventId, signature: Signature) {
+        if self.capacity == 0 || self.signatures.contains_key(&id) {
+            return;
+        }
+        if self.signatures.len() == self.capacity {
+            let evicted = self
+                .insertion_order
+                .pop_front()
+                .expect("full verification cache has an eviction candidate");
+            self.signatures.remove(&evicted);
+        }
+        self.signatures.insert(id, signature);
+        self.insertion_order.push_back(id);
+    }
+}
+
+/// The public trust-gate handle. Owns the persistent verifier workers, the
+/// verified `(id, sig)` LRU, the durable [`KnownSig`] seam, and the
+/// schnorr-call falsifier counter.
+pub struct Verifier {
+    pool: VerifierPool,
+    cache: VerifiedEventCache,
+    known_sig: Arc<dyn KnownSig>,
+    schnorr_calls: Arc<AtomicU64>,
+}
+
+impl Verifier {
+    /// Build the verifier: persistent native workers (or the wasm32
+    /// sequential path), an empty LRU, and the durable seam.
+    pub fn new(
+        config: VerifyConfig,
+        known_sig: Arc<dyn KnownSig>,
+    ) -> Result<Self, ThreadSpawnError> {
+        Self::new_with_spawner(config, known_sig, system_spawner())
+    }
+
+    pub(super) fn new_with_spawner(
+        config: VerifyConfig,
+        known_sig: Arc<dyn KnownSig>,
+        spawner: Arc<dyn ThreadSpawner>,
+    ) -> Result<Self, ThreadSpawnError> {
+        let schnorr_calls = Arc::new(AtomicU64::new(0));
+        let pool = VerifierPool::new(
+            config.workers,
+            config.queue_capacity,
+            spawner,
+            Arc::clone(&schnorr_calls),
+        )?;
+        Ok(Self {
+            pool,
+            cache: VerifiedEventCache::new(config.lru_capacity),
+            known_sig,
+            schnorr_calls,
+        })
+    }
+
+    /// Verify a batch of already-parsed, id-valid, non-stale events. Returns
+    /// one [`Verdict`] per input, in order.
+    ///
+    /// Per event:
+    /// 1. LRU hit → byte-compare stored sig vs `event.sig` (no schnorr, no
+    ///    durable read): `Accept` if equal else `RejectMisbehavior`.
+    /// 2. Else durable `KnownSig` hit → byte-compare (no schnorr): `Accept`
+    ///    (also inserted into the LRU) or `RejectMisbehavior`.
+    /// 3. Else candidate → submit to the worker pool for schnorr. Identical
+    ///    unknown `(id, sig)` pairs share ONE schnorr check within the burst,
+    ///    but every input still gets its own verdict.
+    pub fn verify_batch(&mut self, events: &[Arc<Event>]) -> Vec<Verdict> {
+        if events.is_empty() {
+            return Vec::new();
+        }
+
+        // Resolve every LRU / durable hit inline, and collect the unique
+        // unknown (id, sig) pairs that actually need a worker schnorr check.
+        let mut verdicts: Vec<Option<Verdict>> = vec![None; events.len()];
+        let mut candidates: Vec<Arc<Event>> = Vec::new();
+        let mut candidate_by_pair: HashMap<(EventId, Signature), usize> = HashMap::new();
+        // Input positions awaiting their candidate verdict, paired with the
+        // unique candidate index their (id, sig) pair resolved to.
+        let mut pending: Vec<(usize, usize)> = Vec::new();
+        for (index, event) in events.iter().enumerate() {
+            if let Some(known) = self.cache.get(&event.id) {
+                verdicts[index] = Some(if known == event.sig {
+                    Verdict::Accept
+                } else {
+                    Verdict::RejectMisbehavior
+                });
+                continue;
+            }
+            if let Some(stored) = self.known_sig.known_signature(&event.id) {
+                if stored == event.sig {
+                    self.cache.insert(event.id, event.sig);
+                    verdicts[index] = Some(Verdict::Accept);
+                } else {
+                    verdicts[index] = Some(Verdict::RejectMisbehavior);
+                }
+                continue;
+            }
+            // Candidate: dedup identical unknown (id, sig) pairs to one
+            // schnorr check, but every position keeps its own verdict.
+            let pair = (event.id, event.sig);
+            let candidate = *candidate_by_pair.entry(pair).or_insert_with(|| {
+                let idx = candidates.len();
+                candidates.push(Arc::clone(event));
+                idx
+            });
+            pending.push((index, candidate));
+        }
+
+        let candidate_results = self.pool.verify_batch(&candidates);
+        for (index, candidate) in pending {
+            let outcome = candidate_results[candidate];
+            let event = &events[index];
+            verdicts[index] = Some(resolve_candidate(&mut self.cache, event, outcome));
+        }
+
+        verdicts
+            .into_iter()
+            .map(|verdict| verdict.expect("every position is resolved"))
+            .collect()
+    }
+
+    /// Number of schnorr verifications actually performed (falsifier for the
+    /// durable-dedup invariant). Always present, not feature-gated. Durable
+    /// and LRU hits never reach a worker and never increment this.
+    pub fn schnorr_verifications(&self) -> u64 {
+        self.schnorr_calls.load(Ordering::Relaxed)
+    }
+
+    /// The same counter [`Self::schnorr_verifications`] reads, as a shared
+    /// handle. The translator thread OWNS its `Verifier`, so an end-to-end
+    /// falsifier that drives real relay frames through
+    /// [`super::inner::translator_loop`] can only observe the schnorr count
+    /// by holding this clone from before construction.
+    #[cfg(test)]
+    pub(super) fn schnorr_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.schnorr_calls)
+    }
+}
+
+fn resolve_candidate(
+    cache: &mut VerifiedEventCache,
+    event: &Arc<Event>,
+    cryptographically_valid: VerificationOutcome,
+) -> Verdict {
+    match (cache.get(&event.id), cryptographically_valid) {
+        (Some(known), VerificationOutcome::Valid) if known == event.sig => Verdict::Accept,
+        (Some(_), VerificationOutcome::Valid | VerificationOutcome::Invalid) => {
+            Verdict::RejectMisbehavior
+        }
+        (Some(_), VerificationOutcome::Unavailable) => Verdict::RejectUnavailable,
+        (None, VerificationOutcome::Valid) => {
+            cache.insert(event.id, event.sig);
+            Verdict::Accept
+        }
+        (None, VerificationOutcome::Invalid) => Verdict::RejectMisbehavior,
+        (None, VerificationOutcome::Unavailable) => Verdict::RejectUnavailable,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Persistent verifier worker pool (native threads + wasm32 sequential path).
+// ---------------------------------------------------------------------------
 
 #[cfg(not(target_arch = "wasm32"))]
 struct Worker {
@@ -79,24 +317,39 @@ enum Task {
     Shutdown,
 }
 
+struct VerifierPool {
+    #[cfg(not(target_arch = "wasm32"))]
+    workers: Vec<Option<Worker>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    next_worker: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    queue_capacity: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    spawner: Arc<dyn ThreadSpawner>,
+    #[cfg(target_arch = "wasm32")]
+    secp: Secp256k1<VerifyOnly>,
+    schnorr_calls: Arc<AtomicU64>,
+}
+
 impl VerifierPool {
-    /// Build a pool with explicit native worker and per-worker queue bounds.
-    ///
-    /// Both values are clamped to one. They are retained in the wasm signature
-    /// so callers can construct the pool without target-specific application
-    /// code; wasm still executes sequentially and does not create queues.
-    pub(super) fn new(
+    fn new(
         worker_count: usize,
         queue_capacity: usize,
         spawner: Arc<dyn ThreadSpawner>,
+        schnorr_calls: Arc<AtomicU64>,
     ) -> Result<Self, ThreadSpawnError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let worker_count = worker_count.max(1);
+            let worker_count = configured_workers(worker_count);
             let queue_capacity = queue_capacity.max(1);
             let mut workers = Vec::with_capacity(worker_count);
             for index in 0..worker_count {
-                match Worker::spawn(index, queue_capacity, spawner.as_ref()) {
+                match Worker::spawn(
+                    index,
+                    queue_capacity,
+                    spawner.as_ref(),
+                    Arc::clone(&schnorr_calls),
+                ) {
                     Ok(worker) => workers.push(Some(worker)),
                     Err(error) => {
                         shutdown_workers(&mut workers);
@@ -109,6 +362,7 @@ impl VerifierPool {
                 next_worker: 0,
                 queue_capacity,
                 spawner,
+                schnorr_calls,
             })
         }
 
@@ -117,15 +371,12 @@ impl VerifierPool {
             let _ = (worker_count, queue_capacity, spawner);
             Ok(Self {
                 secp: Secp256k1::verification_only(),
+                schnorr_calls,
             })
         }
     }
 
-    /// Verify a batch and return one validity bit per event, in input order.
-    ///
-    /// `Arc<Event>` lets the translator hand the exact parsed value to a
-    /// worker and later reuse it without cloning its strings or tags.
-    pub(super) fn verify_batch(&mut self, events: &[Arc<Event>]) -> Vec<VerificationOutcome> {
+    fn verify_batch(&mut self, events: &[Arc<Event>]) -> Vec<VerificationOutcome> {
         #[cfg(feature = "bench-instrumentation")]
         let started = std::time::Instant::now();
         #[cfg(not(target_arch = "wasm32"))]
@@ -169,8 +420,7 @@ impl VerifierPool {
 
             // Start fail-closed. Successfully completed tasks overwrite their
             // slot; tasks rejected by a dead worker or abandoned by a worker
-            // panic remain `Unavailable`. Iteration ends once every task-held
-            // result sender has either replied or been dropped.
+            // panic remain `Unavailable`.
             #[cfg(feature = "bench-instrumentation")]
             let collect_started = std::time::Instant::now();
             let mut ordered = vec![VerificationOutcome::Unavailable; events.len()];
@@ -199,7 +449,10 @@ impl VerifierPool {
             let outcomes = events
                 .iter()
                 .map(|event| {
-                    if event.verify_signature_with_ctx(&self.secp) {
+                    let valid = event.verify_signature_with_ctx(&self.secp);
+                    // Count once per actual schnorr check on the wasm path.
+                    self.schnorr_calls.fetch_add(1, Ordering::Relaxed);
+                    if valid {
                         VerificationOutcome::Valid
                     } else {
                         VerificationOutcome::Invalid
@@ -217,7 +470,12 @@ impl VerifierPool {
         if self.workers[index].is_some() {
             return;
         }
-        if let Ok(worker) = Worker::spawn(index, self.queue_capacity, self.spawner.as_ref()) {
+        if let Ok(worker) = Worker::spawn(
+            index,
+            self.queue_capacity,
+            self.spawner.as_ref(),
+            Arc::clone(&self.schnorr_calls),
+        ) {
             self.workers[index] = Some(worker);
         }
     }
@@ -237,18 +495,35 @@ impl VerifierPool {
     }
 }
 
+fn configured_workers(configured: usize) -> usize {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if configured == 0 {
+            DEFAULT_VERIFIER_WORKERS
+        } else {
+            configured.min(MAX_VERIFIER_WORKERS)
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = configured;
+        1
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl Worker {
     fn spawn(
         index: usize,
         queue_capacity: usize,
         spawner: &dyn ThreadSpawner,
+        schnorr_calls: Arc<AtomicU64>,
     ) -> Result<Self, ThreadSpawnError> {
         let (tasks_tx, tasks_rx) = mpsc::sync_channel(queue_capacity);
         let join = spawner
             .spawn(
                 std::thread::Builder::new().name(format!("nmp-verify-{index}")),
-                Box::new(move || worker_loop(tasks_rx)),
+                Box::new(move || worker_loop(tasks_rx, schnorr_calls)),
             )
             .map_err(|error| ThreadSpawnError {
                 role: ThreadRole::VerifierWorker,
@@ -262,7 +537,7 @@ impl Worker {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn worker_loop(tasks: Receiver<Task>) {
+fn worker_loop(tasks: Receiver<Task>, schnorr_calls: Arc<AtomicU64>) {
     let secp = nostr::secp256k1::Secp256k1::verification_only();
     while let Ok(task) = tasks.recv() {
         match task {
@@ -278,6 +553,10 @@ fn worker_loop(tasks: Receiver<Task>) {
                 #[cfg(not(feature = "bench-instrumentation"))]
                 let skip_signature = false;
                 let valid = skip_signature || event.verify_signature_with_ctx(&secp);
+                // Falsifier for the durable-dedup invariant: count once per
+                // actual worker schnorr call. Durable/LRU hits never reach a
+                // worker, so a cold-start replay of known ids stays zero.
+                schnorr_calls.fetch_add(1, Ordering::Relaxed);
                 #[cfg(feature = "bench-instrumentation")]
                 {
                     crate::ingest_attribution::verify_worker(verify_started.elapsed(), 1);
@@ -299,6 +578,7 @@ fn worker_loop(tasks: Receiver<Task>) {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for VerifierPool {
     fn drop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         shutdown_workers(&mut self.workers);
     }
 }
@@ -319,207 +599,5 @@ fn shutdown_workers(workers: &mut [Option<Worker>]) {
     }
 }
 
-/// Bump the observable relay-misbehavior counter for a rejected event.
-pub(super) fn record_misbehavior(health: &mut RelayHealth) {
-    health.invalid_signature_count += 1;
-}
-
-/// Surface an internal verifier outage without attributing it to the relay.
-pub(super) fn record_unavailable(health: &mut RelayHealth) {
-    health.last_error = Some("signature verification worker unavailable".to_string());
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::pool::spawn::system_spawner;
-    use nostr::{EventBuilder, JsonUtil, Keys, Kind, RelayMessage};
-
-    fn signed_event(keys: &Keys, content: &str) -> Event {
-        EventBuilder::new(Kind::TextNote, content)
-            .sign_with_keys(keys)
-            .expect("test fixture must sign cleanly")
-    }
-
-    #[test]
-    fn batch_results_match_sequential_verification_and_input_order() {
-        let keys = Keys::generate();
-        let events: Vec<_> = (0..97)
-            .map(|index| {
-                let mut event = signed_event(&keys, &format!("event-{index}"));
-                if index % 7 == 0 {
-                    event.content.push_str("-tampered");
-                } else if index % 11 == 0 {
-                    event.sig = signed_event(&keys, &format!("other-{index}")).sig;
-                }
-                Arc::new(event)
-            })
-            .collect();
-        let expected: Vec<_> = events
-            .iter()
-            .map(|event| {
-                if event.verify_signature() {
-                    VerificationOutcome::Valid
-                } else {
-                    VerificationOutcome::Invalid
-                }
-            })
-            .collect();
-        let mut pool = VerifierPool::new(4, 2, system_spawner()).unwrap();
-
-        assert_eq!(pool.verify_batch(&events), expected);
-    }
-
-    #[test]
-    fn persistent_pool_can_verify_multiple_bursts() {
-        let keys = Keys::generate();
-        let mut pool = VerifierPool::new(3, 1, system_spawner()).unwrap();
-
-        for burst in 0..8 {
-            let events: Vec<_> = (0..13)
-                .map(|index| Arc::new(signed_event(&keys, &format!("{burst}-{index}"))))
-                .collect();
-            assert_eq!(
-                pool.verify_batch(&events),
-                vec![VerificationOutcome::Valid; events.len()]
-            );
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        assert_eq!(pool.worker_count(), 3);
-    }
-
-    #[test]
-    fn empty_batch_is_empty() {
-        let mut pool = VerifierPool::new(2, 1, system_spawner()).unwrap();
-        assert!(pool.verify_batch(&[]).is_empty());
-    }
-
-    #[test]
-    fn zero_configuration_is_clamped_and_drop_joins_workers() {
-        let pool = VerifierPool::new(0, 0, system_spawner()).unwrap();
-        #[cfg(not(target_arch = "wasm32"))]
-        assert_eq!(pool.worker_count(), 1);
-        drop(pool);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn stopped_worker_fails_affected_batch_closed_without_panicking() {
-        let keys = Keys::generate();
-        let events = vec![Arc::new(signed_event(&keys, "must not escape"))];
-        let mut pool = VerifierPool::new(1, 1, system_spawner()).unwrap();
-        pool.stop_worker(0);
-
-        assert_eq!(
-            pool.verify_batch(&events),
-            vec![VerificationOutcome::Unavailable]
-        );
-        assert_eq!(
-            pool.verify_batch(&events),
-            vec![VerificationOutcome::Valid],
-            "the stopped worker lane must be replaced for future batches"
-        );
-    }
-
-    #[test]
-    fn verifier_outage_is_health_not_false_relay_misbehavior() {
-        let mut health = RelayHealth::default();
-        record_unavailable(&mut health);
-
-        assert_eq!(health.invalid_signature_count, 0);
-        assert_eq!(
-            health.last_error.as_deref(),
-            Some("signature verification worker unavailable")
-        );
-    }
-
-    /// Reproducible real-corpus proof for #168.
-    ///
-    /// `NMP_CORPUS` is JSONL with one canonical event object per line. The
-    /// harness wraps each object in its real relay EVENT envelope without
-    /// reparsing it during setup, then times exactly one typed relay-message
-    /// parse per frame, persistent-worker first-seen verification, and the
-    /// known-redelivery signature-compare path for the required burst matrix.
-    #[test]
-    #[ignore = "requires NMP_CORPUS real-event JSONL"]
-    fn real_corpus_verify_matrix() {
-        use std::collections::HashMap;
-        use std::hint::black_box;
-        use std::time::{Duration, Instant};
-
-        let path = std::env::var("NMP_CORPUS").expect("set NMP_CORPUS to event JSONL");
-        let source = std::fs::read_to_string(&path).expect("read real corpus");
-        let wire: Vec<_> = source
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|event_json| format!(r#"["EVENT","nmp-bench",{event_json}]"#))
-            .collect();
-        assert!(!wire.is_empty(), "real corpus is empty");
-
-        fn median(mut samples: Vec<Duration>) -> Duration {
-            samples.sort_unstable();
-            samples[samples.len() / 2]
-        }
-
-        println!("corpus={path}");
-        println!("corpus_events={}", wire.len());
-        for requested in [1usize, 2, 8, 32, 128, 512, wire.len()] {
-            let size = requested.min(wire.len());
-            let mut parse_samples = Vec::new();
-            let mut verify_samples = Vec::new();
-            let mut known_samples = Vec::new();
-            for _ in 0..3 {
-                let started = Instant::now();
-                let frames: Vec<_> = wire[..size]
-                    .iter()
-                    .map(|raw| {
-                        let parsed: RelayMessage<'static> =
-                            RelayMessage::from_json(raw).expect("parse real relay EVENT once");
-                        crate::pool::RelayFrame::from(parsed)
-                    })
-                    .collect();
-                let events: Vec<_> = frames
-                    .iter()
-                    .map(|frame| Arc::clone(frame.event().expect("fixture wrapper must be EVENT")))
-                    .collect();
-                parse_samples.push(started.elapsed());
-
-                let mut pool =
-                    VerifierPool::new(super::super::DEFAULT_VERIFIER_WORKERS, 64, system_spawner())
-                        .expect("benchmark verifier construction");
-                let started = Instant::now();
-                assert!(events.iter().all(|event| event.verify_id()));
-                let valid = pool.verify_batch(black_box(&events));
-                verify_samples.push(started.elapsed());
-                assert!(valid
-                    .iter()
-                    .all(|outcome| *outcome == VerificationOutcome::Valid));
-
-                let known: HashMap<_, _> =
-                    events.iter().map(|event| (event.id, event.sig)).collect();
-                let started = Instant::now();
-                let hits = events
-                    .iter()
-                    .filter(|event| event.verify_id() && known.get(&event.id) == Some(&event.sig))
-                    .count();
-                known_samples.push(started.elapsed());
-                assert_eq!(hits, events.len());
-            }
-            println!("size={size}");
-            println!("  parse_count={size}");
-            println!(
-                "  parse_once_median_ms={:.3}",
-                median(parse_samples).as_secs_f64() * 1_000.0
-            );
-            println!(
-                "  first_seen_verify_median_ms={:.3}",
-                median(verify_samples).as_secs_f64() * 1_000.0
-            );
-            println!(
-                "  known_redelivery_median_ms={:.3}",
-                median(known_samples).as_secs_f64() * 1_000.0
-            );
-        }
-    }
-}
+mod tests;
