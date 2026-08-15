@@ -48,11 +48,10 @@ nip29 = ["dep:nmp-nip29"]
 # for the same reason it does: ONE owner of the values, and an app that never
 # uses the family does not link its crate. All non-default.
 #
-# `nmp-nip02` is NOT here and cannot be: it is a `protocol-service` in
-# `scripts/dependency-direction-policy.json`, meaning it sits ABOVE the facade
-# and depends on `nmp` itself. An `nmp -> nmp-nip02` edge is a cyclic package
-# dependency cargo refuses to resolve, so reaching the follow service through
-# the facade needs the service's engine coupling inverted first, not a feature.
+# `nmp-nip02` is NOT here and cannot be: it sits ABOVE the facade and depends
+# on `nmp` itself. An `nmp -> nmp-nip02` edge is a cyclic package dependency
+# cargo refuses to resolve, so reaching the follow service through the facade
+# needs the service's engine coupling inverted first, not a feature.
 nip18 = ["dep:nmp-nip18"]
 nipc7 = ["dep:nmp-nipc7"]
 content = ["dep:nmp-content"]
@@ -105,8 +104,8 @@ nmp-blossom = { workspace = true, optional = true }
 # #977: the NIP-29 `Group` door. The dependency runs THIS WAY ROUND and
 # only this way round -- `Group` is pure composition over `nostr` +
 # `nmp-grammar`, and `crate::nip29`'s extension trait is what binds it to
-# the one publish door. `scripts/check-nip29-ownership.sh` fails the build
-# if `crates/nmp-nip29/Cargo.toml` ever gains the reverse edge.
+# the one publish door. `crates/nmp-nip29/Cargo.toml` must never gain the
+# reverse edge.
 nmp-nip29 = { workspace = true, optional = true }
 nmp-signer.workspace = true
 nmp-local-signer.workspace = true

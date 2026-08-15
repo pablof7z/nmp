@@ -3577,9 +3577,9 @@ mod tests {
     /// assertions, deliberately: every variant of both enums is named here,
     /// so a third `WriteRouting` or `FfiWriteRouting` variant makes this
     /// test stop COMPILING instead of quietly leaving one word unexercised.
-    /// A runtime assertion could never say that. The same cardinality is
-    /// enforced on the Swift and Kotlin surfaces, which no Rust test can
-    /// see, by `scripts/check-routing-vocabulary.sh`.
+    /// A runtime assertion could never say that. Whether the same cardinality
+    /// holds on the Swift and Kotlin surfaces is not exercised by this Rust
+    /// test and currently has no mechanical check.
     #[test]
     #[cfg(feature = "nip22")]
     fn the_routing_vocabulary_is_two_words_in_both_directions() {

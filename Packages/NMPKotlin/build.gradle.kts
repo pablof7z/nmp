@@ -15,9 +15,7 @@
 // `./gradlew build`/`./gradlew test` do NOT work straight after a clean
 // clone -- the generated bindings + native lib must be built once first via
 // scripts/build-kotlin-jvm.sh from the repo root. See README.md in this
-// directory; CI proves that exact path on every push via the
-// `kotlin-package` job in .github/workflows/ci.yml (mirroring the
-// `swift-package` job).
+// directory.
 import java.time.Duration
 
 plugins {

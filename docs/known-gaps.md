@@ -554,29 +554,16 @@ about current code:
 
 ## Process / tooling
 
-- **A step can still be redirected through `$GITHUB_ENV`/`$GITHUB_PATH` by an
-  earlier step in the same job (#1170 residue).** Every workflow now runs its
-  steps through `bash --noprofile --norc -p -eo pipefail`, so `BASH_ENV`, `$ENV`,
-  profile files, and shell functions inherited from the environment cannot
-  change what a step executes — that is the demonstrated bypass in #1170 and it
-  is closed and falsified by workflow step audits. What no shell flag reaches is the
-  runner's own inter-step channel: a step that compiles proposed-head code runs
-  that head's build scripts, and those inherit `GITHUB_ENV` and `GITHUB_PATH`
-  and can therefore rewrite `PATH` for a later step in the same job. In
-  `ci.yml`'s `test` job, `cargo clippy` precedes `cargo test`, so the vector is
-  reachable. Closing it needs a mechanism at the job boundary — a fresh runner
-  per evidence claim — not a shell flag,
-  and it is not what #1170 demonstrated.
 - **Cross-SDK parity (architecture review gate 5) has no mechanical check
   (#1637).** The invariant — an app on one platform must not silently lose an
   operation the other two have — is real and still owned by gate 5
   (`AGENTS.md`, `docs/design/architecture-review-gates.md`); the mechanism is
-  not. The previous `scripts/check-sdk-parity.sh` compared lowercase word bags
+  not. The previous SDK-parity check script compared lowercase word bags
   over whole files, including comments and string literals, and passed a
   Swift SDK reduced to one comment-only file with the entire NIP-02 follow API
   deleted. Mutation testing found it had no falsifier, so it and its
-  always-empty allowlist (`scripts/check-sdk-parity-allowlist.toml`) were
-  deleted rather than left green (#1637). Separately, its Rust-side extraction
+  always-empty allowlist file were deleted rather than left green (#1637).
+  Separately, its Rust-side extraction
   never saw declarations sitting behind a `#[cfg]`: `FfiSimpleGroupEntry`
   (`crates/nmp-ffi/src/types.rs:492`), `FfiSimpleGroupsList` (`:507`), and
   `FfiReaction` (`:730`) were invisible to it even while it ran. The

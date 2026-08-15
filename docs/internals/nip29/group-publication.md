@@ -130,10 +130,11 @@ foreign event kinds.
 The defect was declaring a FIXED content catalog when any kind can carry an
 `h` and live in a group. An app-supplied `Filter` cannot re-acquire that
 defect: the crate contributes the host pinning and the `#h` scoping, the app
-contributes the selection. The ownership gate
-(`scripts/check-nip29-ownership.sh:41`) still bans the `group_content_demand`
-identifier and the `[9,30315]` catalog by name, so any group read constructor
-lands as a deliberate gate revision, not a quiet reintroduction.
+contributes the selection. The ownership check that used to ban the
+`group_content_demand` identifier and the `[9,30315]` catalog by name is
+deleted along with the rest of the CI-era scripts; nothing now mechanically
+prevents a quiet reintroduction of the fixed-catalog defect, so this boundary
+relies on review.
 
 ## 5. Writes: the host is not derivable, so `Group` mints `Explicit` — DESIGNED
 
@@ -146,12 +147,13 @@ never writes that value and never touches `h`.
 Two consequences:
 
 - **`nmp-nip29` needs no resolver and no dependency on `nmp`.** Verified:
-  `crates/nmp-nip29/Cargo.toml` depends on exactly `nostr` + `nmp-grammar`,
-  and the ownership gate (`scripts/check-nip29-ownership.sh:30-33`) fails the
-  build if a core or mechanism dependency appears. The whole
-  dependency-direction debate from the design session dissolved on this point:
-  a crate that never computes routing from engine state has nothing to depend
-  on `nmp` for.
+  `crates/nmp-nip29/Cargo.toml` depends on exactly `nostr` + `nmp-grammar`. The
+  ownership check that used to fail the build if a core or mechanism
+  dependency appeared is deleted along with the rest of the CI-era scripts,
+  so this boundary is currently unproven by any mechanism.
+  The whole dependency-direction debate from the design session dissolved on
+  this point: a crate that never computes routing from engine state has
+  nothing to depend on `nmp` for.
 - **`h` is appended BEFORE signing.** Pablo: "obviously it needs to have the h
   tag before its signed". Contextualization operates on the unsigned draft;
   the stamp/sign step comes after. This is already how
@@ -199,8 +201,9 @@ Pablo, on where join/leave/moderation composition lives:
 > this, but the nip29 crate does!
 
 Unlike kind 9 — which NIP-29 does **not** own; C7 chat is `nmp-nipc7`'s, and
-the ownership gate enforces that boundary (`scripts/check-nip29-ownership.sh`)
-— the 9000–9021 join/leave/moderation schema genuinely IS NIP-29's own.
+the ownership check that used to enforce that boundary is deleted, so it is
+currently unproven by any mechanism — the 9000–9021 join/leave/moderation
+schema genuinely IS NIP-29's own.
 
 **Pablo ruled these IN SCOPE for this effort — not a later addition:**
 
@@ -233,8 +236,9 @@ malformed event. The knowledge exists in exactly one place or it is
 reimplemented, differently, in every consumer.
 
 The boundary that keeps this honest: these are the kinds NIP-29 *defines*. Kind
-9 chat is NOT one of them — it is `nmp-nipc7`'s, and the ownership gate
-enforces that (`scripts/check-nip29-ownership.sh`). Owning 9000–9021 does not
+9 chat is NOT one of them — it is `nmp-nipc7`'s, and the ownership check that
+used to enforce that is deleted, so this boundary is currently unproven by
+any mechanism. Owning 9000–9021 does not
 reopen the defect #838 closed, because that defect was NIP-29 claiming schema
 belonging to others.
 
@@ -252,9 +256,8 @@ belonging to others.
 
 **`contextualize_group_event` and `GroupPublication` die with this design.**
 As of `b99f9d41` they still exist (`crates/nmp-nip29/src/publication.rs:17,52`,
-exported at `crates/nmp-nip29/src/lib.rs:30`) and the ownership gate still
-*requires* `contextualize_group_event` to be present
-(`scripts/check-nip29-ownership.sh:57`). They are the build-but-cannot-deliver
+exported at `crates/nmp-nip29/src/lib.rs:30`) and the ownership check still
+*required* `contextualize_group_event` to be present. They are the build-but-cannot-deliver
 half of the old world: `contextualize_group_event` returns
 `GroupPublication { host, event }` and nothing in the workspace can route it.
 Under this design their duties move inside `Group`, the free function and the
@@ -268,9 +271,10 @@ falsifier (`draft_kind_and_schema_survive_except_for_appended_h`,
 **`GroupHostAuthority` was designed, built uncommitted, and abandoned.** For
 honesty of the record: a grammar-tier newtype
 (`WriteRouting::GroupHost(GroupHostAuthority)`, mintable only from a validated
-`GroupPublication`) was fully designed — including a revision of the gate's
-`HostAuthority|PinnedHost` ban, which still stands today at
-`scripts/check-nip29-ownership.sh:103` — on the premise that letting an app
+`GroupPublication`) was fully designed — including a revision of the
+ownership check's `HostAuthority|PinnedHost` ban, which stood until that
+check was deleted along with the rest of the CI-era scripts — on the premise
+that letting an app
 route a write to a chosen relay was a dangerous primitive to be structurally
 contained. Pablo rejected the premise outright: single-relay routing is a
 first-class, general capability ("bare. It is not only overengineering; it's
@@ -306,9 +310,9 @@ Source anchors as PR #1011 left them — historical, not current (see §11):
 - `crates/nmp-nip29/src/operations.rs:1-108` owns the typed 9000–9022
   join/leave/moderation builders. Kind:9 and `q` replies remain in
   `nmp-nipc7`, not this crate.
-- `scripts/check-nip29-ownership.sh:65-115` bans the deleted
-  `contextualize_group_event` / `GroupPublication` seam, requires both Group
-  intent constructors and their schema/no-`previous` falsifiers, and requires
+- The (now-deleted) ownership check banned the deleted
+  `contextualize_group_event` / `GroupPublication` seam, required both Group
+  intent constructors and their schema/no-`previous` falsifiers, and required
   the one read and one write doors.
 - Native projection is still read-only:
   `crates/nmp-ffi/src/nip29.rs:1-38`,
@@ -449,11 +453,12 @@ state the underlying kinds cannot establish.
 - `crates/nmp-ffi/src/nip29.rs` — `FfiRelayScope`, `FfiGroup`,
   `FfiGroupPredicate` project the full read/write API, not only
   discovery; Swift/Kotlin projection is the remaining native work.
-- `scripts/check-nip29-ownership.sh` — retargeted at this shape: requires
-  `RelayScope`, the evidence-scoped predicates, both falsifiers by name, and
-  forbids `crates/nmp-nip29/src/{group,demand}.rs`, `crates/nmp/src/group.rs`,
-  the `GroupOperations` trait, and a lower `WriteIntent` reference from
-  reappearing.
+The ownership check that used to be retargeted at this shape — requiring
+`RelayScope`, the evidence-scoped predicates, both falsifiers by name, and
+forbidding `crates/nmp-nip29/src/{group,demand}.rs`, `crates/nmp/src/group.rs`,
+the `GroupOperations` trait, and a lower `WriteIntent` reference from
+reappearing — is deleted along with the rest of the CI-era scripts; this
+shape is currently unproven by any mechanism.
 
 Deleted, no alias: `group_discovery_demand` and its `pinned_demand` helper;
 `Group::new(host, group_id)` and every single-host constructor; `Group::demand`

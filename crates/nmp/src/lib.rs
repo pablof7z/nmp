@@ -156,8 +156,7 @@ pub mod nip65;
 // behind its own non-default cargo feature for the same reason `nip22` is: one
 // owner of the values, and an app that never uses the family does not link it.
 //
-// `nip02` is deliberately absent. `nmp-nip02` depends on `nmp` -- it is a
-// `protocol-service` in `scripts/dependency-direction-policy.json`, sitting
+// `nip02` is deliberately absent. `nmp-nip02` depends on `nmp` -- sitting
 // ABOVE the facade rather than below it -- so an `nmp -> nmp-nip02` edge is a
 // cyclic package dependency cargo refuses to resolve. Reaching the follow
 // service through the facade means inverting its engine coupling first, which

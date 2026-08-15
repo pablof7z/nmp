@@ -80,10 +80,14 @@ DEVICE_TARGET=aarch64-apple-ios
 SIM_ARM_TARGET=aarch64-apple-ios-sim
 SIM_X86_TARGET=x86_64-apple-ios
 MACOS_TARGET=aarch64-apple-darwin
-DEPLOYMENT_CHECKER="$REPO_ROOT/scripts/check-macos-deployment-target.sh"
 MACOS_DEPLOYMENT_TARGET=$(
-  "$DEPLOYMENT_CHECKER" --print-deployment-target
+  sed -nE 's/^[[:space:]]*\.macOS\(\.v([0-9]+)\),?[[:space:]]*$/\1.0/p' \
+    "$SWIFT_PACKAGE_DIR/Package.swift"
 )
+if [[ -z "$MACOS_DEPLOYMENT_TARGET" ]]; then
+  echo "error: no macOS deployment target found in $SWIFT_PACKAGE_DIR/Package.swift" >&2
+  exit 1
+fi
 # Some native build scripts fingerprint CFLAGS but not MACOSX_DEPLOYMENT_TARGET.
 # Set both so cached C/C++ objects are rebuilt when the package minimum changes.
 MACOS_CFLAGS="${CFLAGS:+$CFLAGS }-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET"
