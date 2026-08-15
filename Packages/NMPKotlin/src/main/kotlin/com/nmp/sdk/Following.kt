@@ -8,8 +8,8 @@
 // own header comment says of the Rust side.
 //
 // SCOPE NOTE: Following.swift also defines `NMPFollowing`, a `@MainActor`
-// `ObservableObject` that bundles `canToggle`/`offersAnotherAttempt`/
-// `toggle()`/`performPrimaryAction()` local UI-state bookkeeping on top of
+// `ObservableObject` that bundles `canToggle`/`toggle()` local UI-state
+// bookkeeping on top of
 // the two APIs below. That class is SwiftUI-specific presentation sugar,
 // exactly the same shape as `Observable.swift`'s `NMPQuerySnapshot` and
 // `NMPDiagnosticsSnapshotObserver` -- and this codebase's established
