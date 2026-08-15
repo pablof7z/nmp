@@ -151,15 +151,25 @@ pub struct RuntimeConfig {
     pub max_publish_attempts: u64,
     #[cfg(feature = "nip65")]
     pub(crate) nip65_sources: Vec<RelayUrl>,
+    /// Operator-configured relays the router reads as neutral routing facts,
+    /// already parsed by the facade.
+    ///
+    /// Plain values rather than a prebuilt store: `RoutingFactStore` is the
+    /// engine's own type, and the facade used to have to name it purely to
+    /// pass these two lists through it (#1142 boundary cleanup).
+    pub(crate) app_relays: Vec<RelayUrl>,
+    pub(crate) fallback_relays: Vec<RelayUrl>,
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             max_auth_capabilities: DEFAULT_MAX_AUTH_CAPABILITIES,
-            max_publish_attempts: crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS,
+            max_publish_attempts: crate::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
             #[cfg(feature = "nip65")]
             nip65_sources: Vec::new(),
+            app_relays: Vec::new(),
+            fallback_relays: Vec::new(),
         }
     }
 }
@@ -200,9 +210,9 @@ impl EngineThread {
         cap: usize,
         pool_config: PoolConfig,
     ) -> Result<(Self, Handle), EngineThreadError> {
-        Self::spawn_with_routing_facts_and_runtime_config(
+        Self::spawn_with_fixture_routing_facts_and_runtime_config(
             store,
-            crate::core::RoutingFactStore::from_fixture(facts),
+            facts,
             cap,
             pool_config,
             RuntimeConfig::default(),
@@ -218,9 +228,8 @@ impl EngineThread {
         runtime_config: RuntimeConfig,
         capabilities: Vec<crate::ReplaceableMaterializerSpec>,
     ) -> Result<(Self, Handle), EngineThreadError> {
-        Self::spawn_with_routing_facts_and_runtime_config(
+        Self::spawn_with_runtime_config_and_session(
             store,
-            crate::core::RoutingFactStore::default(),
             cap,
             pool_config,
             runtime_config,
@@ -229,7 +238,56 @@ impl EngineThread {
         )
     }
 
-    pub(crate) fn spawn_with_routing_facts_and_runtime_config(
+    /// The ordinary door. Routing facts are built here, inside the engine,
+    /// from the operator relays the facade parsed — the facade never names
+    /// `RoutingFactStore`.
+    pub(crate) fn spawn_with_runtime_config_and_session(
+        store: RedbStore,
+        cap: usize,
+        pool_config: PoolConfig,
+        runtime_config: RuntimeConfig,
+        initial_session: RestoredSession,
+        capabilities: Vec<crate::ReplaceableMaterializerSpec>,
+    ) -> Result<(Self, Handle), EngineThreadError> {
+        let routing_facts = crate::core::RoutingFactStore::new(
+            runtime_config.app_relays.clone(),
+            runtime_config.fallback_relays.clone(),
+        );
+        Self::spawn_with_facts(
+            store,
+            routing_facts,
+            cap,
+            pool_config,
+            runtime_config,
+            initial_session,
+            capabilities,
+        )
+    }
+
+    /// The fixture door (#52 Q3). Takes the fixture crate's own public type
+    /// and builds the engine's store from it here, for the same reason.
+    #[cfg(feature = "unstable-mechanism")]
+    pub(crate) fn spawn_with_fixture_routing_facts_and_runtime_config(
+        store: RedbStore,
+        facts: nmp_router_testkit::FixtureRoutingFacts,
+        cap: usize,
+        pool_config: PoolConfig,
+        runtime_config: RuntimeConfig,
+        initial_session: RestoredSession,
+        capabilities: Vec<crate::ReplaceableMaterializerSpec>,
+    ) -> Result<(Self, Handle), EngineThreadError> {
+        Self::spawn_with_facts(
+            store,
+            crate::core::RoutingFactStore::from_fixture(facts),
+            cap,
+            pool_config,
+            runtime_config,
+            initial_session,
+            capabilities,
+        )
+    }
+
+    fn spawn_with_facts(
         store: RedbStore,
         routing_facts: crate::core::RoutingFactStore,
         cap: usize,

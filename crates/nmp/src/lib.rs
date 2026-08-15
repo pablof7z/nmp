@@ -189,7 +189,7 @@ pub use auth::{
     AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp, AuthPolicyPendingSender,
     AuthPolicyRequest, AuthPolicyResolveError, AuthPolicyResult,
 };
-pub use config::{EngineConfig, DEFAULT_MAX_PUBLISH_ATTEMPTS};
+pub use config::EngineConfig;
 pub use diagnostics::{
     AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry, RelayDiagnosticsSnapshot,
     StalledWrite, StalledWriteStage, StalledWriteTotals,
@@ -286,7 +286,7 @@ pub use crate::core::ReceiptId;
 pub use crate::publish_queue::{
     AuthDenialSource, NotSentReason, PublishQueueEntry, PublishQueueReadError, ReceiptResult,
     ReceiptResultError, RefuseReason, RelayState, RelayWaiting, RemoveQueueEntryError, RetryCause,
-    SigningState, WriteFact, WriteOutcome,
+    SigningState, WriteFact, WriteOutcome, DEFAULT_MAX_PUBLISH_ATTEMPTS,
 };
 pub use crate::runtime::{
     ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,

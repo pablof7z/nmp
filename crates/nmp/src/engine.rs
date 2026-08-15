@@ -57,7 +57,7 @@ use nostr::{Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 use crate::auth::{AuthPolicy, EngineAuthPolicyAdapter};
 #[cfg(feature = "nip65")]
 use crate::config::build_nip65_sources;
-use crate::config::{build_routing_facts, EngineConfig};
+use crate::config::{build_routing_fact_relays, EngineConfig};
 
 /// The feature-selected replaceable-capability built-ins the `nmp` crate owns
 /// and supplies at the [`Engine::new`] boundary per #1624. The NIP-02 follow
@@ -199,7 +199,7 @@ impl Engine {
         initial_session: crate::session::RestoredSession,
         capabilities: Vec<crate::ReplaceableMaterializerSpec>,
     ) -> Result<Self, EngineError> {
-        let routing_facts = build_routing_facts(&config)?;
+        let (app_relays, fallback_relays) = build_routing_fact_relays(&config)?;
         // #1624: capability identity is (program, format). A second spec for
         // the same pair is a construction error, not a replacement (the
         // replacement lifecycle is gone). Refuse before any engine thread
@@ -229,6 +229,8 @@ impl Engine {
             max_publish_attempts: config.max_publish_attempts,
             #[cfg(feature = "nip65")]
             nip65_sources: build_nip65_sources(&config)?,
+            app_relays,
+            fallback_relays,
         };
         let (engine_thread, handle) = match &config.store_path {
             Some(path) => {
@@ -271,9 +273,8 @@ impl Engine {
                         reason: error.to_string(),
                     },
                 })?;
-                EngineThread::spawn_with_routing_facts_and_runtime_config(
+                EngineThread::spawn_with_runtime_config_and_session(
                     store,
-                    routing_facts,
                     config.max_relays,
                     pool_config,
                     runtime_config,
@@ -287,9 +288,8 @@ impl Engine {
                     RedbStore::temporary().map_err(|error| EngineError::StoreOpenFailed {
                         reason: error.to_string(),
                     })?;
-                EngineThread::spawn_with_routing_facts_and_runtime_config(
+                EngineThread::spawn_with_runtime_config_and_session(
                     store,
-                    routing_facts,
                     config.max_relays,
                     pool_config,
                     runtime_config,
@@ -374,19 +374,21 @@ impl Engine {
     ) -> Result<Self, EngineError> {
         let runtime_config = RuntimeConfig {
             max_auth_capabilities: crate::runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
-            max_publish_attempts: crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS,
+            max_publish_attempts: crate::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
             nip65_sources,
+            ..RuntimeConfig::default()
         };
-        let (engine_thread, handle) = EngineThread::spawn_with_routing_facts_and_runtime_config(
-            store,
-            crate::core::RoutingFactStore::from_fixture(facts),
-            cap,
-            pool_config,
-            runtime_config,
-            crate::session::RestoredSession::empty(),
-            Vec::new(),
-        )
-        .map_err(EngineError::from_start_error)?;
+        let (engine_thread, handle) =
+            EngineThread::spawn_with_fixture_routing_facts_and_runtime_config(
+                store,
+                facts,
+                cap,
+                pool_config,
+                runtime_config,
+                crate::session::RestoredSession::empty(),
+                Vec::new(),
+            )
+            .map_err(EngineError::from_start_error)?;
         Ok(Self {
             inner: Mutex::new(Some(Inner {
                 handle,

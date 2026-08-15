@@ -53,6 +53,20 @@ use crate::core::ReceiptId;
 pub use nmp_store::RefuseReason;
 pub use result::{ReceiptResult, ReceiptResultError};
 
+/// Enough failures at one relay to call it: roughly a day of the capped
+/// 3s-doubling-to-300s backoff schedule, which is long enough that a relay
+/// having a bad afternoon is not abandoned and short enough that a relay
+/// that is simply gone stops holding an obligation open forever.
+///
+/// Defined here, beside the ceiling it is the default for, rather than in
+/// [`crate::config`]: the queue is what counts attempts and refuses past the
+/// ceiling, so the engine reads its own default rather than reaching up into
+/// facade configuration for it. This matches the two sibling defaults —
+/// `nmp_transport::DEFAULT_MAX_RELAYS` and
+/// [`crate::runtime::DEFAULT_MAX_AUTH_CAPABILITIES`] — which already live
+/// with their enforcers.
+pub const DEFAULT_MAX_PUBLISH_ATTEMPTS: u64 = 16;
+
 /// Which exact AUTH actor refused a write session.
 ///
 /// The distinction prevents a local policy or signer choice from being

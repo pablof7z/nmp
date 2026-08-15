@@ -20,13 +20,46 @@ use nmp_transport::{
 };
 use nostr::{ClientMessage, JsonUtil, PublicKey, RelayUrl};
 
-use crate::auth::{AuthPolicyDecision, AuthPolicyError};
 use crate::core::{
     AuthCapability, AuthCapabilityInstance, AuthEffect, AuthEpoch, AuthOpToken, AuthPolicyOutcome,
     AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, EngineMsg,
 };
 
 use super::{Cmd, SignerRegistry};
+
+/// App policy's closed semantic answer for one exact AUTH request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthPolicyDecision {
+    /// Authenticate this exact session: the reducer freezes and signs the
+    /// canonical kind:22242 template for exactly this challenge.
+    Allow,
+    /// Refuse to authenticate; the session's protected work stays parked
+    /// as `AuthDenied` evidence.
+    Deny { reason: String },
+}
+
+/// Technical policy execution failures, separate from an explicit denial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthPolicyError {
+    /// The policy could not run at all.
+    Unavailable,
+    /// The policy ran but failed for a technical reason.
+    Technical { reason: String },
+}
+
+impl std::fmt::Display for AuthPolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("AUTH policy unavailable"),
+            Self::Technical { reason } => write!(f, "AUTH policy failed: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for AuthPolicyError {}
+
+/// One policy answer: the app's semantic decision, or a technical failure.
+pub type AuthPolicyResult = Result<AuthPolicyDecision, AuthPolicyError>;
 
 /// Immutable input to one app-owned NIP-42 authorization decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
