@@ -24,8 +24,9 @@ must be one NMP-owned operation.
 
 ### 1. Submit the operation, not a rewritten event
 
-NIP-02 registers its materializer once and submits a versioned operation that
-means follow or unfollow one decoded public key. The action freezes the
+NIP-02's materializer is compiled into the engine's capability set at
+construction, and the action submits a versioned operation that means follow or
+unfollow one decoded public key. The action freezes the
 selected author before custody. It does not wait for a relay-ready base, open
 an acquisition worker, or expose source ids to the app.
 
