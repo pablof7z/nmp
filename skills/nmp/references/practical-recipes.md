@@ -76,6 +76,21 @@ let room = nip29::group(hosts, group_id)?.observe(&engine, [Metadata, Members])?
 engine.observe(group.read(contentFilter)?, None)?
 ```
 
+Remembering the selected group is a separate typed semantic write. Its host is
+event data, never a destination:
+
+```text
+let receipt = engine.addGroupToList("research", selectedHost, "Research")
+engine.removeGroupFromList("research", selectedHost)
+engine.addRelayInUse(selectedHost)
+engine.removeRelayInUse(selectedHost)
+```
+
+Each call returns the ordinary receipt, freezes the selected author, survives
+restart, and reapplies over later kind:10009 source truth. Group operations
+touch only valid exact `group` tags; relay operations touch only valid exact
+`r` tags. Unrelated ordering, malformed evidence, and content bytes survive.
+
 `group.read` takes one ordinary app-supplied `Filter` and RETURNS one
 `LiveQuery` -- `Single` for one host, `Union` of complete per-host branches for
 more -- never a per-host list the app merges itself. Hand that result straight

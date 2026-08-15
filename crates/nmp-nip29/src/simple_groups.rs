@@ -21,13 +21,11 @@
 //! observation handle, frame proof, witness, or qualified wrapper for a
 //! parser result to ride on.
 //!
-//! Write-side replacement encoding is deliberately NOT here -- #63's
-//! `rememberGroup`/`forgetGroup` mutations stay gated on #50's source-scoped
-//! base-version contract; this file is read/parse-only. When such a
-//! destructive mutation does arrive it must bind its exact observed base
-//! privately, inside that semantic operation, while constructing an ordinary
-//! opaque `WriteIntent` -- never by promoting a value from this module into a
-//! reusable observed-authority noun.
+//! Write-side replacement encoding is deliberately NOT here: this file stays
+//! a pure, engine-free reader. The app-facing typed add/remove operations live
+//! at `nmp::nip29`, where they compile private versioned operation bytes into
+//! the ordinary durable `WriteIntent` and receipt lifecycle. They never
+//! promote this observational value into a reusable authority noun.
 
 use nostr::{Event, RelayUrl};
 

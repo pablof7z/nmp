@@ -189,13 +189,15 @@ pub struct NmpEngine {
     pub(crate) engine: Arc<nmp::Engine>,
     #[cfg(feature = "nip02")]
     follow_writes: nmp_nip02::FollowWrites,
+    #[cfg(feature = "nip29")]
+    pub(crate) group_list_writes: nmp::nip29::GroupListWrites,
     #[cfg(feature = "nip65")]
-    automatic_routing: AutomaticRoutingAssembly,
+    pub(crate) automatic_routing: AutomaticRoutingAssembly,
 }
 
 #[cfg(feature = "nip65")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AutomaticRoutingAssembly {
+pub(crate) enum AutomaticRoutingAssembly {
     Unavailable,
     Nip65,
 }
@@ -291,10 +293,14 @@ impl NmpEngine {
         });
         #[cfg(feature = "nip02")]
         let follow_writes = nmp_nip02::register_follow_writes(&engine)?;
+        #[cfg(feature = "nip29")]
+        let group_list_writes = nmp::nip29::register_group_list_writes(&engine)?;
         Ok(Arc::new(Self {
             engine,
             #[cfg(feature = "nip02")]
             follow_writes,
+            #[cfg(feature = "nip29")]
+            group_list_writes,
             #[cfg(feature = "nip65")]
             automatic_routing,
         }))
