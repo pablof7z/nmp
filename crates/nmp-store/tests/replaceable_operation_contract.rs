@@ -53,7 +53,6 @@ fn bodyless_accept(
             .map(|generation| generation.materialization.materialization_id),
         starting_source: starting_source(),
         source: source(),
-        source_policy: nmp_store::SemanticSourcePolicy::Continuing,
         source_event: None,
         plan: SemanticPlan::new(1, vec![byte]).unwrap(),
         materialized: None,

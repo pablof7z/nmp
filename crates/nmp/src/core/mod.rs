@@ -68,7 +68,8 @@ mod request_effects;
 #[cfg(test)]
 mod request_replacement_transition_tests;
 mod semantic_delivery;
-mod semantic_sources;
+#[cfg(test)]
+mod semantic_settlement_falsifier_tests;
 #[cfg(test)]
 mod transport_tests;
 mod write;
@@ -2270,18 +2271,31 @@ pub struct EngineCore {
     /// evidence, this survives EOSE because EOSE settles a request without
     /// closing its subscription.
     live_wire_requests: HashMap<(RelaySessionKey, SubId), LiveWireRequest>,
-    /// Hidden ordinary live-query owners for unfinished finite semantic
-    /// source members. The observation id is the exact bridge from router
-    /// request evidence back to the durable source round.
-    semantic_source_observations: HashMap<ObservationId, semantic_sources::SemanticSourceOwner>,
-    /// Only requests whose accepted handoff was observed by a hidden source
-    /// owner enter this index. Inbound EVENT attribution must match this
-    /// exact session/subscription before it may advance a finite resource.
-    semantic_source_requests:
-        HashMap<(RelaySessionKey, SubId), semantic_sources::OwnedSemanticSourceRequest>,
-    /// Observation ids retired while the current reducer turn is still
-    /// draining their synchronous withdrawal effects.
-    semantic_source_retired_observations: BTreeSet<ObservationId>,
+    /// The ordinary coordinate observations this reducer opened on behalf of
+    /// semantic publish lanes, because nothing already covered the relay's
+    /// current value for the coordinate (#1630/#1631).
+    ///
+    /// A delta generation must not be sent to a relay before that relay's
+    /// current value for the coordinate is known, or it can overwrite a
+    /// newer list only that relay holds. An observation stays open for as
+    /// long as its receipt has work left on that relay, so a successor
+    /// generation on the same lane reuses the same evidence instead of
+    /// asking again — and so nothing leaks it, since no app subscription
+    /// would ever withdraw it.
+    ///
+    /// Process-local by construction: nothing here is persisted and no
+    /// verdict is cached. A restart simply repeats the ordinary check.
+    semantic_publish_coverage: BTreeMap<(ReceiptId, RelayUrl), ObservationId>,
+    /// The semantic publish lanes currently waiting on that answer.
+    ///
+    /// Separate from the observations because the two sets differ in both
+    /// directions: a lane can wait on a request the app already owns
+    /// (nothing opened), and a lane that has been answered keeps its
+    /// observation while it is no longer waiting.
+    semantic_publish_coverage_parked: BTreeSet<(ReceiptId, RelayUrl)>,
+    /// Coverage observations retired while the current reducer turn is
+    /// still draining their synchronous withdrawal effects.
+    retired_coverage_observations: BTreeSet<ObservationId>,
     pending_request_claim_transfers:
         BTreeMap<(RelaySessionKey, SubId), PendingRequestClaimTransfer>,
     /// EngineCore's memory of the exact connection generation and SESSION
@@ -2704,9 +2718,9 @@ impl EngineCore {
             active_request_evidence: HashMap::new(),
             active_request_revisions_by_sub: HashMap::new(),
             live_wire_requests: HashMap::new(),
-            semantic_source_observations: HashMap::new(),
-            semantic_source_requests: HashMap::new(),
-            semantic_source_retired_observations: BTreeSet::new(),
+            semantic_publish_coverage: BTreeMap::new(),
+            semantic_publish_coverage_parked: BTreeSet::new(),
+            retired_coverage_observations: BTreeSet::new(),
             pending_request_claim_transfers: BTreeMap::new(),
             slot_to_relay: HashMap::new(),
             connected_relays: BTreeSet::new(),
@@ -3662,7 +3676,7 @@ impl EngineCore {
         // runtime immediately drives a fresh Tick instead of either spinning
         // on the failed transition or suppressing retry forever.
         self.retry_scheduler_blocked = false;
-        let mut effects = match msg {
+        let effects = match msg {
             EngineMsg::Subscribe(query) => self.on_subscribe(query),
             EngineMsg::FlushWireAdmission(now) => self.flush_wire_admission(now),
             EngineMsg::Unsubscribe(id) => self.on_unsubscribe(id),
@@ -3732,12 +3746,24 @@ impl EngineCore {
             }
             EngineMsg::Tick(now) => self.tick(now),
         };
-        // Hidden finite-source queries use the exact same resolver/router
-        // effects as an app query, but their rows and request evidence belong
-        // to the write intent. Consume only those private observation effects
-        // here and leave every ordinary observation untouched.
-        effects = self.consume_semantic_source_effects(effects);
-
+        // A semantic publish lane parked on the ordinary query owner's
+        // answer for its coordinate is waiting on a READ terminal, and
+        // every one of the write plane's own scheduling beats is driven by
+        // a write-plane fact. Without this, the relay that answers the
+        // question would never wake the lane that asked it. The guard is
+        // the question itself: with nothing parked there is nothing to
+        // re-ask, so an ordinary turn pays one map emptiness check.
+        let mut effects = effects;
+        if self.has_parked_coordinate_coverage() {
+            let ready = self.schedule_ready(self.clock);
+            effects.extend(ready);
+        }
+        // The coordinate-coverage observations the publish gate opens use
+        // the ordinary resolver/router path, but no app mailbox owns them:
+        // their rows and evidence belong to the write plane. Drop only those
+        // private delivery effects and leave every ordinary observation
+        // untouched.
+        let mut effects = self.consume_coverage_observation_effects(effects);
         // A write-plane transition can start or end a STALL, and the
         // stalled-write section lives on this same snapshot (#756). Without
         // this, that section would only ever be pushed by unrelated

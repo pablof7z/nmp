@@ -845,7 +845,11 @@ pub(crate) fn encode_receipt(record: &PublishQueueReceiptRecord) -> Vec<u8> {
                         }
                     }
                 }
-                crate::ReplaceableOperationReceiptState::Settled => encoder.u8(4),
+                crate::ReplaceableOperationReceiptState::Settled { materialization } => {
+                    encoder.u8(4);
+                    encoder.u64(materialization.materialization_id.0);
+                    encoder.fixed(materialization.event_id.as_bytes());
+                }
                 crate::ReplaceableOperationReceiptState::Resolved => encoder.u8(1),
                 crate::ReplaceableOperationReceiptState::Cancelled => encoder.u8(2),
                 crate::ReplaceableOperationReceiptState::Refused(reason) => {
@@ -943,7 +947,12 @@ pub(crate) fn decode_receipt(
                 3 => crate::ReplaceableOperationReceiptState::Refused(
                     decoder.text(MAX_TEXT_BYTES, "operation refusal")?,
                 ),
-                4 => crate::ReplaceableOperationReceiptState::Settled,
+                4 => crate::ReplaceableOperationReceiptState::Settled {
+                    materialization: crate::MaterializationRef {
+                        materialization_id: crate::MaterializationId(decoder.u64()?),
+                        event_id: decoder.event_id()?,
+                    },
+                },
                 other => {
                     return Err(PublishQueueCodecError::InvalidTag(
                         "operation receipt state",

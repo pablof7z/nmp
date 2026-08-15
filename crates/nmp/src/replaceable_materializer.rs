@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nmp_grammar::{EventBuilder, ReplaceableOperationError, ReplaceableSourcePolicy, WritePayload};
+use nmp_grammar::{EventBuilder, ReplaceableOperationError, WritePayload};
 use nostr::nips::nip01::Coordinate;
 use nostr::{Kind, UnsignedEvent};
 
@@ -59,8 +59,7 @@ pub(crate) struct ReplaceableMaterializerRegistration {
 }
 
 /// Constructor for the ordinary write payload bound to one compiled
-/// program/format. The caller chooses the closed source lifetime policy; the
-/// engine owns its execution.
+/// program/format. The engine owns its execution.
 ///
 /// This handle names only the compiled capability identity supplied before
 /// engine construction. Publishing its payload through an engine that does
@@ -75,7 +74,6 @@ impl RegisteredReplaceableMaterializer {
     pub fn operation(
         &self,
         current: &Row,
-        source_policy: ReplaceableSourcePolicy,
         operation: Vec<u8>,
     ) -> Result<WritePayload, ReplaceableOperationError> {
         current
@@ -87,7 +85,6 @@ impl RegisteredReplaceableMaterializer {
             self.format,
             current.body.clone(),
             current.body.clone(),
-            source_policy,
             operation,
         )
         .map(WritePayload::ReplaceableOperation)
@@ -102,7 +99,6 @@ impl RegisteredReplaceableMaterializer {
         &self,
         kind: Kind,
         identifier: String,
-        source_policy: ReplaceableSourcePolicy,
         operation: Vec<u8>,
     ) -> Result<WritePayload, ReplaceableOperationError> {
         nmp_grammar::ReplaceableOperation::from_registered_default_parts(
@@ -110,7 +106,6 @@ impl RegisteredReplaceableMaterializer {
             self.format,
             kind,
             identifier,
-            source_policy,
             operation,
         )
         .map(WritePayload::ReplaceableOperation)

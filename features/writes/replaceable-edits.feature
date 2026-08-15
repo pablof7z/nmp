@@ -179,7 +179,7 @@ Feature: A replaceable edit says which version it replaces, and is checked again
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-018
   # nmp:status=built
-  # nmp:evidence=rust:nmp::shared_second_generation_is_once_per_relay_and_replays_without_settling
+  # nmp:evidence=rust:nmp::shared_second_generation_is_once_per_relay_and_replays_while_a_destination_is_down
   # nmp:falsifier=Suppress the physical owner's E2 Signing(Signed) receipt fact while leaving E2 delivery intact; the original contributing receipt no longer observes the shared generation signature.
   Scenario: Shared operation receipts observe one physical generation delivery
     Given Alice and Bob have distinct operation receipts sharing current generation E2
@@ -190,37 +190,26 @@ Feature: A replaceable edit says which version it replaces, and is checked again
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-019
   # nmp:status=built
-  # nmp:evidence=rust:nmp::relay_source_successors_resume_current_delivery_and_remain_continuing_after_restart
+  # nmp:evidence=rust:nmp::relay_source_successors_resume_current_delivery_and_stay_open_after_restart
   # nmp:falsifier=Treat a relay replay of terminal E2 as a new semantic source after restart; it supersedes signed E3 before E3 reaches every existing destination.
-  Scenario: Destination completion does not close a continuing semantic operation
-    Given every destination for the current semantic generation is terminal
-    When its deliberately continuing source policy remains active
+  Scenario: An unreachable destination keeps a semantic operation open
+    Given one routed destination for the current semantic generation is unreachable
+    When every other destination becomes terminal
     Then each operation receipt remains open with event-qualified terminal relay evidence
     And a later qualified source may still create one successor generation
     And no terminal receipt is resurrected
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-021
   # nmp:status=built
-  # nmp:evidence=rust:nmp::finite_sources_are_exact_requests_restart_unfinished_and_close_with_destinations
-  # nmp:falsifier=Stop consuming the retired hidden source observation's evidence; its private Withdrawn fact leaks from the exact two-relay test instead of preserving only the outward wire close.
-  Scenario: A finite semantic operation closes after every owned source and destination is terminal
-    Given relay 1 and relay 2 each own one exact finite source request
-    And relay 1 has settled while relay 2 remains unfinished
-    When a qualified successor arrives through relay 2's active owned request
-    And NMP restarts before relay 2 settles
-    Then only relay 2's unfinished source request is reopened
-    And stale or unrelated request evidence cannot settle or resurrect the source round
-    And after relay 2 and every current destination become terminal the operation cohort settles atomically
-
-  # nmp:id=WRITES-REPLACEABLE-EDIT-023
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::finite_source_policy_reuses_advanced_round_and_refuses_every_policy_change
-  # nmp:falsifier=Rebuild a fresh finite round when the second operation declares the same relay/access set; the already-open request becomes pending again and can be reopened or settled twice.
-  Scenario: Later operations reuse the exact finite source round
-    Given a semantic resource has a finite source round with one request already open
-    When another operation declares the same relay and access set over the current pending generation
-    Then acceptance keeps the original round identity and request evidence
-    And changing the source lifetime, relay set, or access is refused before custody
+  # nmp:evidence=rust:nmp::a_delivered_semantic_write_settles_its_receipt
+  # nmp:falsifier=Refuse the cohort close while every routed lane is terminal; the delivered follow's receipt never reports Settled and its durable semantic state survives.
+  @acceptance
+  Scenario: A semantic operation settles once routing is closed and every lane is terminal
+    Given a follow is routed to its destinations
+    When every lane of the current generation becomes terminal
+    Then every contributing operation receipt settles atomically
+    And the durable semantic resource and its replay program are removed
+    And a later unrelated list does not recreate the action
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-020
   # nmp:status=built

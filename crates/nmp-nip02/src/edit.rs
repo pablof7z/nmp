@@ -1,7 +1,7 @@
 use nmp::{
     EventBuilder, Identity, RegisteredReplaceableMaterializer, ReplaceableMaterializer,
     ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec,
-    ReplaceableSourcePolicy, Row, WriteIntent, WriteRouting,
+    Row, WriteIntent, WriteRouting,
 };
 use nostr::{Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
@@ -60,7 +60,6 @@ impl FollowWrites {
             .first_value_operation(
                 Kind::ContactList,
                 String::new(),
-                ReplaceableSourcePolicy::Continuing,
                 encode_follow_operation(target, change),
             )
             .map_err(|_| ())?;
