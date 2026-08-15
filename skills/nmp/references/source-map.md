@@ -186,8 +186,6 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `scripts/build-kotlin-jvm.sh`
 - Source: `scripts/dependency-direction-policy.json`
 - Source: `scripts/check-nip29-ownership.sh`
-- Source: `scripts/check-sdk-parity.sh`
-- Source: `scripts/check-sdk-parity-allowlist.toml`
 - Source: `.github/workflows/architecture-gates.yml`
 - Source: `.github/workflows/android-emulator.yml`
 - Source: `.github/workflows/macos-qualification.yml`
