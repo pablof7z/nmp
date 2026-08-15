@@ -59,6 +59,10 @@ mod diagnostics_delivery;
 mod engine_thread;
 mod fifo_channel;
 mod history_mailbox;
+// The NIP-65 route-source glue. Private and `pub(crate)` throughout: a `pub`
+// item here would be re-exported by `mechanism::runtime`'s glob.
+#[cfg(feature = "nip65")]
+mod nip65;
 mod pool_bridge;
 mod receipt_stream;
 mod request_wire;
@@ -79,6 +83,8 @@ pub use auth::{
 };
 
 use std::cell::RefCell;
+#[cfg(any(test, feature = "nip65"))]
+use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -107,6 +113,8 @@ use nmp_transport::{
 #[cfg(test)]
 use nmp_transport::{PoolConfig, PoolEvent};
 
+#[cfg(feature = "nip65")]
+use crate::core::AuthorRouteReplacement;
 #[doc(hidden)]
 pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
@@ -841,6 +849,12 @@ fn duration_until(deadline: Timestamp, now: Timestamp) -> Duration {
 #[cfg(test)]
 mod pool_bridge_tests;
 
+// Moved here with the wiring they exercise: these drive a real `EngineCore`
+// through the route source and the loop's own reroot/apply path, which is no
+// longer reachable from the facade module.
+#[cfg(all(test, feature = "nip65"))]
+mod nip65_tests;
+
 #[cfg(test)]
 // The closed-surface falsifier scans this module's code lines for the token
 // `relays:`. Assigning the cap after `Default` keeps a pool fixture from
@@ -978,7 +992,7 @@ mod relay_worker_reconciliation_tests {
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
         #[cfg(feature = "nip65")]
-        let nip65 = RefCell::new(crate::nip65::RuntimeAssembly::new([]));
+        let nip65 = RefCell::new(nip65::RuntimeAssembly::new([]));
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
@@ -1148,7 +1162,7 @@ mod relay_worker_reconciliation_tests {
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
         #[cfg(feature = "nip65")]
-        let nip65 = RefCell::new(crate::nip65::RuntimeAssembly::new([]));
+        let nip65 = RefCell::new(nip65::RuntimeAssembly::new([]));
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
@@ -1279,7 +1293,7 @@ mod relay_worker_reconciliation_tests {
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
         #[cfg(feature = "nip65")]
-        let nip65 = RefCell::new(crate::nip65::RuntimeAssembly::new([]));
+        let nip65 = RefCell::new(nip65::RuntimeAssembly::new([]));
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
@@ -1426,7 +1440,7 @@ mod relay_worker_reconciliation_tests {
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
         #[cfg(feature = "nip65")]
-        let nip65 = RefCell::new(crate::nip65::RuntimeAssembly::new([]));
+        let nip65 = RefCell::new(nip65::RuntimeAssembly::new([]));
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
@@ -1821,7 +1835,7 @@ struct DispatchRuntime<'a> {
     auth_tasks: &'a RefCell<auth::AuthTaskRegistry>,
     receipt_deliveries: &'a RefCell<ReceiptDeliveryRegistry>,
     #[cfg(feature = "nip65")]
-    nip65: &'a RefCell<crate::nip65::RuntimeAssembly>,
+    nip65: &'a RefCell<nip65::RuntimeAssembly>,
 }
 
 #[derive(Default)]
@@ -2159,7 +2173,7 @@ fn engine_loop(
     let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
     let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
     #[cfg(feature = "nip65")]
-    let nip65 = RefCell::new(crate::nip65::RuntimeAssembly::new(nip65_sources));
+    let nip65 = RefCell::new(nip65::RuntimeAssembly::new(nip65_sources));
     let mut active_sign_events = sign_event::ActiveSignEvents::default();
     let mut next_replaceable_materialization_id = 1u64;
     let mut pending_replaceable_materializations: HashMap<u64, PendingReplaceableMaterialization> =
@@ -4170,6 +4184,66 @@ fn dispatch_effects(
     runtime.receipt_deliveries.borrow_mut().finish_batch(core);
 }
 
+/// Re-root the NIP-65 route source onto the authors the reducer now needs.
+///
+/// The LOOP owns every reducer call here. `open_observation` is the same door
+/// `Cmd::Subscribe` uses and it RETURNS the id, so nothing reconstructs a
+/// handle by scanning emitted effects. The route source is told which id it
+/// was given; it can never mint one.
+#[cfg(feature = "nip65")]
+fn nip65_reroot(
+    core: &mut EngineCore,
+    route_source: &mut nip65::RuntimeAssembly,
+    needs: BTreeSet<PublicKey>,
+) -> Vec<Effect> {
+    let reroot = route_source.reroot(needs);
+    if matches!(reroot, nip65::Reroot::Unchanged) {
+        return Vec::new();
+    }
+    // Both remaining outcomes close the current observation. Only `Reopened`
+    // opens a replacement -- which is why `Reroot` is not an `Option`.
+    let mut effects = Vec::new();
+    if let Some(handle) = route_source.unbind() {
+        effects.extend(core.handle(EngineMsg::Unsubscribe(handle)));
+    }
+    let nip65::Reroot::Reopened(query) = reroot else {
+        return effects;
+    };
+    let now = core.clock();
+    match core.open_observation(query, now) {
+        ObservationOpen::Opened {
+            id,
+            seed,
+            effects: opened,
+        } => {
+            route_source.bind(id);
+            effects.extend(opened);
+            effects.push(Effect::EmitRows(id, seed.deltas, seed.evidence));
+        }
+        // A refused route-source query leaves the source unbound, exactly as
+        // the previous path did when no handle could be found.
+        ObservationOpen::Refused {
+            effects: refused, ..
+        } => effects.extend(refused),
+    }
+    effects
+}
+
+/// Apply the route source's neutral replacements through the one author-route
+/// writer. `AuthorRouteReplacement` never leaves this crate's reducer.
+#[cfg(feature = "nip65")]
+fn nip65_apply(core: &mut EngineCore, updates: Vec<nip65::AuthorRouteUpdate>) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    for update in updates {
+        let replacement = match update.routes {
+            Some(routes) => AuthorRouteReplacement::Present(routes),
+            None => AuthorRouteReplacement::Absent,
+        };
+        core.replace_author_routes(update.author, replacement, &mut effects);
+    }
+    effects
+}
+
 // Deliberately mirrors `dispatch_effects`; each destination remains explicit
 // at the one-effect boundary where its ownership is audited.
 #[allow(clippy::too_many_arguments)]
@@ -4190,7 +4264,7 @@ fn dispatch_effect(
         Effect::AuthorRouteNeedsChanged(needs) => {
             #[cfg(feature = "nip65")]
             {
-                let followups = { runtime.nip65.borrow_mut().sync(core, needs) };
+                let followups = { nip65_reroot(core, &mut runtime.nip65.borrow_mut(), needs) };
                 dispatch_effects(
                     core,
                     followups,
@@ -4421,9 +4495,15 @@ fn dispatch_effect(
         }
         Effect::EmitRows(id, rows, evidence) => {
             #[cfg(feature = "nip65")]
-            let nip65_followups = { runtime.nip65.borrow_mut().consume_rows(core, id, &rows) };
+            let nip65_updates = {
+                let mut route_source = runtime.nip65.borrow_mut();
+                route_source
+                    .owns(id)
+                    .then(|| route_source.observe_rows(&rows))
+            };
             #[cfg(feature = "nip65")]
-            if let Some(followups) = nip65_followups {
+            if let Some(updates) = nip65_updates {
+                let followups = nip65_apply(core, updates);
                 dispatch_effects(
                     core,
                     followups,
@@ -4442,14 +4522,15 @@ fn dispatch_effect(
         }
         Effect::EmitObservationEvidence(id, evidence) => {
             #[cfg(feature = "nip65")]
-            let nip65_followups = {
-                runtime
-                    .nip65
-                    .borrow_mut()
-                    .consume_evidence(core, id, &evidence)
+            let nip65_updates = {
+                let mut route_source = runtime.nip65.borrow_mut();
+                route_source
+                    .owns(id)
+                    .then(|| route_source.observe_evidence(&evidence))
             };
             #[cfg(feature = "nip65")]
-            if let Some(followups) = nip65_followups {
+            if let Some(updates) = nip65_updates {
+                let followups = nip65_apply(core, updates);
                 dispatch_effects(
                     core,
                     followups,

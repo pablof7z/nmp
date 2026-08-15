@@ -3573,6 +3573,14 @@ impl EngineCore {
         self.clock = now;
     }
 
+    /// The reducer's own current wall truth. Effect dispatch opens the NIP-65
+    /// route-source observation with this rather than re-reading a clock the
+    /// reducer has not seen yet -- the same value [`Self::on_subscribe`] uses
+    /// for an app subscription.
+    pub(crate) fn clock(&self) -> Timestamp {
+        self.clock
+    }
+
     /// The earliest wall-clock instant at which [`Self::tick`] must run for
     /// something to actually happen (retraction-and-negative-deltas.md
     /// §3.2): the min over every deadline source this reducer currently
