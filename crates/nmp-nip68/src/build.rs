@@ -44,7 +44,7 @@ pub struct PictureSpec {
 }
 
 /// [`build_picture`]'s failure modes. Exhaustive; every variant is constructed
-/// by a test (Reachability Gate).
+/// by a test, so none is dead surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PictureBuildError {
     /// The spec had zero images -- a kind:20 picture with no image artifact is

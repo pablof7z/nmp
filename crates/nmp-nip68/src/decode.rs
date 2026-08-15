@@ -47,7 +47,7 @@ pub struct DecodedImage {
 }
 
 /// A tolerant-decode observation. Exhaustive; every variant is constructed by a
-/// test (Reachability Gate). Diagnostics are RECORDED, never a hard error -- a
+/// test, so none is dead surface. Diagnostics are RECORDED, never a hard error -- a
 /// consumer inspects them to decide how much of a decoded picture to trust.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PictureDiagnostic {

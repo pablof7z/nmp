@@ -9,7 +9,6 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `docs/VISION.md`
 - Source: `docs/known-gaps.md`
 - Source: `docs/bug-class-ledger.md`
-- Source: `docs/design/architecture-review-gates.md`
 - Source: `docs/design/native-task-executor.md`
 - Source: `docs/internals/conventions/bech32-boundary.md`
 - Source: `docs/internals/conventions/no-backwards-compatibility.md`

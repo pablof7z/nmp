@@ -638,8 +638,8 @@ impl From<nmp::EngineError> for FfiError {
             // list with unique (program, format) pairs and exposes no
             // capability input, so a duplicate pair can only arise from a
             // direct Rust `Engine::new_with_capabilities` call. Map to the
-            // generic start-failed error rather than adding an unreachable
-            // typed FFI variant (Reachability Gate).
+            // generic start-failed error rather than adding a typed FFI
+            // variant nothing on the FFI path could ever construct.
             nmp::EngineError::DuplicateReplaceableCapability { program, format } => {
                 Self::EngineStartFailed {
                     component: "replaceable capability".to_string(),
@@ -3882,9 +3882,9 @@ mod tests {
 
     /// A real signed event (`EventBuilder::sign_with_keys`), rendered field-
     /// for-field into a `FfiWritePayload::Signed` the same way an app would
-    /// after receiving one from an external signer provider.
-    /// Reachability Gate for [`FfiError::ReplaceableEditHasNoWireForm`],
-    /// and the falsifier for #951's payload axis: the projection door is
+    /// after receiving one from an external signer provider. Proves
+    /// [`FfiError::ReplaceableEditHasNoWireForm`] is reachable, not dead
+    /// surface, and is the falsifier for #951's payload axis: the projection door is
     /// TOTAL, so the one payload shape with no wire form comes back as a
     /// value instead of panicking on an exported path. A CAS-guarded
     /// replacement crosses this boundary only inside the semantic method
