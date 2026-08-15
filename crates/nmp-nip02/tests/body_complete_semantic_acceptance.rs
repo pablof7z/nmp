@@ -275,9 +275,10 @@ fn invalidated_registration_and_materializer_refusal_leave_no_custody() {
     assert!(
         matches!(
             set_following(&missing, &stale, alice, FollowChange::Follow),
-            Err(FollowActionFailure::ReceiptUnavailable)
+            Err(FollowActionFailure::PublishRefused { .. })
         ),
-        "an unconfigured NIP-02 capability is refused before custody"
+        "an unconfigured NIP-02 capability is refused before custody, \
+         with the engine's own real refusal reason -- not a follow-only fiction"
     );
     assert!(missing
         .publish_queue(None, 10)

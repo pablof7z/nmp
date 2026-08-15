@@ -30,9 +30,7 @@ use crate::convert::{
 #[cfg(test)]
 use crate::convert::{FfiRequestRowsError, FfiRowPullError};
 #[cfg(feature = "nip02")]
-use crate::nip02::{
-    failure_to_ffi, FfiFollowActionFailure, NmpFollowActionStream, NmpFollowStream,
-};
+use crate::nip02::{FfiFollowActionError, NmpFollowStream};
 use crate::session::{
     FfiPrivateKey, FfiPublicKey, FfiSessionAccount, FfiSessionPayload, FfiSessionSnapshot,
 };
@@ -44,29 +42,23 @@ use crate::types::{
 };
 use nmp::ReceiptReattachment;
 
-/// Submit a follow/unfollow operation and expose its ordinary receipt facts.
-/// An unparseable target yields a one-shot `Failed(InvalidTarget)` fact. A
-/// valid target enters semantic-write custody synchronously; no action task,
-/// acquisition worker, retry owner, or drain thread exists at this boundary.
+/// Parse a caller-supplied hex target and refuse before ordinary receipt
+/// custody when it does not decode -- the one refusal this boundary adds to
+/// [`nmp_nip02::set_following`], which the Rust-native API never has to name
+/// because its `target` is already a typed [`nmp::PublicKey`].
 #[cfg(feature = "nip02")]
-fn start_following_action(
-    engine: Arc<nmp::Engine>,
-    writes: nmp_nip02::FollowWrites,
-    target: String,
-    change: nmp_nip02::FollowChange,
-) -> Arc<NmpFollowActionStream> {
-    let target = match parse_pubkey(&target) {
-        Ok(target) => target,
-        Err(_) => {
-            return NmpFollowActionStream::one_shot_failure(FfiFollowActionFailure::InvalidTarget {
-                got: target,
-            })
-        }
-    };
-    match nmp_nip02::set_following(&engine, &writes, target, change) {
-        Ok(receipt) => NmpFollowActionStream::from_receipt(receipt),
-        Err(failure) => NmpFollowActionStream::one_shot_failure(failure_to_ffi(failure)),
+fn parse_follow_target(target: &str) -> Result<nmp::PublicKey, FfiFollowActionError> {
+    parse_pubkey(target).map_err(|_| FfiFollowActionError::InvalidTarget {
+        got: target.to_string(),
+    })
+}
+
+#[cfg(feature = "nip02")]
+fn require_follow_routing(engine: &NmpEngine) -> Result<(), FfiFollowActionError> {
+    if engine.automatic_routing == AutomaticRoutingAssembly::Unavailable {
+        return Err(FfiFollowActionError::AutomaticRoutingUnavailable);
     }
+    Ok(())
 }
 
 /// Construction config for [`NmpEngine::new`]. Build-time feature selection
@@ -604,31 +596,34 @@ impl NmpEngine {
         Ok(NmpFollowStream::new(observation))
     }
 
-    /// Ask NMP to follow `target`. This is the complete NIP-02 action.
-    pub fn follow(&self, target: String) -> Result<Arc<NmpFollowActionStream>, FfiError> {
-        if self.automatic_routing == AutomaticRoutingAssembly::Unavailable {
-            return Err(FfiError::AutomaticRoutingUnavailable);
-        }
-        Ok(start_following_action(
-            self.engine.clone(),
-            self.follow_writes,
+    /// Ask NMP to follow `target` through the ordinary durable write and
+    /// receipt lifecycle. This is the complete NIP-02 action: either a
+    /// truthful immediate refusal, or the same [`NmpReceiptStream`] every
+    /// other write returns.
+    pub fn follow(&self, target: String) -> Result<Arc<NmpReceiptStream>, FfiFollowActionError> {
+        require_follow_routing(self)?;
+        let target = parse_follow_target(&target)?;
+        let receipt = nmp_nip02::set_following(
+            &self.engine,
+            &self.follow_writes,
             target,
             nmp_nip02::FollowChange::Follow,
-        ))
+        )?;
+        Ok(NmpReceiptStream::new(self.engine.clone(), receipt))
     }
 
     /// The inverse of [`Self::follow`], with the same durable operation and
     /// ordinary receipt guarantees.
-    pub fn unfollow(&self, target: String) -> Result<Arc<NmpFollowActionStream>, FfiError> {
-        if self.automatic_routing == AutomaticRoutingAssembly::Unavailable {
-            return Err(FfiError::AutomaticRoutingUnavailable);
-        }
-        Ok(start_following_action(
-            self.engine.clone(),
-            self.follow_writes,
+    pub fn unfollow(&self, target: String) -> Result<Arc<NmpReceiptStream>, FfiFollowActionError> {
+        require_follow_routing(self)?;
+        let target = parse_follow_target(&target)?;
+        let receipt = nmp_nip02::set_following(
+            &self.engine,
+            &self.follow_writes,
             target,
             nmp_nip02::FollowChange::Unfollow,
-        ))
+        )?;
+        Ok(NmpReceiptStream::new(self.engine.clone(), receipt))
     }
 }
 

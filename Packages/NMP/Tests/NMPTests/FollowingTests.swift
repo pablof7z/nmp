@@ -20,31 +20,35 @@ final class FollowingTests: XCTestCase {
         XCTAssertNil(snapshot.baseEventID)
     }
 
-    func testFollowIsAnNMPActionWithTypedSignedOutFailure() async throws {
+    /// #1640: a signed-out follow is a truthful immediate refusal -- there is
+    /// no receipt, and therefore no stream, to observe it through.
+    func testSignedOutFollowRefusesBeforeReceiptCustody() throws {
         let engine = try NMPEngine(config: Self.config)
         defer { engine.shutdown() }
 
-        let action = try engine.follow(Self.target)
-        let statuses = await Self.firstStatuses(from: action, count: 1)
-
-        XCTAssertEqual(statuses, [.failed(.signedOut)])
+        XCTAssertThrowsError(try engine.follow(Self.target)) { error in
+            XCTAssertEqual(error as? FollowActionError, .signedOut)
+        }
     }
 
-    func testInvalidTargetIsTypedActionStateNotANativeException() async throws {
+    /// #1640: an unparseable target refuses synchronously, exactly like every
+    /// other pre-custody refusal -- there is no separate typed-action-state
+    /// channel for it to hide in.
+    func testInvalidTargetRefusesBeforeReceiptCustody() throws {
         let engine = try NMPEngine(config: Self.config)
         defer { engine.shutdown() }
 
-        let action = try engine.follow("not-a-pubkey")
-        let statuses = await Self.firstStatuses(from: action, count: 1)
-        XCTAssertEqual(statuses, [.failed(.invalidTarget("not-a-pubkey"))])
+        XCTAssertThrowsError(try engine.follow("not-a-pubkey")) { error in
+            XCTAssertEqual(error as? FollowActionError, .invalidTarget(got: "not-a-pubkey"))
+        }
     }
 
-    func testProviderlessFollowRefusesBeforeAnActionStreamExists() throws {
+    func testProviderlessFollowRefusesBeforeReceiptCustody() throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
 
         XCTAssertThrowsError(try engine.follow(Self.target)) { error in
-            XCTAssertEqual(error as? NMPError, .automaticRoutingUnavailable)
+            XCTAssertEqual(error as? FollowActionError, .automaticRoutingUnavailable)
         }
     }
 
@@ -62,33 +66,6 @@ final class FollowingTests: XCTestCase {
             }
             let result = await group.next() ?? nil
             observation.cancel()
-            group.cancelAll()
-            return result
-        }
-    }
-
-    private static func firstStatuses(
-        from action: NMPFollowAction,
-        count: Int
-    ) async -> [NMPFollowActionStatus] {
-        await withTaskGroup(of: [NMPFollowActionStatus].self) { group in
-            group.addTask {
-                var result: [NMPFollowActionStatus] = []
-                do {
-                    for try await status in action {
-                        result.append(status)
-                        if result.count == count { break }
-                    }
-                } catch {
-                    // Action stream ended abnormally; return what arrived.
-                }
-                return result
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                return []
-            }
-            let result = await group.next() ?? []
             group.cancelAll()
             return result
         }

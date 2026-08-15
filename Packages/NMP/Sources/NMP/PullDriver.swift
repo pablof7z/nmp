@@ -76,12 +76,6 @@ extension NmpReceiptStream: NMPPullHandle {
     func pullNext() async throws -> FfiWriteFact? { try await next() }
 }
 
-// nmp-native:if nip02
-extension NmpFollowActionStream: NMPPullHandle {
-    func pullNext() async throws -> FfiFollowActionStatus? { try await next() }
-}
-// nmp-native:endif
-
 /// One live Swift iterator may own a native pull handle at a time. The gate is
 /// shared when an AsyncSequence value is copied and uses an enum rather than a
 /// lifecycle boolean (architecture gate 3).
