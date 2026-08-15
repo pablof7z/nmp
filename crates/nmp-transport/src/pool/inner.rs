@@ -1136,6 +1136,23 @@ fn apply_worker_event_with_verdict(
                 }
             }
         }
+        WorkerEventKind::UndecodableFrame => {
+            if !same_worker || event.generation != state.generation {
+                return None;
+            }
+            // Gated exactly like `Frame` above: a report from a retired
+            // worker or a superseded generation says nothing about the
+            // session occupying this slot now.
+            state.health.record_undecodable_frame();
+            Some(PoolEvent::Health {
+                handle: RelayHandle {
+                    slot: event.slot,
+                    generation: event.generation,
+                },
+                session: state.session.clone(),
+                health: state.health.clone(),
+            })
+        }
         WorkerEventKind::InitialReadCompleted => {
             if !same_worker || event.generation != state.generation {
                 return None;
@@ -1556,6 +1573,95 @@ mod tests {
         assert!(
             matches!(outcome, Some(PoolEvent::Frame { .. })),
             "a genuine event must still be forwarded as a Frame"
+        );
+    }
+
+    /// #1668: a text frame the transport could not decode reaches the caller
+    /// as a `PoolEvent::Health` carrying its own tally. It names no
+    /// subscription — the text that would have named one is the text that
+    /// failed to parse — so the session is the narrowest thing it can be a
+    /// fact about, and a caller counting what this relay returned learns that
+    /// no count on this session is exact any more.
+    ///
+    /// It must NOT touch `invalid_signature_count`: a malformed line is not a
+    /// forgery, and a caller deciding whether to stop trusting a relay would
+    /// read the two the same way if they shared a counter.
+    #[test]
+    fn undecodable_frame_reports_health_without_flagging_misbehavior() {
+        let (inner, _rx) = test_pool();
+        let mut guard = inner.lock().unwrap();
+        let url = RelayUrl::parse("wss://relay.example").unwrap();
+        let h = guard.ensure_open(&url);
+        let _ = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: h.slot,
+                generation: h.generation,
+                kind: WorkerEventKind::Connected,
+            },
+        );
+
+        let outcome = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: h.slot,
+                generation: h.generation,
+                kind: WorkerEventKind::UndecodableFrame,
+            },
+        );
+        match outcome {
+            Some(PoolEvent::Health { health, .. }) => {
+                assert_eq!(health.undecodable_frame_count, 1);
+                assert_eq!(
+                    health.invalid_signature_count, 0,
+                    "an undecodable frame is not a forgery and must not inflate the \
+                     misbehavior tally"
+                );
+                assert_eq!(
+                    health.last_error, None,
+                    "an undecodable frame is not a connection failure"
+                );
+            }
+            other => panic!("expected PoolEvent::Health for an undecodable frame, got {other:?}"),
+        }
+        assert_eq!(
+            guard.health_for(h).map(|h| h.undecodable_frame_count),
+            Some(1),
+            "the undecodable count must be visible via Pool::health"
+        );
+    }
+
+    /// The same generation gating every other frame report gets: a report
+    /// from a superseded generation says nothing about the session occupying
+    /// this slot now, and acting on it would erase a live request's count on
+    /// the strength of a dead one's frame.
+    #[test]
+    fn undecodable_frame_from_a_stale_generation_is_ignored() {
+        let (inner, _rx) = test_pool();
+        let mut guard = inner.lock().unwrap();
+        let url = RelayUrl::parse("wss://relay.example").unwrap();
+        let h = guard.ensure_open(&url);
+        let _ = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: h.slot,
+                generation: h.generation,
+                kind: WorkerEventKind::Connected,
+            },
+        );
+
+        let outcome = apply_worker_event(
+            &mut guard,
+            WorkerEvent {
+                slot: h.slot,
+                generation: h.generation.wrapping_add(1),
+                kind: WorkerEventKind::UndecodableFrame,
+            },
+        );
+        assert!(outcome.is_none());
+        assert_eq!(
+            guard.health_for(h).map(|h| h.undecodable_frame_count),
+            Some(0),
         );
     }
 
