@@ -69,14 +69,23 @@ One distinction matters more than the rest, because conflating it loses data:
   cancellations, signer completions and lifecycle terminals are each an event
   that happened; conflating them loses the fact that it happened at all.
 
-**Current honest exception.** Reactivity is dependency-precise in the resolver's
-demand graph, which recomputes only from reactive nodes and propagates to a
-parent only when a value actually changed. It is *not* precise in the
-row-projection layer: several paths reopen the store for every live observation
-and rely on a downstream diff to suppress the resulting no-op effects. No wrong
-data reaches an app, but the work is real and scales with the number of open
-observations. **#1646** owns this. Do not cite NMP as uniformly precise until it
-closes.
+Two paths carry this, and they behave differently — the distinction is worth
+knowing before you cite either.
+
+**Ordinary ingest is dependency-precise, and this is the design working.** A
+committed store mutation returns the exact set of affected handles, and only
+those handles' observations are recomputed; an incremental row algebra handles
+them, falling back to a full re-read for one observation only when it cannot.
+Nothing scans the full observation set. This is the shape to copy.
+
+**Reactive-input change is not.** An active-account switch or an AUTH
+transition reaches for a flat sweep over every live observation and history,
+reopening the store for each, and relies on a downstream diff to suppress the
+resulting no-op effects. On the account-switch path the sweep currently runs
+*twice*. No wrong data reaches an app — this is unnecessary work, not a
+correctness bug — but it scales with the number of open observations and with
+relay-driven AUTH activity. **#1646** owns it. Do not cite NMP as uniformly
+dependency-precise until it closes.
 
 ## Transaction and effect rules
 
