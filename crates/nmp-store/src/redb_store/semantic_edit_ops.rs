@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, PublicKey, Timestamp};
@@ -366,13 +366,18 @@ fn apply_plan(
         let Some((_key, row)) = current_winner.as_ref() else {
             return Ok(SemanticInstallOutcome::Stale);
         };
-        if row.event.id != old.materialization.event_id
-            || row
+        let is_old_local_generation = row.event.id == old.materialization.event_id
+            && row
                 .provenance
                 .local
                 .as_ref()
-                .is_none_or(|local| local.owners != old.members)
-        {
+                .is_some_and(|local| local.owners == old.members);
+        let is_exact_source_inserted_while_closed = plan
+            .next
+            .as_ref()
+            .and_then(|next| next.source.as_ref())
+            .is_some_and(|source| source == row);
+        if !is_old_local_generation && !is_exact_source_inserted_while_closed {
             return Ok(SemanticInstallOutcome::Stale);
         }
         Some(Box::new(row.clone()))
@@ -781,6 +786,24 @@ pub(super) fn accept(
     #[cfg(test)]
     store.crash_if(super::store::RedbCrashPoint::SemanticAcceptBeforeCommit);
     write.commit_prepared(outcome)
+}
+
+pub(super) fn required_programs(
+    store: &RedbStore,
+) -> Result<Vec<(crate::ReplayProgramId, crate::ReplayFormatId)>, PersistenceError> {
+    let read = store.database()?.begin_read().map_err(persist_err)?;
+    let operations = match read.open_table(SEMANTIC_OPERATIONS) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+        Err(error) => return Err(persist_err(error)),
+    };
+    let mut required = BTreeSet::new();
+    for row in operations.iter().map_err(persist_err)? {
+        let (_key, value) = row.map_err(persist_err)?;
+        let operation = decode_operation(value.value())?;
+        required.insert((operation.program, operation.format));
+    }
+    Ok(required.into_iter().collect())
 }
 
 pub(super) fn snapshot(

@@ -126,6 +126,20 @@ sealed class NMPError(message: String) : Exception(message) {
      * operation (#704). */
     data class EngineStartFailed(val component: String, val reason: String) :
         NMPError("engine could not start ($component): $reason")
+    /** Construction named a store that retains a replaceable operation whose
+     * compiled program/format is absent from this engine. No engine started
+     * and the store was not mutated.
+     *
+     * [programHex] and [formatHex] are the two 16-byte compiled-capability
+     * identifiers as canonical lowercase hex (32 characters each). They are
+     * opaque identities to compare, key, and show -- never a public key or an
+     * event id, so nothing here is bech32-able. The FFI hands them over as raw
+     * `ByteArray`s, which are mutable and compare by reference; hex is what
+     * makes this error the value it claims to be, so two errors naming the
+     * same missing capability are `==`, hash alike, and cannot be edited by
+     * whoever received the first one. */
+    data class MissingReplaceableCapability(val programHex: String, val formatHex: String) :
+        NMPError("store retains replaceable operations for a missing compiled capability")
     /** A windowed `observe` could not open its canonical history projection
      * because the store degraded during setup. This is the case's sole
      * production meaning; relay connection/worker failure remains ordinary
@@ -405,6 +419,11 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.StoreResetFailed -> StoreResetFailed(ffi.reason)
                 is FfiException.StoreStillOpen -> StoreStillOpen(ffi.path)
                 is FfiException.EngineStartFailed -> EngineStartFailed(ffi.component, ffi.reason)
+                is FfiException.MissingReplaceableCapability ->
+                    MissingReplaceableCapability(
+                        canonicalLowercaseHex(ffi.program),
+                        canonicalLowercaseHex(ffi.format),
+                    )
                 is FfiException.ObservationUnavailable -> ObservationUnavailable(ffi.reason)
                 is FfiException.ConcurrentNext -> ConcurrentNext
                 is FfiException.FactStreamLagged -> FactStreamLagged(ffi.receiptId)
@@ -467,6 +486,12 @@ sealed class NMPError(message: String) : Exception(message) {
             }
     }
 }
+
+/** Canonical lowercase hex for an opaque byte identity the FFI hands over as
+ * raw bytes. The exact spelling `NMPError.swift`'s `canonicalLowercaseHex`
+ * produces for the same bytes: one identity, one rendering, both SDKs. */
+private fun canonicalLowercaseHex(bytes: ByteArray): String =
+    bytes.joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
 /** Runs `body`, translating any thrown `FfiException` into the ergonomic
  * `NMPError` -- the one seam every call into `uniffi.nmp_ffi` passes

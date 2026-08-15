@@ -52,8 +52,6 @@ nostr.workspace = true
 # The feature list is how this crate reaches every optional protocol and
 # content family (#572/#907 for NIP-22, #1239 for the rest): one owner, turned
 # on, rather than a second edge to the mechanism crate alongside the facade.
-# `scripts/check-ffi-facade-boundary.sh` is the mechanism that keeps all of
-# this true.
 #
 # Before #1239 these were direct edges here and nowhere in the facade, on the
 # reasoning that they are "app-chosen protocol modules, not engine/query/
@@ -67,12 +65,12 @@ uniffi = { workspace = true, features = ["cli"] }
 zeroize = "1"
 k256 = { version = "0.13.4", default-features = false }
 # The ONE family that cannot come through the facade: `nmp-nip02` depends on
-# `nmp` (a `protocol-service` in `scripts/dependency-direction-policy.json`,
-# above the facade rather than below it), so `nmp -> nmp-nip02` is a cyclic
-# package dependency cargo refuses to resolve. #1239 records this as its own
-# unit of work: the follow service's engine coupling has to be inverted before
-# the facade can own its vocabulary. Until then this edge is the only way the
-# staticlib every Swift and Kotlin app links can project the follow door.
+# `nmp`, sitting above the facade rather than below it, so `nmp -> nmp-nip02`
+# is a cyclic package dependency cargo refuses to resolve. #1239 records this
+# as its own unit of work: the follow service's engine coupling has to be
+# inverted before the facade can own its vocabulary. Until then this edge is
+# the only way the staticlib every Swift and Kotlin app links can project the
+# follow door.
 nmp-nip02 = { workspace = true, optional = true }
 # #555: `FfiBlossomAuthorization::validate_signed_event` reassembles an
 # `FfiSignedEvent` record into canonical event JSON for nostr's strict

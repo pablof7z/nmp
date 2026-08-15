@@ -1,13 +1,11 @@
-//! The group door's DECLARED shape, and the gate that enforces it.
+//! The group door's DECLARED shape.
 //!
 //! Split from [`super::groups`] because it answers a different KIND of
 //! question. Everything there is about what a run did; everything here is
 //! about what the door could ever do -- "no group write operation accepts a
 //! relay" is not observable from any execution, because a scenario that never
 //! passed a relay proves nothing about whether it could have. The only witness
-//! for the absence of a parameter is the declaration itself, which is also
-//! exactly what `scripts/check-nip29-ownership.sh` reads, so the scenarios and
-//! the gate agree on their evidence by construction.
+//! for the absence of a parameter is the declaration itself.
 //!
 //! #1033 split the door across two files with no `GroupOperations` trait left
 //! anywhere: `crates/nmp/src/nip29/group.rs` declares `Group`'s inherent read
@@ -31,9 +29,7 @@ use super::NmpWorld;
 /// a composer ("no group write operation accepts a relay", "the group exposes
 /// no composer for kind 9"). Absence is not observable from a run: a scenario
 /// that never passed a relay proves nothing about whether it could have. The
-/// only witness is the door's own declaration, which is also exactly what
-/// `scripts/check-nip29-ownership.sh` reads -- so the scenario and the gate
-/// agree on their evidence by construction.
+/// only witness is the door's own declaration.
 #[derive(Debug, Default, Clone)]
 pub struct GroupSurface {
     /// Every `pub fn` signature declared on `Group`'s own inherent impl.
@@ -179,74 +175,4 @@ impl NmpWorld {
             binding,
         }
     }
-
-    /// `When the NIP-29 kind-blindness gate inspects the group publication
-    /// path` -- runs the real script, against the real tree.
-    ///
-    /// #1653: this used to run `scripts/check-nip29-ownership.sh`, because
-    /// that script owned the kind-9/chat-schema decoy-name ban this scenario
-    /// exercises. That ban moved to `scripts/check-nip29-kind-blindness.sh`
-    /// (already this feature's own evidence citation for the surrounding
-    /// scenarios), so the probe now runs the script that actually owns the
-    /// claim.
-    pub fn run_kind_blindness_gate(&mut self) {
-        self.gate_outcome = Some(run_gate());
-    }
-
-    /// What the gate said when the scenario ran it.
-    pub fn gate_outcome(&self) -> (bool, String) {
-        self.gate_outcome
-            .clone()
-            .expect("nmp-bdd: the kind-blindness gate has not been run")
-    }
-
-    /// What the gate says about the tree RIGHT NOW -- used to prove the
-    /// negative probe below put the tree back exactly as it found it.
-    pub fn gate_outcome_now(&self) -> (bool, String) {
-        run_gate()
-    }
-
-    /// Run the gate against a tree that DOES branch on the kind, then put the
-    /// tree back. Without this the gate scenario would only prove that a
-    /// clean tree passes, which every disabled gate also does.
-    ///
-    /// It is a bare `.rs` file that no `mod` declares, so nothing compiles
-    /// it; the gate globs the directory, which is the surface being tested.
-    /// Unlike the retired `check-nip29-ownership.sh` loop this probe used to
-    /// target, `check-nip29-kind-blindness.sh`'s scan is brace-depth-aware
-    /// rather than truncating at the first `#[cfg(test)]`, so the probe's
-    /// position in the file no longer matters for what it proves.
-    pub fn gate_rejects_a_kind_branch(&self) -> (bool, String) {
-        let probe = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../crates/nmp-nip29/src/kind_branch_probe.rs");
-        struct Cleanup(std::path::PathBuf);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_file(&self.0);
-            }
-        }
-        std::fs::write(
-            &probe,
-            "// nmp-bdd negative probe for the NIP-29 kind-blindness gate. Written, \
-             measured and deleted\n// by one step; if you are reading this in a \
-             checkout, that step was killed mid-run.\npub fn privileges_chat(kind: \
-             nostr::Kind) -> bool {\n    kind == nostr::Kind::from(9)\n}\n",
-        )
-        .expect("nmp-bdd: the negative probe must be writable");
-        let _cleanup = Cleanup(probe);
-        run_gate()
-    }
-}
-
-/// `scripts/check-nip29-kind-blindness.sh`, run as CI runs it.
-fn run_gate() -> (bool, String) {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = std::process::Command::new("bash")
-        .arg("scripts/check-nip29-kind-blindness.sh")
-        .current_dir(&root)
-        .output()
-        .expect("nmp-bdd: the kind-blindness gate must be runnable");
-    let mut said = String::from_utf8_lossy(&output.stdout).to_string();
-    said.push_str(&String::from_utf8_lossy(&output.stderr));
-    (output.status.success(), said)
 }

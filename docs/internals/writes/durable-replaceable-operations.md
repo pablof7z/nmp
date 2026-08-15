@@ -26,6 +26,7 @@ issues:
   - "#1432 — body-complete semantic operation acceptance"
   - "#1433 — complete successor rematerialization"
   - "#1434 — generation-qualified signing and delivery"
+  - "#1624 — construction-time capability input, direct in-thread materialization"
 ---
 
 # Durable operations for replaceable events
@@ -646,26 +647,23 @@ work may replace it with a complete successor, but an accepted receipt never
 transitions to a bodyless state.
 
 Preparing that first complete body may call capability code, but the call does
-not own NMP's state thread. NMP copies only the immutable source and current
-events, ordered operation bytes, capability identity, and the durable versions
-needed to recognize a stale answer. A purpose-specific detached thread runs
-the capability without a store, resolver, receipt, routing handle, or mutable
-engine state. The state thread remains free to accept ordinary publications,
-advance observations, and shut down.
+not run inside a Redb transaction. NMP copies only the immutable source and
+current events, ordered operation bytes, capability identity, and the durable
+versions needed to recognize a stale answer. The compiled capability then runs
+directly as ordinary trusted product code: no store, resolver, receipt,
+routing handle, or mutable engine state is available to it.
 
-When the capability returns, NMP checks the capability installation and the
-durable source, current event, and operation set again before taking custody.
-If any of them changed, the old answer is discarded and the candidate is
-rebuilt from current durable truth under the same publication call. A refusal,
-panic, invalid event, or thread-start failure remains a pre-custody refusal
-with the same zero-residue rule above.
+When the capability returns, NMP checks the durable source, current event, and
+operation set again before taking custody. If any of them changed, the old
+answer is discarded and the candidate is rebuilt from current durable truth
+under the same publication call. A typed refusal or invalid event remains a
+pre-custody refusal with the same zero-residue rule above. A panic or hang is
+an ordinary bug in NMP or its compiled capability and is not translated into
+a write refusal.
 
-The app's `publish` call still waits for acceptance or refusal, but it does not
-hold the facade's lifecycle lock while waiting. Shutdown drains that waiting
-call with `EngineClosed` and does not join a capability thread that may never
-return. A late result after shutdown has no owner and is ignored. This narrow
-boundary deliberately adds no timeout, worker pool, scheduler interface, or
-general callback framework.
+The complete enabled implementation set is supplied before store recovery.
+There is no after-start registration, replacement, detached thread, panic
+containment, completion command, or blocked-callback shutdown contract.
 
 ### 5.4 Ambiguous acceptance after a storage failure
 
@@ -1148,7 +1146,7 @@ same random bytes before anything commits. It is:
   exact bytes rather than encrypting again;
 - entropy or nonce ownership is explicit during materialization;
 - a crash before the atomic install may discard an uncommitted candidate;
-- stale or repeated callbacks cannot replace an unchanged committed
+- a stale or repeated capability result cannot replace an unchanged committed
   materialization with fresh ciphertext;
 - a capability format must not silently change how persisted operation bytes
   are interpreted.
@@ -1728,9 +1726,6 @@ Bounds apply to:
 - retry attempts;
 - retained historical receipt facts.
 
-An implementation using app-registered replay code must additionally bound
-registrations, executor concurrency, and waiting work.
-
 A capability or remote event exceeding a bound receives a typed refusal. NMP
 must not silently truncate semantic input and pretend the intended operation
 was applied.
@@ -1973,31 +1968,34 @@ custody; signature follows after acceptance.
 
 ### 22.2 Configured capability materializers
 
-The application assembles independently packaged capability modules and
-configures exact materializer implementations with NMP before use. NMP depends
-only on a small contract; it does not depend on every profile, follow, article,
-list, or third-party capability crate.
+The application assembles independently packaged capability modules and hands
+NMP the complete compiled materializer set as engine construction input, before
+the state owner starts store recovery. NMP depends only on a small contract; it
+does not depend on every profile, follow, article, list, or third-party
+capability crate.
 
 Conceptually:
 
 ```text
-application startup
-    ├── register profile materializer, format 1
-    ├── register follow materializer, format 1
-    └── register long-form materializer, format 2
+engine construction input
+    ├── profile materializer, format 1
+    ├── follow materializer, format 1
+    └── long-form materializer, format 2
 
 capability operation factory
     └── is bound to exactly one configured materializer key + format
 ```
 
-The registration key identifies semantic ownership. The format identifies the
-exact durable byte contract. A materializer registered under another format
+The configured key identifies semantic ownership. The format identifies the
+exact durable byte contract. A materializer configured under another format
 must not receive unknown bytes.
 
-Configuration is a prerequisite, not a receipt lifecycle. A supported app must
-not mint or transplant raw replay authority. Missing implementation or format
-causes typed refusal before custody for an initial call, and typed engine-open
-failure for already durable work. There is no late-registration wakeup queue.
+Construction input is a prerequisite, not a receipt lifecycle. A supported app
+must not mint or transplant raw replay authority. Missing implementation or
+format causes typed refusal before custody for an initial call, and typed
+engine-open failure for already durable work. There is no after-start
+registration or replacement path for a materializer, so there is nothing for a
+late-registration wakeup to wake.
 
 This dependency inversion avoids a static `nmp -> every capability crate`
 graph, which is rejected: it would make core NMP the catalog owner for every
@@ -2057,40 +2055,35 @@ reruns the encoder merely because the process restarted.
 
 ### 22.4 Execute capability code outside store locks
 
-Application-selected capability code may be slow, fail, or panic. It must not
-run while the durable database transaction or engine's serialized state owner
-is held.
+Compiled capability code is ordinary trusted product code. It must not run
+while a Redb transaction is open.
 
-Initial candidate preparation runs before the acceptance transaction. Later
-source-driven successor preparation uses the same off-lock discipline. The
-successor flow is:
+Initial candidate preparation runs after a short durable snapshot is copied
+and that read transaction is closed. Later source-driven successor
+preparation uses the same off-lock discipline. The successor flow is:
 
 ```text
 1. Point-read the target's exact source revision, current generation,
    compact operation program, and program digest.
-2. Schedule the materializer on a bounded executor.
-3. Run capability code outside persistence locks.
-4. Return the candidate result to the engine.
-5. In one short transaction, compare the exact source revision, current
+2. Close the read transaction.
+3. Run the compiled capability directly.
+4. In one short transaction, compare the exact source revision, current
    generation, program digest, and requested successor identity.
-6. Commit only if every fence still matches; otherwise discard the stale
-   result and reschedule from current state.
+5. Commit only if every fence still matches; otherwise discard the stale
+   result and rebuild from current state.
 ```
 
 A receipt id alone is never a sufficient fence because the same receipt may
 survive several generations.
 
-Configured materializers are trusted application code, not a sandbox boundary.
-Catching a Rust panic cannot contain process abort, unsafe memory corruption,
-unbounded allocation, or an infinite loop. Executor capacity, cooperative
-cancellation, deadlines, shutdown, and native callback lifetime therefore need
-explicit policy and falsifiers before this mechanism can be production
-architecture.
+Configured materializers are trusted compiled product code, not a sandbox
+boundary. A panic or hang is an ordinary in-process bug and must be fixed
+there. NMP does not add a second runtime, timeout, cancellation framework, or
+panic translation around that call.
 
-For the initial call, panic, invalid output, refusal, or required-capability
-unavailability leaves zero acceptance residue. Bounded execution machinery may
-be needed for successors, but it must not add missing-handler or bodyless
-receipt states.
+For the initial call, typed refusal, invalid output, or a missing compiled
+program/format at construction leaves zero acceptance residue. Later refusal
+leaves the previous complete generation intact.
 
 ### 22.5 Durable state shape
 
@@ -2106,8 +2099,8 @@ coordinate containing:
 - indexes that let one source change point-read only its coordinate.
 
 Active accepted state has exactly one current unsigned-or-signed
-materialization, not separate fields that can disagree. Successor preparation
-may be in flight while the last complete generation remains current. Resolved
+materialization, not separate fields that can disagree. The last complete
+generation remains current until its synchronous successor commits. Resolved
 heavy operation bodies can be deleted while small receipt evidence survives.
 
 ### 22.6 Receipt and delivery projection
@@ -2127,21 +2120,21 @@ assumption:
 The old shape should be replaced, not kept as a nullable compatibility alias
 beside a new state owner.
 
-### 22.7 Comparison: registered semantic operations versus closed EventEdit
+### 22.7 Comparison: configured semantic operations versus closed EventEdit
 
 The alternative under evaluation compiles capability operations before
 acceptance into a closed, capability-neutral structural edit format.
 
-| Property | Registered semantic materializer | Closed structural EventEdit |
+| Property | Configured semantic materializer | Closed structural EventEdit |
 |---|---|---|
 | Who owns conflict meaning at replay time? | Capability implementation | Whatever can be expressed in the closed edit language |
-| NMP dependency on capability crates | None; app assembles registrations | None after capability compiles the edit |
-| Restart requirement | Exact implementation and format are required engine configuration | Generic interpreter is always present |
+| NMP dependency on capability crates | None; the app assembles the compiled capability set | None after capability compiles the edit |
+| Restart requirement | Exact implementation and format are required engine construction input | Generic interpreter is always present |
 | Missing-code state | Typed configuration/open failure; never an accepted receipt state | Not required for supported plan versions |
 | Expressiveness | Arbitrary deterministic capability policy | Bounded by structural instruction set |
-| Operational risk | Callback scheduling, panic, slowness, native packaging | More generic machinery and risk of semantic leakage into the IR |
+| Operational risk | A capability defect is an ordinary in-process bug on the engine state thread; native packaging | More generic machinery and risk of semantic leakage into the IR |
 | Versioning | Capability-specific opaque format | Central structural plan version |
-| Native SDK integration | Unproven for arbitrary callbacks | Easier if native apps call fused typed helpers only |
+| Native SDK integration | Native apps call fused typed helpers only; capability code never crosses the native boundary | Easier if native apps call fused typed helpers only |
 
 The dependency-inverted materializer direction is selected because it keeps
 capability semantics out of generic NMP without adding a static dependency on
@@ -2154,13 +2147,13 @@ The #1412 experiment has two evidence layers. Its bodyless lifecycle and
 parallel persistence were rejected, but its first isolated registry prototype
 still proved that:
 
-- two independently packaged capability implementations can register through
+- two independently packaged capability implementations can be supplied through
   one NMP-owned contract;
 - the NMP mechanism has no dependency on either capability;
 - exact materializer and format identity survive restart;
-- missing implementation, mismatched format, typed refusal, panic isolation,
-  bounded slow-handler pressure, and stale completion can be represented;
-- handler code can run outside the store lock and commit through an exact
+- missing implementation, mismatched format, typed refusal, and stale
+  completion can be represented;
+- capability code can run outside the store lock and commit through an exact
   source/revision/generation fence.
 
 Exploratory release measurements over nine samples of 100,000 stateless
@@ -2180,7 +2173,8 @@ feasibility, not a performance contract.
 
 The second layer routed a genuinely bodyless semantic payload through the real
 public Rust `Engine::publish(WriteIntent)` door. That behavior is not the
-production target. At measured head
+production target, and neither is the after-start registration and detached
+execution model it ran on, which #1624 deleted. At measured head
 `283132d2617dc5dff2be538e5385385554420140`, it demonstrated historically that:
 
 - semantic acceptance uses the ordinary receipt and intent-id allocators,
@@ -2193,15 +2187,11 @@ production target. At measured head
 - a source can advance before the first materialization or after an installed
   materialization; the former uses the qualified successor as its base, while
   the latter installs a successor event id under the same receipt;
-- handler execution remains outside the serialized engine/store owner, and
-  installation compares the exact target, selected source event id, ordered
-  operation digest, and generation;
+- handler execution stays outside the store lock, and installation compares the
+  exact target, selected source event id, ordered operation digest, and
+  generation; and
 - a deliberately delayed stale completion is observably processed as stale
-  before the test inspects current state;
-- exactly four handlers execute concurrently, and work deferred behind full
-  capacity resumes after success, refusal, or panic; and
-- a blocked handler does not block an ordinary publication, and engine
-  shutdown does not wait for a native callback that never returns.
+  before the test inspects current state.
 
 Release measurements on an Apple M3 Max used nine fresh-process batches. The
 final experiment/report head is
@@ -2221,10 +2211,9 @@ retains every iteration. The medians and 95th percentiles were:
 | Reopen, register, and install one source-driven successor | 26.7 milliseconds | 29.7 milliseconds |
 | One hundred 5-millisecond handler jobs, end to end | 156.8 milliseconds | 179.5 milliseconds |
 
-The slow-handler workload observed exactly four active callbacks. Exact
-ordered sequences of 1, 10, and 100 retained operations all passed their
-materialization oracle; median registration-to-install time was respectively
-18.8, 17.4, and 20.2 milliseconds. Those realistic sizes revealed no practical
+Exact ordered sequences of 1, 10, and 100 retained operations all passed their
+materialization oracle; median reopen-to-install time was respectively 18.8,
+17.4, and 20.2 milliseconds. Those realistic sizes revealed no practical
 preparation cliff that justifies adding paged scheduling now.
 
 The ordinary and bodyless acceptance rows perform different work and end in
@@ -2234,7 +2223,16 @@ that the difference is an architecture tax or regression.
 The bodyless acceptance, missing-handler persistence, late registration, and
 nullable initial event id in those bullets are retained here only so the
 experiment's measurements remain interpretable. The #1412 decision gate
-explicitly rejected all four for production.
+explicitly rejected all four for production. #1624 then deleted the remaining
+plugin shape the prototype ran on: the compiled capability set is engine
+construction input supplied before the state owner starts store recovery,
+capability code runs directly on that state thread between a closed read
+transaction and one short compare-and-commit transaction, and no executor,
+worker slot, detached thread, panic translation, completion command, timeout,
+or shutdown contract exists around it. Every bullet and row above that names
+registration or a handler job therefore measures a path that no longer exists,
+and the prototype's off-thread handler execution is historical evidence rather
+than the production shape.
 
 ### 22.9 What the rejected #1412 prototype did not prove
 
@@ -2258,9 +2256,6 @@ The experiment therefore did not prove:
 - cancellation with shared materializations;
 - removal or compaction of semantic receipts and operations;
 - complete Rust/FFI/Swift/Kotlin projection;
-- arbitrary native handler callbacks;
-- hostile or permanently non-returning handlers;
-- shutdown while callbacks remain in flight;
 - capability-defined normalization and production storage bounds.
 
 Relay ingest now extracts the changed replaceable coordinate and prepares only
@@ -2268,23 +2263,15 @@ that target, but this is code-inspected rather than proven by a two-target
 runtime falsifier. Queue inspection is bounded at the public door and uses
 cursor-ranged receipt pages in Redb.
 
-Handler execution is bounded, but handler registration and restart recovery
-still enumerate every active semantic resource and eagerly clone all ready
-jobs before the 32-slot executor defers excess targets. Supporting 100,000
+Restart recovery still visits every retained semantic coordinate to
+re-establish its source owner rather than paging that work. Supporting 100,000
 simultaneously unpublished semantic operations is deliberately out of scope:
 it is not a product requirement established by this work, and paged or bounded
 preparation solely for that hypothetical load would be premature complexity.
 The 1, 10, and 100-operation measurements above are the current decision
-evidence. Enormous eager backlogs remain a non-blocking scale limitation;
+evidence. A very large retained backlog therefore lengthens store recovery;
 batching should be added only if it is nearly free or measurements of plausible
 product workloads reveal a practical problem.
-
-The detached-worker shutdown behavior prevents one non-returning callback from
-hanging one engine shutdown, but it cannot pre-empt native code. Repeated
-engines could leave stuck worker threads behind. Panic catching also cannot
-contain process abort, unsafe memory corruption, hostile CPU use, or hostile
-allocation. Native trust/isolation and callback lifetime therefore remain open
-architecture decisions.
 
 ### 22.10 Production implementation sequence
 
@@ -2293,7 +2280,7 @@ This is a dependency order, not a promise that each item is already designed:
 1. Hard-cut public row signature projection to one `Pending | Signed` owner.
 2. Land compact store state for body-complete operations, one current
    materialization, independent receipts, and non-reused generation fences.
-3. Define the exact opaque operation and registration contract in a lower
+3. Define the exact opaque operation and capability contract in a lower
    mechanism crate with no capability dependency.
 4. Extend `WriteIntent` and the real acceptance transaction so a configured
    capability produces a complete initial candidate before custody; preserve
@@ -2326,22 +2313,17 @@ These questions are material and must remain visible:
    wire event exists?
 4. What cancellation is safe when one signed materialization serves several
    receipts?
-5. Should Swift and Kotlin reach configured materializers only through
-   statically packaged fused capability methods, avoiding arbitrary native
-   callback and shutdown hazards?
-6. How are successor materializer non-return, cancellation, and application
-   shutdown bounded without adding a missing-handler receipt lifecycle?
-7. Which exact receipt facts distinguish the stable initial accepted event id
+5. Which exact receipt facts distinguish the stable initial accepted event id
    from later current and retired generations without redundant state owners or
    lifecycle booleans?
-8. What clock owns an operation's logical time, and how are equal or
+6. What clock owns an operation's logical time, and how are equal or
    future-skewed local operation times handled without trusting an app-supplied
    event timestamp?
-9. How does a source policy distinguish first-resource creation from
+7. How does a source policy distinguish first-resource creation from
    unresolved absence for each capability?
-10. Does the final unsigned payload structurally refuse blind replaceable and
-    addressable builders, requiring a capability-owned exact or replayable
-    operation, while preserving verbatim externally pre-signed publication?
+8. Does the final unsigned payload structurally refuse blind replaceable and
+   addressable builders, requiring a capability-owned exact or replayable
+   operation, while preserving verbatim externally pre-signed publication?
 
 Until those choices have executable evidence, they remain open. The
 implementation must not hide them behind generic terms such as “queued,”
@@ -2366,7 +2348,10 @@ implementation and final promotion must remain traceable to:
 - #1386 for restart, query, rebase, and generation-qualified delivery proof;
 - #1387 for final feature, architecture, status, and SDK promotion;
 - #1412 for historical registered-materializer evidence and the explicit
-  rejection of its bodyless lifecycle; and
+  rejection of its bodyless lifecycle;
+- #1624 for the deletion of the detached-materializer plugin model: the
+  compiled capability set is engine construction input and materialization runs
+  directly on the engine state thread; and
 - #1414 for this document's completeness and handoff.
 
 No issue closing, README claim, known-gap removal, ledger closure, or supported

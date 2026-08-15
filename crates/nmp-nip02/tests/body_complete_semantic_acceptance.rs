@@ -10,7 +10,9 @@ use nmp::{
     ReplaceableMaterializer, ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, Row,
     RowDelta, RowSignature, SigningState, WriteIntent, WriteRouting,
 };
-use nmp_nip02::{register_follow_writes, set_following, FollowActionFailure, FollowChange};
+use nmp_nip02::{
+    follow_capability, follow_writes, set_following, FollowActionFailure, FollowChange,
+};
 use nmp_store::{RedbStore, RelayObserved};
 use nostr::{EventBuilder, EventId, Keys, Kind, RelayUrl, Timestamp};
 
@@ -96,15 +98,18 @@ fn alice_then_bob_keep_two_receipts_and_one_complete_pending_event() {
             .expect("the signed source is canonical before editing");
     }
 
-    let engine = Engine::new(EngineConfig {
-        store_path: Some(path.to_string_lossy().into_owned()),
-        ..EngineConfig::default()
-    })
+    let engine = Engine::new_with_capabilities(
+        EngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        },
+        vec![follow_capability()],
+    )
     .expect("engine starts over the seeded store");
     engine
         .add_public_key_account(author.public_key(), true)
         .expect("author is current without installing a signer");
-    let writes = register_follow_writes(&engine).expect("NIP-02 materializer is configured");
+    let writes = follow_writes();
     let subscription = engine
         .observe(
             LiveQuery::from_filter(Filter {
@@ -160,15 +165,18 @@ fn alice_then_bob_keep_two_receipts_and_one_complete_pending_event() {
     engine.shutdown();
     drop(engine);
 
-    let reopened = Engine::new(EngineConfig {
-        store_path: Some(path.to_string_lossy().into_owned()),
-        ..EngineConfig::default()
-    })
+    let reopened = Engine::new_with_capabilities(
+        EngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        },
+        vec![follow_capability()],
+    )
     .expect("engine reopens the durable semantic state");
     reopened
         .add_public_key_account(author.public_key(), true)
         .expect("the same public identity is restored for this fixture");
-    let _writes = register_follow_writes(&reopened).expect("capability is configured before reuse");
+    let _writes = follow_writes();
     let recovered_query = reopened
         .observe(
             LiveQuery::from_filter(Filter {
@@ -255,32 +263,50 @@ fn invalidated_registration_and_materializer_refusal_leave_no_custody() {
             )
             .expect("source is canonical");
     }
-    let engine = Engine::new(EngineConfig {
+    let missing = Engine::new(EngineConfig {
         store_path: Some(path.to_string_lossy().into_owned()),
         ..EngineConfig::default()
     })
-    .expect("engine starts");
-    engine
+    .expect("an empty capability set may open a store with no retained operations");
+    missing
         .add_public_key_account(author.public_key(), true)
         .expect("author is current");
-    let stale = register_follow_writes(&engine).expect("first registration installs");
-    let _replacement = register_follow_writes(&engine).expect("replacement installs");
+    let stale = follow_writes();
     assert!(
         matches!(
-            set_following(&engine, &stale, alice, FollowChange::Follow),
+            set_following(&missing, &stale, alice, FollowChange::Follow),
             Err(FollowActionFailure::ReceiptUnavailable)
         ),
-        "a stale NIP-02 capability is refused before custody"
+        "an unconfigured NIP-02 capability is refused before custody"
     );
-    assert!(engine
+    assert!(missing
         .publish_queue(None, 10)
         .expect("queue reads")
         .is_empty());
+    missing.shutdown();
 
+    let engine = Engine::new_with_capabilities(
+        EngineConfig {
+            store_path: Some(path.to_string_lossy().into_owned()),
+            ..EngineConfig::default()
+        },
+        vec![nmp::ReplaceableMaterializerSpec::new(
+            *b"refuse-program00",
+            *b"refuse-format-v1",
+            AlwaysRefuse,
+        )],
+    )
+    .expect("engine starts with the refusing capability");
+    engine
+        .add_public_key_account(author.public_key(), true)
+        .expect("author is current");
     let original = row(&base);
-    let refusing = engine
-        .add_replaceable_materializer(*b"refuse-program00", *b"refuse-format-v1", AlwaysRefuse)
-        .expect("refusing implementation registers");
+    let refusing = nmp::ReplaceableMaterializerSpec::new(
+        *b"refuse-program00",
+        *b"refuse-format-v1",
+        AlwaysRefuse,
+    )
+    .handle();
     let payload = refusing
         .operation(&original, nmp::ReplaceableSourcePolicy::Continuing, vec![1])
         .expect("registration-bound payload composes");

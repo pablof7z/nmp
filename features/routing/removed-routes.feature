@@ -19,11 +19,11 @@ Feature: The routes that were removed stay removed
   reasons"), and `AuthorRelayList(Kind)`, which was a partial spelling of
   `Auto` with the kind hoisted into the enum.
 
-  The removals themselves are enforced rather than promised (#1105):
-  `scripts/check-routing-vocabulary.sh` enumerates the Rust, FFI, Swift and
-  Kotlin routing surfaces and requires exactly the two words, and tombstones
-  every retired spelling above -- `GroupHost` and `AuthorRelayList`
-  included -- with the replacement each maps to.
+  The removals themselves are meant to be enforced rather than promised
+  (#1105): the routing surfaces across Rust, FFI, Swift and Kotlin require
+  exactly the two words, tombstoning every retired spelling above --
+  `GroupHost` and `AuthorRelayList` included -- with the replacement each
+  maps to. There is currently no mechanical check across all four surfaces.
   `crates/nmp/tests/group_publication_door.rs` is the group door's runtime
   proof: the app supplies content only, the host alone receives, and the
   author's own discovered outbox is never contacted
@@ -44,7 +44,6 @@ Feature: The routes that were removed stay removed
 
   # nmp:id=ROUTING-REMOVEDROUTES-001
   # nmp:status=built
-  # nmp:evidence=script:repository::scripts/check-routing-vocabulary.sh
   # nmp:falsifier=Restore any retired spelling as a variant on one surface only -- the Kotlin sealed class, say -- and the gate names that spelling, that file and the replacement the caller says instead.
   Scenario Outline: A retired routing has no app-reachable spelling
     # Not "is discouraged" and not "is deprecated": there is no value an app
@@ -65,7 +64,6 @@ Feature: The routes that were removed stay removed
 
   # nmp:id=ROUTING-REMOVEDROUTES-002
   # nmp:status=built
-  # nmp:evidence=script:repository::scripts/check-routing-vocabulary.sh
   # nmp:evidence=rust:nmp-grammar::routing_is_two_words_and_explicit_is_verbatim
   # nmp:falsifier=Add a third variant naming a NIP or a strategy to the Rust enum; the gate's surface enumeration reports the extra word and the exhaustive FFI conversion match stops compiling.
   Scenario: There is no third routing word to reach for
@@ -80,7 +78,6 @@ Feature: The routes that were removed stay removed
   # nmp:id=ROUTING-REMOVEDROUTES-003
   # nmp:status=built
   # nmp:evidence=rust:nmp::a_group_write_routes_explicitly_to_the_whole_scope_and_never_to_the_author_outbox
-  # nmp:evidence=script:repository::scripts/check-routing-vocabulary.sh
   # nmp:falsifier=Widen the group's minted route from the scope's hosts to Auto; the host admits nothing, the write parks, and the author's own discovered outbox becomes a destination the app never named.
   Scenario: A group write still crosses the app surface only through the group door
     # What the reversal must NOT have loosened. `Explicit` being general does

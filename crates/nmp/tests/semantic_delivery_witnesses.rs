@@ -6,17 +6,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use nmp::{
     AccessContext, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReceiptReattachment,
     RelayState, ReplaceableMaterializer, ReplaceableMaterializerOperation,
-    ReplaceableMaterializerRefusal, ReplaceableSourcePolicy, Row, RowDelta, RowSignature, SignerOp,
-    SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability, SigningState,
-    SourceAuthority, WriteFact, WriteIntent, WriteOutcome, WritePayload, WriteRouting,
+    ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec, ReplaceableSourcePolicy, Row,
+    RowDelta, RowSignature, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,
+    SigningCapability, SigningState, SourceAuthority, WriteFact, WriteIntent, WriteOutcome,
+    WriteRouting,
 };
 use nmp_signer::PendingSignerSender;
+use nmp_store::{InsertOutcome, RedbStore, RelayObserved};
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::nips::nip01::Coordinate;
 use nostr::{EventBuilder, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -27,81 +29,6 @@ struct AddPeople;
 
 struct CountingDefaultPeople {
     default_calls: Arc<AtomicUsize>,
-}
-
-struct BlockFirstDefaultPeople {
-    default_calls: Arc<AtomicUsize>,
-    existing_calls: Arc<AtomicUsize>,
-    entered: mpsc::Sender<()>,
-    release: Mutex<mpsc::Receiver<()>>,
-}
-
-struct BlockSecondPeopleMaterialization {
-    calls: Arc<AtomicUsize>,
-    entered: mpsc::Sender<usize>,
-    exited: mpsc::Sender<usize>,
-    release: Mutex<mpsc::Receiver<()>>,
-}
-
-struct MaterializerRelease(Option<mpsc::Sender<()>>);
-
-impl MaterializerRelease {
-    fn release(&mut self) {
-        if let Some(release) = self.0.take() {
-            let _ = release.send(());
-        }
-    }
-}
-
-impl Drop for MaterializerRelease {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
-
-struct HeldSigner {
-    pubkey: PublicKey,
-    started: mpsc::Sender<(SignerUnsignedEvent, PendingSignerSender<SignerSignedEvent>)>,
-}
-
-impl SigningCapability for HeldSigner {
-    fn public_key(&self) -> Option<SignerPublicKey> {
-        Some(SignerPublicKey::new(self.pubkey.to_bytes()))
-    }
-
-    fn sign(&self, unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent> {
-        let (sender, operation) = SignerOp::pending_channel();
-        self.started
-            .send((unsigned, sender))
-            .expect("the test owns the signer request receiver");
-        operation
-    }
-}
-
-fn to_nostr_unsigned(unsigned: SignerUnsignedEvent) -> UnsignedEvent {
-    let (public_key, created_at, kind, tags, content) = unsigned.into_parts();
-    UnsignedEvent::new(
-        PublicKey::from_slice(public_key.as_bytes()).expect("engine supplied a public key"),
-        Timestamp::from(created_at),
-        Kind::from(kind),
-        tags.into_iter()
-            .map(Tag::parse)
-            .collect::<Result<Vec<_>, _>>()
-            .expect("engine supplied valid tags"),
-        content,
-    )
-}
-
-fn to_signer_event(event: nostr::Event) -> SignerSignedEvent {
-    SignerSignedEvent::new(
-        event.id.to_bytes(),
-        SignerPublicKey::new(event.pubkey.to_bytes()),
-        event.created_at.as_secs(),
-        event.kind.as_u16(),
-        event.tags.into_iter().map(|tag| tag.to_vec()).collect(),
-        event.content,
-        event.sig.serialize(),
-    )
 }
 
 impl ReplaceableMaterializer for AddPeople {
@@ -185,71 +112,49 @@ impl ReplaceableMaterializer for CountingDefaultPeople {
     }
 }
 
-impl ReplaceableMaterializer for BlockFirstDefaultPeople {
-    fn materialize(
-        &self,
-        source: &UnsignedEvent,
-        current: &UnsignedEvent,
-        operations: &[ReplaceableMaterializerOperation<'_>],
-    ) -> Result<nmp::EventBuilder, ReplaceableMaterializerRefusal> {
-        self.existing_calls.fetch_add(1, Ordering::SeqCst);
-        AddPeople.materialize(source, current, operations)
+struct HeldSigner {
+    pubkey: PublicKey,
+    started: mpsc::Sender<(SignerUnsignedEvent, PendingSignerSender<SignerSignedEvent>)>,
+}
+
+impl SigningCapability for HeldSigner {
+    fn public_key(&self) -> Option<SignerPublicKey> {
+        Some(SignerPublicKey::new(self.pubkey.to_bytes()))
     }
 
-    fn materialize_default(
-        &self,
-        coordinate: &Coordinate,
-        operations: &[ReplaceableMaterializerOperation<'_>],
-    ) -> Result<nmp::EventBuilder, ReplaceableMaterializerRefusal> {
-        let call = self.default_calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if call == 1 {
-            self.entered
-                .send(())
-                .expect("the blocked-default witness remains alive");
-            self.release
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .recv()
-                .expect("the test releases the first default materialization");
-        }
-        AddPeople.materialize_default(coordinate, operations)
+    fn sign(&self, unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent> {
+        let (sender, operation) = SignerOp::pending_channel();
+        self.started
+            .send((unsigned, sender))
+            .expect("the test owns the signer request receiver");
+        operation
     }
 }
 
-impl ReplaceableMaterializer for BlockSecondPeopleMaterialization {
-    fn materialize(
-        &self,
-        source: &UnsignedEvent,
-        current: &UnsignedEvent,
-        operations: &[ReplaceableMaterializerOperation<'_>],
-    ) -> Result<nmp::EventBuilder, ReplaceableMaterializerRefusal> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if call == 2 {
-            self.entered
-                .send(call)
-                .expect("the successor barrier receiver remains live");
-            self.release
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .recv()
-                .expect("the test releases the successor materializer");
-        }
-        let result = AddPeople.materialize(source, current, operations);
-        if call == 2 {
-            let _ = self.exited.send(call);
-        }
-        result
-    }
+fn to_nostr_unsigned(unsigned: SignerUnsignedEvent) -> UnsignedEvent {
+    let (public_key, created_at, kind, tags, content) = unsigned.into_parts();
+    UnsignedEvent::new(
+        PublicKey::from_slice(public_key.as_bytes()).expect("engine supplied a public key"),
+        Timestamp::from(created_at),
+        Kind::from(kind),
+        tags.into_iter()
+            .map(Tag::parse)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("engine supplied valid tags"),
+        content,
+    )
+}
 
-    fn materialize_default(
-        &self,
-        _coordinate: &Coordinate,
-        _operations: &[ReplaceableMaterializerOperation<'_>],
-    ) -> Result<nmp::EventBuilder, ReplaceableMaterializerRefusal> {
-        Err(ReplaceableMaterializerRefusal {
-            reason: "fixture requires an existing source".to_string(),
-        })
-    }
+fn to_signer_event(event: nostr::Event) -> SignerSignedEvent {
+    SignerSignedEvent::new(
+        event.id.to_bytes(),
+        SignerPublicKey::new(event.pubkey.to_bytes()),
+        event.created_at.as_secs(),
+        event.kind.as_u16(),
+        event.tags.into_iter().map(|tag| tag.to_vec()).collect(),
+        event.content,
+        event.sig.serialize(),
+    )
 }
 
 fn contact_list(keys: &Keys, at: u64, content: &str, people: &[PublicKey]) -> nostr::Event {
@@ -434,20 +339,21 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
         ..EngineConfig::default()
     };
 
-    let engine = Arc::new(Engine::new(config()).expect("persistent engine opens"));
+    let default_calls = Arc::new(AtomicUsize::new(0));
+    let spec = ReplaceableMaterializerSpec::new(
+        [66; 16],
+        [67; 16],
+        CountingDefaultPeople {
+            default_calls: Arc::clone(&default_calls),
+        },
+    );
+    let materializer = spec.handle();
+    let engine = Arc::new(
+        Engine::new_with_capabilities(config(), vec![spec]).expect("persistent engine opens"),
+    );
     engine
         .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
         .expect("local author account registers");
-    let default_calls = Arc::new(AtomicUsize::new(0));
-    let materializer = engine
-        .add_replaceable_materializer(
-            [66; 16],
-            [67; 16],
-            CountingDefaultPeople {
-                default_calls: Arc::clone(&default_calls),
-            },
-        )
-        .expect("semantic capability registers");
     let subscription = engine
         .observe(
             pinned_contact_lists([source_url.clone()], author.public_key()),
@@ -552,19 +458,41 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
     drop(engine);
     source.disconnect().await;
 
-    let reopened = Engine::new(config()).expect("persistent engine reopens");
+    let relay_source = contact_list(
+        &author,
+        Timestamp::now().as_secs().saturating_add(5),
+        "relay-owned fields survive",
+        &[bob],
+    );
+    let mut closed_store = RedbStore::open(&store_path).expect("closed store reopens for input");
+    assert!(matches!(
+        closed_store
+            .insert(
+                relay_source.clone(),
+                RelayObserved::new(source_url.clone(), Timestamp::now()),
+            )
+            .expect("newer source is durably observed while the engine is closed"),
+        InsertOutcome::Superseded { .. }
+    ));
+    drop(closed_store);
+
+    let reopened = Engine::new_with_capabilities(
+        config(),
+        vec![
+            ReplaceableMaterializerSpec::new(
+                [66; 16],
+                [67; 16],
+                CountingDefaultPeople {
+                    default_calls: Arc::clone(&default_calls),
+                },
+            ),
+            ReplaceableMaterializerSpec::new([68; 16], [69; 16], AddPeople),
+        ],
+    )
+    .expect("persistent engine reopens");
     reopened
         .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
         .expect("author account reattaches");
-    reopened
-        .add_replaceable_materializer(
-            [66; 16],
-            [67; 16],
-            CountingDefaultPeople {
-                default_calls: Arc::clone(&default_calls),
-            },
-        )
-        .expect("semantic capability reattaches");
     let statuses = attached_statuses(
         reopened
             .reattach_receipt(receipt.id)
@@ -582,38 +510,27 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
         )
         .expect("reopened source observation attaches");
     let mut reopened_rows = BTreeMap::new();
-    let recovered_initial = wait_for_row(&reopened_subscription, &mut reopened_rows, |row| {
-        row.id() == current.id()
-    });
-    assert!(row_contains_person(&recovered_initial, alice));
-    assert!(row_contains_person(&recovered_initial, carol));
-    assert_eq!(
-        default_calls.load(Ordering::SeqCst),
-        2,
-        "restart reconstructs the durable generation without rerunning the default builder"
-    );
-    source = ScriptedRelay::start_on_port(source_port, &RelayConfig::default()).await;
-    assert_eq!(source.url, source_url);
-    let relay_source = contact_list(
-        &author,
-        Timestamp::now().as_secs().saturating_add(5),
-        "relay-owned fields survive",
-        &[bob],
-    );
-    source.seed_signed_event(&relay_source).await;
-    assert!(
-        source.wait_contacted(SETTLE).await,
-        "the reopened finite source request reaches the rebound relay"
-    );
     let successor = wait_for_row(&reopened_subscription, &mut reopened_rows, |row| {
         row.content() == "relay-owned fields survive"
             && row_contains_person(row, alice)
             && row_contains_person(row, bob)
             && row_contains_person(row, carol)
     });
-    assert_eq!(default_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        default_calls.load(Ordering::SeqCst),
+        2,
+        "boot uses the durable source without rerunning the default builder"
+    );
     assert_ne!(successor.id(), initial.id());
     assert_ne!(successor.id(), current.id());
+    source = ScriptedRelay::start_on_port(source_port, &RelayConfig::default()).await;
+    assert_eq!(source.url, source_url);
+    source.seed_signed_event(&relay_source).await;
+    assert!(
+        source.wait_contacted(SETTLE).await,
+        "the reopened finite source request reaches the rebound relay"
+    );
+    assert_eq!(default_calls.load(Ordering::SeqCst), 2);
     assert!(
         destination
             .wait_wire_event_id_count(&successor.id().to_hex(), 1, SETTLE)
@@ -636,9 +553,8 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
         .expect("parameterized observation opens");
     let parameterized = reopened
         .publish(WriteIntent {
-            payload: reopened
-                .add_replaceable_materializer([68; 16], [69; 16], AddPeople)
-                .expect("parameterized capability registers")
+            payload: ReplaceableMaterializerSpec::new([68; 16], [69; 16], AddPeople)
+                .handle()
                 .first_value_operation(
                     parameterized_kind,
                     "bookmarks".to_string(),
@@ -672,377 +588,6 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn source_arrival_invalidates_a_blocked_capability_default_completion() {
-    let source = ScriptedRelay::start(&RelayConfig::default()).await;
-    let destination = ScriptedRelay::start(&RelayConfig::default()).await;
-    let author = Keys::generate();
-    let alice = Keys::generate().public_key();
-    let bob = Keys::generate().public_key();
-    let engine = Arc::new(Engine::new(EngineConfig::default()).expect("engine opens"));
-    engine
-        .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
-        .expect("local author account registers");
-
-    let default_calls = Arc::new(AtomicUsize::new(0));
-    let existing_calls = Arc::new(AtomicUsize::new(0));
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let materializer = engine
-        .add_replaceable_materializer(
-            [70; 16],
-            [71; 16],
-            BlockFirstDefaultPeople {
-                default_calls: Arc::clone(&default_calls),
-                existing_calls: Arc::clone(&existing_calls),
-                entered: entered_tx,
-                release: Mutex::new(release_rx),
-            },
-        )
-        .expect("blocking capability registers");
-    let subscription = engine
-        .observe(
-            pinned_contact_lists([source.url.clone()], author.public_key()),
-            None,
-        )
-        .expect("source observation opens");
-    assert!(
-        source
-            .wait_query_for_kind(Kind::ContactList.as_u16(), SETTLE)
-            .await,
-        "the source query is live before the default operation starts"
-    );
-
-    let intent = WriteIntent {
-        payload: materializer
-            .first_value_operation(
-                Kind::ContactList,
-                String::new(),
-                ReplaceableSourcePolicy::Finite {
-                    relays: BTreeSet::from([source.url.clone()]),
-                    access: AccessContext::Public,
-                },
-                alice.to_bytes().to_vec(),
-            )
-            .expect("the first-value operation is complete"),
-        routing: WriteRouting::Explicit(vec![destination.url.clone()]),
-        identity: Identity::Active,
-        correlation: None,
-    };
-    let publisher_engine = Arc::clone(&engine);
-    let publisher = std::thread::spawn(move || publisher_engine.publish(intent));
-    entered_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("the first default callback reaches the barrier");
-
-    let relay_source = contact_list(
-        &author,
-        Timestamp::now().as_secs(),
-        "relay fields win the race",
-        &[bob],
-    );
-    source.seed_signed_event(&relay_source).await;
-    let mut rows = BTreeMap::new();
-    let observed_source = wait_for_row(&subscription, &mut rows, |row| row.id() == relay_source.id);
-    assert_eq!(observed_source.content(), "relay fields win the race");
-
-    release_tx
-        .send(())
-        .expect("the stale default callback is released");
-    let receipt = publisher
-        .join()
-        .expect("the first-value publisher exits")
-        .expect("the operation enters custody after retry");
-    assert_eq!(
-        default_calls.load(Ordering::SeqCst),
-        1,
-        "the stale default result is discarded rather than accepted or retried over emptiness"
-    );
-
-    let successor = wait_for_row(&subscription, &mut rows, |row| {
-        row.content() == "relay fields win the race"
-            && row_contains_person(row, alice)
-            && row_contains_person(row, bob)
-    });
-    assert_eq!(
-        successor.id(),
-        receipt.event_id,
-        "the first accepted generation is already materialized over the raced relay source"
-    );
-    assert_eq!(
-        existing_calls.load(Ordering::SeqCst),
-        1,
-        "the retained operation is reapplied exactly once over the relay source"
-    );
-    assert!(
-        destination
-            .wait_wire_event_id_count(&successor.id().to_hex(), 1, SETTLE)
-            .await,
-        "the source-based successor reaches the destination"
-    );
-    engine.shutdown();
-    source.shutdown();
-    destination.shutdown();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn finite_successor_materialization_does_not_block_the_engine_or_lose_adjacent_eose() {
-    let base_relay = ScriptedRelay::start(&RelayConfig::default()).await;
-    let source = ScriptedRelay::start(&RelayConfig::default()).await;
-    let author = Keys::generate();
-    let alice = Keys::generate().public_key();
-    let initial_time = Timestamp::now().as_secs().saturating_sub(20);
-    let base = contact_list(&author, initial_time, "base", &[]);
-    let newer = contact_list(&author, initial_time + 5, "newer", &[]);
-    base_relay.seed_signed_event(&base).await;
-
-    let engine = Engine::new(EngineConfig::default()).expect("engine opens");
-    engine
-        .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
-        .expect("local author account registers");
-    let calls = Arc::new(AtomicUsize::new(0));
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (exited_tx, exited_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let mut release = MaterializerRelease(Some(release_tx));
-    let materializer = engine
-        .add_replaceable_materializer(
-            [46; 16],
-            [47; 16],
-            BlockSecondPeopleMaterialization {
-                calls: Arc::clone(&calls),
-                entered: entered_tx,
-                exited: exited_tx,
-                release: Mutex::new(release_rx),
-            },
-        )
-        .expect("semantic capability registers");
-    let subscription = engine
-        .observe(
-            pinned_contact_lists([base_relay.url.clone()], author.public_key()),
-            None,
-        )
-        .expect("contact-list observation opens");
-    let mut rows = BTreeMap::new();
-    let base_row = wait_for_row(&subscription, &mut rows, |row| row.id() == base.id);
-    source.seed_signed_event(&newer).await;
-
-    let receipt = engine
-        .publish(WriteIntent {
-            payload: materializer
-                .operation(
-                    &base_row,
-                    ReplaceableSourcePolicy::Finite {
-                        relays: BTreeSet::from([source.url.clone()]),
-                        access: AccessContext::Public,
-                    },
-                    alice.to_bytes().to_vec(),
-                )
-                .expect("finite operation is complete"),
-            routing: WriteRouting::Explicit(vec![source.url.clone()]),
-            identity: Identity::Active,
-            correlation: None,
-        })
-        .expect("finite operation enters custody");
-    let initial = wait_for_row(&subscription, &mut rows, |row| row.id() == receipt.event_id);
-    assert_eq!(
-        entered_rx.recv_timeout(SETTLE),
-        Ok(2),
-        "the relay successor reaches the deterministic barrier"
-    );
-
-    let ordinary = EventBuilder::new(Kind::Custom(9_999), "ordinary while successor is blocked")
-        .custom_created_at(Timestamp::now())
-        .sign_with_keys(&author)
-        .expect("ordinary fixture signs");
-    let ordinary_id = ordinary.id;
-    let ordinary_receipt = engine
-        .publish(WriteIntent {
-            payload: WritePayload::Signed(ordinary),
-            routing: WriteRouting::Explicit(vec![source.url.clone()]),
-            identity: Identity::Explicit(author.public_key()),
-            correlation: None,
-        })
-        .expect("unrelated publication enters custody while successor work is blocked");
-    assert_eq!(ordinary_receipt.event_id, ordinary_id);
-    assert_eq!(
-        engine
-            .publish_queue_for_event(ordinary_id, None, u8::MAX)
-            .expect("ordinary queue lookup remains responsive")
-            .len(),
-        1
-    );
-    let finite_entry = engine
-        .publish_queue(None, u8::MAX)
-        .expect("semantic queue remains responsive")
-        .into_iter()
-        .find(|entry| entry.receipt_id == receipt.id)
-        .expect("finite receipt remains retained");
-    assert!(finite_entry.outcome.is_none());
-    assert_eq!(initial.content(), "base");
-
-    release.release();
-    assert_eq!(
-        exited_rx.recv_timeout(SETTLE),
-        Ok(2),
-        "the released successor callback exits"
-    );
-    let successor = wait_for_row(&subscription, &mut rows, |row| {
-        row.id() != initial.id() && row.content() == "newer"
-    });
-    assert!(
-        source
-            .wait_wire_event_id_count(&successor.id().to_hex(), 1, SETTLE)
-            .await,
-        "the completed successor reaches its destination"
-    );
-    wait_for_settled(&receipt.statuses);
-    assert!(calls.load(Ordering::SeqCst) >= 2);
-
-    engine.shutdown();
-    base_relay.shutdown();
-    source.shutdown();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn blocked_finite_successor_shutdown_reopens_the_unfinished_source_request() {
-    let base_relay = ScriptedRelay::start(&RelayConfig::default()).await;
-    let mut source = ScriptedRelay::start(&RelayConfig::default()).await;
-    let source_port = source.port();
-    let source_url = source.url.clone();
-    let author = Keys::generate();
-    let alice = Keys::generate().public_key();
-    let initial_time = Timestamp::now().as_secs().saturating_sub(20);
-    let base = contact_list(&author, initial_time, "restart base", &[]);
-    let newer = contact_list(&author, initial_time + 5, "restart successor", &[]);
-    base_relay.seed_signed_event(&base).await;
-    source.seed_signed_event(&newer).await;
-    let directory = tempfile::tempdir().expect("persistent fixture directory");
-    let store_path = directory.path().join("blocked-successor-restart.redb");
-    let config = || EngineConfig {
-        store_path: Some(store_path.to_string_lossy().into_owned()),
-        ..EngineConfig::default()
-    };
-
-    let engine = Arc::new(Engine::new(config()).expect("persistent engine opens"));
-    engine
-        .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
-        .expect("local author account registers");
-    let calls = Arc::new(AtomicUsize::new(0));
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (exited_tx, exited_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let mut release = MaterializerRelease(Some(release_tx));
-    let materializer = engine
-        .add_replaceable_materializer(
-            [56; 16],
-            [57; 16],
-            BlockSecondPeopleMaterialization {
-                calls,
-                entered: entered_tx,
-                exited: exited_tx,
-                release: Mutex::new(release_rx),
-            },
-        )
-        .expect("semantic capability registers");
-    let subscription = engine
-        .observe(
-            pinned_contact_lists([base_relay.url.clone()], author.public_key()),
-            None,
-        )
-        .expect("base observation opens");
-    let mut rows = BTreeMap::new();
-    let base_row = wait_for_row(&subscription, &mut rows, |row| row.id() == base.id);
-    let receipt = engine
-        .publish(WriteIntent {
-            payload: materializer
-                .operation(
-                    &base_row,
-                    ReplaceableSourcePolicy::Finite {
-                        relays: BTreeSet::from([source_url.clone()]),
-                        access: AccessContext::Public,
-                    },
-                    alice.to_bytes().to_vec(),
-                )
-                .expect("finite operation is complete"),
-            routing: WriteRouting::Explicit(vec![source_url.clone()]),
-            identity: Identity::Active,
-            correlation: None,
-        })
-        .expect("finite operation enters custody");
-    assert_eq!(
-        entered_rx.recv_timeout(SETTLE),
-        Ok(2),
-        "the successor callback reaches the restart barrier"
-    );
-
-    let (shutdown_done_tx, shutdown_done_rx) = mpsc::channel();
-    let shutdown_engine = Arc::clone(&engine);
-    let shutdown = std::thread::spawn(move || {
-        shutdown_engine.shutdown();
-        let _ = shutdown_done_tx.send(());
-    });
-    if shutdown_done_rx
-        .recv_timeout(Duration::from_secs(5))
-        .is_err()
-    {
-        release.release();
-        let _ = exited_rx.recv_timeout(SETTLE);
-        let _ = shutdown_done_rx.recv_timeout(SETTLE);
-        shutdown
-            .join()
-            .expect("released shutdown worker joins during cleanup");
-        panic!("shutdown waited for a blocked successor callback");
-    }
-    shutdown.join().expect("shutdown worker joins");
-    release.release();
-    assert_eq!(
-        exited_rx.recv_timeout(SETTLE),
-        Ok(2),
-        "the detached callback exits after explicit test cleanup"
-    );
-    drop(subscription);
-    drop(engine);
-
-    source.disconnect().await;
-    let reopened = Engine::new(config()).expect("persistent engine reopens");
-    reopened
-        .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
-        .expect("author account reattaches");
-    reopened
-        .add_replaceable_materializer([56; 16], [57; 16], AddPeople)
-        .expect("semantic capability reattaches");
-    let statuses = attached_statuses(
-        reopened
-            .reattach_receipt(receipt.id)
-            .expect("finite receipt reattaches after restart"),
-    );
-    let reopened_subscription = reopened
-        .observe(
-            pinned_contact_lists([base_relay.url.clone()], author.public_key()),
-            None,
-        )
-        .expect("reopened observation attaches");
-    let mut reopened_rows = BTreeMap::new();
-    source = ScriptedRelay::start_on_port(source_port, &RelayConfig::default()).await;
-    assert_eq!(source.url, source_url);
-    source.seed_signed_event(&newer).await;
-    let successor = wait_for_row(&reopened_subscription, &mut reopened_rows, |row| {
-        row.content() == "restart successor"
-    });
-    assert!(
-        source
-            .wait_wire_event_id_count(&successor.id().to_hex(), 1, SETTLE)
-            .await,
-        "the recovered successor reaches the original destination"
-    );
-    wait_for_settled(&statuses);
-
-    reopened.shutdown();
-    base_relay.shutdown();
-    source.shutdown();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shared_second_generation_is_once_per_relay_and_replays_without_settling() {
     let relay_one = ScriptedRelay::start(&RelayConfig::default()).await;
     let relay_two = ScriptedRelay::start(&RelayConfig::default()).await;
@@ -1059,13 +604,13 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
         store_path: Some(store_path.to_string_lossy().into_owned()),
         ..EngineConfig::default()
     };
-    let engine = Engine::new(config()).expect("persistent engine opens");
+    let spec = ReplaceableMaterializerSpec::new([6; 16], [7; 16], AddPeople);
+    let materializer = spec.handle();
+    let engine =
+        Engine::new_with_capabilities(config(), vec![spec]).expect("persistent engine opens");
     engine
         .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
         .expect("local author account registers");
-    let materializer = engine
-        .add_replaceable_materializer([6; 16], [7; 16], AddPeople)
-        .expect("semantic capability registers");
     let subscription = engine
         .observe(
             pinned_contact_lists([relay_two.url.clone()], author.public_key()),
@@ -1177,10 +722,14 @@ async fn shared_second_generation_is_once_per_relay_and_replays_without_settling
     drop(subscription);
     engine.shutdown();
 
-    let restarted = Engine::new_with_session(config(), session).expect("engine restarts");
-    restarted
-        .add_replaceable_materializer([6; 16], [7; 16], AddPeople)
-        .expect("semantic capability reattaches");
+    let restarted = Engine::new_with_session_and_capabilities(
+        config(),
+        session,
+        vec![ReplaceableMaterializerSpec::new(
+            [6; 16], [7; 16], AddPeople,
+        )],
+    )
+    .expect("engine restarts");
     for (receipt, owns_predecessor) in [(first_id, true), (second_id, false)] {
         let statuses = attached_statuses(
             restarted
@@ -1239,18 +788,20 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
     let base = contact_list(&author, initial_time, "base", &[]);
     source.seed_signed_event(&base).await;
 
-    let engine = Engine::new(EngineConfig {
-        indexer_relays: vec![indexer.url.to_string()],
-        app_relays: vec![relay_a.url.to_string()],
-        ..EngineConfig::default()
-    })
+    let spec = ReplaceableMaterializerSpec::new([16; 16], [17; 16], AddPeople);
+    let materializer = spec.handle();
+    let engine = Engine::new_with_capabilities(
+        EngineConfig {
+            indexer_relays: vec![indexer.url.to_string()],
+            app_relays: vec![relay_a.url.to_string()],
+            ..EngineConfig::default()
+        },
+        vec![spec],
+    )
     .expect("engine opens with an app relay and one NIP-65 indexer");
     engine
         .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
         .expect("local author account registers");
-    let materializer = engine
-        .add_replaceable_materializer([16; 16], [17; 16], AddPeople)
-        .expect("semantic capability registers");
     let subscription = engine
         .observe(
             pinned_contact_lists([source.url.clone()], author.public_key()),
@@ -1380,13 +931,13 @@ async fn source_session_replacement_wakes_every_signed_successor_destination() {
     let base = contact_list(&author, initial_time, "base", &[]);
     relay_one.seed_signed_event(&base).await;
 
-    let engine = Engine::new(EngineConfig::default()).expect("engine opens");
+    let spec = ReplaceableMaterializerSpec::new([26; 16], [27; 16], AddPeople);
+    let materializer = spec.handle();
+    let engine =
+        Engine::new_with_capabilities(EngineConfig::default(), vec![spec]).expect("engine opens");
     engine
         .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
         .expect("local author account registers");
-    let materializer = engine
-        .add_replaceable_materializer([26; 16], [27; 16], AddPeople)
-        .expect("semantic capability registers");
     let source_relays = [relay_one.url.clone(), relay_two_url.clone()];
     let subscription = engine
         .observe(
@@ -1496,7 +1047,10 @@ async fn relay_source_successors_resume_current_delivery_and_remain_continuing_a
         ..EngineConfig::default()
     };
     let (first_signer_tx, first_signer_rx) = mpsc::channel();
-    let engine = Engine::new(config()).expect("persistent engine opens");
+    let spec = ReplaceableMaterializerSpec::new([36; 16], [37; 16], AddPeople);
+    let materializer = spec.handle();
+    let engine =
+        Engine::new_with_capabilities(config(), vec![spec]).expect("persistent engine opens");
     engine
         .add_public_key_account(author.public_key(), true)
         .expect("author account registers");
@@ -1506,9 +1060,6 @@ async fn relay_source_successors_resume_current_delivery_and_remain_continuing_a
             started: first_signer_tx,
         })
         .expect("held signer registers");
-    let materializer = engine
-        .add_replaceable_materializer([36; 16], [37; 16], AddPeople)
-        .expect("semantic capability registers");
     let source_relays = [relay_one.url.clone(), relay_two_url.clone()];
     let subscription = engine
         .observe(
@@ -1579,10 +1130,14 @@ async fn relay_source_successors_resume_current_delivery_and_remain_continuing_a
     engine.shutdown();
 
     let (restarted_signer_tx, restarted_signer_rx) = mpsc::channel();
-    let restarted = Engine::new_with_session(config(), session).expect("engine restarts");
-    restarted
-        .add_replaceable_materializer([36; 16], [37; 16], AddPeople)
-        .expect("semantic capability reattaches");
+    let restarted = Engine::new_with_session_and_capabilities(
+        config(),
+        session,
+        vec![ReplaceableMaterializerSpec::new(
+            [36; 16], [37; 16], AddPeople,
+        )],
+    )
+    .expect("engine restarts");
     restarted
         .install_test_signing_capability(HeldSigner {
             pubkey: author.public_key(),

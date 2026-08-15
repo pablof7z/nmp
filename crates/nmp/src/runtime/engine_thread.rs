@@ -6,6 +6,7 @@ use std::time::Duration;
 use crossbeam_channel as cb;
 use nmp_store::RedbStore;
 use nmp_transport::{Pool, PoolConfig, PoolEvent};
+#[cfg(feature = "nip65")]
 use nostr::RelayUrl;
 
 use crate::relay_information_service::RelayInformationService;
@@ -80,6 +81,10 @@ pub enum EngineThreadError {
     RelayBudgetOverflow {
         relay_limit: usize,
     },
+    MissingReplaceableCapability {
+        program: [u8; 16],
+        format: [u8; 16],
+    },
     EngineShuttingDown,
 }
 
@@ -95,6 +100,12 @@ impl std::fmt::Display for EngineThreadError {
             Self::RelayBudgetOverflow { relay_limit } => write!(
                 f,
                 "relay worker budget {relay_limit} cannot represent its retirement envelope"
+            ),
+            Self::MissingReplaceableCapability { program, format } => write!(
+                f,
+                "store retains replaceable operations for missing compiled capability program {:02x?} format {:02x?}",
+                program,
+                format
             ),
             Self::EngineShuttingDown => f.write_str("engine is shutting down"),
         }
@@ -168,13 +179,20 @@ impl EngineThread {
         cap: usize,
         pool_config: PoolConfig,
     ) -> Result<(Self, Handle), EngineThreadError> {
-        Self::spawn_with_runtime_config(store, cap, pool_config, RuntimeConfig::default())
+        Self::spawn_with_runtime_config(
+            store,
+            cap,
+            pool_config,
+            RuntimeConfig::default(),
+            Vec::new(),
+        )
     }
 
     /// Spawn a headless runtime over a static fact snapshot.
     ///
     /// This exists for deterministic falsifiers. Production assembly owns
     /// the private mutable fact store and uses [`Self::spawn`].
+    #[cfg(feature = "unstable-mechanism")]
     #[doc(hidden)]
     pub fn spawn_with_fixture_routing_facts(
         store: RedbStore,
@@ -189,6 +207,7 @@ impl EngineThread {
             pool_config,
             RuntimeConfig::default(),
             RestoredSession::empty(),
+            Vec::new(),
         )
     }
 
@@ -197,6 +216,7 @@ impl EngineThread {
         cap: usize,
         pool_config: PoolConfig,
         runtime_config: RuntimeConfig,
+        capabilities: Vec<crate::ReplaceableMaterializerSpec>,
     ) -> Result<(Self, Handle), EngineThreadError> {
         Self::spawn_with_routing_facts_and_runtime_config(
             store,
@@ -205,6 +225,7 @@ impl EngineThread {
             pool_config,
             runtime_config,
             RestoredSession::empty(),
+            capabilities,
         )
     }
 
@@ -215,7 +236,31 @@ impl EngineThread {
         mut pool_config: PoolConfig,
         runtime_config: RuntimeConfig,
         initial_session: RestoredSession,
+        capabilities: Vec<crate::ReplaceableMaterializerSpec>,
     ) -> Result<(Self, Handle), EngineThreadError> {
+        let supplied: std::collections::HashSet<_> = capabilities
+            .iter()
+            .map(|spec| (spec.program, spec.format))
+            .collect();
+        match store.required_replaceable_programs() {
+            Ok(required) => {
+                if let Some((program, format)) = required
+                    .into_iter()
+                    .find(|(program, format)| !supplied.contains(&(program.0, format.0)))
+                {
+                    return Err(EngineThreadError::MissingReplaceableCapability {
+                        program: program.0,
+                        format: format.0,
+                    });
+                }
+            }
+            Err(error) => {
+                return Err(EngineThreadError::ThreadUnavailable {
+                    component: "replaceable capability census".to_string(),
+                    reason: error.to_string(),
+                });
+            }
+        }
         // #704: the ONE engine-owned adapter runtime. A fixed 2-worker
         // multi-thread tokio runtime hosts every adapter task; each worker
         // thread start bumps the process-wide OS-thread counter. Build failure
@@ -321,6 +366,7 @@ impl EngineThread {
                             routing_facts,
                             cap,
                             initial_session,
+                            capabilities,
                             EnginePoolRuntime {
                                 pool: engine_pool,
                                 stop: engine_stop,

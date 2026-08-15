@@ -48,7 +48,6 @@ use nmp_grammar::LiveQuery;
 use nmp_grammar::WriteIntent;
 use nmp_store::{RedbStore, RedbStoreOpenError, RedbStoreResetError};
 use nmp_transport::PoolConfig;
-use nostr::secp256k1::rand::{rngs::OsRng, RngCore};
 #[cfg(test)]
 use nostr::EventId;
 #[cfg(any(test, all(feature = "unstable-mechanism", feature = "nip65")))]
@@ -59,6 +58,19 @@ use crate::auth::{AuthPolicy, EngineAuthPolicyAdapter};
 #[cfg(feature = "nip65")]
 use crate::config::build_nip65_sources;
 use crate::config::{build_routing_facts, EngineConfig};
+
+/// The feature-selected replaceable-capability built-ins the `nmp` crate owns
+/// and supplies at the [`Engine::new`] boundary per #1624. The NIP-02 follow
+/// capability lives in the `nmp-nip02` `protocol-service` crate (which depends
+/// on `nmp`), so it cannot be compiled into `nmp` itself; a consumer that
+/// wants it adds `nmp_nip02::follow_capability()` to the vec passed to
+/// [`Engine::new_with_capabilities`].
+pub(crate) fn default_capabilities() -> Vec<crate::ReplaceableMaterializerSpec> {
+    vec![
+        #[cfg(feature = "nip29")]
+        crate::nip29::group_list_capability(),
+    ]
+}
 use crate::error::EngineError;
 #[cfg(test)]
 use crate::relay_information::{RelayInformationCachePolicy, RelayInformationError};
@@ -116,30 +128,6 @@ pub struct SignEventRequest {
 }
 
 impl Engine {
-    /// Configure one synchronous capability implementation and return the
-    /// only supported constructor for operations bound to that installation.
-    pub fn add_replaceable_materializer<M>(
-        &self,
-        program: [u8; 16],
-        format: [u8; 16],
-        materializer: M,
-    ) -> Result<crate::RegisteredReplaceableMaterializer, EngineError>
-    where
-        M: crate::ReplaceableMaterializer,
-    {
-        let mut instance = [0u8; 16];
-        OsRng.fill_bytes(&mut instance);
-        let registration = crate::replaceable_materializer::ReplaceableMaterializerRegistration {
-            instance,
-            program,
-            format,
-            materializer: std::sync::Arc::new(materializer),
-        };
-        self.with_handle(|handle| handle.add_replaceable_materializer(registration))?
-            .map_err(EngineError::from_start_error)?;
-        Ok(crate::RegisteredReplaceableMaterializer { instance })
-    }
-
     #[cfg(any(test, feature = "test-instrumentation"))]
     #[doc(hidden)]
     pub fn install_test_signing_capability<Sig>(
@@ -178,15 +166,56 @@ impl Engine {
     /// The ONE construction call: config -> store/routing-fact selection,
     /// router cap, everything `nmp-ffi`'s hand-rolled assembly used to
     /// duplicate independently.
+    ///
+    /// Per #1624, normal Rust construction includes the feature-selected
+    /// replaceable-capability built-ins the `nmp` crate itself owns. The
+    /// NIP-29 group-list capability is compiled in when the `nip29` Cargo
+    /// feature is enabled. `nmp-nip02` is a separate `protocol-service` crate
+    /// that depends on `nmp` (a cyclic edge forbids the reverse), so its
+    /// follow capability is supplied at the consumer boundary (the FFI
+    /// facade, or an app via [`Engine::new_with_capabilities`]) rather than
+    /// here.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
-        Self::new_with_initial_session(config, crate::session::RestoredSession::empty())
+        Self::new_with_capabilities(config, default_capabilities())
+    }
+
+    /// Construct an engine with the complete compiled replaceable-capability
+    /// set available before store recovery. A retained operation whose
+    /// program/format is absent from `capabilities` refuses open and leaves
+    /// the store unchanged.
+    pub fn new_with_capabilities(
+        config: EngineConfig,
+        capabilities: Vec<crate::ReplaceableMaterializerSpec>,
+    ) -> Result<Self, EngineError> {
+        Self::new_with_initial_session(
+            config,
+            crate::session::RestoredSession::empty(),
+            capabilities,
+        )
     }
 
     fn new_with_initial_session(
         config: EngineConfig,
         initial_session: crate::session::RestoredSession,
+        capabilities: Vec<crate::ReplaceableMaterializerSpec>,
     ) -> Result<Self, EngineError> {
         let routing_facts = build_routing_facts(&config)?;
+        // #1624: capability identity is (program, format). A second spec for
+        // the same pair is a construction error, not a replacement (the
+        // replacement lifecycle is gone). Refuse before any engine thread
+        // starts or the store is touched.
+        {
+            let mut seen = std::collections::BTreeSet::new();
+            for spec in &capabilities {
+                let key = (spec.program, spec.format);
+                if !seen.insert(key) {
+                    return Err(EngineError::DuplicateReplaceableCapability {
+                        program: spec.program,
+                        format: spec.format,
+                    });
+                }
+            }
+        }
         // #20: one effective ceiling is threaded to both the whole-demand
         // compiler and transport. EngineThread normalizes legacy zero to the
         // finite default and resolves any mechanism-level mismatch downward.
@@ -249,6 +278,7 @@ impl Engine {
                     pool_config,
                     runtime_config,
                     initial_session,
+                    capabilities,
                 )
                 .map_err(EngineError::from_start_error)?
             }
@@ -264,6 +294,7 @@ impl Engine {
                     pool_config,
                     runtime_config,
                     initial_session,
+                    capabilities,
                 )
                 .map_err(EngineError::from_start_error)?
             }
@@ -353,6 +384,7 @@ impl Engine {
             pool_config,
             runtime_config,
             crate::session::RestoredSession::empty(),
+            Vec::new(),
         )
         .map_err(EngineError::from_start_error)?;
         Ok(Self {

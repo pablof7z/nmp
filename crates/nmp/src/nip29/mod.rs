@@ -15,7 +15,7 @@
 //! # Why the door lives here and not in `nmp-nip29`
 //!
 //! `nmp-nip29` is engine-free by construction -- `nostr` + `nmp-grammar`, no
-//! core, no mechanism (`scripts/check-nip29-ownership.sh`). It owns NIP-29's
+//! core, no mechanism. It owns NIP-29's
 //! schema, its tag/predicate semantics, its editors and its signed-event
 //! validation, and it returns only validated semantic values. It never
 //! imports, constructs, stores or returns a [`WriteIntent`](crate::WriteIntent).
@@ -59,8 +59,8 @@ use crate::engine::Engine;
 
 pub use group::{Group, GroupPublishError};
 pub use group_list_writes::{
-    add_group_to_list, add_relay_in_use, register_group_list_writes, remove_group_from_list,
-    remove_relay_in_use, GroupListActionError, GroupListWrites,
+    add_group_to_list, add_relay_in_use, group_list_capability, group_list_writes,
+    remove_group_from_list, remove_relay_in_use, GroupListActionError, GroupListWrites,
 };
 pub use groups::Groups;
 pub use nmp_nip29::GroupContextError;

@@ -156,8 +156,7 @@ pub mod nip65;
 // behind its own non-default cargo feature for the same reason `nip22` is: one
 // owner of the values, and an app that never uses the family does not link it.
 //
-// `nip02` is deliberately absent. `nmp-nip02` depends on `nmp` -- it is a
-// `protocol-service` in `scripts/dependency-direction-policy.json`, sitting
+// `nip02` is deliberately absent. `nmp-nip02` depends on `nmp` -- sitting
 // ABOVE the facade rather than below it -- so an `nmp -> nmp-nip02` edge is a
 // cyclic package dependency cargo refuses to resolve. Reaching the follow
 // service through the facade means inverting its engine coupling first, which
@@ -203,7 +202,7 @@ pub use error::EngineError;
 pub use observation::ObservationEvidence;
 pub use replaceable_materializer::{
     RegisteredReplaceableMaterializer, ReplaceableMaterializer, ReplaceableMaterializerOperation,
-    ReplaceableMaterializerRefusal,
+    ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec,
 };
 pub use session::{
     SessionAccount, SessionMutationError, SessionPayload, SessionProvider, SessionRestoreError,
@@ -212,10 +211,12 @@ pub use session::{
 
 /// Monotonic count of real OS threads NMP spawned through its instrumented
 /// paths (#680 falsifier instrumentation). This includes joined engine-owned
-/// workers and detached calls into registered application/capability code.
-/// The thread-scaling falsifier asserts opening many observations leaves this
-/// delta at 0: an observation is a lightweight `Arc`+waker, never an OS
-/// thread. Doc-hidden test instrumentation, not part of the public API.
+/// workers and detached calls into application code such as sign-event
+/// completions. Compiled replaceable-capability transformations run directly
+/// and do not increment this census. The thread-scaling falsifier asserts
+/// opening many observations leaves this delta at 0: an observation is a
+/// lightweight `Arc`+waker, never an OS thread. Doc-hidden test
+/// instrumentation, not part of the public API.
 #[doc(hidden)]
 #[must_use]
 pub fn nmp_threads_spawned() -> u64 {
@@ -225,10 +226,10 @@ pub fn nmp_threads_spawned() -> u64 {
 /// The number of instrumented OS threads currently ALIVE (#704 review
 /// falsifier instrumentation). Unlike [`nmp_threads_spawned`] (monotonic), this
 /// gauge decrements when a thread exits. Engine shutdown joins engine-owned
-/// workers, but deliberately does not join a detached call into registered
-/// application/capability code; a test must release or finish that foreign
-/// callback before expecting the whole-process gauge to return to baseline.
-/// Doc-hidden test instrumentation, not part of the public API.
+/// workers, but deliberately does not join a detached call into application
+/// code such as a sign-event completion; a test must release or finish that
+/// foreign callback before expecting the whole-process gauge to return to
+/// baseline. Doc-hidden test instrumentation, not part of the public API.
 #[doc(hidden)]
 #[must_use]
 pub fn nmp_threads_live() -> u64 {

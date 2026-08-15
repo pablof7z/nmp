@@ -47,6 +47,10 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
                 "Engine could not start (sentinel-component): sentinel-start"
             ),
             (
+                .missingReplaceableCapability(programHex: "01", formatHex: "02"),
+                "Store retains replaceable operations for a missing compiled capability"
+            ),
+            (
                 .observationUnavailable(reason: "sentinel-observation"),
                 "Observation could not be established: sentinel-observation"
             ),

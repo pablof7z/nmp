@@ -8,7 +8,6 @@ Feature: Native applications select one exact NMP capability set
 
     # nmp:id=MODULES-NATIVE-SELECTION-001
     # nmp:status=built
-    # nmp:evidence=script:repository::scripts/check-native-feature-matrix.sh
     # nmp:evidence=rust:nmp-cli::capability_language_resolves_to_catalog_keys_without_builder_branches
     # nmp:falsifier=Put a feature key or dependency edge in builder code instead of the catalog and Cargo; the genericity and dependency-activation proofs must fail.
     Scenario: An application prepares an arbitrary set of protocol families
@@ -20,7 +19,6 @@ Feature: Native applications select one exact NMP capability set
 
     # nmp:id=MODULES-NATIVE-SELECTION-002
     # nmp:status=built
-    # nmp:evidence=script:repository::scripts/check-native-feature-matrix.sh
     # nmp:evidence=rust:nmp-cli::manifest_is_canonical_and_runtime_fields_are_refused
     # nmp:falsifier=Materialize an unselected family source or let core resolve an optional Cargo feature; the exact-output proofs must fail.
     Scenario: An unselected protocol family is absent rather than disabled at runtime
@@ -34,7 +32,6 @@ Feature: Native applications select one exact NMP capability set
 
     # nmp:id=MODULES-NATIVE-SELECTION-003
     # nmp:status=built
-    # nmp:evidence=script:repository::scripts/check-native-feature-matrix.sh
     # nmp:evidence=rust:nmp-cli::outbox_routing_native_surface_is_hard_cut_and_feature_gated
     # nmp:falsifier=Accept an empty configured indexer set, inject a hidden indexer, or accept providerless Auto into custody; at least one runtime proof must fail.
     Scenario: Selecting outbox routing does not choose an application's indexers
@@ -46,7 +43,6 @@ Feature: Native applications select one exact NMP capability set
 
     # nmp:id=MODULES-NATIVE-SELECTION-004
     # nmp:status=built
-    # nmp:evidence=script:repository::scripts/check-native-feature-matrix.sh
     # nmp:evidence=rust:nmp-cli::source_filter_keeps_only_selected_capability_blocks
     # nmp:evidence=rust:nmp-cli::outbox_routing_native_surface_is_hard_cut_and_feature_gated
     # nmp:falsifier=Leave Auto or outbox-routing configuration in either generated core SDK, or accept Auto through core FFI; the feature-off source and compile proofs must fail.
@@ -58,7 +54,6 @@ Feature: Native applications select one exact NMP capability set
 
     # nmp:id=MODULES-NATIVE-SELECTION-006
     # nmp:status=built
-    # nmp:evidence=script:repository::scripts/check-native-outbox-routing-runtime.sh
     # nmp:falsifier=Ignore the configured indexer, query kind 10002 from another relay, contact a relay not learned from the current relay list, or implement discovery in either native consumer; the controlled witness fails.
     Scenario: Prepared native products discover a cold author outbox
       Given prepared Swift and Kotlin products with outbox routing selected
@@ -73,7 +68,6 @@ Feature: Native applications select one exact NMP capability set
 
     # nmp:id=MODULES-NATIVE-SELECTION-005
     # nmp:status=built
-    # nmp:evidence=script:repository::scripts/check-android-feature-matrix.sh
     # nmp:falsifier=Remove one ABI, mismatch the generated binding, materialize an unselected wrapper, or diverge the desktop and Android feature inventories; the Android matrix must fail.
     Scenario: One selected Kotlin surface becomes one Android AAR
       Given an application feature declaration

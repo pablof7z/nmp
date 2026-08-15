@@ -8,7 +8,7 @@ mod edit;
 mod service;
 
 pub use demand::current_account_demand;
-pub use edit::{follows, register_follow_writes, FollowChange, FollowWrites};
+pub use edit::{follow_capability, follow_writes, follows, FollowChange, FollowWrites};
 pub use service::{
     observe_following, observe_following_async, set_following, AsyncFollowObservation,
     FollowActionFailure, FollowAvailability, FollowObservation, FollowRelationship, FollowSnapshot,

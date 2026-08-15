@@ -123,6 +123,5 @@ with the Rust source.
 The fixed all-feature script is repository qualification machinery, not the
 app feature-selection workflow.
 
-CI proves the package builds from a clean checkout in
-`.github/workflows/ci.yml`; missing generated bindings or binary artifacts fail
-loudly.
+Building from a clean checkout without the generated bindings or binary
+artifacts fails loudly.

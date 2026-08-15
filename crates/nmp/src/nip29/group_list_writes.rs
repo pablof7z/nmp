@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Engine, EngineError, ReceiptStream, RegisteredReplaceableMaterializer, ReplaceableMaterializer,
-    ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, ReplaceableSourcePolicy,
+    ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec,
+    ReplaceableSourcePolicy,
 };
 
 use super::SimpleGroupEntry;
@@ -21,12 +22,14 @@ const GROUP_LIST_PROGRAM: [u8; 16] = *b"nmp-nip29-list!!";
 const GROUP_LIST_FORMAT: [u8; 16] = *b"nip29-list-v001!";
 const GROUP_LIST_OPERATION_VERSION: u8 = 1;
 
-/// Registration-bound constructor for NIP-29 group-list operations.
+/// Compiled constructor for NIP-29 group-list operations.
 ///
 /// The handle is opaque: apps name a typed operation below and receive the
 /// ordinary write receipt. They never construct operation bytes, source
-/// identities, contributor state, or materialization callbacks.
-#[derive(Clone)]
+/// identities, contributor state, or materialization callbacks. Publishing
+/// through an engine that was not constructed with [`group_list_capability`]
+/// is refused before custody.
+#[derive(Clone, Copy)]
 pub struct GroupListWrites {
     registration: RegisteredReplaceableMaterializer,
 }
@@ -53,12 +56,19 @@ impl std::fmt::Display for GroupListActionError {
 
 impl std::error::Error for GroupListActionError {}
 
-/// Install NIP-29's kind:10009 materializer and return its only supported
-/// operation constructor.
-pub fn register_group_list_writes(engine: &Engine) -> Result<GroupListWrites, EngineError> {
-    engine
-        .add_replaceable_materializer(GROUP_LIST_PROGRAM, GROUP_LIST_FORMAT, GroupListMaterializer)
-        .map(|registration| GroupListWrites { registration })
+/// The compiled NIP-29 kind:10009 capability that must be supplied before
+/// engine recovery.
+#[must_use]
+pub fn group_list_capability() -> ReplaceableMaterializerSpec {
+    ReplaceableMaterializerSpec::new(GROUP_LIST_PROGRAM, GROUP_LIST_FORMAT, GroupListMaterializer)
+}
+
+/// Typed NIP-29 group-list constructor bound to [`group_list_capability`].
+#[must_use]
+pub fn group_list_writes() -> GroupListWrites {
+    GroupListWrites {
+        registration: group_list_capability().handle(),
+    }
 }
 
 /// Append `group` when its exact `(group id, canonical host relay)` identity
@@ -497,8 +507,12 @@ mod tests {
 
     #[test]
     fn signed_out_is_refused_and_first_group_enters_ordinary_custody() {
-        let engine = Engine::new(crate::EngineConfig::default()).unwrap();
-        let writes = register_group_list_writes(&engine).unwrap();
+        let engine = Engine::new_with_capabilities(
+            crate::EngineConfig::default(),
+            vec![group_list_capability()],
+        )
+        .unwrap();
+        let writes = group_list_writes();
         let group = SimpleGroupEntry {
             group_id: "room".to_string(),
             host_relay: RelayUrl::parse("wss://host.example").unwrap(),
