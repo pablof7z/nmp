@@ -1,11 +1,15 @@
-// NMP's optional NIP-02 following resource/action, in ergonomic Kotlin
-// shape. Mirrors Following.swift's `NMPEngine.observeFollowing`/`follow`/
-// `unfollow` PUBLIC semantics exactly: same states, same typed failures,
-// same "the action returns immediately with a status stream" contract. No
-// contact-list parsing, replacement composition, or readiness policy lives
-// on this side of the FFI boundary -- this file only mirrors Rust-owned
-// state and drains Rust-owned streams, exactly like `nmp-ffi/src/nip02.rs`'s
-// own header comment says of the Rust side.
+// NMP's optional NIP-02 following resource, and the typed follow/unfollow
+// action's pre-custody refusal (#1640), in ergonomic Kotlin shape. Mirrors
+// Following.swift's `NMPEngine.observeFollowing`/`follow`/`unfollow` PUBLIC
+// semantics exactly. No contact-list parsing, replacement composition, or
+// readiness policy lives on this side of the FFI boundary -- this file only
+// mirrors Rust-owned state and drains Rust-owned streams, exactly like
+// `nmp-ffi/src/nip02.rs`'s own header comment says of the Rust side.
+//
+// The typed current-following read stays a projection over the ordinary
+// live-query path (`observeFollowing`); the write side returns the ordinary
+// [Receipt] directly -- no follow-only action/status stream, registration
+// handle, or second cancellation lifecycle exists at this boundary.
 //
 // SCOPE NOTE: Following.swift also defines `NMPFollowing`, a `@MainActor`
 // `ObservableObject` that bundles `canToggle`/`toggle()` local UI-state
@@ -25,13 +29,11 @@ package com.nmp.sdk
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
-import uniffi.nmp_ffi.FfiFollowActionFailure
-import uniffi.nmp_ffi.FfiFollowActionStatus
+import uniffi.nmp_ffi.FfiFollowActionException
 import uniffi.nmp_ffi.FfiFollowAvailability
 import uniffi.nmp_ffi.FfiFollowRelationship
 import uniffi.nmp_ffi.FfiFollowSnapshot
 import uniffi.nmp_ffi.NmpEngineInterface
-import uniffi.nmp_ffi.NmpFollowActionStream
 
 /** The current account's relationship to a `target` pubkey, as NMP's own
  * kind:3 projection sees it right now (`FfiFollowRelationship` mirror). */
@@ -117,49 +119,32 @@ data class FollowingSnapshot(
     }
 }
 
-/** Every typed way NMP's follow/unfollow action can end without changing
- * the relationship (`FfiFollowActionFailure` mirror). */
-sealed class FollowActionFailure {
-    data class InvalidTarget(val got: String) : FollowActionFailure()
+/** A typed follow/unfollow action was refused before ordinary receipt
+ * custody. [InvalidTarget] is the one refusal this boundary adds: `target`
+ * crosses FFI as a caller-typed hex string. */
+sealed class FollowActionError(message: String) : Exception(message) {
+    data class InvalidTarget(val got: String) :
+        FollowActionError("invalid public key: $got")
 
-    object SignedOut : FollowActionFailure()
+    data object AutomaticRoutingUnavailable :
+        FollowActionError("automatic author/outbox routing is not configured")
 
-    object EngineClosed : FollowActionFailure()
-
-    object ReceiptUnavailable : FollowActionFailure()
+    data object SignedOut : FollowActionError("no current account is selected")
+    data object EngineClosed : FollowActionError("the engine is closed")
+    data class PublishRefused(val reason: String) : FollowActionError(reason)
 
     companion object {
-        fun from(ffi: FfiFollowActionFailure): FollowActionFailure =
-            when (ffi) {
-                is FfiFollowActionFailure.InvalidTarget -> InvalidTarget(ffi.got)
-                is FfiFollowActionFailure.SignedOut -> SignedOut
-                is FfiFollowActionFailure.EngineClosed -> EngineClosed
-                is FfiFollowActionFailure.ReceiptUnavailable -> ReceiptUnavailable
+        internal fun from(error: FfiFollowActionException): FollowActionError =
+            when (error) {
+                is FfiFollowActionException.InvalidTarget -> InvalidTarget(error.got)
+                is FfiFollowActionException.AutomaticRoutingUnavailable ->
+                    AutomaticRoutingUnavailable
+                is FfiFollowActionException.SignedOut -> SignedOut
+                is FfiFollowActionException.EngineClosed -> EngineClosed
+                is FfiFollowActionException.PublishRefused -> PublishRefused(error.reason)
             }
     }
 }
-
-/** A thin projection of the ordinary receipt created by a typed
- * `follow`/`unfollow` action. Successful actions contain only canonical
- * [WriteFact] values; immediate typed refusal is the sole non-receipt case. */
-sealed class FollowActionStatus {
-    data class Receipt(val id: ULong, val status: WriteFact) : FollowActionStatus()
-
-    data class Failed(val failure: FollowActionFailure) : FollowActionStatus()
-
-    companion object {
-        fun from(ffi: FfiFollowActionStatus): FollowActionStatus =
-            when (ffi) {
-                is FfiFollowActionStatus.Receipt ->
-                    Receipt(ffi.receiptId, WriteFact.from(ffi.status))
-                is FfiFollowActionStatus.Failed -> Failed(FollowActionFailure.from(ffi.failure))
-            }
-    }
-}
-
-/** A typed follow/unfollow action's ordinary receipt projection. The stable
- * receipt id arrives inside [FollowActionStatus.Receipt]. */
-data class FollowAction(val status: Flow<FollowActionStatus>)
 
 /** Observe whether the current account follows [target] through the
  * NMP-owned NIP-02 resource (mirrors `NMPEngine.observeFollowing`). This is
@@ -184,34 +169,21 @@ fun observeFollowing(engine: NmpEngineInterface, target: String): Flow<Following
         }
     }
 
-/** Shared pull loop for the ordinary receipt facts projected by a typed
- * `follow`/`unfollow` action. Teardown is collection-scope-tied via
- * `handle.cancel()`. */
-private fun followActionFlow(open: () -> NmpFollowActionStream): Flow<FollowActionStatus> =
-    flow {
-        val handle = nmpRethrowing { open() }
-        try {
-            while (true) {
-                val status = nmpRethrowingAsync { handle.next() } ?: break
-                emit(FollowActionStatus.from(status))
-            }
-        } finally {
-            handle.cancel()
-        }
+/** Ask NMP to follow [target] through the ordinary durable write and receipt
+ * lifecycle (mirrors `NMPEngine.follow`). NMP immediately applies one durable
+ * semantic operation to the best cached contact list, or to NIP-02's complete
+ * empty list when no source exists, and reapplies it if a newer relay source
+ * arrives. Either a truthful immediate [FollowActionError], or the same
+ * [Receipt] every other write returns. */
+fun NMPEngine.follow(target: String): Receipt = followReceipt { ffi.follow(target) }
+
+/** The inverse of [follow], with the same durable operation and ordinary
+ * receipt guarantees (mirrors `NMPEngine.unfollow`). */
+fun NMPEngine.unfollow(target: String): Receipt = followReceipt { ffi.unfollow(target) }
+
+private fun NMPEngine.followReceipt(action: () -> uniffi.nmp_ffi.NmpReceiptStream): Receipt =
+    try {
+        receiptFrom(action())
+    } catch (error: FfiFollowActionException) {
+        throw FollowActionError.from(error)
     }
-
-/** Ask NMP to follow [target] (mirrors `NMPEngine.follow`). NMP immediately
- * applies one durable semantic operation to the best cached contact list, or
- * to NIP-02's complete empty list when no source exists. If a newer relay
- * source arrives, NMP reapplies the same operation while retaining the same
- * receipt. The caller only observes [FollowAction.status]. A missing automatic
- * route provider is refused before custody. An invalid [target] surfaces as
- * `FollowActionStatus.Failed(FollowActionFailure.InvalidTarget)` on the
- * stream, not as a synchronous exception). */
-fun follow(engine: NmpEngineInterface, target: String): FollowAction =
-    FollowAction(followActionFlow { engine.follow(target) })
-
-/** The inverse of [follow], with the same durable semantic operation and
- * ordinary receipt guarantees (mirrors `NMPEngine.unfollow`). */
-fun unfollow(engine: NmpEngineInterface, target: String): FollowAction =
-    FollowAction(followActionFlow { engine.unfollow(target) })

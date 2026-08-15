@@ -42,7 +42,6 @@ import uniffi.nmp_ffi.FfiWindow
 import uniffi.nmp_ffi.FfiWriteIntent
 import uniffi.nmp_ffi.NmpEngineInterface
 import uniffi.nmp_ffi.NmpDiagnosticsStream
-import uniffi.nmp_ffi.NmpFollowActionStream
 import uniffi.nmp_ffi.NmpFollowStream
 import uniffi.nmp_ffi.NmpReceiptStream
 import uniffi.nmp_ffi.NmpRowPull
@@ -280,7 +279,7 @@ class RowPullCancellationTest {
 
         override fun `exportSession`(): FfiSessionPayload = unusedByThisFalsifier()
 
-        override fun `follow`(`target`: String): NmpFollowActionStream = unusedByThisFalsifier()
+        override fun `follow`(`target`: String): NmpReceiptStream = unusedByThisFalsifier()
 
         override fun `makeCurrentAccount`(`account`: FfiSessionAccount): Unit =
             unusedByThisFalsifier()
@@ -338,7 +337,7 @@ class RowPullCancellationTest {
 
         override fun `signEvent`(`event`: FfiSignEventRequest): NmpSignEventHandle = unusedByThisFalsifier()
 
-        override fun `unfollow`(`target`: String): NmpFollowActionStream = unusedByThisFalsifier()
+        override fun `unfollow`(`target`: String): NmpReceiptStream = unusedByThisFalsifier()
 
         private fun unusedByThisFalsifier(): Nothing =
             error("ScriptedRowFlowEngine only scripts observe(); this falsifier never reaches anything else")

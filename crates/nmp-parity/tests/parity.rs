@@ -33,8 +33,7 @@ use nmp_ffi::facade::{
     NmpRowStream,
 };
 use nmp_ffi::nip02::{
-    FfiFollowActionStatus, FfiFollowAvailability, FfiFollowRelationship, FfiFollowSnapshot,
-    NmpFollowActionStream, NmpFollowStream,
+    FfiFollowAvailability, FfiFollowRelationship, FfiFollowSnapshot, NmpFollowStream,
 };
 use nmp_ffi::session::{FfiPrivateKey, FfiPublicKey};
 use nmp_ffi::types::{
@@ -631,10 +630,12 @@ struct NormFollowSnapshot {
     has_base: bool,
 }
 
+/// #1640: follow/unfollow return the ordinary receipt directly -- a
+/// pre-custody refusal is a synchronous `Err`, never a status delivered
+/// through the stream, so this only ever normalizes ordinary receipt facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NormFollowActionStatus {
     Receipt(&'static str),
-    Failed(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -717,21 +718,6 @@ fn bridge_follow_snapshots(stream: &Arc<NmpFollowStream>) -> mpsc::Receiver<FfiF
     tokio::spawn(async move {
         while let Ok(Some(snapshot)) = stream.next().await {
             if tx.send(snapshot).is_err() {
-                break;
-            }
-        }
-    });
-    rx
-}
-
-fn bridge_follow_actions(
-    stream: &Arc<NmpFollowActionStream>,
-) -> mpsc::Receiver<FfiFollowActionStatus> {
-    let (tx, rx) = mpsc::channel();
-    let stream = Arc::clone(stream);
-    tokio::spawn(async move {
-        while let Ok(Some(status)) = stream.next().await {
-            if tx.send(status).is_err() {
                 break;
             }
         }
@@ -2365,7 +2351,6 @@ fn delivery_axis(seen: &[NormFollowActionStatus]) -> Vec<&'static str> {
         .filter_map(|status| match status {
             NormFollowActionStatus::Receipt("routed" | "routed_complete") => None,
             NormFollowActionStatus::Receipt(name) => Some(*name),
-            _ => None,
         })
         .collect()
 }
@@ -2452,45 +2437,31 @@ fn collect_direct_follow_action(receipt: ReceiptStream) -> Vec<NormFollowActionS
     }
 }
 
-fn collect_ffi_follow_action(
-    rx: &mpsc::Receiver<FfiFollowActionStatus>,
-) -> Vec<NormFollowActionStatus> {
+/// #1640: `follow`/`unfollow` return the ordinary [`NmpReceiptStream`]
+/// directly -- a pre-custody refusal is a synchronous `Err` from the call
+/// itself, never a status delivered through this stream, so every status
+/// collected here is an ordinary receipt fact.
+fn collect_ffi_follow_action(receipt: &Arc<NmpReceiptStream>) -> Vec<NormFollowActionStatus> {
+    let rx = bridge_receipts(receipt);
     let deadline = Instant::now() + WAIT;
     let mut result = Vec::new();
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let status = match rx.recv_before_timeout(remaining) {
-            Ok(status) => status,
-            Err(FifoRecvTimeoutError::Closed) => return canonical_axes(result),
-            Err(error) => panic!(
-                "FFI follow action did not close within the total {WAIT:?} bound \
-                 ({error:?}) -- {}",
-                stalled_axes(&result)
-            ),
-        };
-        let normalized = match status {
-            FfiFollowActionStatus::Receipt { status, .. } => {
-                NormFollowActionStatus::Receipt(ffi_follow_receipt_name(&status))
-            }
-            FfiFollowActionStatus::Failed { failure } => {
-                NormFollowActionStatus::Failed(format!("{failure:?}"))
-            }
-        };
+        let status = recv_before(&rx, deadline, "FFI follow action");
+        let normalized = NormFollowActionStatus::Receipt(ffi_follow_receipt_name(&status));
         let done = matches!(
             normalized,
-            NormFollowActionStatus::Failed(_)
-                | NormFollowActionStatus::Receipt(
-                    "published"
-                        | "rejected"
-                        | "auth_failed"
-                        | "gave_up"
-                        | "settled"
-                        | "no_destination"
-                        | "cancelled"
-                        | "superseded"
-                        | "refused"
-                        | "signing_refused"
-                )
+            NormFollowActionStatus::Receipt(
+                "published"
+                    | "rejected"
+                    | "auth_failed"
+                    | "gave_up"
+                    | "settled"
+                    | "no_destination"
+                    | "cancelled"
+                    | "superseded"
+                    | "refused"
+                    | "signing_refused"
+            )
         );
         result.push(normalized);
         if done {
@@ -2674,24 +2645,21 @@ async fn run_ffi_follow_scenario(
     let snapshot_rx = bridge_follow_snapshots(&observation);
     let initial = wait_for_ffi_follow_snapshot(&snapshot_rx, FfiFollowRelationship::NotFollowing);
 
-    let follow_action = engine
+    let follow_receipt = engine
         .follow(target.public_key().to_hex())
         .expect("FFI follow action must start with a configured route provider");
-    let follow_rx = bridge_follow_actions(&follow_action);
-    let follow = collect_ffi_follow_action(&follow_rx);
+    let follow = collect_ffi_follow_action(&follow_receipt);
     let after_follow = wait_for_ffi_follow_snapshot(&snapshot_rx, FfiFollowRelationship::Following);
 
-    let duplicate_action = engine
+    let duplicate_receipt = engine
         .follow(target.public_key().to_hex())
         .expect("FFI duplicate action must start with a configured route provider");
-    let duplicate_rx = bridge_follow_actions(&duplicate_action);
-    let duplicate = collect_ffi_follow_action(&duplicate_rx);
+    let duplicate = collect_ffi_follow_action(&duplicate_receipt);
 
-    let unfollow_action = engine
+    let unfollow_receipt = engine
         .unfollow(target.public_key().to_hex())
         .expect("FFI unfollow action must start with a configured route provider");
-    let unfollow_rx = bridge_follow_actions(&unfollow_action);
-    let unfollow = collect_ffi_follow_action(&unfollow_rx);
+    let unfollow = collect_ffi_follow_action(&unfollow_receipt);
     let after_unfollow =
         wait_for_ffi_follow_snapshot(&snapshot_rx, FfiFollowRelationship::NotFollowing);
 
@@ -2784,11 +2752,10 @@ async fn run_ffi_missing_contact_list(
     let snapshot_rx = bridge_follow_snapshots(&observation);
     let snapshot =
         wait_for_ffi_follow_availability(&snapshot_rx, FfiFollowAvailability::NoContactList);
-    let action_handle = engine
+    let action_receipt = engine
         .follow(target.public_key().to_hex())
         .expect("FFI follow action must start with a configured route provider");
-    let action_rx = bridge_follow_actions(&action_handle);
-    let action = collect_ffi_follow_action(&action_rx);
+    let action = collect_ffi_follow_action(&action_receipt);
     let after_follow = wait_for_ffi_follow_snapshot(&snapshot_rx, FfiFollowRelationship::Following);
 
     observation.cancel();
@@ -4197,7 +4164,7 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
         "a duplicate action remains one ordinary write/receipt lifecycle: {:?}",
         direct.duplicate
     );
-    // #8 U2: `FollowActionStatus::Receipt` forwards every underlying
+    // #8 U2: the ordinary receipt stream forwards every underlying
     // `WriteFact` fact verbatim, so both durable kind:3 writes carry the
     // deterministic cold-Nip42-session `awaiting_relay` beat between
     // `routed` and `sent` (see `expected_send_preamble`) — the unfollow too,
@@ -4298,13 +4265,7 @@ async fn first_follow_survives_restart_and_replays_over_later_nip02_truth() {
     let action = engine
         .follow(target.to_hex())
         .expect("first follow enters ordinary custody without relay-ready source truth");
-    let action_rx = bridge_follow_actions(&action);
-    let receipt_id = match recv_before(&action_rx, Instant::now() + WAIT, "first receipt fact") {
-        FfiFollowActionStatus::Receipt { receipt_id, .. } => receipt_id,
-        FfiFollowActionStatus::Failed { failure } => {
-            panic!("first native follow was refused instead of entering custody: {failure:?}")
-        }
-    };
+    let receipt_id = action.id();
     let first = wait_for_ffi_follow_relationship(&observation_rx, FfiFollowRelationship::Following);
     assert!(
         first.has_base,
@@ -4515,13 +4476,7 @@ async fn offline_follow_recomputes_derived_feed_before_later_source_rebase() {
     let action = engine
         .follow(target.public_key().to_hex())
         .expect("offline follow enters ordinary custody");
-    let action_rx = bridge_follow_actions(&action);
-    let receipt_id = match recv_before(&action_rx, Instant::now() + WAIT, "follow receipt") {
-        FfiFollowActionStatus::Receipt { receipt_id, .. } => receipt_id,
-        FfiFollowActionStatus::Failed { failure } => {
-            panic!("offline follow was refused: {failure:?}")
-        }
-    };
+    let receipt_id = action.id();
     let mut after_follow = original_authors.clone();
     after_follow.insert(target.public_key().to_hex());
     wait_for_ffi_contact_list(

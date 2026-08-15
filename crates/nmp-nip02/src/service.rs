@@ -41,12 +41,30 @@ pub struct FollowSnapshot {
     pub base_event_id: Option<EventId>,
 }
 
+/// Why a typed follow/unfollow action was refused before ordinary receipt
+/// custody. `EngineClosed` and `PublishRefused` name exactly what
+/// [`nmp::Engine::publish`] itself can return for this call
+/// ([`nmp::EngineError`] has no other reachable variant here); there is no
+/// separate follow-only fiction standing in for a receipt that failed to
+/// materialize for no named reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FollowActionFailure {
     SignedOut,
     EngineClosed,
-    ReceiptUnavailable,
+    PublishRefused { reason: String },
 }
+
+impl std::fmt::Display for FollowActionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SignedOut => f.write_str("no current account is selected"),
+            Self::EngineClosed => f.write_str("the engine is closed"),
+            Self::PublishRefused { reason } => write!(f, "{reason}"),
+        }
+    }
+}
+
+impl std::error::Error for FollowActionFailure {}
 
 #[derive(Default)]
 struct Accumulator {
@@ -384,12 +402,12 @@ pub fn set_following(
             .ok_or(FollowActionFailure::SignedOut)?,
         Err(_) => return Err(FollowActionFailure::EngineClosed),
     };
-    let intent = writes
-        .intent(author, target, change)
-        .map_err(|_| FollowActionFailure::ReceiptUnavailable)?;
+    let intent = writes.intent(author, target, change);
     engine.publish(intent).map_err(|error| match error {
         nmp::EngineError::EngineClosed => FollowActionFailure::EngineClosed,
-        _ => FollowActionFailure::ReceiptUnavailable,
+        other => FollowActionFailure::PublishRefused {
+            reason: other.to_string(),
+        },
     })
 }
 

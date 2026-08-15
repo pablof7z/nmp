@@ -49,12 +49,19 @@ impl FollowWrites {
     /// cannot retarget the operation. NMP applies the operation to its
     /// canonical source when one exists; otherwise this capability supplies
     /// the complete empty kind-3 value through [`FollowMaterializer`].
+    ///
+    /// Infallible: `Kind::ContactList` is always replaceable, the identifier
+    /// is always empty (so the non-addressable-identifier refusal cannot
+    /// trigger), and [`encode_follow_operation`] always produces exactly
+    /// [`FOLLOW_OPERATION_LEN`] non-empty bytes, well under the operation
+    /// size bound. [`RegisteredReplaceableMaterializer::first_value_operation`]
+    /// has no other way to refuse this call's fixed shape.
     pub(crate) fn intent(
         &self,
         author: PublicKey,
         target: PublicKey,
         change: FollowChange,
-    ) -> Result<WriteIntent, ()> {
+    ) -> WriteIntent {
         let payload = self
             .registration
             .first_value_operation(
@@ -62,13 +69,13 @@ impl FollowWrites {
                 String::new(),
                 encode_follow_operation(target, change),
             )
-            .map_err(|_| ())?;
-        Ok(WriteIntent {
+            .expect("Kind::ContactList with an empty identifier and a fixed non-empty operation is always accepted");
+        WriteIntent {
             payload,
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(author),
             correlation: None,
-        })
+        }
     }
 }
 
