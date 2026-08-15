@@ -192,6 +192,7 @@ impl EngineThread {
     ///
     /// This exists for deterministic falsifiers. Production assembly owns
     /// the private mutable fact store and uses [`Self::spawn`].
+    #[cfg(feature = "unstable-mechanism")]
     #[doc(hidden)]
     pub fn spawn_with_fixture_routing_facts(
         store: RedbStore,
