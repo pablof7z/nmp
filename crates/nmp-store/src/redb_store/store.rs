@@ -42,6 +42,8 @@ use super::{
     RequiredLockedFileBackend, StoreOwnership, StoredEvent, StoredEventView, Timestamp,
 };
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
+#[cfg(any(test, feature = "test-instrumentation"))]
+use std::sync::Arc;
 use std::sync::Mutex;
 
 /// NMP's complete durable-store implementation. One Redb database, MVCC, ACID.
@@ -153,6 +155,9 @@ pub struct RedbStore {
     /// row and every error.
     #[cfg(any(test, feature = "test-instrumentation"))]
     ordered_event_read_pause: Mutex<Option<OrderedEventReadPauseGate>>,
+    /// Armed only by the exact materializer-entry transaction falsifier.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(super) materializer_entry_probe: Option<Arc<AtomicU64>>,
     /// Application-level write transactions performed by `open`; the
     /// healthy v6 reopen falsifier asserts this stays zero.
     #[cfg(test)]
@@ -940,6 +945,8 @@ impl RedbStore {
             fail_next_coverage_write: None,
             #[cfg(any(test, feature = "test-instrumentation"))]
             ordered_event_read_pause: Mutex::new(None),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            materializer_entry_probe: None,
             #[cfg(test)]
             open_write_transactions: _open_write_transactions,
             #[cfg(test)]

@@ -111,9 +111,8 @@ pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
     self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg,
     HistoryAdvanceError, HistoryQuery, HistorySessionId, LocalSendRefusal, Nip77Frame,
-    ObservationEvidence, ObservationId, ObservationOpen, PreparedReplaceableSuccessor,
-    PublishError, PublishPreparation, ReattachOutcome, ReceiptId, RequestAttemptId,
-    RequestHandoffOutcome, RowDelta,
+    ObservationEvidence, ObservationId, ObservationOpen, PublishError, PublishPreparation,
+    ReattachOutcome, ReceiptId, RequestAttemptId, RequestHandoffOutcome, RowDelta,
 };
 #[cfg(test)]
 use crate::core::{HistoryBatch, Row};
@@ -3626,6 +3625,8 @@ fn engine_loop(
                         PublishPreparation::Materialize(prepared) => {
                             let core::PreparedReplaceableMaterialization { call, continuation } =
                                 *prepared;
+                            #[cfg(any(test, feature = "test-instrumentation"))]
+                            core.assert_materializer_entry_has_no_open_transaction();
                             preparation = core.complete_body_complete_replaceable_operation(
                                 continuation,
                                 call.execute(),
@@ -4433,26 +4434,6 @@ fn dispatch_effect(
                     .self_inbox
                     .send(Cmd::Engine(EngineMsg::RelayInformationResolved(url, None)));
             }
-        }
-        Effect::MaterializeReplaceableSuccessor(prepared) => {
-            // #1624: trusted capability code runs directly on the engine
-            // thread. The transformation is a pure CPU call over a closed
-            // snapshot, so the reducer completes it inline here and re-dispatches
-            // its effects in the same turn. There is no self-enqueued
-            // completion command that shutdown could discard mid-flight.
-            let PreparedReplaceableSuccessor { call, continuation } = *prepared;
-            let followups =
-                core.complete_replaceable_successor_materialization(continuation, call.execute());
-            dispatch_effects(
-                core,
-                followups,
-                pool,
-                row_channels,
-                history_channels,
-                diag_channels,
-                registry,
-                runtime,
-            );
         }
         Effect::PublishEvent(session, event, correlation) => {
             let Ok(handle) = pool.ensure_session(&session) else {

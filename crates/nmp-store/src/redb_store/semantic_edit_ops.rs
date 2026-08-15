@@ -366,13 +366,18 @@ fn apply_plan(
         let Some((_key, row)) = current_winner.as_ref() else {
             return Ok(SemanticInstallOutcome::Stale);
         };
-        if row.event.id != old.materialization.event_id
-            || row
+        let is_old_local_generation = row.event.id == old.materialization.event_id
+            && row
                 .provenance
                 .local
                 .as_ref()
-                .is_none_or(|local| local.owners != old.members)
-        {
+                .is_some_and(|local| local.owners == old.members);
+        let is_exact_source_inserted_while_closed = plan
+            .next
+            .as_ref()
+            .and_then(|next| next.source.as_ref())
+            .is_some_and(|source| source == row);
+        if !is_old_local_generation && !is_exact_source_inserted_while_closed {
             return Ok(SemanticInstallOutcome::Stale);
         }
         Some(Box::new(row.clone()))

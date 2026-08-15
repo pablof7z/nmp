@@ -1283,7 +1283,7 @@ impl EngineCore {
     // NOTICE/AUTH/COUNT/NEG-*) --------------------------------------------
 
     #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(super) fn ingest_relay_events(
+    pub(crate) fn ingest_relay_events(
         &mut self,
         events: Vec<(SignedEvent, RelayObserved)>,
         effects: &mut Vec<Effect>,
@@ -1295,25 +1295,6 @@ impl EngineCore {
                 .collect(),
             effects,
         );
-        // Headless core tests historically observed the complete ingest turn.
-        // Runtime tests exercise the real detached execution path; keep this
-        // private test/benchmark door synchronous so existing reducer tests do
-        // not silently stop at the newly explicit runtime effect.
-        let mut pending = VecDeque::from(std::mem::take(effects));
-        let mut completed = Vec::new();
-        while let Some(effect) = pending.pop_front() {
-            match effect {
-                Effect::MaterializeReplaceableSuccessor(prepared) => {
-                    let PreparedReplaceableSuccessor { call, continuation } = *prepared;
-                    pending.extend(self.complete_replaceable_successor_materialization(
-                        continuation,
-                        call.execute(),
-                    ));
-                }
-                other => completed.push(other),
-            }
-        }
-        *effects = completed;
     }
 
     fn ingest_relay_observations(
@@ -1766,13 +1747,13 @@ impl EngineCore {
                     completed_send.filter(|_| !opens_neg && settled)
                 {
                     if let Some(key) = semantic_source_key {
-                        // Close successor admission before this batch can
-                        // reduce a later EVENT for the same exact request.
-                        // The matching observation fact below applies the
-                        // durable terminal only after in-flight work ends.
-                        self.defer_semantic_source_terminal(
+                        // Settle the exact source request before this batch
+                        // can reduce a later EVENT for it. Materialization is
+                        // synchronous, so no separate completion owner exists.
+                        self.settle_owned_semantic_source_terminal(
                             key,
                             nmp_store::SemanticSourceTerminal::Eose,
+                            &mut effects,
                         );
                     }
                     self.emit_request_settled(send, self.clock, RequestTerminal::Eose, &mut effects)
@@ -1831,9 +1812,10 @@ impl EngineCore {
                                     // admission before this RelayFrames turn
                                     // can reduce another EVENT for the same
                                     // exact finite request.
-                                    self.defer_owned_semantic_source_terminal(
+                                    self.settle_owned_semantic_source_terminal(
                                         (session.clone(), plan_sub_id),
                                         nmp_store::SemanticSourceTerminal::Eose,
+                                        &mut effects,
                                     );
                                     self.emit_request_settled(
                                         attribution_send,
@@ -1928,9 +1910,10 @@ impl EngineCore {
                 if let Some(key) =
                     self.semantic_source_request_key_for_wire(&session, subscription_id.as_str())
                 {
-                    self.defer_semantic_source_terminal(
+                    self.settle_owned_semantic_source_terminal(
                         key,
                         nmp_store::SemanticSourceTerminal::Failed(reason.clone()),
+                        &mut effects,
                     );
                 }
                 if let Some(sub_id) = self
