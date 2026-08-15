@@ -4,11 +4,11 @@ use super::ingest_txn::GovernedWrite;
 use super::mutation::remove_row_in_txn;
 use super::publish_queue::is_suppressed_in_txn;
 use super::query::{expiration_key_timestamp, expiration_key_upper_bound, plan_ordered_query};
+use super::schema::PUBLISH_QUEUE_SUPPRESS;
 use super::schema::{
     event_local_key, event_row_key, persist_err, EventKey, COVERAGE, EVENTS, EVENT_COL_LOCAL,
     EVENT_COL_ROW, EVENT_IDS, EXPIRATION_INDEX, RELAYS,
 };
-use super::schema::{PUBLISH_QUEUE_SUPPRESS_BY_ADDR, PUBLISH_QUEUE_SUPPRESS_BY_ID};
 #[cfg(test)]
 use super::store::RedbCrashPoint;
 use super::store::RedbStore;
@@ -166,11 +166,8 @@ pub(super) fn query(
         let event_ids = read_txn.open_table(EVENT_IDS).map_err(persist_err)?;
         let relays = read_txn.open_table(RELAYS).map_err(persist_err)?;
         let mut relay_cache = HashMap::new();
-        let publish_queue_suppress_by_id = read_txn
-            .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID)
-            .map_err(persist_err)?;
-        let publish_queue_suppress_by_addr = read_txn
-            .open_table(PUBLISH_QUEUE_SUPPRESS_BY_ADDR)
+        let publish_queue_suppress = read_txn
+            .open_table(PUBLISH_QUEUE_SUPPRESS)
             .map_err(persist_err)?;
         let prepared_filter = PreparedFilter::new(filter);
         let mut out = Vec::new();
@@ -212,11 +209,7 @@ pub(super) fn query(
                 &relays,
                 &mut relay_cache,
             )?;
-            if !is_suppressed_in_txn(
-                &publish_queue_suppress_by_id,
-                &publish_queue_suppress_by_addr,
-                &se.event,
-            )? {
+            if !is_suppressed_in_txn(&publish_queue_suppress, &se.event)? {
                 out.push(se);
             }
         }
@@ -665,11 +658,7 @@ pub(super) fn gc(
                             ..
                         })
                     )
-                    && !is_suppressed_in_txn(
-                        &txn.publish_queue_suppress_by_id,
-                        &txn.publish_queue_suppress_by_addr,
-                        &event,
-                    )?
+                    && !is_suppressed_in_txn(&txn.publish_queue_suppress, &event)?
                     && !claims.is_claimed(&event)
                 {
                     victims.push(event);
