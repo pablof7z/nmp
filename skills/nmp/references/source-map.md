@@ -82,6 +82,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp/src/nip22.rs`
 - Source: `crates/nmp/src/nip25.rs`
 - Source: `crates/nmp/src/nip29/mod.rs`
+- Source: `crates/nmp/src/nip29/group_list_writes.rs`
 - Source: `crates/nmp/src/nip29/group.rs`
 - Source: `crates/nmp/src/nip29/groups.rs`
 - Source: `crates/nmp/src/nip29/predicate.rs`

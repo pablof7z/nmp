@@ -1,11 +1,13 @@
 package com.nmp.sdk
 
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class NIP29SimpleGroupsTest {
+    private val secretKey = "0".repeat(63) + "1"
+
     private fun fabricatedRow(kind: UShort): Row =
         Row(
             id = "caller-chosen-id",
@@ -45,6 +47,37 @@ class NIP29SimpleGroupsTest {
     fun currentAccountGroupListDemandTargetsKind10009() {
         val demand = currentAccountGroupListDemand()
         assertEquals(listOf<UShort>(10009u), demand.selection.kinds)
+    }
+
+    @Test
+    fun typedGroupListActionReturnsTheOrdinaryReceipt() {
+        NMPEngine(
+            NMPConfig(
+                outboxRouting = OutboxRoutingConfig(indexers = listOf("wss://indexer.example")),
+            ),
+        ).use { engine ->
+            engine.session.add(secretKey.testPrivateKey(), makeCurrent = true)
+            val receipt =
+                engine.addGroupToList(
+                    groupId = "room",
+                    hostRelay = "wss://host.example",
+                    name = "Room",
+                )
+            val queue = engine.publishQueue(limit = UByte.MAX_VALUE)
+            assertEquals(1, queue.size)
+            assertEquals(receipt.id, queue[0].receiptId)
+        }
+    }
+
+    @Test
+    fun providerlessGroupListActionRefusesBeforeCustody() {
+        NMPEngine(NMPConfig()).use { engine ->
+            engine.session.add(secretKey.testPrivateKey(), makeCurrent = true)
+            assertThrows(GroupListActionError.AutomaticRoutingUnavailable::class.java) {
+                engine.addRelayInUse("wss://relay.example")
+            }
+            assertTrue(engine.publishQueue(limit = UByte.MAX_VALUE).isEmpty())
+        }
     }
 
     /** Browsing a group takes a host the app explicitly supplies; the parsed

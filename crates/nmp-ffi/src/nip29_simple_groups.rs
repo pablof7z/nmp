@@ -11,10 +11,11 @@
 //! `scripts/check-nip29-group-list-ownership.sh`: any observation-qualified
 //! `Observed*` wrapper, projection-error family, frame-proof projector, or
 //! other protocol-specific witness. Group-list reading stays the ordinary
-//! `LiveQuery`/`FfiDemand` noun ([`current_account_group_list_demand`]), and a future
-//! destructive group-list mutation must bind its exact observed base privately
-//! inside that semantic operation while building the ordinary opaque write
-//! intent -- never by exporting a reusable authority noun here.
+//! `LiveQuery`/`FfiDemand` noun ([`current_account_group_list_demand`]). The
+//! typed add/remove methods below compile private operation bytes through the
+//! Rust-owned durable semantic-write machinery and return the ordinary
+//! [`NmpReceiptStream`]; no observed-authority or action-lifecycle noun crosses
+//! this boundary.
 //!
 //! Also deliberately absent since #858: any second projection of this value.
 //! [`FfiSimpleGroupsList`] is the ONE native shape a decoded kind:10009 list
@@ -24,10 +25,62 @@
 //! browse a group picks one [`FfiSimpleGroupEntry`] and passes its
 //! `host_relay`/`group_id` to `crate::nip29`'s constructors itself.
 
+use std::sync::Arc;
+
 use nostr::RelayUrl;
 
 use crate::convert::demand_to_ffi;
+use crate::facade::{NmpEngine, NmpReceiptStream};
 use crate::types::{FfiDemand, FfiRow, FfiSimpleGroupEntry, FfiSimpleGroupsList};
+
+/// A typed group-list action was refused before ordinary receipt custody.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
+pub enum FfiGroupListActionError {
+    InvalidRelayUrl { got: String },
+    AutomaticRoutingUnavailable,
+    SignedOut,
+    EngineClosed,
+    ReceiptUnavailable,
+}
+
+impl std::fmt::Display for FfiGroupListActionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRelayUrl { got } => write!(f, "invalid relay URL: {got}"),
+            Self::AutomaticRoutingUnavailable => {
+                f.write_str("automatic author/outbox routing is not configured")
+            }
+            Self::SignedOut => f.write_str("no current account is selected"),
+            Self::EngineClosed => f.write_str("the engine is closed"),
+            Self::ReceiptUnavailable => {
+                f.write_str("the group-list operation was refused before receipt custody")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FfiGroupListActionError {}
+
+impl From<nmp::nip29::GroupListActionError> for FfiGroupListActionError {
+    fn from(error: nmp::nip29::GroupListActionError) -> Self {
+        match error {
+            nmp::nip29::GroupListActionError::SignedOut => Self::SignedOut,
+            nmp::nip29::GroupListActionError::EngineClosed => Self::EngineClosed,
+            nmp::nip29::GroupListActionError::ReceiptUnavailable => Self::ReceiptUnavailable,
+        }
+    }
+}
+
+fn parse_action_relay(relay: String) -> Result<RelayUrl, FfiGroupListActionError> {
+    RelayUrl::parse(&relay).map_err(|_| FfiGroupListActionError::InvalidRelayUrl { got: relay })
+}
+
+fn require_group_list_routing(engine: &NmpEngine) -> Result<(), FfiGroupListActionError> {
+    if engine.automatic_routing == crate::facade::AutomaticRoutingAssembly::Unavailable {
+        return Err(FfiGroupListActionError::AutomaticRoutingUnavailable);
+    }
+    Ok(())
+}
 
 fn simple_group_entry_to_ffi(entry: &nmp::nip29::SimpleGroupEntry) -> FfiSimpleGroupEntry {
     FfiSimpleGroupEntry {
@@ -79,9 +132,93 @@ pub fn parse_simple_groups_list_tolerant(row: FfiRow) -> FfiSimpleGroupsList {
     )
 }
 
+#[uniffi::export]
+impl NmpEngine {
+    /// Add one public group-list identity through the ordinary durable write
+    /// and receipt lifecycle. The host inside the event never becomes a
+    /// publication route; this kind:10009 uses the selected author's outbox.
+    pub fn add_group_to_list(
+        &self,
+        group_id: String,
+        host_relay: String,
+        name: Option<String>,
+    ) -> Result<Arc<NmpReceiptStream>, FfiGroupListActionError> {
+        require_group_list_routing(self)?;
+        let group = nmp::nip29::SimpleGroupEntry {
+            group_id,
+            host_relay: parse_action_relay(host_relay)?,
+            name,
+        };
+        let receipt = nmp::nip29::add_group_to_list(&self.engine, &self.group_list_writes, group)?;
+        Ok(NmpReceiptStream::new(self.engine.clone(), receipt))
+    }
+
+    /// Remove every valid public group tag with this exact `(id, host)`
+    /// identity while preserving malformed, unrelated, and private data.
+    pub fn remove_group_from_list(
+        &self,
+        group_id: String,
+        host_relay: String,
+    ) -> Result<Arc<NmpReceiptStream>, FfiGroupListActionError> {
+        require_group_list_routing(self)?;
+        let receipt = nmp::nip29::remove_group_from_list(
+            &self.engine,
+            &self.group_list_writes,
+            group_id,
+            parse_action_relay(host_relay)?,
+        )?;
+        Ok(NmpReceiptStream::new(self.engine.clone(), receipt))
+    }
+
+    /// Add one canonical public relay-in-use tag when it is not already
+    /// present. Group tags are outside this operation's ownership.
+    pub fn add_relay_in_use(
+        &self,
+        relay: String,
+    ) -> Result<Arc<NmpReceiptStream>, FfiGroupListActionError> {
+        require_group_list_routing(self)?;
+        let receipt = nmp::nip29::add_relay_in_use(
+            &self.engine,
+            &self.group_list_writes,
+            parse_action_relay(relay)?,
+        )?;
+        Ok(NmpReceiptStream::new(self.engine.clone(), receipt))
+    }
+
+    /// Remove every valid equivalent public relay-in-use tag. Group tags and
+    /// malformed relay tags remain untouched.
+    pub fn remove_relay_in_use(
+        &self,
+        relay: String,
+    ) -> Result<Arc<NmpReceiptStream>, FfiGroupListActionError> {
+        require_group_list_routing(self)?;
+        let receipt = nmp::nip29::remove_relay_in_use(
+            &self.engine,
+            &self.group_list_writes,
+            parse_action_relay(relay)?,
+        )?;
+        Ok(NmpReceiptStream::new(self.engine.clone(), receipt))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::facade::{FfiOutboxRoutingConfig, NmpEngineConfig};
+    use crate::session::FfiPrivateKey;
+
+    fn routed_engine() -> Arc<NmpEngine> {
+        NmpEngine::new(
+            NmpEngineConfig {
+                outbox_routing: Some(FfiOutboxRoutingConfig {
+                    indexers: vec!["wss://indexer.example".to_string()],
+                }),
+                ..NmpEngineConfig::default()
+            },
+            None,
+        )
+        .expect("a nonempty app-owned indexer set constructs")
+    }
 
     fn fabricated_row(kind: u16) -> FfiRow {
         FfiRow {
@@ -134,6 +271,95 @@ mod tests {
     fn current_account_group_list_demand_projects_the_reactive_authors_binding() {
         let demand = current_account_group_list_demand();
         assert_eq!(demand.selection.kinds, Some(vec![10009]));
+    }
+
+    #[test]
+    fn group_list_actions_refuse_invalid_relays_and_missing_routing_before_custody() {
+        let routed = routed_engine();
+        let malformed =
+            match routed.add_group_to_list("room".to_string(), "not-a-relay".to_string(), None) {
+                Err(error) => error,
+                Ok(_) => panic!("a malformed relay must refuse before returning a receipt"),
+            };
+        assert_eq!(
+            malformed,
+            FfiGroupListActionError::InvalidRelayUrl {
+                got: "not-a-relay".to_string()
+            }
+        );
+        assert!(routed.publish_queue(None, u8::MAX).unwrap().is_empty());
+        routed.shutdown();
+
+        let providerless = NmpEngine::new(NmpEngineConfig::default(), None)
+            .expect("an explicit-routing-only engine is valid");
+        providerless
+            .add_private_key_account(FfiPrivateKey::generate(), true)
+            .expect("the native account registers");
+        let providerless_error = match providerless
+            .add_relay_in_use("wss://relay.example".to_string())
+        {
+            Err(error) => error,
+            Ok(_) => panic!("providerless automatic routing must refuse before receipt custody"),
+        };
+        assert_eq!(
+            providerless_error,
+            FfiGroupListActionError::AutomaticRoutingUnavailable
+        );
+        assert!(providerless
+            .publish_queue(None, u8::MAX)
+            .unwrap()
+            .is_empty());
+        providerless.shutdown();
+    }
+
+    #[test]
+    fn group_list_actions_refuse_signed_out_and_return_the_ordinary_receipt() {
+        let engine = routed_engine();
+        let signed_out = match engine.add_group_to_list(
+            "room".to_string(),
+            "wss://host.example".to_string(),
+            Some("Room".to_string()),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("signed-out group-list action must refuse before receipt custody"),
+        };
+        assert_eq!(signed_out, FfiGroupListActionError::SignedOut);
+        assert!(engine.publish_queue(None, u8::MAX).unwrap().is_empty());
+
+        engine
+            .add_private_key_account(FfiPrivateKey::generate(), true)
+            .expect("the native account registers");
+        let receipt = engine
+            .add_group_to_list(
+                "room".to_string(),
+                "wss://host.example".to_string(),
+                Some("Room".to_string()),
+            )
+            .expect("the first list value enters ordinary custody");
+        let relay_receipt = engine
+            .add_relay_in_use("wss://relay.example".to_string())
+            .expect("relay-in-use addition enters ordinary custody");
+        let remove_group_receipt = engine
+            .remove_group_from_list("room".to_string(), "wss://host.example".to_string())
+            .expect("group removal enters ordinary custody");
+        let remove_relay_receipt = engine
+            .remove_relay_in_use("wss://relay.example".to_string())
+            .expect("relay-in-use removal enters ordinary custody");
+        let queue = engine.publish_queue(None, u8::MAX).unwrap();
+        assert_eq!(queue.len(), 4);
+        assert_eq!(
+            queue
+                .iter()
+                .map(|entry| entry.receipt_id)
+                .collect::<Vec<_>>(),
+            vec![
+                receipt.id(),
+                relay_receipt.id(),
+                remove_group_receipt.id(),
+                remove_relay_receipt.id(),
+            ]
+        );
+        engine.shutdown();
     }
 
     /// The host an app browses with is its own explicit typed input, never

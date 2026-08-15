@@ -49,13 +49,17 @@
 //! notification policy belongs to the client/content layer (#838).
 //! Contextual publication is not kind ownership.
 //!
+//! The typed kind:10009 add/remove operations live one layer up at
+//! `nmp::nip29`: they need the engine's durable semantic-operation and receipt
+//! lifecycle, while this crate remains pure schema and composition. The
+//! dependency therefore stays `nmp -> nmp-nip29`.
+//!
 //! `previous` is deliberately absent. It remains omitted until a host-scoped,
 //! group-scoped, author-aware live-window capability can mint it without
 //! caller tuples, silent truncation, or transplantation (#838). A draft that
 //! arrives carrying one is a typed refusal, never a trimmed draft.
 //!
-//! Non-goals (mirrors #108's issue text exactly): no kind:30002 semantics;
-//! no `rememberGroup`/`forgetGroup` mutation (gated on #50).
+//! Non-goal (mirrors #108's issue text exactly): no kind:30002 semantics.
 
 mod context;
 mod discovery;

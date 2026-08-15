@@ -44,6 +44,7 @@
 //! onto a binding the caller supplied.
 
 mod group;
+mod group_list_writes;
 mod groups;
 mod predicate;
 mod read;
@@ -57,6 +58,10 @@ use nostr::RelayUrl;
 use crate::engine::Engine;
 
 pub use group::{Group, GroupPublishError};
+pub use group_list_writes::{
+    add_group_to_list, add_relay_in_use, register_group_list_writes, remove_group_from_list,
+    remove_relay_in_use, GroupListActionError, GroupListWrites,
+};
 pub use groups::Groups;
 pub use nmp_nip29::GroupContextError;
 pub use nmp_nip29::{

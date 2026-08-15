@@ -80,6 +80,14 @@ through user-list authority, never through the currently selected group's
 relay scope. The selected group remains app state. NMP maintains no parallel
 cache, second projection, or protocol-specific subscription lifecycle.
 
+Saving that selected group is a typed semantic action, not a whole-event
+rewrite: `engine.addGroupToList(groupId:hostRelay:name:)` in Swift and
+`engine.addGroupToList(groupId, hostRelay, name)` in Kotlin return the ordinary
+receipt. Separate remove-group and add/remove-relay-in-use methods own only
+their exact valid public tags. They preserve unrelated order, malformed
+evidence, and private content bytes; the host inside a `group` tag never
+becomes a publication destination.
+
 ## Semantic operations
 
 Protocol operations can own multi-event/state rules that should not leak into

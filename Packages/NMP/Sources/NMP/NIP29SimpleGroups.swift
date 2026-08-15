@@ -9,8 +9,10 @@
 // one is reintroduced.
 //
 // Reading kind:10009 stays the ordinary demand/observation noun
-// (`currentAccountGroupListDemand()`, below). Browsing a NIP-29 group still takes an
-// explicit, caller-supplied relay set -- see `NMPRelayScope.on(_:)`.
+// (`currentAccountGroupListDemand()`, below). Typed add/remove methods compile
+// through Rust's durable semantic operation and return the ordinary `Receipt`.
+// Browsing a NIP-29 group still takes an explicit, caller-supplied relay set --
+// see `NMPRelayScope.on(_:)`.
 //
 // `SimpleGroupsList` is also the ONE native shape a decoded kind:10009 list
 // takes (#858). The NIP-29-facing wrapper family that used to sit beside it
@@ -59,6 +61,25 @@ public struct SimpleGroupsList: Sendable, Hashable {
     }
 }
 
+/// A typed group-list action was refused before ordinary receipt custody.
+public enum GroupListActionError: Error, Sendable, Equatable {
+    case invalidRelayUrl(got: String)
+    case automaticRoutingUnavailable
+    case signedOut
+    case engineClosed
+    case receiptUnavailable
+
+    init(_ ffi: FfiGroupListActionError) {
+        switch ffi {
+        case .InvalidRelayUrl(let got): self = .invalidRelayUrl(got: got)
+        case .AutomaticRoutingUnavailable: self = .automaticRoutingUnavailable
+        case .SignedOut: self = .signedOut
+        case .EngineClosed: self = .engineClosed
+        case .ReceiptUnavailable: self = .receiptUnavailable
+        }
+    }
+}
+
 /// The signed-in account's Simple-groups-list demand (#108): `kinds:
 /// [10009]`, `AuthorOutboxes + Public`. Signed-out (no current account)
 /// resolves to zero rows through the ordinary reactive-binding empty-
@@ -81,4 +102,47 @@ public func parseSimpleGroupsListTolerant(_ row: Row) -> SimpleGroupsList {
         tags: row.tags, content: row.content, signature: row.signature.ffi, sources: row.sources
     )
     return SimpleGroupsList(NMPFFI.parseSimpleGroupsListTolerant(row: ffiRow))
+}
+
+public extension NMPEngine {
+    /// Add one exact `(group id, canonical host)` identity through the
+    /// ordinary durable write receipt. An existing display name is not
+    /// rewritten, and the host carried by the list is not a publish route.
+    func addGroupToList(
+        groupId: String,
+        hostRelay: String,
+        name: String? = nil
+    ) throws -> Receipt {
+        try groupListReceipt {
+            try ffi.addGroupToList(groupId: groupId, hostRelay: hostRelay, name: name)
+        }
+    }
+
+    /// Remove every valid public group tag with this exact identity.
+    func removeGroupFromList(groupId: String, hostRelay: String) throws -> Receipt {
+        try groupListReceipt {
+            try ffi.removeGroupFromList(groupId: groupId, hostRelay: hostRelay)
+        }
+    }
+
+    /// Add one canonical relay-in-use tag without changing group tags.
+    func addRelayInUse(_ relay: String) throws -> Receipt {
+        try groupListReceipt { try ffi.addRelayInUse(relay: relay) }
+    }
+
+    /// Remove every valid equivalent relay-in-use tag without changing group
+    /// tags or malformed evidence.
+    func removeRelayInUse(_ relay: String) throws -> Receipt {
+        try groupListReceipt { try ffi.removeRelayInUse(relay: relay) }
+    }
+
+    private func groupListReceipt(
+        _ action: () throws -> NmpReceiptStream
+    ) throws -> Receipt {
+        do {
+            return Receipt(handle: try action())
+        } catch let error as FfiGroupListActionError {
+            throw GroupListActionError(error)
+        }
+    }
 }

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# #1551/#863: the NIP-51 Simple-groups value exposed by NMP's NIP-29 product
-# capability is tolerant and OBSERVATIONAL. A parser result is data, never authority.
+# #1551/#863/#1552: the NIP-51 Simple-groups value exposed by NMP's NIP-29
+# product capability is tolerant and OBSERVATIONAL. A parser result is data,
+# never authority. Typed list actions compile privately through the ordinary
+# semantic WriteIntent and receipt; they never promote parser output.
 #
 # Two shapes have already been shipped and withdrawn here:
 #
@@ -14,9 +16,9 @@
 # Prose cannot keep either out (bug-class-ledger type-over-convention
 # doctrine). This script is the mechanism: it fails the build if the
 # authoritative-sounding door reopens, if the deleted NIP-51 component family
-# returns, if any observation-qualified group-list noun appears, or if the
-# explicit relay-scope NIP-29 selection seam
-# disappears.
+# returns, if any observation-qualified group-list noun appears, if the four
+# typed action doors disappear, or if the explicit relay-scope NIP-29
+# selection seam disappears.
 #
 # #1033 widened NIP-29 browsing from one pinned host to a caller-supplied
 # relay SET (`nip29::on(hosts)` -> `RelayScope`, narrowed with `.group(id)`);
@@ -55,13 +57,19 @@ GROUP_LIST_SOURCES=(
   Packages/NMP/Sources/NMP/NIP29SimpleGroups.swift
   Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29SimpleGroups.kt
 )
+ACTION_SOURCES=(
+  crates/nmp/src/nip29/group_list_writes.rs
+  crates/nmp-ffi/src/nip29_simple_groups.rs
+  Packages/NMP/Sources/NMP/NIP29SimpleGroups.swift
+  Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29SimpleGroups.kt
+)
 NIP29_SOURCES=(
   crates/nmp-nip29/src/discovery.rs
   crates/nmp-ffi/src/nip29.rs
   Packages/NMP/Sources/NMP/NIP29.swift
   Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt
 )
-for required in "${GROUP_LIST_SOURCES[@]}" "${NIP29_SOURCES[@]}"; do
+for required in "${GROUP_LIST_SOURCES[@]}" "${ACTION_SOURCES[@]}" "${NIP29_SOURCES[@]}"; do
   [[ -f $required ]] || fail "required path is missing: $required"
 done
 
@@ -84,9 +92,9 @@ do
   grep -qF -- "$symbol" "$file" || fail "$file is missing $symbol"
 done
 
-# 2. Parsing has no consumer operation that needs authority today, so it may
-#    not mint a reusable protocol-specific proof, canonical wrapper,
-#    lifecycle, or authority token -- anywhere in the workspace or the SDKs.
+# 2. Typed actions need canonical source authority internally, but parser
+#    output is not that authority and may not mint a reusable protocol-specific
+#    proof, canonical wrapper, lifecycle, or authority token anywhere.
 found=$(census 'ObservedSimpleGroups|QualifiedSimpleGroups|SimpleGroupsProjection|CanonicalSimpleGroups|AuthoritativeSimpleGroups|project_observed_simple_groups|projectObservedSimpleGroups|SimpleGroupsWitness|SimpleGroupsProof')
 if [[ -n $found ]]; then
   printf '%s\n' "$found"
@@ -149,6 +157,24 @@ grep -qF 'nip29_browsing_still_demands_an_explicitly_supplied_host' crates/nmp-f
 #    third query/intent-shaped noun of its own.
 if grep -nE 'pub struct .*Query|pub struct .*Intent|struct .*Observation' "${GROUP_LIST_SOURCES[@]}"; then
   fail "NIP-29 group-list parsing introduced a third workload noun"
+fi
+
+# 6a. Every platform exposes the same four typed actions through the ordinary
+#     receipt. A protocol-specific action stream would be a third lifecycle.
+for symbol in add_group_to_list remove_group_from_list add_relay_in_use remove_relay_in_use; do
+  grep -qF "pub fn $symbol" crates/nmp/src/nip29/group_list_writes.rs ||
+    fail "direct Rust group-list action is missing: $symbol"
+  grep -qF "pub fn $symbol" crates/nmp-ffi/src/nip29_simple_groups.rs ||
+    fail "FFI group-list action is missing: $symbol"
+done
+for symbol in addGroupToList removeGroupFromList addRelayInUse removeRelayInUse; do
+  grep -qF "func $symbol" Packages/NMP/Sources/NMP/NIP29SimpleGroups.swift ||
+    fail "Swift group-list action is missing: $symbol"
+  grep -qF "fun NMPEngine.$symbol" Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29SimpleGroups.kt ||
+    fail "Kotlin group-list action is missing: $symbol"
+done
+if grep -nE 'GroupListAction(Stream|Handle|Status)' "${ACTION_SOURCES[@]}"; then
+  fail "NIP-29 group-list actions introduced a protocol-specific lifecycle"
 fi
 
 # 7. The removed component and feature family must stay deleted. This scans
