@@ -297,14 +297,6 @@ sealed class NMPError(message: String) : Exception(message) {
                 "the sole source of that row",
         )
 
-    /** #1033: a read selection handed to `NMPGroup.read` already declared a
-     * `since`/`until`/`limit` timeline bound the group door itself owns. */
-    object GroupCallerSuppliedTimeline :
-        NMPError(
-            "a group read selection must not already declare since/until/limit; the group door " +
-                "owns that bound",
-        )
-
     /** #1281: `NMPRelayScope.groups` was given no group id at all. An event
      * with no `h` row is not in a group, so there is nothing to
      * contextualize and no honest route to mint. */
@@ -467,7 +459,6 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.GroupCallerSuppliedContext -> GroupCallerSuppliedContext
                 is FfiException.GroupCallerSuppliedContextConstraint ->
                     GroupCallerSuppliedContextConstraint
-                is FfiException.GroupCallerSuppliedTimeline -> GroupCallerSuppliedTimeline
                 is FfiException.GroupContextMissing -> GroupContextMissing(ffi.expected)
                 is FfiException.GroupContextMismatched ->
                     GroupContextMismatched(ffi.found, ffi.expected)

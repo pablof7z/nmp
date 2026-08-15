@@ -80,8 +80,7 @@ sealed class GroupListActionError(message: String) : Exception(message) {
 
     data object SignedOut : GroupListActionError("no current account is selected")
     data object EngineClosed : GroupListActionError("the engine is closed")
-    data object ReceiptUnavailable :
-        GroupListActionError("the group-list operation was refused before receipt custody")
+    data class PublishRefused(val reason: String) : GroupListActionError(reason)
 
     companion object {
         internal fun from(error: FfiGroupListActionException): GroupListActionError =
@@ -91,7 +90,7 @@ sealed class GroupListActionError(message: String) : Exception(message) {
                     AutomaticRoutingUnavailable
                 is FfiGroupListActionException.SignedOut -> SignedOut
                 is FfiGroupListActionException.EngineClosed -> EngineClosed
-                is FfiGroupListActionException.ReceiptUnavailable -> ReceiptUnavailable
+                is FfiGroupListActionException.PublishRefused -> PublishRefused(error.reason)
             }
     }
 }
