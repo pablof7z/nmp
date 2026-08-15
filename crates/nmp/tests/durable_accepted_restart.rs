@@ -18,7 +18,7 @@ use nmp_grammar::{
 };
 use nmp_router::FixtureRoutingFacts;
 use nmp_store::{
-    sentinel_signature, testing, AcceptWrite, AcceptWritePayload, EventStore, IntentSigState,
+    sentinel_signature, testing, AcceptWrite, AcceptWritePayload, IntentSigState,
     PublishQueueAttemptOutcome, PublishQueueTerminalOutcome, RedbStore, SigState,
 };
 use nmp_transport::{HandoffResult, RelayFrame, RelayHandle};

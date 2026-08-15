@@ -1,7 +1,7 @@
 //! Issue #768 falsifiers: promotion requires verified, intent-bound
 //! evidence.
 //!
-//! `EventStore::promote_signed` used to take a bare `Signature` guarded only
+//! `RedbStore::promote_signed` used to take a bare `Signature` guarded only
 //! by a doc sentence. Against that door every case below succeeded: a
 //! foreign-but-valid signature promoted, a wholly invalid signature
 //! promoted, and — worst — a foreign signature over a pending kind:5 draft
@@ -15,7 +15,7 @@
 //! nothing is mutated at all.
 
 use nmp_store::{
-    sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, EventStore, InsertOutcome,
+    sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, InsertOutcome,
     IntentSigState, PersistenceFault, PromoteOutcome, PromotionTarget, PublishQueueReceiptPayload,
     PublishQueueWork, ReceiptState, RedbStore, RefuseReason, RelayObserved, SigState,
     VerifiedSignature,

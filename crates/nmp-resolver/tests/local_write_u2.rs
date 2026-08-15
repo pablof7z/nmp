@@ -1,7 +1,7 @@
 //! Unit U2 (`docs/design/crashsafe-accepted-2-3-plan.md` §1.2 / §6-U2,
 //! issues #2/#3 under epic #23): the resolver's LOCAL-authorship add path,
 //! [`Engine::accept_local`]. A locally-composed write enters the ONE store
-//! through the `EventStore::accept_write` door and its [`AcceptOutcome`] is
+//! through the `RedbStore::accept_write` door and its [`AcceptOutcome`] is
 //! sorted into the SAME `react` machinery a relay insert's `InsertOutcome`
 //! feeds — so an optimistic write is query-visible immediately, with **no
 //! app optimistic mirror** and no second visibility path.

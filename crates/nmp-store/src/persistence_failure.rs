@@ -35,10 +35,9 @@ impl PersistenceError {
         Self::new(PersistenceFault::Invariant, message)
     }
 
-    /// Build an explicitly classified failure. [`crate::EventStore`] is a public
-    /// trait, so an out-of-crate backend (or a fault-injecting test double)
-    /// must be able to report a latch or an indeterminate I/O failure, not
-    /// only an invariant.
+    /// Build an explicitly classified failure. Store-adjacent engine
+    /// validation may need to report a latch or an indeterminate I/O failure,
+    /// not only an invariant.
     ///
     /// Claim the weakest fault that is true. [`PersistenceFault::Latched`]
     /// asserts the operation was never attempted; if that is not provable,

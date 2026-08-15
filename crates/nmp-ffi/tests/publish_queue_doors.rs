@@ -18,7 +18,7 @@ use nmp_ffi::types::{
     FfiIdentity, FfiPublishQueueError, FfiRefuseReason, FfiRemoveQueueEntryError, FfiSigningState,
     FfiWriteFact, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
-use nmp_store::{EventStore, RefuseReason};
+use nmp_store::RefuseReason;
 
 /// Seed a real `RedbStore` with one write the acceptance door REFUSED: a
 /// whole-value replacement that lost its compare-and-swap. Publish took
