@@ -14,8 +14,8 @@ use crate::session::RestoredSession;
 #[cfg(test)]
 use super::AddSignerError;
 use super::{
-    engine_loop, pool_bridge_loop, Cmd, EngineClock, EnginePoolRuntime, EnginePoolSink,
-    EngineWiring, Handle, SIGN_EVENT_COMPLETION_OP,
+    engine_loop, pool_bridge_loop, sign_event, Cmd, EngineClock, EnginePoolRuntime, EnginePoolSink,
+    EngineWiring, Handle,
 };
 #[cfg(test)]
 use nostr::{Timestamp, UnsignedEvent};
@@ -414,13 +414,13 @@ impl EngineThread {
     /// #704: when called from a per-operation sign-event completion thread that
     /// is calling `join()` reentrantly, the reducer exempts only that exact
     /// operation from the shutdown drain (read from the completion-thread-local
-    /// `SIGN_EVENT_COMPLETION_OP`). The adapter runtime is then shut down from
+    /// sign-event owner). The adapter runtime is then shut down from
     /// THIS join thread (never a worker) by dropping the last `Arc` after the
     /// reducer thread has exited — remaining adapter task futures are dropped,
     /// firing their Drop guards (delivering `Cancelled`/`Disconnected` to any
     /// foreign completion exactly once).
     pub fn join(mut self) {
-        if let Some(op_id) = SIGN_EVENT_COMPLETION_OP.with(|op| op.get()) {
+        if let Some(op_id) = sign_event::completion_operation() {
             let _ = self.drain_inbox.send(Cmd::ExemptSignEventDrain(op_id));
         }
         if let Some(h) = self.engine_join.take() {

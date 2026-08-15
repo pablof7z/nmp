@@ -834,7 +834,9 @@ impl AuthTaskRegistry {
         self.pending.clear();
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    /// No AUTH task of this registry can still run FOREIGN capability code.
+    /// Read only by the shutdown drain (`super::foreign_work_drained`).
+    pub(super) fn is_drained(&self) -> bool {
         self.active.is_empty() && self.pending.is_empty()
     }
 
