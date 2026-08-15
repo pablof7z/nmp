@@ -38,7 +38,7 @@ fn ingest_door_surfaces_io_failure_as_persistence_error_not_panic() {
     let a = Keys::generate();
     let mut store = RedbStore::temporary_with_observation_precommit_io()
         .expect("temporary Redb observation-I/O fixture");
-    let event = nmp_resolver::testkit::kind1(&a, "disk is full", 1_000);
+    let event = nmp_resolver_testkit::kind1(&a, "disk is full", 1_000);
     let event_id = event.id;
     let from = RelayObserved::new(
         RelayUrl::parse("wss://relay.example.com").unwrap(),
@@ -93,7 +93,7 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
 
     // The real relay ingest path — the exact call that used to `.expect()`
     // panic on a disk-full redb `insert`.
-    let event = nmp_resolver::testkit::kind1(&a, "disk is full", 1_000);
+    let event = nmp_resolver_testkit::kind1(&a, "disk is full", 1_000);
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -215,7 +215,7 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
         public_session(&relay),
         event_frame(
             &wire,
-            nmp_resolver::testkit::kind1(&author, "must not earn coverage", 100),
+            nmp_resolver_testkit::kind1(&author, "must not earn coverage", 100),
         ),
     ));
     assert!(failed
@@ -380,7 +380,7 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         public_session(&relay),
         event_frame(
             &wire_sub_string(&public_request),
-            nmp_resolver::testkit::kind1(&public_author, "the public transaction fails", 100),
+            nmp_resolver_testkit::kind1(&public_author, "the public transaction fails", 100),
         ),
     ));
     assert!(failed
@@ -390,7 +390,7 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
     let _ = recover_after_observation_io(&mut core);
 
     let protected_event =
-        nmp_resolver::testkit::kind1(&protected_author, "the protected transaction commits", 101);
+        nmp_resolver_testkit::kind1(&protected_author, "the protected transaction commits", 101);
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 1,
@@ -484,7 +484,7 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
         public_session(&relay),
         event_frame(
             &first_wire,
-            nmp_resolver::testkit::kind1(&a, "failed immutable request", 100),
+            nmp_resolver_testkit::kind1(&a, "failed immutable request", 100),
         ),
     ));
     assert!(failed
@@ -572,8 +572,8 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
     let path = directory
         .path()
         .join("postcommit-projection-corruption.redb");
-    let corrupt_older = nmp_resolver::testkit::kind1(&author, "corrupt older row", 100);
-    let healthy_newer = nmp_resolver::testkit::kind1(&author, "healthy newest row", 200);
+    let corrupt_older = nmp_resolver_testkit::kind1(&author, "corrupt older row", 100);
+    let healthy_newer = nmp_resolver_testkit::kind1(&author, "healthy newest row", 200);
     {
         let mut store = RedbStore::open(&path).expect("create persistent Redb fixture");
         for event in [corrupt_older.clone(), healthy_newer.clone()] {
@@ -1589,7 +1589,7 @@ fn a_failing_store_read_makes_the_next_deadline_a_typed_error_not_a_false_none()
         public_session(&relay),
         event_frame(
             "s",
-            nmp_resolver::testkit::kind1(&author, "close Redb generation", 1_000),
+            nmp_resolver_testkit::kind1(&author, "close Redb generation", 1_000),
         ),
     ));
     assert!(

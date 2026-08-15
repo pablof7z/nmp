@@ -19,7 +19,7 @@ use nmp_grammar::{
     Binding, ConcreteFilter, Demand, DemandOp, Derived, Filter, IdentityField, IndexedTagName,
     Selector,
 };
-use nmp_resolver::testkit::{accept_write_of, deletion, kind3, Harness};
+use nmp_resolver_testkit::{accept_write_of, deletion, kind3, Harness};
 use nmp_store::AcceptOutcome;
 use nostr::Keys;
 

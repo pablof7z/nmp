@@ -4,7 +4,6 @@ members = [
     # Protocol-neutral, closed structural edit plans over raw tag cells and
     # JSON-object byte spans (#1381). Capability crates compile their own
     # vocabulary into these values; replay needs no module registry.
-    "crates/nmp-event-edit",
     "crates/nmp-grammar",
     "crates/nmp-store",
     "crates/nmp-resolver",
@@ -12,6 +11,7 @@ members = [
     # Static routing-fact fixtures (`FixtureRoutingFacts`, `test_relay`) split
     # out of `nmp-router` (#1667) so they are never part of that crate's
     # shipped public API. Dev-dependency only, everywhere.
+    "crates/nmp-resolver-testkit",
     "crates/nmp-router-testkit",
     "crates/nmp-transport",
     # Dependency-free signer/crypto values, traits, errors, and completion.
@@ -93,11 +93,11 @@ nostr = "0.44.4"
 blake3 = "1"
 futures-channel = "0.3"
 httpdate = "1"
-nmp-event-edit = { path = "crates/nmp-event-edit" }
 nmp-grammar = { path = "crates/nmp-grammar" }
 nmp-store = { path = "crates/nmp-store" }
 nmp-resolver = { path = "crates/nmp-resolver" }
 nmp-router = { path = "crates/nmp-router" }
+nmp-resolver-testkit = { path = "crates/nmp-resolver-testkit" }
 nmp-router-testkit = { path = "crates/nmp-router-testkit" }
 nmp-transport = { path = "crates/nmp-transport" }
 nmp-signer = { path = "crates/nmp-signer" }

@@ -14,7 +14,7 @@ use nmp_store::{
 };
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 
-use crate::engine::{Engine, GraphSnapshot, HandleId, Metrics, QueryHandle, SubscribeOutcome};
+use nmp_resolver::{Engine, GraphSnapshot, HandleId, Metrics, QueryHandle, SubscribeOutcome};
 
 /// The scripted "fake relay" harness: `Engine` plus the
 /// pass-through calls the contract tests drive.

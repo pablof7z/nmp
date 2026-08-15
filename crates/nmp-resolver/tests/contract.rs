@@ -12,11 +12,11 @@ use nmp_grammar::{
     DemandOp, Derived, Filter, Freshness, IdentityField, IndexedTagName, RoutingEvidence,
     RoutingEvidenceKind, Selector, SetAlgebra, SetOp, SourceAuthority,
 };
-use nmp_resolver::testkit::{
-    addressable, deletion, kind10000_mutes, kind10003_bookmarks, kind3, kind39002, Harness,
-};
 use nmp_resolver::{
     Engine, HandleId, QueryHandle, ResolutionNodeKind, ResolvedValue, SubscribeOutcome,
+};
+use nmp_resolver_testkit::{
+    addressable, deletion, kind10000_mutes, kind10003_bookmarks, kind3, kind39002, Harness,
 };
 use nmp_store::{RedbStore, RelayObserved};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
@@ -413,7 +413,7 @@ fn derived_id_values_are_validated_and_canonicalized_at_the_destination_slot() {
 
 #[test]
 fn derived_inner_limit_selects_newest_events_and_refills_after_retraction() {
-    use nmp_resolver::testkit::{deletion, kind1};
+    use nmp_resolver_testkit::{deletion, kind1};
 
     let mut h = Harness::new();
     let a = Keys::generate();
@@ -475,7 +475,7 @@ fn derived_inner_limit_selects_newest_events_and_refills_after_retraction() {
 /// never inserts the projected author set.
 #[test]
 fn derived_inner_strict_cache_filters_provenance_before_limit() {
-    use nmp_resolver::testkit::kind1;
+    use nmp_resolver_testkit::kind1;
 
     let pinned = nostr::RelayUrl::parse("wss://strict-inner-a.example").unwrap();
     let other = nostr::RelayUrl::parse("wss://strict-inner-b.example").unwrap();
@@ -555,7 +555,7 @@ fn derived_inner_strict_cache_filters_provenance_before_limit() {
 /// eligibility even when the Demand itself is pinned elsewhere.
 #[test]
 fn derived_inner_agnostic_cache_accepts_rows_from_any_provenance_before_limit() {
-    use nmp_resolver::testkit::kind1;
+    use nmp_resolver_testkit::kind1;
 
     let pinned = nostr::RelayUrl::parse("wss://agnostic-inner-a.example").unwrap();
     let other = nostr::RelayUrl::parse("wss://agnostic-inner-b.example").unwrap();
@@ -635,7 +635,7 @@ fn derived_scalar_values(engine: &Engine, handle: HandleId) -> BTreeSet<String> 
 /// row insertion and provenance-growth recomputes.
 #[test]
 fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
-    use nmp_resolver::testkit::kind1;
+    use nmp_resolver_testkit::kind1;
 
     let pinned = nostr::RelayUrl::parse("wss://reactive-inner-a.example").unwrap();
     let other = nostr::RelayUrl::parse("wss://reactive-inner-b.example").unwrap();

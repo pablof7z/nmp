@@ -1828,6 +1828,7 @@ dependencies = [
  "nmp-nip65",
  "nmp-nipc7",
  "nmp-resolver",
+ "nmp-resolver-testkit",
  "nmp-router",
  "nmp-router-testkit",
  "nmp-signer",
@@ -1924,15 +1925,6 @@ dependencies = [
  "proptest",
  "pulldown-cmark",
  "regex",
-]
-
-[[package]]
-name = "nmp-event-edit"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -2097,8 +2089,19 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "nmp-grammar",
+ "nmp-resolver-testkit",
  "nmp-store",
  "nmp-test-support",
+ "nostr 0.44.4",
+]
+
+[[package]]
+name = "nmp-resolver-testkit"
+version = "0.1.0"
+dependencies = [
+ "nmp-grammar",
+ "nmp-resolver",
+ "nmp-store",
  "nostr 0.44.4",
 ]
 
@@ -2108,6 +2111,7 @@ version = "0.1.0"
 dependencies = [
  "nmp-grammar",
  "nmp-resolver",
+ "nmp-resolver-testkit",
  "nmp-router-testkit",
  "nmp-store",
  "nmp-test-support",

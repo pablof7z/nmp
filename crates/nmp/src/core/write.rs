@@ -1062,6 +1062,14 @@ impl EngineCore {
     /// mints the REQs for all of them at once, and answering them one
     /// session at a time would discard the others.
     #[cfg(test)]
+    /// Returns EVERY effect this helper caused, admission flush included.
+    ///
+    /// It used to return only the EOSE effects and swallow its own flush,
+    /// which made it lie in exactly one direction: a caller asserting a
+    /// publish DID happen failed loudly if the publish landed in the flush,
+    /// but a caller asserting one did NOT happen passed vacuously. Falsifiers
+    /// mostly assert absence, so it was untrustworthy precisely where it was
+    /// needed, and it produced two false greens in one hour (#1683).
     pub(super) fn answer_coordinate_coverage_for_test(
         &mut self,
         sessions: &[(TransportRelayHandle, RelaySessionKey)],
@@ -1113,7 +1121,11 @@ impl EngineCore {
                 )));
             }
         }
-        answered
+        // Flush first, then the terminals it made possible: chronological,
+        // and complete.
+        let mut caused = flushed;
+        caused.extend(answered);
+        caused
     }
 
     #[cfg(test)]
