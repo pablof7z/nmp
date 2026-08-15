@@ -7,9 +7,10 @@ use nmp_grammar::{
     RoutingEvidence, RoutingEvidenceKind, SourceAuthority,
 };
 use nmp_router::{
-    AdvertisedRelayLimits, CompileBudget, DemandKey, FixtureRoutingFacts, Router, RuleRegistry,
-    Shortfall, ShortfallReason, WireOp,
+    AdvertisedRelayLimits, CompileBudget, DemandKey, Router, RuleRegistry, Shortfall,
+    ShortfallReason, WireOp,
 };
+use nmp_router_testkit::FixtureRoutingFacts;
 use nostr::{Keys, PublicKey, RelayUrl};
 
 fn atom(relay: &RelayUrl, value: &str) -> ContextualAtom {

@@ -1140,7 +1140,7 @@ mod tests {
     use crate::core::EngineMsg;
     use nmp_grammar::LiveQuery;
     use nmp_grammar::{Binding, Demand, Derived, Filter, Freshness, Selector, SourceAuthority};
-    use nmp_router::FixtureRoutingFacts;
+    use nmp_router_testkit::FixtureRoutingFacts;
     use nmp_store::{RedbStore, RelayObserved};
     use nostr::{EventBuilder, Keys, Kind, Tag};
 

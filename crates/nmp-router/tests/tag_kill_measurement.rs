@@ -28,9 +28,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, SourceAuthority};
-use nmp_router::{
-    test_relay, FixtureRoutingFacts, RelayUrl, Router, RuleRegistry, MAX_TAG_VALUES_PER_FILTER,
-};
+use nmp_router::{RelayUrl, Router, RuleRegistry, MAX_TAG_VALUES_PER_FILTER};
+use nmp_router_testkit::{test_relay, FixtureRoutingFacts};
 
 /// A realistic mid-size mosaico channel catalog.
 const NUM_GROUPS: usize = 300;

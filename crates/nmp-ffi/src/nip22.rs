@@ -95,8 +95,8 @@ pub struct FfiDecodedComment {
 }
 
 /// [`decode_comment`]'s typed rejection (`nmp::nip22::CommentDecodeError`
-/// mirror). Exhaustive; every variant is constructed by a test
-/// (Reachability Gate).
+/// mirror). Exhaustive; every variant is constructed by a test, so none is
+/// dead surface an app could be misled into handling.
 #[derive(uniffi::Error, Debug, Clone, PartialEq, Eq)]
 pub enum FfiCommentDecodeError {
     WrongKind {

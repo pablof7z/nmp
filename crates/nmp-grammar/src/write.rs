@@ -336,7 +336,7 @@ impl std::error::Error for ReplaceableOperationError {}
 pub struct CorrelationToken(String);
 
 /// [`CorrelationToken`]'s `TryFrom<&str>` typed refusal. Exhaustive; every variant is
-/// constructed by a test (Reachability Gate). Deliberately fieldless (unlike
+/// constructed by a test, so none is dead surface. Deliberately fieldless (unlike
 /// an earlier draft that carried `len`/`max` on `TooLong`): both facts are
 /// already reachable without duplicating them here (the caller's own input
 /// length, and the public [`CorrelationToken::MAX_LEN`] constant), and a
@@ -665,8 +665,8 @@ mod tests {
     }
 
     /// #591: `TryFrom<&str>` refuses empty and over-length tokens with
-    /// typed errors (Reachability Gate: every `CorrelationTokenError`
-    /// variant is constructed here); a well-formed token round-trips
+    /// typed errors -- every `CorrelationTokenError`
+    /// variant is constructed here, so none is dead surface; a well-formed token round-trips
     /// through `as_ref`.
     #[test]
     fn correlation_token_validates_bounds() {

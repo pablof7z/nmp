@@ -13,7 +13,7 @@
 use super::*;
 
 use nmp::mechanism::core::{StalledWrite, StalledWriteStage};
-use nmp_router::FixtureRoutingFacts;
+use nmp_router_testkit::FixtureRoutingFacts;
 
 fn directory_knowing(author: &Keys, relay: &RelayUrl) -> FixtureRoutingFacts {
     FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()])

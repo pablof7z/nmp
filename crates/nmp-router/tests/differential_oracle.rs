@@ -21,7 +21,8 @@ use nmp_resolver::testkit::{kind1, kind3, Harness};
 use nostr::filter::MatchEventOptions;
 use nostr::{Event, EventId, Keys};
 
-use nmp_router::{test_relay, FixtureRoutingFacts, RelayUrl, Router, RuleRegistry};
+use nmp_router::{RelayUrl, Router, RuleRegistry};
+use nmp_router_testkit::{test_relay, FixtureRoutingFacts};
 
 fn my_follows_filter() -> Filter {
     Filter {

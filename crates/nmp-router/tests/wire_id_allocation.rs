@@ -26,9 +26,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use proptest::prelude::*;
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, SourceAuthority};
-use nmp_router::{
-    CompileOutcome, FixtureRoutingFacts, RelayUrl, Router, RuleRegistry, SubId, WireOp, WireReq,
-};
+use nmp_router::{CompileOutcome, RelayUrl, Router, RuleRegistry, SubId, WireOp, WireReq};
+use nmp_router_testkit::FixtureRoutingFacts;
 
 const CAP: usize = 64;
 

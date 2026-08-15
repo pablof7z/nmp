@@ -184,7 +184,8 @@ impl RoutingFactStore {
         AuthorRouteWriter { facts: self }
     }
 
-    pub(crate) fn from_fixture(fixture: nmp_router::FixtureRoutingFacts) -> Self {
+    #[cfg(feature = "unstable-mechanism")]
+    pub(crate) fn from_fixture(fixture: nmp_router_testkit::FixtureRoutingFacts) -> Self {
         let (authors, operator_app, operator_fallback) = fixture.into_parts();
         Self {
             authors,
@@ -2659,10 +2660,11 @@ impl EngineCore {
     ///
     /// This exists for deterministic falsifiers. Production assembly owns
     /// the private mutable fact store and uses [`Self::new`].
+    #[cfg(feature = "unstable-mechanism")]
     #[doc(hidden)]
     pub fn new_with_fixture_routing_facts(
         store: RedbStore,
-        facts: nmp_router::FixtureRoutingFacts,
+        facts: nmp_router_testkit::FixtureRoutingFacts,
         cap: usize,
     ) -> Self {
         Self::new_with_routing_facts(store, RoutingFactStore::from_fixture(facts), cap)
@@ -3817,11 +3819,20 @@ impl EngineCore {
         if *current != handle || *current_session != session {
             return Vec::new();
         }
-        // A frame the transport rejected before this reducer could see it is
-        // a returned EVENT frame nothing counted (#1630). Health is the only
-        // place it is ever reported, and it names no subscription, so every
-        // request still streaming on this session loses its exact count.
-        if health.invalid_signature_count > 0 || health.last_error.is_some() {
+        // A frame the transport rejected or could not decode before this
+        // reducer could see it is a returned EVENT frame nothing counted
+        // (#1630, #1668). Health is the only place either is ever reported,
+        // and neither names a subscription, so every request still streaming
+        // on this session loses its exact count.
+        //
+        // The undecodable tally is its own field rather than part of the
+        // misbehavior count: a malformed line is not a forgery, and a caller
+        // deciding whether to stop trusting a relay must not see the two as
+        // the same signal.
+        if health.invalid_signature_count > 0
+            || health.undecodable_frame_count > 0
+            || health.last_error.is_some()
+        {
             self.erase_returned_frame_counts(&session);
         }
         self.transport_degraded = health.last_error.or_else(|| {

@@ -15,7 +15,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, SourceAuthority};
-use nmp_router::{FixtureRoutingFacts, RelayUrl, Router, RuleRegistry, WireOp};
+use nmp_router::{RelayUrl, Router, RuleRegistry, WireOp};
+use nmp_router_testkit::FixtureRoutingFacts;
 
 const OUTER_KINDS: [u16; 3] = [39_000, 39_001, 39_002];
 const CAP: usize = 64;

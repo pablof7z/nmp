@@ -9,6 +9,10 @@ members = [
     "crates/nmp-store",
     "crates/nmp-resolver",
     "crates/nmp-router",
+    # Static routing-fact fixtures (`FixtureRoutingFacts`, `test_relay`) split
+    # out of `nmp-router` (#1667) so they are never part of that crate's
+    # shipped public API. Dev-dependency only, everywhere.
+    "crates/nmp-router-testkit",
     "crates/nmp-transport",
     # Dependency-free signer/crypto values, traits, errors, and completion.
     "crates/nmp-signer",
@@ -94,6 +98,7 @@ nmp-grammar = { path = "crates/nmp-grammar" }
 nmp-store = { path = "crates/nmp-store" }
 nmp-resolver = { path = "crates/nmp-resolver" }
 nmp-router = { path = "crates/nmp-router" }
+nmp-router-testkit = { path = "crates/nmp-router-testkit" }
 nmp-transport = { path = "crates/nmp-transport" }
 nmp-signer = { path = "crates/nmp-signer" }
 nmp-local-signer = { path = "crates/nmp-local-signer" }

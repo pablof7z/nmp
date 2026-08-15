@@ -408,7 +408,15 @@ impl RelayFrame {
         match self {
             Self::CommittedObservation(hit) => {
                 let (raw_text, candidate) = hit.into_raw_and_candidate();
-                frame::classify_text_with_candidate(raw_text.as_str(), Some(candidate))
+                match frame::classify_text_with_candidate(raw_text.as_str(), Some(candidate)) {
+                    frame::ClassifiedFrame::Frame(frame) => Some(frame),
+                    // This text already decoded once, on the way into the
+                    // cache, so a failure here is a local cache/lease fault
+                    // rather than relay behavior — and the engine already
+                    // erases every count on the session for any committed
+                    // observation hit, so nothing is left unreported.
+                    frame::ClassifiedFrame::Consumed | frame::ClassifiedFrame::Undecodable => None,
+                }
             }
             frame => Some(frame),
         }

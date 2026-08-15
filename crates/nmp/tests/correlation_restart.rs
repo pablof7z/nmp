@@ -30,7 +30,7 @@ use nmp_grammar::{
     AccessContext, CorrelationToken, Identity, RelaySessionKey, WriteIntent, WritePayload,
     WriteRouting,
 };
-use nmp_router::FixtureRoutingFacts;
+use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::RedbStore;
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{

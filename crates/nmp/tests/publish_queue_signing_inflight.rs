@@ -27,7 +27,7 @@ use nmp::mechanism::runtime::{
     EngineThread, FifoReceiver, FifoRecvTimeoutError, ReceiptReattachment,
 };
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
-use nmp_router::FixtureRoutingFacts;
+use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_signer::{
     PendingSignerSender, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,
     SigningCapability,

@@ -4,7 +4,7 @@
 //! facts, but the mutable capability that installs them belongs to the engine
 //! assembly and is not part of this crate's public vocabulary.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 pub use nostr::{PublicKey, RelayUrl};
 
@@ -98,22 +98,41 @@ pub trait RoutingFacts {
     fn operator_fallback_relays(&self) -> Vec<RelayUrl>;
 }
 
-/// Static routing facts for router tests and pure callers.
-///
-/// This is a value snapshot, not the engine's mutable production store.
+// Static-fixture test facts and the `test_relay` helper live in
+// `nmp-router-testkit` (#1667), not here: this crate has no way to gate a
+// plain `pub` item, and that dev-only capability must never be part of what
+// a default-features consumer of `nmp-router` can reach.
+//
+// This crate's OWN `#[cfg(test)]` unit tests (route.rs, admission_delta_tests.rs,
+// admission/preview_tests.rs) cannot use that shared testkit crate for
+// anything that crosses the `RoutingFacts` trait boundary: `nmp-router-testkit`
+// depends on `nmp-router`, and a crate's `--cfg test` build is a distinct
+// compilation from the plain build such a dev-dependency links against, so
+// `impl RoutingFacts for FixtureRoutingFacts` (compiled against the plain
+// build) never satisfies a `RoutingFacts` bound resolved against the
+// under-test build ("multiple different versions of crate `nmp_router` in
+// the dependency graph"). `test_relay` has no such conflict -- it returns a
+// plain `nostr::RelayUrl`, no local trait involved -- so those same test
+// modules keep using it from `nmp-router-testkit` directly.
+//
+// `LocalFacts` below is the minimal in-crate stand-in those three files use
+// instead. It is not a copy of `FixtureRoutingFacts`'s public surface and
+// must not grow into one; it exists for exactly the handful of call sites
+// that need *some* `RoutingFacts` value to hand a router function, most of
+// which just want the empty case.
+#[cfg(test)]
 #[derive(Default, Clone)]
-pub struct FixtureRoutingFacts {
-    authors: BTreeMap<PublicKey, AuthorRouteState>,
-    app: Vec<RelayUrl>,
-    fallback: Vec<RelayUrl>,
+pub(crate) struct LocalFacts {
+    authors: std::collections::BTreeMap<PublicKey, AuthorRouteState>,
 }
 
-impl FixtureRoutingFacts {
-    pub fn new() -> Self {
+#[cfg(test)]
+impl LocalFacts {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn with_author_routes(
+    pub(crate) fn with_author_routes(
         mut self,
         author: PublicKey,
         outbound: impl IntoIterator<Item = RelayUrl>,
@@ -125,134 +144,19 @@ impl FixtureRoutingFacts {
         );
         self
     }
-
-    /// Add an outbound-only author fact to a static test snapshot.
-    pub fn with_outbound_routes(
-        self,
-        author: PublicKey,
-        outbound: impl IntoIterator<Item = RelayUrl>,
-    ) -> Self {
-        self.with_author_routes(author, outbound, [])
-    }
-
-    /// Add an inbound-only author fact to a static test snapshot.
-    pub fn with_inbound_routes(
-        self,
-        author: PublicKey,
-        inbound: impl IntoIterator<Item = RelayUrl>,
-    ) -> Self {
-        self.with_author_routes(author, [], inbound)
-    }
-
-    pub fn with_author_absent(mut self, author: PublicKey) -> Self {
-        self.authors.insert(author, AuthorRouteState::Absent);
-        self
-    }
-
-    pub fn with_operator_app(mut self, relays: impl IntoIterator<Item = RelayUrl>) -> Self {
-        self.app.extend(relays);
-        self
-    }
-
-    pub fn with_operator_fallback(mut self, relays: impl IntoIterator<Item = RelayUrl>) -> Self {
-        self.fallback.extend(relays);
-        self
-    }
-
-    pub fn disjoint_mailboxes(authors: &[PublicKey]) -> Self {
-        let mut facts = Self::new();
-        for (index, author) in authors.iter().enumerate() {
-            facts = facts.with_author_routes(
-                *author,
-                [test_relay(index * 2), test_relay(index * 2 + 1)],
-                [],
-            );
-        }
-        facts
-    }
-
-    pub fn shared_pool_mailboxes(authors: &[PublicKey], pool: &[RelayUrl]) -> Self {
-        let mut facts = Self::new();
-        for author in authors {
-            facts = facts.with_author_routes(*author, pool.iter().cloned(), []);
-        }
-        facts
-    }
-
-    pub fn prolific_author(author: PublicKey, n: usize) -> Self {
-        Self::new().with_author_routes(author, (0..n).map(test_relay), [])
-    }
-
-    /// Decompose this static fixture for a headless engine falsifier.
-    #[doc(hidden)]
-    pub fn into_parts(
-        self,
-    ) -> (
-        BTreeMap<PublicKey, AuthorRouteState>,
-        Vec<RelayUrl>,
-        Vec<RelayUrl>,
-    ) {
-        (self.authors, self.app, self.fallback)
-    }
 }
 
-impl RoutingFacts for FixtureRoutingFacts {
+#[cfg(test)]
+impl RoutingFacts for LocalFacts {
     fn author_routes(&self, author: &PublicKey) -> AuthorRouteState {
         self.authors.get(author).cloned().unwrap_or_default()
     }
 
     fn operator_app_relays(&self) -> Vec<RelayUrl> {
-        self.app.clone()
+        Vec::new()
     }
 
     fn operator_fallback_relays(&self) -> Vec<RelayUrl> {
-        self.fallback.clone()
-    }
-}
-
-/// A deterministic fixture relay URL (`wss://relay{n}.example.com`).
-pub fn test_relay(n: usize) -> RelayUrl {
-    RelayUrl::parse(&format!("wss://relay{n}.example.com")).expect("valid test relay url")
-}
-
-#[cfg(test)]
-mod tests {
-    use nostr::Keys;
-
-    use super::*;
-
-    #[test]
-    fn lookup_preserves_all_three_states() {
-        let present = Keys::generate().public_key();
-        let absent = Keys::generate().public_key();
-        let unknown = Keys::generate().public_key();
-        let facts = FixtureRoutingFacts::new()
-            .with_author_routes(present, [], [])
-            .with_author_absent(absent);
-
-        assert_eq!(
-            facts.author_routes(&present),
-            AuthorRouteState::Present(AuthorRoutes::default())
-        );
-        assert_eq!(facts.author_routes(&absent), AuthorRouteState::Absent);
-        assert_eq!(facts.author_routes(&unknown), AuthorRouteState::Unknown);
-    }
-
-    #[test]
-    fn one_fact_carries_both_directions() {
-        let author = Keys::generate().public_key();
-        let outbound = test_relay(1);
-        let inbound = test_relay(2);
-        let facts = FixtureRoutingFacts::new().with_author_routes(
-            author,
-            [outbound.clone()],
-            [inbound.clone()],
-        );
-
-        let AuthorRouteState::Present(routes) = facts.author_routes(&author) else {
-            panic!("expected present routes");
-        };
-        assert_eq!(routes.outbound(), &BTreeSet::from([outbound]));
-        assert_eq!(routes.inbound(), &BTreeSet::from([inbound]));
+        Vec::new()
     }
 }

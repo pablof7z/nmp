@@ -47,7 +47,6 @@ test is not proof. Promoting `TARGET`/`PARTIAL` to `BUILT` requires a falsifier
 against the supported public facade and, where applicable, restart and platform
 projection tests.
 
-PR review applies this same rule prospectively, before a new bug class ever
-needs a row here: see `docs/design/architecture-review-gates.md` for the five
-review gates (Noun, Reachability, Bool-Lifecycle, Destructive-API, Cross-SDK
-Parity) this ledger's rule expands into at review time.
+This rule applies prospectively too, before a new bug class ever needs a row
+here — see `AGENTS.md`'s standing conventions for the design-time rules this
+ledger's type-over-convention doctrine expands into.

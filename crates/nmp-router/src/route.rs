@@ -258,8 +258,10 @@ pub(crate) fn provenance_for_exact(
 mod tests {
     use nostr::Keys;
 
+    use nmp_router_testkit::test_relay;
+
     use super::*;
-    use crate::facts::{test_relay, FixtureRoutingFacts};
+    use crate::facts::LocalFacts;
     use crate::solver::{solve, CoverageInput};
 
     fn filter(author: PublicKey) -> ConcreteFilter {
@@ -294,7 +296,7 @@ mod tests {
     #[test]
     fn present_outbound_becomes_neutral_coverage() {
         let author = Keys::generate().public_key();
-        let facts = FixtureRoutingFacts::new().with_author_routes(author, [test_relay(0)], []);
+        let facts = LocalFacts::new().with_author_routes(author, [test_relay(0)], []);
         let candidates = build_candidates(&BTreeSet::from([author]), &facts);
         let coverage = solve(&CoverageInput {
             candidates: candidates.clone(),

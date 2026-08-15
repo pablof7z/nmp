@@ -16,7 +16,7 @@ use nmp_grammar::{
     AccessContext, EventBuilder as NmpEventBuilder, Identity, RelaySessionKey, WriteIntent,
     WritePayload, WriteRouting,
 };
-use nmp_router::FixtureRoutingFacts;
+use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::{
     sentinel_signature, testing, AcceptWrite, AcceptWritePayload, IntentSigState,
     PublishQueueAttemptOutcome, PublishQueueTerminalOutcome, RedbStore, SigState,

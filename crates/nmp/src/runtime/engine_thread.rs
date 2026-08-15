@@ -196,7 +196,7 @@ impl EngineThread {
     #[doc(hidden)]
     pub fn spawn_with_fixture_routing_facts(
         store: RedbStore,
-        facts: nmp_router::FixtureRoutingFacts,
+        facts: nmp_router_testkit::FixtureRoutingFacts,
         cap: usize,
         pool_config: PoolConfig,
     ) -> Result<(Self, Handle), EngineThreadError> {

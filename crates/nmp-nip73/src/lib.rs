@@ -52,7 +52,7 @@ pub enum Nip73 {
 }
 
 /// [`Nip73`] construction's typed refusal. Exhaustive; every variant is
-/// constructed by a test (Reachability Gate).
+/// constructed by a test, so none is dead surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Nip73Error {
     /// The `I` value was empty.
@@ -199,9 +199,9 @@ impl Nip73 {
 mod tests {
     use super::*;
 
-    /// Reachability Gate: every `Nip73Error` variant is constructed across
-    /// this module's tests; this one covers `EmptyValue` and the podcast
-    /// round trip.
+    /// Every `Nip73Error` variant is constructed across this module's
+    /// tests, so none is dead surface; this one covers `EmptyValue` and the
+    /// podcast round trip.
     #[test]
     fn podcast_episode_refuses_empty_and_round_trips_i_and_k() {
         assert_eq!(Nip73::podcast_episode(""), Err(Nip73Error::EmptyValue));
@@ -280,7 +280,7 @@ mod tests {
         );
     }
 
-    /// Reachability Gate: `MalformedUrl` is constructed. A relative
+    /// Proves `MalformedUrl` is constructed, not dead surface. A relative
     /// reference has no scheme and no host, so there is nothing to
     /// normalise and nothing that could identify a page globally.
     #[test]

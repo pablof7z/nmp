@@ -17,8 +17,9 @@ use crate::local_crypto::{self, CanonicalSecret, LocalCryptoError};
 ///
 /// Deliberately separate from [`SignerError`]: construction happens before any
 /// capability operation exists, so reporting it as an unavailable/rejected
-/// *signing operation* would conflate two lifecycle stages. Reachability Gate:
-/// every variant is constructed in this module's parsing/validation path.
+/// *signing operation* would conflate two lifecycle stages. Every variant is
+/// constructed in this module's parsing/validation path, so none is dead
+/// surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalKeySignerError {
     /// The input was neither a valid 32-byte secp256k1 scalar nor its accepted
