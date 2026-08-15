@@ -2860,9 +2860,11 @@ impl EngineCore {
     /// bounds live work without turning historical read connections into
     /// permanent slot owners.
     ///
-    /// This is a pure reducer projection: durable lane reads happen only at
-    /// bootstrap/recovery and mutation boundaries, never while reconciling
-    /// ordinary worker ownership.
+    /// This projection is computed from in-memory state alone: durable lane
+    /// reads happen only at bootstrap/recovery and mutation boundaries, never
+    /// while reconciling ordinary worker ownership. ("Pure" would be the wrong
+    /// word for anything in `EngineCore`, which owns the store and commits
+    /// through it -- see `docs/internals/architecture-boundaries.md`.)
     /// Whether the reducer can prove its lane-worker projection is a
     /// conservative superset of durable nonterminal lanes.
     ///
