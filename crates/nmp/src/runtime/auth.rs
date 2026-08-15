@@ -1208,6 +1208,14 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
+    fn test_verifier() -> nmp_transport::Verifier {
+        nmp_transport::Verifier::new(
+            nmp_transport::VerifyConfig::default(),
+            std::sync::Arc::new(nmp_transport::NullKnownSig),
+        )
+        .expect("test verifier construction must succeed")
+    }
+
     struct QueuedPolicy {
         invoked: std::sync::mpsc::Sender<AuthPolicyRequest>,
         operations: Mutex<VecDeque<AuthPolicyOp>>,
@@ -1342,7 +1350,7 @@ mod tests {
     fn policy_is_bound_before_callback_and_completes_the_exact_instance() {
         let rt = test_runtime();
         let (pool_tx, _pool_rx) = std::sync::mpsc::channel();
-        let pool = Pool::new(PoolConfig::default(), pool_tx).unwrap();
+        let pool = Pool::new(PoolConfig::default(), test_verifier(), pool_tx).unwrap();
         let signers = SignerRegistry::default();
         let mut policies = AuthPolicyRegistry::default();
         let mut tasks = AuthTaskRegistry::default();
@@ -1425,7 +1433,7 @@ mod tests {
     fn replacement_and_epoch_cancel_drain_pending_policy_tasks() {
         let rt = test_runtime();
         let (pool_tx, _pool_rx) = std::sync::mpsc::channel();
-        let pool = Pool::new(PoolConfig::default(), pool_tx).unwrap();
+        let pool = Pool::new(PoolConfig::default(), test_verifier(), pool_tx).unwrap();
         let signers = SignerRegistry::default();
         let mut policies = AuthPolicyRegistry::default();
         let mut tasks = AuthTaskRegistry::default();
@@ -1633,7 +1641,7 @@ mod tests {
     fn absent_policy_and_signer_fail_closed_with_the_exact_token() {
         let rt = test_runtime();
         let (pool_tx, _pool_rx) = std::sync::mpsc::channel();
-        let pool = Pool::new(PoolConfig::default(), pool_tx).unwrap();
+        let pool = Pool::new(PoolConfig::default(), test_verifier(), pool_tx).unwrap();
         let registry = SignerRegistry::default();
         let policies = AuthPolicyRegistry::default();
         let mut tasks = AuthTaskRegistry::default();
@@ -1762,7 +1770,7 @@ mod tests {
         let keys = Keys::generate();
         let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(keys.public_key()));
         let (pool_tx, pool_rx) = std::sync::mpsc::channel();
-        let pool = Pool::new(PoolConfig::default(), pool_tx).unwrap();
+        let pool = Pool::new(PoolConfig::default(), test_verifier(), pool_tx).unwrap();
         let opened = pool.ensure_session(&session).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let connected = loop {

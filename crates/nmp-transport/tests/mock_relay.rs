@@ -87,6 +87,14 @@ fn test_pool_config() -> PoolConfig {
     }
 }
 
+fn test_verifier() -> nmp_transport::Verifier {
+    nmp_transport::Verifier::new(
+        nmp_transport::VerifyConfig::default(),
+        std::sync::Arc::new(nmp_transport::NullKnownSig),
+    )
+    .expect("test verifier construction must succeed")
+}
+
 /// Rust's test harness runs the test fns in this file concurrently by
 /// default, and each `#[tokio::test(flavor = "multi_thread", ...)]` below
 /// gets its OWN dedicated tokio runtime -- so left unguarded, this one file
@@ -159,6 +167,7 @@ async fn connect_req_event_eose_close_then_reconnect_replays_subscription() {
             reconnect_jitter_max: Some(Duration::ZERO),
             ..test_pool_config()
         },
+        test_verifier(),
         tx,
     )
     .expect("test pool construction");
@@ -324,6 +333,7 @@ async fn durable_event_never_survives_reconnect_while_req_preamble_does() {
             reconnect_jitter_max: Some(Duration::ZERO),
             ..test_pool_config()
         },
+        test_verifier(),
         tx,
     )
     .expect("test pool construction");
@@ -480,7 +490,7 @@ async fn durable_event_resolves_written_exactly_once() {
     let url = nostr::RelayUrl::parse(&relay.url().await.to_string()).expect("parse relay url");
 
     let (tx, rx) = mpsc::channel::<PoolEvent>();
-    let pool = Pool::new(test_pool_config(), tx).expect("test pool construction");
+    let pool = Pool::new(test_pool_config(), test_verifier(), tx).expect("test pool construction");
     let h = pool.ensure_open(&url).expect("relay admitted");
     // 15s, not 5s -- see test 7's identical `connected1` wait for why
     // (CONNECT_TIMEOUT-bounded first-dial exposure).
@@ -582,10 +592,10 @@ async fn close_under_saturated_data_lanes_never_deadlocks_the_pool() {
             // send-spam saturate them, recreating #506's deadlock precondition.
             command_queue_capacity: 1,
             ingest_queue_capacity: 1,
-            verifier_queue_capacity: 1,
             reconnect_jitter_max: Some(Duration::ZERO),
             ..test_pool_config()
         },
+        test_verifier(),
         tx,
     )
     .expect("test pool construction");

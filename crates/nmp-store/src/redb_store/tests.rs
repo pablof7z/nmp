@@ -336,6 +336,62 @@ fn a_refused_receipt_needs_no_recovery_write_on_reopen() {
 }
 
 #[test]
+fn known_signature_returns_stored_sig_for_ingested_id_and_none_otherwise() {
+    use nostr::{EventBuilder, Kind};
+
+    let keys = nostr::Keys::generate();
+    let event = EventBuilder::new(Kind::TextNote, "verify-dedup")
+        .sign_with_keys(&keys)
+        .expect("sign fixture");
+    let relay = RelayUrl::parse("ws://127.0.0.1:1").unwrap();
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    store
+        .insert(
+            event.clone(),
+            RelayObserved::new(relay, Timestamp::from(1u64)),
+        )
+        .expect("insert fixture");
+
+    let reader = store.share_sig_reader().expect("cut sig reader");
+    assert_eq!(reader.known_signature(&event.id), Some(event.sig));
+    // Unknown id is not known-good.
+    let absent = EventId::from_byte_array([0xff; 32]);
+    assert_eq!(reader.known_signature(&absent), None);
+}
+
+#[test]
+fn known_signature_reader_survives_store_reopen() {
+    use nostr::{EventBuilder, Kind};
+
+    // The reader reads through a shared cell the store replaces on reopen,
+    // so it must NOT strand on a dead handle after a fault-recovery reopen.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reopen-sig.redb");
+    let keys = nostr::Keys::generate();
+    let event = EventBuilder::new(Kind::TextNote, "survives-reopen")
+        .custom_created_at(Timestamp::from(1u64))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let relay = RelayUrl::parse("ws://127.0.0.1:2").unwrap();
+    let mut store = RedbStore::open(&path).unwrap();
+    store
+        .insert(
+            event.clone(),
+            RelayObserved::new(relay, Timestamp::from(2u64)),
+        )
+        .expect("insert fixture");
+    let reader = store.share_sig_reader().expect("cut sig reader");
+    assert_eq!(reader.known_signature(&event.id), Some(event.sig));
+
+    store
+        .reopen_after_failure()
+        .expect("reopen replaces the shared db handle");
+    // The committed event survives reopen, and the reader sees it through
+    // the NEW handle installed in the shared cell.
+    assert_eq!(reader.known_signature(&event.id), Some(event.sig));
+}
+
+#[test]
 fn surrogate_allocators_do_not_touch_hot_metadata_rows_until_one_flush() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("allocator-flush.redb");

@@ -4,6 +4,14 @@ use nmp_grammar::{AccessContext, RelaySessionKey};
 use nmp_transport::{Pool, PoolConfig, RelayOpenError};
 use nostr::{Keys, RelayUrl};
 
+fn test_verifier() -> nmp_transport::Verifier {
+    nmp_transport::Verifier::new(
+        nmp_transport::VerifyConfig::default(),
+        std::sync::Arc::new(nmp_transport::NullKnownSig),
+    )
+    .expect("test verifier construction must succeed")
+}
+
 #[test]
 fn physical_session_cap_counts_contexts_not_urls() {
     let (tx, _rx) = mpsc::channel();
@@ -12,6 +20,7 @@ fn physical_session_cap_counts_contexts_not_urls() {
             max_relays: 2,
             ..PoolConfig::default()
         },
+        test_verifier(),
         tx,
     )
     .unwrap();
