@@ -73,11 +73,7 @@ mod transport_tests;
 mod write;
 #[doc(hidden)]
 pub use write::PreparedReplaceableSuccessor;
-pub(crate) use write::{
-    PreparedReplaceableMaterialization, PublishPreparation, ReplaceableMaterializationCall,
-    ReplaceableMaterializationContinuation, ReplaceableMaterializationOutcome,
-    ReplaceableSuccessorContinuation,
-};
+pub(crate) use write::{PreparedReplaceableMaterialization, PublishPreparation};
 #[cfg(test)]
 mod write_tests;
 
@@ -2195,7 +2191,7 @@ struct PendingRequestClaimTransfer {
 pub struct EngineCore {
     store: RedbStore,
     resolver: ResolverEngine,
-    replaceable_materializers: HashMap<[u8; 16], ReplaceableMaterializerRegistration>,
+    replaceable_materializers: HashMap<([u8; 16], [u8; 16]), ReplaceableMaterializerRegistration>,
     router: Router,
     routing_facts: RoutingFactStore,
     cap: usize,
@@ -2632,15 +2628,21 @@ struct AttemptCorrelationTarget {
 struct AttemptCorrelationExhausted;
 
 impl EngineCore {
-    pub(crate) fn add_replaceable_materializer(
+    pub(crate) fn install_replaceable_materializer(
         &mut self,
         registration: ReplaceableMaterializerRegistration,
     ) {
-        self.replaceable_materializers.retain(|_, current| {
-            current.program != registration.program || current.format != registration.format
-        });
         self.replaceable_materializers
-            .insert(registration.instance, registration);
+            .insert((registration.program, registration.format), registration);
+    }
+
+    pub(crate) fn install_replaceable_materializers(
+        &mut self,
+        capabilities: Vec<crate::ReplaceableMaterializerSpec>,
+    ) {
+        for spec in capabilities {
+            self.install_replaceable_materializer(spec.into_registration());
+        }
     }
 
     pub fn new(store: RedbStore, cap: usize) -> Self {

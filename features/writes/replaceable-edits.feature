@@ -57,7 +57,7 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:id=WRITES-REPLACEABLE-EDIT-011
   # nmp:status=built
   # nmp:evidence=rust:nmp-nip02::invalidated_registration_and_materializer_refusal_leave_no_custody
-  # nmp:falsifier=Accept an operation from a replaced registration or retain anything after synchronous materializer refusal; the queue is no longer empty and the signed source is no longer the sole canonical row.
+  # nmp:falsifier=Accept an operation whose compiled capability was not supplied at construction or retain anything after synchronous materializer refusal; the queue is no longer empty and the signed source is no longer the sole canonical row.
   Scenario: An unavailable capability refuses the operation before custody
     Given the capability required by the operation is not configured
     When I try to add Alice to my contact list through that capability
@@ -66,32 +66,27 @@ Feature: A replaceable edit says which version it replaces, and is checked again
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-024
   # nmp:status=built
-  # nmp:evidence=rust:nmp::blocked_initial_materializer_does_not_block_engine_work_or_shutdown
-  # nmp:falsifier=Keep capability preparation on the engine state thread or behind the facade lifecycle lock; while the capability remains blocked, ordinary observation/publication or shutdown cannot complete.
+  # nmp:evidence=rust:nmp::repeated_materializations_do_not_change_the_process_thread_count
+  # nmp:falsifier=Restore one OS thread per materialization; the process thread census grows after repeated follow and successor work.
   @acceptance
-  Scenario: Preparing a capability operation cannot freeze the engine before custody
-    Given a configured capability has begun preparing a complete replacement
-    And that capability remains blocked before the operation enters custody
-    When I open an ordinary observation and publish an unrelated event
-    Then the observation and ordinary publication complete while the capability remains blocked
-    When I shut down NMP without releasing the capability
-    Then shutdown completes
-    And the blocked publication reports that the engine closed
-    And NMP retains no receipt, write intent, optimistic row, signing work, route, delivery work, or correlation for the blocked operation
+  Scenario: A trusted capability edit runs without starting another thread
+    Given a compiled contact-list capability is supplied when NMP starts
+    When I follow Alice while offline
+    And a newer remote contact list later arrives
+    Then the complete replacement is visible immediately
+    And repeated initial and successor edits do not change the process thread count
 
   # nmp:id=WRITES-REPLACEABLE-EDIT-025
   # nmp:status=built
-  # nmp:evidence=rust:nmp::finite_successor_materialization_does_not_block_the_engine_or_lose_adjacent_eose
-  # nmp:falsifier=Run relay successor preparation on the engine state thread or settle the adjacent end-of-stored-events before preparation finishes; the bounded public publication cannot enter custody or the completed successor never becomes the settled finite generation.
+  # nmp:evidence=rust:nmp::missing_compiled_capability_refuses_open_and_leaves_the_store_unchanged
+  # nmp:falsifier=Open an engine whose retained follow work lacks its compiled program/format; construction succeeds or the store is mutated.
   @acceptance
-  Scenario: A finite relay source waits for successor preparation without freezing NMP
-    Given a finite source relay returns a newer event and then end-of-stored-events
-    And successor preparation remains blocked after the event batch
-    When I publish an unrelated event
-    Then the unrelated publication enters custody while successor preparation remains blocked
-    And the finite source does not settle while preparation remains blocked
-    When successor preparation completes
-    Then the complete successor is installed before the saved source terminal settles
+  Scenario: Reopening retained work without its compiled capability fails at the door
+    Given I accepted a follow while offline
+    And I close NMP
+    When I reopen the same store without that compiled capability
+    Then construction is refused
+    And the store is unchanged
 
   # The encrypted content is opaque to an operation that owns only a public
   # tag. Its presence does not turn that operation into a crypto operation.

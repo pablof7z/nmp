@@ -135,6 +135,14 @@ pub enum SessionRestoreError {
     CapabilityRegistryFull {
         limit: usize,
     },
+    /// Reopen retained a replaceable operation whose compiled program/format
+    /// is absent from the supplied capability set. Typed through the
+    /// restore path so FFI reopen surfaces the same refusal as `Engine::new`,
+    /// not a generic start-failed string.
+    MissingReplaceableCapability {
+        program: [u8; 16],
+        format: [u8; 16],
+    },
     EngineStartFailed {
         reason: String,
     },
@@ -173,6 +181,12 @@ impl fmt::Display for SessionRestoreError {
                 write!(f, "signing capability registry is full at {limit} entries")
             }
             Self::EngineStartFailed { reason } => write!(f, "engine start failed: {reason}"),
+            Self::MissingReplaceableCapability { program, format } => write!(
+                f,
+                "store retains replaceable operations for missing compiled capability program {:02x?} format {:02x?}",
+                program,
+                format
+            ),
         }
     }
 }

@@ -672,9 +672,7 @@ mod semantic_successor_tests {
             .unwrap();
         let mut core = EngineCore::new(store, 10);
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
-        let instance = [5; 16];
-        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
-            instance,
+        core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
             program: [6; 16],
             format: [7; 16],
             materializer: Arc::new(AddPeople),
@@ -682,7 +680,8 @@ mod semantic_successor_tests {
         let original = UnsignedEvent::from(base.clone());
         let finite_relays = BTreeSet::from([relay_a.clone(), relay_b.clone()]);
         let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
-            instance,
+            [6; 16],
+            [7; 16],
             original.clone(),
             original.clone(),
             nmp_grammar::ReplaceableSourcePolicy::Finite {
@@ -752,8 +751,7 @@ mod semantic_successor_tests {
 
         let mut core = EngineCore::new(reopened, 10);
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
-        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
-            instance,
+        core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
             program: [6; 16],
             format: [7; 16],
             materializer: Arc::new(AddPeople),
@@ -766,7 +764,8 @@ mod semantic_successor_tests {
             .unwrap();
         let current_unsigned = UnsignedEvent::from(current.event);
         let same_finite = nmp_grammar::ReplaceableOperation::from_registered_parts(
-            instance,
+            [6; 16],
+            [7; 16],
             current_unsigned.clone(),
             current_unsigned,
             nmp_grammar::ReplaceableSourcePolicy::Finite {
@@ -813,7 +812,8 @@ mod semantic_successor_tests {
                 .unwrap();
             let current_unsigned = UnsignedEvent::from(current.event);
             let changed = nmp_grammar::ReplaceableOperation::from_registered_parts(
-                instance,
+                [6; 16],
+                [7; 16],
                 current_unsigned.clone(),
                 current_unsigned,
                 source_policy,
@@ -882,15 +882,14 @@ mod semantic_successor_tests {
             .unwrap();
         let mut core = EngineCore::new(store, 10);
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
-        let instance = [8; 16];
-        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
-            instance,
+        core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
             program: [9; 16],
             format: [10; 16],
             materializer: Arc::new(AddPeople),
         });
         let operation = nmp_grammar::ReplaceableOperation::from_registered_default_parts(
-            instance,
+            [9; 16],
+            [10; 16],
             Kind::ContactList,
             String::new(),
             nmp_grammar::ReplaceableSourcePolicy::Finite {
@@ -976,9 +975,7 @@ mod semantic_successor_tests {
                 ..nmp_grammar::Filter::default()
             },
         )));
-        let instance = [5; 16];
-        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
-            instance,
+        core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
             program: [6; 16],
             format: [7; 16],
             materializer: Arc::new(AddPeople),
@@ -991,7 +988,8 @@ mod semantic_successor_tests {
         for (person, destination) in [(alice, destination_a.clone()), (bob, destination_b.clone())]
         {
             let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
-                instance,
+                [6; 16],
+                [7; 16],
                 original.clone(),
                 current.clone(),
                 nmp_grammar::ReplaceableSourcePolicy::Continuing,
@@ -1150,8 +1148,7 @@ mod semantic_successor_tests {
                 .id,
             first_local_id
         );
-        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
-            instance,
+        core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
             program: [6; 16],
             format: [7; 16],
             materializer: Arc::new(AddPeople),
@@ -1267,7 +1264,8 @@ mod semantic_successor_tests {
 
         let erin = Keys::generate().public_key();
         let later_operation = nmp_grammar::ReplaceableOperation::from_registered_parts(
-            instance,
+            [6; 16],
+            [7; 16],
             original,
             UnsignedEvent::from(first_successor.event.clone()),
             nmp_grammar::ReplaceableSourcePolicy::Continuing,
@@ -1421,9 +1419,7 @@ mod semantic_successor_tests {
             .unwrap();
         let mut core = EngineCore::new(store, 10);
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
-        let instance = [15; 16];
-        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
-            instance,
+        core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
             program: [16; 16],
             format: [17; 16],
             materializer: Arc::new(AddPeople),
@@ -1431,7 +1427,8 @@ mod semantic_successor_tests {
 
         let original = UnsignedEvent::from(base);
         let operation = nmp_grammar::ReplaceableOperation::from_registered_parts(
-            instance,
+            [16; 16],
+            [17; 16],
             original.clone(),
             original,
             nmp_grammar::ReplaceableSourcePolicy::Continuing,
@@ -1682,90 +1679,6 @@ mod semantic_successor_tests {
             !core.retry_scheduler_blocked,
             "retired E1 deadlines must be gone rather than poisoning the current scheduler"
         );
-    }
-
-    #[test]
-    fn initial_materializer_thread_spawn_refusal_leaves_no_acceptance_residue() {
-        let author = Keys::generate();
-        let person = Keys::generate().public_key();
-        let base = source(&author, 1, "base", &[]);
-        let mut core = EngineCore::new(RedbStore::temporary().unwrap(), 10);
-        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
-        let instance = [71; 16];
-        core.add_replaceable_materializer(ReplaceableMaterializerRegistration {
-            instance,
-            program: [72; 16],
-            format: [73; 16],
-            materializer: Arc::new(AddPeople),
-        });
-        let original = UnsignedEvent::from(base);
-        let operation = nmp_grammar::ReplaceableOperation::from_registered_parts(
-            instance,
-            original.clone(),
-            original,
-            nmp_grammar::ReplaceableSourcePolicy::Continuing,
-            person.to_bytes().to_vec(),
-        )
-        .unwrap();
-        let token = "initial-materializer-spawn-refusal";
-        let prepared = match core.prepare_publish(WriteIntent {
-            payload: WritePayload::ReplaceableOperation(operation),
-            routing: WriteRouting::Explicit(vec![
-                RelayUrl::parse("wss://spawn-refusal.example").unwrap()
-            ]),
-            identity: Identity::Active,
-            correlation: Some(
-                nmp_grammar::CorrelationToken::try_from(token)
-                    .expect("the spawn-refusal fixture token is valid"),
-            ),
-        }) {
-            PublishPreparation::Materialize(prepared) => prepared,
-            PublishPreparation::Complete(effects) => {
-                panic!("fixture refused before the injected spawn outcome: {effects:#?}")
-            }
-        };
-        let effects = match core.complete_body_complete_replaceable_operation(
-            prepared.continuation,
-            ReplaceableMaterializationOutcome::ThreadUnavailable(
-                "injected spawn refusal".to_string(),
-            ),
-        ) {
-            PublishPreparation::Complete(effects) => effects,
-            PublishPreparation::Materialize(_) => {
-                panic!("an unchanged spawn refusal must not retry capability work")
-            }
-        };
-        assert!(matches!(
-            effects.as_slice(),
-            [Effect::PublishFailed(PublishError::ReplaceableOperationRefused { reason })]
-                if reason.contains("injected spawn refusal")
-        ));
-        assert!(core
-            .publish_queue_entries(None, u8::MAX)
-            .unwrap()
-            .is_empty());
-        let (reattachment, resolved_id) = core.reattach_by_correlation(token.to_string());
-        assert_eq!(reattachment.outcome, ReattachOutcome::NotFound);
-        assert_eq!(resolved_id, None);
-        let coordinate = Coordinate {
-            kind: Kind::ContactList,
-            public_key: author.public_key(),
-            identifier: String::new(),
-        };
-        assert!(core
-            .store
-            .replaceable_operation_snapshot(&coordinate)
-            .unwrap()
-            .is_none());
-        assert!(core
-            .store
-            .query(
-                &nostr::Filter::new()
-                    .kind(Kind::ContactList)
-                    .author(author.public_key())
-            )
-            .unwrap()
-            .is_empty());
     }
 }
 

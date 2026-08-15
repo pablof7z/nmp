@@ -12,8 +12,7 @@ mod replaceable_operation;
 pub use replaceable_operation::PreparedReplaceableSuccessor;
 pub(crate) use replaceable_operation::{
     PreparedReplaceableMaterialization, PublishPreparation, ReplaceableMaterializationCall,
-    ReplaceableMaterializationContinuation, ReplaceableMaterializationOutcome,
-    ReplaceableSuccessorContinuation,
+    ReplaceableMaterializationOutcome, ReplaceableSuccessorContinuation,
 };
 
 fn public_retry_cause(cause: PublishQueueTransientCause) -> Option<RetryCause> {
@@ -2569,16 +2568,11 @@ impl EngineCore {
         }
         let Some(registration) = self
             .replaceable_materializers
-            .values()
-            .find(|registration| {
-                ReplayProgramId(registration.program) == first.program
-                    && ReplayFormatId(registration.format) == first.format
-            })
+            .get(&(first.program.0, first.format.0))
         else {
             effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
             return true;
         };
-        let instance = registration.instance;
         let program = ReplayProgramId(registration.program);
         let format = ReplayFormatId(registration.format);
         let materializer = registration.materializer.clone();
@@ -2602,7 +2596,6 @@ impl EngineCore {
                     operations,
                 ),
                 continuation: ReplaceableSuccessorContinuation {
-                    instance,
                     program,
                     format,
                     materializer,
@@ -2643,21 +2636,11 @@ impl EngineCore {
         }
         let registration_is_current = self
             .replaceable_materializers
-            .get(&continuation.instance)
+            .get(&(continuation.program.0, continuation.format.0))
             .is_some_and(|registration| {
-                registration.program == continuation.program.0
-                    && registration.format == continuation.format.0
-                    && Arc::ptr_eq(&registration.materializer, &continuation.materializer)
+                Arc::ptr_eq(&registration.materializer, &continuation.materializer)
             });
         if !registration_is_current {
-            effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
-            self.finish_replaceable_successor_request(&continuation, effects);
-            return;
-        }
-        if matches!(
-            outcome,
-            ReplaceableMaterializationOutcome::ThreadUnavailable(_)
-        ) {
             effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
             self.finish_replaceable_successor_request(&continuation, effects);
             return;
@@ -2710,14 +2693,10 @@ impl EngineCore {
 
         let builder = match outcome {
             ReplaceableMaterializationOutcome::Materialized(builder) => builder,
-            ReplaceableMaterializationOutcome::Refused(_)
-            | ReplaceableMaterializationOutcome::Panicked => {
+            ReplaceableMaterializationOutcome::Refused(_) => {
                 effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
                 self.finish_replaceable_successor_request(&continuation, effects);
                 return;
-            }
-            ReplaceableMaterializationOutcome::ThreadUnavailable(_) => {
-                unreachable!("thread refusal returned before successor fence validation")
             }
         };
         if builder.kind != continuation.coordinate.kind
@@ -3016,9 +2995,7 @@ impl EngineCore {
                 PublishPreparation::Complete(effects) => return effects,
                 PublishPreparation::Materialize(prepared) => {
                     let PreparedReplaceableMaterialization { call, continuation } = *prepared;
-                    let outcome =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call.execute()))
-                            .unwrap_or(ReplaceableMaterializationOutcome::Panicked);
+                    let outcome = call.execute();
                     preparation =
                         self.complete_body_complete_replaceable_operation(continuation, outcome);
                 }
