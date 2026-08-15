@@ -1138,7 +1138,7 @@ impl EngineCore {
                     // re-dial a still-planned session the instant it was
                     // reconciled away.
                 }
-                DisconnectReason::Error | DisconnectReason::ShuttingDown => {
+                DisconnectReason::Error => {
                     // Transient drop: re-request the worker ONLY while the
                     // reducer still owns demand for exactly this session --
                     // a session no longer required must not be redialed
