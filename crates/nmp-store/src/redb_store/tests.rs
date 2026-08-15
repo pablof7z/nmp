@@ -1797,7 +1797,7 @@ fn surrogate_keys_are_monotonic_and_never_reused_after_remove_or_reopen() {
         )
         .unwrap();
     let first_key = raw_canonical_row(&store, first.id).0;
-    store.remove(first.id, RetractReason::Expired).unwrap();
+    store.remove(first.id, RetractReason::Deleted).unwrap();
     store
         .insert(
             second.clone(),

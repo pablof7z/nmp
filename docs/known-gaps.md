@@ -434,7 +434,7 @@ about current code:
 
 - **~~DM inbox routing incorrect (M3-D)~~ CLOSED (#19), then removed (#839/#870).** The unsafe generic `WriteRouting::ToInboxes` remains deleted. Neutral `AuthorRoutes.inbound` is available to the built-in p-tag fan-out, but no protocol-specific inbox accessor or route vocabulary exists in the router.
 
-- **Decrypt-result feedback path missing (M3-C, plan §8 item 2).** `Effect::RequestDecrypt` is an explicit no-op; there is no `EngineMsg` to feed a decrypt result back into ingest. Needed for reading NIP-17 DMs / private NIP-51 items (ledger #12 encrypted-content path). Deferred with E/negentropy still open; not on the falsifier's feed path.
+- **Decrypt path absent end to end (M3-C, plan §8 item 2).** Ingest never asks for a decryption and there is no `EngineMsg` that could carry a plaintext result back into it: the reducer emits no decrypt effect, and the runtime has nothing to execute. #1636 deleted the unreachable `Effect::RequestDecrypt` variant that stood in for the request half — it had zero construction sites and an empty handler, so it recorded intent rather than behaviour, and nothing about the gap changed when it went. Needed for reading NIP-17 DMs / private NIP-51 items (ledger #12 encrypted-content path); issue #6 owns the async sign/encrypt/decrypt capability design that would supply both halves. Not on the falsifier's feed path.
 
 - **~~Reconnect replayed NIP-77 demand as plain REQ~~ CLOSED (#563).** Every new Public connection generation now clears the stale preamble and repeats the same gap-free sequence as an ordinary demand change: distinct live `REQ {limit:0}` → exact EOSE → concurrent Negentropy while live delivery remains open. Timeout/error paths retain live overlap and use role-separated full-backlog REQs.
 
@@ -526,8 +526,8 @@ about current code:
   composition, exact demand, canonical winner selection, marker parsing, and
   settlement without depending on `nmp`, router, store, resolver, or
   transport. `BootstrapRelayList::into_write_intent` returns an ordinary
-  explicit write; `nmp::nip65::Nip65Operations` binds that value to the
-  ordinary tracked receipt. The same optional feature privately turns generic
+  explicit write; `Engine::publish_relay_list_bootstrap` binds that value to
+  the ordinary tracked receipt. The same optional feature privately turns generic
   author needs into neutral atomic route facts. A deterministic public-facade
   capstone starts through `Engine::new` with only an indexer, independently
   witnesses Alice-scoped kind:10002 acquisition before any content-relay

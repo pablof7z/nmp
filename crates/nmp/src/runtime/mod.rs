@@ -4734,14 +4734,6 @@ fn dispatch_effect(
                     .send(Cmd::Engine(EngineMsg::SignerAttached(pubkey)));
             }
         }
-        Effect::RequestDecrypt(..) => {
-            // No `EngineMsg` feedback path exists yet to carry a decrypted
-            // result back into `EngineCore` (B never wired one -- see the
-            // plan's §8 underspecified item 2, "confirm before E"). Adding
-            // one is out of this builder's scope (core wiring is limited to
-            // what frame parsing needs); left as an explicit no-op, the same
-            // as E's `StartProbe`/`NegOpen` stubs below.
-        }
         Effect::EmitRows(id, rows, evidence) => {
             #[cfg(feature = "nip65")]
             let nip65_followups = { runtime.nip65.borrow_mut().consume_rows(core, id, &rows) };
