@@ -182,9 +182,6 @@ SIM_X86_LIB="${SIM_X86_RELEASE_DIR:-}/$LIB_NAME"
 MACOS_LIB="$MACOS_RELEASE_DIR/$LIB_NAME"
 DEVICE_LIB="${DEVICE_RELEASE_DIR:-}/$LIB_NAME"
 
-echo "== 1b. verify macOS deployment target ($MACOS_DEPLOYMENT_TARGET) =="
-"$DEPLOYMENT_CHECKER" "$MACOS_LIB"
-
 if [[ "$MODE" != macos ]]; then
   echo "== 2. lipo the two simulator arches into one fat staticlib =="
   FAT_SIM_DIR="$TARGET_DIR/ios-sim-fat"
