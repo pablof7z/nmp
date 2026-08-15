@@ -47,7 +47,7 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
                 "Engine could not start (sentinel-component): sentinel-start"
             ),
             (
-                .missingReplaceableCapability(program: Data([1]), format: Data([2])),
+                .missingReplaceableCapability(programHex: "01", formatHex: "02"),
                 "Store retains replaceable operations for a missing compiled capability"
             ),
             (
