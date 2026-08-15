@@ -3,6 +3,7 @@
 //! This module owns acceptance through signing, route snapshots, per-relay
 //! attempts and acknowledgements, cancellation/compensation, and boot recovery.
 
+use super::coordinate_coverage::CoordinateCoverage;
 use super::*;
 use nmp_grammar::ThreadPosition;
 use nostr::nips::nip01::Coordinate;
@@ -353,12 +354,18 @@ impl EngineCore {
     /// untouched because the obligation and its lanes are still live.
     pub(super) fn forget_pending_indexes(&mut self, id: ReceiptId, pending: &PendingWrite) {
         self.intent_receipts.remove(&pending.intent_id);
-        if let Some(receipts) = self.event_to_receipts.get_mut(&pending.frozen.id) {
+        // Every event this receipt is indexed under, not just its current
+        // frozen one. A semantic receipt that rode a predecessor generation
+        // to a relay is still named by that predecessor's entry, and the
+        // index means "this receipt has live work on this event". Leaving a
+        // stale name behind used to be invisible only because a semantic
+        // receipt could never reach a terminal state; once it settles, the
+        // publish-queue projection reads that name and finds a receipt whose
+        // payload is no longer `Contributing`.
+        self.event_to_receipts.retain(|_, receipts| {
             receipts.remove(&id);
-            if receipts.is_empty() {
-                self.event_to_receipts.remove(&pending.frozen.id);
-            }
-        }
+            !receipts.is_empty()
+        });
         // A removed write owns no projection to reconcile, so its bootstrap
         // gap is closed by the removal. Leaving the entry would keep
         // rearming a deadline for a receipt that can never bootstrap again
@@ -372,6 +379,175 @@ impl EngineCore {
                 }
             }
         }
+        self.release_all_coordinate_coverage(id);
+    }
+
+    /// Ask the ordinary query owner whether this relay's current value for
+    /// `coordinate` is known before the lane takes a publish attempt.
+    ///
+    /// Returns `true` when the lane may send. A `false` parks it: the answer
+    /// is outstanding, and the lane re-asks on the next scheduling pass
+    /// after frames arrive. No verdict is remembered between passes and no
+    /// request identity is persisted -- a restart repeats the check.
+    ///
+    /// `Witnessed` is a green light rather than a comparison against the
+    /// pending generation's own source revision, and that is deliberate. A
+    /// witnessed event has already been INGESTED, so
+    /// `install_semantic_source_successor` has already had it and either
+    /// rebased this coordinate onto it -- in which case this lane's
+    /// generation is superseded and this lane no longer exists -- or
+    /// declined it as stale or as one of NMP's own previously published
+    /// materializations. Re-deciding "is this newer" here from `created_at`
+    /// alone would park the lane forever on the relay's echo of NMP's own
+    /// earlier generation, which is newer than the base that generation was
+    /// built from and yet is not a newer list at all.
+    fn coordinate_is_current_for_lane(
+        &mut self,
+        receipt: ReceiptId,
+        coordinate: &Coordinate,
+        session: &RelaySessionKey,
+        relay: &RelayUrl,
+        effects: &mut Vec<Effect>,
+    ) -> bool {
+        // A lane that already owns an open coordinate observation re-reads
+        // the answer; it must never open a second REQ for the same question.
+        // The door's own duplicate check cannot see one this same turn just
+        // asked for, because the reducer mints its REQs before admission
+        // flushes them.
+        let key = (receipt, relay.clone());
+        let already_asked = self.semantic_publish_coverage.contains_key(&key);
+        let (coverage, opened) = if already_asked {
+            (self.coordinate_coverage(coordinate, session), None)
+        } else {
+            self.open_coordinate_observation(coordinate, session, effects)
+        };
+        if let Some(observation) = opened {
+            self.semantic_publish_coverage.insert(key.clone(), observation);
+        }
+        match coverage {
+            CoordinateCoverage::Witnessed { .. } | CoordinateCoverage::ProvenAbsent => {
+                // The question is answered, so the lane stops owning it. A
+                // later generation on this same lane asks again from
+                // scratch: coverage is a fact about one relay session at one
+                // moment, and holding the observation open to reuse a
+                // verdict earned before a reconnect would be reading a
+                // stale one.
+                self.release_coordinate_coverage(receipt, relay);
+                true
+            }
+            CoordinateCoverage::InFlight { .. } => {
+                self.semantic_publish_coverage_parked.insert(key);
+                false
+            }
+            // Nothing covers the coordinate. If this lane has not asked yet,
+            // the door just opened its one REQ and the lane waits for it.
+            //
+            // If it HAS asked and there is still nothing outstanding -- no
+            // live request, none awaiting handoff, and nothing left in
+            // admission for one to be minted from -- then the question this
+            // lane asked is not going to be answered: the request it opened
+            // was dropped or superseded by a relay session that went away.
+            // The lane sends rather than waiting forever. This is the one
+            // deliberate hole in the gate, and it is deliberate because the
+            // alternative is a write that can never leave. It is bounded:
+            // the lane always asks first, and it only proceeds after the
+            // reducer can see that its own question has no outstanding
+            // request behind it.
+            CoordinateCoverage::Uncovered => {
+                if already_asked && !self.wire_admission_needed() {
+                    self.release_coordinate_coverage(receipt, relay);
+                    return true;
+                }
+                self.semantic_publish_coverage_parked.insert(key);
+                false
+            }
+        }
+    }
+
+    /// Close one lane's coordinate question and withdraw the observation it
+    /// opened, if any.
+    fn release_coordinate_coverage(&mut self, receipt: ReceiptId, relay: &RelayUrl) {
+        let key = (receipt, relay.clone());
+        self.semantic_publish_coverage_parked.remove(&key);
+        if let Some(observation) = self.semantic_publish_coverage.remove(&key) {
+            self.retired_coverage_observations.insert(observation);
+            // The withdrawal's own effects are private to this observation
+            // and are dropped by the same drain that drops its rows.
+            let _ = self.on_unsubscribe(observation);
+        }
+    }
+
+    /// Close every coordinate question outstanding at one relay.
+    pub(super) fn release_coordinate_coverage_for_relay(&mut self, relay: &RelayUrl) {
+        let owned: Vec<_> = self
+            .semantic_publish_coverage
+            .keys()
+            .chain(self.semantic_publish_coverage_parked.iter())
+            .filter(|(_, candidate)| candidate == relay)
+            .cloned()
+            .collect();
+        for (receipt, relay) in owned {
+            self.release_coordinate_coverage(receipt, &relay);
+        }
+    }
+
+    /// Close every coordinate question one receipt still owns.
+    ///
+    /// The observation this reducer opened belongs to the lane, not to any
+    /// app subscription, so nothing else would ever withdraw it. Dropping
+    /// the id without unsubscribing leaks a live REQ for the lifetime of
+    /// the process.
+    fn release_all_coordinate_coverage(&mut self, receipt: ReceiptId) {
+        self.semantic_publish_coverage_parked
+            .retain(|(owner, _)| *owner != receipt);
+        let owned: Vec<_> = self
+            .semantic_publish_coverage
+            .keys()
+            .filter(|(owner, _)| *owner == receipt)
+            .cloned()
+            .collect();
+        for (_, relay) in owned {
+            self.release_coordinate_coverage(receipt, &relay);
+        }
+    }
+
+    /// Drop the private delivery effects of every coverage observation this
+    /// reducer owns. Everything else keeps its ordinary runtime path.
+    pub(super) fn consume_coverage_observation_effects(
+        &mut self,
+        effects: Vec<Effect>,
+    ) -> Vec<Effect> {
+        if self.semantic_publish_coverage.is_empty()
+            && self.retired_coverage_observations.is_empty()
+        {
+            return effects;
+        }
+        let owned: BTreeSet<ObservationId> = self
+            .semantic_publish_coverage
+            .values()
+            .copied()
+            .chain(self.retired_coverage_observations.iter().copied())
+            .collect();
+        let outward = effects
+            .into_iter()
+            .filter(|effect| match effect {
+                Effect::EmitRows(id, ..) | Effect::EmitObservationEvidence(id, _) => {
+                    !owned.contains(id)
+                }
+                _ => true,
+            })
+            .collect();
+        self.retired_coverage_observations.clear();
+        outward
+    }
+
+    /// Whether any semantic publish lane is waiting on a coordinate answer.
+    ///
+    /// The engine's message door consults this to decide whether the turn it
+    /// just reduced could have answered someone, rather than re-running the
+    /// whole publish scheduler on every message.
+    pub(super) fn has_parked_coordinate_coverage(&self) -> bool {
+        !self.semantic_publish_coverage_parked.is_empty()
     }
 
     /// Where one open obligation is stuck, if it is stuck at all (#756/#968).
@@ -845,6 +1021,72 @@ impl EngineCore {
         }
     }
 
+    /// Answer the per-relay coordinate question every semantic publish lane
+    /// is parked on, the way relays holding nothing for the coordinate
+    /// would: accept the ordinary REQs the gate opened on each `session` and
+    /// end their stored events empty.
+    ///
+    /// Headless fixtures need this because the gate is real. A lane that
+    /// never learns the relay's current value stays parked rather than
+    /// sending a delta over a list it cannot see, so a fixture that skips
+    /// the answer is asserting against a write that correctly never left.
+    ///
+    /// Every session is answered in one pass on purpose: one admission flush
+    /// mints the REQs for all of them at once, and answering them one
+    /// session at a time would discard the others.
+    #[cfg(test)]
+    pub(super) fn answer_coordinate_coverage_for_test(
+        &mut self,
+        sessions: &[(TransportRelayHandle, RelaySessionKey)],
+        opened: &[Effect],
+    ) -> Vec<Effect> {
+        // One flush, one second: admission advances the engine clock, and a
+        // fixture that jumps it forward would date every later
+        // materialization from wherever it landed.
+        let flushed = self.handle(EngineMsg::FlushWireAdmission(nostr::Timestamp::from(
+            self.clock.as_secs().saturating_add(1),
+        )));
+        let mut answered = Vec::new();
+        for (handle, session) in sessions {
+            let mut sub_ids = Vec::new();
+            for effect in opened.iter().chain(flushed.iter()) {
+                let Effect::Wire(delta) = effect else { continue };
+                for (candidate, ops) in &delta.ops {
+                    if candidate != session {
+                        continue;
+                    }
+                    for op in ops {
+                        let WireOp::Req(sub_id, filter) = op else {
+                            continue;
+                        };
+                        let attempt_id = delta.attempt_id(candidate, sub_id, filter);
+                        self.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+                            attempt_id,
+                            handle: *handle,
+                        });
+                        sub_ids.push(sub_id.clone());
+                    }
+                }
+            }
+            // An empty result is legitimate: a lane whose coordinate is
+            // already covered by evidence an earlier request left behind is
+            // answered without any new REQ, which is exactly the reuse
+            // #1630 exists for.
+            for sub_id in sub_ids {
+                answered.extend(self.handle(EngineMsg::RelayFrame(
+                    *handle,
+                    session.clone(),
+                    RelayFrame::from_message(nostr::RelayMessage::EndOfStoredEvents(
+                        std::borrow::Cow::Owned(nostr::SubscriptionId::new(wire_sub_id_string(
+                            &sub_id,
+                        ))),
+                    )),
+                )));
+            }
+        }
+        answered
+    }
+
     #[cfg(test)]
     pub(super) fn set_next_attempt_correlation_for_test(&mut self, next: Option<u64>) {
         self.next_attempt_correlation = next;
@@ -1121,6 +1363,11 @@ impl EngineCore {
             // `schedule_ready` that closes every `wake_relay_lanes`, so
             // nothing is stranded by leaving it alone.
             if !self.connected_relays.contains(&session) {
+                // A coordinate answer is a fact about one relay SESSION. The
+                // session this lane needs is gone, so whatever it learned
+                // about that relay's current value died with it and the lane
+                // asks again on the session that replaces it.
+                self.release_coordinate_coverage(id, &lane.key.relay);
                 effects.push(Effect::EnsureWriteRelay(session));
                 continue;
             }
@@ -1160,6 +1407,46 @@ impl EngineCore {
             }
             if in_flight >= MAX_GLOBAL_ATTEMPTS || in_flight_relays.contains(&lane.key.relay) {
                 continue;
+            }
+            // The per-relay coordinate gate (#1631). A delta generation is
+            // built from whatever value NMP holds; sending it to a relay
+            // that holds a NEWER list would overwrite that list with one
+            // derived from an older base. A complete-event write carries no
+            // such base and skips the check entirely.
+            if let Some(coordinate) = self
+                .pending
+                .get(&id)
+                .and_then(|pending| match &pending.target {
+                    PendingWriteTarget::ReplaceableOperation(target) => {
+                        Some(target.coordinate.clone())
+                    }
+                    PendingWriteTarget::Event => None,
+                })
+            {
+                // Which view of the relay to ask for. The AUTH gate above
+                // has already established one of exactly two things about
+                // this lane: the relay never required AUTH for this
+                // identity, in which case its ordinary public read session
+                // is the view it serves; or AUTH completed, in which case
+                // the authenticated view is both the correct one and
+                // actually reachable. Asking on the identity-scoped session
+                // unconditionally would park every write to an ordinary
+                // relay behind an authenticated READ session that relay
+                // will never open.
+                let read_session = if self.auth_ready_sessions.contains_key(&session) {
+                    session.clone()
+                } else {
+                    RelaySessionKey::public(lane.key.relay.clone())
+                };
+                if !self.coordinate_is_current_for_lane(
+                    id,
+                    &coordinate,
+                    &read_session,
+                    &lane.key.relay,
+                    &mut effects,
+                ) {
+                    continue;
+                }
             }
             let Some(event) = self.pending.get(&id).map(|pending| pending.frozen.clone()) else {
                 continue;
@@ -3860,6 +4147,33 @@ impl EngineCore {
                     outcome: None,
                     persistence_fault: owner_pending
                         .and_then(|pending| pending.persistence_fault.clone()),
+                });
+                continue;
+            }
+            // A cohort that closed reports the generation it delivered and
+            // then stops: no route, no lanes, no open work, and no way back
+            // in. Every other replaceable-operation shape is terminal
+            // acceptance state the ordinary arms below cannot describe
+            // either, so they stay a refused projection rather than a
+            // silently wrong one.
+            if let PublishQueueReceiptPayload::ReplaceableOperation {
+                state: nmp_store::ReplaceableOperationReceiptState::Settled { materialization },
+                ..
+            } = &receipt.payload
+            {
+                entries.push(PublishQueueEntry {
+                    receipt_id: id,
+                    event_id: materialization.event_id,
+                    pubkey: receipt.expected_pubkey,
+                    accepted_at: receipt.accepted_at.unwrap_or_else(|| Timestamp::from(0u64)),
+                    signing: SigningState::Signed {
+                        event_id: materialization.event_id,
+                    },
+                    relays: BTreeSet::new(),
+                    route_complete: true,
+                    relay_states: Vec::new(),
+                    outcome: Some(WriteOutcome::Settled),
+                    persistence_fault: None,
                 });
                 continue;
             }

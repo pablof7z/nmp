@@ -828,8 +828,16 @@ mod semantic_successor_tests {
                 slot: u32::try_from(slot).unwrap(),
                 generation: 1,
             };
+            let read_session = RelaySessionKey::public(destination.clone());
+            let read_handle = TransportRelayHandle {
+                slot: u32::try_from(slot).unwrap().saturating_add(32),
+                generation: 1,
+            };
+            core.handle(EngineMsg::RelayConnected(read_handle, read_session.clone()));
             core.handle(EngineMsg::RelayConnected(handle, session.clone()));
-            let released = core.handle(EngineMsg::AuthProbeReleased(handle, session.clone()));
+            let parked = core.handle(EngineMsg::AuthProbeReleased(handle, session.clone()));
+            let released = core
+                .answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
             let correlation = released
                 .iter()
                 .find_map(|effect| match effect {
@@ -842,11 +850,20 @@ mod semantic_successor_tests {
                 })
                 .expect("E1 starts on every destination");
             core.handle(EngineMsg::EventHandoff(correlation, HandoffResult::Written));
-            core.handle(EngineMsg::RelayFrame(
-                handle,
-                session.clone(),
-                RelayFrame::from(nostr::RelayMessage::ok(e1_signed.id, true, "saved")),
-            ));
+            // Only the first destination acknowledges. #1631 ends active
+            // semantic work the moment routing is closed and EVERY lane of
+            // the current generation is terminal, so acknowledging both here
+            // would settle the cohort and delete the very receipts this test
+            // is about to prove a successor rides. One destination still
+            // outstanding is also the exact shape of the epic's own
+            // scenario: r1 published, r2 has not.
+            if destination == &destination_a {
+                core.handle(EngineMsg::RelayFrame(
+                    handle,
+                    session.clone(),
+                    RelayFrame::from(nostr::RelayMessage::ok(e1_signed.id, true, "saved")),
+                ));
+            }
             core.handle(EngineMsg::RelayDisconnected(
                 handle,
                 session,
@@ -1254,8 +1271,16 @@ mod semantic_successor_tests {
             .collect::<Vec<_>>();
         let mut e1_correlations = BTreeMap::new();
         for ((handle, session), relay) in handles.iter().zip(&sessions).zip(&destinations) {
+            let read_session = RelaySessionKey::public(relay.clone());
+            let read_handle = TransportRelayHandle {
+                slot: handle.slot.saturating_add(32),
+                generation: 1,
+            };
+            core.handle(EngineMsg::RelayConnected(read_handle, read_session.clone()));
             core.handle(EngineMsg::RelayConnected(*handle, session.clone()));
-            let released = core.handle(EngineMsg::AuthProbeReleased(*handle, session.clone()));
+            let parked = core.handle(EngineMsg::AuthProbeReleased(*handle, session.clone()));
+            let released = core
+                .answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
             let correlation = released
                 .iter()
                 .find_map(|effect| match effect {
@@ -1350,6 +1375,25 @@ mod semantic_successor_tests {
             e2_generation,
             Ok(e2.clone()),
         ));
+        // E2 is a new generation, so every lane asks the per-relay
+        // coordinate question again before it may take an attempt (#1631).
+        let read_sessions = handles
+            .iter()
+            .zip(&destinations)
+            .map(|(handle, relay)| {
+                (
+                    TransportRelayHandle {
+                        slot: handle.slot.saturating_add(32),
+                        generation: 1,
+                    },
+                    RelaySessionKey::public(relay.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let e2_answered = core.answer_coordinate_coverage_for_test(&read_sessions, &e2_started);
+        let mut combined = e2_started;
+        combined.extend(e2_answered);
+        let e2_started = combined;
         assert_eq!(
             e2_started
                 .iter()

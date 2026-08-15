@@ -1043,6 +1043,12 @@ impl EngineCore {
                 format!("transport disconnected: {reason:?}"),
                 &mut effects,
             );
+            // A coordinate answer is a fact about one relay SESSION, and any
+            // question still outstanding on this one died with the socket.
+            // Releasing it here rather than waiting for the publish
+            // scheduler to notice is what keeps a lane from parking forever
+            // on a request that can no longer be answered.
+            self.release_coordinate_coverage_for_relay(&session.relay);
             // AUTH truth is a property of the exact connection generation
             // that earned it (#8) — it dies with the socket, unconditionally,
             // for every disconnect reason: the epoch is cancelled, protected

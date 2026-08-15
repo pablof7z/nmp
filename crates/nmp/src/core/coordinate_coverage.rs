@@ -46,14 +46,6 @@
 //! (#1668), so a relay that both truncates at the bound and emits an
 //! undecodable frame could have its truncated answer read as complete.
 
-// The decision half of this module has no production caller until #1631
-// gates the per-relay delta publish on it and deletes the source-policy
-// machinery that asks the same question with its own hidden REQ. Its
-// falsifiers below are its callers until then; the recording half
-// (returned-frame counts and witnesses) is already live on the ordinary
-// ingest path.
-#![allow(dead_code)]
-
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 

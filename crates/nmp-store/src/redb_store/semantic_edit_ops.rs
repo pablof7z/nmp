@@ -1012,7 +1012,9 @@ pub(super) fn close_cohort(
             receipt.payload = PublishQueueReceiptPayload::ReplaceableOperation {
                 coordinate: coordinate.clone(),
                 acceptance,
-                state: ReplaceableOperationReceiptState::Settled,
+                state: ReplaceableOperationReceiptState::Settled {
+                    materialization: generation.materialization,
+                },
             };
             let encoded = encode_receipt(&receipt);
             ingest

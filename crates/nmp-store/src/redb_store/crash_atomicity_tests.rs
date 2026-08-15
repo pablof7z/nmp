@@ -1273,7 +1273,7 @@ fn terminal_destinations_close_every_semantic_receipt_and_compact_the_program() 
         assert!(matches!(
             receipt.payload,
             PublishQueueReceiptPayload::ReplaceableOperation {
-                state: ReplaceableOperationReceiptState::Settled,
+                state: ReplaceableOperationReceiptState::Settled { .. },
                 ..
             }
         ));

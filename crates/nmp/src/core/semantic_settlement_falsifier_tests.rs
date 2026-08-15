@@ -1,38 +1,44 @@
-//! #1406 falsifier.
+//! #1406/#1631 settlement falsifier.
 //!
 //! Traces (posted to #1406) found the settlement/deletion path for a
-//! semantic (`ReplaceableOperation`) write is gated TWICE, not once:
+//! semantic (`ReplaceableOperation`) write was gated TWICE, not once:
 //!
-//! - the reducer, `try_close_semantic_cohort` (`core/semantic_sources.rs`):
+//! - the reducer, `try_close_semantic_cohort`:
 //!   `if !matches!(&snapshot.source_policy, SemanticSourcePolicy::Finite(round) if round.is_closed()) { return; }`
 //! - the store, `close_cohort` (`nmp-store/redb_store/semantic_edit_ops.rs`):
 //!   `let SemanticSourcePolicy::Finite(round) = &state.source_policy else { return Ok(SourceRoundOpen); }`
 //!
 //! `ReplaceableSourcePolicy::Continuing` -- the value `nmp-nip02/src/edit.rs`
-//! and `nmp/src/nip29/group_list_writes.rs` both unconditionally construct --
-//! can never satisfy either gate. `close_if_all_lanes_terminal`
-//! (`core/write.rs`) calls the reducer gate and returns immediately for every
-//! `ReplaceableOperation` write, so neither `WriteFact::Outcome(WriteOutcome::Settled)`
-//! nor any durable semantic-state deletion is reachable for a real semantic
-//! write today. This test drives the real end-to-end reducer+store path (it
-//! never constructs `Finite` itself, so a patch that fixes only one of the
-//! two gates still leaves this red), and asserts on every member receipt of
-//! a shared generation, not just the owner intent
+//! and `nmp/src/nip29/group_list_writes.rs` both unconditionally constructed
+//! -- could never satisfy either gate, so neither
+//! `WriteFact::Outcome(WriteOutcome::Settled)` nor any durable
+//! semantic-state deletion was reachable for a real semantic write.
+//! #1631 deleted the source-policy concept entirely; settlement now keys on
+//! routing closed plus every lane of the current generation terminal, under
+//! the store's exact-generation CAS.
+//!
+//! This test drives the real end-to-end reducer+store path and asserts on
+//! every member receipt of a shared generation, not just the owner intent
 //! (`generation.members.first()` is merely who the reducer's close CHECK
 //! reads lane state from; the store's success arm settles every member).
+//! Restore either gate and it goes red again, which is what makes the 8-of-8
+//! result evidence rather than a shortcut.
 //!
-//! This uses a minimal in-crate materializer (`Kind::ContactList`,
-//! `ReplaceableSourcePolicy::Continuing`) rather than the real `nmp-nip02`/
-//! `nmp-nip29` crates: both depend on `nmp`, so an `nmp -> nmp-nip02` edge is
-//! the exact cyclic dependency `crates/nmp/src/lib.rs`'s own doc comment says
-//! must not exist. The defect lives in the generic mechanism every semantic
-//! capability shares, not in either protocol module's own tag/kind logic, so
-//! a same-policy stand-in proves the identical fault line without that edge.
+//! It uses a minimal in-crate materializer (`Kind::ContactList`) rather than
+//! the real `nmp-nip02`/`nmp-nip29` crates: both depend on `nmp`, so an
+//! `nmp -> nmp-nip02` edge is the exact cyclic dependency
+//! `crates/nmp/src/lib.rs`'s own doc comment says must not exist. The defect
+//! lived in the generic mechanism every semantic capability shares, not in
+//! either protocol module's tag/kind logic.
 //!
-//! nmp:falsifier=Route both gates' fix in and this must go green: every
-//! member receipt of every generation settles regardless of whether its
-//! relay published or gave up, and no durable/in-memory semantic state
-//! survives the last terminal lane.
+//! The fixture also has to answer #1631's per-relay coordinate question
+//! before any delta reaches the wire, because a lane that never learns the
+//! relay's current value for the coordinate is correctly parked rather than
+//! sending a list built over a base that relay may already have superseded.
+//!
+//! nmp:falsifier=Every member receipt of every generation settles once its
+//! lane is terminal, regardless of whether its relay published or gave up,
+//! and no durable/in-memory semantic state survives the last terminal lane.
 
 use super::*;
 use crate::{
@@ -42,8 +48,8 @@ use crate::{
 use nostr::{Keys, Kind, RelayMessage, RelayUrl};
 
 /// Mirrors NIP-02's `FollowMaterializer` shape closely enough to exercise the
-/// same generic-mechanism path (`Kind::ContactList`, opaque operation bytes,
-/// `ReplaceableSourcePolicy::Continuing`) without depending on `nmp-nip02`.
+/// same generic-mechanism path (`Kind::ContactList`, opaque operation bytes)
+/// without depending on `nmp-nip02`.
 struct TinyContactListMaterializer;
 
 impl ReplaceableMaterializer for TinyContactListMaterializer {
@@ -131,6 +137,8 @@ fn arm_generation(
     assert!(member_count >= 1);
     let author = Keys::generate();
     let relay = RelayUrl::parse(&format!("wss://falsifier-{slot}.example.com")).unwrap();
+    let write_slot = slot.saturating_mul(2);
+    let read_slot = write_slot.saturating_add(1);
     core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
 
     let mut members = Vec::with_capacity(member_count);
@@ -171,11 +179,31 @@ fn arm_generation(
 
     let session = session_for(&relay, &author);
     let handle = TransportRelayHandle {
-        slot,
+        slot: write_slot,
         generation: 1,
     };
+    // The relay's ordinary public read session, which is what #1631's
+    // publish gate asks for the coordinate: this relay never required AUTH,
+    // so the view it will serve the EVENT is the view it serves any reader.
+    let read_session = RelaySessionKey::public(relay.clone());
+    let read_handle = TransportRelayHandle {
+        slot: read_slot,
+        generation: 1,
+    };
+    core.handle(EngineMsg::RelayConnected(
+        read_handle,
+        read_session.clone(),
+    ));
     core.handle(EngineMsg::RelayConnected(handle, session.clone()));
-    let scheduled = core.handle(EngineMsg::AuthProbeReleased(handle, session.clone()));
+    let parked = core.handle(EngineMsg::AuthProbeReleased(handle, session.clone()));
+    assert!(
+        !parked
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(..))),
+        "a delta generation must not reach the relay before the relay's own \
+         current value for the coordinate is known"
+    );
+    let scheduled = core.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
     let (correlation, event_id) = scheduled
         .iter()
         .find_map(|effect| match effect {
@@ -207,10 +235,10 @@ fn settled_receipts(effects: &[Effect]) -> BTreeSet<ReceiptId> {
 }
 
 /// Isolation case: TWO member intents share one `Published` generation. Both
-/// must settle. Neither does.
+/// must settle.
 #[test]
-fn published_generation_settles_no_member() {
-    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 4);
+fn every_member_of_a_published_generation_settles() {
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
     let registration = install_capability(&mut core, [1u8; 16]);
     let gen = arm_generation(&mut core, &registration, 0, 2);
 
@@ -237,16 +265,15 @@ fn published_generation_settles_no_member() {
     println!("PUBLISHED: settled {settled:?} of expected {expected:?}");
     assert_eq!(
         settled, expected,
-        "#1406: every member of a fully-published shared generation must settle and none does"
+        "#1406/#1631: every member of a fully-published shared generation must settle"
     );
 }
 
 /// Isolation case: TWO member intents share one `GaveUp` generation (bounded
 /// `max_publish_attempts`, not a timeout heuristic). Both must settle.
-/// Neither does.
 #[test]
-fn given_up_generation_settles_no_member() {
-    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 4)
+fn every_member_of_a_given_up_generation_settles() {
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8)
         .with_max_publish_attempts(1);
     let registration = install_capability(&mut core, [2u8; 16]);
     let gen = arm_generation(&mut core, &registration, 0, 2);
@@ -268,7 +295,7 @@ fn given_up_generation_settles_no_member() {
     println!("GAVE UP: settled {settled:?} of expected {expected:?}");
     assert_eq!(
         settled, expected,
-        "#1406: every member of a shared generation whose relay gave up must settle and none does"
+        "#1406/#1631: every member of a shared generation whose relay gave up must settle"
     );
 }
 
@@ -277,10 +304,10 @@ fn given_up_generation_settles_no_member() {
 /// of terminal outcomes -- half `Published`, half `GaveUp`
 /// (`max_publish_attempts(1)`, the real bounded retry-deadline machinery,
 /// not a happy-path-only or owner-only proof). Every member receipt of every
-/// generation must reach `WriteOutcome::Settled` once its lane is terminal.
-/// None does, for any of them, regardless of N.
+/// generation must reach `WriteOutcome::Settled` once its lane is terminal,
+/// for every one of them, regardless of N.
 #[test]
-fn n_generations_mixed_outcomes_no_member_ever_settles() {
+fn every_member_of_n_generations_settles_under_mixed_outcomes() {
     const GENERATIONS: usize = 4;
     const MEMBERS_PER_GENERATION: usize = 2;
     assert_eq!(
@@ -291,7 +318,7 @@ fn n_generations_mixed_outcomes_no_member_ever_settles() {
 
     let mut core = EngineCore::new(
         RedbStore::temporary().expect("temporary Redb store"),
-        GENERATIONS + 2,
+        GENERATIONS * 2 + 2,
     )
     .with_max_publish_attempts(1);
     let registration = install_capability(&mut core, [3u8; 16]);
@@ -342,10 +369,7 @@ fn n_generations_mixed_outcomes_no_member_ever_settles() {
         settled_total, expected_total,
         "#1406: {settled_total} of {expected_total} member receipts settled after every \
          generation's shared route went terminal (mix of Published/GaveUp, {MEMBERS_PER_GENERATION} \
-         members sharing each generation) -- every one of them should have settled and none did, \
-         because BOTH try_close_semantic_cohort's (core/semantic_sources.rs) and close_cohort's \
-         (nmp-store/redb_store/semantic_edit_ops.rs) Finite(..).is_closed() gates can never pass \
-         while ReplaceableSourcePolicy::Continuing is the only policy any capability constructs \
-         (nmp-nip02/src/edit.rs, nmp/src/nip29/group_list_writes.rs)"
+         members sharing each generation) -- every one of them must settle once routing is closed \
+         and every lane of the current generation is terminal"
     );
 }
