@@ -1070,6 +1070,9 @@ impl EngineCore {
     /// but a caller asserting one did NOT happen passed vacuously. Falsifiers
     /// mostly assert absence, so it was untrustworthy precisely where it was
     /// needed, and it produced two false greens in one hour (#1683).
+    #[must_use = "this helper drives admission and terminals; its effects are \
+                  the only record that a publish happened during them, and \
+                  dropping them is how #1683's falsifier first passed vacuously"]
     pub(super) fn answer_coordinate_coverage_for_test(
         &mut self,
         sessions: &[(TransportRelayHandle, RelaySessionKey)],
