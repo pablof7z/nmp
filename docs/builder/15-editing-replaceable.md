@@ -1,9 +1,9 @@
 # Editing replaceable state safely
 
-**Status: IMPLEMENTED CONTRACT.** NMP now has an atomic exact-base guard for
-protocol-owned whole-value edits. The first public semantic operation is
-NIP-02 following (`nmp.follow(pubkey)` / `nmp.unfollow(pubkey)`). The contract
-is source-scoped; it never claims to know the globally newest Nostr value.
+**Status: IMPLEMENTED CONTRACT.** NMP accepts protocol-owned semantic
+operations, materializes them over its best canonical source, and retains them
+for replay when newer source truth arrives. The first public operation is
+NIP-02 following (`nmp.follow(pubkey)` / `nmp.unfollow(pubkey)`).
 
 ## The destructive-write trap
 
@@ -16,83 +16,47 @@ unestablished local value. The new kind:3 wins by timestamp and silently
 deletes every contact, relay hint, petname, content string, and unrelated tag
 the app failed to copy.
 
-An app-side read/modify/write helper cannot make that safe. The acquisition
-evidence, protocol edit, canonical base check, signing, routing, and receipt
+An app-side read/modify/write helper cannot make that safe. The protocol edit,
+source selection, preservation rules, signing, routing, replay, and receipt
 must be one NMP-owned operation.
 
 ## The implemented contract
 
-### 1. Establish a source-scoped base
+### 1. Submit the operation, not a rewritten event
 
-A protocol action opens an ordinary NMP live demand for the replaceable
-coordinate. It receives the canonical local winner and the same
-`AcquisitionEvidence` every other query receives.
+NIP-02 registers its materializer once and submits a versioned operation that
+means follow or unfollow one decoded public key. The action freezes the
+selected author before custody. It does not wait for a relay-ready base, open
+an acquisition worker, or expose source ids to the app.
 
-NIP-02's closed default policy is ready only when every relay in the current
-author-outbox plan is live, has reconciled the query shape, and reports no
-shortfall. Cached rows render while acquisition continues, but cached-only,
-AUTH-denied, source-error, local-limit, and no-planned-source states do not
-authorize an edit.
-
-If every current planned source reconciles and returns no kind:3, the resource
-reports `NoContactList`. The ordinary `follow` and `unfollow` actions still
-refuse to publish. First-list creation needs a separately named operation with
-an explicit product policy; it cannot masquerade as editing an established
-list. A bare cache miss is never treated as an empty list.
-
-### 2. Compose from the exact value
+### 2. Materialize over NMP's best source
 
 The NIP-02 module owns kind:3 parsing and editing. It preserves the base
 content and every unrelated tag byte-for-byte and in the same order.
 
 - Follow appends one minimal valid `p` tag.
 - Unfollow removes every matching `p` tag and nothing else.
-- An already-satisfied relationship is a typed no-op and publishes nothing.
+- Repeated or opposing operations are folded in order into one complete value.
 
 The app never reconstructs kind:3 and the UI never owns a second optimistic
 follow Boolean.
 
-### 3. Compare-and-swap at acceptance
+When no source is known, NIP-02's capability-defined default is one complete
+empty kind:3 for the frozen author. The requested operation is applied to that
+value immediately. This grants no claim that Nostr is globally empty: a later
+relay event remains eligible to become the source.
 
-The composed unsigned replacement carries the exact local base event id as an
-acceptance precondition. The generic guard can express `None` for a future
-protocol operation whose explicitly designed first-value policy permits it,
-but NIP-02's ordinary follow action never emits that form.
-
-The Redb store checks that precondition inside the same atomic transaction
-that would allocate a journaled intent and its receipt id, then insert the
-pending canonical row. If another winner arrived first, that transaction
-changes nothing and returns:
-
-```text
-AcceptOutcome::Refused(
-    RefuseReason::ReplaceableBaseChanged { expected, actual }
-)
-```
-
-The reducer then takes that semantic refusal into one terminal receipt-only
-record. `publish()` returns its store-issued receipt id and frozen attempted
-event id, and the receipt ends with
-`WriteOutcome::Refused(RefuseReason::ReplaceableBaseChanged { expected,
-actual })`. There is no accepted intent, optimistic event, signer request,
-route, delivery work, or retry obligation. The retained expected/actual pair
-lets the app read the current winner, reapply the user's change, and submit a
-new action.
-
-The action does not silently rebuild on the new base. A caller may wait for the
-live resource to refine and explicitly invoke a new action.
-
-### 4. Use the ordinary write pipeline
+### 3. Keep one durable operation and receipt
 
 After acceptance, the edit uses the normal durable write path: frozen author,
 signer selection, canonical pending row, author-outbox routing, retry ownership,
 and per-relay receipt facts. Dropping the button or action observer does not
 cancel the durable obligation.
 
-The compare-and-swap prevents a race against NMP's canonical local winner
-before acceptance. It cannot prevent a previously unknown remote event from
-appearing later; source evidence remains scoped and the newer valid winner will
-still refine ordinary live queries.
+The retained operation, its source/program identity, and its ordinary receipt
+survive restart. A newer valid relay event is materialized with the same
+operation, producing a successor generation under the same receipt. The app
+does not refetch, rebuild, retry, or allocate a second lifecycle.
 
 ## Swift API
 
@@ -103,10 +67,6 @@ let action = nmp.follow(targetPubkey)
 
 for await status in action.status {
     switch status {
-    case .acquiring:
-        break
-    case .noChange:
-        break
     case .receipt(_, let writeStatus):
         render(writeStatus)
     case .failed(let reason):
@@ -115,9 +75,10 @@ for await status in action.status {
 }
 ```
 
-Every operational outcome is stream state, including malformed target,
-signed-out account, source failure, acquisition timeout, no-op, atomic base
-conflict, signing, routing, and relay results. `follow` itself does not throw.
+Successful action state is the ordinary receipt stream. Immediate typed
+failure covers malformed target, signed-out account, engine closure, or an
+unavailable receipt. A missing automatic-route provider is refused before
+custody.
 
 For a bindable live relationship:
 
@@ -128,24 +89,25 @@ NMPFollowButton(following: following)
 NMPUserCard(pubkey: targetPubkey, profile: profile, following: following)
 ```
 
-`NMPFollowing` copies NMP's relationship, availability, and action streams onto
-the main actor. `NMPFollowButton` renders that state and forwards a tap to the
-resource. Neither type parses tags, chooses a base, opens a second cache,
-selects relays, signs, retries, or invents success.
+`NMPFollowing` copies NMP's relationship, availability, and receipt facts onto
+the main actor. `NMPFollowButton` renders that state and forwards a tap. It is
+actionable for a known cached relationship and for the explicit no-list state;
+neither type parses tags, chooses a base, selects relays, signs, retries, or
+invents success.
 
 ## Extending the pattern
 
-`UnsignedReplaceableEdit` is the generic Rust write payload for protocol
-modules that need this exact-base acceptance contract. The raw FFI write API
-deliberately cannot mint it: native apps reach guarded replacement only through
-a semantic NMP operation whose module owns the schema and acquisition policy.
+`ReplaceableOperation` is the generic Rust write payload for protocol modules
+that need retained, replayable semantic edits. Only an engine-issued
+registration can mint it. The raw FFI write API deliberately cannot: native
+apps reach it through a typed protocol action that owns the schema and policy.
 
 Another replaceable protocol helper must still define and falsify:
 
-- its source authority and readiness policy;
+- its source authority and source requirement;
 - exact preservation rules for fields it does not own;
 - first-value policy when the source-scoped base is `None`;
-- conflict and retry UX;
+- operation ordering and successor-settlement policy;
 - access-context isolation for private or AUTH-scoped state.
 
 The existence of the generic guard does not bless arbitrary app-authored
@@ -157,14 +119,12 @@ The shipped falsifiers cover:
 
 - tag order, content, relay hint, petname, duplicate-target, and unrelated-tag
   preservation;
-- exact-base success, generic `None`-means-`None`, regular-event misuse
-  rejection, and a concurrent winner producing one typed terminal receipt-only
-  refusal with no accepted-intent journal or downstream work;
-- signed-out, no-source, and reconciled-no-contact-list failure without a
-  write;
+- capability-default first value, cached-source materialization, restart, and
+  later-source replay under one receipt;
+- signed-out and providerless refusal without a write;
 - a real loopback indexer/outbox relay through both direct Rust and the iOS FFI
   surface: initial state, follow/ACK, reactive following state, duplicate
-  follow no-op, preservation of an existing contact, unfollow/ACK, and reactive
+  follow, preservation of an existing contact, unfollow/ACK, and reactive
   not-following state;
 - Swift action-state mapping and Gallery accessibility/runtime behavior.
 

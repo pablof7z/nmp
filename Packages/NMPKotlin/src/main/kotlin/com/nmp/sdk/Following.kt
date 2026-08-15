@@ -8,8 +8,8 @@
 // own header comment says of the Rust side.
 //
 // SCOPE NOTE: Following.swift also defines `NMPFollowing`, a `@MainActor`
-// `ObservableObject` that bundles `canToggle`/`offersAnotherAttempt`/
-// `toggle()`/`performPrimaryAction()` local UI-state bookkeeping on top of
+// `ObservableObject` that bundles `canToggle`/`toggle()` local UI-state
+// bookkeeping on top of
 // the two APIs below. That class is SwiftUI-specific presentation sugar,
 // exactly the same shape as `Observable.swift`'s `NMPQuerySnapshot` and
 // `NMPDiagnosticsSnapshotObserver` -- and this codebase's established
@@ -51,10 +51,10 @@ enum class FollowRelationship {
     }
 }
 
-/** Whether NMP's NIP-02 action can safely compose a whole-list replacement
- * from the current source-scoped snapshot (`FfiFollowAvailability` mirror).
- * `Ready` is explicitly about every source in the current plan; it is not a
- * claim that Nostr is globally complete. */
+/** Source evidence for the live relationship projection
+ * (`FfiFollowAvailability` mirror). It does not gate follow/unfollow: NMP can
+ * write cached state or create the first list while relay truth is incomplete.
+ * `Ready` is not global Nostr completeness. */
 enum class FollowAvailability {
     SignedOut,
     Acquiring,
@@ -124,20 +124,6 @@ sealed class FollowActionFailure {
 
     object SignedOut : FollowActionFailure()
 
-    object AccountChanged : FollowActionFailure()
-
-    object AcquisitionTimedOut : FollowActionFailure()
-
-    object NoContactList : FollowActionFailure()
-
-    object CachedOnly : FollowActionFailure()
-
-    object SourceUnavailable : FollowActionFailure()
-
-    object BaseHasWrongKind : FollowActionFailure()
-
-    object InvalidGeneratedTag : FollowActionFailure()
-
     object EngineClosed : FollowActionFailure()
 
     object ReceiptUnavailable : FollowActionFailure()
@@ -147,29 +133,16 @@ sealed class FollowActionFailure {
             when (ffi) {
                 is FfiFollowActionFailure.InvalidTarget -> InvalidTarget(ffi.got)
                 is FfiFollowActionFailure.SignedOut -> SignedOut
-                is FfiFollowActionFailure.AccountChanged -> AccountChanged
-                is FfiFollowActionFailure.AcquisitionTimedOut -> AcquisitionTimedOut
-                is FfiFollowActionFailure.NoContactList -> NoContactList
-                is FfiFollowActionFailure.CachedOnly -> CachedOnly
-                is FfiFollowActionFailure.SourceUnavailable -> SourceUnavailable
-                is FfiFollowActionFailure.BaseHasWrongKind -> BaseHasWrongKind
-                is FfiFollowActionFailure.InvalidGeneratedTag -> InvalidGeneratedTag
                 is FfiFollowActionFailure.EngineClosed -> EngineClosed
                 is FfiFollowActionFailure.ReceiptUnavailable -> ReceiptUnavailable
             }
     }
 }
 
-/** One pushed state of a `follow`/`unfollow` action's outcome
- * (`FfiFollowActionStatus` mirror): acquisition, no-op, atomic conflict
- * (folded into the `Receipt` case's own `WriteOutcome.Refused`),
- * signing, routing, and relay receipt states all arrive through this one
- * typed stream. */
+/** A thin projection of the ordinary receipt created by a typed
+ * `follow`/`unfollow` action. Successful actions contain only canonical
+ * [WriteFact] values; immediate typed refusal is the sole non-receipt case. */
 sealed class FollowActionStatus {
-    object Acquiring : FollowActionStatus()
-
-    data class NoChange(val following: Boolean) : FollowActionStatus()
-
     data class Receipt(val id: ULong, val status: WriteFact) : FollowActionStatus()
 
     data class Failed(val failure: FollowActionFailure) : FollowActionStatus()
@@ -177,8 +150,6 @@ sealed class FollowActionStatus {
     companion object {
         fun from(ffi: FfiFollowActionStatus): FollowActionStatus =
             when (ffi) {
-                is FfiFollowActionStatus.Acquiring -> Acquiring
-                is FfiFollowActionStatus.NoChange -> NoChange(ffi.following)
                 is FfiFollowActionStatus.Receipt ->
                     Receipt(ffi.receiptId, WriteFact.from(ffi.status))
                 is FfiFollowActionStatus.Failed -> Failed(FollowActionFailure.from(ffi.failure))
@@ -186,10 +157,8 @@ sealed class FollowActionStatus {
     }
 }
 
-/** A started `follow`/`unfollow` action's identity: just its status stream
- * (mirrors `NMPFollowAction`). Unlike [Receipt], there is no separate stable
- * id here -- the receipt id, once acquisition succeeds, arrives inside
- * [FollowActionStatus.Receipt] itself. */
+/** A typed follow/unfollow action's ordinary receipt projection. The stable
+ * receipt id arrives inside [FollowActionStatus.Receipt]. */
 data class FollowAction(val status: Flow<FollowActionStatus>)
 
 /** Observe whether the current account follows [target] through the
@@ -215,12 +184,9 @@ fun observeFollowing(engine: NmpEngineInterface, target: String): Flow<Following
         }
     }
 
-/** Shared pull loop for the `follow`/`unfollow` action status stream. Unlike
- * [observeFollowing]'s conflated relationship stream, this is a FIFO fact
- * stream (`NmpFollowActionStream`): every status matters (the caller is
- * watching a one-shot action run to completion, not a live projection it may
- * fall behind on), and the engine's FIFO channel delivers each transition in
- * order. Teardown is collection-scope-tied via `handle.cancel()`. */
+/** Shared pull loop for the ordinary receipt facts projected by a typed
+ * `follow`/`unfollow` action. Teardown is collection-scope-tied via
+ * `handle.cancel()`. */
 private fun followActionFlow(open: () -> NmpFollowActionStream): Flow<FollowActionStatus> =
     flow {
         val handle = nmpRethrowing { open() }
@@ -234,19 +200,18 @@ private fun followActionFlow(open: () -> NmpFollowActionStream): Flow<FollowActi
         }
     }
 
-/** Ask NMP to follow [target] (mirrors `NMPEngine.follow`). This is the
- * complete NIP-02 action: it waits for the module's source-evidence policy,
- * preserves the exact kind:3 base, atomically guards that base, signs,
- * routes, and streams the durable receipt. The caller owns none of those
- * steps -- it only observes [FollowAction.status]. Returns immediately;
- * collection throws [NMPError.AutomaticRoutingUnavailable] before the action
- * starts when the engine has no automatic-route provider. An invalid [target] surfaces as
+/** Ask NMP to follow [target] (mirrors `NMPEngine.follow`). NMP immediately
+ * applies one durable semantic operation to the best cached contact list, or
+ * to NIP-02's complete empty list when no source exists. If a newer relay
+ * source arrives, NMP reapplies the same operation while retaining the same
+ * receipt. The caller only observes [FollowAction.status]. A missing automatic
+ * route provider is refused before custody. An invalid [target] surfaces as
  * `FollowActionStatus.Failed(FollowActionFailure.InvalidTarget)` on the
  * stream, not as a synchronous exception). */
 fun follow(engine: NmpEngineInterface, target: String): FollowAction =
     FollowAction(followActionFlow { engine.follow(target) })
 
-/** The inverse of [follow], with the same acquisition, compare-and-swap,
- * signer, routing, and receipt guarantees (mirrors `NMPEngine.unfollow`). */
+/** The inverse of [follow], with the same durable semantic operation and
+ * ordinary receipt guarantees (mirrors `NMPEngine.unfollow`). */
 fun unfollow(engine: NmpEngineInterface, target: String): FollowAction =
     FollowAction(followActionFlow { engine.unfollow(target) })

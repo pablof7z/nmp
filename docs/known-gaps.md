@@ -265,7 +265,8 @@ about current code:
   three user-card layouts, and three reaction families. NIP-02 remains the
   first component whose protocol resource/action also ships: `NMPFollowing`
   projects canonical kind:3 state, `NMPEngine.follow`/`unfollow` own
-  source-evidenced tag-preserving guarded replacement, and `NMPFollowButton`
+  a durable semantic operation that materializes over cached or capability-
+  defined empty state and replays over later relay truth, and `NMPFollowButton`
   only renders and forwards the tap. Pure documents plus literal or injected
   component factories make deterministic conformance states possible without
   a shared fake session. The native iOS Gallery consumes the exact components,
@@ -274,9 +275,9 @@ about current code:
   literal/no-fetch policy, cycle/depth, unknown-kind, Dynamic Type, RTL,
   reduced motion, dark appearance, long Markdown, and 72-row rapid visibility
   churn while reporting engine wire-subscription evidence rather than a UI
-  claim counter. A real loopback parity proof drives follow, duplicate
-  no-op, unrelated-contact preservation, and unfollow through direct Rust and
-  the iOS FFI API. Controlled relay identity/list primitives now ship in
+  claim counter. A real loopback parity proof drives first-list creation,
+  follow, duplicate operation, unrelated-contact preservation, and unfollow
+  through direct Rust and the iOS FFI API. Controlled relay identity/list primitives now ship in
   SwiftUI and a narrow optional desktop-JVM Compose subproject (#198). Both
   render caller-supplied one-shot NIP-11 state and query-scoped `SourceStatus`;
   they own no engine, HTTP, polling, cache, timers, or image loading. The
@@ -289,10 +290,7 @@ about current code:
   Still unbuilt at this checkpoint: broad Compose UI parity and a Compose
   Gallery, broader registry/template breadth, NIP-25 live reaction resources/
   write intents (#155), and broader product/photo/highlight/media component
-  families. The ordinary follow action also deliberately refuses
-  first-contact-list creation; that requires a separately named policy/action
-  before it can ship. See `docs/design/ui-components-strategy.md` and issue
-  #75.
+  families. See `docs/design/ui-components-strategy.md` and issue #75.
 - **Boundedness is only partial.** Swift newest-frame buffering, indexed queries,
   router caps, and #474/#485's expandable observation window are bounded, but
   graph, derived-set, wire, relay, ordinary-result, receipt, ingestion, and

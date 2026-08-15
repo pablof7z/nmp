@@ -1991,12 +1991,10 @@ name = "nmp-nip02"
 version = "0.1.0"
 dependencies = [
  "nmp",
- "nmp-event-edit",
  "nmp-grammar",
  "nmp-store",
  "nostr 0.44.4",
  "tempfile",
- "tokio",
 ]
 
 [[package]]

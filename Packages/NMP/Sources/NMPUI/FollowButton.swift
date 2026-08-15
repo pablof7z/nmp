@@ -17,20 +17,17 @@ public struct NMPFollowButtonBody: View {
 
     public let snapshot: NMPFollowingSnapshot
     public let isActing: Bool
-    public let offersAnotherAttempt: Bool
     public let variant: NMPFollowButtonVariant
     public let action: () -> Void
 
     public init(
         snapshot: NMPFollowingSnapshot,
         isActing: Bool = false,
-        offersAnotherAttempt: Bool = false,
         variant: NMPFollowButtonVariant = .compact,
         action: @escaping () -> Void
     ) {
         self.snapshot = snapshot
         self.isActing = isActing
-        self.offersAnotherAttempt = offersAnotherAttempt
         self.variant = variant
         self.action = action
     }
@@ -98,7 +95,7 @@ public struct NMPFollowButtonBody: View {
 
     @ViewBuilder
     private var statusGlyph: some View {
-        if isActing || snapshot.availability == .acquiring {
+        if isActing || snapshot.relationship == .unknown {
             ProgressView()
                 .controlSize(.small)
                 .tint(foreground)
@@ -108,7 +105,6 @@ public struct NMPFollowButtonBody: View {
     }
 
     private var title: String {
-        if offersAnotherAttempt { return "Retry" }
         switch snapshot.relationship {
         case .following: return "Following"
         case .notFollowing, .unknown: return "Follow"
@@ -116,10 +112,9 @@ public struct NMPFollowButtonBody: View {
     }
 
     private var symbol: String {
-        if offersAnotherAttempt { return "arrow.clockwise" }
         switch snapshot.availability {
         case .cachedOnly, .sourceUnavailable: return "wifi.exclamationmark"
-        case .noContactList: return "person.crop.circle.badge.exclamationmark"
+        case .noContactList: return "plus"
         case .signedOut: return "person.crop.circle.badge.exclamationmark"
         case .acquiring: return "plus"
         case .ready:
@@ -131,19 +126,16 @@ public struct NMPFollowButtonBody: View {
     }
 
     private var canAct: Bool {
-        snapshot.availability == .ready
+        snapshot.currentPubkey != nil
             && snapshot.relationship != .unknown
             && !isActing
     }
 
     private var isUnavailable: Bool {
-        snapshot.availability != .ready
+        snapshot.currentPubkey == nil || snapshot.relationship == .unknown
     }
 
     private var foreground: Color {
-        if offersAnotherAttempt && !isUnavailable {
-            return .white
-        }
         if snapshot.relationship == .following || isUnavailable {
             return theme.foreground
         }
@@ -154,26 +146,18 @@ public struct NMPFollowButtonBody: View {
         if isUnavailable {
             return theme.elevatedSurface
         }
-        if offersAnotherAttempt {
-            return theme.accent
-        }
         return snapshot.relationship == .following ? theme.elevatedSurface : theme.accent
     }
 
     private var border: Color {
-        if offersAnotherAttempt && !isUnavailable { return .clear }
         return snapshot.relationship == .following || isUnavailable ? theme.border : .clear
     }
 
     private var accessibilityLabel: String {
-        if offersAnotherAttempt {
-            return snapshot.relationship == .following ? "Retry unfollow" : "Retry follow"
-        }
         return snapshot.relationship == .following ? "Unfollow" : "Follow"
     }
 
     private var accessibilityValue: String {
-        if offersAnotherAttempt && canAct { return "Ready to retry" }
         switch snapshot.availability {
         case .signedOut: return "Signed out"
         case .acquiring: return "Loading current follow state"
@@ -185,16 +169,16 @@ public struct NMPFollowButtonBody: View {
     }
 
     private var accessibilityHint: String {
-        if offersAnotherAttempt && canAct {
-            return "Retries the NMP follow action from the latest canonical state"
-        }
         switch snapshot.availability {
         case .signedOut: return "Sign in to change this relationship"
-        case .acquiring: return "Wait for NMP to resolve the current contact list"
+        case .acquiring:
+            return canAct
+                ? "Changes the cached relationship while NMP continues acquiring relay truth"
+                : "Wait for NMP to resolve the current relationship"
         case .ready: return snapshot.relationship == .following ? "Stops following this user" : "Follows this user"
-        case .noContactList: return "Create a contact list before using the ordinary follow action"
-        case .cachedOnly: return "Reconnect before changing the contact list"
-        case .sourceUnavailable: return "NMP has no safe source plan for this edit"
+        case .noContactList: return "Creates the first contact list and follows this user"
+        case .cachedOnly: return "Changes the cached relationship now and syncs it later"
+        case .sourceUnavailable: return "Changes the known relationship and retains it for later relay truth"
         }
     }
 }
@@ -218,7 +202,6 @@ public struct NMPFollowButton: View {
         NMPFollowButtonBody(
             snapshot: following.snapshot,
             isActing: following.isActing,
-            offersAnotherAttempt: following.offersAnotherAttempt,
             variant: variant,
             action: following.performPrimaryAction
         )

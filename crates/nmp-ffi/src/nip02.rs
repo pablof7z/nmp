@@ -3,13 +3,13 @@
 //! no contact-list parsing, replacement composition, readiness policy, or
 //! optimistic following boolean lives at the FFI boundary.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::convert::{write_status_to_ffi, FfiError, WriteStatusRef};
 use crate::types::FfiWriteFact;
 use nmp_nip02::{
-    AsyncFollowObservation, ComposeFollowError, FollowActionFailure, FollowActionStatus,
-    FollowAvailability, FollowRelationship, FollowSnapshot,
+    AsyncFollowObservation, FollowActionFailure, FollowAvailability, FollowRelationship,
+    FollowSnapshot,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -42,25 +42,12 @@ pub struct FfiFollowSnapshot {
 pub enum FfiFollowActionFailure {
     InvalidTarget { got: String },
     SignedOut,
-    AccountChanged,
-    AcquisitionTimedOut,
-    NoContactList,
-    CachedOnly,
-    SourceUnavailable,
-    BaseHasWrongKind,
-    InvalidGeneratedTag,
     EngineClosed,
     ReceiptUnavailable,
-    // #704: `ThreadUnavailable` was removed -- the follow action runs as an
-    // async task and has no worker/thread admission refusal to report.
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiFollowActionStatus {
-    Acquiring,
-    NoChange {
-        following: bool,
-    },
     Receipt {
         receipt_id: u64,
         status: FfiWriteFact,
@@ -109,21 +96,42 @@ impl Drop for NmpFollowStream {
     }
 }
 
-/// Pull-based follow/unfollow action stream (#680/#704). The async action task
-/// pushes each [`FollowActionStatus`] into a waker-aware FIFO without holding a
-/// dedicated worker thread; this handle awaits them in order. `None` is the
-/// terminal signal. `Drop`/`cancel` close the stream.
+/// Pull-based follow/unfollow receipt projection. It owns no action worker,
+/// retry policy, cancellation state, or durable lifecycle: successful actions
+/// read the ordinary receipt FIFO directly; an immediate typed refusal is one
+/// preloaded terminal fact. `None` is the terminal signal.
 #[derive(uniffi::Object)]
 pub struct NmpFollowActionStream {
-    inner: nmp::AsyncFifoReceiver<FollowActionStatus>,
-    last_receipt_id: Mutex<Option<u64>>,
+    delivery: FollowActionDelivery,
+}
+
+enum FollowActionDelivery {
+    Receipt {
+        receipt_id: u64,
+        statuses: nmp::AsyncFifoReceiver<nmp::WriteFact>,
+    },
+    Immediate {
+        statuses: nmp::AsyncFifoReceiver<FfiFollowActionStatus>,
+    },
 }
 
 impl NmpFollowActionStream {
-    pub(crate) fn new(inner: nmp::AsyncFifoReceiver<FollowActionStatus>) -> Arc<Self> {
+    pub(crate) fn from_receipt(receipt: nmp::ReceiptStream) -> Arc<Self> {
         Arc::new(Self {
-            inner,
-            last_receipt_id: Mutex::new(None),
+            delivery: FollowActionDelivery::Receipt {
+                receipt_id: receipt.id.0,
+                statuses: receipt.statuses.into_async(),
+            },
+        })
+    }
+
+    pub(crate) fn one_shot_failure(failure: FfiFollowActionFailure) -> Arc<Self> {
+        let (sender, statuses) = nmp::fifo_channel();
+        sender.send(FfiFollowActionStatus::Failed { failure });
+        Arc::new(Self {
+            delivery: FollowActionDelivery::Immediate {
+                statuses: statuses.into_async(),
+            },
         })
     }
 }
@@ -134,29 +142,42 @@ impl NmpFollowActionStream {
     /// the action's lifecycle. A second concurrent `next()` is
     /// [`FfiError::ConcurrentNext`].
     pub async fn next(&self) -> Result<Option<FfiFollowActionStatus>, FfiError> {
-        match self.inner.next().await {
-            Ok(Some(status)) => {
-                if let FollowActionStatus::Receipt { receipt_id, .. } = &status {
-                    *self.last_receipt_id.lock().unwrap() = Some(*receipt_id);
+        match &self.delivery {
+            FollowActionDelivery::Receipt {
+                receipt_id,
+                statuses,
+            } => match statuses.next().await {
+                Ok(Some(status)) => Ok(Some(FfiFollowActionStatus::Receipt {
+                    receipt_id: *receipt_id,
+                    status: write_status_to_ffi(WriteStatusRef(&status)),
+                })),
+                Ok(None) => Ok(None),
+                Err(nmp::FifoNextError::ConcurrentNext) => Err(FfiError::ConcurrentNext),
+                Err(nmp::FifoNextError::Lagged) => Err(FfiError::FactStreamLagged {
+                    receipt_id: Some(*receipt_id),
+                }),
+            },
+            FollowActionDelivery::Immediate { statuses } => match statuses.next().await {
+                Ok(status) => Ok(status),
+                Err(nmp::FifoNextError::ConcurrentNext) => Err(FfiError::ConcurrentNext),
+                Err(nmp::FifoNextError::Lagged) => {
+                    Err(FfiError::FactStreamLagged { receipt_id: None })
                 }
-                Ok(Some(action_status_to_ffi(status)))
-            }
-            Ok(None) => Ok(None),
-            Err(nmp::FifoNextError::ConcurrentNext) => Err(FfiError::ConcurrentNext),
-            Err(nmp::FifoNextError::Lagged) => Err(FfiError::FactStreamLagged {
-                receipt_id: *self.last_receipt_id.lock().unwrap(),
-            }),
+            },
         }
     }
 
     pub fn cancel(&self) {
-        self.inner.close();
+        match &self.delivery {
+            FollowActionDelivery::Receipt { statuses, .. } => statuses.close(),
+            FollowActionDelivery::Immediate { statuses } => statuses.close(),
+        }
     }
 }
 
 impl Drop for NmpFollowActionStream {
     fn drop(&mut self) {
-        self.inner.close();
+        self.cancel();
     }
 }
 
@@ -181,40 +202,11 @@ pub(crate) fn snapshot_to_ffi(snapshot: FollowSnapshot) -> FfiFollowSnapshot {
     }
 }
 
-fn failure_to_ffi(failure: FollowActionFailure) -> FfiFollowActionFailure {
+pub(crate) fn failure_to_ffi(failure: FollowActionFailure) -> FfiFollowActionFailure {
     match failure {
-        FollowActionFailure::InvalidTarget { got } => FfiFollowActionFailure::InvalidTarget { got },
         FollowActionFailure::SignedOut => FfiFollowActionFailure::SignedOut,
-        FollowActionFailure::AccountChanged => FfiFollowActionFailure::AccountChanged,
-        FollowActionFailure::AcquisitionTimedOut => FfiFollowActionFailure::AcquisitionTimedOut,
-        FollowActionFailure::NoContactList => FfiFollowActionFailure::NoContactList,
-        FollowActionFailure::CachedOnly => FfiFollowActionFailure::CachedOnly,
-        FollowActionFailure::SourceUnavailable => FfiFollowActionFailure::SourceUnavailable,
-        FollowActionFailure::Compose(error) => match error {
-            ComposeFollowError::BaseHasWrongKind => FfiFollowActionFailure::BaseHasWrongKind,
-            ComposeFollowError::InvalidGeneratedTag => FfiFollowActionFailure::InvalidGeneratedTag,
-            // The existing FFI action uses `compose_follow_change`, which
-            // cannot construct the registration-bound Rust-only refusal.
-            // Keep this internal projection total without inventing an
-            // unreachable native lifecycle state.
-            ComposeFollowError::InvalidOperation => FfiFollowActionFailure::InvalidGeneratedTag,
-        },
         FollowActionFailure::EngineClosed => FfiFollowActionFailure::EngineClosed,
         FollowActionFailure::ReceiptUnavailable => FfiFollowActionFailure::ReceiptUnavailable,
-    }
-}
-
-pub(crate) fn action_status_to_ffi(status: FollowActionStatus) -> FfiFollowActionStatus {
-    match status {
-        FollowActionStatus::Acquiring => FfiFollowActionStatus::Acquiring,
-        FollowActionStatus::NoChange { following } => FfiFollowActionStatus::NoChange { following },
-        FollowActionStatus::Receipt { receipt_id, status } => FfiFollowActionStatus::Receipt {
-            receipt_id,
-            status: write_status_to_ffi(WriteStatusRef(&status)),
-        },
-        FollowActionStatus::Failed(failure) => FfiFollowActionStatus::Failed {
-            failure: failure_to_ffi(failure),
-        },
     }
 }
 

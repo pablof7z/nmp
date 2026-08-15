@@ -1,23 +1,15 @@
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use nmp::{
-    fifo_channel, AcquisitionEvidence, AsyncFifoReceiver, Engine, EventId, FifoReceiver,
-    FifoRecvError, FifoRecvTimeoutError, FifoSender, ObservationCancel, PublicKey, Row, RowDelta,
-    ShortfallFact, SourceStatus, WriteFact,
+    AcquisitionEvidence, Engine, EventId, ObservationCancel, PublicKey, ReceiptStream, Row,
+    RowDelta, ShortfallFact, SourceStatus,
 };
 
 use crate::demand::current_account_demand;
-use crate::edit::{
-    compose_follow_change, follows, ComposeFollowError, ComposeFollowResult, FollowChange,
-};
-
-const ACQUISITION_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_ACQUISITION_SNAPSHOTS: usize = 64;
+use crate::edit::{follows, FollowChange, FollowWrites};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FollowRelationship {
@@ -26,10 +18,10 @@ pub enum FollowRelationship {
     Following,
 }
 
-/// Whether a destructive whole-list edit is currently permitted by NMP's
-/// closed default policy. `Ready` means every source in the current query
-/// plan has source-scoped reconciliation evidence and is currently live;
-/// it deliberately does not claim global Nostr completeness.
+/// Source evidence for the live relationship projection. This does not gate
+/// the semantic action: cached state and first-value creation remain writable
+/// while relay truth is incomplete. `Ready` deliberately does not claim
+/// global Nostr completeness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FollowAvailability {
     SignedOut,
@@ -51,27 +43,9 @@ pub struct FollowSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FollowActionFailure {
-    /// The requested target public key did not parse (hex). No worker started.
-    InvalidTarget {
-        got: String,
-    },
     SignedOut,
-    AccountChanged,
-    AcquisitionTimedOut,
-    NoContactList,
-    CachedOnly,
-    SourceUnavailable,
-    Compose(ComposeFollowError),
     EngineClosed,
     ReceiptUnavailable,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FollowActionStatus {
-    Acquiring,
-    NoChange { following: bool },
-    Receipt { receipt_id: u64, status: WriteFact },
-    Failed(FollowActionFailure),
 }
 
 #[derive(Default)]
@@ -390,326 +364,110 @@ pub fn observe_following_async(
     })
 }
 
-pub struct FollowAction {
-    statuses: FifoReceiver<FollowActionStatus>,
-}
-
-type FollowActionFuture = Box<
-    dyn FnOnce(FifoSender<FollowActionStatus>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
->;
-
-/// A prepared follow action whose worker has not started yet. Native bridges
-/// use this split to establish their observer before any acquisition or write
-/// can run unseen.
+/// Apply one typed NIP-02 change through the ordinary durable semantic-write
+/// path and return its ordinary receipt.
 ///
-/// #704: the worker is an async task on the engine runtime, not a reserved
-/// blocking thread. The status FIFO's single [`FifoSender`] lives here until
-/// [`Self::start`] runs: if the engine is already closed (no runtime handle)
-/// the runner keeps the sender and emits the terminal failure through it; on
-/// success the sender is handed to the async worker.
-pub struct FollowActionRunner {
-    task: FollowActionFuture,
-    sender: FifoSender<FollowActionStatus>,
-    runtime: Result<tokio::runtime::Handle, nmp::EngineError>,
-}
-
-impl FollowActionRunner {
-    pub fn start(self) {
-        let Self {
-            task,
-            sender,
-            runtime,
-        } = self;
-        match runtime {
-            Ok(runtime) => {
-                runtime.spawn(task(sender));
-            }
-            Err(error) => {
-                sender.send(FollowActionStatus::Failed(engine_failure(error)));
-            }
-        }
-    }
-}
-
-impl FollowAction {
-    pub fn recv(&self) -> Result<FollowActionStatus, FifoRecvError> {
-        self.statuses.recv()
-    }
-
-    pub fn recv_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Result<FollowActionStatus, FifoRecvTimeoutError> {
-        self.statuses.recv_timeout(timeout)
-    }
-
-    /// The pull-based async surface over the same status FIFO (#680). The FFI
-    /// follow-action stream awaits `next()` on this; direct-Rust drains keep
-    /// using [`Self::recv`]/[`Self::recv_timeout`].
-    #[must_use]
-    pub fn into_async(self) -> AsyncFifoReceiver<FollowActionStatus> {
-        self.statuses.into_async()
-    }
-
-    /// A one-shot action that never starts a worker: it carries exactly the one
-    /// terminal `Failed(failure)` fact, then ends. Used for a pre-worker
-    /// rejection (e.g. an unparseable target) that must still be observed as a
-    /// terminal follow-action status rather than a separate error channel.
-    #[must_use]
-    pub fn one_shot_failure(failure: FollowActionFailure) -> Self {
-        let (sender, statuses) = fifo_channel();
-        sender.send(FollowActionStatus::Failed(failure));
-        // `sender` drops here → the FIFO ends after the single fact drains.
-        Self { statuses }
-    }
-}
-
-/// Start NMP's simple NIP-02 action. The acquisition/readiness policy,
-/// exact-base edit, atomic conflict guard, signer, durable outbox routing,
-/// and receipt stream all remain in Rust. A UI merely observes these states
-/// and asks for `Follow` or `Unfollow`. Initial acquisition is bounded by
-/// both an idle timeout and a closed snapshot budget, so relay churn cannot
-/// keep a pre-write action alive forever.
-pub fn set_following(engine: Arc<Engine>, target: PublicKey, change: FollowChange) -> FollowAction {
-    let (action, runner) = prepare_set_following(engine, target, change);
-    runner.start();
-    action
-}
-
-/// Prepare NMP's simple NIP-02 action without starting its worker. The caller
-/// must start the returned runner after its observation path is established.
-pub fn prepare_set_following(
-    engine: Arc<Engine>,
+/// This call does not acquire a relay-ready base or start a second action
+/// worker. It freezes the active account before capability execution, then
+/// uses an explicit identity so a later account switch cannot retarget the
+/// accepted operation. NMP selects the best canonical source it already has;
+/// when none exists, NIP-02 supplies its complete empty kind-3 value.
+pub fn set_following(
+    engine: &Engine,
+    writes: &FollowWrites,
     target: PublicKey,
     change: FollowChange,
-) -> (FollowAction, FollowActionRunner) {
-    prepare_set_following_with_timeout(engine, target, change, ACQUISITION_TIMEOUT)
-}
-
-#[cfg(test)]
-fn set_following_with_timeout(
-    engine: Arc<Engine>,
-    target: PublicKey,
-    change: FollowChange,
-    timeout: Duration,
-) -> FollowAction {
-    let (action, runner) = prepare_set_following_with_timeout(engine, target, change, timeout);
-    runner.start();
-    action
-}
-
-fn prepare_set_following_with_timeout(
-    engine: Arc<Engine>,
-    target: PublicKey,
-    change: FollowChange,
-    timeout: Duration,
-) -> (FollowAction, FollowActionRunner) {
-    let (sender, statuses) = fifo_channel();
-    let runtime = engine.adapter_runtime();
-    // #704: the follow-action worker is an async task. Its acquisition wait is
-    // `AsyncSubscription::next()` under a per-snapshot `tokio::time::timeout`,
-    // and its receipt streaming awaits the async status FIFO — no OS thread is
-    // held while the engine round-trips or the write settles.
-    let task: FollowActionFuture = Box::new(move |tx: FifoSender<FollowActionStatus>| {
-        Box::pin(async move {
-            tx.send(FollowActionStatus::Acquiring);
-            let author = match engine.session() {
-                Ok(session) if session.current_pubkey.is_none() => {
-                    tx.send(FollowActionStatus::Failed(FollowActionFailure::SignedOut));
-                    return;
-                }
-                Ok(session) => session.current_pubkey.expect("checked above"),
-                Err(error) => {
-                    tx.send(FollowActionStatus::Failed(engine_failure(error)));
-                    return;
-                }
-            };
-
-            let subscription = match engine
-                .observe_async(nmp::LiveQuery::single(current_account_demand()), None)
-            {
-                Ok(subscription) => subscription,
-                Err(error) => {
-                    tx.send(FollowActionStatus::Failed(engine_failure(error)));
-                    return;
-                }
-            };
-            let mut accumulator = Accumulator::default();
-            let mut last_availability = FollowAvailability::Acquiring;
-            let mut remaining_snapshots = MAX_ACQUISITION_SNAPSHOTS;
-
-            let base = loop {
-                if remaining_snapshots == 0 {
-                    tx.send(FollowActionStatus::Failed(
-                        FollowActionFailure::AcquisitionTimedOut,
-                    ));
-                    return;
-                }
-                remaining_snapshots -= 1;
-                match tokio::time::timeout(timeout, subscription.next()).await {
-                    Ok(Ok(Some(frame))) => {
-                        accumulator.apply(frame.deltas);
-                        let current = match engine.session() {
-                            Ok(session) => session.current_pubkey,
-                            Err(error) => {
-                                tx.send(FollowActionStatus::Failed(engine_failure(error)));
-                                return;
-                            }
-                        };
-                        if current != Some(author) {
-                            tx.send(FollowActionStatus::Failed(
-                                FollowActionFailure::AccountChanged,
-                            ));
-                            return;
-                        }
-                        last_availability = availability(current, &frame.evidence);
-                        if last_availability == FollowAvailability::SourceUnavailable {
-                            tx.send(FollowActionStatus::Failed(
-                                FollowActionFailure::SourceUnavailable,
-                            ));
-                            return;
-                        }
-                        if last_availability == FollowAvailability::Ready {
-                            let Some(base) = accumulator.base_for(author).cloned() else {
-                                tx.send(FollowActionStatus::Failed(
-                                    FollowActionFailure::NoContactList,
-                                ));
-                                return;
-                            };
-                            break base;
-                        }
-                    }
-                    // Per-snapshot deadline elapsed.
-                    Err(_elapsed) => {
-                        let failure = match last_availability {
-                            FollowAvailability::CachedOnly => FollowActionFailure::CachedOnly,
-                            FollowAvailability::SourceUnavailable => {
-                                FollowActionFailure::SourceUnavailable
-                            }
-                            _ => FollowActionFailure::AcquisitionTimedOut,
-                        };
-                        tx.send(FollowActionStatus::Failed(failure));
-                        return;
-                    }
-                    // Demand withdrawn / engine closed (`Ok(None)`), or an
-                    // overlapping `next()` (`Err`, unreachable for this single
-                    // sequential consumer).
-                    Ok(Ok(None)) | Ok(Err(_)) => {
-                        tx.send(FollowActionStatus::Failed(
-                            FollowActionFailure::EngineClosed,
-                        ));
-                        return;
-                    }
-                }
-            };
-
-            let composed = match compose_follow_change(&base, target, change) {
-                Ok(value) => value,
-                Err(error) => {
-                    tx.send(FollowActionStatus::Failed(FollowActionFailure::Compose(
-                        error,
-                    )));
-                    return;
-                }
-            };
-            let intent = match composed {
-                ComposeFollowResult::NoChange => {
-                    tx.send(FollowActionStatus::NoChange {
-                        following: change == FollowChange::Follow,
-                    });
-                    return;
-                }
-                ComposeFollowResult::Publish(intent) => *intent,
-            };
-
-            let receipt = match engine.publish(intent) {
-                Ok(receipt) => receipt,
-                Err(error) => {
-                    let failure = match error {
-                        nmp::EngineError::EngineClosed => FollowActionFailure::EngineClosed,
-                        _ => FollowActionFailure::ReceiptUnavailable,
-                    };
-                    tx.send(FollowActionStatus::Failed(failure));
-                    return;
-                }
-            };
-            let receipt_id = receipt.id.0;
-            let statuses = receipt.statuses.into_async();
-            while let Ok(Some(status)) = statuses.next().await {
-                tx.send(FollowActionStatus::Receipt { receipt_id, status });
-            }
-        })
-    });
-    (
-        FollowAction { statuses },
-        FollowActionRunner {
-            task,
-            sender,
-            runtime,
-        },
-    )
-}
-
-fn engine_failure(_error: nmp::EngineError) -> FollowActionFailure {
-    // #704: the only operational engine failure a follow-action can hit is a
-    // closed engine (the reserve/`ThreadUnavailable` admission path is gone).
-    FollowActionFailure::EngineClosed
+) -> Result<ReceiptStream, FollowActionFailure> {
+    let author = match engine.session() {
+        Ok(session) => session
+            .current_pubkey
+            .ok_or(FollowActionFailure::SignedOut)?,
+        Err(_) => return Err(FollowActionFailure::EngineClosed),
+    };
+    let intent = writes
+        .intent(author, target, change)
+        .map_err(|_| FollowActionFailure::ReceiptUnavailable)?;
+    engine.publish(intent).map_err(|error| match error {
+        nmp::EngineError::EngineClosed => FollowActionFailure::EngineClosed,
+        _ => FollowActionFailure::ReceiptUnavailable,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp::{AccessContext, EngineConfig, RelayUrl, SourceEvidence};
+    use nmp::{AccessContext, EngineConfig, RelayUrl, SigningState, SourceEvidence, WriteFact};
     use nostr::Keys;
-
-    // #704: three tests were deleted here —
-    // `injected_follow_observer_refusal_is_typed_and_cancels_the_subscription`,
-    // `injected_follow_action_worker_refusal_is_the_only_terminal_status`, and
-    // `acquisition_thread_refusal_is_not_collapsed_to_engine_closed`. All three
-    // asserted the removed executor admission-refusal surface: the
-    // `observe_following_with_spawn` / `FollowActionRunner::start_with` spawn
-    // seams and the `FollowActionFailure::ThreadUnavailable` variant no longer
-    // exist — the observer/action workers are async tasks on the engine runtime
-    // that reserve nothing and cannot be refused.
 
     #[test]
     fn signed_out_action_fails_typed_without_a_write() {
-        let engine = Arc::new(Engine::new(EngineConfig::default()).unwrap());
-        let action = set_following_with_timeout(
-            engine,
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let writes = crate::register_follow_writes(&engine).unwrap();
+        let failure = set_following(
+            &engine,
+            &writes,
             Keys::generate().public_key(),
             FollowChange::Follow,
-            Duration::from_millis(10),
-        );
-        assert_eq!(action.recv().unwrap(), FollowActionStatus::Acquiring);
-        assert_eq!(
-            action.recv().unwrap(),
-            FollowActionStatus::Failed(FollowActionFailure::SignedOut)
-        );
+        )
+        .err();
+        assert_eq!(failure, Some(FollowActionFailure::SignedOut));
+        assert!(engine.publish_queue(None, 10).unwrap().is_empty());
+        engine.shutdown();
     }
 
     #[test]
-    fn logged_in_without_sources_times_out_instead_of_inventing_empty_contacts() {
-        let engine = Arc::new(Engine::new(EngineConfig::default()).unwrap());
+    fn logged_in_without_sources_accepts_the_capability_default() {
+        let engine = Engine::new(EngineConfig::default()).unwrap();
         let author = Keys::generate();
         engine
             .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
             .unwrap();
-        let action = set_following_with_timeout(
-            engine,
+        let writes = crate::register_follow_writes(&engine).unwrap();
+        let receipt = set_following(
+            &engine,
+            &writes,
             Keys::generate().public_key(),
             FollowChange::Follow,
-            Duration::from_millis(20),
-        );
-        assert_eq!(action.recv().unwrap(), FollowActionStatus::Acquiring);
+        )
+        .expect("the NIP-02 empty contact list enters ordinary custody");
+        assert_eq!(engine.publish_queue(None, 10).unwrap().len(), 1);
         assert_eq!(
-            action.recv().unwrap(),
-            FollowActionStatus::Failed(FollowActionFailure::SourceUnavailable)
+            engine.publish_queue(None, 10).unwrap()[0].receipt_id,
+            receipt.id
         );
+        engine.shutdown();
     }
 
     #[test]
-    fn reconciled_absence_is_visible_but_not_an_editable_empty_list() {
+    fn account_switch_after_action_cannot_retarget_the_frozen_author() {
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let author = Keys::generate().public_key();
+        let later_account = Keys::generate().public_key();
+        engine.add_public_key_account(author, true).unwrap();
+        engine.add_public_key_account(later_account, false).unwrap();
+        let writes = crate::register_follow_writes(&engine).unwrap();
+
+        let receipt = set_following(
+            &engine,
+            &writes,
+            Keys::generate().public_key(),
+            FollowChange::Follow,
+        )
+        .expect("the action enters custody under the selected author");
+        engine.make_current_account(later_account).unwrap();
+
+        assert_eq!(
+            receipt.statuses.recv_timeout(Duration::from_secs(5)),
+            Ok(WriteFact::Signing(SigningState::AwaitingSigner {
+                pubkey: author,
+            })),
+            "the receipt must remain bound to the account selected before custody"
+        );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn reconciled_absence_remains_observation_truth_not_source_provenance() {
         let author = Keys::generate().public_key();
         let target = Keys::generate().public_key();
         let evidence = AcquisitionEvidence {
