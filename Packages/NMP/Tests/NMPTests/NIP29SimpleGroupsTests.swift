@@ -3,6 +3,8 @@ import XCTest
 @testable import NMP
 
 final class NIP29SimpleGroupsTests: XCTestCase {
+    private let secretKey = String(repeating: "0", count: 63) + "1"
+
     private func fabricatedRow(kind: UInt16) -> Row {
         Row(
             id: "caller-chosen-id", pubkey: "caller-chosen-pubkey",
@@ -37,6 +39,42 @@ final class NIP29SimpleGroupsTests: XCTestCase {
     func testCurrentAccountDemandTargetsKind10009() {
         let demand = NMP.currentAccountGroupListDemand()
         XCTAssertEqual(demand.selection.kinds, [10009])
+    }
+
+    func testTypedGroupListActionReturnsTheOrdinaryReceipt() throws {
+        let engine = try NMPEngine(
+            config: NMPConfig(
+                outboxRouting: OutboxRoutingConfig(indexers: ["wss://indexer.example"])
+            )
+        )
+        defer { engine.shutdown() }
+        _ = try engine.session.add(
+            privateKey: testPrivateKey(secretKey),
+            makeCurrent: true
+        )
+
+        let receipt = try engine.addGroupToList(
+            groupId: "room",
+            hostRelay: "wss://host.example",
+            name: "Room"
+        )
+        let queue = try engine.publishQueue(limit: .max)
+        XCTAssertEqual(queue.count, 1)
+        XCTAssertEqual(queue[0].receiptID, receipt.id)
+    }
+
+    func testProviderlessGroupListActionRefusesBeforeCustody() throws {
+        let engine = try NMPEngine(config: NMPConfig())
+        defer { engine.shutdown() }
+        _ = try engine.session.add(
+            privateKey: testPrivateKey(secretKey),
+            makeCurrent: true
+        )
+
+        XCTAssertThrowsError(try engine.addRelayInUse("wss://relay.example")) { error in
+            XCTAssertEqual(error as? GroupListActionError, .automaticRoutingUnavailable)
+        }
+        XCTAssertTrue(try engine.publishQueue(limit: .max).isEmpty)
     }
 
     /// Browsing a group takes a host the app explicitly supplies; the parsed

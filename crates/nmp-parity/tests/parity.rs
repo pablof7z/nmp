@@ -9,6 +9,9 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use nmp::nip29::{
+    add_group_to_list, add_relay_in_use, register_group_list_writes, SimpleGroupEntry,
+};
 use nmp::{
     AcquisitionEvidence, AuthDenialSource, AuthPhase, Binding, CancelWriteOutcome,
     CorrelationToken, DiagnosticsSnapshot, Engine, EngineConfig, EngineError, FifoReceiver,
@@ -33,10 +36,10 @@ use nmp_ffi::nip02::{
 use nmp_ffi::session::{FfiPrivateKey, FfiPublicKey};
 use nmp_ffi::types::{
     FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthPhase, FfiBinding, FfiCancelWriteOutcome,
-    FfiDiagnosticsSnapshot, FfiFilter, FfiIdentity, FfiNotSentReason, FfiReceiptReattachment,
-    FfiRefuseReason, FfiRelayState, FfiRelayWaiting, FfiRetryCause, FfiRowDelta, FfiShortfallFact,
-    FfiSigningState, FfiSourceStatus, FfiStalledWriteStage, FfiWriteFact, FfiWriteIntent,
-    FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
+    FfiDiagnosticsSnapshot, FfiFilter, FfiIdentity, FfiLiveQuery, FfiNotSentReason,
+    FfiReceiptReattachment, FfiRefuseReason, FfiRelayState, FfiRelayWaiting, FfiRetryCause,
+    FfiRowDelta, FfiShortfallFact, FfiSigningState, FfiSourceStatus, FfiStalledWriteStage,
+    FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
 use nmp_nip02::{
     observe_following, register_follow_writes, set_following, FollowAvailability, FollowChange,
@@ -4054,6 +4057,366 @@ async fn first_follow_survives_restart_and_replays_over_later_nip02_truth() {
         assert!(
             Instant::now() < deadline,
             "later relay truth never produced a tag-preserving NIP-02 successor; admitted={:?}",
+            relay.admitted_events()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let queue = reopened.publish_queue(None, u8::MAX).unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].receipt_id, receipt_id);
+    assert_eq!(queue[0].event_id, successor.id.to_hex());
+
+    reopened.shutdown();
+    reopened_observation.cancel();
+    relay.shutdown();
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GroupListActionOutcome {
+    add_group: Vec<NormFollowActionStatus>,
+    add_relay: Vec<NormFollowActionStatus>,
+    tags: Vec<Vec<String>>,
+    content: String,
+    host_delivery_count: usize,
+}
+
+fn normalized_group_list_tags(event: &nostr::Event, group_host: &str) -> Vec<Vec<String>> {
+    event
+        .tags
+        .iter()
+        .map(|tag| {
+            tag.as_slice()
+                .iter()
+                .map(|cell| {
+                    if cell == group_host {
+                        "<group-host>".to_string()
+                    } else {
+                        cell.clone()
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn collect_ffi_group_list_action(receipt: &Arc<NmpReceiptStream>) -> Vec<NormFollowActionStatus> {
+    let rx = bridge_receipts(receipt);
+    let deadline = Instant::now() + WAIT;
+    let mut result = Vec::new();
+    loop {
+        let status = recv_before(&rx, deadline, "FFI NIP-29 group-list receipt");
+        let normalized = NormFollowActionStatus::Receipt(ffi_follow_receipt_name(&status));
+        let done = matches!(
+            normalized,
+            NormFollowActionStatus::Receipt(
+                "published"
+                    | "rejected"
+                    | "auth_failed"
+                    | "gave_up"
+                    | "settled"
+                    | "no_destination"
+                    | "cancelled"
+                    | "superseded"
+                    | "refused"
+                    | "signing_refused"
+            )
+        );
+        result.push(normalized);
+        if done {
+            return canonical_axes(result);
+        }
+    }
+}
+
+async fn wait_for_group_list_publish(
+    relay: &ScriptedRelay,
+    group_id: &str,
+    group_host: &str,
+    relay_in_use: &str,
+) -> nostr::Event {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(event) = relay.admitted_events().into_iter().find(|event| {
+            event.kind == Kind::Custom(10_009)
+                && event.tags.iter().any(|tag| {
+                    let row = tag.as_slice();
+                    row.first().is_some_and(|cell| cell == "group")
+                        && row.get(1).is_some_and(|cell| cell == group_id)
+                        && row.get(2).is_some_and(|cell| cell == group_host)
+                })
+                && event.tags.iter().any(|tag| {
+                    let row = tag.as_slice();
+                    row.first().is_some_and(|cell| cell == "r")
+                        && row.get(1).is_some_and(|cell| cell == relay_in_use)
+                })
+        }) {
+            return event;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "typed NIP-29 actions never produced the complete group-list event; admitted={:?}",
+            relay.admitted_events()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn run_direct_group_list_scenario(author: &Keys) -> GroupListActionOutcome {
+    let indexer = ScriptedRelay::start(&RelayConfig::default()).await;
+    let outbox = ScriptedRelay::start(&RelayConfig::default()).await;
+    let group_host = ScriptedRelay::start(&RelayConfig::default()).await;
+    indexer
+        .seed_relay_list(author, &[outbox.url.to_string()], &[], QUERY_CREATED_AT)
+        .await;
+    let relay_in_use = "wss://relay-in-use.example";
+    let engine = Engine::new(EngineConfig {
+        indexer_relays: vec![indexer.url.to_string()],
+        ..EngineConfig::default()
+    })
+    .expect("direct NIP-29 engine constructs");
+    engine
+        .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
+        .expect("direct NIP-29 author registers");
+    let writes = register_group_list_writes(&engine).expect("NIP-29 materializer registers");
+
+    let add_group = collect_direct_follow_action(
+        add_group_to_list(
+            &engine,
+            &writes,
+            SimpleGroupEntry {
+                group_id: "research".to_string(),
+                host_relay: group_host.url.clone(),
+                name: Some("Research".to_string()),
+            },
+        )
+        .expect("direct group add enters ordinary custody"),
+    );
+    let add_relay = collect_direct_follow_action(
+        add_relay_in_use(
+            &engine,
+            &writes,
+            nostr::RelayUrl::parse(relay_in_use).unwrap(),
+        )
+        .expect("direct relay add enters ordinary custody"),
+    );
+    let event =
+        wait_for_group_list_publish(&outbox, "research", group_host.url.as_str(), relay_in_use)
+            .await;
+    let outcome = GroupListActionOutcome {
+        add_group,
+        add_relay,
+        tags: normalized_group_list_tags(&event, group_host.url.as_str()),
+        content: event.content,
+        host_delivery_count: group_host.admitted_events().len(),
+    };
+    engine.shutdown();
+    indexer.shutdown();
+    outbox.shutdown();
+    group_host.shutdown();
+    outcome
+}
+
+async fn run_ffi_group_list_scenario(author: &Keys) -> GroupListActionOutcome {
+    let indexer = ScriptedRelay::start(&RelayConfig::default()).await;
+    let outbox = ScriptedRelay::start(&RelayConfig::default()).await;
+    let group_host = ScriptedRelay::start(&RelayConfig::default()).await;
+    indexer
+        .seed_relay_list(author, &[outbox.url.to_string()], &[], QUERY_CREATED_AT)
+        .await;
+    let relay_in_use = "wss://relay-in-use.example";
+    let engine = new_ffi_engine(NmpEngineConfig {
+        outbox_routing: Some(FfiOutboxRoutingConfig {
+            indexers: vec![indexer.url.to_string()],
+        }),
+        ..NmpEngineConfig::default()
+    })
+    .expect("FFI NIP-29 engine constructs");
+    engine
+        .add_private_key_account(ffi_private_key(author), true)
+        .expect("FFI NIP-29 author registers");
+
+    let add_group_receipt = engine
+        .add_group_to_list(
+            "research".to_string(),
+            group_host.url.to_string(),
+            Some("Research".to_string()),
+        )
+        .expect("FFI group add enters ordinary custody");
+    let add_group = collect_ffi_group_list_action(&add_group_receipt);
+    let add_relay_receipt = engine
+        .add_relay_in_use(relay_in_use.to_string())
+        .expect("FFI relay add enters ordinary custody");
+    let add_relay = collect_ffi_group_list_action(&add_relay_receipt);
+    let event =
+        wait_for_group_list_publish(&outbox, "research", group_host.url.as_str(), relay_in_use)
+            .await;
+    let outcome = GroupListActionOutcome {
+        add_group,
+        add_relay,
+        tags: normalized_group_list_tags(&event, group_host.url.as_str()),
+        content: event.content,
+        host_delivery_count: group_host.admitted_events().len(),
+    };
+    engine.shutdown();
+    indexer.shutdown();
+    outbox.shutdown();
+    group_host.shutdown();
+    outcome
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_and_ffi_group_list_actions_are_identical_and_host_is_not_route() {
+    let author = fixed_keys();
+    let direct = run_direct_group_list_scenario(&author).await;
+    let ffi = run_ffi_group_list_scenario(&author).await;
+    assert_eq!(
+        direct, ffi,
+        "direct Rust and FFI must expose one action truth"
+    );
+    assert_eq!(direct.host_delivery_count, 0);
+    assert_eq!(
+        direct.tags,
+        vec![
+            vec![
+                "group".to_string(),
+                "research".to_string(),
+                "<group-host>".to_string(),
+                "Research".to_string(),
+            ],
+            vec!["r".to_string(), "wss://relay-in-use.example".to_string()],
+        ]
+    );
+    assert!(direct.content.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn first_group_list_action_survives_restart_and_replays_over_later_truth() {
+    let delayed = RelayConfig {
+        query_delay: Some(Duration::from_secs(30)),
+        ..RelayConfig::default()
+    };
+    let mut relay = ScriptedRelay::start(&delayed).await;
+    let relay_port = relay.port();
+    let relay_url = relay.url.clone();
+    let author = fixed_keys();
+    let saved_host = "wss://saved-host.example";
+    let directory = tempfile::tempdir().expect("persistent NIP-29 fixture directory");
+    let store_path = directory.path().join("nip29-first-value-replay.redb");
+    let config = || NmpEngineConfig {
+        store_path: Some(store_path.to_string_lossy().into_owned()),
+        app_relays: vec![relay_url.to_string()],
+        fallback_relays: vec![],
+        ..ffi_outbox_routing_config()
+    };
+
+    let engine = new_ffi_engine(config()).expect("persistent native NIP-29 engine opens");
+    engine
+        .add_private_key_account(ffi_private_key(&author), true)
+        .expect("NIP-29 author registers");
+    let observation = engine
+        .observe_query(
+            FfiLiveQuery {
+                branches: vec![nmp_ffi::convert::demand_to_ffi(
+                    nmp::nip29::current_account_group_list_demand(),
+                )],
+                aggregate_result_limit: None,
+            },
+            None,
+        )
+        .expect("group-list observation opens the author-outbox source");
+    let _observation_rx = bridge_rows(&observation);
+    assert!(
+        relay.wait_query_for_kind(10_009, WAIT).await,
+        "the delayed relay holds the group-list source request before first-value custody"
+    );
+    let receipt = engine
+        .add_group_to_list(
+            "research".to_string(),
+            saved_host.to_string(),
+            Some("Research".to_string()),
+        )
+        .expect("first saved group enters ordinary custody without relay truth");
+    let receipt_id = receipt.id();
+    assert_eq!(
+        engine.publish_queue(None, u8::MAX).unwrap()[0].receipt_id,
+        receipt_id
+    );
+    engine.shutdown();
+    observation.cancel();
+    drop(receipt);
+    drop(observation);
+    drop(engine);
+    relay.disconnect().await;
+
+    let reopened = new_ffi_engine(config()).expect("persistent native NIP-29 engine reopens");
+    reopened
+        .add_private_key_account(ffi_private_key(&author), true)
+        .expect("NIP-29 author reattaches");
+    let reopened_observation = reopened
+        .observe_query(
+            FfiLiveQuery {
+                branches: vec![nmp_ffi::convert::demand_to_ffi(
+                    nmp::nip29::current_account_group_list_demand(),
+                )],
+                aggregate_result_limit: None,
+            },
+            None,
+        )
+        .expect("reopened group-list observation requests later source truth");
+    let _reopened_rx = bridge_rows(&reopened_observation);
+    assert!(matches!(
+        reopened
+            .reattach_receipt(receipt_id)
+            .expect("ordinary receipt reattaches after restart"),
+        FfiReceiptReattachment::Attached { .. }
+    ));
+
+    relay = ScriptedRelay::start_on_port(relay_port, &RelayConfig::default()).await;
+    assert_eq!(relay.url, relay_url);
+    let existing_group = Tag::parse([
+        "group".to_string(),
+        "remote".to_string(),
+        "wss://remote-host.example".to_string(),
+        "Remote".to_string(),
+    ])
+    .unwrap();
+    let existing_relay = Tag::parse(["r", "wss://remote-relay.example"]).unwrap();
+    let malformed = Tag::parse(["group", "malformed"]).unwrap();
+    let unrelated = Tag::parse(["x", "remote-owned", "extra"]).unwrap();
+    let relay_source = nostr::EventBuilder::new(Kind::Custom(10_009), "opaque private content")
+        .tags([
+            existing_group.clone(),
+            existing_relay.clone(),
+            malformed.clone(),
+            unrelated.clone(),
+        ])
+        .custom_created_at(Timestamp::from(
+            Timestamp::now().as_secs().saturating_add(5),
+        ))
+        .sign_with_keys(&author)
+        .expect("later NIP-29 source signs");
+    relay.seed_signed_event(&relay_source).await;
+
+    let deadline = Instant::now() + WAIT;
+    let successor = loop {
+        if let Some(event) = relay.admitted_events().into_iter().find(|event| {
+            event.content == "opaque private content"
+                && event.tags.iter().any(|tag| tag == &existing_group)
+                && event.tags.iter().any(|tag| tag == &existing_relay)
+                && event.tags.iter().any(|tag| tag == &malformed)
+                && event.tags.iter().any(|tag| tag == &unrelated)
+                && event.tags.iter().any(|tag| {
+                    let row = tag.as_slice();
+                    row.first().is_some_and(|cell| cell == "group")
+                        && row.get(1).is_some_and(|cell| cell == "research")
+                        && row.get(2).is_some_and(|cell| cell == saved_host)
+                })
+        }) {
+            break event;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "later relay truth never produced a preserving NIP-29 successor; admitted={:?}",
             relay.admitted_events()
         );
         tokio::time::sleep(Duration::from_millis(20)).await;

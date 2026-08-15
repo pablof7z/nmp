@@ -27,11 +27,11 @@
 //! - [`entity`] -- the bech32 nostr-entity DECODE codec (#116), the one
 //!   exported free function that needs no `NmpEngine` instance at all: no
 //!   engine, no network, no signing.
-//! - [`nip29`] -- the read-only NIP-29 host-browser projection (#108):
-//!   group discovery plus tolerant, observational kind:10009 Simple-groups
-//!   parsing. The parser is a free function over caller-constructible data;
-//!   it grants no authority. NIP-29 does not project a fixed content catalog
-//!   or a kind:9 composer (#838).
+//! - [`nip29`] -- NIP-29 group discovery and typed operations plus tolerant,
+//!   observational kind:10009 Simple-groups parsing. The parser is a free
+//!   function over caller-constructible data and grants no authority; the
+//!   kind:10009 add/remove methods use the ordinary durable receipt. NIP-29
+//!   does not project a fixed content catalog or a kind:9 composer (#838).
 //! - [`blossom`] -- the opt-in Blossom blob projection (#555): kind:24242
 //!   authorization drafts/validation and the blocking BUD-02/04/12 client,
 //!   engine-less like [`entity`]/[`nip29`], with each operation's failure
