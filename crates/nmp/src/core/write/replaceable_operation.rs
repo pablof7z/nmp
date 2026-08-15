@@ -79,7 +79,7 @@ impl ReplaceableMaterializationCall {
         }
     }
 
-    pub(crate) fn execute(self) -> ReplaceableMaterializationOutcome {
+    fn execute(self) -> ReplaceableMaterializationOutcome {
         let operations = self
             .operations
             .iter()
@@ -101,9 +101,23 @@ impl ReplaceableMaterializationCall {
 }
 
 impl EngineCore {
-    #[cfg(any(test, feature = "test-instrumentation"))]
-    pub(crate) fn assert_materializer_entry_has_no_open_transaction(&mut self) {
+    /// The single entry point for trusted capability code. Every caller has
+    /// already read the durable snapshot it needs and closed that Redb
+    /// transaction; the pure transformation runs here with nothing open, and
+    /// the caller reopens one short compare-and-commit transaction afterwards.
+    ///
+    /// `execute` is private to this module so that this is the *only* way to
+    /// reach a materializer. That is what keeps the #1624 transaction
+    /// falsifier honest: a new call site cannot quietly grow its own entry
+    /// that skips the assertion, which is exactly how the headless
+    /// `on_publish` path went uninstrumented while the runtime path did not.
+    pub(crate) fn run_replaceable_materialization(
+        &mut self,
+        call: ReplaceableMaterializationCall,
+    ) -> ReplaceableMaterializationOutcome {
+        #[cfg(any(test, feature = "test-instrumentation"))]
         nmp_store::testing::assert_materializer_entry_has_no_open_transaction(&mut self.store);
+        call.execute()
     }
 
     pub(super) fn prepare_body_complete_replaceable_operation(

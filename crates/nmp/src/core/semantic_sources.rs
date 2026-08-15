@@ -534,7 +534,6 @@ mod tests {
     use std::borrow::Cow;
     use std::sync::Arc;
 
-    use ::negentropy::{Negentropy as RawNegentropy, NegentropyStorageVector as RawStorage};
     use nmp_store::{RedbStore, RelayObserved};
     use nostr::{EventBuilder as NostrEventBuilder, Keys, Kind, RelayMessage, SubscriptionId, Tag};
 
@@ -671,7 +670,6 @@ mod tests {
             }),
         ))
     }
-
 
     fn member_state(
         core: &EngineCore,

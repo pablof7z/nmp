@@ -3625,11 +3625,10 @@ fn engine_loop(
                         PublishPreparation::Materialize(prepared) => {
                             let core::PreparedReplaceableMaterialization { call, continuation } =
                                 *prepared;
-                            #[cfg(any(test, feature = "test-instrumentation"))]
-                            core.assert_materializer_entry_has_no_open_transaction();
+                            let outcome = core.run_replaceable_materialization(call);
                             preparation = core.complete_body_complete_replaceable_operation(
                                 continuation,
-                                call.execute(),
+                                outcome,
                             );
                         }
                     }

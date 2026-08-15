@@ -1465,9 +1465,7 @@ impl EngineCore {
                     .map(|operation| operation.plan.bytes().to_vec())
                     .collect(),
             );
-            #[cfg(any(test, feature = "test-instrumentation"))]
-            self.assert_materializer_entry_has_no_open_transaction();
-            let builder = match call.execute() {
+            let builder = match self.run_replaceable_materialization(call) {
                 ReplaceableMaterializationOutcome::Materialized(builder) => builder,
                 ReplaceableMaterializationOutcome::Refused(reason) => {
                     return Err(nmp_store::PersistenceError::invariant(format!(
@@ -2809,9 +2807,7 @@ impl EngineCore {
             source_unsigned,
             operations,
         );
-        #[cfg(any(test, feature = "test-instrumentation"))]
-        self.assert_materializer_entry_has_no_open_transaction();
-        let outcome = call.execute();
+        let outcome = self.run_replaceable_materialization(call);
         self.install_materialized_replaceable_successor(
             ReplaceableSuccessorInput {
                 program,
@@ -3114,7 +3110,7 @@ impl EngineCore {
                 PublishPreparation::Complete(effects) => return effects,
                 PublishPreparation::Materialize(prepared) => {
                     let PreparedReplaceableMaterialization { call, continuation } = *prepared;
-                    let outcome = call.execute();
+                    let outcome = self.run_replaceable_materialization(call);
                     preparation =
                         self.complete_body_complete_replaceable_operation(continuation, outcome);
                 }
