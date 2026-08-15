@@ -61,12 +61,6 @@ pub struct EngineConfig {
     pub max_publish_attempts: u64,
 }
 
-/// Enough failures at one relay to call it: roughly a day of the capped
-/// 3s-doubling-to-300s backoff schedule, which is long enough that a relay
-/// having a bad afternoon is not abandoned and short enough that a relay
-/// that is simply gone stops holding an obligation open forever.
-pub const DEFAULT_MAX_PUBLISH_ATTEMPTS: u64 = 16;
-
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
@@ -76,7 +70,7 @@ impl Default for EngineConfig {
             fallback_relays: Vec::new(),
             max_relays: nmp_transport::DEFAULT_MAX_RELAYS,
             max_auth_capabilities: crate::runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
-            max_publish_attempts: DEFAULT_MAX_PUBLISH_ATTEMPTS,
+            max_publish_attempts: crate::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
         }
     }
 }
@@ -87,9 +81,9 @@ fn parse_relay_url(url: &str) -> Result<RelayUrl, EngineError> {
     })
 }
 
-pub(crate) fn build_routing_facts(
+pub(crate) fn build_routing_fact_relays(
     config: &EngineConfig,
-) -> Result<crate::core::RoutingFactStore, EngineError> {
+) -> Result<(Vec<RelayUrl>, Vec<RelayUrl>), EngineError> {
     // Validate optional-component configuration even when that component is
     // not compiled in. Feature selection must not turn malformed input into
     // a silently accepted configuration.
@@ -106,10 +100,7 @@ pub(crate) fn build_routing_facts(
         .iter()
         .map(|u| parse_relay_url(u))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(crate::core::RoutingFactStore::new(
-        app_relays,
-        fallback_relays,
-    ))
+    Ok((app_relays, fallback_relays))
 }
 
 #[cfg(feature = "nip65")]
@@ -123,9 +114,6 @@ pub(crate) fn build_nip65_sources(config: &EngineConfig) -> Result<Vec<RelayUrl>
 
 #[cfg(test)]
 mod tests {
-    use nmp_router::{AuthorRouteState, RoutingFacts};
-    use nostr::Keys;
-
     use super::*;
 
     #[test]
@@ -136,21 +124,20 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let facts = build_routing_facts(&config).expect("valid indexer config");
+        let (app_relays, fallback_relays) =
+            build_routing_fact_relays(&config).expect("valid indexer config");
 
         assert!(
-            facts.operator_app_relays().is_empty(),
+            app_relays.is_empty(),
             "a NIP-65 source must not become an operator app/content lane"
         );
         assert!(
-            facts.operator_fallback_relays().is_empty(),
+            fallback_relays.is_empty(),
             "a NIP-65 source must not become a generic fallback lane"
         );
-        assert_eq!(
-            facts.author_routes(&Keys::generate().public_key()),
-            AuthorRouteState::Unknown,
-            "configuration must not fabricate an author route"
-        );
+        // "Configuration must not fabricate an author route" used to be an
+        // assertion here. Configuration now yields two relay lists and no
+        // author channel at all, so there is nothing left to assert.
         #[cfg(feature = "nip65")]
         assert_eq!(
             build_nip65_sources(&config).expect("valid NIP-65 source"),

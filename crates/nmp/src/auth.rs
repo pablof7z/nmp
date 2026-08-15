@@ -6,10 +6,12 @@
 //! engine consults it — nonblocking, ready-or-pending — every time a relay
 //! challenges one exact protected session.
 //!
-//! [`AuthPolicyDecision`] and [`AuthPolicyError`] are the single semantic
-//! AUTH answer types. Runtime policy evaluation uses them directly.
+//! Every type here is a newtype over runtime machinery, including the two
+//! semantic answer types: [`AuthPolicyDecision`] and [`AuthPolicyError`] are
+//! defined by [`crate::runtime`], which is what evaluates a policy and
+//! produces them, and are re-exported through this facade for apps to name.
 //! [`AuthPolicyRequest`], [`AuthPolicyOp`], and [`AuthPolicyPendingSender`]
-//! remain newtypes over runtime request and cancellation machinery. The
+//! are newtypes over runtime request and cancellation machinery. The
 //! pending/cancel linearization (a losing terminal-cancel waits for a
 //! resolver that already owns completion; a queued answer is consumed
 //! before the receiver may be abandoned) is runtime-owned and inherited by
@@ -17,6 +19,8 @@
 //! or any part of that race's resolution.
 
 use nostr::{PublicKey, RelayUrl};
+
+pub use crate::runtime::{AuthPolicyDecision, AuthPolicyError, AuthPolicyResult};
 
 /// Immutable input to one app-owned NIP-42 authorization decision: the
 /// frozen expected identity, the exact canonical relay, the exact challenge
@@ -65,40 +69,6 @@ impl AuthPolicyRequest {
         self.inner.epoch_sequence()
     }
 }
-
-/// App policy's closed semantic answer for one exact AUTH request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthPolicyDecision {
-    /// Authenticate this exact session: the reducer freezes and signs the
-    /// canonical kind:22242 template for exactly this challenge.
-    Allow,
-    /// Refuse to authenticate; the session's protected work stays parked
-    /// as `AuthDenied` evidence.
-    Deny { reason: String },
-}
-
-/// Technical policy execution failures, separate from an explicit denial.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthPolicyError {
-    /// The policy could not run at all.
-    Unavailable,
-    /// The policy ran but failed for a technical reason.
-    Technical { reason: String },
-}
-
-impl std::fmt::Display for AuthPolicyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unavailable => f.write_str("AUTH policy unavailable"),
-            Self::Technical { reason } => write!(f, "AUTH policy failed: {reason}"),
-        }
-    }
-}
-
-impl std::error::Error for AuthPolicyError {}
-
-/// One policy answer: the app's semantic decision, or a technical failure.
-pub type AuthPolicyResult = Result<AuthPolicyDecision, AuthPolicyError>;
 
 /// One-shot completion door for a pending [`AuthPolicyOp`]. Cloneable;
 /// exactly one clone's [`Self::resolve`] ever lands — every later call gets

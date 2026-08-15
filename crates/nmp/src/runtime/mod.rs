@@ -78,8 +78,9 @@ pub use receipt_stream::{ReceiptReattachment, ReceiptStream};
 pub use sign_event::{SignEventCancel, SignEventError, SignEventOperation};
 
 pub use auth::{
-    AddAuthPolicyError, AuthPolicy, AuthPolicyOp, AuthPolicyPendingSender, AuthPolicyRegistration,
-    AuthPolicyRequest, AuthPolicyResolveError, PendingAuthPolicyOp,
+    AddAuthPolicyError, AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp,
+    AuthPolicyPendingSender, AuthPolicyRegistration, AuthPolicyRequest, AuthPolicyResolveError,
+    AuthPolicyResult, PendingAuthPolicyOp,
 };
 
 use std::cell::RefCell;
@@ -197,6 +198,12 @@ pub type RowsMsg = (
     Vec<ObservationEvidence>,
 );
 
+// A runtime-level integration falsifier: it spawns a real `EngineThread` and
+// asserts typed refusals reach the app. It lived under `core/` and reached
+// back up through `crate::runtime::*` to do it, which was the only
+// `core -> runtime` edge in the crate (#1142 boundary cleanup).
+#[cfg(test)]
+mod history_load_failure_tests;
 #[cfg(test)]
 mod history_mailbox_tests;
 
@@ -1542,9 +1549,7 @@ mod auth_registry_admission_tests {
             PoolConfig::default(),
             RuntimeConfig {
                 max_auth_capabilities: limit,
-                max_publish_attempts: crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS,
-                #[cfg(feature = "nip65")]
-                nip65_sources: Vec::new(),
+                ..RuntimeConfig::default()
             },
             Vec::new(),
         )
