@@ -43,6 +43,26 @@ PRODUCTION=(
     "$ROOT/crates/nmp-nip29/src"
 )
 
+# The files that carry capability entry: where the trait lives, where the call
+# is built and run, and the two production modules that call
+# `run_replaceable_materialization`. `catch_unwind` is scanned only here, not
+# across the whole crate, because `crates/nmp/src/runtime/auth.rs` owns an
+# unrelated and legitimate use for a tokio task adapter. Scoping it keeps the
+# check exact instead of forcing a blanket allowance that would also stop it
+# catching the real thing.
+MATERIALIZER_PATH=(
+    "$ROOT/crates/nmp/src/replaceable_materializer.rs"
+    "$ROOT/crates/nmp/src/core/write/replaceable_operation.rs"
+    "$ROOT/crates/nmp/src/core/write.rs"
+    "$ROOT/crates/nmp/src/runtime/mod.rs"
+)
+
+MATERIALIZER_PATH_PATTERNS=(
+    # Panic containment/translation for trusted, compiled capability code. A
+    # panic there is an ordinary NMP bug to fix, not something NMP contains.
+    'catch_unwind'
+)
+
 # Each pattern names a piece of the deleted plugin lifecycle. Restoring any
 # one is a regression of the #1624 contraction.
 PATTERNS=(
@@ -62,16 +82,32 @@ PATTERNS=(
     # Panic translation / containment for trusted capability code.
     'ReplaceableMaterializationOutcome::Panicked'
     'ReplaceableMaterializationOutcome::ThreadUnavailable'
+    # Blocked-callback liveness tests. #1624 withdraws every responsiveness
+    # promise about capability code, so the tests that asserted one must not
+    # come back under any of their old spellings.
+    'blocked_[a-z_]*materializer'
+    'materializer_is_blocked'
 )
 
 status=0
-for pattern in "${PATTERNS[@]}"; do
-    if grep -RIn --exclude-dir=target --exclude='*.rs.bk' -e "$pattern" "${PRODUCTION[@]}" >/tmp/nmp-detached-materializer-hits.$$ 2>/dev/null; then
+scan() {
+    local pattern=$1
+    shift
+    if grep -REIn --exclude-dir=target --exclude='*.rs.bk' -e "$pattern" "$@" \
+        >/tmp/nmp-detached-materializer-hits.$$ 2>/dev/null; then
         echo "error: reintroduced detached-materializer path: '$pattern'" >&2
         cat /tmp/nmp-detached-materializer-hits.$$ >&2
         status=1
     fi
     rm -f /tmp/nmp-detached-materializer-hits.$$
+}
+
+for pattern in "${PATTERNS[@]}"; do
+    scan "$pattern" "${PRODUCTION[@]}"
+done
+
+for pattern in "${MATERIALIZER_PATH_PATTERNS[@]}"; do
+    scan "$pattern" "${MATERIALIZER_PATH[@]}"
 done
 
 if [[ $status -eq 0 ]]; then

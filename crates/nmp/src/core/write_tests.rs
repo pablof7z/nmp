@@ -911,8 +911,9 @@ mod semantic_successor_tests {
                 PublishPreparation::Complete(effects) => break effects,
                 PublishPreparation::Materialize(prepared) => {
                     let PreparedReplaceableMaterialization { call, continuation } = *prepared;
-                    preparation = core
-                        .complete_body_complete_replaceable_operation(continuation, call.execute());
+                    let outcome = core.run_replaceable_materialization(call);
+                    preparation =
+                        core.complete_body_complete_replaceable_operation(continuation, outcome);
                 }
             }
         };
