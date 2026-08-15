@@ -161,7 +161,7 @@ pub(super) const POSTINGS_READY: &str = "postings_query_ready";
 /// accepted writes, lanes, attempts, receipts, and route facts — because they
 /// share one `redb::Database` transaction boundary and are therefore one
 /// epoch, not seven independently-versioned ones.
-pub(super) const SCHEMA_VERSION: u64 = 21;
+pub(super) const SCHEMA_VERSION: u64 = 22;
 /// Bound redb's process-private page cache for mobile/desktop clients.
 ///
 /// redb 4.1 defaults this cache to 1 GiB. A million-event sequential ingest
@@ -326,10 +326,28 @@ pub(super) const PUBLISH_QUEUE_RELAY_IDS: TableDefinition<&[u8], &[u8; 4]> =
     TableDefinition::new("publish_queue_relay_ids");
 pub(super) const PUBLISH_QUEUE_KIND5_CLAIMS: TableDefinition<&[u8; 8], &[u8]> =
     TableDefinition::new("publish_queue_kind5_claims");
-pub(super) const PUBLISH_QUEUE_SUPPRESS_BY_ID: TableDefinition<&[u8; 64], &[u8]> =
-    TableDefinition::new("publish_queue_suppress_by_id");
-pub(super) const PUBLISH_QUEUE_SUPPRESS_BY_ADDR: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("publish_queue_suppress_by_addr");
+/// Provisional kind:5 suppression claims, for event ids and for
+/// replaceable/addressable addresses alike (#1248, the same fold
+/// [`TOMBSTONES`] already went through). Key: `[kind:u8 | id|author or
+/// address]`, where `kind` is [`PUBLISH_QUEUE_SUPPRESS_ID`] or
+/// [`PUBLISH_QUEUE_SUPPRESS_ADDR`]. Both were separate trees over the same
+/// logical thing -- a provisional suppression claim reached by point
+/// `get`/`insert`/`remove`, never ranged, never iterated, never counted --
+/// so neither earned a tree of its own.
+///
+/// An id row's value is the JSON-encoded claimant `Vec<u64>` (intent ids);
+/// an addr row's value is the JSON-encoded `Vec<AddrClaimant>`
+/// (intent id, ceiling pairs). This table stays a SEPARATE key space from
+/// [`TOMBSTONES`] even though the two now share a byte-identical layout:
+/// a claim and a permanent tombstone legitimately coexist under the same
+/// logical target (every accepted kind:5 stages a claim here regardless of
+/// whether a tombstone already exists for that target), so the two are
+/// different relations, not two lifecycle stages of one relation (#1248
+/// discussion, ruled explicitly).
+pub(super) const PUBLISH_QUEUE_SUPPRESS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("publish_queue_suppress");
+pub(super) const PUBLISH_QUEUE_SUPPRESS_ID: u8 = 0;
+pub(super) const PUBLISH_QUEUE_SUPPRESS_ADDR: u8 = 1;
 /// Current semantic-edit resources, one row per exact replaceable/addressable
 /// coordinate. The value contains the source fence, one current
 /// materialization, and its contributing operation ids; opaque operation
@@ -446,5 +464,24 @@ pub(super) fn addr_tombstone_key(address: &str) -> Vec<u8> {
     let mut key = Vec::with_capacity(1 + address.len());
     key.push(TOMBSTONE_ADDR);
     key.extend_from_slice(address.as_bytes());
+    key
+}
+
+/// The `publish_queue_suppress` key for one (target id, claiming author)
+/// pair -- the provisional counterpart of [`id_tombstone_key`], same shape.
+pub(super) fn id_suppress_key(id_and_author: &[u8; 64]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + 64);
+    key.push(PUBLISH_QUEUE_SUPPRESS_ID);
+    key.extend_from_slice(id_and_author);
+    key
+}
+
+/// The `publish_queue_suppress` key for one replaceable/addressable
+/// address -- the provisional counterpart of [`addr_tombstone_key`], same
+/// shape.
+pub(super) fn addr_suppress_key(address: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + address.len());
+    key.push(PUBLISH_QUEUE_SUPPRESS_ADDR);
+    key.extend_from_slice(address);
     key
 }

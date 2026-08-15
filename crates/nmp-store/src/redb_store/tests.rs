@@ -2157,7 +2157,7 @@ fn query_newest_ids_preserves_provisional_suppression() {
     let claim_key = publish_queue_codec::id_claim_key(&hidden.id, &hidden.pubkey);
     let write_txn = store.raw_database().begin_write().unwrap();
     {
-        let mut claims = write_txn.open_table(PUBLISH_QUEUE_SUPPRESS_BY_ID).unwrap();
+        let mut claims = write_txn.open_table(PUBLISH_QUEUE_SUPPRESS).unwrap();
         add_claimant_in_txn(&mut claims, &claim_key, IntentId(1)).unwrap();
     }
     write_txn.commit().unwrap();
@@ -2175,6 +2175,98 @@ fn query_newest_ids_preserves_provisional_suppression() {
     assert_eq!(expected, vec![visible.id]);
     assert_eq!(projected, expected);
     assert_eq!(store.query_work(), (2, 2, 2));
+}
+
+/// #1248: `publish_queue_suppress_by_id` and `publish_queue_suppress_by_addr`
+/// folded into one `PUBLISH_QUEUE_SUPPRESS` tree, discriminant-tagged
+/// (`PUBLISH_QUEUE_SUPPRESS_ID`/`PUBLISH_QUEUE_SUPPRESS_ADDR`) the same way
+/// [`TOMBSTONES`] already folded its own id/addr pair. This proves the
+/// merged representation round-trips exactly what the two former tables
+/// held: an id claim and an addr claim staged together, in the SAME tree,
+/// survive a REAL `redb` reopen (not just the same open handle) with no
+/// cross-namespace interference, and the raw tree holds exactly the two rows
+/// under their own tags -- not four, not one merged row.
+#[test]
+fn merged_suppress_table_round_trips_both_former_tables_across_a_real_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("merged-suppress.redb");
+    let id_keys = nostr::Keys::generate();
+    let addr_keys = nostr::Keys::generate();
+    let id_target = room_event(&id_keys, "id-target", 1_000, "id claim target");
+    let id_claim_key = publish_queue_codec::id_claim_key(&id_target.id, &id_keys.public_key());
+    let addr_key = crate::address_key::AddressKey::Addressable(
+        addr_keys.public_key(),
+        Kind::from(30_023u16),
+        "d".to_string(),
+    );
+    let addr_key_bytes = addr_key.to_redb_key().into_bytes();
+
+    {
+        let store = RedbStore::open(&path).unwrap();
+        let write_txn = store.raw_database().begin_write().unwrap();
+        {
+            let mut suppress = write_txn.open_table(PUBLISH_QUEUE_SUPPRESS).unwrap();
+            add_claimant_in_txn(&mut suppress, &id_claim_key, IntentId(11)).unwrap();
+            add_addr_claimant_in_txn(
+                &mut suppress,
+                &addr_key_bytes,
+                IntentId(22),
+                Timestamp::from(5_000u64),
+            )
+            .unwrap();
+        }
+        write_txn.commit().unwrap();
+    }
+    // A real reopen, not the same handle -- proves durable bytes, not
+    // in-process state.
+    let store = RedbStore::open(&path).unwrap();
+
+    let read_txn = store.raw_database().begin_read().unwrap();
+    let suppress = read_txn.open_table(PUBLISH_QUEUE_SUPPRESS).unwrap();
+
+    // Both claims are independently readable under their own tag.
+    assert!(
+        has_claimants_in_txn(&suppress, &id_claim_key).unwrap(),
+        "the id claim must survive the merge and the reopen"
+    );
+    assert!(
+        addr_has_covering_claimant_in_txn(&suppress, &addr_key_bytes, Timestamp::from(5_000u64))
+            .unwrap(),
+        "the addr claim must survive the merge and the reopen"
+    );
+    // An id-tagged lookup must never see the addr row and vice versa -- the
+    // discriminant, not accident of key width, is what separates them.
+    assert!(
+        !addr_has_covering_claimant_in_txn(
+            &suppress,
+            &id_target.id.as_bytes()[..],
+            Timestamp::from(5_000u64)
+        )
+        .unwrap(),
+        "an id-shaped key must not resolve under the addr tag"
+    );
+
+    // The raw tree holds EXACTLY the two rows staged, under the expected
+    // tags -- not the four a naive concatenation could produce, not one row
+    // colliding the two claims together.
+    let mut rows: Vec<(u8, usize)> = suppress
+        .iter()
+        .unwrap()
+        .map(|entry| {
+            let (key, _) = entry.unwrap();
+            let key = key.value().to_vec();
+            (key[0], key.len() - 1)
+        })
+        .collect();
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            (PUBLISH_QUEUE_SUPPRESS_ID, 64),
+            (PUBLISH_QUEUE_SUPPRESS_ADDR, addr_key_bytes.len()),
+        ],
+        "the merged tree must hold exactly the id row and the addr row, each under its own tag"
+    );
 }
 
 #[test]
