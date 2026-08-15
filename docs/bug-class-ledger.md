@@ -5,6 +5,16 @@ type/API mechanism makes the bad path unreachable and a falsifier demonstrates
 that fact. `TARGET` records an agreed invariant whose mechanism is not built;
 `PARTIAL` means current proof covers only part of the promoted contract.
 
+Read the Structural exclusion column and the dominant mechanism is *absence*:
+"no public open-REQ verb", "no public index setter exists", "no expanded-set
+callback exists", "no public query state expresses a global completeness
+verdict". That is the strongest form and the one to reach for first — the
+unsupported thing has no API, so no caller can express it and no reviewer has
+to notice. Making the type concrete is the second form. A check script is the
+last: it is what you write when no type can carry the invariant, and it polices
+a spelling rather than removing the capability. A script that guards an API
+which no longer exists has stopped being a mechanism and become ceremony.
+
 | # | Bug class | Structural exclusion | Current proof status |
 |---|---|---|---|
 | 1 | **Stale replaceable event retained** | One canonical mutating store door performs exact-id dedup, then replaceable arbitration; no public index setter exists. | **BUILT / M3 verified.** Redb exercises supersession through the door; retraction of the displaced row is tracked separately. |
