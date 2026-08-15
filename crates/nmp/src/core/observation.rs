@@ -295,7 +295,7 @@ impl EngineCore {
             request.coverage_claims.clone(),
             request.event_failure_target,
         );
-        let attempt_id = self.mint_request_attempt(RequestAttemptState {
+        let attempt_id = self.attempts.mint(RequestAttemptState {
             session: request.session.clone(),
             sub_id: request.sub_id.clone(),
             filter_hash: request.filter.hash(),
@@ -450,7 +450,7 @@ impl EngineCore {
         &mut self,
         outcome: RequestHandoffOutcome,
     ) -> (Vec<Effect>, BTreeSet<nmp_router::DemandKey>) {
-        let Some(attempt) = self.take_request_attempt(&outcome) else {
+        let Some(attempt) = self.attempts.take(&outcome) else {
             return (Vec::new(), BTreeSet::new());
         };
         let key = (attempt.session.clone(), attempt.sub_id.clone());
@@ -484,7 +484,7 @@ impl EngineCore {
         let mut effects = Vec::new();
         match outcome {
             RequestHandoffOutcome::Accepted { handle, .. } => {
-                self.clear_request_retry_for_attempt(&attempt);
+                self.attempts.clear_retry_for_attempt(&attempt);
                 let shared_filter = Arc::new(request.filter.clone());
                 for (id, path, filter_revision) in &targets {
                     self.emit_observation_fact(
@@ -542,13 +542,12 @@ impl EngineCore {
                     self.attribution
                         .discard_wire_mapping(&request.session, &request.sub_id);
                 }
-                self.schedule_request_retry(attempt);
+                let now = self.clock;
+                self.attempts.schedule_retry(attempt, now);
                 let retry_at = self
-                    .request_retry_by_sub
-                    .get(&request.sub_id)
-                    .and_then(|key| self.pending_request_retries.get(key))
-                    .map(|retry| retry.due)
-                    .unwrap_or(self.clock);
+                    .attempts
+                    .retry_due_for_sub(&request.sub_id)
+                    .unwrap_or(now);
                 for (id, path, filter_revision) in targets {
                     self.emit_observation_fact(
                         id,
@@ -679,21 +678,7 @@ impl EngineCore {
     }
 
     pub(super) fn awaiting_request_keys(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
-        self.request_attempts
-            .values()
-            .map(|attempt| {
-                (
-                    attempt.session.clone(),
-                    attempt.purpose.evidence_sub_id(&attempt.sub_id),
-                )
-            })
-            .chain(self.pending_request_retries.values().map(|retry| {
-                (
-                    retry.attempt.session.clone(),
-                    retry.attempt.purpose.evidence_sub_id(&retry.attempt.sub_id),
-                )
-            }))
-            .collect()
+        self.attempts.awaiting_evidence_keys()
     }
 
     pub(super) fn close_requests_for_session(

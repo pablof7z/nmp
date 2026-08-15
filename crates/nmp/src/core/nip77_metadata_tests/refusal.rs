@@ -12,7 +12,7 @@ fn refused_live_candidate_never_becomes_active_and_keeps_one_owned_retry_deadlin
         fixture.core.pending_neg_handoffs_by_plan[&fixture.plan_sub_id],
         BTreeSet::from([candidate.clone()])
     );
-    assert_eq!(fixture.core.pending_request_retries.len(), 1);
+    assert_eq!(fixture.core.attempts.counts().retry_jobs, 1);
     assert!(fixture.core.next_deadline().unwrap().is_some());
 
     let due = fixture.core.next_deadline().unwrap().unwrap();
@@ -21,7 +21,7 @@ fn refused_live_candidate_never_becomes_active_and_keeps_one_owned_retry_deadlin
         .iter()
         .any(|effect| matches!(effect, Effect::Wire(_))));
     assert!(fixture.core.active_nip77_live.is_empty());
-    assert_eq!(fixture.core.request_attempts.len(), 1);
+    assert_eq!(fixture.core.attempts.counts().attempts, 1);
     fixture.finish();
 }
 
@@ -76,7 +76,7 @@ fn stray_eose_cannot_advance_refused_candidate_missing_id_or_backlog_roles() {
         .pending_neg_handoffs
         .contains_key(&candidate_id));
     assert!(candidate.core.active_nip77_live.is_empty());
-    assert_eq!(candidate.core.pending_request_retries.len(), 1);
+    assert_eq!(candidate.core.attempts.counts().retry_jobs, 1);
     candidate.finish();
 
     let mut missing = Fixture::new();
@@ -105,7 +105,7 @@ fn stray_eose_cannot_advance_refused_candidate_missing_id_or_backlog_roles() {
     missing.refuse(&missing_id);
     assert!(missing.stray_eose(&missing_id).is_empty());
     assert!(missing.core.pending_backfills.contains_key(&missing_id));
-    assert_eq!(missing.core.pending_request_retries.len(), 1);
+    assert_eq!(missing.core.attempts.counts().retry_jobs, 1);
     missing.finish();
 
     let mut backlog = Fixture::new();
@@ -122,7 +122,7 @@ fn stray_eose_cannot_advance_refused_candidate_missing_id_or_backlog_roles() {
     backlog.refuse(&backlog_id);
     assert!(backlog.stray_eose(&backlog_id).is_empty());
     assert!(backlog.core.pending_backfills.contains_key(&backlog_id));
-    assert_eq!(backlog.core.pending_request_retries.len(), 1);
+    assert_eq!(backlog.core.attempts.counts().retry_jobs, 1);
     backlog.finish();
 }
 
@@ -152,7 +152,7 @@ fn refused_missing_id_and_backlog_roles_each_keep_one_retry_and_teardown_exactly
         .cloned()
         .unwrap();
     missing.refuse(&missing_id);
-    assert_eq!(missing.core.pending_request_retries.len(), 1);
+    assert_eq!(missing.core.attempts.counts().retry_jobs, 1);
     assert!(missing.core.active_nip77_live.is_empty());
     missing.finish();
 
@@ -168,7 +168,7 @@ fn refused_missing_id_and_backlog_roles_each_keep_one_retry_and_teardown_exactly
         .cloned()
         .unwrap();
     backlog.refuse(&backlog_id);
-    assert_eq!(backlog.core.pending_request_retries.len(), 1);
+    assert_eq!(backlog.core.attempts.counts().retry_jobs, 1);
     assert!(backlog.core.active_nip77_live.is_empty());
     backlog.finish();
 }
@@ -213,11 +213,7 @@ fn missing_id_retry_stays_claimless_when_plan_metadata_grows() {
         .attribution
         .current_claims(&missing_id)
         .is_empty());
-    let attempt = fixture
-        .core
-        .request_attempts
-        .get(&pending.attempt_id)
-        .unwrap();
+    let attempt = fixture.core.attempts.get(pending.attempt_id).unwrap();
     assert!(attempt.owner_demands.is_empty());
     assert!(attempt.coverage_claims.is_empty());
     fixture.finish();
