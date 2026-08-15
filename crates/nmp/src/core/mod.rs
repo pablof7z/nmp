@@ -67,6 +67,8 @@ mod request_effects;
 #[cfg(test)]
 mod request_replacement_transition_tests;
 mod semantic_delivery;
+#[cfg(test)]
+mod semantic_settlement_falsifier_tests;
 mod semantic_sources;
 #[cfg(test)]
 mod transport_tests;
