@@ -527,29 +527,35 @@ about current code:
   outstanding. Nothing is persisted and nothing is cached per caller, so a
   restart simply repeats the check. Three honest limits. (1) **A lane that has
   asked and finds nothing outstanding behind its own question sends anyway,
-  and if that relay held a newer list the loss is terminal.** The measured
-  shape of this state is: the relay's read session is connected, the lane's
-  own coordinate observation is alive, and yet the resolver has minted no
-  request for its demand and none is pending admission. Why the resolver
-  declines to ask in that state is not established. The lane sends rather
-  than parking forever, because a follow that can never leave is also a
-  defect — but this is a real hole, not a narrowing: the publish overwrites
-  whatever the relay held, the relay then serves NMP's value, and no
-  successor can rebuild the entries that were only in the relay's copy. The
-  relay-session-death case is NOT this one; that is released explicitly on
-  disconnect and re-asked on the session that replaces it. **#1683** owns the
-  fix, against #1630's door rather than the write path, per #1631's own stop
-  point; until it lands, this window is open. (2) The coverage question is asked on the relay's
+  and if that relay held a newer list the loss is terminal.** #1683 narrowed
+  this and did not close it. The measured cause of the original window was
+  NIP-77: the coordinate read compiles to a live-first `limit: 0` barrier,
+  which requests no stored event and so answers nothing on its own, and the
+  door could not tell that from "nothing ever asked". That case is now
+  `CoordinateCoverage::Reconciling` — covering both the outstanding barrier
+  and a Negentropy session reconciling exactly that coordinate — and the lane
+  waits for it. What remains is a residual `Uncovered` state, reached with
+  admission quiet, where the lane still sends. It is deliberate and still
+  load-bearing: removing that escape so `Uncovered` always parks makes
+  `relay_source_successors_resume_current_delivery_and_stay_open_after_restart`
+  and `source_session_replacement_wakes_every_signed_successor_destination`
+  hang, which is the follow-that-can-never-leave defect in the other
+  direction. Why the resolver declines to ask in the residual state is not
+  established. Where it fires the publish still overwrites whatever the relay
+  held, and no successor can rebuild entries that were only in the relay's
+  copy. The relay-session-death case is NOT this one; that is released
+  explicitly on disconnect and re-asked on the session that replaces it.
+  (2) The coverage question is asked on the relay's
   authenticated session only when AUTH already completed for it, and on the
   ordinary public session otherwise; a relay that serves an authenticated
   reader a different list than a public one can still be overwritten. (3) The
   500-frame bound is fixed rather than read from a relay's advertised NIP-11
   `default_limit` (#744 owns that), and it counts frames at the reducer's own
   frame doors. Every unattributable frame the reducer can see erases that
-  count, but `nmp-transport` drops a text frame it cannot parse with no
-  engine-visible signal at all, so a relay that both truncates at the bound
-  and emits an undecodable frame could have a truncated answer read as
-  complete. #1668 owns closing that.
+  count. #1668 closed the last invisible class: `nmp-transport` now reports a
+  text frame it cannot decode through `RelayHealth::undecodable_frame_count`,
+  and the reducer erases every returned-frame count on that session when it
+  sees one, so a truncated answer can no longer be read as complete.
 
 ## Security hardening deferred
 
