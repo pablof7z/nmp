@@ -436,7 +436,13 @@ impl EngineCore {
                 self.release_coordinate_coverage(receipt, relay);
                 true
             }
-            CoordinateCoverage::InFlight { .. } => {
+            // Both mean the question is asked and the answer is coming, so
+            // both wait. The barrier case is the one #1683 closed: it used to
+            // read as `Uncovered` and publish over a base this relay may have
+            // superseded, which is terminal loss. Waiting here is bounded by
+            // the barrier's own reconciliation, not open-ended -- the request
+            // exists, and its coverage credit is what wakes this lane again.
+            CoordinateCoverage::InFlight { .. } | CoordinateCoverage::Reconciling { .. } => {
                 self.semantic_publish_coverage_parked.insert(key);
                 false
             }
@@ -454,25 +460,26 @@ impl EngineCore {
             // `release_coordinate_coverage_for_relay` and re-asked on the
             // session that replaces it.
             //
-            // Why the resolver declines to ask is not established here, and
-            // this comment does not guess. What IS established is the cost of
-            // each choice. Parking is a follow that can never leave. Sending
-            // is a follow published over a base this relay may have
-            // superseded, and that loss is TERMINAL: the relay then serves
-            // NMP's value, so the newer list it held is gone and no successor
-            // can rebuild it.
+            // #1683 narrowed this and did not close it. The measured cause
+            // of the original window was NIP-77: the coordinate read
+            // compiles to a live-first `limit: 0` barrier that answers
+            // nothing on its own, and the door could not tell that from
+            // "nothing ever asked". That case is now `Reconciling` and is
+            // handled above.
             //
-            // Sending is chosen, because pre-#1631 EVERY semantic publish
-            // went out with no coordinate check at all: this leaves a
-            // measured minority unchecked where master leaves all of them,
-            // while parking would introduce a new liveness defect. It is
-            // still the one deliberate hole in the gate.
+            // What is left here is the residual state, and the escape below
+            // is still load-bearing: making `Uncovered` always park hangs
+            // `relay_source_successors_resume_current_delivery_and_stay_open_after_restart`
+            // and `source_session_replacement_wakes_every_signed_successor_destination`
+            // -- a follow that can never leave, which is the same defect
+            // pointing the other way. Why the resolver declines to ask in
+            // the residual state is not established, and this comment does
+            // not guess.
             //
-            // #1683 closes it, against #1630's door rather than here --
-            // #1631's stop point is explicit that a coverage question the
-            // shared query owner cannot express is fixed in that owner, not
-            // worked around at the call site. `docs/known-gaps.md` records
-            // the window.
+            // Sending is still chosen for it, on the same reasoning #1631
+            // used: pre-#1631 EVERY semantic publish went out with no
+            // coordinate check at all. `docs/known-gaps.md` records what
+            // remains open.
             CoordinateCoverage::Uncovered => {
                 if already_asked && !self.wire_admission_needed() {
                     self.release_coordinate_coverage(receipt, relay);

@@ -154,6 +154,18 @@ pub(crate) enum CoordinateCoverage {
     /// outstanding on this session. Its terminal answers this caller too;
     /// zero duplicate REQ.
     InFlight { sub_id: SubId },
+    /// This coordinate HAS been asked on this session, by NIP-77's live-first
+    /// barrier: a `limit: 0` REQ that requests no stored event, so its own
+    /// terminal answers nothing. The answer arrives when reconciliation
+    /// finishes and credits coverage (#1683).
+    ///
+    /// Deliberately not folded into [`Self::Uncovered`]. The two are opposite
+    /// facts — "asked, answer still coming" versus "nothing has asked" — and
+    /// collapsing them leaves a caller that needs an answer choosing between
+    /// waiting forever and acting without one. A caller that cannot act
+    /// unanswered waits for this; a caller that can, proceeds knowing it was
+    /// asked.
+    Reconciling { sub_id: SubId },
     /// Nothing covers it. Exactly one ordinary REQ answers it.
     Uncovered,
 }
@@ -251,6 +263,7 @@ impl EngineCore {
     ) -> CoordinateCoverage {
         let mut absent = false;
         let mut in_flight: Option<SubId> = None;
+        let mut reconciling: Option<SubId> = None;
         for ((request_session, sub_id), live) in &self.live_wire_requests {
             if request_session != session || !selects_coordinate(&live.filter, coordinate) {
                 continue;
@@ -274,8 +287,14 @@ impl EngineCore {
                     );
                 }
                 StoredEvents::Streaming { .. } => {
-                    if is_exact_coordinate_request(&live.filter, coordinate) {
-                        in_flight = min_sub_id(in_flight, sub_id);
+                    match coordinate_request_shape(&live.filter, coordinate) {
+                        Some(CoordinateRequestShape::Answerable) => {
+                            in_flight = min_sub_id(in_flight, sub_id);
+                        }
+                        Some(CoordinateRequestShape::LiveFirstBarrier) => {
+                            reconciling = min_sub_id(reconciling, sub_id);
+                        }
+                        None => {}
                     }
                 }
             }
@@ -283,20 +302,69 @@ impl EngineCore {
         if absent {
             return CoordinateCoverage::ProvenAbsent;
         }
-        in_flight
-            .or_else(|| self.awaiting_exact_coordinate_request(coordinate, session))
+        if let Some(sub_id) = in_flight.or_else(|| {
+            self.awaiting_coordinate_request(
+                coordinate,
+                session,
+                CoordinateRequestShape::Answerable,
+            )
+        }) {
+            return CoordinateCoverage::InFlight { sub_id };
+        }
+        // Only after no answerable request exists: a barrier means the
+        // question is asked but its own terminal will not answer it.
+        reconciling
+            .or_else(|| {
+                self.awaiting_coordinate_request(
+                    coordinate,
+                    session,
+                    CoordinateRequestShape::LiveFirstBarrier,
+                )
+            })
+            .or_else(|| self.reconciling_coordinate_session(coordinate, session))
             .map_or(CoordinateCoverage::Uncovered, |sub_id| {
-                CoordinateCoverage::InFlight { sub_id }
+                CoordinateCoverage::Reconciling { sub_id }
             })
     }
 
     /// An exact coordinate REQ this reducer has already minted but the
     /// transport has not accepted yet — awaiting handoff, or parked for
     /// retry after a refusal. Opening a second one would duplicate it.
-    fn awaiting_exact_coordinate_request(
+    /// A Negentropy session already reconciling exactly this coordinate on
+    /// this session.
+    ///
+    /// The barrier hands off to this and is abandoned, so without this the
+    /// state would read as `Uncovered` again one step after the barrier's
+    /// own EOSE — the same window, one moment later.
+    fn reconciling_coordinate_session(
         &self,
         coordinate: &Coordinate,
         session: &RelaySessionKey,
+    ) -> Option<SubId> {
+        // Negentropy runs on the public session only, so it can speak for a
+        // public question and never for a protected one — the same
+        // access-context rule the rest of this module keeps free by carrying
+        // it in the session key.
+        if session.access != nmp_grammar::AccessContext::Public {
+            return None;
+        }
+        let mut found = None;
+        for (sub_id, neg) in &self.neg_sessions {
+            if neg.relay != session.relay {
+                continue;
+            }
+            if coordinate_request_shape(&neg.filter, coordinate).is_some() {
+                found = min_sub_id(found, sub_id);
+            }
+        }
+        found
+    }
+
+    fn awaiting_coordinate_request(
+        &self,
+        coordinate: &Coordinate,
+        session: &RelaySessionKey,
+        shape: CoordinateRequestShape,
     ) -> Option<SubId> {
         let mut found = None;
         for ((request_session, _), queue) in &self.pending_request_evidence {
@@ -304,14 +372,14 @@ impl EngineCore {
                 continue;
             }
             for request in queue {
-                if is_exact_coordinate_request(&request.filter, coordinate) {
+                if coordinate_request_shape(&request.filter, coordinate) == Some(shape) {
                     found = min_sub_id(found, &request.sub_id);
                 }
             }
         }
         for retry in self.pending_request_retries.values() {
             if &retry.attempt.session == session
-                && is_exact_coordinate_request(&retry.attempt.filter, coordinate)
+                && coordinate_request_shape(&retry.attempt.filter, coordinate) == Some(shape)
             {
                 found = min_sub_id(found, &retry.attempt.sub_id);
             }
@@ -442,13 +510,34 @@ fn selects_coordinate(filter: &ConcreteFilter, coordinate: &Coordinate) -> bool 
 /// A request whose selection is this coordinate and nothing else, over the
 /// whole of time. Its terminal answers the coordinate question directly, so
 /// a second caller joins it rather than sending a duplicate REQ.
-fn is_exact_coordinate_request(filter: &ConcreteFilter, coordinate: &Coordinate) -> bool {
+/// What a request whose selection is exactly one coordinate can do about it.
+///
+/// The `limit: 0` case used to be an unnamed rejection inside
+/// the exactness predicate, which made a request that HAD asked the
+/// question indistinguishable from no request at all (#1683). Naming it here
+/// is what lets [`CoordinateCoverage`] tell those apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoordinateRequestShape {
+    /// Asks for the stored event, so its terminal is an answer.
+    Answerable,
+    /// NIP-77's live-first barrier: `limit: 0` requests no stored event, so
+    /// its own terminal answers nothing and the answer arrives through
+    /// reconciliation instead.
+    LiveFirstBarrier,
+}
+
+/// The shape of `filter` as a question about `coordinate`, or `None` when it
+/// is not exactly that question.
+fn coordinate_request_shape(
+    filter: &ConcreteFilter,
+    coordinate: &Coordinate,
+) -> Option<CoordinateRequestShape> {
     let addressing = if coordinate.kind.is_addressable() {
         filter.tags.len() == 1 && filter.tags.values().all(|values| values.len() == 1)
     } else {
         filter.tags.is_empty()
     };
-    selects_coordinate(filter, coordinate)
+    let exact = selects_coordinate(filter, coordinate)
         && addressing
         && filter.kinds.as_ref().is_some_and(|kinds| kinds.len() == 1)
         && filter
@@ -456,10 +545,15 @@ fn is_exact_coordinate_request(filter: &ConcreteFilter, coordinate: &Coordinate)
             .as_ref()
             .is_some_and(|authors| authors.len() == 1)
         && filter.since.is_none()
-        && filter.until.is_none()
-        // A `limit: 0` REQ (NIP-77's live-first barrier) asks for no stored
-        // event at all and therefore answers nothing.
-        && filter.limit != Some(0)
+        && filter.until.is_none();
+    if !exact {
+        return None;
+    }
+    Some(if filter.limit == Some(0) {
+        CoordinateRequestShape::LiveFirstBarrier
+    } else {
+        CoordinateRequestShape::Answerable
+    })
 }
 
 /// Whether one FINISHED covering request proves this relay holds no event
@@ -1066,20 +1160,23 @@ mod tests {
             &coordinate
         ));
         assert!(
-            !is_exact_coordinate_request(&base, &coordinate),
+            coordinate_request_shape(&base, &coordinate).is_none(),
             "an addressable request without a #d asks for every identifier"
         );
-        assert!(is_exact_coordinate_request(
-            &ConcreteFilter {
-                tags: BTreeMap::from([(d, BTreeSet::from(["mine".to_string()]))]),
-                ..base
-            },
-            &coordinate
-        ));
+        assert_eq!(
+            coordinate_request_shape(
+                &ConcreteFilter {
+                    tags: BTreeMap::from([(d, BTreeSet::from(["mine".to_string()]))]),
+                    ..base
+                },
+                &coordinate
+            ),
+            Some(CoordinateRequestShape::Answerable)
+        );
     }
 
     #[test]
-    fn a_live_first_limit_zero_req_is_never_an_exact_coordinate_request() {
+    fn a_live_first_limit_zero_req_is_a_barrier_shape_not_an_answerable_one() {
         let alice = Keys::generate();
         let coordinate = contact_list_coordinate(&alice);
         let exact = ConcreteFilter {
@@ -1087,20 +1184,33 @@ mod tests {
             authors: Some(BTreeSet::from([alice.public_key().to_hex()])),
             ..ConcreteFilter::default()
         };
-        assert!(is_exact_coordinate_request(&exact, &coordinate));
-        assert!(!is_exact_coordinate_request(
-            &ConcreteFilter {
-                limit: Some(0),
-                ..exact.clone()
-            },
-            &coordinate
-        ));
-        assert!(!is_exact_coordinate_request(
-            &ConcreteFilter {
-                until: Some(500),
-                ..exact
-            },
-            &coordinate
-        ));
+        assert_eq!(
+            coordinate_request_shape(&exact, &coordinate),
+            Some(CoordinateRequestShape::Answerable)
+        );
+        // #1683: the barrier is a shape of its own, not the absence of one.
+        // Reading it as "no request asks this" is what let the publish gate
+        // treat an asked question as an unasked one.
+        assert_eq!(
+            coordinate_request_shape(
+                &ConcreteFilter {
+                    limit: Some(0),
+                    ..exact.clone()
+                },
+                &coordinate
+            ),
+            Some(CoordinateRequestShape::LiveFirstBarrier)
+        );
+        // A windowed request is genuinely not this question at all.
+        assert_eq!(
+            coordinate_request_shape(
+                &ConcreteFilter {
+                    until: Some(500),
+                    ..exact
+                },
+                &coordinate
+            ),
+            None
+        );
     }
 }
