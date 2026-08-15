@@ -567,3 +567,20 @@ about current code:
   reachable. Closing it needs a mechanism at the job boundary — a fresh runner
   per evidence claim — not a shell flag,
   and it is not what #1170 demonstrated.
+- **Cross-SDK parity (architecture review gate 5) has no mechanical check
+  (#1637).** The invariant — an app on one platform must not silently lose an
+  operation the other two have — is real and still owned by gate 5
+  (`AGENTS.md`, `docs/design/architecture-review-gates.md`); the mechanism is
+  not. The previous `scripts/check-sdk-parity.sh` compared lowercase word bags
+  over whole files, including comments and string literals, and passed a
+  Swift SDK reduced to one comment-only file with the entire NIP-02 follow API
+  deleted. Mutation testing found it had no falsifier, so it and its
+  always-empty allowlist (`scripts/check-sdk-parity-allowlist.toml`) were
+  deleted rather than left green (#1637). Separately, its Rust-side extraction
+  never saw declarations sitting behind a `#[cfg]`: `FfiSimpleGroupEntry`
+  (`crates/nmp-ffi/src/types.rs:492`), `FfiSimpleGroupsList` (`:507`), and
+  `FfiReaction` (`:730`) were invisible to it even while it ran. The
+  replacement — a checked-in manifest of exported UniFFI items generating a
+  protocol each SDK must conform to, so a missing operation is a compile
+  error rather than a substring search — is separate, not-yet-started work
+  under #1637.
