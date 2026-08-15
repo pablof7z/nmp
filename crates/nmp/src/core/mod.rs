@@ -3328,38 +3328,29 @@ impl EngineCore {
                     policy_bound: false,
                     signer_bound: false,
                     auth_event_id: None,
-                    send_handoff_accepted: false,
-                    relay_ok_accepted: false,
                 },
             );
         }
         for (session, state) in &self.auth_sessions {
-            let (phase, auth_event_id, send_handoff_accepted, relay_ok_accepted) =
-                match &state.phase {
-                    AuthSessionPhase::AwaitingPolicy { .. } => {
-                        (AuthDiagnosticsPhase::AwaitingPolicy, None, false, false)
-                    }
-                    AuthSessionPhase::AwaitingSignature { .. } => {
-                        (AuthDiagnosticsPhase::AwaitingSignature, None, false, false)
-                    }
-                    AuthSessionPhase::AwaitingSend { event_id, .. } => (
-                        AuthDiagnosticsPhase::AwaitingSend,
-                        Some(*event_id),
-                        false,
-                        false,
-                    ),
-                    AuthSessionPhase::AwaitingOk { event_id } => (
-                        AuthDiagnosticsPhase::AwaitingRelayAck,
-                        Some(*event_id),
-                        true,
-                        false,
-                    ),
-                    AuthSessionPhase::Ready { event_id } => {
-                        (AuthDiagnosticsPhase::Ready, Some(*event_id), true, true)
-                    }
-                    AuthSessionPhase::Denied => (AuthDiagnosticsPhase::Denied, None, false, false),
-                    AuthSessionPhase::Error => (AuthDiagnosticsPhase::Error, None, false, false),
-                };
+            let (phase, auth_event_id) = match &state.phase {
+                AuthSessionPhase::AwaitingPolicy { .. } => {
+                    (AuthDiagnosticsPhase::AwaitingPolicy, None)
+                }
+                AuthSessionPhase::AwaitingSignature { .. } => {
+                    (AuthDiagnosticsPhase::AwaitingSignature, None)
+                }
+                AuthSessionPhase::AwaitingSend { event_id, .. } => {
+                    (AuthDiagnosticsPhase::AwaitingSend, Some(*event_id))
+                }
+                AuthSessionPhase::AwaitingOk { event_id } => {
+                    (AuthDiagnosticsPhase::AwaitingRelayAck, Some(*event_id))
+                }
+                AuthSessionPhase::Ready { event_id } => {
+                    (AuthDiagnosticsPhase::Ready, Some(*event_id))
+                }
+                AuthSessionPhase::Denied => (AuthDiagnosticsPhase::Denied, None),
+                AuthSessionPhase::Error => (AuthDiagnosticsPhase::Error, None),
+            };
             auth_sessions.insert(
                 session.clone(),
                 AuthDiagnosticsSnapshot {
@@ -3377,8 +3368,6 @@ impl EngineCore {
                     policy_bound: state.policy_instance.is_some(),
                     signer_bound: state.signer_instance.is_some(),
                     auth_event_id,
-                    send_handoff_accepted,
-                    relay_ok_accepted,
                 },
             );
         }

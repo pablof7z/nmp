@@ -2209,14 +2209,16 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
     }
 }
 
-fn auth_diagnostics_phase_to_ffi(phase: AuthDiagnosticsPhase) -> FfiAuthPhase {
+/// One-for-one, and it must stay that way (#1616): no two source variants
+/// may share a target, or a native app and a direct-Rust app read different
+/// phases for the same session at the same instant.
+pub fn auth_diagnostics_phase_to_ffi(phase: AuthDiagnosticsPhase) -> FfiAuthPhase {
     match phase {
         AuthDiagnosticsPhase::AwaitingChallenge => FfiAuthPhase::AwaitingChallenge,
         AuthDiagnosticsPhase::AwaitingPolicy => FfiAuthPhase::AwaitingPolicy,
         AuthDiagnosticsPhase::AwaitingSignature => FfiAuthPhase::AwaitingSignature,
-        AuthDiagnosticsPhase::AwaitingSend | AuthDiagnosticsPhase::AwaitingRelayAck => {
-            FfiAuthPhase::AwaitingRelayAck
-        }
+        AuthDiagnosticsPhase::AwaitingSend => FfiAuthPhase::AwaitingSend,
+        AuthDiagnosticsPhase::AwaitingRelayAck => FfiAuthPhase::AwaitingRelayAck,
         AuthDiagnosticsPhase::Ready => FfiAuthPhase::Ready,
         AuthDiagnosticsPhase::Denied => FfiAuthPhase::Denied,
         AuthDiagnosticsPhase::Error => FfiAuthPhase::Error,
@@ -2234,8 +2236,6 @@ fn auth_diagnostics_to_ffi(snapshot: AuthDiagnosticsSnapshot) -> FfiAuthDiagnost
         policy_bound: snapshot.policy_bound,
         signer_bound: snapshot.signer_bound,
         auth_event_id: snapshot.auth_event_id.map(|id| id.to_hex()),
-        send_handoff_accepted: snapshot.send_handoff_accepted,
-        relay_ok_accepted: snapshot.relay_ok_accepted,
     }
 }
 
@@ -3032,8 +3032,6 @@ mod tests {
                 policy_bound: index >= 2,
                 signer_bound: index >= 3,
                 auth_event_id: (index >= 3).then_some(event_id),
-                send_handoff_accepted: index >= 4,
-                relay_ok_accepted: index == 5,
             })
             .collect();
         let ffi = diagnostics_snapshot_to_ffi(DiagnosticsSnapshot {
@@ -3164,13 +3162,24 @@ mod tests {
                 FfiAuthPhase::AwaitingChallenge,
                 FfiAuthPhase::AwaitingPolicy,
                 FfiAuthPhase::AwaitingSignature,
-                FfiAuthPhase::AwaitingRelayAck,
+                FfiAuthPhase::AwaitingSend,
                 FfiAuthPhase::AwaitingRelayAck,
                 FfiAuthPhase::Ready,
                 FfiAuthPhase::Denied,
                 FfiAuthPhase::Error,
             ]
         );
+        // #1616: the eight engine phases must land on eight DISTINCT FFI
+        // phases. The previous shape of this assertion listed
+        // `AwaitingRelayAck` twice and read as intentional, so nothing
+        // objected to a native app being told the relay was slow while NMP
+        // still held the signed AUTH event.
+        let distinct: std::collections::BTreeSet<_> = ffi
+            .auth_sessions
+            .iter()
+            .map(|session| format!("{:?}", session.phase))
+            .collect();
+        assert_eq!(distinct.len(), auth_phases.len());
         assert_eq!(ffi.auth_sessions[0].relay, relay.to_string());
         assert_eq!(
             ffi.auth_sessions[0].access,
@@ -3189,10 +3198,6 @@ mod tests {
         assert_eq!(ffi.auth_sessions[3].auth_event_id, Some(event_id.to_hex()));
         assert!(ffi.auth_sessions[3].policy_bound);
         assert!(ffi.auth_sessions[3].signer_bound);
-        assert!(!ffi.auth_sessions[3].send_handoff_accepted);
-        assert!(ffi.auth_sessions[4].send_handoff_accepted);
-        assert!(!ffi.auth_sessions[4].relay_ok_accepted);
-        assert!(ffi.auth_sessions[5].relay_ok_accepted);
         assert_eq!(
             ffi.transport_degraded.as_deref(),
             Some("signature verification worker unavailable")

@@ -145,6 +145,24 @@ class AuthPolicyTest {
 
     @Test
     fun authDiagnosticsProjectEveryExactFieldAndPhase() {
+        // Spelled out rather than derived from `AuthPhase.from`, which would
+        // assert only that the projection agrees with itself. #1616: every
+        // FFI phase must reach a DISTINCT Kotlin phase, so a future variant
+        // cannot be folded onto an existing one unnoticed.
+        val expected =
+            mapOf(
+                FfiAuthPhase.AWAITING_CHALLENGE to AuthPhase.AwaitingChallenge,
+                FfiAuthPhase.AWAITING_POLICY to AuthPhase.AwaitingPolicy,
+                FfiAuthPhase.AWAITING_SIGNATURE to AuthPhase.AwaitingSignature,
+                FfiAuthPhase.AWAITING_SEND to AuthPhase.AwaitingSend,
+                FfiAuthPhase.AWAITING_RELAY_ACK to AuthPhase.AwaitingRelayAck,
+                FfiAuthPhase.READY to AuthPhase.Ready,
+                FfiAuthPhase.DENIED to AuthPhase.Denied,
+                FfiAuthPhase.ERROR to AuthPhase.Error,
+            )
+        assertEquals(FfiAuthPhase.entries.toSet(), expected.keys)
+        assertEquals(expected.size, expected.values.toSet().size)
+
         FfiAuthPhase.entries.forEach { ffiPhase ->
             val projected =
                 AuthDiagnostics.from(
@@ -158,8 +176,6 @@ class AuthPolicyTest {
                         policyBound = true,
                         signerBound = false,
                         authEventId = "e".repeat(64),
-                        sendHandoffAccepted = true,
-                        relayOkAccepted = false,
                     ),
                 )
 
@@ -168,12 +184,10 @@ class AuthPolicyTest {
             assertEquals(17uL, projected.transportGeneration)
             assertEquals(23uL, projected.epochSequence)
             assertEquals("blake3:challenge", projected.challengeDescriptor)
-            assertEquals(AuthPhase.from(ffiPhase), projected.phase)
+            assertEquals(expected.getValue(ffiPhase), projected.phase)
             assertTrue(projected.policyBound)
             assertFalse(projected.signerBound)
             assertEquals("e".repeat(64), projected.authEventId)
-            assertTrue(projected.sendHandoffAccepted)
-            assertFalse(projected.relayOkAccepted)
         }
     }
 
