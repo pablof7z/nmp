@@ -2,11 +2,12 @@
 
 ## Direct Rust
 
-Depend on the `nmp` crate and construct `Engine::new(EngineConfig)`. The consumer-facing methods are:
+Depend on the `nmp` crate and construct `Engine::new(EngineConfig)`, or `Engine::new_with_capabilities(EngineConfig, Vec<ReplaceableMaterializerSpec>)` to add a capability `nmp` cannot compile in itself. The consumer-facing methods are:
 
 ```text
 reset_persistent_store
 new
+new_with_capabilities
 new_with_session
 observe
 publish
@@ -31,6 +32,8 @@ observe_diagnostics
 relay_information
 shutdown
 ```
+
+`new` supplies only the capabilities `nmp` compiles in itself (the NIP-29 group-list capability, when the `nip29` feature is enabled). A capability owned by a separate crate that depends on `nmp` — such as `nmp-nip02`'s follow/unfollow, which cannot be re-exported through the facade without a package cycle — is supplied explicitly: `new_with_capabilities(config, vec![nmp_nip02::follow_capability()])`. See [Content and protocols](content-and-protocols.md) for the full NIP-02 shape. A second spec for the same `(program, format)` pair refuses construction with `EngineError::DuplicateReplaceableCapability` rather than replacing the first.
 
 `from_parts` is hidden behind `unstable-mechanism` for in-repo tests and is not an application assembly path. `cargo test -p nmp-consumer-check` is the focused supported-facade proof. Test any other touched Rust crate with `cargo test -p <crate>`; `cargo test --workspace` is the merge gate.
 

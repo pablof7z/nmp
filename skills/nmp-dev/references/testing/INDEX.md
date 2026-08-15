@@ -47,7 +47,7 @@ Never leave the correction only in chat, a PR, or a test name.
 - Test setup provides inputs instead of inserting the expected result.
 - Tests cover every request context, restart, failure, and platform condition
   needed by the claim.
-- Every evidence locator resolves to a real check in its required CI job.
+- Every evidence locator resolves to a real check that a reviewer actually ran by hand. There is no CI to run it for them.
 - All required checks pass. A live check supplements repeatable evidence; it
   does not replace it.
 - Remaining work has one issue.
