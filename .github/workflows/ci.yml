@@ -65,6 +65,9 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Falsify the Kotlin build script's target-dir resolution
+        run: bash scripts/test-build-kotlin-jvm.sh
+
       - name: Build Kotlin bindings + native lib (host triple)
         run: scripts/build-kotlin-jvm.sh
 
