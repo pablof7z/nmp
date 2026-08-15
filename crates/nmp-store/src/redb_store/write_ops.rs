@@ -1255,8 +1255,7 @@ pub(super) fn compensate_write_with_state(
                             let visible = match ingest.canonical.load_by_id(id)? {
                                 None => false,
                                 Some((_key, se)) => !is_suppressed_in_txn(
-                                    &ingest.publish_queue_suppress_by_id,
-                                    &ingest.publish_queue_suppress_by_addr,
+                                    &ingest.publish_queue_suppress,
                                     &se.event,
                                 )?,
                             };
@@ -1270,14 +1269,14 @@ pub(super) fn compensate_write_with_state(
                                     claiming_author,
                                 } => {
                                     remove_claimant_in_txn(
-                                        &mut ingest.publish_queue_suppress_by_id,
+                                        &mut ingest.publish_queue_suppress,
                                         &id_claim_key(&target, &claiming_author),
                                         intent_id,
                                     )?;
                                 }
                                 SuppressClaimRecord::Addr { key: addr_key, .. } => {
                                     remove_addr_claimant_in_txn(
-                                        &mut ingest.publish_queue_suppress_by_addr,
+                                        &mut ingest.publish_queue_suppress,
                                         &addr_key,
                                         intent_id,
                                     )?;
@@ -1290,11 +1289,8 @@ pub(super) fn compensate_write_with_state(
                                 continue;
                             }
                             if let Some((_key, se)) = ingest.canonical.load_by_id(&id)? {
-                                if !is_suppressed_in_txn(
-                                    &ingest.publish_queue_suppress_by_id,
-                                    &ingest.publish_queue_suppress_by_addr,
-                                    &se.event,
-                                )? {
+                                if !is_suppressed_in_txn(&ingest.publish_queue_suppress, &se.event)?
+                                {
                                     revealed.push(se);
                                 }
                             }

@@ -6,7 +6,7 @@ use super::publish_queue_codec::{
     NEXT_RECEIPT_ID_KEY, NEXT_TERMINAL_SEQUENCE_KEY, TERMINAL_RECEIPT_BYTES_KEY,
     TERMINAL_RECEIPT_COUNT_KEY,
 };
-use super::schema::persist_err;
+use super::schema::{addr_suppress_key, id_suppress_key, persist_err};
 use super::{
     address_key_for, Deserialize, Event, EventId, IntentId, IntentSigState, PersistenceError,
     PublicKey, PublishQueueDeadline, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
@@ -477,16 +477,18 @@ pub(super) enum SuppressClaimRecord {
 }
 
 /// Append `intent_id` to the JSON-encoded `Vec<u64>` claimant set at
-/// `table[key]` (creating it if absent) — shared by `PUBLISH_QUEUE_SUPPRESS_BY_ID`
-/// only now (see [`add_addr_claimant_in_txn`] for the ceiling-carrying
-/// address counterpart).
+/// `table[id_suppress_key(key)]` (creating it if absent) — the id half of
+/// [`PUBLISH_QUEUE_SUPPRESS`] (see [`add_addr_claimant_in_txn`] for the
+/// ceiling-carrying address counterpart, which shares this same table under
+/// a different tag).
 pub(super) fn add_claimant_in_txn(
-    table: &mut redb::Table<'_, &'static [u8; 64], &'static [u8]>,
+    table: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
     key: &[u8; 64],
     intent_id: IntentId,
 ) -> Result<(), PersistenceError> {
+    let key = id_suppress_key(key);
     let mut claimants: Vec<u64> = table
-        .get(key)
+        .get(key.as_slice())
         .map_err(persist_err)?
         .map(|guard| decode_claimants(guard.value()))
         .transpose()?
@@ -495,22 +497,26 @@ pub(super) fn add_claimant_in_txn(
         claimants.push(intent_id.0);
     }
     let encoded = encode_claimants(&claimants).map_err(|error| codec_error("claimants", error))?;
-    table.insert(key, encoded.as_slice()).map_err(persist_err)?;
+    table
+        .insert(key.as_slice(), encoded.as_slice())
+        .map_err(persist_err)?;
     Ok(())
 }
 
-/// Remove `intent_id` from the claimant set at `table[key]`, deleting the
-/// row outright once it becomes empty (the row's mere existence implies
-/// non-empty by construction — [`add_claimant_in_txn`] never inserts an
-/// empty set) — the reversal counterpart of [`add_claimant_in_txn`], and
-/// [`has_claimants_in_txn`]'s existence check relies on this invariant.
+/// Remove `intent_id` from the claimant set at `table[id_suppress_key(key)]`,
+/// deleting the row outright once it becomes empty (the row's mere
+/// existence implies non-empty by construction — [`add_claimant_in_txn`]
+/// never inserts an empty set) — the reversal counterpart of
+/// [`add_claimant_in_txn`], and [`has_claimants_in_txn`]'s existence check
+/// relies on this invariant.
 pub(super) fn remove_claimant_in_txn(
-    table: &mut redb::Table<'_, &'static [u8; 64], &'static [u8]>,
+    table: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
     key: &[u8; 64],
     intent_id: IntentId,
 ) -> Result<(), PersistenceError> {
+    let key = id_suppress_key(key);
     let Some(json) = table
-        .get(key)
+        .get(key.as_slice())
         .map_err(persist_err)?
         .map(|guard| guard.value().to_vec())
     else {
@@ -519,29 +525,33 @@ pub(super) fn remove_claimant_in_txn(
     let mut claimants = decode_claimants(&json).map_err(|error| codec_error("claimants", error))?;
     claimants.retain(|id| *id != intent_id.0);
     if claimants.is_empty() {
-        table.remove(key).map_err(persist_err)?;
+        table.remove(key.as_slice()).map_err(persist_err)?;
     } else {
         let encoded =
             encode_claimants(&claimants).map_err(|error| codec_error("claimants", error))?;
-        table.insert(key, encoded.as_slice()).map_err(persist_err)?;
+        table
+            .insert(key.as_slice(), encoded.as_slice())
+            .map_err(persist_err)?;
     }
     Ok(())
 }
 
-/// `true` iff `table[key]` currently names at least one claimant —
-/// consulted by [`is_suppressed_in_txn`] for ID claims. Relies on
+/// `true` iff `table[id_suppress_key(key)]` currently names at least one
+/// claimant — consulted by [`is_suppressed_in_txn`] for ID claims. Relies on
 /// [`remove_claimant_in_txn`]'s "never leave an empty set behind"
 /// invariant: mere row existence implies non-empty.
 pub(super) fn has_claimants_in_txn(
-    table: &impl ReadableTable<&'static [u8; 64], &'static [u8]>,
+    table: &impl ReadableTable<&'static [u8], &'static [u8]>,
     key: &[u8; 64],
 ) -> Result<bool, PersistenceError> {
-    Ok(table.get(key).map_err(persist_err)?.is_some())
+    let key = id_suppress_key(key);
+    Ok(table.get(key.as_slice()).map_err(persist_err)?.is_some())
 }
 
-/// One `(claiming_intent_id, created_at_ceiling)` pair — `PUBLISH_QUEUE_SUPPRESS_BY_ADDR`'s
-/// value shape (issue #61 P0 correction, mirrors `SuppressClaimRecord::Addr`'s
-/// doc for why a bare claimant list is not enough).
+/// One `(claiming_intent_id, created_at_ceiling)` pair — the addr half of
+/// [`PUBLISH_QUEUE_SUPPRESS`]'s value shape (issue #61 P0 correction, mirrors
+/// `SuppressClaimRecord::Addr`'s doc for why a bare claimant list is not
+/// enough).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct AddrClaimant {
     pub(super) intent_id: u64,
@@ -549,17 +559,18 @@ pub(super) struct AddrClaimant {
 }
 
 /// Add (or update) `intent_id`'s ceiling in the JSON-encoded
-/// `Vec<AddrClaimant>` claimant list at `table[key]` — the address
-/// counterpart of [`add_claimant_in_txn`], carrying a ceiling per
-/// claimant instead of a bare id.
+/// `Vec<AddrClaimant>` claimant list at `table[addr_suppress_key(key)]` —
+/// the address counterpart of [`add_claimant_in_txn`], carrying a ceiling
+/// per claimant instead of a bare id.
 pub(super) fn add_addr_claimant_in_txn(
     table: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
     key: &[u8],
     intent_id: IntentId,
     ceiling: Timestamp,
 ) -> Result<(), PersistenceError> {
+    let key = addr_suppress_key(key);
     let mut claimants: Vec<AddrClaimant> = table
-        .get(key)
+        .get(key.as_slice())
         .map_err(persist_err)?
         .map(|guard| decode_addr_claimants(guard.value()))
         .transpose()?
@@ -571,20 +582,23 @@ pub(super) fn add_addr_claimant_in_txn(
     });
     let encoded = encode_addr_claimants(&claimants)
         .map_err(|error| codec_error("address claimants", error))?;
-    table.insert(key, encoded.as_slice()).map_err(persist_err)?;
+    table
+        .insert(key.as_slice(), encoded.as_slice())
+        .map_err(persist_err)?;
     Ok(())
 }
 
-/// Remove `intent_id`'s ceiling entry from `table[key]`, deleting the row
-/// outright once empty — the address counterpart of
+/// Remove `intent_id`'s ceiling entry from `table[addr_suppress_key(key)]`,
+/// deleting the row outright once empty — the address counterpart of
 /// [`remove_claimant_in_txn`].
 pub(super) fn remove_addr_claimant_in_txn(
     table: &mut redb::Table<'_, &'static [u8], &'static [u8]>,
     key: &[u8],
     intent_id: IntentId,
 ) -> Result<(), PersistenceError> {
+    let key = addr_suppress_key(key);
     let Some(json) = table
-        .get(key)
+        .get(key.as_slice())
         .map_err(persist_err)?
         .map(|guard| guard.value().to_vec())
     else {
@@ -594,17 +608,19 @@ pub(super) fn remove_addr_claimant_in_txn(
         decode_addr_claimants(&json).map_err(|error| codec_error("address claimants", error))?;
     claimants.retain(|c| c.intent_id != intent_id.0);
     if claimants.is_empty() {
-        table.remove(key).map_err(persist_err)?;
+        table.remove(key.as_slice()).map_err(persist_err)?;
     } else {
         let encoded = encode_addr_claimants(&claimants)
             .map_err(|error| codec_error("address claimants", error))?;
-        table.insert(key, encoded.as_slice()).map_err(persist_err)?;
+        table
+            .insert(key.as_slice(), encoded.as_slice())
+            .map_err(persist_err)?;
     }
     Ok(())
 }
 
-/// `true` iff ANY claimant at `table[key]` currently covers
-/// `candidate_created_at` (its ceiling is at-or-after it) — the
+/// `true` iff ANY claimant at `table[addr_suppress_key(key)]` currently
+/// covers `candidate_created_at` (its ceiling is at-or-after it) — the
 /// provisional counterpart of the permanent `ADDR_TOMBSTONES` ceiling
 /// check, consulted by [`is_suppressed_in_txn`].
 pub(super) fn addr_has_covering_claimant_in_txn(
@@ -612,8 +628,9 @@ pub(super) fn addr_has_covering_claimant_in_txn(
     key: &[u8],
     candidate_created_at: Timestamp,
 ) -> Result<bool, PersistenceError> {
+    let key = addr_suppress_key(key);
     let Some(json) = table
-        .get(key)
+        .get(key.as_slice())
         .map_err(persist_err)?
         .map(|guard| guard.value().to_vec())
     else {
@@ -636,23 +653,21 @@ pub(super) fn addr_has_covering_claimant_in_txn(
 /// `Table`/`ReadOnlyTable` types) so it works from BOTH `gc`'s write
 /// transaction and `query`'s read-only one — every other helper in this
 /// file only ever runs inside a write transaction; this is the first
-/// read-only caller.
+/// read-only caller. Both the id and address checks now read the SAME
+/// [`PUBLISH_QUEUE_SUPPRESS`] table under their own tag (#1248) — passed
+/// once, not twice.
 pub(super) fn is_suppressed_in_txn(
-    publish_queue_suppress_by_id: &impl ReadableTable<&'static [u8; 64], &'static [u8]>,
-    publish_queue_suppress_by_addr: &impl ReadableTable<&'static [u8], &'static [u8]>,
+    publish_queue_suppress: &impl ReadableTable<&'static [u8], &'static [u8]>,
     event: &Event,
 ) -> Result<bool, PersistenceError> {
     let id_key = super::publish_queue_codec::id_claim_key(&event.id, &event.pubkey);
-    if has_claimants_in_txn(publish_queue_suppress_by_id, &id_key)? {
+    if has_claimants_in_txn(publish_queue_suppress, &id_key)? {
         return Ok(true);
     }
     if let Some(key) = address_key_for(event) {
         let key_bytes = key.to_redb_key().into_bytes();
-        if addr_has_covering_claimant_in_txn(
-            publish_queue_suppress_by_addr,
-            &key_bytes,
-            event.created_at,
-        )? {
+        if addr_has_covering_claimant_in_txn(publish_queue_suppress, &key_bytes, event.created_at)?
+        {
             return Ok(true);
         }
     }
