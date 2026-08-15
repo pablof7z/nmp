@@ -6,7 +6,6 @@ use std::time::Duration;
 use crossbeam_channel as cb;
 use nmp_store::RedbStore;
 use nmp_transport::{Pool, PoolConfig, PoolEvent};
-#[cfg(feature = "nip65")]
 use nostr::RelayUrl;
 
 use crate::relay_information_service::RelayInformationService;
