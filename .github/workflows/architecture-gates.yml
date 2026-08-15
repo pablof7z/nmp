@@ -190,6 +190,23 @@ jobs:
       - name: Keep nmp-ffi off direct mechanism-crate edges
         run: bash scripts/check-ffi-facade-boundary.sh
 
+  # One owner per property (#1657). The current account was stored twice and
+  # held equal by six pairs of adjacent statements that nothing typed, while
+  # the sign-event author check and reactive re-rooting read different copies.
+  # The behavioural half of the falsifier is
+  # `nmp::every_current_account_reader_sees_the_same_selection_through_a_full_lifecycle`;
+  # this refuses the reintroduced field before behaviour is exercised.
+  one-current-account:
+    name: The current account is stored once
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Refuse a second stored current account in the runtime
+        run: bash scripts/check-one-current-account.sh
+
   # A 600-line hard cap per file, scoped to crates/nmp-bdd. The cap was a norm
   # before it was a check, which is how that tree's `world.rs` reached 1,333
   # lines; the script's own header records why the scope is this one crate and

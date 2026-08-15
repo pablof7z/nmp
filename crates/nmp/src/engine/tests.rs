@@ -1441,6 +1441,135 @@ fn sign_event_rejects_missing_current_account_or_provider_before_invocation() {
     engine.shutdown();
 }
 
+/// #1657 falsifier: every reader of the current account sees one value.
+///
+/// The current account used to be stored twice -- `RuntimeSessionState.
+/// current_pubkey` and `EngineCore.active_pubkey` -- written by adjacent
+/// statements at six sites with nothing typing the pairing. The three readers
+/// below were split across those copies: the session snapshot and the
+/// sign-event author admission read the runtime's, while `Identity::Active`
+/// resolution read the reducer's. A half-written pair would therefore have
+/// signed as one account while the reducer authored as another, with no
+/// assertion between them.
+///
+/// This drives a whole account lifecycle -- select, switch, remove, clear --
+/// and asserts all three readers move together at every step. Reintroducing a
+/// second copy and updating only some of its writers fails here.
+#[test]
+fn every_current_account_reader_sees_the_same_selection_through_a_full_lifecycle() {
+    let engine = Engine::new(EngineConfig::default()).expect("engine must build");
+    let request = || SignEventRequest {
+        created_at: nostr::Timestamp::from(1_723_456_789),
+        kind: nostr::Kind::Custom(27_273),
+        tags: Vec::new(),
+        content: "one selection".to_string(),
+    };
+
+    // Two provider-backed accounts, so the sign-event admission path is
+    // reachable and names a real author.
+    let alice = engine
+        .install_test_local_provider(&format!("{:064x}", 11u8))
+        .expect("alice registers")
+        .public_key();
+    let bob = engine
+        .install_test_local_provider(&format!("{:064x}", 12u8))
+        .expect("bob registers")
+        .public_key();
+
+    for expected in [alice, bob] {
+        engine
+            .make_current_account(expected)
+            .expect("account becomes current");
+        assert_eq!(
+            engine.session().expect("session reads").current_pubkey,
+            Some(expected),
+            "the session snapshot must name the selected account"
+        );
+        let signed = engine
+            .sign_event(request())
+            .expect("the current account's provider signs")
+            .recv()
+            .expect("the sign-only operation completes");
+        assert_eq!(
+            signed.pubkey, expected,
+            "sign-event admission must use the same selection the snapshot reports"
+        );
+    }
+
+    // Removing the current account clears the selection for every reader.
+    engine
+        .remove_account(&crate::SessionAccount {
+            public_key: bob,
+            provider: Some(crate::SessionProvider::LocalKey),
+            signing: crate::SigningAvailability::Available,
+        })
+        .expect("removal succeeds");
+    assert_eq!(
+        engine.session().expect("session reads").current_pubkey,
+        None,
+        "removing the current account must clear the snapshot's selection"
+    );
+    assert_eq!(
+        engine.sign_event(request()).err(),
+        Some(SignEventError::NoCurrentSigningProvider),
+        "removing the current account must clear the sign-event admission's selection"
+    );
+
+    // The reducer's own `Identity::Active` resolution is the third reader.
+    // A public-key-only account parks the write against the exact author the
+    // reducer chose, so the parked obligation names it without a signer race.
+    let carol = Keys::generate().public_key();
+    engine
+        .add_public_key_account(carol, true)
+        .expect("public-only current account");
+    assert_eq!(
+        engine.session().expect("session reads").current_pubkey,
+        Some(carol),
+        "the snapshot must follow the newest selection"
+    );
+    let receipt = engine
+        .publish(WriteIntent {
+            payload: nmp_grammar::WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::TextNote,
+                tags: Vec::new().into_iter().collect(),
+                content: "authored by the active identity".to_string(),
+                created_at: Some(Timestamp::from(77)),
+            }),
+            routing: nmp_grammar::WriteRouting::Explicit(vec![RelayUrl::parse(
+                "wss://one-selection.example",
+            )
+            .unwrap()]),
+            identity: Identity::Active,
+            correlation: None,
+        })
+        .expect("the active identity resolves and the write is accepted");
+    let parked = engine
+        .publish_queue_for_event(receipt.event_id, None, 1)
+        .expect("the parked obligation reads");
+    assert!(
+        matches!(
+            parked[0].signing,
+            SigningState::AwaitingSigner { pubkey } if pubkey == carol
+        ),
+        "`Identity::Active` must resolve to the same selection every other \
+         reader reports, got {:?}",
+        parked[0].signing
+    );
+
+    engine.clear_session().expect("session clears");
+    assert_eq!(
+        engine.session().expect("session reads").current_pubkey,
+        None,
+        "clearing the session must clear the selection for every reader"
+    );
+    assert_eq!(
+        engine.sign_event(request()).err(),
+        Some(SignEventError::NoCurrentSigningProvider),
+        "clearing the session must leave no signable current account"
+    );
+    engine.shutdown();
+}
+
 struct MismatchedSigner {
     reported: PublicKey,
     actual: Keys,
