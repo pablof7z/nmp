@@ -257,7 +257,8 @@ impl EngineCore {
     }
 
     pub(super) fn on_subscribe(&mut self, query: LiveQuery) -> Vec<Effect> {
-        match self.open_observation(query, self.clock) {
+        let now = self.clock();
+        match self.open_observation(query, now) {
             ObservationOpen::Opened {
                 id,
                 seed,
