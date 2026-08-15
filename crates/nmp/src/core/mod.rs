@@ -3825,8 +3825,6 @@ impl EngineCore {
             );
         }
         self.recompile(&mut effects);
-        self.refresh_all_observations(&mut effects);
-        self.refresh_all_histories(&mut effects);
         if let Some(pk) = pk {
             // The runtime moves its current signing provider pointer before delivering
             // this message. Re-arm matching accepted work here as well as
