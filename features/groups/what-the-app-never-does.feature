@@ -28,8 +28,8 @@ Feature: The app never names the host, the route, or the context tag
 
   # nmp:id=PROTOCOL-WHATTHEAPPNEVERDOES-002
   # nmp:status=built
-  # nmp:evidence=script:repository::scripts/check-nip29-operation-catalogue.sh
-  # nmp:falsifier=adding a relay, route or host parameter to any of the nine named operations, or to publish/publishSigned/read, on any of the four surfaces (the Rust facade, the Rust FFI, Swift, Kotlin) makes check-nip29-operation-catalogue.sh's per-surface signature-shape checks fail with "takes a per-call relay, route or host parameter" or "takes a raw kind, tag, relay or route parameter"
+  # nmp:evidence=script:repository::scripts/check-nip29-surfaces.sh
+  # nmp:falsifier=adding a relay, route or host parameter to any of the nine named operations, or to publish/publishSigned/read, on any of the four surfaces (the Rust facade, the Rust FFI, Swift, Kotlin) makes check-nip29-surfaces.sh's per-surface signature-shape checks fail with "takes a per-call relay, route or host parameter" or "takes a raw kind, tag, relay or route parameter"
   @nip29 @must-never
   Scenario: There is no way to name a relay on a group write
     When I inspect the group's write surface
@@ -39,12 +39,12 @@ Feature: The app never names the host, the route, or the context tag
 
   # nmp:id=PROTOCOL-WHATTHEAPPNEVERDOES-003
   # nmp:status=built
-  # nmp:evidence=script:repository::scripts/check-nip29-operation-catalogue.sh
+  # nmp:evidence=script:repository::scripts/check-nip29-surfaces.sh
   # nmp:evidence=rust:nmp-nip29::caller_supplied_own_h_is_refused_before_signing_or_routing
   # nmp:evidence=rust:nmp-nip29::caller_supplied_other_group_h_is_refused_the_same_way
   # nmp:evidence=rust:nmp-nip29::draft_kind_and_schema_survive_except_for_appended_h
   # nmp:evidence=rust:nmp-grammar::the_ordinary_builder_accepts_an_h_shaped_tag_with_no_validation
-  # nmp:falsifier=adding an h/context parameter to any group write operation on any of the four surfaces makes check-nip29-operation-catalogue.sh fail; silently overwriting instead of refusing a caller-supplied h makes caller_supplied_own_h_is_refused_before_signing_or_routing and caller_supplied_other_group_h_is_refused_the_same_way return Ok; deriving the appended h from anything other than the group id given at construction makes draft_kind_and_schema_survive_except_for_appended_h see the wrong value. This claim is about the semantic NIP-29 door only, not impossibility throughout the repository -- the_ordinary_builder_accepts_an_h_shaped_tag_with_no_validation is the positive control proving the ordinary EventBuilder escape (nmp-grammar's `tag(Tag)`, #1034's one intentional exact/raw escape) stays exactly as permissive outside a Group as it always was; that test regressing to a refusal would be evidence the door had been widened into the general builder, not narrowed as claimed
+  # nmp:falsifier=adding an h/context parameter to any group write operation on any of the four surfaces makes check-nip29-surfaces.sh fail; silently overwriting instead of refusing a caller-supplied h makes caller_supplied_own_h_is_refused_before_signing_or_routing and caller_supplied_other_group_h_is_refused_the_same_way return Ok; deriving the appended h from anything other than the group id given at construction makes draft_kind_and_schema_survive_except_for_appended_h see the wrong value. This claim is about the semantic NIP-29 door only, not impossibility throughout the repository -- the_ordinary_builder_accepts_an_h_shaped_tag_with_no_validation is the positive control proving the ordinary EventBuilder escape (nmp-grammar's `tag(Tag)`, #1034's one intentional exact/raw escape) stays exactly as permissive outside a Group as it always was; that test regressing to a refusal would be evidence the door had been widened into the general builder, not narrowed as claimed
   @nip29 @must-never
   Scenario: There is no way to set the h tag through the group
     When I inspect the group's write surface

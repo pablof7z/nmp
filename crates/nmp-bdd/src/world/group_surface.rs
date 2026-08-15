@@ -180,9 +180,16 @@ impl NmpWorld {
         }
     }
 
-    /// `When the NIP-29 ownership gate inspects the group publication path` --
-    /// runs the real script, against the real tree.
-    pub fn run_ownership_gate(&mut self) {
+    /// `When the NIP-29 kind-blindness gate inspects the group publication
+    /// path` -- runs the real script, against the real tree.
+    ///
+    /// #1653: this used to run `scripts/check-nip29-ownership.sh`, because
+    /// that script owned the kind-9/chat-schema decoy-name ban this scenario
+    /// exercises. That ban moved to `scripts/check-nip29-kind-blindness.sh`
+    /// (already this feature's own evidence citation for the surrounding
+    /// scenarios), so the probe now runs the script that actually owns the
+    /// claim.
+    pub fn run_kind_blindness_gate(&mut self) {
         self.gate_outcome = Some(run_gate());
     }
 
@@ -190,7 +197,7 @@ impl NmpWorld {
     pub fn gate_outcome(&self) -> (bool, String) {
         self.gate_outcome
             .clone()
-            .expect("nmp-bdd: the ownership gate has not been run")
+            .expect("nmp-bdd: the kind-blindness gate has not been run")
     }
 
     /// What the gate says about the tree RIGHT NOW -- used to prove the
@@ -203,11 +210,12 @@ impl NmpWorld {
     /// tree back. Without this the gate scenario would only prove that a
     /// clean tree passes, which every disabled gate also does.
     ///
-    /// The probe goes ABOVE any test module because the gate's own `awk`
-    /// stops scanning at `#[cfg(test)]` -- a probe below that line would
-    /// prove the opposite of what it claims. It is a bare `.rs` file that no
-    /// `mod` declares, so nothing compiles it; the gate globs the directory,
-    /// which is the surface being tested.
+    /// It is a bare `.rs` file that no `mod` declares, so nothing compiles
+    /// it; the gate globs the directory, which is the surface being tested.
+    /// Unlike the retired `check-nip29-ownership.sh` loop this probe used to
+    /// target, `check-nip29-kind-blindness.sh`'s scan is brace-depth-aware
+    /// rather than truncating at the first `#[cfg(test)]`, so the probe's
+    /// position in the file no longer matters for what it proves.
     pub fn gate_rejects_a_kind_branch(&self) -> (bool, String) {
         let probe = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/nmp-nip29/src/kind_branch_probe.rs");
@@ -219,7 +227,7 @@ impl NmpWorld {
         }
         std::fs::write(
             &probe,
-            "// nmp-bdd negative probe for the NIP-29 ownership gate. Written, \
+            "// nmp-bdd negative probe for the NIP-29 kind-blindness gate. Written, \
              measured and deleted\n// by one step; if you are reading this in a \
              checkout, that step was killed mid-run.\npub fn privileges_chat(kind: \
              nostr::Kind) -> bool {\n    kind == nostr::Kind::from(9)\n}\n",
@@ -230,14 +238,14 @@ impl NmpWorld {
     }
 }
 
-/// `scripts/check-nip29-ownership.sh`, run as CI runs it.
+/// `scripts/check-nip29-kind-blindness.sh`, run as CI runs it.
 fn run_gate() -> (bool, String) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = std::process::Command::new("bash")
-        .arg("scripts/check-nip29-ownership.sh")
+        .arg("scripts/check-nip29-kind-blindness.sh")
         .current_dir(&root)
         .output()
-        .expect("nmp-bdd: the ownership gate must be runnable");
+        .expect("nmp-bdd: the kind-blindness gate must be runnable");
     let mut said = String::from_utf8_lossy(&output.stdout).to_string();
     said.push_str(&String::from_utf8_lossy(&output.stderr));
     (output.status.success(), said)

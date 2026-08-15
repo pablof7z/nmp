@@ -105,26 +105,15 @@ done
 
 # NIP-29 may preserve a C7 `q` row, but it may not define kind:9,
 # chat replies, mention materialization, notification p rows, or a fixed
-# content-kind catalog.
+# content-kind catalog. #1653 moved the enforcement of this paragraph to
+# `scripts/check-nip29-kind-blindness.sh`'s `check_no_owned_decoy_names`:
+# this script's own version of the ban truncated its scan at the file's
+# FIRST `#[cfg(test)]` marker via a plain `awk .../{exit}`, so a real item
+# placed after that marker in a file with fixtures near its top (like
+# `context.rs`) was invisible to it. kind-blindness.sh's brace-depth-aware
+# scanner does not have that hole, and NIP-29's own kind ownership already
+# belongs there by subject.
 #
-# NIP-29's OWN kinds (9000-9022 join/leave/moderation) are this crate's, per
-# #989, so the kind ban is exact rather than prefix-shaped: `Kind::from(9)`
-# is refused while `Kind::from(JOIN_REQUEST)` at 9021 is allowed. Because a
-# named constant would otherwise launder kind 9 past an exact match, a
-# constant bound to 9 (`= 9;`) is refused too. Prefer adding a kind here only
-# when NIP-29 itself defines it.
-for source in crates/nmp-nip29/src/*.rs; do
-  found=$(
-    awk '/^#\[cfg\(test\)\]/{exit} {print}' "$source" |
-      grep -nE 'CHAT_KIND|Kind::from\(9\)|=[[:space:]]*9;|compose_chat|GroupReply|recipient_pubkeys|group_content_demand|\[9[^0-9]+30315\]' ||
-      true
-  )
-  if [[ -n $found ]]; then
-    printf '%s:%s\n' "$source" "$found"
-    fail "NIP-29 re-acquired chat/content-schema ownership it does not have"
-  fi
-done
-
 # `previous` may appear only as a reserved authority that contextualization
 # rejects. No tuple/window constructor or tag emitter may exist.
 if grep -nE 'GroupTimelineEvidence|PREVIOUS_MAX|from_events|Tag::parse\(\["previous"' \
