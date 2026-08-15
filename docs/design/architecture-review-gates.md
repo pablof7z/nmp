@@ -2,12 +2,11 @@
 
 - **Status:** active PR-review checklist (gates 1-4). Gate 5's invariant is
   real — an app on one platform must not silently lose an operation the other
-  two have — but it currently has no mechanical check. Its previous check,
-  `scripts/check-sdk-parity.sh`, compared lowercase word bags over whole
-  files including comments and string literals, and still passed with the
-  Swift SDK reduced to a single comment-only file (#1637). It was deleted
-  rather than left green; the replacement is tracked in #1637 and not yet
-  built.
+  two have — but it currently has no mechanical check. Its previous
+  SDK-parity check script compared lowercase word bags over whole files
+  including comments and string literals, and still passed with the Swift
+  SDK reduced to a single comment-only file (#1637). It was deleted rather
+  than left green; the replacement is tracked in #1637 and not yet built.
 - **Origin:** issue #496, written after the #485 architectural sweep. History\*
   (issue #474/#484) was a parallel-noun modeling error caught by a manual
   architectural read before merge. `Engine::reset_persistent_store` (issue
@@ -205,7 +204,7 @@ NIP-02 following surface shipped fully for Swift (`Packages/NMP/Sources/NMP/Foll
 existed — silently breaking the claimed Rust/UniFFI/Swift/Kotlin parity for
 the largest single instance of this class the #485 sweep found.
 
-**Mechanical check — deleted (#1637).** `scripts/check-sdk-parity.sh`
+**Mechanical check — deleted (#1637).** The former SDK-parity check script
 tokenized the lowercase concept-words of every `#[uniffi::export]`ed
 function/method and every `uniffi::Object`/`Enum`/`Record`/`Error`-derived
 type in `crates/nmp-ffi/src/*.rs`, and diffed that word set against the
@@ -226,16 +225,15 @@ Mutation testing on a scratch copy of master found it had no falsifier:
 - adding back **one** 1,251-byte file containing two comment lines and zero
   Swift declarations, listing those 161 words → **passed**
 
-Its allowlist, `scripts/check-sdk-parity-allowlist.toml`, stayed empty of
-entries for the entire time the check existed. That read as "no exceptions
-needed"; it actually meant the check was never strong enough to produce a
-failure worth allowlisting.
+Its allowlist file stayed empty of entries for the entire time the check
+existed. That read as "no exceptions needed"; it actually meant the check
+was never strong enough to produce a failure worth allowlisting.
 
 A check that passes while its invariant is violated is a false assurance —
 green gets read as evidence by everyone except the person who found the
-mutation. Both files, and the `sdk-parity` job that ran the script in
-`.github/workflows/architecture-gates.yml`, were deleted in the same change
-(#1637) rather than left green.
+mutation. Both files, and the `sdk-parity` CI job that ran the script, were
+deleted in the same change (#1637) rather than left green. That whole
+workflow is since gone along with the rest of the CI-era tooling.
 
 **Historical backtest (of the deleted script).** Before it was deleted, the
 script *was* backtested against real history: at the commit before the #493
@@ -252,6 +250,6 @@ each SDK must conform to, so a missing `unfollow` is a compile error, not a
 substring search. Until that exists, gate 5 is enforced only by the by-eye
 read described in "How to use this checklist" above.
 
-**CI wiring.** None. The `sdk-parity` job was removed from
-`.github/workflows/architecture-gates.yml` in the same change that deleted
-the script (#1637).
+**CI wiring.** None. The `sdk-parity` job and the workflow that ran it were
+removed in the same change that deleted the script (#1637); there is no CI
+of any kind now.

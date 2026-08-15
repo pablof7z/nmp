@@ -8,13 +8,12 @@ Feature: Every NIP-29 operation crosses one typed group door
   no forwarding wrapper. Every distinction below is now proved against that
   final facade.
 
-  `scripts/check-nip29-ownership.sh` proves the door's STRUCTURE (the
-  banned pre-#1033 spellings stay gone, the `RelayScope`/`Group` shape is
-  present, the two #1033 routing/source-stamping falsifiers exist).
-  `scripts/check-nip29-surfaces.sh` proves the exhaustive
-  nine-name operation catalogue and its exact per-surface parameter shape.
-  This feature proves BEHAVIOUR: what an app can actually observe happen
-  (or not happen) when it uses the door.
+  The door's STRUCTURE (the banned pre-#1033 spellings stay gone, the
+  `RelayScope`/`Group` shape is present) and the exhaustive nine-name
+  operation catalogue with its exact per-surface parameter shape currently
+  have no mechanical check proving them; both were previously proved by
+  scripts that are now deleted. This feature proves BEHAVIOUR: what an app
+  can actually observe happen (or not happen) when it uses the door.
 
   The legacy `features/groups/*.feature` fixture is retired for the eight
   distinctions this file now carries as `built` -- equal-or-stronger
@@ -100,8 +99,6 @@ Feature: Every NIP-29 operation crosses one typed group door
 
   # nmp:id=PROTOCOL-NIP29OPERATIONS-012
   # nmp:status=built
-  # nmp:evidence=script:repository::scripts/check-nip29-surfaces.sh
-  # nmp:falsifier=Performed: adding a `kind: nostr::Kind` parameter to `Group::join_request` in `crates/nmp/src/nip29/group.rs` makes the script fail with "named operation `join_request` takes a raw kind, tag, relay or route parameter"; reverting restores the `ok` exit.
   @nip29
   Scenario: Every named operation takes semantic fields and a retained group capability, never a raw kind, tag, relay or route
     When I inspect the compiled Rust, Swift and Kotlin group operation surface
@@ -112,8 +109,6 @@ Feature: Every NIP-29 operation crosses one typed group door
 
   # nmp:id=PROTOCOL-NIP29OPERATIONS-013
   # nmp:status=built
-  # nmp:evidence=script:repository::scripts/check-nip29-surfaces.sh
-  # nmp:falsifier=Performed: adding a decoy `sendReaction(engine:authorPubkeyHex:emoji:)` method to `Packages/NMP/Sources/NMP/NIP29.swift`'s `NMPGroup` makes the script fail ("named-operation catalogue is not exactly the nine modeled operations"); reverting restores the `ok` exit.
   @nip29
   Scenario: Only deliberately modeled NIP-29 operations get named composers, on every surface
     When I inspect the group operation surface across Rust, FFI, Swift and Kotlin

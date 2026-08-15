@@ -15,8 +15,8 @@ Feature: An app says "figure it out" or "these exact relays", and nothing else
 
   The design this file specifies (`docs/internals/routing/auto-and-explicit.md`)
   is built: both words are app-constructible on Rust, the FFI, Swift and
-  Kotlin, and `scripts/check-routing-vocabulary.sh` enumerates every surface
-  to prove there is no third one (#1105). Scenarios still tagged `@designed`
+  Kotlin (#1105), though there is currently no mechanical check across every
+  surface proving there is no third one. Scenarios still tagged `@designed`
   remain acceptance criteria for the parts that are not.
 
   Background:

@@ -585,9 +585,9 @@ mod tests {
     /// caller chose — it can only mean "derive it at send time"; `Explicit`
     /// is the only variant that holds relays, so caller-chosen destinations
     /// have exactly one spelling. Adding a third variant breaks the
-    /// exhaustive match below rather than passing unnoticed. The same
-    /// cardinality is enforced across the FFI, Swift and Kotlin surfaces by
-    /// `scripts/check-routing-vocabulary.sh`.
+    /// exhaustive match below rather than passing unnoticed. Whether the
+    /// same cardinality holds across the FFI, Swift and Kotlin surfaces
+    /// currently has no mechanical check.
     #[test]
     fn routing_is_two_words_and_explicit_is_verbatim() {
         let a = RelayUrl::parse("wss://a.example.com").unwrap();

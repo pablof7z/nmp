@@ -21,9 +21,7 @@
 //
 // `swift build`/`swift test` do NOT work straight after a clean `git clone`
 // -- `nmp_ffiFFI`'s binaryTarget and NMPFFI's generated source must be built
-// once first. See README.md in this directory for the one-command fix
-// (#18); CI proves that exact path on every push via the `swift-package`
-// job in .github/workflows/ci.yml.
+// once first. See README.md in this directory for the one-command fix (#18).
 import PackageDescription
 
 let package = Package(

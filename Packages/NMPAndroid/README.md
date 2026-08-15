@@ -25,10 +25,9 @@ The catalog-pinned side-by-side NDK under the Android SDK is authoritative.
 The project template cannot assemble alone after a clean checkout because the
 feature-selected sources and native libraries are deliberate generated inputs.
 
-`.github/workflows/android-emulator.yml` qualifies the generated Maven artifact
-from the consumer fixture's committed core-only `.nmp.toml` as an external
-API-35 application. It exercises `NMPEngine` construction, a controlled live
-observation, scoped failure/recovery, structured cancellation, fresh-process
-app-private-store reopen, deterministic close, wrong-ABI refusal, and bounded
-64-collector performance; it never uses generated bindings or an app-owned
-relay socket.
+The consumer fixture's committed core-only `.nmp.toml` treats the generated
+Maven artifact as an external API-35 application would: constructing
+`NMPEngine`, a controlled live observation, scoped failure/recovery,
+structured cancellation, fresh-process app-private-store reopen, deterministic
+close, wrong-ABI refusal, and bounded 64-collector performance -- never using
+generated bindings or an app-owned relay socket.

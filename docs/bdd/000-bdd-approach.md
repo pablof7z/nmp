@@ -86,41 +86,15 @@ Canonical English lives only under `features/<behavioral-domain>/`. Executable
 proof stays with the narrow contract owner and is connected by metadata; crate
 structure never owns or duplicates the English specification.
 
-`tools/behavior-traceability` parses every feature through the Gherkin 0.14 AST.
-It uses AST hierarchy, positions, and spans for Feature/Rule/Scenario meaning,
-and reads only the adjacent `# nmp:*` comment block from source. Indentation and
-whitespace after `#` do not change that lexical boundary; the transitional
-runner uses the same conservative whole-file sentinel. It validates
-status, evidence, issues, inherited tags, and explicit base/head diffs without
-depending on `nmp-bdd`, so governance survives that runner's retirement.
-The checker is a detached Cargo workspace with its own lockfile and explicit
-targets. CI builds it from a neutral temporary directory and Cargo home; root
-workspace dependencies and repository Cargo configuration cannot enter its
-executable graph. A protected credentialed step resolves only the exact
-deduplicated issue-number/state snapshot, then the head-built checker runs
-without a GitHub token. Live issue numbers and states are never mirrored in
-checker source or unit-test fixtures: unit tests use synthetic snapshots, while
-only the credential-free injected CI snapshot validates the canonical corpus.
-Rust locators do not trust source-file syntax. After that credential boundary,
-the checker runs pinned Cargo metadata and `cargo test --no-run` from a neutral
-directory with isolated Cargo home/target state, exact workspace package IDs,
-bounded process groups, and bounded output. It accepts only unique,
-non-ignored names reported by normal libtest harnesses; dead or feature-gated
-files, other packages, custom harnesses, failed builds/lists, and ambiguous
-names cannot become evidence. Build scripts, proc macros, and harness
-initialization therefore run only inside this credential-free bounded phase.
-Executable evidence maps only to a closed proof-step grammar: one whole `run`
-command on a known hosted-runner family, under the runner's ordinary Bash, that
-names its proof tool directly — `cargo`, `swift`, the repository-owned Gradle
-wrapper, or the exact repository script path. Setup steps, wrappers, shell
-control flow, environment prefixes, substitutions, backgrounding, and any
-trailing command are not proof: the proof must be the terminal command in its
-shell context, and a step that disables errexit or follows the proof with
-anything else is rejected. A non-Bash `shell:` carries no lane claim at all.
-
-This grammar decides *whether a required lane runs the named proof*. Workflow
-integrity is reviewed and tested like other repository code; there is no
-separate protected-path or owner-status authorization system.
+The `nmp:*` governance metadata described below (stable id, status, ordered
+evidence, falsifier/issue) was previously validated mechanically by a
+detached AST-based checker crate wired into CI that parsed every feature
+through the Gherkin 0.14 AST and cross-checked evidence against real
+Rust/Swift/Kotlin test names and live issue state. That crate and the CI
+workflows that ran it are deleted along with the rest of the CI-era tooling;
+there is no CI and nothing mechanically validates this metadata anymore. The
+convention remains the intended authoring discipline, but until a
+replacement mechanism exists it is enforced only by review, not by a checker.
 
 ```text
 features/
@@ -140,14 +114,11 @@ crates/nmp-bdd/
   src/steps/{given,when}.rs
   src/steps/then/  # {feed,receipts,routing,wire,budget}.rs
   tests/bdd.rs
-tools/behavior-traceability/
-  Cargo.lock        # detached checker dependency closure
-  src/              # AST, metadata, locators, issue state, explicit git diff
 ```
 
-Every file in `crates/nmp-bdd` stays under 600 lines
-(`scripts/check-bdd-file-length.sh`); each module's own doc comment says what
-it owns and why that is the boundary.
+Every file in `crates/nmp-bdd` is meant to stay under 600 lines; each module's
+own doc comment says what it owns and why that is the boundary. This is
+currently unenforced by any script.
 
 Every governed scenario has:
 
@@ -175,7 +146,7 @@ The `nmp` acceptance target under `crates/nmp/tests/acceptance/` is the one
 deterministic public-facade Cucumber runner. It loads selected canonical
 `features/<domain>/` files directly, constructs `Engine::new`, and uses
 independent scripted-relay witnesses; no `.feature` copy lives beside the
-test. CI runs it in the distinct `facade-acceptance` job.
+test. There is no CI; it is run manually.
 
 ## 5. Current executable scope
 

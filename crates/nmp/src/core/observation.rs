@@ -7,6 +7,7 @@ use nostr::{RelayUrl, Timestamp};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use super::coordinate_coverage::RequestReturnEvidence;
 use super::{
     AttributionSendId, Effect, EngineCore, LocalSendRefusal, RequestAttemptId,
     RequestAttemptPurpose, RequestAttemptState, RequestHandoffOutcome, RequestSend,
@@ -190,6 +191,11 @@ pub(super) struct LiveWireRequest {
     pub(super) evidence_sub_id: SubId,
     pub(super) handle: TransportRelayHandle,
     pub(super) stored_events: StoredEvents,
+    /// What this relay actually returned under this request, for the
+    /// replaceable-coordinate reuse check (#1630). Created with the request
+    /// and dropped with it; a replacement REQ reusing this key starts a
+    /// fresh one, and nothing here is ever persisted.
+    pub(super) returns: RequestReturnEvidence,
 }
 
 /// Which half of NIP-01's REQ lifecycle the wire request under one
@@ -506,6 +512,7 @@ impl EngineCore {
                             request_revision: request.request_revision,
                             committed_interval: None,
                         },
+                        returns: RequestReturnEvidence::default(),
                     },
                 );
                 self.active_request_revisions_by_sub

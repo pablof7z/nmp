@@ -8,7 +8,6 @@ The regression runs as part of the ordinary workspace test lane:
 ```sh
 cargo test --workspace                        # includes this regression
 cargo test -p fjall-journal-fault-harness     # just this regression
-./scripts/check-fjall-journal-fault.sh        # plus fmt/clippy for the detached probes
 ```
 
 Tracks #818, under #701 and storage epic #698.
@@ -57,8 +56,8 @@ pinned releases stay detached and are built and run as child processes. No Fjall
 version enters NMP's production or default feature graph.
 
 Because the probe packages are detached, the repo-wide `cargo fmt --all` and
-`cargo clippy --workspace` never see them; `scripts/check-fjall-journal-fault.sh`
-lints them.
+`cargo clippy --workspace` never see them; they must be formatted and linted
+directly, from within each `v3_1_*` package, when changed.
 
 One consequence worth stating: the root lockfile carries Fjall 3.1.6 only.
 Fjall/`lsm-tree` 3.1.7 and 3.1.8 are resolved by the child `cargo build --locked`
