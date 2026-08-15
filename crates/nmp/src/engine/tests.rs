@@ -5,8 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
 use super::*;
+use crate::core::{Effect, EngineCore, EngineMsg};
 use crate::publish_queue::{NotSentReason, SigningState, WriteFact, WriteOutcome};
 use crate::{Row, RowDelta, RowSignature};
+use nmp_store::RelayObserved;
 use nostr::{Keys, Tag};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2460,6 +2462,33 @@ fn repeated_materializations_do_not_change_the_process_thread_count() {
 }
 
 #[test]
+fn duplicate_replaceable_capability_refuses_before_store_open() {
+    let fixture = tempfile::tempdir().expect("temporary directory");
+    let path = fixture.path().join("duplicate-capability.redb");
+    let config = EngineConfig {
+        store_path: Some(path.to_string_lossy().into_owned()),
+        ..EngineConfig::default()
+    };
+    let capabilities = vec![
+        crate::ReplaceableMaterializerSpec::new([85; 16], [86; 16], AddPeopleMaterializer),
+        crate::ReplaceableMaterializerSpec::new([85; 16], [86; 16], AddPeopleMaterializer),
+    ];
+
+    let error = Engine::new_with_capabilities(config, capabilities)
+        .err()
+        .expect("duplicate capability identity must refuse construction");
+    let EngineError::DuplicateReplaceableCapability { program, format } = error else {
+        panic!("duplicate capability returned the wrong construction error")
+    };
+    assert_eq!(program, [85; 16]);
+    assert_eq!(format, [86; 16]);
+    assert!(
+        !path.exists(),
+        "duplicate capability refusal must happen before store custody"
+    );
+}
+
+#[test]
 #[ignore = "ran only by the outer census test in an isolated child process"]
 fn repeated_materializations_do_not_change_the_process_thread_count_inner() {
     let spec = crate::ReplaceableMaterializerSpec::new([83; 16], [84; 16], AddPeopleMaterializer);
@@ -2505,6 +2534,58 @@ fn repeated_materializations_do_not_change_the_process_thread_count_inner() {
             destination,
         ))
         .expect("second follow enters custody");
+
+    let relay = RelayUrl::parse("wss://thread-census-source.example").unwrap();
+    let source_author = Keys::generate();
+    let base = nostr::EventBuilder::new(Kind::ContactList, "base")
+        .custom_created_at(Timestamp::from(10))
+        .sign_with_keys(&source_author)
+        .expect("base source signs");
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    store
+        .insert(
+            base.clone(),
+            RelayObserved::new(relay.clone(), Timestamp::from(10)),
+        )
+        .expect("base source is stored");
+    let transaction_probe =
+        nmp_store::testing::arm_materializer_entry_transaction_probe(&mut store, 2);
+    let mut core = EngineCore::new(store, 4);
+    core.install_replaceable_materializers(vec![crate::ReplaceableMaterializerSpec::new(
+        [87; 16],
+        [88; 16],
+        AddPeopleMaterializer,
+    )]);
+    core.handle(EngineMsg::SetActivePubkey(Some(source_author.public_key())));
+    let operation = nmp_grammar::ReplaceableOperation::from_registered_parts(
+        [87; 16],
+        [88; 16],
+        UnsignedEvent::from(base.clone()),
+        UnsignedEvent::from(base),
+        nmp_grammar::ReplaceableSourcePolicy::Continuing,
+        Keys::generate().public_key().to_bytes().to_vec(),
+    )
+    .expect("successor fixture operation is valid");
+    assert!(core
+        .handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(operation),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        }))
+        .iter()
+        .any(|effect| matches!(effect, Effect::WriteAccepted(..))));
+    let successor = nostr::EventBuilder::new(Kind::ContactList, "newer source")
+        .custom_created_at(Timestamp::from(20))
+        .sign_with_keys(&source_author)
+        .expect("successor source signs");
+    let mut successor_effects = Vec::new();
+    core.ingest_relay_events(
+        vec![(successor, RelayObserved::new(relay, Timestamp::from(20)))],
+        &mut successor_effects,
+    );
+    transaction_probe.assert_exhausted();
+
     let after = crate::nmp_threads_spawned();
     assert_eq!(
         before, after,

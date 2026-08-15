@@ -67,6 +67,7 @@ Feature: A replaceable edit says which version it replaces, and is checked again
   # nmp:id=WRITES-REPLACEABLE-EDIT-024
   # nmp:status=built
   # nmp:evidence=rust:nmp::repeated_materializations_do_not_change_the_process_thread_count
+  # nmp:evidence=script:repository::scripts/check-no-detached-materializer.sh
   # nmp:falsifier=Restore one OS thread per materialization; the process thread census grows after repeated follow and successor work.
   @acceptance
   Scenario: A trusted capability edit runs without starting another thread

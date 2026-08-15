@@ -9,10 +9,10 @@
 # registration, no per-call OS-thread spawn, no panic translation, no
 # completion command/id/pending maps, and no blocked-callback liveness test.
 #
-# A behavioral thread-census test cannot use the process-wide monotonic
-# counter under parallel test execution (other engines' construction inflates
-# it between samples), so this static census is the deterministic falsifier.
-# Restoring any of these production paths fails this script.
+# The behavioral thread-census test runs in an isolated child process and
+# drives both initial and source-successor materialization. This census is its
+# structural companion: restoring any deleted lifecycle spelling fails here
+# even before behavior is exercised.
 #
 # Usage:
 #   scripts/check-no-detached-materializer.sh
@@ -34,9 +34,8 @@ ROOT="$SCRIPT_DIR/.."
 . "$ROOT/scripts/lib/require-commands.sh"
 require_commands grep rm
 
-# Production source only: the nmp crate core/runtime/engine and the FFI facade.
-# Tests, fixtures, and this script itself are excluded so the gate measures the
-# shipped shape, not its falsifiers.
+# Crate source roots. Inline test modules are scanned too; none should preserve
+# the deleted plugin vocabulary as a second test-only architecture.
 PRODUCTION=(
     "$ROOT/crates/nmp/src"
     "$ROOT/crates/nmp-ffi/src"
@@ -52,6 +51,11 @@ PATTERNS=(
     'ReplaceableMaterializationCompleted'
     'StartReplaceableSuccessor'
     'CompleteReplaceableSuccessor'
+    'PreparedReplaceableSuccessor'
+    'ReplaceableSuccessorContinuation'
+    'MaterializeReplaceableSuccessor'
+    'complete_replaceable_successor_materialization'
+    'semantic_successor_requests'
     # Per-call OS-thread spawn path and its thread name.
     'spawn_replaceable_materialization'
     'nmp-replaceable-materializer'

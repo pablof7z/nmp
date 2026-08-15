@@ -11,19 +11,6 @@ pub(crate) struct PreparedReplaceableMaterialization {
     pub(crate) continuation: ReplaceableMaterializationContinuation,
 }
 
-pub struct PreparedReplaceableSuccessor {
-    pub(crate) call: ReplaceableMaterializationCall,
-    pub(crate) continuation: ReplaceableSuccessorContinuation,
-}
-
-impl std::fmt::Debug for PreparedReplaceableSuccessor {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PreparedReplaceableSuccessor")
-            .finish_non_exhaustive()
-    }
-}
-
 pub(crate) struct ReplaceableMaterializationCall {
     materializer: Arc<dyn crate::ReplaceableMaterializer>,
     input: ReplaceableMaterializationInput,
@@ -60,17 +47,11 @@ pub(crate) struct ReplaceableMaterializationContinuation {
     canonical_source_id: Option<EventId>,
 }
 
-pub(crate) struct ReplaceableSuccessorContinuation {
+pub(super) struct ReplaceableSuccessorInput {
     pub(super) program: ReplayProgramId,
     pub(super) format: ReplayFormatId,
-    pub(super) materializer: Arc<dyn crate::ReplaceableMaterializer>,
     pub(super) coordinate: Coordinate,
-    pub(super) fence: ReplaceableMaterializationFence,
     pub(super) observation: AttributedRelayObservation,
-    pub(super) source_request: Option<(
-        super::super::semantic_sources::SemanticSourceRequestKey,
-        super::super::semantic_sources::OwnedSemanticSourceRequest,
-    )>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -120,6 +101,11 @@ impl ReplaceableMaterializationCall {
 }
 
 impl EngineCore {
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub(crate) fn assert_materializer_entry_has_no_open_transaction(&mut self) {
+        nmp_store::testing::assert_materializer_entry_has_no_open_transaction(&mut self.store);
+    }
+
     pub(super) fn prepare_body_complete_replaceable_operation(
         &mut self,
         operation: nmp_grammar::ReplaceableOperation,

@@ -18,6 +18,7 @@ use nmp::{
     WriteRouting,
 };
 use nmp_signer::PendingSignerSender;
+use nmp_store::{InsertOutcome, RedbStore, RelayObserved};
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::nips::nip01::Coordinate;
 use nostr::{EventBuilder, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
@@ -457,6 +458,24 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
     drop(engine);
     source.disconnect().await;
 
+    let relay_source = contact_list(
+        &author,
+        Timestamp::now().as_secs().saturating_add(5),
+        "relay-owned fields survive",
+        &[bob],
+    );
+    let mut closed_store = RedbStore::open(&store_path).expect("closed store reopens for input");
+    assert!(matches!(
+        closed_store
+            .insert(
+                relay_source.clone(),
+                RelayObserved::new(source_url.clone(), Timestamp::now()),
+            )
+            .expect("newer source is durably observed while the engine is closed"),
+        InsertOutcome::Superseded { .. }
+    ));
+    drop(closed_store);
+
     let reopened = Engine::new_with_capabilities(
         config(),
         vec![
@@ -491,38 +510,27 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
         )
         .expect("reopened source observation attaches");
     let mut reopened_rows = BTreeMap::new();
-    let recovered_initial = wait_for_row(&reopened_subscription, &mut reopened_rows, |row| {
-        row.id() == current.id()
-    });
-    assert!(row_contains_person(&recovered_initial, alice));
-    assert!(row_contains_person(&recovered_initial, carol));
-    assert_eq!(
-        default_calls.load(Ordering::SeqCst),
-        2,
-        "restart reconstructs the durable generation without rerunning the default builder"
-    );
-    source = ScriptedRelay::start_on_port(source_port, &RelayConfig::default()).await;
-    assert_eq!(source.url, source_url);
-    let relay_source = contact_list(
-        &author,
-        Timestamp::now().as_secs().saturating_add(5),
-        "relay-owned fields survive",
-        &[bob],
-    );
-    source.seed_signed_event(&relay_source).await;
-    assert!(
-        source.wait_contacted(SETTLE).await,
-        "the reopened finite source request reaches the rebound relay"
-    );
     let successor = wait_for_row(&reopened_subscription, &mut reopened_rows, |row| {
         row.content() == "relay-owned fields survive"
             && row_contains_person(row, alice)
             && row_contains_person(row, bob)
             && row_contains_person(row, carol)
     });
-    assert_eq!(default_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        default_calls.load(Ordering::SeqCst),
+        2,
+        "boot uses the durable source without rerunning the default builder"
+    );
     assert_ne!(successor.id(), initial.id());
     assert_ne!(successor.id(), current.id());
+    source = ScriptedRelay::start_on_port(source_port, &RelayConfig::default()).await;
+    assert_eq!(source.url, source_url);
+    source.seed_signed_event(&relay_source).await;
+    assert!(
+        source.wait_contacted(SETTLE).await,
+        "the reopened finite source request reaches the rebound relay"
+    );
+    assert_eq!(default_calls.load(Ordering::SeqCst), 2);
     assert!(
         destination
             .wait_wire_event_id_count(&successor.id().to_hex(), 1, SETTLE)
