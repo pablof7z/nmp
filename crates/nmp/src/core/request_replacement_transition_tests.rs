@@ -363,7 +363,7 @@ fn withdrawing_a_refused_nip77_successor_retires_its_predecessor_and_every_trans
             attempt_id: successor_attempt,
             cause: LocalSendRefusal::SessionUnavailable,
         });
-    assert_eq!(fixture.core.pending_request_retries.len(), 1);
+    assert_eq!(fixture.core.attempts.counts().retry_jobs, 1);
     assert_eq!(fixture.core.pending_request_replacements.len(), 1);
     assert!(!fixture
         .core

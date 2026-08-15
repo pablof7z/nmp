@@ -447,9 +447,7 @@ pub use observation::{
 };
 pub use query::Nip77Frame;
 pub use request_attempt::{LocalSendRefusal, RequestAttemptId, RequestHandoffOutcome};
-use request_attempt::{
-    PendingRequestRetry, RequestAttemptPurpose, RequestAttemptState, RequestRetryKey, RequestSend,
-};
+use request_attempt::{RequestAttemptPurpose, RequestAttemptState, RequestAttempts, RequestSend};
 pub use request_effects::{AttemptedReplay, AttemptedWireDelta};
 // `runtime` (C) needs the EXACT same wire subscription-id string
 // `attribution.rs` records at send time (`AttributionState::record_send`) so
@@ -2256,13 +2254,11 @@ pub struct EngineCore {
     next_history_id: u64,
     attribution: AttributionState,
     pending_request_evidence: HashMap<(RelaySessionKey, SubId), VecDeque<PendingRequestEvidence>>,
-    request_attempts: HashMap<RequestAttemptId, RequestAttemptState>,
-    request_attempts_by_sub: HashMap<SubId, BTreeSet<RequestAttemptId>>,
-    request_attempts_by_session: HashMap<RelaySessionKey, BTreeSet<RequestAttemptId>>,
-    next_request_attempt: Option<u64>,
-    pending_request_retries: BTreeMap<RequestRetryKey, PendingRequestRetry>,
-    request_retry_by_sub: HashMap<SubId, RequestRetryKey>,
-    request_retries_by_session: HashMap<RelaySessionKey, BTreeSet<RequestRetryKey>>,
+    /// Every local request-send attempt and the retries parked behind them
+    /// (#1606 step 1). Its maps are private to `request_attempt.rs`, so the
+    /// reverse-index invariants are enforced by the compiler rather than by
+    /// every caller remembering them.
+    attempts: RequestAttempts,
     pending_request_replacements: BTreeMap<SubId, nmp_router::RequestReplacement>,
     request_replacements_by_session: HashMap<RelaySessionKey, BTreeSet<SubId>>,
     active_request_evidence: HashMap<u64, ActiveRequestEvidence>,
@@ -2706,13 +2702,7 @@ impl EngineCore {
             next_history_id: 1,
             attribution: AttributionState::new(),
             pending_request_evidence: HashMap::new(),
-            request_attempts: HashMap::new(),
-            request_attempts_by_sub: HashMap::new(),
-            request_attempts_by_session: HashMap::new(),
-            next_request_attempt: Some(0),
-            pending_request_retries: BTreeMap::new(),
-            request_retry_by_sub: HashMap::new(),
-            request_retries_by_session: HashMap::new(),
+            attempts: RequestAttempts::new(),
             pending_request_replacements: BTreeMap::new(),
             request_replacements_by_session: HashMap::new(),
             active_request_evidence: HashMap::new(),
@@ -2969,6 +2959,7 @@ impl EngineCore {
             attribution_inflight_shape_refs,
         ) = self.attribution.ownership_census();
         let router = self.router.ownership_census();
+        let attempts = self.attempts.counts();
         CoreOwnershipCensus {
             observations: self.observations.len(),
             branch_handles: self.handles.len(),
@@ -3077,27 +3068,15 @@ impl EngineCore {
                 .values()
                 .map(VecDeque::len)
                 .sum(),
-            request_attempts: self.request_attempts.len(),
-            request_attempt_sub_keys: self.request_attempts_by_sub.len(),
-            request_attempt_sub_edges: self
-                .request_attempts_by_sub
-                .values()
-                .map(BTreeSet::len)
-                .sum(),
-            request_attempt_session_keys: self.request_attempts_by_session.len(),
-            request_attempt_session_edges: self
-                .request_attempts_by_session
-                .values()
-                .map(BTreeSet::len)
-                .sum(),
-            request_retry_jobs: self.pending_request_retries.len(),
-            request_retry_sub_keys: self.request_retry_by_sub.len(),
-            request_retry_session_keys: self.request_retries_by_session.len(),
-            request_retry_session_edges: self
-                .request_retries_by_session
-                .values()
-                .map(BTreeSet::len)
-                .sum(),
+            request_attempts: attempts.attempts,
+            request_attempt_sub_keys: attempts.sub_keys,
+            request_attempt_sub_edges: attempts.sub_edges,
+            request_attempt_session_keys: attempts.session_keys,
+            request_attempt_session_edges: attempts.session_edges,
+            request_retry_jobs: attempts.retry_jobs,
+            request_retry_sub_keys: attempts.retry_sub_keys,
+            request_retry_session_keys: attempts.retry_session_keys,
+            request_retry_session_edges: attempts.retry_session_edges,
             request_replacement_jobs: self.pending_request_replacements.len(),
             request_replacement_session_keys: self.request_replacements_by_session.len(),
             request_replacement_session_edges: self
@@ -3652,11 +3631,7 @@ impl EngineCore {
             .values()
             .map(|pending| pending.due)
             .min();
-        let request_retry = self
-            .pending_request_retries
-            .values()
-            .map(|pending| pending.due)
-            .min();
+        let request_retry = self.attempts.next_retry_due();
         Ok([
             expiry,
             neg_liveness,

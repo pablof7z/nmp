@@ -969,7 +969,7 @@ impl EngineCore {
             && advertises_nip77 != Some(false)
         {
             if let Some(probe) = self.prober.begin_probe(&url) {
-                let attempt_id = self.mint_request_attempt(RequestAttemptState {
+                let attempt_id = self.attempts.mint(RequestAttemptState {
                     session: public_session,
                     sub_id: probe.sub_id.clone(),
                     filter_hash: probe.filter.hash(),

@@ -377,11 +377,9 @@ impl EngineCore {
                 }
             }
         }
-        for retry in self.pending_request_retries.values() {
-            if &retry.attempt.session == session
-                && coordinate_request_shape(&retry.attempt.filter, coordinate) == Some(shape)
-            {
-                found = min_sub_id(found, &retry.attempt.sub_id);
+        for attempt in self.attempts.retried_attempts_for_session(session) {
+            if coordinate_request_shape(&attempt.filter, coordinate) == Some(shape) {
+                found = min_sub_id(found, &attempt.sub_id);
             }
         }
         found
