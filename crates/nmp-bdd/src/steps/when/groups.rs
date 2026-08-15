@@ -243,8 +243,3 @@ async fn observe_all_staged_filters(w: &mut NmpWorld) {
 async fn inspect_group_surface(w: &mut NmpWorld, which: String) {
     w.inspect_group_surface(&which);
 }
-
-#[when(regex = r#"^the NIP-29 kind-blindness gate inspects the group publication path$"#)]
-async fn run_the_kind_blindness_gate(w: &mut NmpWorld) {
-    w.run_kind_blindness_gate();
-}
