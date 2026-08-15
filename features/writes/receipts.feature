@@ -194,7 +194,7 @@ Feature: Publishing tells the truth, per relay
     # nmp:id=WRITES-STORE-RECOVERY-003
     # nmp:status=specified
     # nmp:gap=evidence
-    # nmp:issue=#1495
+    # nmp:issue=#1644
     @ledger-9
     Scenario: A store that cannot be reconstructed never fabricates acceptance
       Given the durable store remains unavailable
