@@ -1442,11 +1442,16 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
             })
         })
         .collect();
+    // #1628: `sign_event.rs` is a reviewed owner, not an incidental third
+    // file. It holds the sign-only lifecycle's whole state, so the two facade
+    // verbs that hand back a registration derived from that state live with
+    // it. A NEW name appearing in this list is the thing to object to.
     assert_eq!(
         handle_impl_owners,
         vec![
             ("mod.rs".to_owned(), 1),
-            ("receipt_stream.rs".to_owned(), 1)
+            ("receipt_stream.rs".to_owned(), 1),
+            ("sign_event.rs".to_owned(), 1)
         ],
         "Handle must have exactly one impl in each reviewed owner and none elsewhere"
     );
