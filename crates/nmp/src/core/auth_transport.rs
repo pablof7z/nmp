@@ -212,7 +212,7 @@ impl EngineCore {
                     phase: AuthSessionPhase::Error,
                 },
             );
-            self.refresh_all_observations(&mut effects);
+            self.refresh_all_observation_evidence(&mut effects);
             return effects;
         };
         if challenge.is_empty() {
@@ -227,7 +227,7 @@ impl EngineCore {
                     phase: AuthSessionPhase::Error,
                 },
             );
-            self.refresh_all_observations(&mut effects);
+            self.refresh_all_observation_evidence(&mut effects);
             return effects;
         }
         let Some(token) = self.mint_auth_operation(&epoch) else {
@@ -242,7 +242,7 @@ impl EngineCore {
                     phase: AuthSessionPhase::Error,
                 },
             );
-            self.refresh_all_observations(&mut effects);
+            self.refresh_all_observation_evidence(&mut effects);
             return effects;
         };
         self.auth_sessions.insert(
@@ -263,7 +263,7 @@ impl EngineCore {
             expected_pubkey,
             challenge,
         }));
-        self.refresh_all_observations(&mut effects);
+        self.refresh_all_observation_evidence(&mut effects);
         effects
     }
 
@@ -300,7 +300,7 @@ impl EngineCore {
                 phase: AuthSessionPhase::Denied,
             },
         );
-        self.refresh_all_observations(&mut effects);
+        self.refresh_all_observation_evidence(&mut effects);
         effects
     }
 
@@ -416,7 +416,7 @@ impl EngineCore {
                         let Some(next) = last.as_secs().checked_add(1) else {
                             state.phase = AuthSessionPhase::Error;
                             self.auth_sessions.insert(session, state);
-                            self.refresh_all_observations(&mut effects);
+                            self.refresh_all_observation_evidence(&mut effects);
                             return effects;
                         };
                         next.max(clock)
@@ -426,13 +426,13 @@ impl EngineCore {
                 let Some(maximum) = clock.checked_add(AUTH_MAX_FUTURE_SECS) else {
                     state.phase = AuthSessionPhase::Error;
                     self.auth_sessions.insert(session, state);
-                    self.refresh_all_observations(&mut effects);
+                    self.refresh_all_observation_evidence(&mut effects);
                     return effects;
                 };
                 if minimum > maximum {
                     state.phase = AuthSessionPhase::Error;
                     self.auth_sessions.insert(session, state);
-                    self.refresh_all_observations(&mut effects);
+                    self.refresh_all_observation_evidence(&mut effects);
                     return effects;
                 }
                 let created_at = Timestamp::from(minimum);
@@ -445,7 +445,7 @@ impl EngineCore {
                 let Some(sign_token) = self.mint_auth_operation(&state.epoch) else {
                     state.phase = AuthSessionPhase::Error;
                     self.auth_sessions.insert(session, state);
-                    self.refresh_all_observations(&mut effects);
+                    self.refresh_all_observation_evidence(&mut effects);
                     return effects;
                 };
                 state.last_created_at = Some(created_at);
@@ -473,7 +473,7 @@ impl EngineCore {
         if let Some((source, reason)) = denial {
             self.deny_write_lanes_for_auth(&session, source, reason, &mut effects);
         }
-        self.refresh_all_observations(&mut effects);
+        self.refresh_all_observation_evidence(&mut effects);
         effects
     }
 
@@ -559,7 +559,7 @@ impl EngineCore {
                 let Some(send_token) = self.mint_auth_operation(&state.epoch) else {
                     state.phase = AuthSessionPhase::Error;
                     self.auth_sessions.insert(session, state);
-                    self.refresh_all_observations(&mut effects);
+                    self.refresh_all_observation_evidence(&mut effects);
                     return effects;
                 };
                 state.phase = AuthSessionPhase::AwaitingSend {
@@ -588,7 +588,7 @@ impl EngineCore {
         if let Some((source, reason)) = denial {
             self.deny_write_lanes_for_auth(&session, source, reason, &mut effects);
         }
-        self.refresh_all_observations(&mut effects);
+        self.refresh_all_observation_evidence(&mut effects);
         effects
     }
 
@@ -674,7 +674,7 @@ impl EngineCore {
             AuthSendOutcome::Unavailable => state.phase = AuthSessionPhase::Error,
         }
         self.auth_sessions.insert(session, state);
-        self.refresh_all_observations(&mut effects);
+        self.refresh_all_observation_evidence(&mut effects);
         effects
     }
 
@@ -703,7 +703,7 @@ impl EngineCore {
                 self.auth_sessions.insert(session, state);
             }
         }
-        self.refresh_all_observations(&mut effects);
+        self.refresh_all_observation_evidence(&mut effects);
         effects
     }
 
@@ -873,8 +873,8 @@ impl EngineCore {
         // (`Connecting` -> `AwaitingRequest`) with no coverage/row change at
         // all. Refresh before dispatch so the accepted callback can only move
         // that fact forward to `Requesting`, never regress it afterward.
-        self.refresh_all_observations(&mut effects);
-        self.refresh_all_histories(&mut effects);
+        self.refresh_all_observation_evidence(&mut effects);
+        self.refresh_all_history_evidence(&mut effects);
         effects.extend(request_dispatch);
         effects.extend(self.wake_relay_lanes(&session, false));
         if open_failure_cleared {
@@ -952,17 +952,17 @@ impl EngineCore {
         // not cost a full recompile -- and this cannot loop, because
         // resolution is driven by connect rather than by planning.
         if self.advertised_planning_limits(&url) != budget_before {
-            self.recompile(&mut effects);
             // A budget that binds REFUSES demand, and the app has to hear
             // that from its own query rather than from a diagnostics screen:
             // the refused atoms are `limited` in the new plan, which
             // `acquisition_evidence` renders as `ShortfallFact::LocalLimit`.
-            // Only a handle/history refresh puts that in front of the
-            // subscriber -- the same pair `on_relay_connected` runs when a
-            // relay coming online changes a handle's evidence with no row
-            // change at all.
-            self.refresh_all_observations(&mut effects);
-            self.refresh_all_histories(&mut effects);
+            // `recompile` already ends with its own full observation/history
+            // sweep (#1646) that picks up exactly that shortfall -- a second
+            // sweep here would just re-walk every live observation and
+            // history a second time over a diff `recompile` already settled,
+            // the same redundant-call shape #1646 deleted from
+            // `on_set_active_pubkey`.
+            self.recompile(&mut effects);
         }
         if self.connected_relays.contains(&public_session)
             && self.router.plan().reqs.contains_key(&public_session)
@@ -1155,8 +1155,8 @@ impl EngineCore {
         }
         // Same reasoning as `on_relay_connected`: a link-status flip alone
         // must become observable via `EmitRows`.
-        self.refresh_all_observations(&mut effects);
-        self.refresh_all_histories(&mut effects);
+        self.refresh_all_observation_evidence(&mut effects);
+        self.refresh_all_history_evidence(&mut effects);
         effects.extend(self.schedule_ready(self.clock));
         effects
     }
@@ -1196,7 +1196,7 @@ impl EngineCore {
                 message,
                 &mut effects,
             );
-            self.refresh_all_observations(&mut effects);
+            self.refresh_all_observation_evidence(&mut effects);
             return effects;
         }
 
@@ -1235,8 +1235,8 @@ impl EngineCore {
             .iter()
             .position(|effect| matches!(effect, Effect::Replay(_, _)))
             .map(|index| effects.remove(index));
-        self.refresh_all_observations(&mut effects);
-        self.refresh_all_histories(&mut effects);
+        self.refresh_all_observation_evidence(&mut effects);
+        self.refresh_all_history_evidence(&mut effects);
         effects.extend(replay);
         effects
     }
