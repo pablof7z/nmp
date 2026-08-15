@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
-use nmp_router::FixtureRoutingFacts;
+use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::RedbStore;
 use nmp_transport::{DisconnectReason, RelayFrame, RelayHandle};
 use nostr::{EventBuilder, EventId, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp};

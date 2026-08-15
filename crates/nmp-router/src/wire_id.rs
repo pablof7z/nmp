@@ -205,7 +205,7 @@ mod tests {
 
     fn token(n: u64) -> SubId {
         SubId::allocate(
-            crate::facts::test_relay(0),
+            nmp_router_testkit::test_relay(0),
             &SourceAuthority::Public,
             AccessContext::Public,
             ConcreteFilter::default().hash(),

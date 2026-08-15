@@ -2,7 +2,7 @@
 
 use super::*;
 use nmp_grammar::{Binding, Demand, Filter};
-use nmp_router::test_relay;
+use nmp_router_testkit::test_relay;
 use nmp_store::RedbStore;
 use nostr::Keys;
 

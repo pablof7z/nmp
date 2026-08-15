@@ -22,9 +22,9 @@ use nmp_grammar::{
     AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, RelaySessionKey, SourceAuthority,
 };
 use nmp_router::{
-    AdvertisedRelayLimits, CompileBudget, DemandKey, FixtureRoutingFacts, RelayUrl, Router,
-    RuleRegistry, WireOp,
+    AdvertisedRelayLimits, CompileBudget, DemandKey, RelayUrl, Router, RuleRegistry, WireOp,
 };
+use nmp_router_testkit::FixtureRoutingFacts;
 
 /// Well clear of anything these fixtures plan: this file is about the
 /// per-relay SUBSCRIPTION budget, never the whole-demand relay ceiling.

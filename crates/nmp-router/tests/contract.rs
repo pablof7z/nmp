@@ -5,10 +5,8 @@ use std::collections::BTreeSet;
 use nmp_grammar::{
     AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey, SourceAuthority,
 };
-use nmp_router::{
-    test_relay, FixtureRoutingFacts, Lane, PublicKey, RouteKind, Router, RuleRegistry,
-    ShortfallReason,
-};
+use nmp_router::{Lane, PublicKey, RouteKind, Router, RuleRegistry, ShortfallReason};
+use nmp_router_testkit::{test_relay, FixtureRoutingFacts};
 use nostr::Keys;
 
 fn author() -> PublicKey {

@@ -49,7 +49,7 @@ use std::time::Duration;
 
 use nmp::mechanism::runtime::EngineThread;
 use nmp_grammar::{AccessContext, Demand, Filter, Freshness, LiveQuery, SourceAuthority};
-use nmp_router::FixtureRoutingFacts;
+use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::RedbStore;
 use nmp_transport::PoolConfig;
 use nostr::RelayUrl;

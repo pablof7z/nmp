@@ -17,7 +17,8 @@
 use std::collections::BTreeSet;
 
 use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
-use nmp_router::{test_relay, FixtureRoutingFacts, PublicKey, RelayUrl, Router, RuleRegistry};
+use nmp_router::{PublicKey, RelayUrl, Router, RuleRegistry};
+use nmp_router_testkit::{test_relay, FixtureRoutingFacts};
 use nostr::{Keys, SecretKey};
 
 const NUM_AUTHORS: usize = 300;

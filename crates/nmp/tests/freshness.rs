@@ -10,7 +10,8 @@ use nmp_grammar::{
     AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness,
     RelaySessionKey, Selector, SourceAuthority,
 };
-use nmp_router::{FixtureRoutingFacts, WireOp};
+use nmp_router::WireOp;
+use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::{CoverageInterval, RedbStore, RelayObserved};
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{Event, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};

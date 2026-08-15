@@ -6,9 +6,9 @@ use nmp_grammar::{
 use nmp_store::coverage_key;
 use nostr::RelayUrl;
 
+use crate::facts::LocalFacts;
 use crate::{
-    AdvertisedRelayLimits, CompileBudget, DemandKey, FixtureRoutingFacts, Router, RuleRegistry,
-    SubId, WireReq,
+    AdvertisedRelayLimits, CompileBudget, DemandKey, Router, RuleRegistry, SubId, WireReq,
 };
 
 fn pinned(relay: &RelayUrl, kind: u16) -> ContextualAtom {
@@ -35,11 +35,10 @@ fn a_new_source_cannot_borrow_freshness_after_the_global_relay_cap_is_full() {
     let candidate = pinned(&candidate_relay, 2);
     let candidate_demand = DemandKey::for_atom(&candidate);
     let mut router = Router::new(RuleRegistry::default_widen_only());
-    router.admit(&BTreeSet::from([incumbent]), &FixtureRoutingFacts::new(), 1);
+    router.admit(&BTreeSet::from([incumbent]), &LocalFacts::new(), 1);
 
     let before = router.ownership_census();
-    let preview =
-        router.preview_admission(&BTreeSet::from([candidate]), &FixtureRoutingFacts::new(), 1);
+    let preview = router.preview_admission(&BTreeSet::from([candidate]), &LocalFacts::new(), 1);
 
     assert_eq!(request_count(&preview), 0);
     assert_eq!(
@@ -54,14 +53,10 @@ fn an_exact_running_request_remains_freshness_eligible_when_the_cap_is_full() {
     let relay = RelayUrl::parse("wss://preview-exact-incumbent.example").unwrap();
     let atom = pinned(&relay, 1);
     let mut router = Router::new(RuleRegistry::default_widen_only());
-    router.admit(
-        &BTreeSet::from([atom.clone()]),
-        &FixtureRoutingFacts::new(),
-        1,
-    );
+    router.admit(&BTreeSet::from([atom.clone()]), &LocalFacts::new(), 1);
 
     let before = router.ownership_census();
-    let preview = router.preview_admission(&BTreeSet::from([atom]), &FixtureRoutingFacts::new(), 1);
+    let preview = router.preview_admission(&BTreeSet::from([atom]), &LocalFacts::new(), 1);
 
     assert_eq!(request_count(&preview), 1);
     assert!(preview.plan.limited_demands.is_empty());
@@ -88,16 +83,13 @@ fn a_new_request_cannot_borrow_freshness_after_the_session_budget_is_full() {
     let mut router = Router::new(RuleRegistry::default_widen_only());
     router.admit(
         &BTreeSet::from([incumbent]),
-        &FixtureRoutingFacts::new(),
+        &LocalFacts::new(),
         budget.clone(),
     );
 
     let before = router.ownership_census();
-    let preview = router.preview_admission(
-        &BTreeSet::from([candidate]),
-        &FixtureRoutingFacts::new(),
-        budget,
-    );
+    let preview =
+        router.preview_admission(&BTreeSet::from([candidate]), &LocalFacts::new(), budget);
 
     assert_eq!(request_count(&preview), 0);
     assert_eq!(
@@ -157,7 +149,7 @@ fn one_preview_never_visits_ten_thousand_unrelated_incumbent_demand_edges() {
     let before = router.ownership_census();
     let preview = router.preview_admission(
         &BTreeSet::from([pinned(&candidate_relay, 20_000)]),
-        &FixtureRoutingFacts::new(),
+        &LocalFacts::new(),
         20,
     );
 

@@ -6,9 +6,9 @@ use nmp_grammar::{
 use nmp_store::coverage_key;
 use nostr::{Keys, RelayUrl};
 
+use crate::facts::LocalFacts;
 use crate::{
-    DemandKey, FixtureRoutingFacts, Lane, RouteKind, RouteProvenance, Router, RuleRegistry, SubId,
-    WireOp, WireReq,
+    DemandKey, Lane, RouteKind, RouteProvenance, Router, RuleRegistry, SubId, WireOp, WireReq,
 };
 use std::time::Instant;
 
@@ -31,11 +31,7 @@ fn exact_metadata_attach_examines_only_candidate_entries_over_ten_thousand_incum
     let one = pinned(&relay, [1]);
     let two = pinned(&relay, [2]);
     let mut router = Router::new(RuleRegistry::default_widen_only());
-    router.admit(
-        &BTreeSet::from([wide.clone()]),
-        &FixtureRoutingFacts::new(),
-        20,
-    );
+    router.admit(&BTreeSet::from([wide.clone()]), &LocalFacts::new(), 20);
 
     let incumbent = router.prev_plan.reqs.values_mut().flatten().next().unwrap();
     for kind in 10_000..20_000 {
@@ -48,7 +44,7 @@ fn exact_metadata_attach_examines_only_candidate_entries_over_ten_thousand_incum
     router.reset_admission_work();
     let outcome = router.admit(
         &BTreeSet::from([one.clone(), two.clone()]),
-        &FixtureRoutingFacts::new(),
+        &LocalFacts::new(),
         20,
     );
     assert!(outcome.wire.ops.is_empty());
@@ -87,14 +83,10 @@ fn withdrawing_one_attached_owner_prunes_only_its_local_request_metadata() {
     let two_claim = coverage_key(&two);
     let mut router = Router::new(RuleRegistry::default_widen_only());
 
-    router.admit(
-        &BTreeSet::from([wide.clone()]),
-        &FixtureRoutingFacts::new(),
-        20,
-    );
+    router.admit(&BTreeSet::from([wide.clone()]), &LocalFacts::new(), 20);
     let attached = router.admit(
         &BTreeSet::from([one.clone(), two.clone()]),
-        &FixtureRoutingFacts::new(),
+        &LocalFacts::new(),
         20,
     );
     assert!(attached.wire.ops.is_empty());
@@ -263,11 +255,7 @@ fn full_compile_probes_only_the_one_surviving_request_out_of_ten_thousand_priors
     let relay = RelayUrl::parse("wss://full-metadata-survivor.example").unwrap();
     let current = pinned(&relay, [1]);
     let mut router = Router::new(RuleRegistry::default_widen_only());
-    router.compile(
-        &BTreeSet::from([current.clone()]),
-        &FixtureRoutingFacts::new(),
-        20,
-    );
+    router.compile(&BTreeSet::from([current.clone()]), &LocalFacts::new(), 20);
 
     for index in 1..10_000 {
         let stale_relay =
@@ -302,11 +290,7 @@ fn full_compile_probes_only_the_one_surviving_request_out_of_ten_thousand_priors
     assert_eq!(router.prev_plan.reqs.len(), 10_000);
 
     router.reset_full_metadata_work();
-    let outcome = router.compile(
-        &BTreeSet::from([current.clone()]),
-        &FixtureRoutingFacts::new(),
-        20,
-    );
+    let outcome = router.compile(&BTreeSet::from([current.clone()]), &LocalFacts::new(), 20);
     assert_eq!(
         outcome
             .wire
@@ -330,11 +314,7 @@ fn full_compile_indexes_only_added_metadata_over_ten_thousand_incumbent_edges() 
     let wide = pinned(&relay, [1, 2]);
     let added = pinned(&relay, [1]);
     let mut router = Router::new(RuleRegistry::default_widen_only());
-    router.compile(
-        &BTreeSet::from([wide.clone()]),
-        &FixtureRoutingFacts::new(),
-        20,
-    );
+    router.compile(&BTreeSet::from([wide.clone()]), &LocalFacts::new(), 20);
 
     let incumbent = router.prev_plan.reqs.values_mut().flatten().next().unwrap();
     for kind in 10_000..20_000 {
@@ -365,7 +345,7 @@ fn full_compile_indexes_only_added_metadata_over_ten_thousand_incumbent_edges() 
     router.reset_full_metadata_work();
     let outcome = router.compile(
         &BTreeSet::from([wide.clone(), added.clone()]),
-        &FixtureRoutingFacts::new(),
+        &LocalFacts::new(),
         20,
     );
     assert!(outcome.wire.ops.is_empty());
