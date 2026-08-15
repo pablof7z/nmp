@@ -37,6 +37,8 @@ mod attribution;
 #[cfg(test)]
 mod auth_core_headless;
 mod auth_transport;
+#[cfg(test)]
+mod auth_transport_tests;
 mod diagnostics;
 mod evidence;
 #[cfg(test)]

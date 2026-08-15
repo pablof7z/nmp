@@ -748,7 +748,9 @@ impl EngineCore {
     /// The current bounded rows remain authoritative unless a prior store
     /// failure marked the projection incomplete, in which case the full
     /// refresh oracle repairs it before evidence is emitted.
-    #[cfg(test)]
+    ///
+    /// #1646: the production door for every AUTH transition, mirroring
+    /// [`Self::refresh_all_observation_evidence`] for history sessions.
     pub(super) fn refresh_all_history_evidence(&mut self, effects: &mut Vec<Effect>) {
         let ids: Vec<_> = self.histories.keys().copied().collect();
         for id in ids {

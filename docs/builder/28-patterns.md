@@ -100,7 +100,10 @@ manually repairing another subscription.
 `Derived` and `SetOp` remain inside the engine's closed graph. Reusable helpers
 return the same printable graph; they do not receive expanded-set callbacks.
 Changing `$currentPubkey` reroots only dependent graphs. Literal multi-account
-queries remain live.
+queries remain live. This describes the resolver's demand graph specifically;
+the row-projection layer that turns that graph into `RowDelta`s currently
+re-derives every open observation and history on each switch, literal
+multi-account queries included (#1646).
 
 ### #12: core has no presentation policy
 

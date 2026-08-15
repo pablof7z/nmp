@@ -197,7 +197,12 @@ prose beyond what their assertions prove.
 ### Query demand and evidence (`#7`, `#11`, `#18`)
 
 - Changing `$currentPubkey` reroots only dependent observations while a literal
-  multi-account query remains live.
+  multi-account query remains live -- true of the resolver's demand graph
+  (`nmp-resolver::Engine::set_active_pubkey`/`run_recompute`), which recomputes
+  only nodes a `changed` propagation actually reaches. The row-projection
+  layer (`EngineCore::on_set_active_pubkey`) is coarser: it still re-derives
+  every open observation and history on each switch, including a literal
+  query's (#1646).
 - Equal selections under different source/AUTH contexts do not borrow evidence.
 - One source at EOSE plus one offline/AUTH-blocked source yields both facts and
   no global completion state.

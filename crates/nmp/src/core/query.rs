@@ -2936,7 +2936,12 @@ impl EngineCore {
     /// Coverage cannot change canonical rows, so a complete projection can
     /// retain its remembered row set and avoid reopening the store's event
     /// indexes. An incomplete projection still falls back to the full oracle.
-    #[cfg(test)]
+    ///
+    /// #1646: the production door for every AUTH transition (challenge,
+    /// policy/signer/send completion, relay connect/disconnect, epoch
+    /// invalidation). Those transitions change session/coverage evidence —
+    /// never canonical rows — so they never need `refresh_all_observations`'s
+    /// full store reopen.
     pub(super) fn refresh_all_observation_evidence(&mut self, effects: &mut Vec<Effect>) {
         let ids: Vec<ObservationId> = self.observations.keys().copied().collect();
         for id in ids {
