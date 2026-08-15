@@ -5,18 +5,23 @@ SCRIPT_PATH=${BASH_SOURCE[0]}
 SCRIPT_DIR=${SCRIPT_PATH%/*}
 [[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
 source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
-require_commands cargo dirname rg || exit 2
+require_commands dirname rg || exit 2
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO"
 
-tree=$(cargo tree -p nmp-content -e normal --prefix none)
-for forbidden in nmp nmp-store nmp-router nmp-resolver nmp-transport; do
-  if rg -q "^${forbidden} v" <<<"$tree"; then
-    echo "error: nmp-content normal dependency tree contains forbidden engine/mechanism crate: $forbidden" >&2
-    exit 1
-  fi
-done
+# The dependency half of this boundary is NOT checked here. `nmp-content` is
+# classified `pure-extension` in `scripts/dependency-direction-policy.json`,
+# a role whose `may_reach` is `generic-value` and `pure-extension` only --
+# so `nmp` (facade) and `nmp-store`/`nmp-router`/`nmp-resolver`/
+# `nmp-transport` (generic-mechanism) are already unreachable, proved by
+# `scripts/check-dependency-direction.py` against the resolved cargo graph
+# and fail-closed on any unclassified package. A second `cargo tree` walk
+# over five hardcoded names tested a strict subset of that, more slowly, and
+# would not have noticed a sixth mechanism crate.
+#
+# What is left below is what the policy cannot express: which TYPES and
+# FUNCTIONS live on either side of the boundary.
 
 if rg -n \
   'HydrationPolicy|ClaimDecision|ResolutionDecision|ReferenceDemandPlan|decode_profile|ProfileMetadata|decode_article|struct Article' \

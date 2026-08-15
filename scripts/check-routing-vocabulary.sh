@@ -47,7 +47,8 @@ SCRIPT_PATH=${BASH_SOURCE[0]}
 SCRIPT_DIR=${SCRIPT_PATH%/*}
 [[ $SCRIPT_DIR != "$SCRIPT_PATH" ]] || SCRIPT_DIR=.
 source "$SCRIPT_DIR/lib/require-commands.sh" || exit 2
-require_commands awk dirname grep sort tr || exit 2
+require_commands awk dirname git grep sort tr || exit 2
+source "$SCRIPT_DIR/lib/tracked-corpus.sh" || exit 2
 
 ROOT=${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 cd "$ROOT"
@@ -191,15 +192,33 @@ fi
 # `GroupHost`        `Explicit([host])` minted by `nmp-nip29`.
 # `AuthorRelayList`  `Auto` -- it was a partial spelling of it with the kind
 #                    hoisted into the enum.
-scan_paths=()
+#
+# #1334: the corpus is what GIT tracks, never what the working tree happens
+# to hold. `grep -RInE` over `Packages/` read
+# `Packages/NMP/Sources/NMPFFI/nmp_ffi.swift` -- a gitignored uniffi dump
+# (`.gitignore:36`) -- and reported a stale generated binding as a
+# resurrected spelling, with the offending text in no tracked file and no
+# commit. CI checks out clean, so that file is absent there and the same
+# walk was quietly fail-open: false positive locally, no coverage where it
+# counted. `scripts/lib/tracked-corpus.sh` (#1178) is the corpus a clean
+# checkout would have; it must be called at top level, since a failed
+# enumeration inside `$(...)` would exit the subshell and read as "no
+# violations found".
+scan_pathspecs=()
 for candidate in crates Packages skills; do
-  [[ -d $candidate ]] && scan_paths+=("$candidate")
+  [[ -d $candidate ]] && scan_pathspecs+=("$candidate")
 done
+TRACKED_PATHS=()
+if ((${#scan_pathspecs[@]})); then
+  tracked_paths "$ROOT" "${scan_pathspecs[@]}" ||
+    fail "the tracked corpus could not be read, so the tombstone scan would
+       be vacuous -- a gate that scans air is worse than no gate."
+fi
 
 tombstone() {
   local pattern=$1 retired=$2 replacement=$3 found
-  ((${#scan_paths[@]})) || return 0
-  found=$(grep -RInE "$pattern" "${scan_paths[@]}" 2>/dev/null || true)
+  ((${#TRACKED_PATHS[@]})) || return 0
+  found=$(census "$ROOT" "$pattern" "${TRACKED_PATHS[@]}")
   if [[ -n $found ]]; then
     printf '%s\n' "$found"
     fail "the retired routing spelling \`$retired\` came back. What a caller
