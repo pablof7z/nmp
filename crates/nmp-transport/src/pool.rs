@@ -37,41 +37,12 @@ pub use committed_observations::{
     CommittedObservationCandidate, CommittedObservationHit, CommittedObservationPublication,
 };
 use inner::PoolInner;
+use spawn::{system_spawner, ThreadSpawner};
+pub use verify::{
+    KnownSig, NullKnownSig, Verdict, Verifier, VerifyConfig, DEFAULT_VERIFIER_WORKERS,
+    MAX_DEFAULT_VERIFIER_WORKERS, MAX_VERIFIER_WORKERS,
+};
 pub use worker::ReconnectPreambleTransition;
-
-#[cfg(feature = "bench-instrumentation")]
-pub fn configure_diagnostic_duplicate_ceiling(capacity: usize, event_payload_only: bool) {
-    frame::configure_diagnostic_duplicate_ceiling(capacity, event_payload_only);
-}
-
-#[cfg(feature = "bench-instrumentation")]
-#[doc(hidden)]
-pub fn configure_diagnostic_preparsed_ceiling(
-    subscription_id: Option<SubscriptionId>,
-    events: Vec<Arc<Event>>,
-) {
-    frame::configure_diagnostic_preparsed_ceiling(subscription_id, events);
-}
-
-/// Safe default for the single engine/transport relay ceiling. Zero is
-/// normalized to this value as well, so legacy/default construction cannot
-/// silently re-enable unbounded worker growth.
-pub const DEFAULT_MAX_RELAYS: usize = 10;
-
-/// Small fixed verifier set owned by one engine. Signature verification is
-/// CPU-bound and fed through bounded queues; copying host parallelism into
-/// every engine multiplied OS threads without imposing a process budget.
-pub const DEFAULT_VERIFIER_WORKERS: usize = 2;
-
-/// Hard ceiling for an explicitly configured per-engine verifier pool.
-/// The default remains deliberately small; embedders opting into a wider
-/// pool still cannot create an unbounded number of OS threads.
-pub const MAX_VERIFIER_WORKERS: usize = 16;
-
-/// Upper bound for the host-aware verifier width selected by
-/// [`PoolConfig::default`]. Explicit configurations may still request up to
-/// [`MAX_VERIFIER_WORKERS`].
-pub const MAX_DEFAULT_VERIFIER_WORKERS: usize = 8;
 
 /// The finite thread role whose OS spawn was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +78,25 @@ impl std::fmt::Display for ThreadSpawnError {
 }
 
 impl std::error::Error for ThreadSpawnError {}
+
+#[cfg(feature = "bench-instrumentation")]
+pub fn configure_diagnostic_duplicate_ceiling(capacity: usize, event_payload_only: bool) {
+    frame::configure_diagnostic_duplicate_ceiling(capacity, event_payload_only);
+}
+
+#[cfg(feature = "bench-instrumentation")]
+#[doc(hidden)]
+pub fn configure_diagnostic_preparsed_ceiling(
+    subscription_id: Option<SubscriptionId>,
+    events: Vec<Arc<Event>>,
+) {
+    frame::configure_diagnostic_preparsed_ceiling(subscription_id, events);
+}
+
+/// Safe default for the single engine/transport relay ceiling. Zero is
+/// normalized to this value as well, so legacy/default construction cannot
+/// silently re-enable unbounded worker growth.
+pub const DEFAULT_MAX_RELAYS: usize = 10;
 
 /// A pool cannot exist without its finite verifier/translation/retirement
 /// executors. Construction is all-or-nothing and cleans up any threads that
@@ -604,16 +594,6 @@ pub struct PoolConfig {
     pub command_queue_capacity: usize,
     /// Maximum translated pool events waiting for the engine bridge.
     pub event_sink_queue_capacity: usize,
-    /// Persistent native verification workers. Zero selects the small fixed
-    /// [`DEFAULT_VERIFIER_WORKERS`] set. The production default uses half the
-    /// host parallelism, capped at [`MAX_DEFAULT_VERIFIER_WORKERS`]; explicit
-    /// values are capped at [`MAX_VERIFIER_WORKERS`].
-    pub verifier_workers: usize,
-    /// Maximum verification tasks queued at each persistent worker.
-    pub verifier_queue_capacity: usize,
-    /// Maximum verified id/signature entries retained by the translator.
-    /// Eviction only causes later re-verification; it never changes policy.
-    pub verified_cache_capacity: usize,
     /// Maximum exact committed EVENT observations eligible for the preparse
     /// duplicate fast path. Eviction or zero capacity only causes ordinary
     /// parse/verify/store ingest.
@@ -651,18 +631,11 @@ pub struct PoolConfig {
 
 impl Default for PoolConfig {
     fn default() -> Self {
-        let verifier_workers = std::thread::available_parallelism()
-            .map_or(DEFAULT_VERIFIER_WORKERS, usize::from)
-            .div_ceil(2)
-            .clamp(DEFAULT_VERIFIER_WORKERS, MAX_DEFAULT_VERIFIER_WORKERS);
         Self {
             max_relays: DEFAULT_MAX_RELAYS,
             ingest_queue_capacity: 8_192,
             command_queue_capacity: 1_024,
             event_sink_queue_capacity: 8_192,
-            verifier_workers,
-            verifier_queue_capacity: 64,
-            verified_cache_capacity: 131_072,
             committed_observation_cache_capacity: 131_072,
             max_verify_batch: 512,
             max_engine_batch: 4_096,
@@ -691,18 +664,24 @@ pub struct Pool {
 impl Pool {
     /// Construct a new pool. `sink` receives every [`PoolEvent`] until the
     /// pool is shut down (or the sink itself is dropped, for the blanket
-    /// `mpsc::Sender` impl).
-    pub fn new(cfg: PoolConfig, sink: impl PoolEventSink) -> Result<Self, PoolBuildError> {
-        Self::new_with_spawner(cfg, Arc::new(sink), spawn::system_spawner())
+    /// `mpsc::Sender` impl). The trust gate (`verifier`) is constructed by
+    /// the engine and passed in; transport does not own crypto (#1677).
+    pub fn new(
+        cfg: PoolConfig,
+        verifier: Verifier,
+        sink: impl PoolEventSink,
+    ) -> Result<Self, PoolBuildError> {
+        Self::new_with_spawner(cfg, verifier, Arc::new(sink), system_spawner())
     }
 
     fn new_with_spawner(
         cfg: PoolConfig,
+        verifier: Verifier,
         sink: Arc<dyn PoolEventSink>,
-        spawner: Arc<dyn spawn::ThreadSpawner>,
+        spawner: Arc<dyn ThreadSpawner>,
     ) -> Result<Self, PoolBuildError> {
         Ok(Self {
-            inner: PoolInner::try_new(cfg, sink, spawner)?,
+            inner: PoolInner::try_new(cfg, verifier, sink, spawner)?,
         })
     }
 
@@ -1025,6 +1004,7 @@ impl Pool {
 #[cfg(test)]
 mod thread_budget_tests {
     use super::spawn::test_support::RefusingThreadSpawner;
+    use super::verify::DEFAULT_VERIFIER_WORKERS;
     use super::*;
     use std::sync::{mpsc, Arc};
 
@@ -1037,14 +1017,36 @@ mod thread_budget_tests {
         mpsc::Receiver<PoolEvent>,
     ) {
         let spawner = Arc::new(RefusingThreadSpawner::after(successful_spawns));
-        let erased: Arc<dyn spawn::ThreadSpawner> = spawner.clone();
+        let erased: Arc<dyn ThreadSpawner> = spawner.clone();
         let (sink, events) = mpsc::channel();
+        // The verifier is constructed BEFORE the pool (#1677: the engine
+        // owns the trust gate and hands it to `Pool::new`), so its workers
+        // spawn first against the same injected spawner. A construction
+        // refusal here is surfaced as a typed `PoolBuildError`.
+        let verifier = match Verifier::new_with_spawner(
+            VerifyConfig {
+                workers: DEFAULT_VERIFIER_WORKERS,
+                queue_capacity: 64,
+                lru_capacity: 131_072,
+            },
+            Arc::new(NullKnownSig),
+            erased.clone(),
+        ) {
+            Ok(verifier) => verifier,
+            Err(error) => {
+                return (
+                    spawner,
+                    Err(PoolBuildError::ThreadUnavailable(error)),
+                    events,
+                )
+            }
+        };
         let pool = Pool::new_with_spawner(
             PoolConfig {
                 max_relays,
-                verifier_workers: DEFAULT_VERIFIER_WORKERS,
                 ..PoolConfig::default()
             },
+            verifier,
             Arc::new(sink),
             erased,
         );
@@ -1053,10 +1055,13 @@ mod thread_budget_tests {
 
     #[test]
     fn injected_construction_refusals_are_typed_and_cleanup_exactly() {
+        // Spawn order under #1677: the verifier is constructed before the
+        // pool, so its two workers spawn first, then the reaper, then the
+        // translator. A refusal at any step is typed and cleans up exactly.
         for (allowed, expected_role) in [
-            (0, ThreadRole::RetirementReaper),
+            (0, ThreadRole::VerifierWorker),
             (1, ThreadRole::VerifierWorker),
-            (2, ThreadRole::VerifierWorker),
+            (2, ThreadRole::RetirementReaper),
             (3, ThreadRole::PoolTranslator),
         ] {
             let (spawner, result, _events) = test_pool(allowed, 1);
@@ -1076,7 +1081,7 @@ mod thread_budget_tests {
 
     #[test]
     fn relay_spawn_refusal_is_typed_without_publishing_a_slot() {
-        // reaper + two verifier workers + translator succeed; relay fails.
+        // two verifier workers + reaper + translator succeed; relay fails.
         let (spawner, pool, _events) = test_pool(4, 1);
         let pool = pool.expect("fixed engine executors fit the injected budget");
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
@@ -1111,34 +1116,6 @@ mod thread_budget_tests {
         pool.shutdown();
         assert_eq!(spawner.live(), 0, "shutdown is an exact join barrier");
     }
-
-    #[test]
-    fn verifier_worker_configuration_honors_an_explicit_bounded_budget() {
-        assert_eq!(
-            inner::configured_verifier_workers(0),
-            DEFAULT_VERIFIER_WORKERS
-        );
-        assert_eq!(inner::configured_verifier_workers(1), 1);
-        assert_eq!(inner::configured_verifier_workers(4), 4);
-        assert_eq!(
-            inner::configured_verifier_workers(usize::MAX),
-            MAX_VERIFIER_WORKERS
-        );
-    }
-
-    #[test]
-    fn default_verifier_width_uses_half_the_host_up_to_eight() {
-        let available = std::thread::available_parallelism().map_or(2, usize::from);
-        assert_eq!(
-            PoolConfig::default().verifier_workers,
-            available.div_ceil(2).clamp(2, MAX_DEFAULT_VERIFIER_WORKERS)
-        );
-    }
-
-    #[test]
-    fn default_verification_cache_covers_a_hundred_thousand_event_replay() {
-        assert!(PoolConfig::default().verified_cache_capacity >= 100_000);
-    }
 }
 
 #[cfg(test)]
@@ -1146,17 +1123,19 @@ mod ephemeral_send_tests {
     use super::*;
     use nmp_grammar::AccessContext;
     use nostr::Keys;
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Arc};
 
     #[test]
     fn dialing_stale_wrong_session_and_binary_handoffs_fail_synchronously() {
         let (events, event_rx) = mpsc::channel();
+        let verifier = Verifier::new(VerifyConfig::default(), Arc::new(NullKnownSig)).unwrap();
         let pool = Pool::new(
             PoolConfig {
                 reconnect_delay_initial: Some(Duration::from_secs(30)),
                 reconnect_jitter_max: Some(Duration::ZERO),
                 ..PoolConfig::default()
             },
+            verifier,
             events,
         )
         .unwrap();
