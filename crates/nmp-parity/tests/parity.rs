@@ -13,14 +13,17 @@ use nmp::nip29::{
     add_group_to_list, add_relay_in_use, register_group_list_writes, SimpleGroupEntry,
 };
 use nmp::{
-    AcquisitionEvidence, AuthDenialSource, AuthPhase, Binding, CancelWriteOutcome,
-    CorrelationToken, DiagnosticsSnapshot, Engine, EngineConfig, EngineError, FifoReceiver,
-    FifoRecvTimeoutError, Filter, Identity, Lane, LiveQuery, NotSentReason, ReceiptId,
-    ReceiptReattachment, ReceiptStream, RefuseReason, RelayState, RelayWaiting, RetryCause, Row,
-    RowDelta, ShortfallFact, SigningState, SourceStatus, StalledWriteStage, Subscription,
-    Timestamp, UnsignedEvent, WriteFact, WriteIntent, WriteOutcome, WritePayload, WriteRouting,
+    AcquisitionEvidence, AuthDenialSource, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot,
+    AuthPhase, Binding, CancelWriteOutcome, CorrelationToken, DiagnosticsSnapshot, Engine,
+    EngineConfig, EngineError, FifoReceiver, FifoRecvTimeoutError, Filter, Identity, Lane,
+    LiveQuery, NotSentReason, ReceiptId, ReceiptReattachment, ReceiptStream, RefuseReason,
+    RelayState, RelayWaiting, RetryCause, Row, RowDelta, ShortfallFact, SigningState, SourceStatus,
+    StalledWriteStage, StalledWriteTotals, Subscription, Timestamp, UnsignedEvent, WriteFact,
+    WriteIntent, WriteOutcome, WritePayload, WriteRouting,
 };
-use nmp_ffi::convert::{write_status_to_ffi, FfiError, WriteStatusRef};
+use nmp_ffi::convert::{
+    diagnostics_snapshot_to_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
+};
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 // #680: observers/callbacks are gone; the facade exposes pull-based async
 // stream objects whose `next()` we bridge into the existing mpsc drains via a
@@ -35,11 +38,12 @@ use nmp_ffi::nip02::{
 };
 use nmp_ffi::session::{FfiPrivateKey, FfiPublicKey};
 use nmp_ffi::types::{
-    FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthPhase, FfiBinding, FfiCancelWriteOutcome,
-    FfiDiagnosticsSnapshot, FfiFilter, FfiIdentity, FfiLiveQuery, FfiNotSentReason,
-    FfiReceiptReattachment, FfiRefuseReason, FfiRelayState, FfiRelayWaiting, FfiRetryCause,
-    FfiRowDelta, FfiShortfallFact, FfiSigningState, FfiSourceStatus, FfiStalledWriteStage,
-    FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
+    FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthPhase, FfiBinding,
+    FfiCancelWriteOutcome, FfiDiagnosticsSnapshot, FfiFilter, FfiIdentity, FfiLiveQuery,
+    FfiNotSentReason, FfiReceiptReattachment, FfiRefuseReason, FfiRelayState, FfiRelayWaiting,
+    FfiRetryCause, FfiRowDelta, FfiShortfallFact, FfiSigningState, FfiSourceStatus,
+    FfiStalledWriteStage, FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload,
+    FfiWriteRouting,
 };
 use nmp_grammar::{AccessContext, Demand, Derived, Selector, SourceAuthority};
 use nmp_nip02::{
@@ -48,7 +52,7 @@ use nmp_nip02::{
 };
 use nmp_store::{RedbStore, RelayObserved};
 use nostr::PublicKey;
-use nostr::{EventBuilder, JsonUtil, Keys, Kind, RelayUrl, Tag};
+use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Tag};
 
 const WAIT: Duration = Duration::from_secs(10);
 const SOURCE_ANCHOR_KIND: u16 = 9_997;
@@ -557,9 +561,31 @@ struct NormRelayDiagnostics {
     coverage: Vec<(String, Option<(u64, u64)>)>,
 }
 
+/// One `DiagnosticsSnapshot.auth_sessions` row, reduced to the facts both
+/// surfaces claim to carry (#1616). `transport_slot` is deliberately absent:
+/// the FFI record does not expose it, so comparing it would fail for a
+/// reason that has nothing to do with agreement.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct NormAuthSession {
+    relay: String,
+    access: String,
+    transport_generation: u64,
+    epoch_sequence: Option<u64>,
+    challenge_descriptor: Option<String>,
+    phase: String,
+    policy_bound: bool,
+    signer_bound: bool,
+    auth_event_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NormDiagnostics {
     relays: Vec<NormRelayDiagnostics>,
+    /// The per-session AUTH read-out. Present here because a field the
+    /// parity harness never looks at is a field the two surfaces are free to
+    /// disagree about, which is exactly how `AwaitingSend` was collapsed
+    /// into `AwaitingRelayAck` for native apps only (#1616).
+    auth_sessions: Vec<NormAuthSession>,
     uncovered_author_count: usize,
     dropped_merge_rules: Vec<String>,
     /// (stage label, detail, stalled-since instant) per bounded detail row,
@@ -770,6 +796,53 @@ fn lane_name(lane: Lane) -> &'static str {
     }
 }
 
+/// #1616: this match and [`ffi_auth_diagnostics_phase_name`] are the harness's
+/// only statement of what each AUTH lifecycle phase is CALLED. Both are
+/// exhaustive, so a variant added to one enum and not the other stops
+/// compiling here; both must produce the same eight labels, so folding two
+/// variants onto one label fails
+/// [`auth_diagnostics_phase_survives_the_ffi_boundary_intact`] instead of
+/// quietly agreeing.
+fn direct_auth_diagnostics_phase_name(phase: AuthDiagnosticsPhase) -> &'static str {
+    match phase {
+        AuthDiagnosticsPhase::AwaitingChallenge => "awaiting_challenge",
+        AuthDiagnosticsPhase::AwaitingPolicy => "awaiting_policy",
+        AuthDiagnosticsPhase::AwaitingSignature => "awaiting_signature",
+        AuthDiagnosticsPhase::AwaitingSend => "awaiting_send",
+        AuthDiagnosticsPhase::AwaitingRelayAck => "awaiting_relay_ack",
+        AuthDiagnosticsPhase::Ready => "ready",
+        AuthDiagnosticsPhase::Denied => "denied",
+        AuthDiagnosticsPhase::Error => "error",
+    }
+}
+
+fn ffi_auth_diagnostics_phase_name(phase: FfiAuthPhase) -> &'static str {
+    match phase {
+        FfiAuthPhase::AwaitingChallenge => "awaiting_challenge",
+        FfiAuthPhase::AwaitingPolicy => "awaiting_policy",
+        FfiAuthPhase::AwaitingSignature => "awaiting_signature",
+        FfiAuthPhase::AwaitingSend => "awaiting_send",
+        FfiAuthPhase::AwaitingRelayAck => "awaiting_relay_ack",
+        FfiAuthPhase::Ready => "ready",
+        FfiAuthPhase::Denied => "denied",
+        FfiAuthPhase::Error => "error",
+    }
+}
+
+fn direct_access_name(access: AccessContext) -> String {
+    match access {
+        AccessContext::Public => "public".to_string(),
+        AccessContext::Nip42(public_key) => format!("nip42:{}", public_key.to_hex()),
+    }
+}
+
+fn ffi_access_name(access: FfiAccessContext) -> String {
+    match access {
+        FfiAccessContext::Public => "public".to_string(),
+        FfiAccessContext::Nip42 { public_key } => format!("nip42:{public_key}"),
+    }
+}
+
 fn direct_status_name(status: SourceStatus) -> String {
     match status {
         SourceStatus::Requesting => "requesting".to_string(),
@@ -802,6 +875,11 @@ fn ffi_status_name(status: FfiSourceStatus) -> String {
             FfiAuthPhase::AwaitingChallenge => "awaiting_auth:challenge".to_string(),
             FfiAuthPhase::AwaitingSignature => "awaiting_auth:signature".to_string(),
             FfiAuthPhase::AwaitingRelayAck => "awaiting_auth:relay_ack".to_string(),
+            // Scoped evidence's `nmp::AuthPhase` has no send phase and no
+            // terminal, so any of these on a `SourceStatus` is a
+            // representable non-state: label it so the comparison fails
+            // loudly instead of matching some direct-side spelling.
+            FfiAuthPhase::AwaitingSend => "awaiting_auth:invalid_send".to_string(),
             FfiAuthPhase::Ready => "awaiting_auth:invalid_ready".to_string(),
             FfiAuthPhase::Denied => "awaiting_auth:invalid_denied".to_string(),
             FfiAuthPhase::Error => "awaiting_auth:invalid_error".to_string(),
@@ -1202,9 +1280,25 @@ fn normalize_direct_diagnostics(snapshot: DiagnosticsSnapshot, relay: &str) -> N
         .map(str::to_string)
         .collect::<Vec<_>>();
     dropped_merge_rules.sort();
+    let auth_sessions = snapshot
+        .auth_sessions
+        .into_iter()
+        .map(|session| NormAuthSession {
+            relay: normalize_url(session.relay.as_str(), relay),
+            access: direct_access_name(session.access),
+            transport_generation: session.transport_generation,
+            epoch_sequence: session.epoch_sequence,
+            challenge_descriptor: session.challenge_hash,
+            phase: direct_auth_diagnostics_phase_name(session.phase).to_string(),
+            policy_bound: session.policy_bound,
+            signer_bound: session.signer_bound,
+            auth_event_id: session.auth_event_id.map(|id| id.to_hex()),
+        })
+        .collect::<Vec<_>>();
     let totals = snapshot.stalled_write_totals;
     NormDiagnostics {
         relays,
+        auth_sessions,
         uncovered_author_count: snapshot.uncovered_author_count,
         dropped_merge_rules,
         stalled_writes: snapshot
@@ -1278,9 +1372,25 @@ fn normalize_ffi_diagnostics(snapshot: FfiDiagnosticsSnapshot, relay: &str) -> N
     relays.sort();
     let mut dropped_merge_rules = snapshot.dropped_merge_rules;
     dropped_merge_rules.sort();
+    let auth_sessions = snapshot
+        .auth_sessions
+        .into_iter()
+        .map(|session| NormAuthSession {
+            relay: normalize_url(&session.relay, relay),
+            access: ffi_access_name(session.access),
+            transport_generation: session.transport_generation,
+            epoch_sequence: session.epoch_sequence,
+            challenge_descriptor: session.challenge_descriptor,
+            phase: ffi_auth_diagnostics_phase_name(session.phase).to_string(),
+            policy_bound: session.policy_bound,
+            signer_bound: session.signer_bound,
+            auth_event_id: session.auth_event_id,
+        })
+        .collect::<Vec<_>>();
     let totals = snapshot.stalled_write_totals;
     NormDiagnostics {
         relays,
+        auth_sessions,
         uncovered_author_count: snapshot.uncovered_author_count as usize,
         dropped_merge_rules,
         stalled_writes: snapshot
@@ -1306,6 +1416,98 @@ fn normalize_ffi_diagnostics(snapshot: FfiDiagnosticsSnapshot, relay: &str) -> N
             totals.detail_limit,
         ),
     }
+}
+
+/// #1616: every AUTH lifecycle phase must survive `nmp` -> `nmp-ffi`
+/// unchanged, so a Rust app and a native app reading the SAME session report
+/// the same phase.
+///
+/// This is a vocabulary proof, not a scenario: a live loopback reaches at
+/// most one or two phases, and the collapse that shipped lived in the ones a
+/// scenario never visits. It drives all eight through the real
+/// `diagnostics_snapshot_to_ffi` and compares the normalized rows the same
+/// way the scenario tests compare theirs.
+///
+/// It fails if a variant is added to `AuthDiagnosticsPhase` or
+/// `FfiAuthPhase` alone (the phase-name matches stop compiling), if the FFI
+/// conversion folds two phases onto one (`distinct` shrinks), and if any
+/// other `auth_sessions` fact is dropped or altered at the boundary (the row
+/// comparison).
+#[test]
+fn auth_diagnostics_phase_survives_the_ffi_boundary_intact() {
+    let relay = RelayUrl::parse("wss://auth-parity.example").expect("relay url must parse");
+    let public_key = fixed_keys().public_key();
+    let auth_event_id = EventId::from_hex(&"c".repeat(64)).expect("event id must parse");
+    let phases = [
+        AuthDiagnosticsPhase::AwaitingChallenge,
+        AuthDiagnosticsPhase::AwaitingPolicy,
+        AuthDiagnosticsPhase::AwaitingSignature,
+        AuthDiagnosticsPhase::AwaitingSend,
+        AuthDiagnosticsPhase::AwaitingRelayAck,
+        AuthDiagnosticsPhase::Ready,
+        AuthDiagnosticsPhase::Denied,
+        AuthDiagnosticsPhase::Error,
+    ];
+
+    let snapshot = || DiagnosticsSnapshot {
+        relays: Vec::new(),
+        auth_sessions: phases
+            .iter()
+            .enumerate()
+            .map(|(index, phase)| AuthDiagnosticsSnapshot {
+                relay: relay.clone(),
+                access: AccessContext::Nip42(public_key),
+                transport_slot: 7,
+                transport_generation: 11 + index as u64,
+                epoch_sequence: Some(23 + index as u64),
+                challenge_hash: Some(format!("blake3:challenge-{index}")),
+                phase: *phase,
+                policy_bound: index % 2 == 0,
+                signer_bound: index % 3 == 0,
+                auth_event_id: (index % 2 == 1).then_some(auth_event_id),
+            })
+            .collect(),
+        uncovered_author_count: 0,
+        dropped_merge_rules: Vec::new(),
+        sessions_rejected_over_cap: 0,
+        sessions_refused_by_subscription_budget: 0,
+        store_degraded: None,
+        transport_degraded: None,
+        stalled_writes: Vec::new(),
+        stalled_write_totals: StalledWriteTotals::default(),
+    };
+
+    let direct = normalize_direct_diagnostics(snapshot(), relay.as_str());
+    let ffi = normalize_ffi_diagnostics(diagnostics_snapshot_to_ffi(snapshot()), relay.as_str());
+
+    // Phases first, so a collapse reports the two surfaces' phase sequences
+    // rather than eight whole rows.
+    let phase_names = |sessions: &[NormAuthSession]| {
+        sessions
+            .iter()
+            .map(|session| session.phase.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        phase_names(&direct.auth_sessions),
+        phase_names(&ffi.auth_sessions),
+        "the same AUTH session must report the same phase on both surfaces"
+    );
+    let distinct: BTreeSet<&str> = ffi
+        .auth_sessions
+        .iter()
+        .map(|session| session.phase.as_str())
+        .collect();
+    assert_eq!(
+        distinct.len(),
+        phases.len(),
+        "each engine phase must reach a DISTINCT FFI phase; two sharing a \
+         name is the #1616 collapse: {distinct:?}"
+    );
+    assert_eq!(
+        direct.auth_sessions, ffi.auth_sessions,
+        "every other AUTH session fact must survive the boundary unchanged"
+    );
 }
 
 fn direct_filter(pubkey: &str, kind: u16) -> Filter {

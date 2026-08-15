@@ -100,7 +100,12 @@ data class RelayDiagnostics(
     }
 }
 
-/** One bounded exact-session AUTH diagnostics record. */
+/** One bounded exact-session AUTH diagnostics record.
+ *
+ * `phase` is the sole owner of the AUTH lifecycle: "transport accepted the
+ * AUTH event" is `AwaitingRelayAck` or `Ready`, and "the relay's OK was
+ * correlated" is `Ready`. No boolean restates either -- a second owner is a
+ * second thing that can disagree with the first. */
 data class AuthDiagnostics(
     val relay: String,
     val access: NMPAccessContext,
@@ -111,8 +116,6 @@ data class AuthDiagnostics(
     val policyBound: Boolean,
     val signerBound: Boolean,
     val authEventId: String?,
-    val sendHandoffAccepted: Boolean,
-    val relayOkAccepted: Boolean,
 ) {
     companion object {
         fun from(ffi: FfiAuthDiagnostics): AuthDiagnostics =
@@ -126,8 +129,6 @@ data class AuthDiagnostics(
                 policyBound = ffi.policyBound,
                 signerBound = ffi.signerBound,
                 authEventId = ffi.authEventId,
-                sendHandoffAccepted = ffi.sendHandoffAccepted,
-                relayOkAccepted = ffi.relayOkAccepted,
             )
     }
 }
