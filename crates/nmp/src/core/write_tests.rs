@@ -760,8 +760,10 @@ mod semantic_successor_tests {
             write_session.clone(),
         ));
         // Driven inline rather than through `answer_coordinate_coverage_for_test`
-        // so EVERY effect is captured: that helper discards its own admission
-        // flush, and the publish this test must not see would land inside it.
+        // because reaching the window needs REPEATED flush/EOSE rounds and
+        // that helper does exactly one. (It used to swallow its own flush too,
+        // which is what made the first version of this test vacuous; that is
+        // fixed, so capture is no longer the reason -- only the loop is.)
         let mut seen = core.handle(EngineMsg::AuthProbeReleased(write_handle, write_session));
         // Proof the scenario actually reaches the window this test is about,
         // recorded AS IT HAPPENS: a run that never gets here would otherwise

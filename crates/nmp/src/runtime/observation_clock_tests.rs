@@ -62,7 +62,7 @@ fn due_deadline_runs_before_a_simultaneously_ready_command() {
     let relay = RelayUrl::parse("wss://deadline-race.example").unwrap();
     let base = Timestamp::from(Timestamp::now().as_secs().saturating_add(3_600));
     let expiry = Timestamp::from(base.as_secs().saturating_add(1));
-    let event = nmp_resolver::testkit::expiring_kind1(
+    let event = nmp_resolver_testkit::expiring_kind1(
         &author,
         "deadline must win the command race",
         base.as_secs(),
@@ -120,7 +120,7 @@ fn explicit_tick_at_a_due_deadline_runs_maintenance_once() {
     let relay = RelayUrl::parse("wss://explicit-tick.example").unwrap();
     let base = Timestamp::from(Timestamp::now().as_secs().saturating_add(3_600));
     let expiry = Timestamp::from(base.as_secs().saturating_add(60));
-    let event = nmp_resolver::testkit::expiring_kind1(
+    let event = nmp_resolver_testkit::expiring_kind1(
         &author,
         "one maintenance owner",
         base.as_secs(),

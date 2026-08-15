@@ -50,7 +50,7 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
 
     // B's kind:1 post arrives UNSOLICITED (before B is ever followed) --
     // the store holds it, but it matches no handle's root atoms yet.
-    let b_post = nmp_resolver::testkit::kind1(&b, "hello from b", 50);
+    let b_post = nmp_resolver_testkit::kind1(&b, "hello from b", 50);
     let pre_effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -69,7 +69,7 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
     // Now `a` follows `b`: root atoms fan out to include {kind:1,
     // authors:{b}} -- demand changes (Wire opens b's write relay) AND the
     // handle's row set changes (b's pre-existing post is now in scope).
-    let contact_list = nmp_resolver::testkit::kind3(&a, &[b.public_key()], 100);
+    let contact_list = nmp_resolver_testkit::kind3(&a, &[b.public_key()], 100);
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -139,7 +139,7 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
     let mut total_delta_entries = 0usize;
     let mut distinct_delivered = BTreeSet::new();
     for i in 0..N {
-        let event = nmp_resolver::testkit::kind1(&a, &format!("load-test post #{i}"), 1_000 + i);
+        let event = nmp_resolver_testkit::kind1(&a, &format!("load-test post #{i}"), 1_000 + i);
         let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
                 slot: 0,
@@ -243,7 +243,7 @@ fn limited_handle_projects_only_the_n_newest_of_m_matches() {
     let mut current = BTreeSet::new();
     let mut high_water = 0usize;
     for created_at in [10u64, 20, 30, 40, 50] {
-        let event = nmp_resolver::testkit::kind1(&a, &format!("note @{created_at}"), created_at);
+        let event = nmp_resolver_testkit::kind1(&a, &format!("note @{created_at}"), created_at);
         ids_by_time.push((created_at, event.id));
         let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
@@ -303,10 +303,10 @@ fn limited_multi_atom_handle_merges_then_applies_the_global_top_n() {
         ..Filter::default()
     })));
 
-    let a_100 = nmp_resolver::testkit::kind1(&a, "a-100", 100);
-    let a_90 = nmp_resolver::testkit::kind1(&a, "a-90", 90);
-    let b_95 = nmp_resolver::testkit::kind1(&b, "b-95", 95);
-    let b_85 = nmp_resolver::testkit::kind1(&b, "b-85", 85);
+    let a_100 = nmp_resolver_testkit::kind1(&a, "a-100", 100);
+    let a_90 = nmp_resolver_testkit::kind1(&a, "a-90", 90);
+    let b_95 = nmp_resolver_testkit::kind1(&b, "b-95", 95);
+    let b_85 = nmp_resolver_testkit::kind1(&b, "b-85", 85);
     let mut current = BTreeSet::new();
     for event in [a_90, b_85, a_100.clone(), b_95.clone()] {
         let effects = core.handle(EngineMsg::RelayFrame(
@@ -348,8 +348,8 @@ fn newer_event_evicts_oldest_of_top_n_via_delta() {
         2,
     )));
 
-    let oldest = nmp_resolver::testkit::kind1(&a, "oldest", 100);
-    let middle = nmp_resolver::testkit::kind1(&a, "middle", 200);
+    let oldest = nmp_resolver_testkit::kind1(&a, "oldest", 100);
+    let middle = nmp_resolver_testkit::kind1(&a, "middle", 200);
     let mut current = BTreeSet::new();
     for event in [oldest.clone(), middle.clone()] {
         let effects = core.handle(EngineMsg::RelayFrame(
@@ -368,7 +368,7 @@ fn newer_event_evicts_oldest_of_top_n_via_delta() {
     }
 
     // The top-2 is now {oldest, middle}. A strictly newer event arrives.
-    let newest = nmp_resolver::testkit::kind1(&a, "newest", 300);
+    let newest = nmp_resolver_testkit::kind1(&a, "newest", 300);
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -428,9 +428,9 @@ fn retracting_top_n_member_pulls_in_next_newest() {
     )));
 
     // Three matches; the top-2 is {second, third}, `first` is excluded.
-    let first = nmp_resolver::testkit::kind1(&a, "first", 100);
-    let second = nmp_resolver::testkit::kind1(&a, "second", 200);
-    let third = nmp_resolver::testkit::kind1(&a, "third", 300);
+    let first = nmp_resolver_testkit::kind1(&a, "first", 100);
+    let second = nmp_resolver_testkit::kind1(&a, "second", 200);
+    let third = nmp_resolver_testkit::kind1(&a, "third", 300);
     let mut current = BTreeSet::new();
     for event in [first.clone(), second.clone(), third.clone()] {
         let effects = core.handle(EngineMsg::RelayFrame(
@@ -456,7 +456,7 @@ fn retracting_top_n_member_pulls_in_next_newest() {
     }
 
     // Retract `third` (a current top-N member) via a NIP-09 kind:5 delete.
-    let deletion = nmp_resolver::testkit::deletion(&a, &[third.id], 400);
+    let deletion = nmp_resolver_testkit::deletion(&a, &[third.id], 400);
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -512,7 +512,7 @@ fn unlimited_handle_projects_every_match() {
     let mut all_ids = BTreeSet::new();
     let mut current = BTreeSet::new();
     for created_at in [10u64, 20, 30, 40, 50] {
-        let event = nmp_resolver::testkit::kind1(&a, &format!("note @{created_at}"), created_at);
+        let event = nmp_resolver_testkit::kind1(&a, &format!("note @{created_at}"), created_at);
         all_ids.insert(event.id);
         let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {
@@ -554,7 +554,7 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
     let wire = wire_sub_string(sub_id);
 
     // A bare EVENT frame (no EOSE yet) must record nothing.
-    let e = nmp_resolver::testkit::kind3(&a, &[], 10);
+    let e = nmp_resolver_testkit::kind3(&a, &[], 10);
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -1422,7 +1422,7 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
     // `a` follows `b`: the outer atom {kind:1, authors:{b}} now resolves and
     // opens relay1.
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(10u64)));
-    let contact_list = nmp_resolver::testkit::kind3(&a, &[b.public_key()], 10);
+    let contact_list = nmp_resolver_testkit::kind3(&a, &[b.public_key()], 10);
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
