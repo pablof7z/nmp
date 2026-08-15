@@ -1,21 +1,22 @@
 # Architecture review gates -- the mechanical checks from
-# docs/design/architecture-review-gates.md (issue #496):
+# docs/design/architecture-review-gates.md (issue #496).
 #
-#   gate 5  Cross-SDK parity: the hand-written Swift and Kotlin SDK surfaces
-#           must both cover every concept the Rust FFI exports
-#           (scripts/check-sdk-parity.sh + its documented allowlist).
+# Gate 5, Cross-SDK parity, has no mechanical check here: its previous check
+# compared lowercase word bags across whole files, including comments and
+# string literals, and passed with the Swift SDK reduced to a single comment
+# listing the missing concepts (see AGENTS.md and #1637). It was deleted
+# rather than left green. The invariant is real and still owned by gate 5;
+# the mechanism is a known gap until a declaration-level replacement lands.
 #
-# Alongside it live narrow, per-boundary structural checks that enforce one
-# specific ownership contract each (currently #1551/#863's NIP-29 group-list
-# parsing rule and #879's pure content/locator boundary). Same character, same
-# trust properties.
+# Alongside the remaining structural checks below (currently #1551/#863's
+# NIP-29 group-list parsing rule and #879's pure content/locator boundary),
+# same character, same trust properties.
 #
 # These checks require no secrets and make no pull_request_target trust
 # decisions, so an ordinary reviewable workflow is the right home.
 #
-# Gate 5 is intended to be a branch-protection REQUIRED check (an owner/admin
-# setting; see the gate doc). Every job here gates on content only and never
-# executes PR-provided code beyond these repo scripts.
+# Every job here gates on content only and never executes PR-provided code
+# beyond these repo scripts.
 
 name: Architecture gates
 
@@ -64,18 +65,6 @@ jobs:
 
       - name: Refuse success when a checker dependency is absent
         run: bash scripts/test-check-tool-requirements.sh
-
-  sdk-parity:
-    name: Cross-SDK parity (gate 5)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Diff each component's Swift/Kotlin vocabulary against its Rust FFI surface
-        run: bash scripts/check-sdk-parity.sh
 
   # #879: NIP-19/NIP-21 decoding preserves exact authored locator data and
   # must never regain engine, acquisition-policy, or compatibility-planner

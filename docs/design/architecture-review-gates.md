@@ -1,12 +1,13 @@
 # Architecture review gates
 
-- **Status:** active PR-review checklist (gates 1-4) plus one mechanical CI
-  check: gate 5 (`scripts/check-sdk-parity.sh`, with the documented
-  per-component exception catalog
-  `scripts/check-sdk-parity-allowlist.toml`). It runs as a blocking job in
-  `.github/workflows/architecture-gates.yml` on every PR; making it a
-  branch-protection *required* check is a repo-admin setting the workflow
-  itself cannot grant.
+- **Status:** active PR-review checklist (gates 1-4). Gate 5's invariant is
+  real — an app on one platform must not silently lose an operation the other
+  two have — but it currently has no mechanical check. Its previous check,
+  `scripts/check-sdk-parity.sh`, compared lowercase word bags over whole
+  files including comments and string literals, and still passed with the
+  Swift SDK reduced to a single comment-only file (#1637). It was deleted
+  rather than left green; the replacement is tracked in #1637 and not yet
+  built.
 - **Origin:** issue #496, written after the #485 architectural sweep. History\*
   (issue #474/#484) was a parallel-noun modeling error caught by a manual
   architectural read before merge. `Engine::reset_persistent_store` (issue
@@ -35,10 +36,10 @@ to:
 Run gates 1-4 by eye against the diff of any PR that adds a public type,
 error variant, destructive verb, or a `bool` living next to a handle/executor.
 They are cheap — each is a single question with a yes/no trained "tell."
-Gate 5 runs mechanically in CI (`.github/workflows/architecture-gates.yml`)
-and locally via `scripts/check-sdk-parity.sh`. The mechanical half is a floor,
-not a replacement: gate 5 proves a concept is *mentioned*, not correctly
-projected. The by-eye half still applies in review.
+Gate 5 has no mechanical check today (#1637): the by-eye read is not a floor
+under some mechanical check, it is the entire check. Treat that as a known
+gap, not as a checked box — see the gate's own section below for what was
+tried, why it was deleted, and what the replacement needs to be.
 
 ---
 
@@ -204,54 +205,53 @@ NIP-02 following surface shipped fully for Swift (`Packages/NMP/Sources/NMP/Foll
 existed — silently breaking the claimed Rust/UniFFI/Swift/Kotlin parity for
 the largest single instance of this class the #485 sweep found.
 
-**Mechanical check.** `scripts/check-sdk-parity.sh` (added alongside this
-doc). It tokenizes the concept-words of every `#[uniffi::export]`ed
+**Mechanical check — deleted (#1637).** `scripts/check-sdk-parity.sh`
+tokenized the lowercase concept-words of every `#[uniffi::export]`ed
 function/method and every `uniffi::Object`/`Enum`/`Record`/`Error`-derived
-type in `crates/nmp-ffi/src/*.rs`, and diffs that word set against the
-identifier vocabulary actually present in `Packages/NMP/Sources/**` and
-`Packages/NMPKotlin/src/main/kotlin/**`. A concept word entirely absent from
-one native SDK is reported with an example originating Rust symbol, and the
-script exits non-zero. See the script's own header comment for exactly how it
-decides "public surface" and its known limitations (it is a word-level
-heuristic over source text, not a real parser or symbol-level diff — it
-proves a concept is *unmentioned*, not that every signature lines up).
-Run it locally with:
+type in `crates/nmp-ffi/src/*.rs`, and diffed that word set against the
+identifier vocabulary found *anywhere* in `Packages/NMP/Sources/**` and
+`Packages/NMPKotlin/src/main/kotlin/**` — including comments and string
+literals, and blind to a `#[cfg]` sitting between a derive and the
+declaration it applies to (so `FfiSimpleGroupEntry`
+(`crates/nmp-ffi/src/types.rs:492`), `FfiSimpleGroupsList` (`:507`), and
+`FfiReaction` (`:730`) were never visible to it at all).
 
-```sh
-scripts/check-sdk-parity.sh
-```
+Mutation testing on a scratch copy of master found it had no falsifier:
 
-Two decisions harden the raw scan into an enforceable check:
+- deleting the entire public NIP-02 follow API
+  (`Packages/NMP/Sources/NMP/Following.swift`, 385 lines) → **passed**
+- also deleting `NIP22.swift` and `NostrEntity.swift` → **passed**
+- deleting all 25 hand-written Swift files (5,758 lines) → failed, 161
+  concepts missing
+- adding back **one** 1,251-byte file containing two comment lines and zero
+  Swift declarations, listing those 161 words → **passed**
 
-- **Generated bindings are excluded.** The gitignored UniFFI outputs
-  (`Packages/NMP/Sources/NMPFFI/**`,
-  `Packages/NMPKotlin/src/main/kotlin/uniffi/**`) contain every Rust FFI
-  symbol by construction; a locally-built tree that counted them would make
-  the whole check vacuously green (and disagree with a clean CI checkout).
-  Only the hand-written SDK surface counts as "present."
-- **Intentional per-platform modeling differences use a documented
-  allowlist**, `scripts/check-sdk-parity-allowlist.toml`: each closed-schema
-  record names one active component, one lowercase concept word, one platform,
-  and one reviewable justification. Unknown components, duplicate tuples,
-  malformed concepts/platforms, and empty reasons fail. The file is currently
-  empty of entries.
+Its allowlist, `scripts/check-sdk-parity-allowlist.toml`, stayed empty of
+entries for the entire time the check existed. That read as "no exceptions
+needed"; it actually meant the check was never strong enough to produce a
+failure worth allowlisting.
 
-The retained scan has one active component, `nmp-core`, and owns its Rust FFI,
-Swift, and Kotlin roots directly in the script. An exception for that
-component cannot mask a different component; adding another component requires
-adding its roots to the gate in the same change. The gate does not depend on
-the deleted surface snapshot/catalog toolchain.
+A check that passes while its invariant is violated is a false assurance —
+green gets read as evidence by everyone except the person who found the
+mutation. Both files, and the `sdk-parity` job that ran the script in
+`.github/workflows/architecture-gates.yml`, were deleted in the same change
+(#1637) rather than left green.
 
-Backtested against real history: at the commit before the #493 Kotlin
-Following port (`920033e^`), the check fails with exactly the five real
+**Historical backtest (of the deleted script).** Before it was deleted, the
+script *was* backtested against real history: at the commit before the #493
+Kotlin Following port (`920033e^`), it failed with the five real
 missing-concept words (`follow`/`following`/`unfollow`/`relationship`/
-`availability`); on post-#493 masters it passes. Treat any new report line as
-a starting point for a human read — the remedy is an SDK fix or, only for a
-genuinely intentional modeling difference, a current, source-verifiable
-allowlist entry.
+`availability`); on post-#493 masters it passed. That the check could catch
+that one historical case is why it shipped originally — the mutation testing
+above is what later proved it could not catch a far larger deletion of the
+same kind.
 
-**CI wiring.** The check runs as a blocking job (`sdk-parity`) in
-`.github/workflows/architecture-gates.yml` on every PR and on pushes to
-`master`. It lives in its own workflow file because
-Marking the job branch-protection **required** is a repo-admin setting; until
-it is flipped, the job is still red/green on every PR.
+**Replacement — not yet built (#1637).** The target mechanism is a
+checked-in manifest of exported UniFFI items generating a protocol/interface
+each SDK must conform to, so a missing `unfollow` is a compile error, not a
+substring search. Until that exists, gate 5 is enforced only by the by-eye
+read described in "How to use this checklist" above.
+
+**CI wiring.** None. The `sdk-parity` job was removed from
+`.github/workflows/architecture-gates.yml` in the same change that deleted
+the script (#1637).
