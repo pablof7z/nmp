@@ -83,8 +83,6 @@ pub enum EngineError {
     /// It is also never a worker-pool-busy, task-admission, permit, or
     /// queue-full outcome. The engine-closed case is [`Self::EngineClosed`].
     ObservationUnavailable { reason: String },
-    /// A custom capability did not expose a stable registry identity.
-    SignerMissingPublicKey,
     /// The shared account-signer/AUTH-policy capability registry reached its
     /// configured [`EngineConfig::max_auth_capabilities`](crate::EngineConfig::max_auth_capabilities)
     /// bound (#8). Nothing was registered behind this refusal.
@@ -167,7 +165,6 @@ impl std::fmt::Display for EngineError {
             Self::ObservationUnavailable { reason } => {
                 write!(f, "observation could not be established: {reason}")
             }
-            Self::SignerMissingPublicKey => write!(f, "signer has no public key"),
             Self::AuthCapabilityRegistryFull { limit } => {
                 write!(f, "AUTH capability registry is full at {limit} entries")
             }
@@ -255,20 +252,6 @@ impl EngineError {
             other => Self::PublishRefused {
                 reason: other.to_string(),
             },
-        }
-    }
-
-    #[cfg(any(test, feature = "test-instrumentation"))]
-    pub(crate) fn from_add_signer_error(error: crate::runtime::AddSignerError) -> Self {
-        match error {
-            crate::runtime::AddSignerError::MissingPublicKey => Self::SignerMissingPublicKey,
-            crate::runtime::AddSignerError::CapabilityInstanceExhausted => {
-                Self::AuthCapabilityInstanceExhausted
-            }
-            crate::runtime::AddSignerError::RegistryFull { limit } => {
-                Self::AuthCapabilityRegistryFull { limit }
-            }
-            crate::runtime::AddSignerError::EngineShuttingDown => Self::EngineClosed,
         }
     }
 

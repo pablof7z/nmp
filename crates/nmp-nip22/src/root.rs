@@ -146,7 +146,7 @@ impl CommentRoot {
                 rows.push(row(&[k, id.k_value()]));
             }
         }
-        if let Some(author) = author_row.filter(|author| options.keeps_pubkey(author)) {
+        if let Some(author) = author_row {
             if !options.suppresses_author() {
                 rows.push(row(&[p, &author.to_hex(), &relay]));
             }

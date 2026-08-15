@@ -624,9 +624,6 @@ impl From<nmp::EngineError> for FfiError {
             nmp::EngineError::ObservationUnavailable { reason } => {
                 Self::ObservationUnavailable { reason }
             }
-            nmp::EngineError::SignerMissingPublicKey => Self::InvalidSigner {
-                reason: "signer has no public key".to_string(),
-            },
             nmp::EngineError::AuthCapabilityRegistryFull { limit } => {
                 Self::AuthCapabilityRegistryFull {
                     limit: limit as u64,

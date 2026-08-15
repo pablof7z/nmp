@@ -120,7 +120,6 @@ pub struct TagOptions {
     root_scope: bool,
     without_carried_mentions: bool,
     without_author: bool,
-    without_self: Option<PublicKey>,
     relay: Option<RelayUrl>,
 }
 
@@ -157,24 +156,6 @@ impl TagOptions {
         self
     }
 
-    /// Drop `p` rows naming `pubkey` — normally the composing account, so a
-    /// reply does not notify its own author.
-    ///
-    /// It takes the key because [`crate::EventBuilder`] structurally cannot
-    /// carry an author: identity arrives from [`crate::WriteIntent`] at
-    /// publish, so a builder has no way to know whose key to drop.
-    ///
-    /// Stripping self-`p` at signing time instead was considered and
-    /// **rejected**. mosaico's four `allow_self_tagging()` call sites are all
-    /// NIP-29 membership rows where the `p` row is the OPERAND OF THE VERB:
-    /// blanket stripping turns "add me to this group" into a silently empty
-    /// kind:9000. A `p` row is not always a notification, and nothing
-    /// downstream of the builder can tell the difference from the bytes.
-    pub fn without_self(mut self, pubkey: PublicKey) -> Self {
-        self.without_self = Some(pubkey);
-        self
-    }
-
     /// State the relay hint instead of taking the target's own. What an app
     /// that knows better than the observed sources uses.
     pub fn from_relay(mut self, relay: RelayUrl) -> Self {
@@ -195,15 +176,6 @@ impl TagOptions {
         self.without_author
     }
 
-    /// Whether `pubkey` survives [`Self::without_self`].
-    pub fn keeps_pubkey(&self, pubkey: &PublicKey) -> bool {
-        self.keeps(pubkey)
-    }
-
-    fn keeps(&self, pubkey: &PublicKey) -> bool {
-        self.without_self.as_ref() != Some(pubkey)
-    }
-
     /// Union two modifier sets. Additive means exactly this: a suppression
     /// either set states is stated, and no combination can un-say something.
     /// It is what makes the vocabulary order-independent even when one call
@@ -214,7 +186,6 @@ impl TagOptions {
             without_carried_mentions: self.without_carried_mentions
                 || other.without_carried_mentions,
             without_author: self.without_author || other.without_author,
-            without_self: self.without_self.or(other.without_self),
             relay: self.relay.clone().or_else(|| other.relay.clone()),
         }
     }
@@ -413,13 +384,6 @@ pub trait Modifiers: RootScope + Sized {
             options: TagOptions::default().without_author(),
         }
     }
-    /// See [`TagOptions::without_self`].
-    fn without_self(&self, pubkey: PublicKey) -> Tagged<'_, Self> {
-        Tagged {
-            target: self,
-            options: TagOptions::default().without_self(pubkey),
-        }
-    }
     /// See [`TagOptions::from_relay`].
     ///
     /// `from_relay` names where the HINT comes from, not a conversion of a
@@ -451,11 +415,6 @@ impl<'a, T: RootScope> Tagged<'a, T> {
     /// See [`TagOptions::without_author`].
     pub fn without_author(mut self) -> Self {
         self.options = self.options.without_author();
-        self
-    }
-    /// See [`TagOptions::without_self`].
-    pub fn without_self(mut self, pubkey: PublicKey) -> Self {
-        self.options = self.options.without_self(pubkey);
         self
     }
     /// See [`TagOptions::from_relay`].
@@ -603,7 +562,7 @@ fn carried_pubkeys(event: &Event, options: &TagOptions) -> Vec<PublicKey> {
         let Some(pubkey) = pubkey_at(row, 1) else {
             continue;
         };
-        if options.keeps(&pubkey) && seen.insert(pubkey) {
+        if seen.insert(pubkey) {
             carried.push(pubkey);
         }
     }
@@ -629,7 +588,7 @@ fn person_rows(author: Option<PublicKey>, carried: &[PublicKey], options: &TagOp
         .map(RelayUrl::to_string)
         .unwrap_or_default();
     let push = |pubkey: PublicKey, seen: &mut BTreeSet<PublicKey>, rows: &mut Vec<Tag>| {
-        if !options.keeps(&pubkey) || !seen.insert(pubkey) {
+        if !seen.insert(pubkey) {
             return;
         }
         rows.push(row(["p", &pubkey.to_hex(), &relay]));
@@ -761,7 +720,7 @@ pub fn event_root_rows(event: &Event, sources: Option<RelayUrl>, options: &TagOp
 
     let mut rows = scope_rows(&root, true);
     if !options.without_author {
-        if let Some(author) = root.author.filter(|author| options.keeps(author)) {
+        if let Some(author) = root.author {
             rows.push(row(["P", &author.to_hex()]));
         }
     }
@@ -1074,8 +1033,7 @@ mod tests {
 
     /// Carry-forward is per relationship, not global. A reply carries the
     /// parent's `p` rows (NIP-10 says to); a reaction declines them (NIP-25
-    /// says not to). Both dedupe identically, and `without_self` drops the
-    /// composing account from either.
+    /// says not to). Both dedupe identically.
     #[test]
     fn carry_forward_and_dedup_behave_identically_on_every_path() {
         let mentioned = Keys::generate().public_key();
@@ -1110,15 +1068,6 @@ mod tests {
             1,
             "a reaction notifies the author and nobody else"
         );
-
-        let without_me = rows(
-            &crate::EventBuilder::new(Kind::from(1))
-                .tag(note.without_self(me))
-                .tags,
-        );
-        assert!(!without_me
-            .iter()
-            .any(|row| row[0] == "p" && row[1] == me.to_hex()));
     }
 
     /// Modifiers are additive and order-independent.
