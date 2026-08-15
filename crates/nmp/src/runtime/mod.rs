@@ -119,6 +119,7 @@ use nmp_transport::{PoolConfig, PoolEvent};
 
 #[cfg(feature = "nip65")]
 use crate::core::AuthorRouteReplacement;
+
 #[doc(hidden)]
 pub use crate::core::ReceiptReplayCursor;
 use crate::core::{
@@ -849,6 +850,14 @@ mod relay_worker_reconciliation_tests {
     use nmp_store::RedbStore;
     use nostr::{Keys, Kind};
 
+    fn test_verifier() -> nmp_transport::Verifier {
+        nmp_transport::Verifier::new(
+            nmp_transport::VerifyConfig::default(),
+            std::sync::Arc::new(nmp_transport::NullKnownSig),
+        )
+        .expect("test verifier construction must succeed")
+    }
+
     fn query(author: &str) -> LiveQuery {
         LiveQuery::from_filter(Filter {
             kinds: Some(BTreeSet::from([1])),
@@ -885,7 +894,7 @@ mod relay_worker_reconciliation_tests {
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
-        let pool = Pool::new(config, pool_tx).expect("test pool construction");
+        let pool = Pool::new(config, test_verifier(), pool_tx).expect("test pool construction");
         let public_handle = pool
             .ensure_session(&public)
             .expect("Public read owns the cap-sized pool");
@@ -927,7 +936,7 @@ mod relay_worker_reconciliation_tests {
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
-        let pool = Pool::new(config, pool_tx).expect("test pool construction");
+        let pool = Pool::new(config, test_verifier(), pool_tx).expect("test pool construction");
         let public_handle = pool
             .ensure_session(&public)
             .expect("Public read owns the cap-sized pool");
@@ -950,7 +959,7 @@ mod relay_worker_reconciliation_tests {
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
-        let pool = Pool::new(config, pool_tx).expect("test pool construction");
+        let pool = Pool::new(config, test_verifier(), pool_tx).expect("test pool construction");
         let mut rows = HashMap::new();
         let mut histories = HashMap::new();
         let mut diagnostics = HashMap::new();
@@ -1120,7 +1129,7 @@ mod relay_worker_reconciliation_tests {
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
-        let pool = Pool::new(config, pool_tx).expect("test pool construction");
+        let pool = Pool::new(config, test_verifier(), pool_tx).expect("test pool construction");
         let mut rows = HashMap::new();
         let mut histories = HashMap::new();
         let mut diagnostics = HashMap::new();
@@ -1251,7 +1260,7 @@ mod relay_worker_reconciliation_tests {
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
-        let pool = Pool::new(config, pool_tx).expect("test pool construction");
+        let pool = Pool::new(config, test_verifier(), pool_tx).expect("test pool construction");
         let mut rows = HashMap::new();
         let mut histories = HashMap::new();
         let mut diagnostics = HashMap::new();
@@ -1398,7 +1407,7 @@ mod relay_worker_reconciliation_tests {
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
-        let pool = Pool::new(config, pool_tx).expect("test pool construction");
+        let pool = Pool::new(config, test_verifier(), pool_tx).expect("test pool construction");
         let mut rows = HashMap::new();
         let mut histories = HashMap::new();
         let mut diagnostics = HashMap::new();

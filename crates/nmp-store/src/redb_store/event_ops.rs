@@ -20,7 +20,8 @@ use super::{
     RelayObserved, RelayUrl, RetractReason, ShapeRecord, SigState, StoredEvent, StoredEventView,
     Timestamp,
 };
-use redb::{ReadableDatabase, ReadableTable};
+use nostr::secp256k1::schnorr::Signature;
+use redb::{Database, ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 #[cfg(any(
     test,
@@ -144,6 +145,61 @@ pub(super) fn insert_batch(
         crate::ingest_attribution::transaction_total(transaction_started.elapsed());
     }
     Ok(outcomes)
+}
+
+/// Durable dedup-by-id for the verify gate (#1677): the known-good
+/// signature for an already-ingested event id, if any. This is a narrow
+/// point read — it decodes only the signature column off the canonical
+/// row, not the whole event. A pending local draft (sentinel signature)
+/// is NOT known-good and returns `None`, so a relay delivering the real
+/// signed version of a still-pending draft is still admitted through to
+/// schnorr rather than falsely rejected as a signature mismatch.
+pub(super) fn known_signature(
+    store: &RedbStore,
+    id: &EventId,
+) -> Result<Option<Signature>, PersistenceError> {
+    known_signature_from_db(store.database()?, id)
+}
+
+/// Shared-handle variant: the [`StoreSigReader`] holds its own
+/// `Arc<Database>` cut from the store, so it reads durable signatures
+/// without borrowing the engine's `RedbStore` and without blocking the
+/// writer (redb is MVCC).
+pub(super) fn known_signature_from_db(
+    db: &Database,
+    id: &EventId,
+) -> Result<Option<Signature>, PersistenceError> {
+    let read_txn = db.begin_read().map_err(persist_err)?;
+    let event_ids = read_txn.open_table(EVENT_IDS).map_err(persist_err)?;
+    let Some(event_key) = event_ids
+        .get(id.as_bytes())
+        .map_err(persist_err)?
+        .map(|guard| guard.value())
+    else {
+        return Ok(None);
+    };
+    let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
+    let Some(value) = events
+        .get(event_row_key(event_key).as_slice())
+        .map_err(persist_err)?
+    else {
+        // An id map naming a canonical row that is gone is corruption, but
+        // for the verify gate a missing row is simply "not known" — the
+        // candidate falls through to schnorr. The invariant is caught by
+        // other read paths; this door stays non-fatal.
+        return Ok(None);
+    };
+    let view = StoredEventView::from_trusted(value.value()).map_err(|error| {
+        PersistenceError::invariant(format!(
+            "decode canonical event view for known_signature {event_key}: {error:?}"
+        ))
+    })?;
+    let sig = Signature::from_slice(view.signature_bytes())
+        .expect("decoded canonical row carries a structurally valid 64-byte signature");
+    if sig == crate::sentinel_signature() {
+        return Ok(None);
+    }
+    Ok(Some(sig))
 }
 
 pub(super) fn query(

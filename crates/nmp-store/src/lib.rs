@@ -92,7 +92,6 @@ pub use persistent_store_lifetime::{RedbStoreOpenError, RedbStoreResetError};
 pub use redb_store::testing;
 #[cfg(any(test, feature = "test-instrumentation"))]
 pub use redb_store::OrderedEventReadPause;
-pub use redb_store::RedbStore;
 #[cfg(feature = "bench-instrumentation")]
 pub use redb_store::{
     prepare_equivalent_store_corpus, run_fjall_governed_ingest_bench,
@@ -105,6 +104,7 @@ pub use redb_store::{
     StoreBenchPreparedMetrics, StoreBenchPreparedRecord, StoreBenchPreparedTable,
     StoreBenchProcessCounters, StoreBenchVariant,
 };
+pub use redb_store::{RedbStore, StoreSigReader};
 pub use semantic_edit::{
     AccessContextId, MaterializationCandidate, MaterializationId, OperationResolution,
     OperationSourceRequirement, PendingMaterializationState, QualifiedSource,

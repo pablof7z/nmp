@@ -64,11 +64,35 @@ pub fn assert_materializer_entry_has_no_open_transaction(store: &mut RedbStore) 
     let Some(remaining) = store.materializer_entry_probe.as_ref().cloned() else {
         return;
     };
+    // `check_integrity` needs `&mut Database`, and the live handle is shared
+    // with the verify gate's `StoreSigReader` cell (#1677). Drop the cell's
+    // clone for the duration of the probe, then reinstall it: the store is
+    // borrowed exclusively here, so no reader can be mid-lookup.
+    {
+        let mut shared = store
+            .shared_db
+            .lock()
+            .expect("shared database cell poisoned");
+        shared.take();
+    }
     let database = store
         .db
         .as_mut()
-        .expect("the materializer-entry probe requires an open Redb handle");
-    match database.check_integrity() {
+        .and_then(Arc::get_mut)
+        .expect("the materializer-entry probe requires an exclusive open Redb handle");
+    let integrity = database.check_integrity();
+    {
+        let handle = store
+            .db
+            .as_ref()
+            .expect("the probe left the database handle open");
+        let mut shared = store
+            .shared_db
+            .lock()
+            .expect("shared database cell poisoned");
+        *shared = Some(Arc::clone(handle));
+    }
+    match integrity {
         Ok(true) => {}
         Ok(false) => panic!("Redb integrity check reported an invalid database"),
         Err(redb::DatabaseError::TransactionInProgress) => {

@@ -119,6 +119,14 @@ mod tests {
     use nmp_transport::{PoolConfig, RelayOpenError, RelaySessionKey};
     use nostr::{Keys, RelayUrl};
 
+    fn test_verifier() -> nmp_transport::Verifier {
+        nmp_transport::Verifier::new(
+            nmp_transport::VerifyConfig::default(),
+            std::sync::Arc::new(nmp_transport::NullKnownSig),
+        )
+        .expect("test verifier construction must succeed")
+    }
+
     use crate::runtime::diagnostics_channel::latest_channel;
     use crate::runtime::EngineThread;
 
@@ -162,6 +170,7 @@ mod tests {
                 max_relays: 1,
                 ..PoolConfig::default()
             },
+            test_verifier(),
             pool_tx,
         )
         .expect("test pool construction");
@@ -201,7 +210,8 @@ mod tests {
     #[test]
     fn new_observer_current_snapshot_satisfies_pending_delivery_without_duplicate() {
         let (pool_tx, _pool_rx) = mpsc::channel();
-        let pool = Pool::new(PoolConfig::default(), pool_tx).expect("test pool construction");
+        let pool = Pool::new(PoolConfig::default(), test_verifier(), pool_tx)
+            .expect("test pool construction");
         let core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 1);
         let mut snapshot = snapshot_with_pool(&core, &pool);
         snapshot.uncovered_author_count = 7;
