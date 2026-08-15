@@ -19,7 +19,8 @@ Use only relevant sections.
 - [ ] Public-API and native-platform tests are kept only when they prove an
       additional result.
 - [ ] Every non-live evidence locator names one enabled test or validation
-      script in required CI.
+      script that a reviewer actually ran. There is no CI; nothing runs it
+      for them.
 - [ ] Every live locator names one enabled supplemental live job.
 
 ## Fixtures
@@ -64,7 +65,7 @@ Use only relevant sections.
 - [ ] The focused check, changed-crate tests, and required public-API or fault
       checks pass.
 - [ ] Required parity and native-platform tests pass.
-- [ ] Required repository checks pass.
+- [ ] `cargo test --workspace` and `cargo fmt --all --check` pass, run by hand — there is no CI to run them.
 - [ ] Unrun live or platform checks are stated.
 - [ ] A future agent can recover the exact distinction, linked test, and
       deliberate-break check from feature metadata without reading chat.
