@@ -1,5 +1,13 @@
 # M3 — Store + transport + write outbox, durable: implementation plan
 
+> **Superseded as a description of current architecture (#1647).** This is a
+> dated 2026-07-11 plan, preserved for its reasoning. Where it describes how
+> NMP is built *today* — layering, the sync/async seam, what `EngineCore` is —
+> it is out of date and must not be cited. `docs/internals/architecture-boundaries.md`
+> is authoritative. In particular this document's "PURE synchronous reducer"
+> label for `EngineCore` is wrong: `EngineCore` owns the store and commits
+> through it (`crates/nmp/src/core/mod.rs`).
+
 - **Date:** 2026-07-11
 - **Status:** Provisional-until-v2 (no self-compat obligation). Builder-facing plan for M3 per `docs/VISION.md` §6.
 - **Milestone:** M3 — make the engine **durable and network-real, still headless** (no FFI — that is M4). Persistent store behind the same single insert door; real WebSocket transport; durable write outbox; negentropy probing + neg-first sync; an engine-internal signer + encrypt/decrypt capability.
@@ -34,7 +42,7 @@ nostr, negentropy, redb, tungstenite/mio/rustls (external)
         deps: grammar, store, resolver, router, transport, signer, negentropy(ext)
 ```
 
-**Dependency direction.** Everything flows one way into `nmp-engine`; nothing depends on it. `nmp-transport` and `nmp-signer` depend on NO other NMP crate (pure edges → parallel builders, isolated tests). `nmp-store` gains dependencies only on `redb` (behind a `redb` feature) — the trait stays the seam so `MemoryStore` remains the test backend.
+**Dependency direction.** Everything flows one way into `nmp-engine`; nothing depends on it. `nmp-transport` and `nmp-signer` depend on NO other NMP crate (pure edges → parallel builders, isolated tests). `nmp-store` gains dependencies only on `redb` (behind a `redb` feature) — the trait stays the seam so `MemoryStore` remains the test backend. *(Not what happened: `MemoryStore` was deleted in #1427 and the `EventStore` trait in #1495. Redb is the one production store and it is concrete.)*
 
 **Why not fold negentropy/signer into engine (YAGNI check):** the *pure* parts (reconciler FSM, probe state machine, local signer, encrypt/decrypt) are self-contained and headless-testable; splitting `nmp-signer` earns the remote-signer trait seam (NIP-46 later) and isolation; the negentropy reconciler is kept as an engine *module* (not a crate) because it is driven turn-by-turn by the reducer and shares the engine's message vocabulary — a crate boundary there would buy nothing. That is the line: signer = crate (clean capability seam), negentropy = module (reducer-coupled).
 

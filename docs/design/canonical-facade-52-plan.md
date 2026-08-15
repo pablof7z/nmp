@@ -6,6 +6,12 @@ annotations now record the implementation that followed. Authoritative
 contract lives in `gh issue view 52` / `#43` and `docs/known-gaps.md`
 §"Promoted v2 contract gaps"; this note preserves the design and its proof map.
 
+> **Superseded as a description of current architecture (#1647).** Its
+> "pure reducer" characterisations of `core` cite a `lib.rs:1-19` header that no
+> longer reads that way. `EngineCore` owns the store and commits through it.
+> `docs/internals/architecture-boundaries.md` is authoritative for the decision,
+> commit, effect and reactive boundaries.
+
 ---
 
 ## 0. The problem, grounded in the current two entry points
