@@ -63,6 +63,7 @@ mod pool_bridge;
 mod receipt_stream;
 mod request_wire;
 mod row_channel;
+mod sign_event;
 
 pub use clock::EngineClock;
 pub use engine_thread::{
@@ -70,6 +71,7 @@ pub use engine_thread::{
 };
 pub use history_mailbox::{AsyncHistoryReceiver, HistoryMsg, HistoryReceiver};
 pub use receipt_stream::{ReceiptReattachment, ReceiptStream};
+pub use sign_event::{SignEventCancel, SignEventError, SignEventOperation};
 
 pub use auth::{
     AddAuthPolicyError, AuthPolicy, AuthPolicyOp, AuthPolicyPendingSender, AuthPolicyRegistration,
@@ -78,7 +80,6 @@ pub use auth::{
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -89,8 +90,8 @@ use nmp_grammar::ConcreteFilter;
 use nmp_grammar::LiveQuery;
 use nmp_router::{SubId, WireOp};
 use nmp_signer::{
-    PendingSignerOp, SignerOp, SignerPublicKey, SignerSignedEvent, SignerSignedEventParts,
-    SignerUnsignedEvent, SigningCapability,
+    SignerOp, SignerPublicKey, SignerSignedEvent, SignerSignedEventParts, SignerUnsignedEvent,
+    SigningCapability,
 };
 use nmp_store::RedbStore;
 #[cfg(test)]
@@ -380,8 +381,8 @@ enum Cmd {
     /// capability without entering the write/store/delivery reducer.
     SignEvent {
         unsigned: UnsignedEvent,
-        completion: SignEventCompletion,
-        reply: Sender<Result<SignEventRegistration, SignEventError>>,
+        completion: sign_event::SignEventCompletion,
+        reply: Sender<Result<sign_event::SignEventRegistration, SignEventError>>,
     },
     CancelSignEvent(u64),
     SignEventFinished(u64),
@@ -520,96 +521,18 @@ impl RuntimeSessionState {
             .filter_map(|(public_key, provider)| provider.map(|_| *public_key))
             .collect()
     }
-}
 
-/// Typed outcome vocabulary for the governed sign-only operation. This is
-/// deliberately separate from write receipts: signing here never accepts a
-/// write intent, mutates canonical storage, creates a delivery lane, or
-/// publishes to a relay.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SignEventError {
-    NoCurrentSigningProvider,
-    InvalidRequest { reason: String },
-    SignerUnavailable { reason: String },
-    SignerRejected { reason: String },
-    InvalidSignerOutput { reason: String },
-    EngineClosed,
-    Cancelled,
-}
-
-type SignEventCompletion = Box<dyn FnOnce(Result<SignedEvent, SignEventError>) + Send + 'static>;
-
-#[repr(u8)]
-#[derive(Clone, Copy)]
-enum SignEventState {
-    Open,
-    Cancelled,
-    Resolved,
-}
-
-thread_local! {
-    /// #704: set on a per-operation sign-event completion thread to the exact
-    /// operation id it is running. `EngineThread::join()` reads it so a
-    /// completion closure that calls `join()` reentrantly exempts only its own
-    /// operation from the shutdown drain (replacing the executor `TaskId`
-    /// mechanism, which is gone).
-    static SIGN_EVENT_COMPLETION_OP: std::cell::Cell<Option<u64>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// One linearization point shared by caller cancellation, engine shutdown,
-/// runtime shutdown, and signer completion. Cancellation claims `Open ->
-/// Cancelled` and fires the bound cancel action (the pending op's canceller for
-/// a remote signer; a no-op for a ready local signer).
-struct SignEventTerminal {
-    state: AtomicU8,
-    cancel: Box<dyn Fn() + Send + Sync>,
-}
-
-impl SignEventTerminal {
-    fn new(cancel: Box<dyn Fn() + Send + Sync>) -> Arc<Self> {
-        Arc::new(Self {
-            state: AtomicU8::new(SignEventState::Open as u8),
-            cancel,
-        })
+    /// The signing capabilities this session holds, named rather than reached
+    /// through this value's `Deref`.
+    ///
+    /// The `Deref` below is convenience for code that already knows both
+    /// halves are the same value. A caller that depends only on the SIGNER
+    /// half — [`sign_event::ActiveSignEvents::admit`] is the one that matters
+    /// (#1628) — asks for it by name, so its dependency reads as a dependency
+    /// instead of a coercion.
+    fn signer_registry(&self) -> &SignerRegistry {
+        &self.signers
     }
-
-    fn cancel(&self) -> bool {
-        if self
-            .state
-            .compare_exchange(
-                SignEventState::Open as u8,
-                SignEventState::Cancelled as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return false;
-        }
-        (self.cancel)();
-        true
-    }
-
-    fn resolve(&self) -> bool {
-        self.state
-            .compare_exchange(
-                SignEventState::Open as u8,
-                SignEventState::Resolved as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-    }
-}
-
-struct SignEventRegistration {
-    id: u64,
-    terminal: Arc<SignEventTerminal>,
-}
-
-struct ActiveSignEvent {
-    terminal: Arc<SignEventTerminal>,
 }
 
 struct PendingInitialPublication {
@@ -641,128 +564,6 @@ fn spawn_replaceable_materialization(
         })
         .map(drop)
         .map_err(|error| error.to_string())
-}
-
-/// #704: run one foreign sign-event `completion` closure on a FRESH dedicated
-/// OS thread spawned for that single in-flight app operation. The closure may
-/// block indefinitely and may call `Engine::join()` reentrantly (the
-/// reentrant-join tests) — running it on the shared runtime would stall the
-/// fixed workers, and a reentrant `join()` from a worker would deadlock tokio.
-/// The thread advertises its operation id via `SIGN_EVENT_COMPLETION_OP` so
-/// `join()` can exempt exactly this operation, and posts `SignEventFinished`
-/// via a drop guard on the way out (panic-safe).
-#[allow(clippy::too_many_arguments)]
-fn spawn_sign_event_completion(
-    inbox: Sender<Cmd>,
-    operation_id: u64,
-    terminal: Arc<SignEventTerminal>,
-    unsigned: UnsignedEvent,
-    expected_id: EventId,
-    signer_result: Option<Result<SignerSignedEvent, nmp_signer::SignerError>>,
-    completion: SignEventCompletion,
-) {
-    let thread_inbox = inbox.clone();
-    let spawned = thread::Builder::new()
-        .name("nmp-sign-event-completion".to_string())
-        .spawn(move || {
-            nmp_transport::thread_census::run_counted_thread(move || {
-                SIGN_EVENT_COMPLETION_OP.with(|op| op.set(Some(operation_id)));
-                let _finished = SignEventFinishedGuard {
-                    inbox: thread_inbox,
-                    operation_id,
-                };
-                let result = match signer_result {
-                    Some(result) if terminal.resolve() => result
-                        .and_then(decode_signed_event)
-                        .map_err(signer_error)
-                        .and_then(|signed| validate_signer_output(&unsigned, expected_id, signed)),
-                    Some(_) | None => Err(SignEventError::Cancelled),
-                };
-                completion(result);
-            });
-        });
-    if spawned.is_err() {
-        // OS thread exhaustion (astronomically rare): the failed spawn dropped
-        // the completion closure without calling it, so the caller observes a
-        // disconnected result. Clear the operation from the shutdown drain.
-        let _ = inbox.send(Cmd::SignEventFinished(operation_id));
-    }
-}
-
-/// #704: owns the foreign sign-event `completion` while the async signing wait
-/// is outstanding. When the awaiting task resolves it sets `signer_result` and
-/// drops; when the task's future is instead dropped (runtime shutdown /
-/// cancellation) `signer_result` stays `None`. Either way `Drop` runs the
-/// completion exactly once on a fresh per-op OS thread (delivering a signed
-/// event, a signer error, or `Cancelled`), never leaving the foreign closure
-/// uncalled.
-struct SignEventCompletionDispatch {
-    inbox: Sender<Cmd>,
-    operation_id: u64,
-    terminal: Arc<SignEventTerminal>,
-    unsigned: UnsignedEvent,
-    expected_id: EventId,
-    completion: Option<SignEventCompletion>,
-    signer_result: Option<Result<SignerSignedEvent, nmp_signer::SignerError>>,
-}
-
-impl Drop for SignEventCompletionDispatch {
-    fn drop(&mut self) {
-        if let Some(completion) = self.completion.take() {
-            spawn_sign_event_completion(
-                self.inbox.clone(),
-                self.operation_id,
-                Arc::clone(&self.terminal),
-                self.unsigned.clone(),
-                self.expected_id,
-                self.signer_result.take(),
-                completion,
-            );
-        }
-    }
-}
-
-struct SignEventFinishedGuard {
-    inbox: Sender<Cmd>,
-    operation_id: u64,
-}
-
-impl Drop for SignEventFinishedGuard {
-    fn drop(&mut self) {
-        let _ = self.inbox.send(Cmd::SignEventFinished(self.operation_id));
-    }
-}
-
-impl std::fmt::Display for SignEventError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoCurrentSigningProvider => {
-                f.write_str("the current account has no available signing provider")
-            }
-            Self::InvalidRequest { reason } => write!(f, "invalid sign request: {reason}"),
-            Self::SignerUnavailable { reason } => write!(f, "signer unavailable: {reason}"),
-            Self::SignerRejected { reason } => write!(f, "signer rejected request: {reason}"),
-            Self::InvalidSignerOutput { reason } => {
-                write!(f, "signer returned invalid output: {reason}")
-            }
-            Self::EngineClosed => f.write_str("engine already shut down"),
-            Self::Cancelled => f.write_str("sign operation cancelled"),
-        }
-    }
-}
-
-impl std::error::Error for SignEventError {}
-
-fn signer_error(error: nmp_signer::SignerError) -> SignEventError {
-    match error {
-        nmp_signer::SignerError::InvalidResponse(reason) => {
-            SignEventError::InvalidSignerOutput { reason }
-        }
-        nmp_signer::SignerError::Rejected(reason) => SignEventError::SignerRejected { reason },
-        other => SignEventError::SignerUnavailable {
-            reason: other.to_string(),
-        },
-    }
 }
 
 fn encode_unsigned_event(unsigned: &UnsignedEvent) -> SignerUnsignedEvent {
@@ -817,46 +618,6 @@ fn decode_signed_event(signed: SignerSignedEvent) -> Result<SignedEvent, nmp_sig
         content,
         signature,
     ))
-}
-
-fn validate_sign_request(unsigned: &UnsignedEvent) -> Result<EventId, SignEventError> {
-    let computed = EventId::new(
-        &unsigned.pubkey,
-        &unsigned.created_at,
-        &unsigned.kind,
-        &unsigned.tags,
-        &unsigned.content,
-    );
-    if unsigned.id.is_some_and(|declared| declared != computed) {
-        return Err(SignEventError::InvalidRequest {
-            reason: "declared event id does not match the immutable body".to_string(),
-        });
-    }
-    Ok(computed)
-}
-
-fn validate_signer_output(
-    unsigned: &UnsignedEvent,
-    expected_id: EventId,
-    signed: SignedEvent,
-) -> Result<SignedEvent, SignEventError> {
-    if signed.id != expected_id
-        || signed.pubkey != unsigned.pubkey
-        || signed.created_at != unsigned.created_at
-        || signed.kind != unsigned.kind
-        || signed.tags != unsigned.tags
-        || signed.content != unsigned.content
-    {
-        return Err(SignEventError::InvalidSignerOutput {
-            reason: "signed event does not match the frozen body, author, or id".to_string(),
-        });
-    }
-    signed
-        .verify()
-        .map_err(|error| SignEventError::InvalidSignerOutput {
-            reason: format!("signature verification failed: {error}"),
-        })?;
-    Ok(signed)
 }
 
 struct RegisteredSigner {
@@ -2310,6 +2071,27 @@ mod store_recovery_driver_tests {
     }
 }
 
+/// Shutdown is finished when no lifecycle can still run FOREIGN code.
+///
+/// Two owners can, and they are the only two: an AUTH policy or signer task
+/// awaiting an app-provided capability, and a sign-only operation whose
+/// completion closure has not been delivered. Each answers for its own state;
+/// this composes their answers.
+///
+/// It exists as one named function because the composition is asked twice —
+/// once when `Cmd::Shutdown` arrives and once per drained command afterwards —
+/// and two hand-written copies of the same conjunction are two places for a
+/// third owner to be forgotten. "Drained" is deliberately not "empty": an
+/// operation exempted by a reentrant `join()` is gone from the drain while its
+/// completion is still running, which is correct and is the whole reason this
+/// predicate is not `is_empty()` on one map.
+fn foreign_work_drained(
+    auth_tasks: &RefCell<auth::AuthTaskRegistry>,
+    sign_events: &sign_event::ActiveSignEvents,
+) -> bool {
+    auth_tasks.borrow().is_drained() && sign_events.is_drained()
+}
+
 /// The engine thread's body: construct `EngineCore` (this is the ONLY place
 /// it is ever built — it never leaves this stack frame), then block on
 /// `cmd_rx` (D8) until `Cmd::Shutdown`.
@@ -2378,8 +2160,7 @@ fn engine_loop(
     let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
     #[cfg(feature = "nip65")]
     let nip65 = RefCell::new(crate::nip65::RuntimeAssembly::new(nip65_sources));
-    let mut next_sign_event_id = 1u64;
-    let mut sign_event_cancellations: HashMap<u64, ActiveSignEvent> = HashMap::new();
+    let mut active_sign_events = sign_event::ActiveSignEvents::default();
     let mut next_replaceable_materialization_id = 1u64;
     let mut pending_replaceable_materializations: HashMap<u64, PendingReplaceableMaterialization> =
         HashMap::new();
@@ -2870,12 +2651,10 @@ fn engine_loop(
                     let _ = applied.send(());
                 }
                 Cmd::CancelSignEvent(id) | Cmd::SignEventFinished(id) => {
-                    if let Some(active) = sign_event_cancellations.remove(&id) {
-                        active.terminal.cancel();
-                    }
+                    active_sign_events.cancel(id);
                 }
                 Cmd::ExemptSignEventDrain(op_id) => {
-                    sign_event_cancellations.remove(&op_id);
+                    active_sign_events.exempt_from_shutdown_drain(op_id);
                 }
                 #[cfg(any(test, feature = "bench-instrumentation"))]
                 Cmd::DeadlineRaceProbe { .. } => {}
@@ -2886,7 +2665,7 @@ fn engine_loop(
                 | Cmd::UnsubscribeHistory(_)
                 | Cmd::Shutdown => {}
             }
-            if auth_tasks.borrow().is_empty() && sign_event_cancellations.is_empty() {
+            if foreign_work_drained(&auth_tasks, &active_sign_events) {
                 break;
             }
             continue;
@@ -2901,15 +2680,13 @@ fn engine_loop(
                 }
                 auth_tasks.borrow_mut().shutdown();
                 registry.cancel_all_pending_writes();
-                for active in sign_event_cancellations.values() {
-                    active.terminal.cancel();
-                }
-                if auth_tasks.borrow().is_empty() && sign_event_cancellations.is_empty() {
+                active_sign_events.cancel_for_shutdown();
+                if foreign_work_drained(&auth_tasks, &active_sign_events) {
                     break;
                 }
             }
             Cmd::ExemptSignEventDrain(op_id) => {
-                sign_event_cancellations.remove(&op_id);
+                active_sign_events.exempt_from_shutdown_drain(op_id);
             }
             Cmd::RelayInformationFetched {
                 url,
@@ -3397,117 +3174,27 @@ fn engine_loop(
                 completion,
                 reply,
             } => {
-                let Some(author) = registry.current_pubkey else {
-                    let _ = reply.send(Err(SignEventError::NoCurrentSigningProvider));
-                    continue;
-                };
-                if unsigned.pubkey != author {
-                    let _ = reply.send(Err(SignEventError::InvalidRequest {
-                        reason: "request author does not match the current account".to_string(),
-                    }));
-                    continue;
-                }
-                let expected_id = match validate_sign_request(&unsigned) {
-                    Ok(expected_id) => expected_id,
-                    Err(error) => {
-                        let _ = reply.send(Err(error));
-                        continue;
-                    }
-                };
-                let Some(signer_op) = registry.sign(unsigned.clone()) else {
-                    let _ = reply.send(Err(SignEventError::NoCurrentSigningProvider));
-                    continue;
-                };
-
-                let operation_id = next_sign_event_id;
-                next_sign_event_id = next_sign_event_id.wrapping_add(1).max(1);
-
-                // #704: the SIGNING WAIT holds no thread. A ready local signer
-                // has its result now; a pending remote signer is awaited by an
-                // async task on the adapter runtime. Cancellation fires the
-                // pending op's canceller (a no-op for a ready result); the
-                // foreign `completion` — which may block and may call
-                // `Engine::join()` reentrantly — always runs on a FRESH per-op
-                // OS thread, never the runtime or the reducer.
-                let (cancel_action, signer_source): (
-                    Box<dyn Fn() + Send + Sync>,
-                    SignEventSignerResult,
-                ) = match signer_op {
-                    SignerOp::Ready(result) => (
-                        Box::new(|| {}),
-                        SignEventSignerResult::Ready(Box::new(result)),
-                    ),
-                    SignerOp::Pending(pending) => {
-                        let canceller = pending.canceller();
-                        (
-                            Box::new(move || canceller.cancel()),
-                            SignEventSignerResult::Pending(pending),
-                        )
-                    }
-                };
-                let terminal = SignEventTerminal::new(cancel_action);
-
-                sign_event_cancellations.insert(
-                    operation_id,
-                    ActiveSignEvent {
-                        terminal: Arc::clone(&terminal),
+                // The owner's one inward edge, spelled out: the selected
+                // author is the session's state, the signing capability is the
+                // signer registry's, and neither is reached through
+                // `RuntimeSessionState`'s `Deref`.
+                active_sign_events.admit(
+                    registry.current_pubkey,
+                    registry.signer_registry(),
+                    sign_event::CompletionWiring {
+                        runtime: runtime_handle,
+                        inbox: self_inbox,
                     },
+                    unsigned,
+                    completion,
+                    &reply,
                 );
-                if reply
-                    .send(Ok(SignEventRegistration {
-                        id: operation_id,
-                        terminal: Arc::clone(&terminal),
-                    }))
-                    .is_err()
-                {
-                    sign_event_cancellations.remove(&operation_id);
-                    terminal.cancel();
-                    continue;
-                }
-
-                let inbox = self_inbox.clone();
-                match signer_source {
-                    SignEventSignerResult::Ready(result) => {
-                        spawn_sign_event_completion(
-                            inbox,
-                            operation_id,
-                            terminal,
-                            unsigned,
-                            expected_id,
-                            Some(*result),
-                            completion,
-                        );
-                    }
-                    SignEventSignerResult::Pending(pending) => {
-                        // The signing wait is async; the (possibly-blocking)
-                        // foreign completion is delivered on a per-op thread
-                        // whether the await resolves OR the task's future is
-                        // dropped at runtime shutdown (the dispatch Drop guard).
-                        let dispatch = SignEventCompletionDispatch {
-                            inbox,
-                            operation_id,
-                            terminal,
-                            unsigned,
-                            expected_id,
-                            completion: Some(completion),
-                            signer_result: None,
-                        };
-                        runtime_handle.spawn(async move {
-                            let mut dispatch = dispatch;
-                            let result = pending.await;
-                            dispatch.signer_result = Some(result);
-                            // drop(dispatch) here spawns the completion thread.
-                        });
-                    }
-                }
             }
             Cmd::CancelSignEvent(id) => {
-                if let Some(active) = sign_event_cancellations.remove(&id) {
-                    active.terminal.cancel();
-                }
+                active_sign_events.cancel(id);
             }
             Cmd::SignEventFinished(id) => {
-                sign_event_cancellations.remove(&id);
+                active_sign_events.finish(id);
             }
             Cmd::ObserveDiagnostics { reply } => {
                 let id = next_diag_id;
@@ -4066,9 +3753,7 @@ fn engine_loop(
             let _ = pending.reply.send(Err(PublishError::EngineShuttingDown));
         }
     }
-    for (_, active) in sign_event_cancellations.drain() {
-        active.terminal.cancel();
-    }
+    active_sign_events.drain_for_shutdown();
 
     // Tear down this thread's OWN `Pool` clone. If no other `Pool` clone
     // survives (the design here never keeps one anywhere else), this drops
@@ -5044,57 +4729,6 @@ impl Drop for DeadlineRaceHold {
     }
 }
 
-/// One accepted sign-only operation. It owns no write receipt or durable
-/// obligation: dropping it before completion cancels the exact signer RPC.
-pub struct SignEventOperation {
-    result: Option<Receiver<Result<SignedEvent, SignEventError>>>,
-    cancel: SignEventCancel,
-}
-
-enum SignEventSignerResult {
-    Ready(Box<Result<SignerSignedEvent, nmp_signer::SignerError>>),
-    Pending(PendingSignerOp<SignerSignedEvent>),
-}
-
-impl SignEventOperation {
-    pub fn recv(mut self) -> Result<SignedEvent, SignEventError> {
-        self.result
-            .take()
-            .expect("sign-event result is consumed exactly once")
-            .recv()
-            .unwrap_or(Err(SignEventError::Cancelled))
-    }
-
-    #[must_use]
-    pub fn cancel_handle(&self) -> SignEventCancel {
-        self.cancel.clone()
-    }
-}
-
-impl Drop for SignEventOperation {
-    fn drop(&mut self) {
-        if self.result.is_some() {
-            self.cancel.cancel();
-        }
-    }
-}
-
-/// Idempotent cancellation token for one exact sign-only operation.
-#[derive(Clone)]
-pub struct SignEventCancel {
-    inbox: Sender<Cmd>,
-    id: u64,
-    terminal: Arc<SignEventTerminal>,
-}
-
-impl SignEventCancel {
-    pub fn cancel(&self) {
-        if self.terminal.cancel() {
-            let _ = self.inbox.send(Cmd::CancelSignEvent(self.id));
-        }
-    }
-}
-
 /// Opaque ownership proof for one exact signer-registry installation.
 /// Replacing a signer for the same public key creates a distinct value, so
 /// cleanup from the older provider cannot detach the replacement.
@@ -5481,48 +5115,6 @@ impl Handle {
         reply_rx
             .recv()
             .expect("nmp-engine: engine thread dropped the remove_auth_policy reply")
-    }
-
-    /// Ask the current account's registered signing provider to sign one exact event,
-    /// without accepting a write or touching the canonical store/delivery state. A
-    /// pending remote operation is cancellable through the returned handle and
-    /// engine shutdown; #704 removed the admission slot — nothing is refused.
-    pub fn sign_event(
-        &self,
-        unsigned: UnsignedEvent,
-    ) -> Result<SignEventOperation, SignEventError> {
-        let (completion_tx, completion_rx) = mpsc::channel();
-        let cancel = self.sign_event_with_completion(unsigned, move |result| {
-            let _ = completion_tx.send(result);
-        })?;
-        Ok(SignEventOperation {
-            result: Some(completion_rx),
-            cancel,
-        })
-    }
-
-    #[doc(hidden)]
-    pub fn sign_event_with_completion(
-        &self,
-        unsigned: UnsignedEvent,
-        completion: impl FnOnce(Result<SignedEvent, SignEventError>) + Send + 'static,
-    ) -> Result<SignEventCancel, SignEventError> {
-        let (reply_tx, reply_rx) = mpsc::channel();
-        self.inbox
-            .send(Cmd::SignEvent {
-                unsigned,
-                completion: Box::new(completion),
-                reply: reply_tx,
-            })
-            .map_err(|_| SignEventError::EngineClosed)?;
-        let registration = reply_rx
-            .recv()
-            .map_err(|_| SignEventError::EngineClosed)??;
-        Ok(SignEventCancel {
-            inbox: self.inbox.clone(),
-            id: registration.id,
-            terminal: registration.terminal,
-        })
     }
 
     /// Re-root every reactive query and default unsigned-publish authority
