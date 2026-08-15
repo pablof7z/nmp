@@ -3559,6 +3559,14 @@ impl EngineCore {
         self.clock = now;
     }
 
+    /// The reducer's own current wall truth. Effect dispatch opens the NIP-65
+    /// route-source observation with this rather than re-reading a clock the
+    /// reducer has not seen yet -- the same value [`Self::on_subscribe`] uses
+    /// for an app subscription.
+    pub(crate) fn clock(&self) -> Timestamp {
+        self.clock
+    }
+
     /// The earliest wall-clock instant at which [`Self::tick`] must run for
     /// something to actually happen (retraction-and-negative-deltas.md
     /// §3.2): the min over every deadline source this reducer currently
@@ -3783,6 +3791,18 @@ impl EngineCore {
             })
         });
         vec![Effect::EmitDiagnostics(self.diagnostics_snapshot())]
+    }
+
+    /// The current account, for the runtime's own reads (#1657).
+    ///
+    /// This is the one stored copy. The reducer must hold it because it
+    /// resolves `Identity::Active` and re-roots reactive bindings from pure
+    /// `&mut self` code that cannot reach the runtime's account registry, and
+    /// because `EngineCore` is exercised headlessly with no runtime in
+    /// existence at all. `RuntimeSessionState` therefore keeps no second
+    /// copy: it owns the account set and asks here for the selection.
+    pub(crate) fn active_pubkey(&self) -> Option<PublicKey> {
+        self.active_pubkey
     }
 
     fn on_set_active_pubkey(&mut self, pk: Option<PublicKey>) -> Vec<Effect> {
