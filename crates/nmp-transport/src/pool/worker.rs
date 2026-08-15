@@ -825,8 +825,6 @@ fn run_worker(
                 let mut pending_reconnect_preamble =
                     PendingReconnectPreamble::snapshot(generation, &current_preamble);
                 drop(current_preamble);
-                #[cfg(feature = "bench-instrumentation")]
-                super::pause_after_reconnect_preamble_snapshot(&url);
                 if event_tx
                     .send(WorkerEvent {
                         slot,
@@ -846,20 +844,18 @@ fn run_worker(
                 // new socket comes up.
                 //
                 // `SUSPEND_GAP_THRESHOLD`'s safety margin (never firing on an
-                // ordinary idle wait) is only sound relative to whatever
-                // idle/pong timeouts THIS pool is actually configured with --
-                // its doc assumes the production defaults. A `PoolConfig`
-                // override that pushes either past the threshold would let a
-                // legitimate idle wait masquerade as a resume gap; debug
-                // builds catch that misconfiguration here rather than
+                // ordinary idle wait) is only sound relative to the keepalive
+                // idle/pong timeouts the worker actually runs with, which are
+                // `crate::keepalive`'s constants. Raising either past the
+                // threshold would let a legitimate idle wait masquerade as a
+                // resume gap; debug builds catch that edit here rather than
                 // silently changing ping cadence in production.
                 debug_assert!(
                     SUSPEND_GAP_THRESHOLD > keepalive_idle
                         && SUSPEND_GAP_THRESHOLD > keepalive_pong_timeout,
-                    "SUSPEND_GAP_THRESHOLD ({SUSPEND_GAP_THRESHOLD:?}) must exceed the configured \
-                     keepalive idle/pong timeouts ({keepalive_idle:?}/{keepalive_pong_timeout:?}), \
-                     or an ordinary idle wait under this config can spuriously trip the resume-gap \
-                     heuristic"
+                    "SUSPEND_GAP_THRESHOLD ({SUSPEND_GAP_THRESHOLD:?}) must exceed the keepalive \
+                     idle/pong timeouts ({keepalive_idle:?}/{keepalive_pong_timeout:?}), or an \
+                     ordinary idle wait can spuriously trip the resume-gap heuristic"
                 );
                 let mut suspend_gap =
                     SuspendGapDetector::new(SystemTime::now(), SUSPEND_GAP_THRESHOLD);
@@ -927,8 +923,6 @@ fn run_worker(
                         }
                         let base = retry_in.expect("retry_in set above for non-permanent");
                         let delay = backoff::jittered(base, url.as_str(), reconnect_jitter_max);
-                        #[cfg(feature = "bench-instrumentation")]
-                        let delay = super::control_reconnect_delay(&url, delay);
                         attempt = attempt.wrapping_add(1);
                         if !wait_before_reconnect(
                             &command_rx,
@@ -973,8 +967,6 @@ fn run_worker(
                 }
                 let base = retry_in.expect("retry_in set above for non-permanent");
                 let delay = backoff::jittered(base, url.as_str(), reconnect_jitter_max);
-                #[cfg(feature = "bench-instrumentation")]
-                let delay = super::control_reconnect_delay(&url, delay);
                 attempt = attempt.wrapping_add(1);
                 if !wait_before_reconnect(
                     &command_rx,
