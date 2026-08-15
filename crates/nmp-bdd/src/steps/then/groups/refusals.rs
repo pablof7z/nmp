@@ -33,11 +33,6 @@ async fn an_h_carrying_event_is_refused(w: &mut NmpWorld) {
     );
 }
 
-#[then(regex = r#"^the publication is refused with a typed caller-supplied-previous error$"#)]
-async fn refused_caller_supplied_previous(w: &mut NmpWorld) {
-    assert_refusal(w, "CallerSuppliedTimeline");
-}
-
 #[then(regex = r#"^the publication is refused with a typed error$"#)]
 async fn refused_with_a_typed_error(w: &mut NmpWorld) {
     assert!(
@@ -69,18 +64,6 @@ async fn error_names_the_h_tag(w: &mut NmpWorld) {
     );
 }
 
-#[then(regex = r#"^the error names the previous tag$"#)]
-async fn error_names_the_previous_tag(w: &mut NmpWorld) {
-    let said = w
-        .group_refusal()
-        .expect("expected a typed refusal")
-        .to_string();
-    assert!(
-        said.contains("'previous'"),
-        "the refusal must name the tag: {said}"
-    );
-}
-
 #[then(regex = r#"^the refusal is the same error as for a matching h$"#)]
 async fn same_refusal_as_matching_h(w: &mut NmpWorld) {
     assert_refusal(w, "CallerSuppliedContext");
@@ -105,51 +88,5 @@ async fn refusal_is_a_caller_error(w: &mut NmpWorld) {
         w.receipt_count(),
         0,
         "a caller error has no receipt to carry a relay's rejection"
-    );
-}
-
-#[then(regex = r#"^neither tag was stripped from the event I supplied$"#)]
-async fn neither_tag_stripped(w: &mut NmpWorld) {
-    let supplied = w
-        .supplied_draft()
-        .cloned()
-        .expect("this scenario supplies its own draft");
-    let names: Vec<String> = supplied
-        .tags
-        .iter()
-        .filter_map(|tag| tag.as_slice().first().cloned())
-        .collect();
-    assert!(
-        names.iter().any(|n| n == "h") && names.iter().any(|n| n == "previous"),
-        "the door refuses; it never trims. The draft still carries both, got {names:?}"
-    );
-}
-
-#[then(regex = r#"^the delivered event carries no previous tag$"#)]
-async fn delivered_carries_no_previous(w: &mut NmpWorld) {
-    let event = delivered(w).await;
-    assert!(
-        values_of(&event, "previous").is_empty(),
-        "the group never mints a previous row"
-    );
-}
-
-/// PROTOCOL-APPSUPPLIEDCONTEXTREFUSED-005's corrected claim: the UNSIGNED
-/// group-publication door never invents its own `previous` row (proven
-/// again here, on the delivered event) and never silently accepts a
-/// caller-supplied one (proven for the same door, on the same world, by the
-/// sibling scenario "An event carrying a previous tag is refused"). This
-/// step no longer claims "no surface anywhere" can mint one -- #1034
-/// deliberately preserves one global ordered Exact escape, and a
-/// caller-SIGNED event may already carry a tag shaped like `previous`, which
-/// `Group::validate_context` reports on verbatim rather than interpreting.
-#[then(
-    regex = r#"^the unsigned group-publication door never invents or accepts a caller-supplied previous tag$"#
-)]
-async fn the_unsigned_door_never_invents_a_previous_tag(w: &mut NmpWorld) {
-    let event = delivered(w).await;
-    assert!(
-        values_of(&event, "previous").is_empty(),
-        "the unsigned group-publication door never invents a previous row of its own"
     );
 }

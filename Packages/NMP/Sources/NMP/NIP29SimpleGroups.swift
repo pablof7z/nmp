@@ -66,7 +66,7 @@ public enum GroupListActionError: Error, Sendable, Equatable {
     case automaticRoutingUnavailable
     case signedOut
     case engineClosed
-    case receiptUnavailable
+    case publishRefused(reason: String)
 
     init(_ ffi: FfiGroupListActionError) {
         switch ffi {
@@ -74,7 +74,7 @@ public enum GroupListActionError: Error, Sendable, Equatable {
         case .AutomaticRoutingUnavailable: self = .automaticRoutingUnavailable
         case .SignedOut: self = .signedOut
         case .EngineClosed: self = .engineClosed
-        case .ReceiptUnavailable: self = .receiptUnavailable
+        case .PublishRefused(let reason): self = .publishRefused(reason: reason)
         }
     }
 }
