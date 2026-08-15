@@ -162,6 +162,17 @@ jobs:
       - name: Refuse production table-name literals outside nmp-store
         run: bash scripts/check-store-table-names.sh
 
+  no-detached-materializer:
+    name: Semantic capability code runs directly, not as a plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Refuse runtime registration, per-call spawn, panic translation, completion maps
+        run: bash scripts/check-no-detached-materializer.sh
+
   no-compatibility-surface:
     name: No compatibility surface
     runs-on: ubuntu-latest
