@@ -1,6 +1,6 @@
 //! Typed ownership for one exact local request-send attempt (#849/#774).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use nmp_grammar::{ConcreteFilter, DescriptorHash, RelaySessionKey};
 use nmp_router::{SubId, WireDelta, WireOp};
@@ -138,32 +138,335 @@ impl RequestAttemptPurpose {
     }
 }
 
-impl EngineCore {
-    pub(super) fn extend_request_attempt_metadata(
+/// Every local request-send attempt this reducer owns, plus the retries
+/// parked behind them.
+///
+/// Fields are PRIVATE and this is a sibling module of `write`, `query`,
+/// `observation` and `auth_transport`, so none of them can reach the maps —
+/// only this file can, and the reverse-index invariants below are therefore
+/// enforceable rather than merely documented (#1606).
+///
+/// It holds state and the invariants over that state, and nothing else: no
+/// `store`, no `router`, no `resolver`, no `Effect`. Anything that has to
+/// emit is orchestration and stays on `EngineCore`. This is the
+/// `AttributionState` contract, verbatim.
+#[derive(Debug, Default)]
+pub(super) struct RequestAttempts {
+    attempts: HashMap<RequestAttemptId, RequestAttemptState>,
+    by_sub: HashMap<SubId, BTreeSet<RequestAttemptId>>,
+    by_session: HashMap<RelaySessionKey, BTreeSet<RequestAttemptId>>,
+    next_id: Option<u64>,
+    retries: BTreeMap<RequestRetryKey, PendingRequestRetry>,
+    retry_by_sub: HashMap<SubId, RequestRetryKey>,
+    retries_by_session: HashMap<RelaySessionKey, BTreeSet<RequestRetryKey>>,
+}
+
+/// The census contribution, so `bench_ownership_census` counts this owner's
+/// state without naming its maps. Deliberately `pub(super)` and NOT nested
+/// into `CoreOwnershipCensus`, which stays a flat `pub` struct.
+#[cfg(any(test, feature = "bench-instrumentation"))]
+pub(super) struct RequestAttemptCounts {
+    pub(super) attempts: usize,
+    pub(super) sub_keys: usize,
+    pub(super) sub_edges: usize,
+    pub(super) session_keys: usize,
+    pub(super) session_edges: usize,
+    pub(super) retry_jobs: usize,
+    pub(super) retry_sub_keys: usize,
+    pub(super) retry_session_keys: usize,
+    pub(super) retry_session_edges: usize,
+}
+
+impl RequestAttempts {
+    pub(super) fn new() -> Self {
+        Self {
+            next_id: Some(0),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn get(&self, attempt_id: RequestAttemptId) -> Option<&RequestAttemptState> {
+        self.attempts.get(&attempt_id)
+    }
+
+    pub(super) fn mint(&mut self, attempt: RequestAttemptState) -> RequestAttemptId {
+        let value = self
+            .next_id
+            .expect("request attempt identity space exhausted");
+        self.next_id = value.checked_add(1);
+        let id = RequestAttemptId(value);
+        self.by_sub
+            .entry(attempt.sub_id.clone())
+            .or_default()
+            .insert(id);
+        self.by_session
+            .entry(attempt.session.clone())
+            .or_default()
+            .insert(id);
+        let previous = self.attempts.insert(id, attempt);
+        debug_assert!(previous.is_none());
+        id
+    }
+
+    pub(super) fn take(&mut self, outcome: &RequestHandoffOutcome) -> Option<RequestAttemptState> {
+        self.remove(outcome.attempt_id())
+    }
+
+    pub(super) fn retire_for_sub(&mut self, sub_id: &SubId) {
+        let attempts = self.by_sub.remove(sub_id).unwrap_or_default();
+        for attempt_id in attempts {
+            self.remove(attempt_id);
+        }
+        self.cancel_retry_for_sub(sub_id);
+    }
+
+    pub(super) fn retire_for_session(&mut self, session: &RelaySessionKey) {
+        let attempts = self.by_session.remove(session).unwrap_or_default();
+        for attempt_id in attempts {
+            self.remove(attempt_id);
+        }
+        let retries = self.retries_by_session.remove(session).unwrap_or_default();
+        for retry in retries {
+            self.remove_retry(&retry);
+        }
+    }
+
+    fn remove(&mut self, attempt_id: RequestAttemptId) -> Option<RequestAttemptState> {
+        let attempt = self.attempts.remove(&attempt_id)?;
+        if let Some(ids) = self.by_sub.get_mut(&attempt.sub_id) {
+            ids.remove(&attempt_id);
+            if ids.is_empty() {
+                self.by_sub.remove(&attempt.sub_id);
+            }
+        }
+        if let Some(ids) = self.by_session.get_mut(&attempt.session) {
+            ids.remove(&attempt_id);
+            if ids.is_empty() {
+                self.by_session.remove(&attempt.session);
+            }
+        }
+        Some(attempt)
+    }
+
+    /// `now` is an argument rather than a read of `EngineCore::clock`: the
+    /// owner holds no clock, exactly as it holds no store.
+    pub(super) fn schedule_retry(&mut self, attempt: RequestAttemptState, now: Timestamp) {
+        let Some(key) = attempt.retry_key() else {
+            return;
+        };
+        let failures = attempt.retry_failures.saturating_add(1);
+        self.remove_retry(&key);
+        self.retry_by_sub
+            .insert(attempt.sub_id.clone(), key.clone());
+        self.retries_by_session
+            .entry(attempt.session.clone())
+            .or_default()
+            .insert(key.clone());
+        self.retries.insert(
+            key,
+            PendingRequestRetry {
+                attempt,
+                due: now + bootstrap_retry_delay_secs(failures),
+                failures,
+            },
+        );
+    }
+
+    pub(super) fn clear_retry_for_attempt(&mut self, attempt: &RequestAttemptState) {
+        if let Some(key) = attempt.retry_key() {
+            self.remove_retry(&key);
+        }
+    }
+
+    pub(super) fn cancel_retry_for_sub(&mut self, sub_id: &SubId) {
+        if let Some(key) = self.retry_by_sub.remove(sub_id) {
+            self.remove_retry(&key);
+        }
+    }
+
+    fn remove_retry(&mut self, key: &RequestRetryKey) -> Option<PendingRequestRetry> {
+        let pending = self.retries.remove(key)?;
+        self.retry_by_sub.remove(&pending.attempt.sub_id);
+        if let Some(keys) = self.retries_by_session.get_mut(&pending.attempt.session) {
+            keys.remove(key);
+            if keys.is_empty() {
+                self.retries_by_session.remove(&pending.attempt.session);
+            }
+        }
+        Some(pending)
+    }
+
+    /// When the retry parked behind `sub_id` is due, for the deferred-request
+    /// observation fact. One call instead of the two-map hop I5 governs.
+    pub(super) fn retry_due_for_sub(&self, sub_id: &SubId) -> Option<Timestamp> {
+        let key = self.retry_by_sub.get(sub_id)?;
+        self.retries.get(key).map(|retry| retry.due)
+    }
+
+    /// Every request awaiting a terminal, as the `(session, evidence sub id)`
+    /// pairs acquisition evidence is keyed by.
+    pub(super) fn awaiting_evidence_keys(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
+        self.attempts
+            .values()
+            .chain(self.retries.values().map(|retry| &retry.attempt))
+            .map(|attempt| {
+                (
+                    attempt.session.clone(),
+                    attempt.purpose.evidence_sub_id(&attempt.sub_id),
+                )
+            })
+            .collect()
+    }
+
+    /// The attempt behind every retry parked on one session.
+    pub(super) fn retried_attempts_for_session<'a>(
+        &'a self,
+        session: &'a RelaySessionKey,
+    ) -> impl Iterator<Item = &'a RequestAttemptState> + 'a {
+        self.retries
+            .values()
+            .map(|retry| &retry.attempt)
+            .filter(move |attempt| &attempt.session == session)
+    }
+
+    /// The earliest parked retry deadline, for the reducer's wake schedule.
+    pub(super) fn next_retry_due(&self) -> Option<Timestamp> {
+        self.retries.values().map(|pending| pending.due).min()
+    }
+
+    /// Retry keys whose deadline has passed. Selection only -- dispatching
+    /// them emits wire effects and therefore stays at the root.
+    pub(super) fn due_retry_keys(&self, now: Timestamp) -> Vec<RequestRetryKey> {
+        self.retries
+            .iter()
+            .filter(|(_, pending)| pending.due <= now)
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    pub(super) fn take_retry(&mut self, key: &RequestRetryKey) -> Option<PendingRequestRetry> {
+        self.remove_retry(key)
+    }
+
+    /// Carry the failure count of the retry that produced `attempt_id` onto
+    /// the freshly minted attempt.
+    pub(super) fn set_retry_failures(&mut self, attempt_id: RequestAttemptId, failures: u32) {
+        self.attempts
+            .get_mut(&attempt_id)
+            .expect("the retry dispatch just minted its exact attempt")
+            .retry_failures = failures;
+    }
+
+    /// Widen the coverage/owner metadata of every attempt and parked retry
+    /// under `role_sub_ids`.
+    ///
+    /// The fan-out is an ARGUMENT, not a read: computing which role
+    /// subscriptions belong to a plan needs NIP-77 state this owner has no
+    /// business seeing, so the root computes it and hands the answer in.
+    pub(super) fn extend_metadata(
         &mut self,
+        role_sub_ids: &BTreeSet<SubId>,
         update: &nmp_router::RequestMetadataUpdate,
     ) {
-        let mut role_sub_ids = BTreeSet::from([update.sub_id.clone()]);
+        self.for_each_metadata_target(role_sub_ids, &mut |attempt| {
+            attempt
+                .coverage_claims
+                .extend(update.added_coverage_claims.iter().copied());
+            attempt
+                .owner_demands
+                .extend(update.added_owner_demands.iter().copied());
+        });
+    }
+
+    pub(super) fn remove_metadata(
+        &mut self,
+        role_sub_ids: &BTreeSet<SubId>,
+        removal: &nmp_router::RequestMetadataRemoval,
+    ) {
+        self.for_each_metadata_target(role_sub_ids, &mut |attempt| {
+            attempt
+                .coverage_claims
+                .retain(|claim| !removal.removed_coverage_claims.contains(claim));
+            attempt
+                .owner_demands
+                .retain(|demand| !removal.removed_owner_demands.contains(demand));
+        });
+    }
+
+    /// I5, in one place: both reverse indexes are exact, and both `expect`s
+    /// that say so are internal to the owner that maintains them.
+    fn for_each_metadata_target(
+        &mut self,
+        role_sub_ids: &BTreeSet<SubId>,
+        apply: &mut dyn FnMut(&mut RequestAttemptState),
+    ) {
+        for role_sub_id in role_sub_ids {
+            let attempt_ids = self.by_sub.get(role_sub_id).cloned().unwrap_or_default();
+            for attempt_id in attempt_ids {
+                apply(
+                    self.attempts
+                        .get_mut(&attempt_id)
+                        .expect("request attempt reverse index is exact"),
+                );
+            }
+            if let Some(retry_key) = self.retry_by_sub.get(role_sub_id).cloned() {
+                apply(
+                    &mut self
+                        .retries
+                        .get_mut(&retry_key)
+                        .expect("request retry reverse index is exact")
+                        .attempt,
+                );
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) fn counts(&self) -> RequestAttemptCounts {
+        RequestAttemptCounts {
+            attempts: self.attempts.len(),
+            sub_keys: self.by_sub.len(),
+            sub_edges: self.by_sub.values().map(BTreeSet::len).sum(),
+            session_keys: self.by_session.len(),
+            session_edges: self.by_session.values().map(BTreeSet::len).sum(),
+            retry_jobs: self.retries.len(),
+            retry_sub_keys: self.retry_by_sub.len(),
+            retry_session_keys: self.retries_by_session.len(),
+            retry_session_edges: self.retries_by_session.values().map(BTreeSet::len).sum(),
+        }
+    }
+}
+
+impl EngineCore {
+    /// Which role subscriptions one plan's metadata update applies to.
+    ///
+    /// This is the NIP-77 fan-out the attempt owner deliberately cannot see:
+    /// a plan's live candidate, its reconciliation session, and its backlog
+    /// children all carry the plan's claims. Computed here, where that state
+    /// lives, and handed to the owner as a set. Cluster 11's owner will
+    /// provide this directly once it exists.
+    fn role_sub_ids_for_plan(&self, plan_sub_id: &SubId) -> BTreeSet<SubId> {
+        let mut role_sub_ids = BTreeSet::from([plan_sub_id.clone()]);
         role_sub_ids.extend(
             self.pending_neg_handoffs_by_plan
-                .get(&update.sub_id)
+                .get(plan_sub_id)
                 .into_iter()
                 .flatten()
                 .cloned(),
         );
         role_sub_ids.extend(
             self.neg_sessions_by_plan
-                .get(&update.sub_id)
+                .get(plan_sub_id)
                 .into_iter()
                 .flatten()
                 .cloned(),
         );
-        let backfills = self
+        for child in self
             .pending_backfills_by_plan
-            .get(&update.sub_id)
+            .get(plan_sub_id)
             .cloned()
-            .unwrap_or_default();
-        for child in backfills {
+            .unwrap_or_default()
+        {
             match self.pending_backfills.get(&child) {
                 // The ids-only fetch is not coverage proof and deliberately
                 // owns no plan claims. The retained NEG snapshot is extended
@@ -179,249 +482,33 @@ impl EngineCore {
                 None => {}
             }
         }
-        for role_sub_id in role_sub_ids {
-            let attempt_ids = self
-                .request_attempts_by_sub
-                .get(&role_sub_id)
-                .cloned()
-                .unwrap_or_default();
-            for attempt_id in attempt_ids {
-                let attempt = self
-                    .request_attempts
-                    .get_mut(&attempt_id)
-                    .expect("request attempt reverse index is exact");
-                attempt
-                    .coverage_claims
-                    .extend(update.added_coverage_claims.iter().copied());
-                attempt
-                    .owner_demands
-                    .extend(update.added_owner_demands.iter().copied());
-            }
-            if let Some(retry_key) = self.request_retry_by_sub.get(&role_sub_id).cloned() {
-                let retry = self
-                    .pending_request_retries
-                    .get_mut(&retry_key)
-                    .expect("request retry reverse index is exact");
-                retry
-                    .attempt
-                    .coverage_claims
-                    .extend(update.added_coverage_claims.iter().copied());
-                retry
-                    .attempt
-                    .owner_demands
-                    .extend(update.added_owner_demands.iter().copied());
-            }
-        }
+        role_sub_ids
+    }
+
+    pub(super) fn extend_request_attempt_metadata(
+        &mut self,
+        update: &nmp_router::RequestMetadataUpdate,
+    ) {
+        let role_sub_ids = self.role_sub_ids_for_plan(&update.sub_id);
+        self.attempts.extend_metadata(&role_sub_ids, update);
     }
 
     pub(super) fn remove_request_attempt_metadata(
         &mut self,
         removal: &nmp_router::RequestMetadataRemoval,
     ) {
-        let mut role_sub_ids = BTreeSet::from([removal.sub_id.clone()]);
-        role_sub_ids.extend(
-            self.pending_neg_handoffs_by_plan
-                .get(&removal.sub_id)
-                .into_iter()
-                .flatten()
-                .cloned(),
-        );
-        role_sub_ids.extend(
-            self.neg_sessions_by_plan
-                .get(&removal.sub_id)
-                .into_iter()
-                .flatten()
-                .cloned(),
-        );
-        for child in self
-            .pending_backfills_by_plan
-            .get(&removal.sub_id)
-            .cloned()
-            .unwrap_or_default()
-        {
-            match self.pending_backfills.get(&child) {
-                Some(super::TemporaryReq::MissingIds { .. }) => {}
-                Some(super::TemporaryReq::Backlog { .. }) => {
-                    role_sub_ids.insert(child);
-                }
-                Some(super::TemporaryReq::BacklogActivatesLive { live_sub_id, .. }) => {
-                    role_sub_ids.insert(child);
-                    role_sub_ids.insert(live_sub_id.clone());
-                }
-                None => {}
-            }
-        }
-        for role_sub_id in role_sub_ids {
-            let attempt_ids = self
-                .request_attempts_by_sub
-                .get(&role_sub_id)
-                .cloned()
-                .unwrap_or_default();
-            for attempt_id in attempt_ids {
-                let attempt = self
-                    .request_attempts
-                    .get_mut(&attempt_id)
-                    .expect("request attempt reverse index is exact");
-                attempt
-                    .coverage_claims
-                    .retain(|claim| !removal.removed_coverage_claims.contains(claim));
-                attempt
-                    .owner_demands
-                    .retain(|demand| !removal.removed_owner_demands.contains(demand));
-            }
-            if let Some(retry_key) = self.request_retry_by_sub.get(&role_sub_id).cloned() {
-                let retry = self
-                    .pending_request_retries
-                    .get_mut(&retry_key)
-                    .expect("request retry reverse index is exact");
-                retry
-                    .attempt
-                    .coverage_claims
-                    .retain(|claim| !removal.removed_coverage_claims.contains(claim));
-                retry
-                    .attempt
-                    .owner_demands
-                    .retain(|demand| !removal.removed_owner_demands.contains(demand));
-            }
-        }
+        let role_sub_ids = self.role_sub_ids_for_plan(&removal.sub_id);
+        self.attempts.remove_metadata(&role_sub_ids, removal);
     }
 
-    pub(super) fn mint_request_attempt(
-        &mut self,
-        attempt: RequestAttemptState,
-    ) -> RequestAttemptId {
-        let value = self
-            .next_request_attempt
-            .expect("request attempt identity space exhausted");
-        self.next_request_attempt = value.checked_add(1);
-        let id = RequestAttemptId(value);
-        self.request_attempts_by_sub
-            .entry(attempt.sub_id.clone())
-            .or_default()
-            .insert(id);
-        self.request_attempts_by_session
-            .entry(attempt.session.clone())
-            .or_default()
-            .insert(id);
-        let previous = self.request_attempts.insert(id, attempt);
-        debug_assert!(previous.is_none());
-        id
-    }
-
-    pub(super) fn take_request_attempt(
-        &mut self,
-        outcome: &RequestHandoffOutcome,
-    ) -> Option<RequestAttemptState> {
-        self.remove_request_attempt(outcome.attempt_id())
-    }
-
-    pub(super) fn retire_request_attempts_for_sub(&mut self, sub_id: &SubId) {
-        let attempts = self
-            .request_attempts_by_sub
-            .remove(sub_id)
-            .unwrap_or_default();
-        for attempt_id in attempts {
-            self.remove_request_attempt(attempt_id);
-        }
-        self.cancel_request_retry_for_sub(sub_id);
-    }
-
-    pub(super) fn retire_request_attempts_for_session(&mut self, session: &RelaySessionKey) {
-        let attempts = self
-            .request_attempts_by_session
-            .remove(session)
-            .unwrap_or_default();
-        for attempt_id in attempts {
-            self.remove_request_attempt(attempt_id);
-        }
-        let retries = self
-            .request_retries_by_session
-            .remove(session)
-            .unwrap_or_default();
-        for retry in retries {
-            self.remove_request_retry(&retry);
-        }
-    }
-
-    fn remove_request_attempt(
-        &mut self,
-        attempt_id: RequestAttemptId,
-    ) -> Option<RequestAttemptState> {
-        let attempt = self.request_attempts.remove(&attempt_id)?;
-        if let Some(ids) = self.request_attempts_by_sub.get_mut(&attempt.sub_id) {
-            ids.remove(&attempt_id);
-            if ids.is_empty() {
-                self.request_attempts_by_sub.remove(&attempt.sub_id);
-            }
-        }
-        if let Some(ids) = self.request_attempts_by_session.get_mut(&attempt.session) {
-            ids.remove(&attempt_id);
-            if ids.is_empty() {
-                self.request_attempts_by_session.remove(&attempt.session);
-            }
-        }
-        Some(attempt)
-    }
-
-    pub(super) fn schedule_request_retry(&mut self, attempt: RequestAttemptState) {
-        let Some(key) = attempt.retry_key() else {
-            return;
-        };
-        let failures = attempt.retry_failures.saturating_add(1);
-        self.remove_request_retry(&key);
-        self.request_retry_by_sub
-            .insert(attempt.sub_id.clone(), key.clone());
-        self.request_retries_by_session
-            .entry(attempt.session.clone())
-            .or_default()
-            .insert(key.clone());
-        self.pending_request_retries.insert(
-            key,
-            PendingRequestRetry {
-                attempt,
-                due: self.clock + bootstrap_retry_delay_secs(failures),
-                failures,
-            },
-        );
-    }
-
-    pub(super) fn clear_request_retry_for_attempt(&mut self, attempt: &RequestAttemptState) {
-        if let Some(key) = attempt.retry_key() {
-            self.remove_request_retry(&key);
-        }
-    }
-
-    pub(super) fn cancel_request_retry_for_sub(&mut self, sub_id: &SubId) {
-        if let Some(key) = self.request_retry_by_sub.remove(sub_id) {
-            self.remove_request_retry(&key);
-        }
-    }
-
-    fn remove_request_retry(&mut self, key: &RequestRetryKey) -> Option<PendingRequestRetry> {
-        let pending = self.pending_request_retries.remove(key)?;
-        self.request_retry_by_sub.remove(&pending.attempt.sub_id);
-        if let Some(keys) = self
-            .request_retries_by_session
-            .get_mut(&pending.attempt.session)
-        {
-            keys.remove(key);
-            if keys.is_empty() {
-                self.request_retries_by_session
-                    .remove(&pending.attempt.session);
-            }
-        }
-        Some(pending)
-    }
-
+    /// Dispatch every retry whose deadline has passed.
+    ///
+    /// Selection and bookkeeping are the owner's; re-sending is not — it
+    /// mints a fresh attempt through attribution and emits a wire effect, so
+    /// the body stays here.
     pub(super) fn retry_due_request_attempts(&mut self, now: Timestamp, effects: &mut Vec<Effect>) {
-        let due: Vec<_> = self
-            .pending_request_retries
-            .iter()
-            .filter(|(_, pending)| pending.due <= now)
-            .map(|(key, _)| key.clone())
-            .collect();
-        for key in due {
-            let Some(pending) = self.remove_request_retry(&key) else {
+        for key in self.attempts.due_retry_keys(now) {
+            let Some(pending) = self.attempts.take_retry(&key) else {
                 continue;
             };
             if !self.request_retry_is_current(&pending.attempt) {
@@ -443,10 +530,8 @@ impl EngineCore {
                 },
                 attempt.purpose,
             );
-            self.request_attempts
-                .get_mut(&attempt_id)
-                .expect("the retry dispatch just minted its exact attempt")
-                .retry_failures = pending.failures;
+            self.attempts
+                .set_retry_failures(attempt_id, pending.failures);
             effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
                 ops: vec![(session, vec![WireOp::Req(sub_id, filter)])],
             })));

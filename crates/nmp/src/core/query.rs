@@ -1785,7 +1785,7 @@ impl EngineCore {
     /// One exact request is abandoned. It may no longer earn coverage or
     /// produce a settlement fact.
     pub(super) fn abandon_sub(&mut self, sub_id: &SubId) {
-        self.retire_request_attempts_for_sub(sub_id);
+        self.attempts.retire_for_sub(sub_id);
         self.attribution.discard_sub(sub_id);
         let session = RelaySessionKey::new(sub_id.0.clone(), sub_id.2);
         self.cancel_request_claim_transfers(&session, sub_id, None);
@@ -1802,7 +1802,7 @@ impl EngineCore {
     /// A session dropped. Every attributed request on it is dead; replay
     /// creates fresh request revisions after reconnect.
     pub(super) fn abandon_session_subs(&mut self, session: &RelaySessionKey) {
-        self.retire_request_attempts_for_session(session);
+        self.attempts.retire_for_session(session);
         self.attribution.clear_session(session);
         self.pending_request_evidence
             .retain(|(candidate, _), _| candidate != session);
@@ -2416,7 +2416,7 @@ impl EngineCore {
         frame: Nip77Frame,
         outcome: RequestHandoffOutcome,
     ) -> Vec<Effect> {
-        let Some(attempt) = self.request_attempts.get(&outcome.attempt_id()).cloned() else {
+        let Some(attempt) = self.attempts.get(outcome.attempt_id()).cloned() else {
             return Vec::new();
         };
         let relay = attempt.session.relay.clone();
@@ -2428,7 +2428,7 @@ impl EngineCore {
             // continuing round have no further reducer state to advance --
             // they already advanced, and now honestly.
             (Nip77Frame::Probe, true) | (Nip77Frame::Continue, true) => {
-                self.take_request_attempt(&outcome);
+                self.attempts.take(&outcome);
             }
             (Nip77Frame::Open, true) => {
                 let Some(_session) = self.neg_sessions.get(&sub_id) else {
@@ -2437,7 +2437,7 @@ impl EngineCore {
                 effects.extend(self.on_wire_request_handoff(outcome));
             }
             (Nip77Frame::Probe, false) => {
-                self.take_request_attempt(&outcome);
+                self.attempts.take(&outcome);
                 if self
                     .prober
                     .refuse_probe(&relay, &crate::core::wire_sub_id_string(&sub_id))
@@ -2467,7 +2467,7 @@ impl EngineCore {
                 effects.extend(fallback_effects);
             }
             (Nip77Frame::Continue, false) => {
-                self.take_request_attempt(&outcome);
+                self.attempts.take(&outcome);
                 let Some(session) = self.take_neg_session(&sub_id) else {
                     return effects;
                 };
@@ -2507,7 +2507,7 @@ impl EngineCore {
         let step = session.reconciler.step(message_hex);
         match step {
             Ok(NegStep::Continue(next_hex)) => {
-                let attempt_id = self.mint_request_attempt(RequestAttemptState {
+                let attempt_id = self.attempts.mint(RequestAttemptState {
                     session: RelaySessionKey::public(relay.clone()),
                     sub_id: sub_id.clone(),
                     filter_hash,

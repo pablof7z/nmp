@@ -287,10 +287,10 @@ fn exact_public_disconnect_retires_the_active_nip77_child_and_every_reverse_owne
     assert!(fixture.core.neg_sessions_by_plan.is_empty());
     assert!(fixture.core.pending_backfills.is_empty());
     assert!(fixture.core.pending_backfills_by_plan.is_empty());
-    assert!(fixture.core.request_attempts.is_empty());
-    assert!(fixture.core.request_attempts_by_session.is_empty());
-    assert!(fixture.core.pending_request_retries.is_empty());
-    assert!(fixture.core.request_retries_by_session.is_empty());
+    assert_eq!(fixture.core.attempts.counts().attempts, 0);
+    assert_eq!(fixture.core.attempts.counts().session_keys, 0);
+    assert_eq!(fixture.core.attempts.counts().retry_jobs, 0);
+    assert_eq!(fixture.core.attempts.counts().retry_session_keys, 0);
     fixture.finish();
 }
 
