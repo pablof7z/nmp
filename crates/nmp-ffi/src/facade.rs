@@ -30,7 +30,9 @@ use crate::convert::{
 #[cfg(test)]
 use crate::convert::{FfiRequestRowsError, FfiRowPullError};
 #[cfg(feature = "nip02")]
-use crate::nip02::{NmpFollowActionStream, NmpFollowStream};
+use crate::nip02::{
+    failure_to_ffi, FfiFollowActionFailure, NmpFollowActionStream, NmpFollowStream,
+};
 use crate::session::{
     FfiPrivateKey, FfiPublicKey, FfiSessionAccount, FfiSessionPayload, FfiSessionSnapshot,
 };
@@ -42,25 +44,29 @@ use crate::types::{
 };
 use nmp::ReceiptReattachment;
 
-/// Start a follow/unfollow action and expose its status stream (#680/#704). A
-/// valid target starts an async action task on the shared runtime; an
-/// unparseable target yields a one-shot stream carrying a single
-/// `Failed(InvalidTarget)` fact. The status FIFO is delivered pull-based over
-/// [`NmpFollowActionStream`], so no worker or drain thread is held by the
-/// action.
+/// Submit a follow/unfollow operation and expose its ordinary receipt facts.
+/// An unparseable target yields a one-shot `Failed(InvalidTarget)` fact. A
+/// valid target enters semantic-write custody synchronously; no action task,
+/// acquisition worker, retry owner, or drain thread exists at this boundary.
 #[cfg(feature = "nip02")]
 fn start_following_action(
     engine: Arc<nmp::Engine>,
+    writes: nmp_nip02::FollowWrites,
     target: String,
     change: nmp_nip02::FollowChange,
 ) -> Arc<NmpFollowActionStream> {
-    let action = match parse_pubkey(&target) {
-        Ok(target) => nmp_nip02::set_following(engine, target, change),
-        Err(_) => nmp_nip02::FollowAction::one_shot_failure(
-            nmp_nip02::FollowActionFailure::InvalidTarget { got: target },
-        ),
+    let target = match parse_pubkey(&target) {
+        Ok(target) => target,
+        Err(_) => {
+            return NmpFollowActionStream::one_shot_failure(FfiFollowActionFailure::InvalidTarget {
+                got: target,
+            })
+        }
     };
-    NmpFollowActionStream::new(action.into_async())
+    match nmp_nip02::set_following(&engine, &writes, target, change) {
+        Ok(receipt) => NmpFollowActionStream::from_receipt(receipt),
+        Err(failure) => NmpFollowActionStream::one_shot_failure(failure_to_ffi(failure)),
+    }
 }
 
 /// Construction config for [`NmpEngine::new`]. Build-time feature selection
@@ -181,6 +187,8 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
 #[derive(uniffi::Object)]
 pub struct NmpEngine {
     pub(crate) engine: Arc<nmp::Engine>,
+    #[cfg(feature = "nip02")]
+    follow_writes: nmp_nip02::FollowWrites,
     #[cfg(feature = "nip65")]
     automatic_routing: AutomaticRoutingAssembly,
 }
@@ -281,8 +289,12 @@ impl NmpEngine {
                 .map_err(FfiError::from)?,
             None => nmp::Engine::new(config.into())?,
         });
+        #[cfg(feature = "nip02")]
+        let follow_writes = nmp_nip02::register_follow_writes(&engine)?;
         Ok(Arc::new(Self {
             engine,
+            #[cfg(feature = "nip02")]
+            follow_writes,
             #[cfg(feature = "nip65")]
             automatic_routing,
         }))
@@ -582,19 +594,21 @@ impl NmpEngine {
         }
         Ok(start_following_action(
             self.engine.clone(),
+            self.follow_writes.clone(),
             target,
             nmp_nip02::FollowChange::Follow,
         ))
     }
 
-    /// The inverse of [`Self::follow`], with the same acquisition,
-    /// compare-and-swap, signer, routing, and receipt guarantees.
+    /// The inverse of [`Self::follow`], with the same durable operation and
+    /// ordinary receipt guarantees.
     pub fn unfollow(&self, target: String) -> Result<Arc<NmpFollowActionStream>, FfiError> {
         if self.automatic_routing == AutomaticRoutingAssembly::Unavailable {
             return Err(FfiError::AutomaticRoutingUnavailable);
         }
         Ok(start_following_action(
             self.engine.clone(),
+            self.follow_writes.clone(),
             target,
             nmp_nip02::FollowChange::Unfollow,
         ))

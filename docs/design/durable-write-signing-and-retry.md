@@ -30,12 +30,13 @@ queued in memory.
 
 ### Guarded whole-value replacement
 
-A protocol module composing a destructive replaceable/addressable edit may
+A protocol module composing a destructive whole-value replaceable/addressable edit may
 attach the exact canonical base event id it observed. `None` means the module
 established no local winner under its explicit source-evidence policy; it does
-not assert global Nostr absence. NIP-02's ordinary `follow` / `unfollow`
-operation deliberately requires `Some(base)`; the generic `None` form does not
-silently grant it first-list creation policy.
+not assert global Nostr absence. This remains the contract for
+`ReplaceableEdit`; NIP-02 follow/unfollow now uses the separate replayable
+`ReplaceableOperation` path, whose capability explicitly defines its complete
+empty first value and retains the operation for later source truth.
 
 The store compares that expected base with the current winner inside the same
 acceptance transaction, before allocating a journaled intent and its receipt id
@@ -51,10 +52,9 @@ draft, and a precondition attached to a regular non-replaceable event fails
 closed.
 
 This mechanism closes the local read/accept race. It does not turn EOSE or a
-watermark into global completeness: the protocol operation separately owns
-which planned sources and evidence are sufficient to compose at all. Raw FFI
-writes cannot mint the guard; native callers reach it through semantic
-operations such as NMP's NIP-02 `follow` / `unfollow` action.
+watermark into global completeness. Raw FFI writes cannot mint either guarded
+whole-value edits or replayable operations; native callers reach them through
+typed protocol actions.
 
 ### Replaceable delivery coalescing
 
