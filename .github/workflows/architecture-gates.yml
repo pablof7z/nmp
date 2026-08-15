@@ -8,9 +8,10 @@
 # rather than left green. The invariant is real and still owned by gate 5;
 # the mechanism is a known gap until a declaration-level replacement lands.
 #
-# Alongside the remaining structural checks below (currently #1551/#863's
-# NIP-29 group-list parsing rule and #879's pure content/locator boundary),
-# same character, same trust properties.
+# Alongside it live narrow, per-boundary structural checks that enforce one
+# specific ownership contract each (currently the NIP-29 cluster's context,
+# kind-blindness, and cross-surface checks -- #838/#1653 -- and #879's pure
+# content/locator boundary). Same character, same trust properties.
 #
 # These checks require no secrets and make no pull_request_target trust
 # decisions, so an ordinary reviewable workflow is the right home.
@@ -88,23 +89,6 @@ jobs:
       - name: Forbid acquisition policy and engine dependencies in locator parsing
         run: bash scripts/check-content-parser-boundary.sh
 
-  # #1551/#863: the NIP-51 Simple-groups value exposed by NMP's NIP-29 product
-  # capability is tolerant/observational, and the two
-  # withdrawn shapes (an authoritative-sounding `decode_*` door and a public
-  # observation-qualified `ObservedSimpleGroupsList`) must be excluded by a
-  # mechanism, not by reviewer memory. Same "plain shell over repo content,
-  # no toolchain, no secrets" character as the two gates above.
-  nip29-group-list-ownership:
-    name: NIP-29 group-list ownership
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Forbid the deleted component and derived group-list authority
-        run: bash scripts/check-nip29-group-list-ownership.sh
-
   # #838: NIP-29 contributes group context to a complete draft whose kind and
   # schema it does not own; NIP-C7 independently owns kind:9/q replies; client
   # mention and notification policy belongs to neither protocol module.
@@ -124,18 +108,51 @@ jobs:
   # Rust facade, FFI, Swift, Kotlin -- each taking semantic fields plus a
   # retained capability, never a raw kind, tag, relay or route. Invoked
   # directly (not via `bash`) so its exact executable name is this job's own
-  # #1074 evidence locator (`script:repository::scripts/check-nip29-operation-
-  # catalogue.sh`, features/groups/one-typed-group-door.feature).
-  nip29-operation-catalogue:
-    name: NIP-29 exhaustive operation catalogue
+  # #1074 evidence locator (`script:repository::scripts/check-nip29-
+  # surfaces.sh`, features/groups/one-typed-group-door.feature).
+  #
+  # #1653 renamed this from check-nip29-operation-catalogue.sh and folded in
+  # two now-deleted scripts/workflows (check-nip29-read-door.sh's whole
+  # read-lifecycle claim, and check-nip29-group-list-ownership.sh's
+  # non-vacuous requirements), collapsing a five-script NIP-29 gate cluster
+  # spread across three workflow files down to two scripts in this one job
+  # plus the kind-blindness job below.
+  nip29-surfaces:
+    name: NIP-29 exhaustive operation catalogue and read-lifecycle, every surface
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Only the nine modeled operations get named composers, semantic-only
-        run: scripts/check-nip29-operation-catalogue.sh
+      - name: Only the nine modeled operations get named composers, semantic-only, and no surface grows a read lifecycle of its own
+        run: scripts/check-nip29-surfaces.sh
+
+  # #1124 (PROTOCOL-KINDBLINDNESS-001..005): the NIP-29 group publication/read
+  # path stays kind-blind -- no kind constant it does not itself define, and
+  # no branch anywhere that reads an app-selected kind. Invoked directly (not
+  # via `bash`) so its exact executable path is this job's own #1074 evidence
+  # locator (`script:repository::scripts/check-nip29-kind-blindness.sh`,
+  # `features/groups/kind-blindness.feature`).
+  #
+  # #1653 folded this in from its own former top-level workflow file
+  # (nip29-kind-blindness.yml) as part of the same NIP-29 gate-cluster
+  # collapse, and absorbed check-nip29-ownership.sh's own kind-9/chat-schema
+  # decoy-name ban, which used to truncate its scan at the file's first
+  # `#[cfg(test)]` marker.
+  nip29-kind-blindness:
+    name: NIP-29 owns no kind it does not itself define
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: The checker's self-test proves it can fail against real mutated fixtures
+        run: scripts/test-nip29-kind-blindness.sh
+
+      - name: The group publication/read path stays kind-blind
+        run: scripts/check-nip29-kind-blindness.sh
 
   # NMP keeps no backwards compatibility: a replaced spelling is deleted in the
   # same change. There are no external consumers, so compatibility is a tax

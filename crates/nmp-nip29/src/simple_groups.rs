@@ -73,7 +73,7 @@ pub struct SimpleGroupsList {
 /// whatever the caller hands it, and its result is data with no authority
 /// attached (#863). The `_tolerant` suffix is the name-level statement of
 /// that; it is enforced mechanically by
-/// `scripts/check-nip29-group-list-ownership.sh`.
+/// `scripts/check-nip29-surfaces.sh`.
 pub fn parse_simple_groups_list_tolerant(event: &Event) -> SimpleGroupsList {
     parse_simple_groups_list_from_raw_tags_tolerant(
         event.tags.iter().map(|tag| tag.as_slice()),

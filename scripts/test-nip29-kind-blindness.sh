@@ -146,4 +146,28 @@ EOF
 expect_fail "a kind branch appended after context.rs's test module" "$AFTER_TESTS_SRC" \
   "a kind branch or a new kind-reading surface appeared"
 
-echo "nip29-kind-blindness test: ok (5 red, 2 green, all against real mutated fixtures)"
+# --- RED 6 (#1653): a kind:9/chat-schema decoy name -- not a numeric literal
+# Checks A/B already catch, but a NAME the retired check-nip29-ownership.sh
+# loop used to ban -- appended after context.rs's test module. Proves the
+# absorbed check reuses the same brace-depth-aware scan as RED 5, not a
+# truncating one.
+DECOY_SRC=$(fresh_copy decoy)
+cat >>"$DECOY_SRC/context.rs" <<'EOF'
+
+pub fn compose_chat_after_tests(builder: &nmp_grammar::EventBuilder) -> bool {
+    builder.content.len() > 0
+}
+EOF
+expect_fail "a compose_chat decoy name appended after context.rs's test module" "$DECOY_SRC" \
+  "NIP-29 re-acquired chat/content-schema ownership it does not have"
+
+# --- RED 7 (#1653, hole 3): renaming an owning file away must fail closed,
+# not be silently skipped -- proves a foreign kind smuggled into a renamed
+# discovery.rs cannot hide behind a missing-file `continue`.
+RENAMED_SRC=$(fresh_copy renamed)
+mv "$RENAMED_SRC/discovery.rs" "$RENAMED_SRC/disc.rs"
+printf '\npub const EVIL_KIND: u16 = 12345;\n' >>"$RENAMED_SRC/disc.rs"
+expect_fail "discovery.rs renamed away, hiding a foreign kind constant" "$RENAMED_SRC" \
+  "expected NIP-29 kind-owning source is missing"
+
+echo "nip29-kind-blindness test: ok (7 red, 2 green, all against real mutated fixtures)"
