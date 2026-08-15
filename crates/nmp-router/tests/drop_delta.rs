@@ -16,7 +16,8 @@ use nmp_grammar::{Binding, Filter};
 use nmp_resolver::testkit::Harness;
 use nostr::Keys;
 
-use nmp_router::{test_relay, FixtureRoutingFacts, Router, RuleRegistry, WireOp};
+use nmp_router::{Router, RuleRegistry, WireOp};
+use nmp_router_testkit::{test_relay, FixtureRoutingFacts};
 
 fn literal_author_filter(author_hex: &str) -> Filter {
     Filter {

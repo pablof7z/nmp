@@ -838,7 +838,7 @@ mod relay_worker_reconciliation_tests {
         AccessContext, Binding, Demand, Filter, Identity, SourceAuthority, WriteIntent,
         WritePayload, WriteRouting,
     };
-    use nmp_router::FixtureRoutingFacts;
+    use nmp_router_testkit::FixtureRoutingFacts;
     use nmp_store::RedbStore;
     use nostr::{Keys, Kind};
 

@@ -25,7 +25,8 @@ use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter, Identity, RelaySessionKey,
     SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
-use nmp_router::{FixtureRoutingFacts, SubId, WireOp};
+use nmp_router::{SubId, WireOp};
+use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::{
     AcceptWrite, CoverageInterval, DurabilityOutcome, PersistenceFault, PublishQueueAttemptOutcome,
     RedbStore, RelayObserved,

@@ -24,7 +24,7 @@ use nostr::{Keys, PublicKey, Timestamp, UnsignedEvent};
 
 use nmp::mechanism::runtime::Handle;
 use nmp::Engine;
-use nmp_router::FixtureRoutingFacts;
+use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::RedbStore;
 use nmp_transport::PoolConfig;
 

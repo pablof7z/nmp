@@ -14,7 +14,10 @@ default = []
 # it in a consumer's `Cargo.toml` is a greppable, reviewable line -- a
 # stability exception, not a security one (the acceptance-boundary verify in
 # `crate::core` covers every path regardless, Unit A0/#56).
-unstable-mechanism = []
+# `nmp-router-testkit` (#1667) is the fixture-facts crate every constructor
+# this feature unlocks takes -- optional and pulled in ONLY by this feature,
+# so a default-features consumer never links a test-fixture crate.
+unstable-mechanism = ["dep:nmp-router-testkit"]
 
 # #851: NIP-22 comment composition/decode, projected through the canonical
 # facade so direct Rust and `nmp-ffi` share ONE owner for those values. The
@@ -112,6 +115,7 @@ nmp-signer.workspace = true
 nmp-local-signer.workspace = true
 nmp-store.workspace = true
 nmp-router.workspace = true
+nmp-router-testkit = { workspace = true, optional = true }
 nmp-resolver.workspace = true
 nmp-transport.workspace = true
 # The one pure destination-admission owner (#885): discovery admission and
@@ -154,8 +158,13 @@ libc = { version = "0.2", optional = true }
 # consumer links is unchanged.
 # `nip29_group_list_headless.rs` proves the kind:10009 demand against a real
 # engine through the same `nmp::nip29` path an app uses.
-nmp = { path = ".", features = ["nip29", "nip65", "test-instrumentation"] }
+# `unstable-mechanism`: every headless/`_headless.rs` and `core_headless/`
+# integration test seeds its `EngineCore`/`EngineThread` through the gated
+# fixture constructors (#1665, #1667) -- this crate's own test targets are
+# their only in-workspace callers.
+nmp = { path = ".", features = ["nip29", "nip65", "test-instrumentation", "unstable-mechanism"] }
 nmp-test-support.workspace = true
+nmp-router-testkit.workspace = true
 nmp-store = { workspace = true, features = ["test-instrumentation"] }
 cucumber = "0.21"
 # In-process test relay for the runtime (C) integration tests: reconnection

@@ -27,7 +27,7 @@ use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, IdentityField};
 use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
-use nmp_router::FixtureRoutingFacts;
+use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_signer::{
     SignerError, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,
     SigningCapability,

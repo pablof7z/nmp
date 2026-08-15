@@ -6,7 +6,7 @@ use super::*;
 mod receipt_allocator_tests {
     use super::*;
 
-    use nmp_router::FixtureRoutingFacts;
+    use nmp_router_testkit::FixtureRoutingFacts;
     use nmp_store::{PersistenceFault, RedbStore, RefuseReason};
     use nostr::{EventBuilder, Keys, Kind};
 
@@ -1695,7 +1695,7 @@ mod semantic_successor_tests {
 #[cfg(test)]
 mod persistence_stall_replay_tests {
     use super::*;
-    use nmp_router::FixtureRoutingFacts;
+    use nmp_router_testkit::FixtureRoutingFacts;
     use nmp_store::RedbStore;
     use nostr::{Keys, RelayUrl};
 

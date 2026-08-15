@@ -182,7 +182,8 @@ impl RoutingFactStore {
         AuthorRouteWriter { facts: self }
     }
 
-    pub(crate) fn from_fixture(fixture: nmp_router::FixtureRoutingFacts) -> Self {
+    #[cfg(feature = "unstable-mechanism")]
+    pub(crate) fn from_fixture(fixture: nmp_router_testkit::FixtureRoutingFacts) -> Self {
         let (authors, operator_app, operator_fallback) = fixture.into_parts();
         Self {
             authors,
@@ -2638,10 +2639,11 @@ impl EngineCore {
     ///
     /// This exists for deterministic falsifiers. Production assembly owns
     /// the private mutable fact store and uses [`Self::new`].
+    #[cfg(feature = "unstable-mechanism")]
     #[doc(hidden)]
     pub fn new_with_fixture_routing_facts(
         store: RedbStore,
-        facts: nmp_router::FixtureRoutingFacts,
+        facts: nmp_router_testkit::FixtureRoutingFacts,
         cap: usize,
     ) -> Self {
         Self::new_with_routing_facts(store, RoutingFactStore::from_fixture(facts), cap)

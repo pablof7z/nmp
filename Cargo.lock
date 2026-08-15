@@ -1829,6 +1829,7 @@ dependencies = [
  "nmp-nipc7",
  "nmp-resolver",
  "nmp-router",
+ "nmp-router-testkit",
  "nmp-signer",
  "nmp-store",
  "nmp-test-support",
@@ -1863,6 +1864,7 @@ dependencies = [
  "nmp-local-signer",
  "nmp-resolver",
  "nmp-router",
+ "nmp-router-testkit",
  "nmp-signer",
  "nmp-store",
  "nmp-test-support",
@@ -2106,10 +2108,19 @@ version = "0.1.0"
 dependencies = [
  "nmp-grammar",
  "nmp-resolver",
+ "nmp-router-testkit",
  "nmp-store",
  "nmp-test-support",
  "nostr 0.44.4",
  "proptest",
+]
+
+[[package]]
+name = "nmp-router-testkit"
+version = "0.1.0"
+dependencies = [
+ "nmp-router",
+ "nostr 0.44.4",
 ]
 
 [[package]]

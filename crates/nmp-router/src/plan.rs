@@ -321,7 +321,7 @@ mod tests {
     }
 
     fn relay(n: usize) -> RelayUrl {
-        crate::facts::test_relay(n)
+        nmp_router_testkit::test_relay(n)
     }
 
     fn plan_of(relay: RelayUrl, filter: ConcreteFilter) -> RelayPlan {

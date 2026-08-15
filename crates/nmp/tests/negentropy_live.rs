@@ -23,7 +23,7 @@ use nmp::mechanism::runtime::{EngineThread, RowsReceiver};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter};
 use nmp_local_signer::LocalKeySigner;
-use nmp_router::FixtureRoutingFacts;
+use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::RedbStore;
 use nmp_transport::PoolConfig;
 use nostr::{EventId, Keys, RelayUrl};
