@@ -1374,6 +1374,25 @@ impl EngineCore {
             .iter()
             .filter_map(|(_, _, _, attribution)| attribution.clone())
             .collect();
+        // Which request delivered which replaceable/addressable coordinate
+        // (#1630). Applied only after the commit succeeds, so a witness is
+        // never claimed for an event this process cannot read back.
+        let witnessed: Vec<_> = events
+            .iter()
+            .filter_map(|(event, _, _, attribution)| {
+                let (session, wire_sub_id) = attribution.as_ref()?;
+                let coordinate = coordinate_coverage::event_coordinate(event)?;
+                Some((
+                    session.clone(),
+                    wire_sub_id.clone(),
+                    coordinate,
+                    coordinate_coverage::WitnessedCoordinate {
+                        event_id: event.id,
+                        created_at: event.created_at,
+                    },
+                ))
+            })
+            .collect();
         let publications: Vec<_> = events
             .iter()
             .map(|(event, observed, candidate, _)| {
@@ -1428,6 +1447,9 @@ impl EngineCore {
                 self.degrade_store(error, effects);
             }
             Ok(ingest) => {
+                for (session, wire_sub_id, coordinate, witness) in witnessed {
+                    self.record_coordinate_witness(&session, &wire_sub_id, coordinate, witness);
+                }
                 #[cfg(feature = "bench-instrumentation")]
                 let phase_started = std::time::Instant::now();
                 #[cfg(feature = "bench-instrumentation")]
@@ -1550,6 +1572,10 @@ impl EngineCore {
             return Vec::new();
         }
         for (session, event_kind) in observations {
+            // Same as the ordinary committed-observation frame door: a
+            // returned EVENT frame that names no subscription leaves no
+            // request on this session with an exact returned count (#1630).
+            self.erase_returned_frame_counts(&session);
             *self
                 .events_by_session_kind
                 .entry(session)
@@ -1579,6 +1605,10 @@ impl EngineCore {
                     if current != handle || session != reported_session {
                         continue;
                     }
+                    // A preparsed committed-observation hit is a returned
+                    // EVENT frame carrying no subscription id, so no request
+                    // on this session keeps an exact returned count (#1630).
+                    self.erase_returned_frame_counts(&session);
                     *self
                         .events_by_session_kind
                         .entry(session)
@@ -1640,6 +1670,7 @@ impl EngineCore {
                     crate::ingest_attribution::relay_frame_session_validation(
                         phase_started.elapsed(),
                     );
+                    self.record_returned_event_frame(&session, subscription_id.as_str());
                     #[cfg(feature = "bench-instrumentation")]
                     let phase_started = std::time::Instant::now();
                     *self
@@ -1702,6 +1733,7 @@ impl EngineCore {
                 event,
             } => {
                 let event = event.into_owned();
+                self.record_returned_event_frame(&session, subscription_id.as_str());
                 *self
                     .events_by_session_kind
                     .entry(session.clone())

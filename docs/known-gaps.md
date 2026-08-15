@@ -515,6 +515,28 @@ about current code:
   Kotlin do not yet expose this vocabulary. Issue #718 remains open until those
   projections and their cross-SDK falsifiers land.
 
+- **Replaceable-coordinate query reuse is built; it has no production caller
+  yet, and one class of dropped relay frame is still invisible to it
+  (#1630, #1631, #1668).** `EngineCore::coordinate_coverage` /
+  `open_coordinate_observation` answer "does this relay session already
+  prove a current value for this coordinate" from ordinary live-wire-request
+  bookkeeping alone: a covering request that already delivered the
+  coordinate, a covering request that finished over all of time under a
+  fixed 500-returned-frame bound with a committed coverage interval, or an
+  exact coordinate request already outstanding. Nothing is persisted and
+  nothing is cached per caller, so a restart simply repeats the check. Two
+  honest limits. (1) #1631 is what gates the per-relay semantic-delta
+  publish on this path and deletes the source-policy machinery that asks the
+  same question with its own hidden REQ; until it lands, the decision half of
+  the module is exercised only by its falsifiers. (2) The 500-frame bound is
+  fixed rather than read from a relay's advertised NIP-11 `default_limit`
+  (#744 owns that), and it counts frames at the reducer's own frame doors.
+  Every unattributable frame the reducer can see erases that count, but
+  `nmp-transport` drops a text frame it cannot parse with no engine-visible
+  signal at all, so a relay that both truncates at the bound and emits an
+  undecodable frame could have a truncated answer read as complete. #1668
+  owns closing that.
+
 ## Security hardening deferred
 
 - **Secret zeroization is deliberately bounded, not system-wide.** `LocalKeySigner` has one fixed-allocation canonical zeroizing secret owner (moving the signer relocates only a pointer) and constructs only operation-scoped wiping BIP-340/NIP-44 owners, including padded/decrypted plaintext and hash/cipher state; it retains no `nostr::Keys`/`SecretKey`/`Keypair`, whose pinned upstream erasure is only `non_secure_erase` (#765). The durable event/delivery store persists only the expected pubkey plus an opaque identity reference. This claims nothing about OS-locked memory, register erasure, or dependency-internal stack frames. Owner: security/signing workstream (#47).
