@@ -11,12 +11,23 @@
 //! boundary, and is never recomputed or estimated at this layer.
 //!
 //! This is also where the documented per-session AUTH read-out lands
-//! ([`AuthDiagnosticsSnapshot`]/[`AuthDiagnosticsPhase`], deferred by #8
-//! Waves 2–3): the ENGINE's `DiagnosticsSnapshot.auth_sessions` field stays
-//! `#[doc(hidden)]` at the engine layer, while THIS mirror carries the
-//! supported, documented `auth_sessions` projection.
+//! ([`AuthDiagnosticsSnapshot`], deferred by #8 Waves 2–3): the ENGINE's
+//! `DiagnosticsSnapshot.auth_sessions` field stays `#[doc(hidden)]` at the
+//! engine layer, while THIS mirror carries the supported, documented
+//! `auth_sessions` projection.
+//!
+//! A mirror controls which engine FIELDS are documented; it is not a licence
+//! to redeclare the closed VOCABULARY one of those fields is written in.
+//! [`crate::AuthDiagnosticsPhase`] is therefore re-exported from the engine
+//! rather than mirrored (#1616) — exactly as the sibling scoped
+//! [`crate::AuthPhase`] already is. The byte-identical copy that used to
+//! live here is what let an FFI `match` quietly collapse `AwaitingSend` into
+//! `AwaitingRelayAck`, so a direct-Rust app and a native app read different
+//! phases for the same session.
 
 use nmp_grammar::AccessContext;
+
+use crate::core::AuthDiagnosticsPhase;
 use nmp_router::Lane;
 use nmp_store::CoverageInterval;
 use nostr::{EventId, RelayUrl, Timestamp};
@@ -174,8 +185,6 @@ pub struct AuthDiagnosticsSnapshot {
     pub signer_bound: bool,
     /// The frozen kind:22242 event id awaiting/holding relay correlation.
     pub auth_event_id: Option<EventId>,
-    pub send_handoff_accepted: bool,
-    pub relay_ok_accepted: bool,
 }
 
 impl AuthDiagnosticsSnapshot {
@@ -191,8 +200,6 @@ impl AuthDiagnosticsSnapshot {
             policy_bound,
             signer_bound,
             auth_event_id,
-            send_handoff_accepted,
-            relay_ok_accepted,
         } = value;
         Self {
             relay,
@@ -201,41 +208,10 @@ impl AuthDiagnosticsSnapshot {
             transport_generation,
             epoch_sequence,
             challenge_hash,
-            phase: AuthDiagnosticsPhase::from_engine(phase),
+            phase,
             policy_bound,
             signer_bound,
             auth_event_id,
-            send_handoff_accepted,
-            relay_ok_accepted,
-        }
-    }
-}
-
-/// Where one protected session currently sits in its AUTH lifecycle (#8's
-/// ratified vocabulary — see the issue's "Reducer vocabulary refinement").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthDiagnosticsPhase {
-    AwaitingChallenge,
-    AwaitingPolicy,
-    AwaitingSignature,
-    AwaitingSend,
-    AwaitingRelayAck,
-    Ready,
-    Denied,
-    Error,
-}
-
-impl AuthDiagnosticsPhase {
-    fn from_engine(value: crate::core::AuthDiagnosticsPhase) -> Self {
-        match value {
-            crate::core::AuthDiagnosticsPhase::AwaitingChallenge => Self::AwaitingChallenge,
-            crate::core::AuthDiagnosticsPhase::AwaitingPolicy => Self::AwaitingPolicy,
-            crate::core::AuthDiagnosticsPhase::AwaitingSignature => Self::AwaitingSignature,
-            crate::core::AuthDiagnosticsPhase::AwaitingSend => Self::AwaitingSend,
-            crate::core::AuthDiagnosticsPhase::AwaitingRelayAck => Self::AwaitingRelayAck,
-            crate::core::AuthDiagnosticsPhase::Ready => Self::Ready,
-            crate::core::AuthDiagnosticsPhase::Denied => Self::Denied,
-            crate::core::AuthDiagnosticsPhase::Error => Self::Error,
         }
     }
 }
@@ -463,8 +439,6 @@ mod tests {
             policy_bound: true,
             signer_bound: false,
             auth_event_id: None,
-            send_handoff_accepted: false,
-            relay_ok_accepted: false,
         }
     }
 
@@ -475,38 +449,11 @@ mod tests {
     /// here rather than a silently dropped diagnostic fact.
     #[test]
     fn mirror_conversion_preserves_every_engine_fact_and_phase() {
-        use crate::core::AuthDiagnosticsPhase as EnginePhase;
-        let phases = [
-            (
-                EnginePhase::AwaitingChallenge,
-                AuthDiagnosticsPhase::AwaitingChallenge,
-            ),
-            (
-                EnginePhase::AwaitingPolicy,
-                AuthDiagnosticsPhase::AwaitingPolicy,
-            ),
-            (
-                EnginePhase::AwaitingSignature,
-                AuthDiagnosticsPhase::AwaitingSignature,
-            ),
-            (
-                EnginePhase::AwaitingSend,
-                AuthDiagnosticsPhase::AwaitingSend,
-            ),
-            (
-                EnginePhase::AwaitingRelayAck,
-                AuthDiagnosticsPhase::AwaitingRelayAck,
-            ),
-            (EnginePhase::Ready, AuthDiagnosticsPhase::Ready),
-            (EnginePhase::Denied, AuthDiagnosticsPhase::Denied),
-            (EnginePhase::Error, AuthDiagnosticsPhase::Error),
-        ];
-        for (engine_phase, facade_phase) in phases {
-            assert_eq!(
-                AuthDiagnosticsPhase::from_engine(engine_phase),
-                facade_phase
-            );
-        }
+        // #1616: the phase is not mirrored at all — `crate::AuthDiagnosticsPhase`
+        // and the engine's are ONE type, so there is no conversion left to get
+        // wrong. This binding is the proof: it does not compile if the facade
+        // ever grows a second declaration of the phase vocabulary again.
+        let _: fn(crate::core::AuthDiagnosticsPhase) -> AuthDiagnosticsPhase = |phase| phase;
 
         let relay = RelayUrl::parse("wss://mirror.example.com").unwrap();
         let engine = crate::core::DiagnosticsSnapshot {
@@ -611,8 +558,6 @@ mod tests {
         assert!(auth.policy_bound);
         assert!(!auth.signer_bound);
         assert_eq!(auth.auth_event_id, None);
-        assert!(!auth.send_handoff_accepted);
-        assert!(!auth.relay_ok_accepted);
 
         assert_eq!(facade.uncovered_author_count, 7);
         assert_eq!(facade.dropped_merge_rules, vec!["limit"]);

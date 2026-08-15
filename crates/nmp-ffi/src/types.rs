@@ -561,14 +561,24 @@ pub enum FfiSourceStatus {
 }
 
 /// Closed AUTH phase vocabulary shared by scoped acquisition evidence and
-/// engine-global AUTH diagnostics. Scoped evidence uses only the awaiting
-/// variants; completed/denied/error truth remains top-level in
-/// [`FfiSourceStatus`] and appears here only for a diagnostics session.
+/// engine-global AUTH diagnostics. Scoped evidence ([`nmp::AuthPhase`]) uses
+/// only `AwaitingChallenge`/`AwaitingPolicy`/`AwaitingSignature`/
+/// `AwaitingRelayAck`; `AwaitingSend` and the completed/denied/error truth
+/// belong to a diagnostics session ([`nmp::AuthDiagnosticsPhase`]), whose
+/// eight members this enum carries one-for-one.
+///
+/// `AwaitingSend` is not cosmetic and must never be folded into
+/// `AwaitingRelayAck` (#1616): `AwaitingSend` is NMP's own pending work —
+/// the AUTH event is signed and transport has not taken it — while
+/// `AwaitingRelayAck` is the relay's. An app deciding whether to wait, warn,
+/// or fail over acts on that difference, and folding it told a native app
+/// the relay was slow when NMP had not sent anything yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiAuthPhase {
     AwaitingChallenge,
     AwaitingPolicy,
     AwaitingSignature,
+    AwaitingSend,
     AwaitingRelayAck,
     Ready,
     Denied,
@@ -923,9 +933,10 @@ pub struct FfiRelayDiagnostics {
 /// One bounded exact-session AUTH diagnostics record. `relay + access`
 /// identifies the session. Capability-instance ids and the raw challenge do
 /// not cross FFI: only binding booleans and the engine's BLAKE3 challenge
-/// descriptor are exposed. `AwaitingRelayAck` covers the post-signature
-/// send/ack span; `send_handoff_accepted` distinguishes whether transport
-/// accepted the AUTH event yet.
+/// descriptor are exposed. `phase` is the sole owner of the AUTH lifecycle
+/// (#1616): "transport accepted the AUTH event" is `AwaitingRelayAck |
+/// Ready` and "the relay's OK was correlated" is `Ready`, so no boolean
+/// restates them here — a second owner is a second thing to disagree with.
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiAuthDiagnostics {
     pub relay: String,
@@ -937,8 +948,6 @@ pub struct FfiAuthDiagnostics {
     pub policy_bound: bool,
     pub signer_bound: bool,
     pub auth_event_id: Option<String>,
-    pub send_handoff_accepted: bool,
-    pub relay_ok_accepted: bool,
 }
 
 /// Where a durable write obligation is stuck (`nmp::StalledWriteStage`

@@ -85,10 +85,17 @@ public struct Row: Sendable, Identifiable, Hashable {
 
 /// Closed AUTH negotiation and terminal diagnostics phases
 /// (populated by the #8 AUTH reducer).
+///
+/// A `SourceStatus.awaitingAuth` carries only the four negotiation cases;
+/// `awaitingSend` and the terminals reach an app through an
+/// `AuthDiagnostics` row. `awaitingSend` is NMP's own pending work -- the
+/// AUTH event is signed and transport has not taken it -- and is never the
+/// same answer as `awaitingRelayAck`, which is the relay's pending work.
 public enum AuthPhase: Sendable, Hashable {
     case awaitingChallenge
     case awaitingPolicy
     case awaitingSignature
+    case awaitingSend
     case awaitingRelayAck
     case ready
     case denied
@@ -99,6 +106,7 @@ public enum AuthPhase: Sendable, Hashable {
         case .awaitingChallenge: self = .awaitingChallenge
         case .awaitingPolicy: self = .awaitingPolicy
         case .awaitingSignature: self = .awaitingSignature
+        case .awaitingSend: self = .awaitingSend
         case .awaitingRelayAck: self = .awaitingRelayAck
         case .ready: self = .ready
         case .denied: self = .denied

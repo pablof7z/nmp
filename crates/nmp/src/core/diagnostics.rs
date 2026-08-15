@@ -124,19 +124,40 @@ pub struct AuthDiagnosticsSnapshot {
     pub policy_bound: bool,
     pub signer_bound: bool,
     pub auth_event_id: Option<EventId>,
-    pub send_handoff_accepted: bool,
-    pub relay_ok_accepted: bool,
 }
 
+/// Where one protected session currently sits in its AUTH lifecycle (#8's
+/// ratified vocabulary — see the issue's "Reducer vocabulary refinement").
+///
+/// This enum is the SOLE owner of that lifecycle: `crate::diagnostics`
+/// re-exports this exact type rather than mirroring it (#1616), and every
+/// surface — direct Rust, FFI, Swift, Kotlin — carries all eight members.
+/// There is deliberately no companion boolean restating a phase an app can
+/// already read: "transport took the AUTH event" is exactly
+/// `AwaitingRelayAck | Ready`, and "the relay's OK was correlated" is
+/// exactly `Ready`. Two fields owning one property is how the two surfaces
+/// came to disagree in the first place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthDiagnosticsPhase {
+    /// Connected on a protected session with no challenge received yet.
     AwaitingChallenge,
+    /// A challenge is held and the registered AUTH policy has not answered.
     AwaitingPolicy,
+    /// The policy approved and the signer has not returned the kind:22242
+    /// event.
     AwaitingSignature,
+    /// The signed AUTH event exists and NMP has not handed it to transport
+    /// yet — NMP's own pending work, never the relay's.
     AwaitingSend,
+    /// Transport accepted the AUTH event and the relay's OK has not been
+    /// correlated — the relay's pending work, never NMP's.
     AwaitingRelayAck,
+    /// The relay accepted the AUTH event: this session is authenticated.
     Ready,
+    /// The relay rejected the AUTH event, or the policy refused.
     Denied,
+    /// The negotiation failed for a reason that is neither a relay refusal
+    /// nor a policy refusal.
     Error,
 }
 

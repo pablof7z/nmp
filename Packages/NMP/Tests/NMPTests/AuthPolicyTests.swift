@@ -243,11 +243,16 @@ final class AuthPolicyTests: XCTestCase {
             (.awaitingChallenge, .awaitingChallenge),
             (.awaitingPolicy, .awaitingPolicy),
             (.awaitingSignature, .awaitingSignature),
+            (.awaitingSend, .awaitingSend),
             (.awaitingRelayAck, .awaitingRelayAck),
             (.ready, .ready),
             (.denied, .denied),
             (.error, .error),
         ]
+        // #1616: distinct FFI phases must stay distinct in Swift. Without
+        // this, `awaitingSend` could be mapped onto `awaitingRelayAck` and
+        // every per-case assertion below would still pass.
+        XCTAssertEqual(Set(phases.map(\.1)).count, phases.count)
 
         for (ffiPhase, expectedPhase) in phases {
             let projected = AuthDiagnostics(
@@ -260,9 +265,7 @@ final class AuthPolicyTests: XCTestCase {
                     phase: ffiPhase,
                     policyBound: true,
                     signerBound: false,
-                    authEventId: String(repeating: "b", count: 64),
-                    sendHandoffAccepted: true,
-                    relayOkAccepted: false
+                    authEventId: String(repeating: "b", count: 64)
                 )
             )
 
@@ -275,8 +278,6 @@ final class AuthPolicyTests: XCTestCase {
             XCTAssertTrue(projected.policyBound)
             XCTAssertFalse(projected.signerBound)
             XCTAssertEqual(projected.authEventID, String(repeating: "b", count: 64))
-            XCTAssertTrue(projected.sendHandoffAccepted)
-            XCTAssertFalse(projected.relayOKAccepted)
         }
     }
 

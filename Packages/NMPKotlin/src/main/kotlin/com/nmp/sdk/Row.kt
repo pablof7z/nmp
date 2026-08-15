@@ -68,13 +68,21 @@ data class Row(
 }
 
 /** Closed AUTH negotiation phase vocabulary shared by evidence and
- * diagnostics (populated by the #8 AUTH reducer). */
+ * diagnostics (populated by the #8 AUTH reducer).
+ *
+ * A `SourceStatus.AwaitingAuth` carries only the four negotiation members;
+ * `AwaitingSend` and the terminals reach an app through an `AuthDiagnostics`
+ * row. `AwaitingSend` is NMP's own pending work -- the AUTH event is signed
+ * and transport has not taken it -- and is never the same answer as
+ * `AwaitingRelayAck`, which is the relay's pending work. */
 sealed class AuthPhase {
     object AwaitingChallenge : AuthPhase()
 
     object AwaitingPolicy : AuthPhase()
 
     object AwaitingSignature : AuthPhase()
+
+    object AwaitingSend : AuthPhase()
 
     object AwaitingRelayAck : AuthPhase()
 
@@ -90,6 +98,7 @@ sealed class AuthPhase {
                 FfiAuthPhase.AWAITING_CHALLENGE -> AwaitingChallenge
                 FfiAuthPhase.AWAITING_POLICY -> AwaitingPolicy
                 FfiAuthPhase.AWAITING_SIGNATURE -> AwaitingSignature
+                FfiAuthPhase.AWAITING_SEND -> AwaitingSend
                 FfiAuthPhase.AWAITING_RELAY_ACK -> AwaitingRelayAck
                 FfiAuthPhase.READY -> Ready
                 FfiAuthPhase.DENIED -> Denied

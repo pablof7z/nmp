@@ -192,8 +192,8 @@ pub use auth::{
 };
 pub use config::{EngineConfig, DEFAULT_MAX_PUBLISH_ATTEMPTS};
 pub use diagnostics::{
-    AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
-    RelayDiagnosticsSnapshot, StalledWrite, StalledWriteStage, StalledWriteTotals,
+    AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry, RelayDiagnosticsSnapshot,
+    StalledWrite, StalledWriteStage, StalledWriteTotals,
 };
 pub use engine::RelayInformationRequestError;
 pub use engine::{
@@ -340,10 +340,22 @@ pub use nmp_grammar::{
 // or an app cannot even print what it read. The diagnostics snapshot family
 // itself (`DiagnosticsSnapshot`/`RelayDiagnosticsSnapshot`/
 // `FilterCoverageEntry` plus the #8 AUTH read-out
-// `AuthDiagnosticsSnapshot`/`AuthDiagnosticsPhase`) is facade-OWNED --
-// defined in [`mod@diagnostics`] and exported above, converted once at the
+// `AuthDiagnosticsSnapshot`) is facade-OWNED -- defined in
+// [`mod@diagnostics`] and exported above, converted once at the
 // `DiagnosticsSubscription` delivery boundary -- rather than re-exported
 // from the engine (the `bc8fb97` NIP-11 pattern).
+//
+// Both AUTH phase vocabularies are engine-owned and re-exported here, not
+// mirrored (#1616): a facade mirror exists to choose which engine FIELDS an
+// app may read, and neither of these closed vocabularies needs a second
+// declaration to make that choice. They stay two types because they answer
+// two questions. The scoped `AuthPhase` on `SourceStatus::AwaitingAuth`
+// carries only the four awaiting members -- an authenticated source is just
+// `Requesting` and `AuthDenied` is its own top-level status, so a
+// completed/denied "awaiting" would be a representable non-state. The
+// engine-global `AuthDiagnosticsPhase` on `DiagnosticsSnapshot.auth_sessions`
+// describes one session's whole lifecycle, terminals included, and adds the
+// `AwaitingSend` that separates NMP's own pending work from the relay's.
 //
 // Two distinct coverage scopes live here, deliberately not conflated
 // (`docs/design/scoped-evidence-49-12-plan.md` §4): `AcquisitionEvidence`
@@ -354,8 +366,8 @@ pub use nmp_grammar::{
 // engine-global, per-(relay, filter) diagnostics watermark -- unscoped by
 // design, and never reused as a query-level verdict either.
 pub use crate::core::{
-    AcquisitionEvidence, AuthPhase, Row, RowDelta, RowSignature, ShortfallFact, SourceEvidence,
-    SourceStatus, WindowLoad,
+    AcquisitionEvidence, AuthDiagnosticsPhase, AuthPhase, Row, RowDelta, RowSignature,
+    ShortfallFact, SourceEvidence, SourceStatus, WindowLoad,
 };
 pub use nmp_router::Lane;
 pub use nmp_store::CoverageInterval;
