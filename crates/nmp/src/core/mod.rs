@@ -39,6 +39,7 @@ mod auth_core_headless;
 mod auth_transport;
 #[cfg(test)]
 mod auth_transport_tests;
+mod coordinate_coverage;
 mod diagnostics;
 mod evidence;
 #[cfg(test)]
@@ -2540,6 +2541,12 @@ pub struct EngineCore {
     /// builds pay no field or increment cost.
     #[cfg(any(test, feature = "bench-instrumentation"))]
     projection_store_queries: Cell<u64>,
+    /// Ordinary REQs opened by [`Self::open_coordinate_observation`] because
+    /// nothing already covered the coordinate (#1630). The reuse falsifier
+    /// reads this: a second check for a covered coordinate must leave it at
+    /// zero.
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    coordinate_reuse_new_reqs: Cell<u64>,
     #[cfg(any(test, feature = "bench-instrumentation"))]
     router_compiles: Cell<u64>,
     #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -2752,6 +2759,8 @@ impl EngineCore {
             max_publish_attempts: crate::config::DEFAULT_MAX_PUBLISH_ATTEMPTS,
             #[cfg(any(test, feature = "bench-instrumentation"))]
             projection_store_queries: Cell::new(0),
+            #[cfg(any(test, feature = "bench-instrumentation"))]
+            coordinate_reuse_new_reqs: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
             router_compiles: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -3781,6 +3790,13 @@ impl EngineCore {
         };
         if *current != handle || *current_session != session {
             return Vec::new();
+        }
+        // A frame the transport rejected before this reducer could see it is
+        // a returned EVENT frame nothing counted (#1630). Health is the only
+        // place it is ever reported, and it names no subscription, so every
+        // request still streaming on this session loses its exact count.
+        if health.invalid_signature_count > 0 || health.last_error.is_some() {
+            self.erase_returned_frame_counts(&session);
         }
         self.transport_degraded = health.last_error.or_else(|| {
             (health.invalid_signature_count > 0).then(|| {
