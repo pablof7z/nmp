@@ -10,7 +10,7 @@ Feature: NIP-29 remembered-group actions are durable semantic writes
   # nmp:evidence=parity:nmp-parity::direct_and_ffi_group_list_actions_are_identical_and_host_is_not_route
   # nmp:evidence=swift:NMP::testTypedGroupListActionReturnsTheOrdinaryReceipt
   # nmp:evidence=kotlin:NMPKotlin::typedGroupListActionReturnsTheOrdinaryReceipt
-  # nmp:falsifier=Treat a group host from event data as a publish destination, or let a group operation edit relay-in-use tags; the direct/FFI route-and-value parity witness observes the extra host delivery or changed unowned row.
+  # nmp:falsifier=Treat a group host from event data as a publish destination and the direct/FFI parity witness observes the extra host delivery; let a group operation edit relay-in-use tags and the Rust ownership witness observes the changed unowned row.
   Scenario: Typed group and relay actions own only their exact public rows
     Given my group list contains unrelated rows, duplicate valid rows, malformed rows, and private content
     When I add or remove one exact group id and canonical host identity
