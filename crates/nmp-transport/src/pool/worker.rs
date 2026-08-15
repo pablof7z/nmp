@@ -44,7 +44,7 @@ use crate::keepalive::{
 };
 
 use super::connect::{open_relay_socket, RelaySocket, MAX_OUTBOUND_FRAME_BYTES};
-use super::frame::classify_message;
+use super::frame::{classify_message, ClassifiedFrame};
 use super::spawn::ThreadSpawner;
 use super::{
     AttemptCorrelation, EphemeralOperation, EphemeralSendOutcome, HandoffResult, RelayFrame,
@@ -413,6 +413,11 @@ pub(super) enum WorkerEventKind {
         retry_in: Option<Duration>,
     },
     Frame(RelayFrame),
+    /// This relay sent a TEXT frame that did not decode into a
+    /// `RelayMessage`. It carries nothing: the text that would have named a
+    /// subscription is the text that failed to parse, so this is a fact
+    /// about the session's current generation and nothing narrower (#1668).
+    UndecodableFrame,
     /// The one, ever, resolution of a `SendDurable` command's
     /// `AttemptCorrelation` (issue #93). See [`super::PoolEvent::EventHandoff`]
     /// for the delivery contract (never gated on generation/slot staleness
@@ -2050,12 +2055,21 @@ fn drain_reads(
                         permanent: false,
                     });
                 }
-                if let Some(frame) = classify_message(message, relay, committed_observations) {
+                let kind = match classify_message(message, relay, committed_observations) {
+                    ClassifiedFrame::Frame(frame) => Some(WorkerEventKind::Frame(frame)),
+                    ClassifiedFrame::Consumed => None,
+                    // The text did not decode, so it names no subscription
+                    // and could have been an EVENT for any of them. Reporting
+                    // it is the whole point: a silent drop is what let a
+                    // truncated answer read as complete (#1668).
+                    ClassifiedFrame::Undecodable => Some(WorkerEventKind::UndecodableFrame),
+                };
+                if let Some(kind) = kind {
                     if event_tx
                         .send(WorkerEvent {
                             slot,
                             generation,
-                            kind: WorkerEventKind::Frame(frame),
+                            kind,
                         })
                         .is_err()
                     {
@@ -2484,6 +2498,61 @@ mod tests {
         assert!(pack_generation(1, 0) < pack_generation(1, 1));
         assert!(pack_generation(1, u32::MAX) < pack_generation(2, 0));
         assert_eq!(pack_generation(0, 0), 0);
+    }
+
+    /// #1668, over a real socket: the worker's own read loop turns a text
+    /// frame it cannot decode into a reportable worker event, and leaves a
+    /// keepalive ping silent.
+    ///
+    /// Deliberately driven through `drain_reads` rather than by calling the
+    /// classifier: the gap this closes was a missing `else` in the read
+    /// loop, so a test that stops at the classifier would pass with the loop
+    /// still dropping the frame on the floor.
+    #[test]
+    fn drain_reads_reports_an_undecodable_text_frame_and_stays_silent_on_keepalive() {
+        let relay = super::super::committed_observations::RelayScope::new(
+            &RelayUrl::parse("wss://relay.example").unwrap(),
+        );
+        let committed_observations =
+            super::super::committed_observations::CommittedObservationCache::new(0);
+        let (mut socket, mut peer) = real_websocket_pair();
+        // Three inbound messages: one that cannot be parsed at all, one that
+        // parses and is dropped on purpose, and one keepalive.
+        peer.send(Message::Text(
+            r#"["EVENT", not-valid-json"#.to_string().into(),
+        ))
+        .unwrap();
+        peer.send(Message::Text(r#"["AUTH",""]"#.to_string().into()))
+            .unwrap();
+        peer.send(Message::Ping(Vec::new().into())).unwrap();
+        peer.flush().unwrap();
+
+        let (event_tx, event_rx) = mpsc::sync_channel(TEST_EVENT_QUEUE_CAPACITY);
+        let mut keepalive = KeepaliveState::new(
+            Instant::now(),
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+        );
+        let waker_slot = Arc::new(Mutex::new(None));
+        let mut poller = RelayPoller::new(&mut socket, &waker_slot).unwrap();
+        assert!(poller.wait(Duration::from_secs(1)).unwrap());
+        drop(poller);
+
+        drain_reads(
+            3,
+            9,
+            &event_tx,
+            &mut socket,
+            &mut keepalive,
+            None,
+            relay,
+            &committed_observations,
+        );
+
+        let events = event_rx.try_iter().collect::<Vec<_>>();
+        assert_eq!(events.len(), 1, "only the undecodable frame is reportable");
+        assert!(matches!(events[0].kind, WorkerEventKind::UndecodableFrame));
+        assert_eq!((events[0].slot, events[0].generation), (3, 9));
     }
 
     #[test]

@@ -654,6 +654,21 @@ mod tests {
             ))
         }
 
+        /// Report that the transport could not decode one text frame on this
+        /// session, the way `PoolEvent::Health` does (#1668). Nothing here
+        /// names a subscription, because the text that would have named one
+        /// is the text that failed to parse.
+        fn report_undecodable_frame(&mut self) -> Vec<Effect> {
+            self.core.handle(EngineMsg::RelayHealth(
+                self.handle,
+                self.session.clone(),
+                nmp_transport::RelayHealth {
+                    undecodable_frame_count: 1,
+                    ..nmp_transport::RelayHealth::default()
+                },
+            ))
+        }
+
         /// Run the coordinate check the way #1631 will, and report how many
         /// REQs actually reached the wire because of it.
         fn check(&mut self, coordinate: &Coordinate) -> (CoordinateCoverage, usize) {
@@ -849,6 +864,96 @@ mod tests {
         let (coverage, placed) = fixture.check(&contact_list_coordinate(&alice));
         assert_eq!(coverage, CoordinateCoverage::Uncovered);
         assert_eq!((fixture.opened_coordinate_reqs(), placed), (1, 1));
+    }
+
+    /// #1668's falsifier, and the exact minimal pair of
+    /// `a_finished_covering_request_under_the_bound_proves_absence`: the same
+    /// covering request, finished under the bound without the coordinate,
+    /// stops proving absence the moment the transport reports one text frame
+    /// it could not decode.
+    ///
+    /// That frame may have been an EVENT for this very request. Before #1668
+    /// the reducer never heard about it, so this setup read as a complete
+    /// answer and declared the coordinate absent — the one silent way a
+    /// truncated answer could masquerade as a whole one.
+    #[test]
+    fn an_undecodable_frame_forfeits_the_absence_proof() {
+        let alice = Keys::generate();
+        let other = Keys::generate();
+        let mut fixture = kind3_read();
+        fixture.deliver(contact_list(&other, 50));
+        fixture.report_undecodable_frame();
+        fixture.end_stored_events();
+
+        let (coverage, placed) = fixture.check(&contact_list_coordinate(&alice));
+        assert_eq!(
+            coverage,
+            CoordinateCoverage::Uncovered,
+            "a session that dropped an undecodable frame can prove nothing absent"
+        );
+        assert_eq!(
+            (fixture.opened_coordinate_reqs(), placed),
+            (1, 1),
+            "the exact coordinate query is used instead, exactly once"
+        );
+    }
+
+    /// The undecodable report is a fact about the SESSION, not one request:
+    /// the frame named no subscription, so every request still streaming
+    /// there loses its exact count, not merely the one that happened to be
+    /// checked.
+    #[test]
+    fn an_undecodable_frame_forfeits_absence_for_every_streaming_request() {
+        let alice = Keys::generate();
+        let mut fixture = kind3_read();
+        let session = fixture.session.clone();
+
+        // A second relay-pinned read on the same session, accepted onto the
+        // wire alongside the first.
+        let second = Demand::new(
+            Filter {
+                kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
+                ..Filter::default()
+            },
+            SourceAuthority::Pinned(BTreeSet::from([relay()])),
+            AccessContext::Public,
+        )
+        .expect("a relay-pinned read is nonempty");
+        fixture
+            .core
+            .handle(EngineMsg::Subscribe(LiveQuery::single(second)));
+        let admitted = fixture
+            .core
+            .handle(EngineMsg::FlushWireAdmission(Timestamp::from(2u64)));
+        for (_, _, _, attempt_id) in placed_requests(&admitted) {
+            fixture
+                .core
+                .on_wire_request_handoff(RequestHandoffOutcome::Accepted {
+                    attempt_id,
+                    handle: fixture.handle,
+                });
+        }
+
+        fixture.report_undecodable_frame();
+
+        let streaming_with_exact_counts = fixture
+            .core
+            .live_wire_requests
+            .iter()
+            .filter(|((request_session, _), live)| {
+                request_session == &session
+                    && matches!(live.stored_events, StoredEvents::Streaming { .. })
+                    && live.returns.stored_frames != ReturnedFrames::Unattributable
+            })
+            .count();
+        assert_eq!(
+            streaming_with_exact_counts, 0,
+            "one undecodable frame erases the count of every request streaming on the session"
+        );
+
+        fixture.end_stored_events();
+        let (coverage, _) = fixture.check(&contact_list_coordinate(&alice));
+        assert_eq!(coverage, CoordinateCoverage::Uncovered);
     }
 
     /// Public coverage never answers a NIP-42 question: coverage is keyed by
