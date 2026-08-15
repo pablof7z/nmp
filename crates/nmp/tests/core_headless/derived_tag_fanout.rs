@@ -36,7 +36,7 @@ const INNER_KIND: u16 = 39_001;
 // ---- fixtures -----------------------------------------------------------
 
 /// A kind:39001 (NIP-29 group admins) event: `group` as the `d` tag,
-/// `admins` as `p` tags. Mirrors `nmp_resolver::testkit::kind39002`, which
+/// `admins` as `p` tags. Mirrors `nmp_resolver_testkit::kind39002`, which
 /// covers 39002 (members) but not 39001.
 fn group_admins(
     author: &Keys,
@@ -904,10 +904,7 @@ fn g_a_derived_set_collapses_the_same_way_in_the_authors_slot_and_a_tag_slot() {
                 generation: 1,
             },
             public_session(&r0),
-            event_frame(
-                "s",
-                nmp_resolver::testkit::kind3(&me, &list, 100 + n as u64),
-            ),
+            event_frame("s", nmp_resolver_testkit::kind3(&me, &list, 100 + n as u64)),
         ));
         record_accepted_step(
             &mut core,
@@ -1030,15 +1027,12 @@ fn i_re_served_events_after_a_successor_cost_bandwidth_but_never_rows() {
                 generation: 1,
             },
             public_session(&r0),
-            event_frame(
-                "s",
-                nmp_resolver::testkit::kind3(&me, &list, 200 + n as u64),
-            ),
+            event_frame("s", nmp_resolver_testkit::kind3(&me, &list, 200 + n as u64)),
         ));
         delivered_rows += effect_row_delta_count(&effects);
         let accepted = accept_requests(&mut core, &handles, &effects);
         delivered_rows += effect_row_delta_count(&accepted);
-        let post = nmp_resolver::testkit::kind1(author, "post", 300 + n as u64);
+        let post = nmp_resolver_testkit::kind1(author, "post", 300 + n as u64);
         posts.push(post.clone());
         let effects = core.handle(EngineMsg::RelayFrame(
             RelayHandle {

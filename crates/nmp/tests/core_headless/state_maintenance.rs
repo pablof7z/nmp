@@ -23,7 +23,7 @@ fn root_query_emits_removed_on_delete() {
         &a.public_key().to_hex(),
     )));
 
-    let note = nmp_resolver::testkit::kind1(&a, "delete me", 100);
+    let note = nmp_resolver_testkit::kind1(&a, "delete me", 100);
     let note_id = note.id;
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -41,7 +41,7 @@ fn root_query_emits_removed_on_delete() {
         "the note must arrive as Added first"
     );
 
-    let deletion = nmp_resolver::testkit::deletion(&a, &[note_id], 200);
+    let deletion = nmp_resolver_testkit::deletion(&a, &[note_id], 200);
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
@@ -83,7 +83,7 @@ fn expiry_emits_removed_via_manual_tick() {
         &a.public_key().to_hex(),
     )));
 
-    let expiring = nmp_resolver::testkit::expiring_kind1(&a, "ephemeral", 100, 150);
+    let expiring = nmp_resolver_testkit::expiring_kind1(&a, "ephemeral", 100, 150);
     let expiring_id = expiring.id;
     let effects = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -150,7 +150,7 @@ fn next_deadline_is_min_over_expiry_and_neg_liveness() {
     // Ingest an event expiring at t=150 on the open sub -- the store's
     // expiration index is now the sole deadline source (no neg session
     // exists yet).
-    let expiring = nmp_resolver::testkit::expiring_kind1(&a, "ephemeral", 100, 150);
+    let expiring = nmp_resolver_testkit::expiring_kind1(&a, "ephemeral", 100, 150);
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,

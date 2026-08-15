@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
-use nmp_resolver::testkit::accept_write_of;
 use nmp_resolver::Engine;
+use nmp_resolver_testkit::accept_write_of;
 use nmp_store::{AcceptOutcome, CompensateOutcome, RedbStore, RelayObserved};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag, Timestamp};
 

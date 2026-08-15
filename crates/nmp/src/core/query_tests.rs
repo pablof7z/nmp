@@ -250,7 +250,7 @@ mod affected_handle_invalidation_tests {
         let author = Keys::generate();
         let followed = Keys::generate();
         let relay = RelayUrl::parse("wss://local-demand-change.example").unwrap();
-        let followed_post = nmp_resolver::testkit::kind1(&followed, "already cached", 10);
+        let followed_post = nmp_resolver_testkit::kind1(&followed, "already cached", 10);
         let mut store = RedbStore::temporary().expect("temporary Redb store");
         store
             .insert(
@@ -278,7 +278,7 @@ mod affected_handle_invalidation_tests {
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
 
-        let contact_list = nmp_resolver::testkit::kind3(&author, &[followed.public_key()], 20);
+        let contact_list = nmp_resolver_testkit::kind3(&author, &[followed.public_key()], 20);
         let effects = core.on_publish(exact_signed_intent(contact_list, &relay));
 
         assert_eq!(core.router_compiles.get(), 1);
@@ -615,7 +615,7 @@ mod affected_handle_invalidation_tests {
             .resolver
             .accept_local(
                 &mut core.store,
-                nmp_resolver::testkit::accept_write_of(event, accepted_at),
+                nmp_resolver_testkit::accept_write_of(event, accepted_at),
             )
             .unwrap();
         let (intent_id, pending) = match &accepted.outcome {

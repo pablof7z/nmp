@@ -1,6 +1,6 @@
 //! M2 contract test 12: the differential oracle
 //! (`docs/plans/M2-compiler-router-plan.md` §4.4). Wires the REAL resolver
-//! (`nmp_resolver::testkit`) into the router: generated demand (a real
+//! (`nmp_resolver_testkit`) into the router: generated demand (a real
 //! "my follows" subscription, fanned out by M1 into per-author atoms) is
 //! compiled two ways over the SAME injected relay facts --
 //!
@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{Binding, ConcreteFilter, Demand, Derived, Filter, IdentityField, Selector};
-use nmp_resolver::testkit::{kind1, kind3, Harness};
+use nmp_resolver_testkit::{kind1, kind3, Harness};
 use nostr::filter::MatchEventOptions;
 use nostr::{Event, EventId, Keys};
 

@@ -741,7 +741,7 @@ fn latch_redb_generation_without_core_diagnostics(core: &mut EngineCore) {
     let accepted = event(&keys, 1, 1_500);
     let error = match core.resolver.accept_local(
         &mut core.store,
-        nmp_resolver::testkit::accept_write_of(accepted, 1_501),
+        nmp_resolver_testkit::accept_write_of(accepted, 1_501),
     ) {
         Ok(_) => panic!("construction-armed acceptance I/O must close the Redb generation"),
         Err(error) => error,

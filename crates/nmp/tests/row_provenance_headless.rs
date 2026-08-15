@@ -85,7 +85,7 @@ fn same_event_id_from_two_relays_unions_into_one_row_with_both_sources() {
     )));
     let mut delivered = Vec::new();
 
-    let event = nmp_resolver::testkit::kind1(&author, "provenance falsifier", 100);
+    let event = nmp_resolver_testkit::kind1(&author, "provenance falsifier", 100);
 
     // Arrives from relay0 first: a brand-new row, sources == {relay0}.
     let effects = deliver(&mut core, 0, &relay0, &event);
@@ -205,7 +205,7 @@ fn unrelated_handle_lifecycle_never_spuriously_emits_sources_grew() {
     )));
     let mut delivered = Vec::new();
 
-    let event = nmp_resolver::testkit::kind1(&author, "lifecycle falsifier", 200);
+    let event = nmp_resolver_testkit::kind1(&author, "lifecycle falsifier", 200);
     append_row_deltas(&deliver(&mut core, 0, &relay0, &event), &mut delivered);
 
     // An UNRELATED second query (different kind, matches nobody this store
@@ -273,7 +273,7 @@ fn projected_sources_survive_a_real_redb_reopen() {
     let author = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let relay1 = RelayUrl::parse("wss://relay1.example.com").unwrap();
-    let event = nmp_resolver::testkit::kind1(&author, "redb reopen falsifier", 300);
+    let event = nmp_resolver_testkit::kind1(&author, "redb reopen falsifier", 300);
 
     {
         let mut store = RedbStore::open(&path).expect("redb: open");

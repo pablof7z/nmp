@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use nmp::mechanism::core::{Effect, EngineCore, EngineMsg};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, RelaySessionKey};
-use nmp_resolver::testkit::{kind1, kind3};
+use nmp_resolver_testkit::{kind1, kind3};
 use nmp_router::{SubId, WireOp};
 use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::RedbStore;
@@ -77,7 +77,7 @@ fn wire_sub_string(sub_id: &SubId) -> String {
 }
 
 /// A kind:10002 (NIP-65 relay list) event -- genuinely missing from
-/// `nmp_resolver::testkit`'s builder set (M5's self-bootstrapping outbox is
+/// `nmp_resolver_testkit`'s builder set (M5's self-bootstrapping outbox is
 /// this crate's own concern, not M1's), so built directly here with no `r`
 /// tags (this test only needs it to arrive and be COUNTED, never to actually
 /// discover new write relays -- both authors' relays are already fixture-

@@ -556,7 +556,7 @@ fn expired_local_acceptance_is_refused_before_custody_and_retains_nothing() {
         &a.public_key().to_hex(),
     )));
     core.handle(EngineMsg::Tick(Timestamp::from(200)));
-    let expired = nmp_resolver::testkit::expiring_kind1(&a, "expired", 100, 150);
+    let expired = nmp_resolver_testkit::expiring_kind1(&a, "expired", 100, 150);
     let effects = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Signed(expired),
         routing: WriteRouting::Auto,

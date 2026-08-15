@@ -1051,7 +1051,7 @@ fn neg_liveness_deadline_does_not_busy_spin() {
     // wire format itself (via `RelayMessage::event`, not `nostr-relay-
     // builder`), so there is no cross-version bridge to cross here.
     let now_secs = Timestamp::now().as_secs();
-    let seed = nmp_resolver::testkit::expiring_kind1(
+    let seed = nmp_resolver_testkit::expiring_kind1(
         &a,
         "syncs EngineCore's clock before the neg session opens",
         now_secs,
@@ -1341,8 +1341,8 @@ fn boot_catches_up_past_due_expiry() {
     {
         let mut store = RedbStore::open(&db_path).expect("open redb store (build phase)");
         let expiring =
-            nmp_resolver::testkit::expiring_kind1(&a, "expires almost immediately", 100, 101);
-        let control = nmp_resolver::testkit::kind1(&a, "a plain, non-expiring note", 100);
+            nmp_resolver_testkit::expiring_kind1(&a, "expires almost immediately", 100, 101);
+        let control = nmp_resolver_testkit::kind1(&a, "a plain, non-expiring note", 100);
         expiring_id = expiring.id;
         control_id = control.id;
         let observed = RelayObserved::new(relay0.clone(), Timestamp::from(100u64));
