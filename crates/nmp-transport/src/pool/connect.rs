@@ -34,7 +34,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// MiB message / 16 MiB frame) — a malicious or compromised relay could push
 /// that much per message, times every live relay worker, as an unbounded
 /// memory-amplification lever. NIP-11 documents are deliberately capped at
-/// 256 KiB (`relay_information::MAX_RESPONSE_BYTES`); ordinary Nostr relay
+/// 256 KiB (`nmp_nip11`'s `MAX_RESPONSE_BYTES`); ordinary Nostr relay
 /// traffic (EVENTs, up to NIP-45-style COUNT responses) has no legitimate
 /// need for anything near a megabyte. This is a hard ceiling, not derived
 /// from any relay's self-reported `max_message_length` — a hostile relay's

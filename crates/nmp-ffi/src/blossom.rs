@@ -42,7 +42,7 @@
 //! wrappers dispatch them off the main thread (Swift: continuation +
 //! global queue; Kotlin: `Dispatchers.IO`). Each call builds a fresh
 //! current-thread tokio runtime AND a fresh `BlossomClient` inside it,
-//! mirroring `crates/nmp/src/relay_information_service.rs`'s `http_runtime()`
+//! mirroring the NIP-11 service's since-deleted `http_runtime()`
 //! discipline: the reqwest client is born and dropped inside the flight's own
 //! runtime, so connection state cannot remain bound to a runtime that no
 //! longer exists on the next call. Hostname resolution uses reqwest's platform
@@ -1193,7 +1193,7 @@ fn list_error_to_ffi(error: ListError) -> FfiBlossomListError {
 }
 
 /// One current-thread tokio runtime per client call
-/// (`crates/nmp/src/relay_information_service.rs`'s `http_runtime()` discipline,
+/// (the NIP-11 service's since-deleted `http_runtime()` discipline,
 /// mirrored deliberately): the reqwest client is constructed AND dropped
 /// inside this flight's own runtime, so no runtime-bound connection state can
 /// leak into the next call. DNS uses the platform resolver.

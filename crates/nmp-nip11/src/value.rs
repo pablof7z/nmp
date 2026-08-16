@@ -1,8 +1,8 @@
-//! Canonical NIP-11 values for the supported `nmp` facade.
+//! Canonical NIP-11 values.
 //!
-//! Acquisition and caching stay in [`crate::relay_information_service`]. These
-//! types are the single authority for cache policy, freshness, errors,
-//! documents, limitations, and snapshots. There is no second facade copy.
+//! Acquisition and caching stay in [`crate::service`]. These types are the
+//! single authority for cache policy, freshness, errors, documents,
+//! limitations, and snapshots. There is no second facade copy.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -316,22 +316,22 @@ impl RelayInformationSnapshot {
 mod tests {
     use super::*;
 
-    /// #852: the service re-exports these types; it does not define a second
-    /// family. If a mirror returns, this assignment stops compiling.
+    /// #852: the crate facade re-exports these types; it does not define a
+    /// second family. If a mirror returns, this assignment stops compiling.
     #[test]
-    fn service_reexports_the_same_nip11_value_types() {
+    fn the_facade_exports_the_same_nip11_value_types() {
         fn same_type<T>(_: T, _: T) {}
         same_type(
             RelayInformationCachePolicy::UseCache,
-            crate::relay_information_service::RelayInformationCachePolicy::UseCache,
+            crate::RelayInformationCachePolicy::UseCache,
         );
         same_type(
             RelayInformationFreshness::Fresh,
-            crate::relay_information_service::RelayInformationFreshness::Fresh,
+            crate::RelayInformationFreshness::Fresh,
         );
         same_type(
             RelayInformationError::ServiceClosed,
-            crate::relay_information_service::RelayInformationError::ServiceClosed,
+            crate::RelayInformationError::ServiceClosed,
         );
     }
 }

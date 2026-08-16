@@ -1810,9 +1810,7 @@ dependencies = [
  "blake3",
  "crossbeam-channel",
  "cucumber",
- "futures-channel",
  "hex",
- "httpdate",
  "libc",
  "negentropy",
  "nmp",
@@ -1822,6 +1820,7 @@ dependencies = [
  "nmp-grammar",
  "nmp-local-signer",
  "nmp-nip02",
+ "nmp-nip11",
  "nmp-nip18",
  "nmp-nip22",
  "nmp-nip25",
@@ -1839,7 +1838,6 @@ dependencies = [
  "nmp-transport",
  "nostr 0.44.4",
  "nostr-relay-builder",
- "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -1989,6 +1987,21 @@ version = "0.1.0"
 dependencies = [
  "nmp-grammar",
  "nostr 0.44.4",
+]
+
+[[package]]
+name = "nmp-nip11"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "crossbeam-channel",
+ "futures-channel",
+ "httpdate",
+ "nostr 0.44.4",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

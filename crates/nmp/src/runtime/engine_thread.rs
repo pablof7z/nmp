@@ -8,7 +8,8 @@ use nmp_store::RedbStore;
 use nmp_transport::{Pool, PoolConfig, PoolEvent};
 use nostr::RelayUrl;
 
-use crate::relay_information_service::RelayInformationService;
+use nmp_nip11::RelayInformationService;
+
 use crate::session::RestoredSession;
 
 #[cfg(test)]

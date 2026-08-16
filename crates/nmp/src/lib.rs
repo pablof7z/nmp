@@ -53,7 +53,6 @@ mod diagnostics;
 mod engine;
 mod error;
 mod observation;
-mod relay_information;
 mod subscription;
 
 // #827: the M3 engine, folded in from the former `nmp-engine` crate. These are
@@ -72,9 +71,12 @@ mod subscription;
 //   routing, the receipt stream).
 // - [`mod@negentropy`] -- the prober FSM + `ProbedRelay` capability token +
 //   `Reconciler` (a MODULE, not a crate -- plan §1: reducer-coupled).
-// - [`mod@relay_information_service`] -- engine-owned one-shot NIP-11
-//   acquisition. Public NIP-11 values live in [`mod@relay_information`];
-//   this module owns cache, flight, and fetch coordination only.
+//
+// NIP-11 acquisition is deliberately NOT in this list: it is `nmp-nip11`, a
+// crate. HTTP is the reason -- a module here would put `reqwest` in the same
+// manifest as the reducer, and `EngineCore` must link no HTTP client. The
+// values it produces are re-exported below; the reducer sees only
+// `core::RelayInformationCapabilityEvidence`, which `runtime` projects.
 //
 // They are PRIVATE, exactly like every other module of this facade, which is
 // what keeps ~242 mechanism items out of the public API: the
@@ -87,7 +89,6 @@ mod core;
 mod ingest_attribution;
 mod negentropy;
 mod publish_queue;
-mod relay_information_service;
 mod replaceable_materializer;
 mod runtime;
 mod session;
@@ -122,9 +123,6 @@ pub mod mechanism {
     }
     pub mod publish_queue {
         pub use crate::publish_queue::*;
-    }
-    pub mod relay_information_service {
-        pub use crate::relay_information_service::*;
     }
     pub mod runtime {
         pub use crate::runtime::*;
@@ -259,7 +257,10 @@ pub fn nmp_threads_live() -> u64 {
 // not double the facade with generic auto-trait expansions.
 #[doc(hidden)]
 pub use crate::runtime::ConcurrentNext;
-pub use relay_information::{
+// #1239's rule, applied to NIP-11: an app reaches a protocol family through
+// this facade, never as a second Cargo line beside it. The values are
+// `nmp-nip11`'s; naming that crate is the engine's business, not the app's.
+pub use nmp_nip11::{
     RelayInformationCachePolicy, RelayInformationDocument, RelayInformationError,
     RelayInformationFreshness, RelayInformationLimitations, RelayInformationSnapshot,
 };
