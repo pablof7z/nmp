@@ -280,9 +280,23 @@ plus `cargo clippy --workspace --all-targets -- -D warnings` **without**
 `--all-features` as well as with it — dead-code warnings are shape-dependent
 in exactly the same way, and #1724's own first fix produced one.
 
-**The reducer remains one crate today — and "today" is part of the claim,
-not a hedge.** Two separate things get run together here, and keeping them
-apart is the whole point of this section.
+## The reducer's decomposition: owners first, packages later
+
+**The destination is `nmp-query` as one crate**, owning the complete
+live-query acquisition and projection lifecycle, with `nmp-engine` reduced to
+ordering between it and the write plane. That is settled by decision, not by
+the measurements below.
+
+The *sequence* to it is not negotiable in the other direction: concrete owners
+are built inside `nmp-engine` first, and a package boundary is drawn only once
+the interface is known — because Rust's crate boundary turns whatever shape
+exists at that moment into permanent public API. Everything below is about
+which owners, in what order, and what each extraction proved.
+
+### What the plane-seam measurements do and do not say
+
+Two separate things get run together here, and keeping them apart is the whole
+point of this section.
 
 *What is measured.* The read-plane/write-plane seam is wrong, and wrong
 structurally rather than by degree: a field-level scan of `EngineCore` shows
@@ -311,19 +325,19 @@ ruling talks past rather than answers.
 So the standing position is exactly this, and no more:
 
 - The engine/runtime boundary is settled.
-- The reducer remains one crate **today**. That is a statement about current
-  evidence, not a blessing of the current internals.
-- The current read/write split and the examined owner extractions **do not
-  earn package boundaries**. Those seams failed for the reasons measured
-  below, not because they would leave both sides depending on the same
-  lower-level crates.
-- **#1606 continues through private concrete owners.** That work is not
-  waiting on any packaging question.
-- **A future crate requires new evidence**: a coherent responsibility with a
-  stable independent interface, an independent lifecycle, an independent
-  consumer, an independently consumed artifact, or a dependency that must
-  not exist. A distinct dependency list is not required. Going looking for
-  one of those is legitimate work, not relitigation.
+- The **write/read plane seam** is measured and wrong. That measurement says
+  nothing about the query lifecycle's boundary, and must not be read as if it
+  did — an earlier version of this section made exactly that overreach.
+- The four examined owner-shaped candidates **do not earn package
+  boundaries**, for the reasons measured below, not because they would leave
+  both sides depending on the same lower-level crates.
+- **#1606 continues through private concrete owners**, and that is now also
+  the road to `nmp-query`: each owner hardens one piece of the interface the
+  eventual crate boundary will freeze.
+- **A crate still requires evidence** of a coherent responsibility with a
+  stable independent interface and lifecycle. A distinct dependency list is
+  not required. `nmp-query` is expected to meet that bar; the owner work is
+  how it gets there, not a substitute for it.
 
 The census below is what the first bullet rests on, specifically its tail:
 `store` is touched from six files, `clock` from seven, and neither reaches
@@ -336,6 +350,68 @@ And read it knowing the instrument's limit: it counts per *file*, and a file
 holds both `impl SomeOwner` and `impl EngineCore`, so it charges root
 orchestration to whatever owner shares the file. "They all need the same four
 things" below is where that is measured properly and comes out differently.
+### Owners extracted so far
+
+`RequestAttempts` (#1693), `HistorySessions` (#1695), `WireOwnership` and
+`RequestTargets` (#1746) all came out of the ≥85%-concentration band.
+`EngineCore` is **114 → 103 fields** across the last two. What they proved:
+
+**`WireOwnership` — ten fields.** `rebuild_wire_ownership` opened with
+**twelve consecutive `.clear()` calls** and then open-coded the owner counting
+a second time. Two of those twelve clears belonged to the request-target
+owner. The reset is now `WireOwnership::default()` and the replay goes through
+the same `retain` the incremental path uses, so a new map cannot be forgotten
+by a reset that does not name it.
+
+- The second copy had already **drifted**, which is the finding the reading
+  missed: the rebuild skipped `router.activate` and `attribution.observe_atom`
+  entirely and rebuilt the author-outbox bridge a different way. They were
+  not two spellings of one algorithm awaiting divergence. They had diverged.
+- Two refcount rules became one. Per-handle refcounts asserted
+  (`checked_sub(..).expect(..)`); the owner counts 200 lines away absorbed the
+  same violation with `saturating_sub`. The whole suite passes under the loud
+  spelling, so the silent one was protecting no real path.
+- Four test files hand-wrote six of the maps to build a 10,000-atom fixture,
+  including assigning an owner count directly — a **third** copy of the
+  counting, free to invent states the production path cannot reach. Fixtures
+  build through the owner's doors now.
+
+**`RequestTargets` — three fields.** Three siblings on the god struct with
+nothing saying which was derived from which. They are two layers: `by_handle`
+is what a branch *declares*; the other two are what is *live*, derived by
+intersecting the declaration with the branch's wire-contributing scopes. The
+rebuild's surviving two clears became one named operation,
+`forget_activations()` — *forget every activation, keep every declaration* —
+and a rebuild that clears one and not the other is no longer expressible.
+Activation had also been reaching into `self.handles` to derive which scopes
+contribute wire; that is a freshness decision the branch owns, so it now
+arrives as a passed-in fact.
+
+### The falsifier caught the census lying
+
+`rebuild == incremental` had never been asserted, though `recompile` runs the
+rebuild over state the incremental path built and nothing marks that state
+suspect first. Written as a test, it was green — and **stayed green with the
+rebuild's reset deliberately deleted**.
+
+The reason is worth keeping: `CoreOwnershipCensus` counted how many demands
+were live but never their owner *counts*. It could not distinguish an owner
+count of two from one of four, which means every `assert_eq!(census,
+default())` teardown proof in the suite was blind to a wrong-but-nonzero
+count. `wire_owner_refs` closes it. Both owners' deliberate breaks are now red
+on exactly the field that describes them:
+
+| deliberate break | red field |
+| --- | --- |
+| delete the wire rebuild's reset | `wire_owner_refs` 4 vs 2 |
+| clear one of `forget_activations`' two maps | `request_target_refs` 8 vs 4 |
+
+This is the shape of the general rule already stated below: a green test is
+evidence only once it has been shown to go red for the reason claimed. Here
+the break was not detected by the assertion — it was detected by *what the
+assertion could see*, and no amount of care in writing the test would have
+found that. When adding an owner, add the census observable that would notice
+its counts being wrong, not merely absent.
 
 ### The field census — picking the next owner by lookup, not judgement
 
@@ -361,13 +437,16 @@ shared context, and the split between those two groups is the whole finding.
 Read it three ways:
 
 1. **≥85% in one file, several fields moving together → owner candidate.**
-   `HistorySessions` (#1695) and `RequestAttempts` (#1693) both came out of
-   this band. So does live-wire ownership: ten fields at 71–91%, ~75 accesses
-   essentially all in `query.rs`, and — the number that actually settles it —
-   **exactly one genuinely foreign reader** (`observation.rs`, a membership
-   predicate). The other apparently-foreign reads are the bench census
-   calling `.len()`, which is not a reader so much as a boundary violation
-   the owner is supposed to fix.
+   `HistorySessions` (#1695), `RequestAttempts` (#1693) and `WireOwnership`
+   all came out of this band. The third is the worked example: ten fields at
+   71–91%, ~75 accesses essentially all in `query.rs`, and — the number that
+   actually settled it — **exactly one genuinely foreign reader**
+   (`observation.rs`, a membership predicate). The other apparently-foreign
+   reads were the bench census calling `.len()`, which is not a reader so
+   much as a boundary violation the owner is supposed to fix; they became one
+   `counts()` call. The prediction held: 59 raw field accesses in `query.rs`
+   became 25 named method calls, and the single foreign reader became
+   `wire.is_attached(id)`.
 2. **100% in one file but standing alone → not a cluster, leave it.** 22
    fields are single-file, and most are counters (`history_rows_examined`,
    `router_compiles`, `diagnostic_snapshots_built`). A lone field is already

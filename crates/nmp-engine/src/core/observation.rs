@@ -958,7 +958,7 @@ impl EngineCore {
         id: HandleId,
         current: BTreeMap<super::ActiveRequestTarget, usize>,
     ) {
-        let wire_attached = self.wire_atoms_by_handle.contains_key(&id);
+        let wire_attached = self.wire.is_attached(id);
         if wire_attached {
             self.deactivate_request_targets_for_handle(id);
         }
