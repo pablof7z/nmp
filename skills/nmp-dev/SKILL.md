@@ -51,6 +51,10 @@ testing](references/testing/INDEX.md).
   validation scripts, and evidence metadata. Do not keep the old path for
   compatibility.
 - Keep `README.md`, `docs/known-gaps.md`, and the bug-class ledger truthful.
+- A crate is a unit of responsibility and authority. Cargo is one way of
+  making that boundary structural. Do not refuse a package because both
+  sides still share lower-level dependencies. See
+  `docs/internals/crate-architecture.md`.
 
 ## Execute
 
