@@ -445,8 +445,8 @@ The codebase already knows this and stopped enforcing it:
   "a never-enforced router contract"** — the kill measurement was its only
   consumer.
 - NIP-11 `max_subscriptions` **is** parsed
-  (`crates/nmp-engine/src/relay_information.rs`) and surfaced through FFI, but
-  nothing in `nmp-engine/src/core/` or `nmp-router/src/` reads it. Planning never
+  (`crates/nmp-nip11/src/value.rs`) and surfaced through FFI, but
+  nothing in `crates/nmp/src/core/` or `nmp-router/src/` reads it. Planning never
   consults it.
 - The router's `cap` parameter bounds the number of **relays**, not
   subscriptions per relay.

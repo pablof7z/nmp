@@ -1,0 +1,44 @@
+[package]
+name = "nmp-nip11"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+
+# Mechanism-only retention evidence (`RelayInformationRetentionCensus`) used
+# by `nmp`'s cache/flight-ownership falsifiers. Non-default: an app links a
+# service with no census door at all.
+test-instrumentation = []
+
+[dependencies]
+nostr.workspace = true
+# NIP-11 is HTTP state. This crate is the ONLY place in the engine's
+# dependency graph that says so: `reqwest` and `httpdate` are named here and
+# nowhere else in `nmp`'s tree, so an engine build that does not link this
+# crate contains no HTTP client. That is the whole point of the crate line --
+# `EngineCore` consumes the reducer-facing projection of a document
+# (`RelayInformationCapabilityEvidence`, which `core` defines itself) and
+# must never acquire a transitive edge to an HTTP stack.
+reqwest.workspace = true
+httpdate.workspace = true
+# `document_revision`: the stable identity of the exact received JSON, which
+# capability facts cite instead of an unscoped boolean.
+blake3.workspace = true
+# The per-flight cancellation signal a dropped caller fires.
+futures-channel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Acquisition runs on the engine-owned runtime handed to `new`; this crate
+# imposes no runtime of its own. `sync` carries the per-flight `watch`
+# completion and the active-fetch `Semaphore`.
+tokio = { version = "1", features = ["rt", "time", "sync"] }
+
+[dev-dependencies]
+# The in-file fetcher fakes hand scripted results back to the service from a
+# test thread. Test-only: production acquisition uses `futures-channel` and
+# `tokio::sync` alone.
+crossbeam-channel = "0.5"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros"] }

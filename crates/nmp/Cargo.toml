@@ -88,7 +88,7 @@ bench-instrumentation = [
     "nmp-resolver/bench-instrumentation",
     "nmp-transport/bench-instrumentation",
 ]
-test-instrumentation = ["nmp-store/test-instrumentation"]
+test-instrumentation = ["nmp-store/test-instrumentation", "nmp-nip11/test-instrumentation"]
 
 [[example]]
 name = "incremental_delta_bench"
@@ -139,12 +139,16 @@ nmp-router.workspace = true
 nmp-router-testkit = { workspace = true, optional = true }
 nmp-resolver.workspace = true
 nmp-transport.workspace = true
-# The one pure destination-admission owner (#885): discovery admission and
-# the NIP-11 fetcher decide from it instead of re-deriving host rules.
+# NIP-11 relay information: the values an app reads and the one-shot HTTP
+# acquisition service the runtime drives. It is a crate, not a module here,
+# because the boundary needs manifest-level proof -- `reqwest` and `httpdate`
+# are named by that package and by nothing else in this tree, so `EngineCore`
+# links no HTTP client. The reducer consumes the projection
+# (`core::RelayInformationCapabilityEvidence`) that `runtime` maps a snapshot
+# into; it never names this crate's types.
+nmp-nip11.workspace = true
 blake3.workspace = true
 crossbeam-channel = "0.5"
-futures-channel.workspace = true
-httpdate.workspace = true
 # The negentropy reconciler is an engine MODULE (`src/negentropy/`), not a
 # crate (§1: reducer-coupled, driven turn-by-turn by `EngineCore`) -- but it
 # wraps this external set-reconciliation crate. See
@@ -159,7 +163,6 @@ hex = "0.4"
 serde.workspace = true
 serde_json.workspace = true
 zeroize = "1"
-reqwest.workspace = true
 # #704: the engine owns ONE multi-thread tokio runtime (2 workers) that hosts
 # every adapter task (NIP-11 fetches, signer/AUTH completion awaits, optional
 # provider sessions, follow-action acquisition) -- replacing the deleted

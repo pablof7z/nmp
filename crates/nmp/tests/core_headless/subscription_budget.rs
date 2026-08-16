@@ -40,8 +40,8 @@ fn limited_pinned_query(kind: u16) -> LiveQuery {
 fn advertising(
     max_subscriptions: Option<u64>,
     max_subid_length: Option<u64>,
-) -> nmp::mechanism::relay_information_service::RelayInformationCapabilityEvidence {
-    nmp::mechanism::relay_information_service::RelayInformationCapabilityEvidence {
+) -> nmp::mechanism::core::RelayInformationCapabilityEvidence {
+    nmp::mechanism::core::RelayInformationCapabilityEvidence {
         supported_nips: Some(vec![11]),
         max_subscriptions,
         max_subid_length,
