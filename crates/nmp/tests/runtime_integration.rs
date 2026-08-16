@@ -542,6 +542,23 @@ async fn runtime_admission_deadline_groups_a_rapid_query_burst() {
         .subscribe(pinned_tag_value(&relay.url, "bob"))
         .expect("join second pending query to the same cohort");
 
+    // Wait for the deadline to FIRE before counting what it produced. A quiet
+    // wire does not mean "the burst was admitted as one request" -- it equally
+    // means "nothing has happened yet", and `wait_wire_quiet` cannot tell those
+    // apart. Under CPU contention the 100ms quiet window elapses before the
+    // admission deadline fires at all, and the count below then asserts against
+    // an entirely empty record: observed failing with `reqs: []`, left 0.
+    //
+    // Waiting for the positive fact first turns "the runtime never sent it"
+    // into its own named failure, and leaves the quiet window doing the only
+    // job it can actually do -- proving no SECOND request follows the first.
+    assert!(
+        relay
+            .wait_wire_req(Duration::from_secs(10), |req| req.names_tag('p'))
+            .await
+            .is_some(),
+        "the runtime's admission deadline never sent the burst at all"
+    );
     relay
         .wait_wire_quiet(Duration::from_millis(100), Duration::from_secs(5))
         .await;

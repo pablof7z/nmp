@@ -140,7 +140,7 @@ final class C9CrashDuringPublicationTests: XCTestCase {
         case settled(finalRowCount: Int, finalIDs: Set<String>, sources: [String], relayRegressed: Bool)
         case notReattached
         case rowNeverVisible
-        case receiptNeverSettled
+        case receiptNeverSettled(String)
         case threw(String)
     }
 
@@ -198,11 +198,17 @@ final class C9CrashDuringPublicationTests: XCTestCase {
         enum Step: Sendable {
             case row(count: Int, ids: Set<String>, sources: [String])
             case receiptSettled
+            /// The receipt stream stopped WITHOUT a settled outcome, either by
+            /// ending or by throwing. Distinct from `.receiptSettled` because
+            /// collapsing them makes "delivery never resumed" report as
+            /// "delivery resumed" -- see the comment on the receipt task.
+            case receiptUnsettled(String)
             case timedOut
         }
 
         var rowResult: (count: Int, ids: Set<String>, sources: [String])?
         var receiptSettled = false
+        var receiptUnsettledReason: String?
         let wantedSources = Set(expectedSources)
 
         // ONE continuous iteration of the row query for its whole life,
@@ -228,6 +234,13 @@ final class C9CrashDuringPublicationTests: XCTestCase {
                 } catch {}
                 return .row(count: 0, ids: [], sources: [])
             }
+            // A stream that ends without settling, or throws, is NOT a settled
+            // delivery. Both used to fall through to `.receiptSettled`, so the
+            // two failures this scenario exists to detect -- delivery never
+            // resuming after the crash, and the receipt stream breaking --
+            // reported as success. `.receiptNeverSettled` was reachable only
+            // by the 25s timeout. C7 already distinguishes these; this is the
+            // newer scenario weakening the oracle it was copied from.
             group.addTask {
                 do {
                     for try await fact in receipt.status {
@@ -236,8 +249,10 @@ final class C9CrashDuringPublicationTests: XCTestCase {
                             return .receiptSettled
                         }
                     }
-                } catch {}
-                return .receiptSettled
+                    return .receiptUnsettled("the receipt stream ended without a settled outcome")
+                } catch {
+                    return .receiptUnsettled("the receipt stream threw: \(error)")
+                }
             }
             group.addTask {
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
@@ -254,6 +269,9 @@ final class C9CrashDuringPublicationTests: XCTestCase {
                 case .receiptSettled:
                     receiptSettled = true
                     remaining -= 1
+                case .receiptUnsettled(let reason):
+                    receiptUnsettledReason = reason
+                    remaining -= 1
                 case .timedOut:
                     remaining = 0
                 }
@@ -264,7 +282,11 @@ final class C9CrashDuringPublicationTests: XCTestCase {
         query.cancel()
 
         guard let rowResult, !rowResult.ids.isEmpty else { return .rowNeverVisible }
-        guard receiptSettled else { return .receiptNeverSettled }
+        guard receiptSettled else {
+            return .receiptNeverSettled(
+                receiptUnsettledReason ?? "no settled outcome arrived before the timeout"
+            )
+        }
 
         let regressed = await tracker.regressed
         return .settled(
@@ -330,8 +352,10 @@ final class C9CrashDuringPublicationTests: XCTestCase {
             XCTFail("reattachReceipt(correlation:) did not find the obligation after restart")
         case .rowNeverVisible:
             XCTFail("locally accepted canonical state did not survive the crash")
-        case .receiptNeverSettled:
-            XCTFail("delivery did not resume/settle after restart with no further app action")
+        case .receiptNeverSettled(let reason):
+            XCTFail(
+                "delivery did not resume/settle after restart with no further app action: \(reason)"
+            )
         case .threw(let message):
             XCTFail("recovery threw: \(message)")
         }
