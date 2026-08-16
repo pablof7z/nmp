@@ -21,8 +21,8 @@
 //!
 //! ## Ledger #8, structural (not a runtime `if`)
 //!
-//! [`ProbedRelay`]'s inner field is `pub(crate)` and this module hands out
-//! NO public constructor for it: the ONLY place a `ProbedRelay` is ever
+//! [`ProbedRelay`]'s inner field is PRIVATE to this module and this module
+//! hands out NO constructor for it: the ONLY place a `ProbedRelay` is ever
 //! created is [`Prober::probed`] (reading a cached `Supported` verdict) and
 //! [`Prober::on_neg_msg`] (a probe response arriving). `core::Effect::
 //! NegOpen`'s first field is `ProbedRelay`, never `RelayUrl` — a caller
@@ -32,6 +32,14 @@
 //! demand therefore falls through to a plain REQ *by construction*, not by
 //! a `Prober::state(..) == Supported` check a future edit could accidentally
 //! invert or bypass.
+//!
+//! The field used to be `pub(crate)`, which made "by construction" true only
+//! of `core/mod.rs` and only because a test grepped that one file's source
+//! text for `ProbedRelay(`. Nothing outside this module ever constructed one
+//! or read `.0`, so the field is simply private now and every file in the
+//! crate is fenced by the compiler: a construction attempt in `core/query.rs`
+//! is `E0603: tuple struct constructor 'ProbedRelay' is private`. The text
+//! scan is deleted — it could only ever have seen one file.
 //!
 //! ## Coverage from NEG-DONE
 //!
@@ -72,7 +80,7 @@ pub enum ProbeState {
 /// a bare `RelayUrl` — an unprobed relay cannot reach the negentropy path;
 /// it gets a plain REQ instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProbedRelay(pub(crate) RelayUrl);
+pub struct ProbedRelay(RelayUrl);
 
 impl ProbedRelay {
     /// The relay this token proves NIP-77 support for.
