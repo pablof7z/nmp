@@ -407,7 +407,38 @@ why the rule generalises past the eight named invariants:
 
 **Any guard whose failure mode is fail-open is probably untested.** When you
 add one, the falsifier is not optional, and it must construct the input the
-guard exists to reject. See #1727.
+guard exists to reject. See #1727, and #1736 for the fixture the corpus
+needs before I3 and I8 can be falsified at all.
+
+### A red falsifier is only evidence if it is red for the right reason
+
+The sibling of the rule above, and the same family of lie. Fail-open says a
+guard can be **green while violated**. This says a falsifier can be **red
+while proving nothing**.
+
+Break-then-restore proves a test *responds* to the change. It does not prove
+it responds *to that change*. Those are different claims, and the gap between
+them is where a test quietly becomes decorative: it goes red the day you
+break the invariant, and then goes red forever after for an unrelated setup
+failure nobody looks at.
+
+The failure is easy to walk into because the two causes are indistinguishable
+from the assertion's side. I1's falsifier asserts that a semantic
+generation's `WriteFact::Destinations` reaches every member receipt. Delete
+the `event_to_receipts` half and the fan-out degrades to the owner alone —
+red. But *the generation never forming* also produces one receipt, and also
+goes red. Same assertion, same colour, completely different meaning.
+
+**The discipline is one line: assert the precondition holds BEFORE the break
+makes the property observable.** Establish that the multi-member generation
+exists, and only then assert the fan-out. That converts "this test went red"
+into "this test went red because the invariant broke".
+
+Four instances of a test lying about what it knows have surfaced in two days
+— three fail-open gates and one falsifier that passed with its subject fully
+reverted, because a helper swallowed the effect being asserted (#1683). Both
+rules exist because neither is obvious while you are writing the test that
+has the problem.
 
 ### Which package does a test belong to
 
