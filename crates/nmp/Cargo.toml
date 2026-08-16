@@ -23,15 +23,16 @@ unstable-mechanism = [
     "nmp-runtime/unstable-mechanism",
 ]
 
-# Pure Rust NIP-65 values plus the private automatic coordinator assembly.
-# Off by default: core-only builds contain no protocol dependency or symbols.
-# NIP-65 is NOT #1707-reversed like the eight re-export doors were: its
-# `impl Engine` publish method and `nmp-runtime`'s own deep
-# engine-routing-loop glue are a different problem from a bare re-export
-# door, unresolved so far. See `src/lib.rs`'s doc comment above `pub mod
-# nip65;`. The glue moved with the runtime, so the feature has to turn it on
-# there too.
-nip65 = ["dep:nmp-nip65", "nmp-runtime/nip65"]
+# NIP-65 IS #1707-reversed now, mostly: `impl Engine { publish_relay_list_
+# bootstrap }` was capability convenience -- one line of `engine.publish(...)`
+# wearing an engine-bound signature, not routing mechanism -- and is deleted,
+# same as the eight bare re-export doors. `nmp` itself needs no NIP-65
+# dependency at all any more. What this feature still turns on is
+# `nmp-runtime`'s own deep automatic-outbox-discovery routing glue, the one
+# deliberate exception left in this reversal: that is how the engine
+# performs ITS OWN job of discovering an author's relays, not a capability
+# it merely executes. See `src/lib.rs`'s doc comment for the reasoning.
+nip65 = ["nmp-runtime/nip65"]
 
 # #1707 deleted the `nip29`/`nip22`/`nip25`/`nip18`/`nipc7`/`content`/`asset`/
 # `blossom`/`nip68` features and their `dep:nmp-*` optional dependencies
@@ -79,7 +80,6 @@ required-features = ["nip65"]
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
-nmp-nip65 = { workspace = true, optional = true }
 nmp-signer.workspace = true
 nmp-local-signer.workspace = true
 # The deterministic reducer (#1707). It left this crate so its own manifest
