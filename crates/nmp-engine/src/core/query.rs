@@ -1233,6 +1233,21 @@ impl EngineCore {
         // is half-attached while that runs is a handle whose own atoms are
         // invisible to a refresh caused by its own arrival.
         self.wire.index_handle(id, atoms.clone());
+        // The ordering above, as a precondition rather than a comment.
+        //
+        // Deliberately an assertion and not a test: running the entire
+        // workspace with the two steps reversed leaves 2033 tests passing. The
+        // refresh this protects only fires when a covered-atom reattach
+        // transfers request metadata, and no reachable input produces
+        // transferred claims today, so no behavioural falsifier exists to
+        // write. It is enforced here, where the ordering is owned, rather than
+        // inside `retain` -- the owner-count and routing-evidence algebra is a
+        // legitimate unit to exercise without any handle at all, and several
+        // admission proofs do exactly that.
+        debug_assert!(
+            atoms.iter().all(|atom| self.wire.is_indexed(atom)),
+            "attach must index the whole handle before retaining any of its atoms"
+        );
         let mut diagnostics_changed = false;
         for atom in &atoms {
             diagnostics_changed |= self.retain_wire_atom_owner_with_effects(atom, effects);

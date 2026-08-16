@@ -32,8 +32,13 @@ Do not ask "what dependency does this split remove?" before establishing
 whether the candidate owns a coherent responsibility. A package may be
 justified even when both sides use the same lower-level mechanisms.
 
-Enforcement is still structural, and this repository has zero CI by decision,
-so nothing below depends on a checker. Manifest exclusion is one mechanism: a
+Enforcement here is structural, and deliberately does not depend on a checker.
+That is a property of the mechanisms below, not a statement about CI: CI
+returns once local commands are deterministic and known flakes are fixed or
+honestly excluded with an owning issue, and when it does, each gate must
+protect one named failure mode and fail when the mechanism it protects is
+reverted. None of the boundaries below become weaker or stronger for it.
+Manifest exclusion is one mechanism: a
 crate that does not declare a dependency cannot use it. Many important
 boundaries are enforced by other structural means — private fields, opaque
 types, ownership, state machines, typed messages, constructors, transaction
@@ -853,14 +858,55 @@ broken in the reducer — the maintaining line deleted — and
 
 | invariant | what it maintains | result |
 |---|---|---|
-| **I1** insertion + removal | publish-queue index mirror | **green — not caught** |
+| I1 insertion + removal | publish-queue index mirror | **red** (closed by #1742) |
 | I2 | wire owner counts / routing-evidence union | red, **38 failures** |
 | **I3** | exact-generation session conjunction | **green — not caught** |
 | I4 | history session ↔ handle inversion | red, 2 |
 | I5 | request-attempt reverse indexes | red, 2 |
 | I6 | coverage/parked asymmetry | red, 1 |
-| **I7** | store recovery clears every derived projection | **green — not caught** |
+| **I7** | store recovery clears every derived projection | **green — one consequence covered, eleven mechanisms not** |
 | **I8** | per-turn `retry_scheduler_blocked` reset | **green — not caught** |
+
+Re-measured 2026-08-16 against `cargo test -p nmp-engine --all-features`
+(423 tests), because the table above and #1742 disagreed. Both halves of I1
+are now genuinely caught: deleting `intent_receipts.insert` is 20 failures,
+deleting `event_to_receipts.insert` is exactly one —
+`a_shared_events_ack_reaches_every_co_owner_after_a_restart`. That is a
+well-aimed falsifier: one break, one named failure, no collateral. I3 and I8
+reproduce as green exactly as recorded.
+
+### One falsifier retires one mechanism, not one invariant
+
+I7 is the row worth reading twice, because "not caught" understates it and
+"caught" would be false.
+
+#1742 *did* add an I7 falsifier, and it is a good one: it asserts that a
+dispatched, unacknowledged write is re-armed from durable keys after a
+reopen-required store failure, which is a real observable consequence of
+clear-then-rebuild. But `recover_store_after_failure` maintains I7 with
+**eleven separate resets**, and each was deleted individually here:
+`quarantined_auth_receipts`, `pending`, `last_stalled_write_census`,
+`cached_stalled_writes`, `event_to_receipts`, `intent_receipts`,
+`receipts_by_lane_relay`, `lane_relay_index_degraded`,
+`lane_projection_unprovable`, `lane_bootstrap_retries`,
+`attempt_correlations`. **All eleven leave the corpus green** — including
+`pending.clear()`, the durable write-obligation map itself. Store recovery
+can skip rebuilding it and 423 tests do not notice.
+
+So the ledger row reads as covered while eleven independently-deletable lines
+sit unguarded. The rule this yields:
+
+> **When an invariant is maintained by more than one line, one falsifier
+> retires one line. Count mechanisms, not invariants.**
+
+This is the same defect the census had, one level up, and it appeared three
+times in a single day at three different scales: `CoreOwnershipCensus`
+counted how many demands were live but not their owner counts;
+`plan_edges == child_count` could not see a child indexed under the wrong
+plan; and an invariant row named one consequence of eleven mechanisms. Every
+one of those assertions was *correct*. Every one was blind to most of what it
+claimed. Correctness of an assertion says nothing about its coverage, and the
+only way to learn the difference is to break each mechanism separately.
 
 The line is not read-plane versus write-plane. It is:
 
@@ -873,9 +919,11 @@ The line is not read-plane versus write-plane. It is:
   a persistent I/O error becoming a `recv_timeout(0)` busy-spin. Every break
   makes the code **more permissive**: I3 drops a conjunct, I8 drops a reset.
   Nothing fails until a hostile or degraded input arrives, and the corpus
-  never constructs one. (I1 is the exception that proves the rule: it is
+  never constructs one. (I1 was the exception that proved the rule: it is
   structural, but its only readers live one package up, so the reducer's own
-  tests never observe it either.)
+  tests did not observe it either — until #1742 wrote a test that does. I7 is
+  the exception that survives, and for a different reason: it is not one
+  guard but eleven, and it has a falsifier for one *consequence* of them.)
 
 **This is a habit, not a testing gap, and it is the same one that got an
 entire verification apparatus deleted on 2026-08-15.** Every check removed
@@ -888,7 +936,9 @@ why the rule generalises past the eight named invariants:
 **Any guard whose failure mode is fail-open is probably untested.** When you
 add one, the falsifier is not optional, and it must construct the input the
 guard exists to reject. See #1727, and #1736 for the fixture the corpus
-needs before I3 and I8 can be falsified at all.
+needs before I3 and I8 can be falsified at all. I7 needs no such fixture —
+its eleven resets are reachable from an ordinary store-failure recovery — so
+it is uncovered by omission rather than by difficulty.
 
 ### A red falsifier is only evidence if it is red for the right reason
 

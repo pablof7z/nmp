@@ -112,6 +112,7 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
                 revision: departing_target.revision,
             },
             1,
+            None,
         );
         atoms.insert(surviving.clone());
         core.wire.reindex_handle(handle, atoms);

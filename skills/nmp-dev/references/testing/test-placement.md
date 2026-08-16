@@ -5,6 +5,36 @@ automatically in the crate being edited. Organize feature files by user
 behavior. Organize executable tests by the component and kind of proof they
 need.
 
+## Three layers
+
+Tests prove behavior at three layers. The layers are complementary: a
+public-API system scenario does not replace the owner and headless-engine
+tests underneath it, and E2E coverage never substitutes for unit coverage of
+the invariant it depends on.
+
+### Owner tests
+
+Prove exact local invariants inside the crate that owns the state: both
+directions of every mirrored index, replacement behavior, teardown, and
+rejection of states production cannot reach. Fixtures must be built only
+through production doors (see below) — never by hand-writing the owner's
+internal maps.
+
+### Headless engine scenarios
+
+Prove cross-owner ordering, committed-store propagation, generations,
+recovery, cancellation, deadlines, and teardown, driving the engine directly.
+No sockets, no wall-clock timing — control clocks and channels instead (see
+[`distributed-systems.md`](distributed-systems.md)).
+
+### Public-API system scenarios
+
+Prove a complete promise of the supported API using a small real consumer of
+`nmp::Engine`, a temporary Redb, the actual runtime, and deterministic
+relay/signer/clock fakes — never live internet relays or uncontrolled data.
+Exercise restart and complete query and write flows through the API an app
+actually calls, not an internal shortcut.
+
 ## Decision table
 
 | What the test proves | Where it belongs |
@@ -25,6 +55,13 @@ infrastructure as the sole correctness proof.
 Setup may provide stores, clocks, scripted relays, identities, network rules,
 injected failures, and test-only constructors approved by the owning crate. It
 must not perform the behavior being tested or use private state as proof.
+
+A fixture that hand-writes internal maps is a second implementation of the
+logic under test, and it can invent states production cannot reach. Four NMP
+test files once hand-wrote six wire-ownership maps to build a 10,000-atom
+fixture, including assigning an owner refcount directly — a state no
+production path can produce. Build fixtures only through production doors:
+the same constructors, writes, and API calls a real caller uses.
 
 For discovery, seed the protocol fact and observe contacts/results. Do not
 insert or inspect the resolved route directly.

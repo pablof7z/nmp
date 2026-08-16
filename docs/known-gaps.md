@@ -407,7 +407,7 @@ about current code:
   then, compatibility is intentionally provisional and changes are deliberate
   rather than casual.
 
-## Load-bearing for M5 (the falsifier app) — must close before M5 claims pass
+## Load-bearing for M5 (the Canary) — must close before M5 claims pass
 
 - **~~Protocol-coupled mutable relay directory~~ CLOSED-AS-DELETION (#870).** `RelayDirectory`, `LiveDirectory`, discovery-kind/indexer routing, protocol lanes, half-mutators, and core kind:10002 parsing are deleted. Generic router/core now read one neutral `Unknown | Present { outbound, inbound } | Absent` author fact keyed by decoded `PublicKey`; production mutation is one private, borrowed, non-cloneable atomic writer. Provider needs leave core generically, including settled zero-route contributors when an `Auto` has no destination. The engine-free `nmp-nip65` crate owns exact demand, canonical winner selection, marker parsing, admission, and all-source settlement; the non-default `nmp/nip65` feature privately assembles it through ordinary query/write values. Core-only dependency trees contain no NIP-65 crate. Native publication/packaging remains tracked by #764 (blocked by #824); #952 is closed NOT_PLANNED.
 
@@ -415,9 +415,9 @@ about current code:
 
 - **~~kind:10002 discovery over-fetch~~ SUPERSEDED (#870).** The old core-owned `sync_discovery` loop and its churn-specific tests were deleted with the mutable directory. The optional NIP-65 coordinator reroots one ordinary exact demand when the complete generic need set changes; zero needs unsubscribe, zero sources open nothing, and stale revisions cannot settle.
 
-- **Unbounded historical replay can peg the main thread (M5 dogfooding finding), bound across two halves (#17).** `apps/Falsifier` (the M5 SwiftUI app) reproducibly saturates a simulator's main thread at ~97-98% CPU for 1-2 minutes, twice: (1) whenever a query without a `limit` (e.g. the app's `FeedFilters.followsRelayLists()`, `kinds:[10002]`) is freshly `observe`d, and (2) whenever `observeDiagnostics()` is first iterated. `sample` on the running process shows sustained top-of-stack time in `nmp_store::redb_store::RedbStore::query` plus `serde_json`/schnorr-signature JSON parsing, not idle waiting -- real, repeated work, not a hang (it does eventually finish and CPU returns to 0%).
+- **Unbounded historical replay can peg the main thread (M5 dogfooding finding), bound across two halves (#17).** `apps/Canary` (the M5 SwiftUI app, then named Falsifier) reproducibly saturates a simulator's main thread at ~97-98% CPU for 1-2 minutes, twice: (1) whenever a query without a `limit` (e.g. the app's `FeedFilters.followsRelayLists()`, `kinds:[10002]`) is freshly `observe`d, and (2) whenever `observeDiagnostics()` is first iterated. `sample` on the running process shows sustained top-of-stack time in `nmp_store::redb_store::RedbStore::query` plus `serde_json`/schnorr-signature JSON parsing, not idle waiting -- real, repeated work, not a hang (it does eventually finish and CPU returns to 0%).
   - **Observation-delivery path CLOSED; broader limit work remains under #46.** `NMPQuery`/`NMPDiagnostics` used to re-deliver the full accumulated snapshot on every single delta (no batching/coalescing), so an ordinary app iterating `for await batch in query` with ordinary SwiftUI `@State` writes got many consecutive full re-renders, starving the run loop. The Rust ordinary-row edge also retained every reducer batch in an unbounded `mpsc` queue while a callback was slow. **Fix:** the producer now atomically composes skipped row deltas into one exact transition per changed event id in a single mailbox slot; applying the next delivered batch to the last delivered state yields the newest reducer state and latest evidence without full-set redelivery. Windowed rows and diagnostics already use one-slot latest snapshots. Swift now performs one native pull per app pull, owns no producer task or second queue, and cadence-limits snapshot returns to about one per 16 ms without prefetching; Kotlin likewise serializes native pulls and relies on the engine mailbox rather than `Flow.conflate()`. The backlog is bounded at every observation handoff, though an unwindowed query's semantic result cardinality and accumulated app state remain unbounded by design. Live-relay-verified (`Packages/NMP/Tests/NMPTests/LiveRelayTests.swift`, real replay against `purplepag.es`/`relay.primal.net`) plus direct-pull/cadence Swift tests and the 10,000-skipped-update Rust proof establish final-state equality without a stale-frame queue. Ingestion pressure, graph/wire ceilings, and other broader #46 categories remain open.
-  - **Rust query-cost half CLOSED (#38); per-event refresh cost now bounded — on-device re-verification pending.** `nmp-store`'s `RedbStore::query` used to decode every row's JSON with no index narrowing (the dominant `sample` cost). **Fix (#38):** two persistent redb secondary indexes (`BY_AUTHOR`/`BY_KIND`) maintained in lockstep through the one centralized `remove_row_in_txn`/insert path (so they cannot drift across supersession/kind:5/expiry/gc); `query` now does bounded index range-scans for id/author/kind/address filters and only JSON-decodes the narrowed candidate set (falsifier: an author-filtered query over 1 target + 200 noise rows decodes exactly 1). The other named cost — `crates/nmp/src/core/mod.rs` refreshing all handles after every ingested event — is unchanged, but each refresh is now a *cheap indexed* query rather than a full-table scan, so the O(events × handles) blow-up is bounded. **Honest status:** the root cause is fixed and the Swift-delivery half caps re-render frequency, but the ~97% CPU jank has NOT been re-measured on device with all three fixes (Swift coalescing + Rust index + churn) live — verify the running result on the Falsifier before declaring the M5 jank gone. Screenshots: `docs/screenshots/m5-06-diagnostics-loading-jank.jpg`, `m5-07-diagnostics-steady-state.jpg`.
+  - **Rust query-cost half CLOSED (#38); per-event refresh cost now bounded — on-device re-verification pending.** `nmp-store`'s `RedbStore::query` used to decode every row's JSON with no index narrowing (the dominant `sample` cost). **Fix (#38):** two persistent redb secondary indexes (`BY_AUTHOR`/`BY_KIND`) maintained in lockstep through the one centralized `remove_row_in_txn`/insert path (so they cannot drift across supersession/kind:5/expiry/gc); `query` now does bounded index range-scans for id/author/kind/address filters and only JSON-decodes the narrowed candidate set (falsifier: an author-filtered query over 1 target + 200 noise rows decodes exactly 1). The other named cost — `crates/nmp/src/core/mod.rs` refreshing all handles after every ingested event — is unchanged, but each refresh is now a *cheap indexed* query rather than a full-table scan, so the O(events × handles) blow-up is bounded. **Honest status:** the root cause is fixed and the Swift-delivery half caps re-render frequency, but the ~97% CPU jank has NOT been re-measured on device with all three fixes (Swift coalescing + Rust index + churn) live — verify the running result on the Canary before declaring the M5 jank gone. Screenshots: `docs/screenshots/m5-06-diagnostics-loading-jank.jpg`, `m5-07-diagnostics-steady-state.jpg`.
   - **NIP-29 tag/limit amplification CLOSED at the store boundary (#142); device room-open verification pending.** `BY_AUTHOR`/`BY_KIND` still left `kind:9 & #h=<group> & limit:200` decoding every cached kind:9 event across every room, and the complete-set `RedbStore::query` door cannot safely honor `limit` because reactive recompute and negentropy require its full answer (#124/#139). **Fix:** redb now maintains a generic NIP-01 single-letter tag index keyed by tag/value/`created_at`/event-id in the same transaction as every canonical mutation and rebuilds it crash-atomically on legacy reopen. A separate `query_newest` door reverse-scans one ordered tag bucket and stops after N accepted rows; handle projection uses that bounded door per root atom, then preserves the authoritative final merged global top-N. Real persisted corpus: 1,062 kind:9 rows, busiest `#h` room 557 rows, `limit:200`; 50-iteration release mean fell from 5.150 ms to 0.784 ms (6.57x), and full-event JSON/crypto reconstruction fell from 1,062 candidates to 200. This proves the store cost drop, not yet the end-to-end device UX; the remaining binary-record/planner/batch work is tracked under #148.
   - **Nested-JSON canonical event rows CLOSED (#150), then split immutable-note storage CLOSED (#162).** Canonical v3 rows are endian-defined binary values addressed by monotonic `u64` surrogate keys: immutable id/pubkey/signature/time/kind/tags/content bytes live in `EVENTS`, raw 32-byte ids resolve through `EVENT_IDS`, and relay/local provenance lives in a separate binary metadata sidecar. Every ordered/address/expiry index stores the surrogate key; canonical lowercase 64-hex tag values occupy 32 raw bytes in the tag index. Query predicates borrow fixed fields and tag/content slices from the redb value guard, so rejected candidates never construct `nostr::Event`, parse hex, or reconstruct secp types. An exact equal-or-earlier relay replay reads only the metadata sidecar and performs no write at all; signature adoption rewrites the immutable note only when the signed event actually changes. The v3 change is intentionally schema-breaking: opening a file containing a legacy event epoch now fails before any v3 table is created, so old outbox/coverage facts can never run beside an empty v3 event store. Differential matching tests pin equivalence with `nostr::Filter::match_event`, and a raw referential-integrity audit covers supersession, duplicate provenance, kind:5, NIP-40, GC, compensation, and every crash seam. On the 1,114-event real corpus (1,062 kind:9, busiest room 557), the bounded room query measured 0.260 ms versus the original 5.150 ms; a 1,114-event exact replay measured 6.102 ms versus 24.98 ms before the split, and 20 exact passes left the 4,214,784-byte redb file unchanged. The surrogate is a lookup/CPU win, not a claimed size win: v3 logical stored bytes were 1,486,162 versus v2's 1,474,770 (+11,392, 0.77%); its five query indexes were 475,137 versus 465,940 (+9,197, 1.97%) because exact tie ordering still retains the full id while each row gains an eight-byte value. The checked-in `storage_stats` example reproduces physical and per-table accounting across both schemas. Many *distinct* relays still grow and rewrite the variable-length sidecar: relay-url interning/fixed-width observations remain open under #148. These remain store microbenchmarks; end-to-end device room-open verification is still pending.
   - **Relay URL interning and fixed-width per-event observations CLOSED (#167).** This supersedes the final “remain open” sentence in the historical #162/v3 bullet above. Canonical v4 stores optional local intent state in a dedicated `NMPL` value and each relay observation as one fixed 12-byte `(event_key:u64, relay_key:u32)` key plus an eight-byte latest timestamp. Relay URLs are interned once behind bijective forward/reverse tables with exact refcounts; removing the last observation reclaims the URL, while monotonic relay keys are never reused. Exact/equal replay point-checks one observation and writes nothing; a later timestamp replaces one eight-byte value; a new relay adds one fixed row without rewriting event or local bytes. A transaction accumulates effective refcounts in memory and flushes the hot row once per distinct relay, including bulk insert, expiry, GC, supersession, and compensation. Query materialization joins observations only after borrowed event filtering and caches each parsed relay URL once per query. Every observation/event/relay/refcount relation is included in the raw exact-set integrity audit and a process-abort seam proves dictionary, observation, refcount, event, indexes, and outbox remain one atomic fact. The checked-in `ingest_bench` now reproduces a 1/20/100-relay matrix from a real current store, including busiest-room newest-200, complete and reopen-first queries, exact-replay growth, and logical/physical bytes. A three-run matrix on the 1,114-event corpus (1,062 kind:9; busiest room 557) measured 0.296/0.700/2.678 ms for room newest-200, 1.691/4.640/18.368 ms for complete queries, 4.943/5.969/5.998 ms for exact replay with zero file growth, and 1,437,260/1,862,424/3,652,664 logical bytes. At 100 relays the physical file was 16,809,984 bytes. For historical scale, the earlier v3 101-relay run measured 6.571 ms room, 36.008 ms complete, 30.523 ms per new-relay pass, 6,168,304 logical bytes, and 29,700,096 physical bytes. Public `Provenance` construction necessarily remains proportional to returned observations; the avoidable URL reparsing, variable-sidecar COW, and repeated hot-refcount writes are closed. Device room-open verification remains pending.
@@ -430,11 +430,11 @@ about current code:
 - **Transport/verifier OS-thread ownership CLOSED (#442, #446); native observation and internal adapter admission REPLACED by pull-based handles and async tasks (#680, #704).** Every engine owns exactly two persistent native verifier workers (one on wasm's sequential path), one transport translator, one relay-retirement reaper, and two shared async-runtime workers; there is no blocking-adapter pool or pool reaper. `max_relays` bounds demanded live relay workers plus an equal charged retirement allowance. **#680 removed the one-OS-thread-per-observation bridge and the app-visible native-task ceiling entirely:** row, window, diagnostics, follow, receipt, and follow-action streams are waker-driven async pull handles (`ObservationHandle::next()`) over engine-owned bounded mailboxes, so NMP OS-thread count is independent of live-observation count. **#762 closes the foreign-completion cancellation edge for delta rows:** Swift and Kotlin synchronously claim a private FFI pull ticket before awaiting; commit runs only after generated completion returns, while abort/drop restores the exact retained delta and keeps at most one composed mailbox successor. `max_native_tasks`/`maxNativeTasks`/`ExecutorSaturated`/the native-task census/idle-barrier are gone from Rust, FFI, Swift, and Kotlin. Receipt/follow-action live facts use a fixed 32-item FIFO: overflow retains the prefix, prunes the stalled sink, and reports typed lag; receipt reattachment traverses deterministic durable pages of at most 32 facts using an identity-stable continuation bounded by relay fan-out, then atomically joins live work after a caught-up check. The cursor records consumed per-lane fact identities rather than a numeric offset into mutable reconstructed history, so a durable fact added between pages is delivered exactly once even when it sorts before already-consumed facts from another relay. Every live receipt delivery also has a private registration identity tied to the consumer FIFO's close/drop hook, so cancellation removes the exact sink without waiting for another status from a potentially permanently parked receipt. This bounds live delivery separately from durable history. #753 now bounds that history as whole terminal closures without compacting retained facts; open work remains pinned. **#704 removes the remaining internal admission concept:** NIP-11, signer, AUTH, and follow-action logical work runs as async tasks; signer/AUTH completion doors are waker-and-condvar primitives whose enum lifecycles make cancellation, resolution, and receiver ownership mutually explicit; no logical wait holds a scheduler permit or worker thread, and no operation exposes `ThreadUnavailable`/`WaiterSaturated` because an internal scheduler is occupied. An admitted NIP-11 acquisition does hold one of 8 private physical network/body permits until completion; excess callers await that bound cancellably in their own futures. Foreign completions whose contract permits blocking run on fresh per-operation threads rather than an admitted internal pool. Falsifiers cover a 1,000-handle thread-scaling proof (0 thread growth); a 64+-observation dense-composition proof; cancellation/shutdown wake-to-`None`; normal Swift loop-exit teardown; concurrent-`next()` misuse; fixed-size receipt lag followed by finite durable replay; mutation-between-pages exactly-once delivery; 128 close/drop reattachments on a permanently parked receipt with zero retained delivery registrations; dense mixed observe/NIP-11/sign/follow load without capacity refusal; typed one-shot completion ownership; and public-API absence of the deleted capacity vocabulary. `docs/design/async-observation-handles.md` and `docs/design/internal-executor-elimination.md` record the replacement architecture; `native-task-executor.md` is retained as the superseded record.
 - **Suspend/resume transparency (#4): transport-internal hardening + clock audit done; physical-device evidence pending.** iOS kills sockets when the app backgrounds; the requirement is that the engine make resume fully transparent (reconnect, replay, repair coverage) with zero app code, per the M4 kill condition against scene-phase/app-lifecycle machinery. `crates/nmp-transport/src/keepalive.rs`'s `SuspendGapDetector` (paired with `apply_resume_gap`, threaded through `pool/worker.rs`'s connected loop) detects a large gap between consecutive worker-loop iterations using a wall-clock (`SystemTime`) reading rather than `Instant` — Apple's `Instant` is `CLOCK_UPTIME_RAW` and does not advance across device sleep, so it cannot observe the gap at all, let alone measure it. On detection, an otherwise-`Idle` keepalive verdict is upgraded to an immediate ping (never double-pinging a ping already awaiting its pong), cutting the worst-case dead-socket detection window from the ~60s idle+pong keepalive cycle alone. A clock audit of every other suspension-spanning wait in transport/engine (reconnect backoff, the keepalive FSM's own idle/pong `Instant` math, the 250ms NIP-11 capability-decision grace, the NIP-11 acquisition path's `SystemTime`-based freshness/deadline math, and the engine's `next_deadline()`/`duration_until`) found no additional concrete bug: engine-level deadlines are already wall-clock (`nostr::Timestamp`) and already floor a past-due post-suspend deadline to an immediate tick, and every other `Instant`-based wait is a short, self-consistent relative timer inside a thread that is itself frozen for the same suspended interval, so it simply resumes correctly rather than drifting. **What remains open, and can only be closed by a human with a physical device:** the on-device pass itself — feed live, background 10+ minutes (verified dead socket), foreground, confirm the feed catches up and `DiagnosticsView` shows re-established wire subs plus repaired coverage, with zero app code. Runbook: `docs/plans/M5-ios-falsifier-plan.md` §6.1. Negentropy-under-long-suspension is verified observationally in that same pass (the reconnect-repair mechanism itself is already covered by #563); this is deliberately not a separate Rust falsifier, since the suspension-specific factors (stale TLS sessions, a changed network path, actual OS backgrounding kill semantics) are not reproducible in a simulator or a headless test.
 
-## Real but non-blocking for the falsifier (feeds, not DMs)
+## Real but non-blocking for the Canary (feeds, not DMs)
 
 - **~~DM inbox routing incorrect (M3-D)~~ CLOSED (#19), then removed (#839/#870).** The unsafe generic `WriteRouting::ToInboxes` remains deleted. Neutral `AuthorRoutes.inbound` is available to the built-in p-tag fan-out, but no protocol-specific inbox accessor or route vocabulary exists in the router.
 
-- **Decrypt path absent end to end (M3-C, plan §8 item 2).** Ingest never asks for a decryption and there is no `EngineMsg` that could carry a plaintext result back into it: the reducer emits no decrypt effect, and the runtime has nothing to execute. #1636 deleted the unreachable `Effect::RequestDecrypt` variant that stood in for the request half — it had zero construction sites and an empty handler, so it recorded intent rather than behaviour, and nothing about the gap changed when it went. Needed for reading NIP-17 DMs / private NIP-51 items (ledger #12 encrypted-content path); issue #6 owns the async sign/encrypt/decrypt capability design that would supply both halves. Not on the falsifier's feed path.
+- **Decrypt path absent end to end (M3-C, plan §8 item 2).** Ingest never asks for a decryption and there is no `EngineMsg` that could carry a plaintext result back into it: the reducer emits no decrypt effect, and the runtime has nothing to execute. #1636 deleted the unreachable `Effect::RequestDecrypt` variant that stood in for the request half — it had zero construction sites and an empty handler, so it recorded intent rather than behaviour, and nothing about the gap changed when it went. Needed for reading NIP-17 DMs / private NIP-51 items (ledger #12 encrypted-content path); issue #6 owns the async sign/encrypt/decrypt capability design that would supply both halves. Not on the Canary's feed path.
 
 - **~~Reconnect replayed NIP-77 demand as plain REQ~~ CLOSED (#563).** Every new Public connection generation now clears the stale preamble and repeats the same gap-free sequence as an ordinary demand change: distinct live `REQ {limit:0}` → exact EOSE → concurrent Negentropy while live delivery remains open. Timeout/error paths retain live overlap and use role-separated full-backlog REQs.
 
@@ -616,7 +616,133 @@ about current code:
 
 - **`nmp-media` provides the STANDALONE staged composition seam (prepare → upload → compose) with separated failure domains, but not the durable upload, the FFI projection, or BUD-03 server-list placement (#559, epic #216 T15-C-MEDIA-COMPOSITION).** The opt-in crate wires the app-facing pipeline `Sha256Hash → signed authorization → VerifiedUpload → kind:20 draft` into three witness-typed stages so a skipped/failed stage is unrepresentable: `prepare` (holds the exact bytes it hashed and authorized — uploading those held bytes makes an authorized-hash/uploaded-bytes mismatch structurally impossible), the async standalone `PreparedUpload::upload` (a used-once obligation yielding a verified `UploadedAsset`), and `compose_picture` (the final unsigned kind:20 whose public `kind`/`tags`/`content`/`created_at` fields copy into the public-field `EventBuilder`; selecting its `pubkey` explicitly on the ordinary `WriteIntent` preserves the author through the EXISTING publish path). It defines no event schema of its own — composition is not schema ownership (`routing-and-ownership.md` §3.2.1) — and it never publishes (relay/publish is downstream). The three failure domains are three SEPARATE types (`PrepareError`, `MediaUploadError`, `MediaComposeError`) so an upload failure can never be pattern-matched or `?`-merged as a compose failure; `MediaUploadError::Blossom` preserves the whole separated Blossom `UploadError` taxonomy intact. Deliberately NOT in this unit: the upload half is NOT crash-durable (the engine-integrated durable-upload obligation — persisted intent / reattachable receipt / HTTP-publish Effect / blob persistence — is the ADDITIVE #562, whose witness types are identical to these); the FFI/Swift/Kotlin projection of the seam is a SEPARATE later unit (batched with the nip68 projection, compile-gated); and BUD-03 kind:10063 server-list placement is still deferred.
 
+## Reducer invariants without falsifiers
+
+- **I3 and I8 have no reducer-level falsifier.** Both are fail-open guards on
+  abnormal paths: I3 is the exact-generation session conjunction
+  (`docs/internals/crate-architecture.md:572`, `:858`), I8 the per-turn
+  `retry_scheduler_blocked` reset (`docs/internals/crate-architecture.md:695`,
+  `:863`; field at `crates/nmp-engine/src/core/mod.rs:2200`, reset sites
+  including `mod.rs:3060`/`:3237` and `write.rs:299`/`:2418`). Breaking either
+  leaves the corpus green — `crate-architecture.md:858`/`:863` record both as
+  "green — not caught," and `:874`/`:891` note that a mutated reducer becomes
+  strictly more permissive (I3 drops a conjunct, I8 drops a reset) with no
+  test noticing. Blocked on the hostile/degraded-input fixture tracked in
+  issue #1736.
+
+- **The `attach_wire_handle` ordering change is unobservable.** Indexing a
+  handle before retaining its atoms was changed during the `WireOwnership`
+  extraction (`crates/nmp-engine/src/core/query.rs:1224`-`1256`). Running the
+  entire workspace with the ordering reversed gives 2033 passed, 0 failed — no
+  reachable input distinguishes the two orders, because the evidence refresh
+  it protects only fires when a covered-atom reattach transfers request
+  metadata, and nothing produces transferred claims today. The ordering is
+  currently enforced by a `debug_assert!` precondition at `query.rs:1247`
+  inside `attach_wire_handle`, not by a behavioural test — the surrounding
+  comment (`query.rs:1231`-`1246`) states this explicitly. Record it as an
+  unproven invariant.
+
+- **`abandon_sub` call-site asymmetry.** `crates/nmp-engine/src/core/query.rs`
+  defines `abandon_sub` at line 1604 and calls it from many sites within the
+  same file (currently lines 1777, 1789, 1827, 1843, 1855, 1862, 1884, 1903,
+  1944, 1972, 2041, 2352, 2668); `crates/nmp-engine/src/core/auth_transport.rs`
+  calls it from six more sites (currently lines 1084, 1787, 1799, 1833, 1841,
+  1845). The specific line numbers originally used to describe this gap
+  (`query.rs` definition "around line 2254," a covered call site at
+  `auth_transport.rs:1057`, and uncovered call sites at `query.rs:158` and
+  `:780`) no longer match this tree — the file has moved since that note was
+  written, and none of those exact lines currently contain an `abandon_sub`
+  reference.
+
+  Reframed 2026-08-16 rather than chased. `abandon_sub` retires five things
+  at once — request attempts, attribution, claim transfers, pending request
+  evidence, and the `active_request_revisions_by_sub` →
+  `active_request_evidence` → `live_wire_requests` chain. Those are exactly
+  the fields the field census ranks as the next owner candidate
+  (`active_request_evidence` 56%, `active_request_revisions_by_sub` 50%,
+  `live_wire_requests` 42%, `pending_request_evidence` 30%, all topping out
+  in `observation.rs`). So "does every path that retires a subscription go
+  through one door" is not a question to answer by grepping nineteen call
+  sites against a note whose line numbers rotted — it is a question that
+  stops being askable once that cluster has an owner, because the door
+  becomes the only way in.
+
+  Tracked here so it is not lost, but the fix is the extraction, not an
+  audit. Re-open it as a real finding only if the extraction surfaces a
+  caller that cannot go through the owner's door.
+
 ## Process / tooling
+
+- **Unexplained workspace-test abort.** A `cargo test --workspace` run
+  aborted after 198 tests once, on 2026-08-16. Every subsequent full run has
+  been clean (2031-2033 passed, 0 failed). Not reproduced. A later clean run
+  does not explain an earlier abort. Investigated 2026-08-16; the mechanism is
+  narrowed but not pinned, so this stays open.
+
+  What the symptom rules out: **a flaky assertion cannot produce it.** No
+  `Cargo.toml` in the workspace sets `panic=abort`, and nothing passes
+  `--fail-fast`, so libtest catches a panicking assertion on the test's own
+  thread, prints it under that test's name, and continues to the next one. A
+  run that stops mid-stream with nothing named is categorically a different
+  event from a test failing.
+
+  What it points at instead is resource exhaustion, in one of two phases, and
+  the evidence splits across them:
+
+  - *Build phase, disk.* Demonstrated on this machine the same day: the
+    worktree's own `target/` had reached 100GB (60G `debug/deps`, 35G
+    `debug/incremental`) across roughly fifteen rebuild cycles, `df` showed
+    1.0Gi free at 100% capacity, and `cargo test --workspace` died with
+    `failed to write ... No space left on device (os error 28)` plus
+    `could not compile nostr-sdk` / `nmp-nip11` and linker failures in
+    `nmp-bdd`. Freeing 39GB restored a clean run. This is real and it is a
+    standing hazard, but it is **phase-mismatched** against the record: it
+    produces named compiler errors, whereas "198 tests had run" means the
+    binaries were built and already printing per-test lines.
+  - *Run phase, process death.* OOM `SIGKILL`, stack overflow, or a
+    double-panic abort is the closer mechanistic match for "the stream just
+    stops". There is no direct evidence for it — macOS `log show` was not
+    usable in the investigating shell, so jetsam/OOM records could not be
+    checked either way. Near-100% disk plausibly correlates with memory
+    pressure from parallel `rustc`/test processes, but that is inference, not
+    evidence.
+
+  Nothing was found in `nmp-engine`'s own test suite that could cause a silent
+  abort: `RedbStore::temporary()` uses `tempfile::tempdir()` (unique per call,
+  RAII-removed — see `redb_store/tests.rs:52`), there are zero `thread::spawn`
+  and zero `process::exit` in the crate, and the scale tests open one store
+  each rather than thousands of handles.
+
+  **The experiment that would settle it**, which must run somewhere other than
+  a shared, contended worktree to be interpretable: on a machine with real
+  headroom and a fresh `target/`, pre-build every workspace test binary, then
+  drive free disk to near-zero and run `cargo test --workspace --no-fail-fast`.
+  An ENOSPC/compiler-shaped death confirms disk end-to-end including run-phase
+  recompiles; a death with no message, or a bare `signal:` line, points at
+  OOM instead; no reproduction at all means the original event was
+  environmental rather than inherent to this suite.
+
+- **A panic in a runtime-owned background thread is silently swallowed.**
+  `crates/nmp-runtime/src/engine_thread.rs:499,509,579,582,596` and
+  `crates/nmp-transport/src/pool/worker.rs` all discard their join results
+  (`let _ = handle.join()`). Because nothing sets `panic=abort`, a thread that
+  panics neither kills the process nor surfaces anywhere — so a test can pass
+  while the runtime thread underneath it died. This is a masked-failure risk
+  in exactly the fail-open class the reducer's own guards are audited for, and
+  it is unaudited: it was found while investigating the abort above, and is
+  not the cause of it.
+
+- **One test asserts against the wall clock.**
+  `crates/nmp-engine/tests/core_headless/live_queries.rs:185` asserts
+  `start.elapsed() < Duration::from_secs(30)`. On a loaded or contended
+  machine that is a genuine flake, independent of everything above. It fails
+  by name rather than silently, so it does not explain the abort, but the
+  standing rule is to control clocks rather than race them.
+
+- **`process::exit` call sites are unaudited.** Present in
+  `crates/nmp-store/src/redb_store/{store,tests,postings_store,publish_queue_ops}.rs`
+  and `crates/nmp-cli/src/main.rs`. Not reviewed for reachability from a test
+  process. Flagged, not cleared.
 
 - **Cross-SDK parity has no mechanical check (#1637).** The invariant — an app
   on one platform must not silently lose an operation the other two have — is

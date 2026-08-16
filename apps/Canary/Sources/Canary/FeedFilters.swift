@@ -1,7 +1,7 @@
 // App-owned query ergonomics (M5 plan §3: "Keeping it app-side is
 // deliberate -- proves the app, not NMP, owns its query ergonomics"). `NMP`
 // itself exposes nothing named "follows" or "relay list" -- only the
-// general `NMPFilter`/`NMPBinding` algebra. This file is the falsifier's own
+// general `NMPFilter`/`NMPBinding` algebra. This file is the Canary's own
 // two named query shapes, built from that algebra.
 
 import NMP
