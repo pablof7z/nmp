@@ -21,6 +21,7 @@ mod descriptor;
 mod indexed_tag_name;
 mod live_query;
 mod nip19;
+mod replaceable_materializer;
 mod row;
 mod selector;
 mod tagging;
@@ -39,6 +40,11 @@ pub use descriptor::{
 pub use indexed_tag_name::IndexedTagName;
 pub use live_query::{LiveQuery, LiveQueryError};
 pub use nip19::{decode as decode_nostr_entity, NostrEntity, NostrEntityError};
+pub use replaceable_materializer::{
+    RegisteredReplaceableMaterializer, ReplaceableMaterializer, ReplaceableMaterializerOperation,
+    ReplaceableMaterializerRefusal, ReplaceableMaterializerRegistration,
+    ReplaceableMaterializerSpec,
+};
 pub use row::{first_verified_source, sentinel_signature, Row, RowDelta, RowSignature};
 pub use selector::{IdentityField, Selector};
 pub use tagging::{
