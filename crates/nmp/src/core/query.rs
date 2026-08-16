@@ -3198,13 +3198,16 @@ impl EngineCore {
                     row.event.id,
                     RememberedRow {
                         created_at: row.event.created_at.as_secs(),
-                        signature_state: RowSignature::from_store(&row.event, row.signature_state),
+                        signature_state: row_signature_from_store_state(
+                            &row.event,
+                            row.signature_state,
+                        ),
                         sources: sources.clone(),
                     },
                 );
                 added.insert(
                     row.event.id,
-                    Row::from_stored_event(
+                    row_from_stored_event(
                         {
                             #[cfg(feature = "bench-instrumentation")]
                             crate::ingest_attribution::projection_event_clone();
@@ -3220,7 +3223,8 @@ impl EngineCore {
                     continue;
                 }
                 if let Some(remembered) = state.last_rows.get_mut(&row.event.id) {
-                    let signature_state = RowSignature::from_store(&row.event, row.signature_state);
+                    let signature_state =
+                        row_signature_from_store_state(&row.event, row.signature_state);
                     let signature_changed = remembered.signature_state != signature_state;
                     let prior_len = remembered.sources.len();
                     remembered
@@ -3230,7 +3234,7 @@ impl EngineCore {
                     if signature_changed {
                         updated.insert(
                             row.event.id,
-                            Row::from_stored_event(
+                            row_from_stored_event(
                                 row.event.clone(),
                                 row.signature_state,
                                 remembered.sources.clone(),
@@ -3247,11 +3251,12 @@ impl EngineCore {
                     continue;
                 }
                 if let Some(remembered) = state.last_rows.get_mut(&row.event.id) {
-                    let signature_state = RowSignature::from_store(&row.event, row.signature_state);
+                    let signature_state =
+                        row_signature_from_store_state(&row.event, row.signature_state);
                     remembered.signature_state = signature_state;
                     remembered.sources = row.observed_relays.clone();
                     if let Some(added_row) = added.get_mut(&row.event.id) {
-                        *added_row = Row::from_stored_event(
+                        *added_row = row_from_stored_event(
                             row.event.clone(),
                             row.signature_state,
                             remembered.sources.clone(),
@@ -3259,7 +3264,7 @@ impl EngineCore {
                     } else {
                         updated.insert(
                             row.event.id,
-                            Row::from_stored_event(
+                            row_from_stored_event(
                                 row.event.clone(),
                                 row.signature_state,
                                 remembered.sources.clone(),
@@ -3318,13 +3323,16 @@ impl EngineCore {
                 row.event.id,
                 RememberedRow {
                     created_at: row.event.created_at.as_secs(),
-                    signature_state: RowSignature::from_store(&row.event, row.signature_state),
+                    signature_state: row_signature_from_store_state(
+                        &row.event,
+                        row.signature_state,
+                    ),
                     sources: sources.clone(),
                 },
             );
             complete_rows.insert(
                 row.event.id,
-                Row::from_stored_event(
+                row_from_stored_event(
                     {
                         #[cfg(feature = "bench-instrumentation")]
                         crate::ingest_attribution::projection_event_clone();
@@ -3344,10 +3352,10 @@ impl EngineCore {
                     .sources
                     .extend(row.observed_relays.iter().cloned());
                 remembered.signature_state =
-                    RowSignature::from_store(&row.event, row.signature_state);
+                    row_signature_from_store_state(&row.event, row.signature_state);
                 complete_rows.insert(
                     row.event.id,
-                    Row::from_stored_event(
+                    row_from_stored_event(
                         row.event.clone(),
                         row.signature_state,
                         remembered.sources.clone(),
@@ -3361,11 +3369,11 @@ impl EngineCore {
             }
             if let Some(remembered) = current.get_mut(&row.event.id) {
                 remembered.signature_state =
-                    RowSignature::from_store(&row.event, row.signature_state);
+                    row_signature_from_store_state(&row.event, row.signature_state);
                 remembered.sources = row.observed_relays.clone();
                 complete_rows.insert(
                     row.event.id,
-                    Row::from_stored_event(
+                    row_from_stored_event(
                         row.event.clone(),
                         row.signature_state,
                         remembered.sources.clone(),
@@ -3489,7 +3497,7 @@ impl EngineCore {
                     *id,
                     RememberedRow {
                         created_at: row.created_at().as_secs(),
-                        signature_state: row.signature,
+                        signature_state: row.signature(),
                         sources: row.sources.clone(),
                     },
                 )
@@ -3503,7 +3511,7 @@ impl EngineCore {
         for (event_id, row) in current {
             match state.last_rows.get(&event_id) {
                 None => delta.push(RowDelta::Added(row)),
-                Some(last) if last.signature_state != row.signature => {
+                Some(last) if last.signature_state != row.signature() => {
                     delta.push(RowDelta::Updated(row));
                 }
                 Some(last) if last.sources != row.sources => {
@@ -3755,7 +3763,7 @@ impl EngineCore {
                         .local
                         .as_ref()
                         .map_or(SigState::Signed, |local| local.sig_state);
-                    Row::from_stored_event(
+                    row_from_stored_event(
                         se.event,
                         signature_state,
                         se.provenance.seen.into_keys().collect(),

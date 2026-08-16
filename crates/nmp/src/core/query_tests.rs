@@ -203,7 +203,7 @@ mod affected_handle_invalidation_tests {
                     event_id,
                     RememberedRow {
                         created_at: row.created_at().as_secs(),
-                        signature_state: row.signature,
+                        signature_state: row.signature(),
                         sources: row.sources,
                     },
                 )
@@ -827,7 +827,7 @@ mod affected_handle_invalidation_tests {
             batches[0],
             [RowDelta::Added(row)]
                 if row.id() == arriving.id
-                    && matches!(row.signature, RowSignature::Signed(_))
+                    && matches!(row.signature(), RowSignature::Signed(_))
         ));
 
         // A byte-for-byte duplicate observation is a true no-op: no handle
