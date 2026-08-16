@@ -412,20 +412,38 @@ crates must not be folded into tests; the proof is the manifest.
 
 Mechanical, no checker required:
 
-1. **Protocol-named entries directly under `crates/nmp/src`** — today
-   **11** (`nip02/`, `nip29/`, `nip18.rs`, `nip22.rs`, `nip25.rs`,
-   `nip65.rs`, `nip68.rs`, `nipc7.rs`, `blossom.rs`, `asset.rs`,
-   `content.rs`; `media/` already gone, #1708). Target **0**. This is
-   #1707's falsifier and the primary number: it is rule 2 stated as an `ls`.
-2. **Protocol crates named in `crates/nmp/Cargo.toml`** — today **11**
-   optional dependencies. Target **0**.
-3. **Lines in `crates/nmp`** — **7,254** across 14 files, down from 73,598
-   at the start of 2026-08-16. Target ≈ **7,500**, so this one is reached.
-   Crude and gameable by moving code, which is exactly why it is secondary
-   to (1) — see the warning below.
-4. **Crates changed by adding a capability** — today three (`nmp`,
-   `nmp-ffi`, the capability crate). Target **one** for direct-Rust apps
-   (+`nmp-ffi` only when a native projection is wanted).
+1. **Protocol-named entries directly under `crates/nmp/src`** — **0**
+   (steps 0–4 moved `media/`, `nip02/`, `nip29/`, `nip18.rs`, `nip22.rs`,
+   `nip25.rs`, `nip68.rs`, `nipc7.rs`, `blossom.rs`, `asset.rs`,
+   `content.rs`; the NIP-65 split then deleted the last one, `nip65.rs` --
+   one line of capability convenience, `engine.publish(request.into_
+   write_intent())`, wearing an engine-bound signature, not routing
+   mechanism). Target **0**, reached. This is #1707's falsifier and the
+   primary number: it is rule 2 stated as an `ls`.
+2. **Protocol crates named in `crates/nmp/Cargo.toml`** — **0** optional
+   dependencies (down from 11; the last, `nmp-nip65`, left with the door
+   above). Target **0**, reached.
+3. **Lines in `crates/nmp`** — **7,239**, down from 46,898 in this doc's
+   prior count and 73,032 when the engine still lived here. Below the
+   ≈7,500 target already: the #1720 engine/runtime cut and #1707's own
+   capability eviction landed in parallel and compounded rather than
+   merely adding. Crude, gameable by moving code, so secondary to (1).
+4. **Crates changed by adding a capability** — **one** for direct-Rust apps
+   (the capability crate alone; `nmp` needs no companion edit), **two**
+   including `nmp-ffi` when a native projection is wanted. Target reached.
+
+**The one exception, counted honestly rather than by either measure
+above**: `nmp-runtime`'s own automatic-outbox-discovery routing glue
+(`nmp-runtime/src/nip65.rs`, feature-gated) depends on `nmp-nip65` for the
+coordinator's neutral vocabulary. That edge is invisible to measures 1–2
+because it lives in `nmp-runtime`, not `crates/nmp` -- it is real
+regardless. It is not a capability the engine merely executes: it is how
+the engine performs its own job of discovering an author's relays for
+outbox routing, so it stays. A second production implementor of
+author-route discovery is what would change that answer; nothing else
+would, and no trait should be built to pre-empt one that does not exist
+(the same reasoning that keeps `nmp-store` free of a backend-abstraction
+seam, #1495).
 
 ### What the crate work did and did not fix
 
@@ -449,7 +467,11 @@ the value types — `PendingWrite` owning its own transitions rather than
 ## Decided — not to be relitigated without new facts
 
 - Capabilities live above `nmp`; the absorption direction of #1143/#1563 was
-  wrong and is being reversed (#1707, owner ruling 2026-08-15).
+  wrong and is being reversed (#1707, owner ruling 2026-08-15). Steps 0–4
+  (media, `Row`/`ReplaceableMaterializer`, NIP-02, the eight bare re-export
+  doors, NIP-29) and the NIP-65 split are done; measures 1–2 above read
+  zero. NIP-65's routing glue is the one exception, ruled separately and
+  kept for the reason above.
 - `Row`/`RowSignature` and the `ReplaceableMaterializer` contract belong in
   `nmp-grammar` (#1707 steps 1–2); the contract's own imports prove it needs
   nothing from the engine.

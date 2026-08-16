@@ -82,22 +82,32 @@ mod subscription;
 // glob of this one's internals. `nmp`'s public API is now exactly the
 // re-export list below — visible, and the whole of it.
 
-#[cfg(feature = "nip65")]
-pub mod nip65;
-
 // #1707 deleted `nip22`/`nip25`/`nip18`/`nipc7`/`content`/`asset`/`blossom`/
-// `nip68`: each was a pure re-export door over its own engine-free mechanism
-// crate -- no `WriteIntent`/`Engine`/`Row` construction, nothing the engine
-// needed to execute, just vocabulary a caller could equally well reach by
-// naming `nmp-nip22`/`nmp-nip25`/`nmp-nip18`/`nmp-nipc7`/`nmp-content`/
-// `nmp-asset`/`nmp-blossom`/`nmp-nip68` directly. `nmp` must not contain a
-// single line of any capability's meaning, re-export door or not; a
-// direct-Rust app now names the mechanism crate directly, the same way
-// `nmp-ffi`/Swift/Kotlin already do and the same way `nmp-media` already
-// works. NIP-65 stays (`nip65` above): unlike these eight, it has a real
-// engine-bound `impl Engine` publish method AND `nmp_runtime::nip65`'s own
-// deep engine-routing-loop glue, which is a different problem from a bare
-// re-export door and is not resolved here.
+// `nip68`/`nip65`: each was a pure re-export door over its own engine-free
+// mechanism crate -- no `WriteIntent`/`Engine`/`Row` construction, nothing
+// the engine needed to execute, just vocabulary a caller could equally well
+// reach by naming `nmp-nip22`/`nmp-nip25`/`nmp-nip18`/`nmp-nipc7`/
+// `nmp-content`/`nmp-asset`/`nmp-blossom`/`nmp-nip68`/`nmp-nip65` directly.
+// `nip65`'s door was `impl Engine { publish_relay_list_bootstrap }`, one
+// line of capability convenience (`engine.publish(request.into_write_intent())`)
+// wearing an engine-bound signature -- not routing mechanism, so it went
+// the same way the other eight did: deleted, not relocated. `nmp` must not
+// contain a single line of any capability's meaning, re-export door or
+// not; a direct-Rust app now names the mechanism crate directly, the same
+// way `nmp-ffi`/Swift/Kotlin already do and the same way `nmp-media`
+// already works.
+//
+// NIP-65's automatic-outbox-discovery ROUTING GLUE is a different thing
+// entirely and is the one deliberate exception left in this whole
+// reversal: `nmp-runtime::nip65` (feature-gated, `nmp-runtime/Cargo.toml`)
+// converts the coordinator's `CoordinatorUpdate` into the routing loop's
+// own neutral vocabulary. That is how the engine performs ITS OWN job of
+// discovering an author's relays for outbox routing, not a capability the
+// engine merely executes for an app -- moving it above the engine would
+// create the exact upward dependency this reversal exists to remove. One
+// declared, feature-gated edge, counted honestly rather than hidden behind
+// a trait: a second production implementor of author-route discovery is
+// what would change that answer, nothing else.
 
 pub use auth::{
     AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp, AuthPolicyPendingSender,
