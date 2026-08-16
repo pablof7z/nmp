@@ -26,7 +26,7 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
         delta,
         RowDelta::Added(row)
             if row.id() == accepted_id
-                && row.signature() == nmp::RowSignature::Pending
+                && row.signature() == nmp_grammar::RowSignature::Pending
     )));
     assert!(
         effects
@@ -241,7 +241,7 @@ fn signer_unavailable_keeps_accepted_row_visible() {
         delta,
         RowDelta::Added(row)
             if row.id() == expected_id
-                && row.signature() == nmp::RowSignature::Pending
+                && row.signature() == nmp_grammar::RowSignature::Pending
     )));
 
     let exact_attach = core.handle(EngineMsg::SignerAttached(a.public_key()));
@@ -257,7 +257,7 @@ fn signer_unavailable_keeps_accepted_row_visible() {
         delta,
         RowDelta::Updated(row)
             if row.id() == expected_id
-                && matches!(row.signature(), nmp::RowSignature::Signed(_))
+                && matches!(row.signature(), nmp_grammar::RowSignature::Signed(_))
                 && row.signed_event().is_some_and(|event| event.verify().is_ok())
     )));
     for handle in [first_handle, second_handle] {
