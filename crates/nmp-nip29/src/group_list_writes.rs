@@ -1,20 +1,22 @@
 //! Durable semantic operations over the current account's kind:10009 list.
 //!
-//! `nmp-nip29` owns the pure NIP-29/NIP-51 tag vocabulary. This module lives
-//! one layer up because a durable operation must also mint the ordinary
-//! [`WriteIntent`](crate::WriteIntent), freeze the selected account, and enter
-//! the engine's receipt lifecycle. The dependency remains `nmp -> nmp-nip29`.
+//! Moved back here from `nmp` by #1707: `nmp` must not know what a kind:3
+//! contact list, a NIP-29 group, or a kind:10009 saved-groups list means.
+//! This module composes the ordinary [`WriteIntent`](nmp_grammar::WriteIntent),
+//! freezes the selected account, and enters the engine's receipt lifecycle
+//! over `nmp`'s own engine surface -- the same capability-owns-its-meaning
+//! shape every other protocol crate now uses.
 
 use nmp_grammar::{EventBuilder, Identity, WriteIntent, WriteRouting};
 use nostr::{Kind, RelayUrl, Tag, Timestamp, UnsignedEvent};
 use serde::{Deserialize, Serialize};
 
-use crate::{
+use nmp::{
     Engine, EngineError, ReceiptStream, RegisteredReplaceableMaterializer, ReplaceableMaterializer,
     ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec,
 };
 
-use super::SimpleGroupEntry;
+use crate::SimpleGroupEntry;
 
 const GROUP_LIST_KIND: Kind = Kind::Custom(10009);
 const GROUP_LIST_PROGRAM: [u8; 16] = *b"nmp-nip29-list!!";
@@ -35,7 +37,7 @@ pub struct GroupListWrites {
 
 /// Why a typed group-list action was refused before ordinary write custody.
 /// `EngineClosed` and `PublishRefused` name exactly what
-/// [`crate::Engine::publish`] itself can return for this call
+/// [`nmp::Engine::publish`] itself can return for this call
 /// ([`EngineError`] has no other reachable variant here); there is no
 /// separate group-list-only fiction standing in for a receipt that failed to
 /// materialize for no named reason.
@@ -517,7 +519,7 @@ mod tests {
     #[test]
     fn signed_out_is_refused_and_first_group_enters_ordinary_custody() {
         let engine = Engine::new_with_capabilities(
-            crate::EngineConfig::default(),
+            nmp::EngineConfig::default(),
             vec![group_list_capability()],
         )
         .unwrap();
@@ -552,15 +554,14 @@ mod tests {
     /// unknown to it), forwarded verbatim rather than folded into a
     /// group-list-only fiction.
     ///
-    /// `Engine::new` will not reproduce this: it auto-includes
-    /// `group_list_capability()` in its default capability set whenever the
-    /// `nip29` feature is compiled in (`default_capabilities`), unlike
-    /// NIP-02's `follow_capability`, which is never auto-included. An empty
-    /// explicit capability set is the one construction that leaves the
-    /// compiled program/format genuinely unknown to the engine.
+    /// `Engine::new` will not reproduce this either (#1707 removed the
+    /// auto-inclusion `default_capabilities` used to give this specific
+    /// capability -- `nmp` cannot auto-register a capability it does not
+    /// know exists). Every capability, this one included, is now supplied
+    /// explicitly, the same shape NIP-02's `follow_capability` always used.
     #[test]
     fn unregistered_capability_is_refused_with_the_engines_own_reason() {
-        let engine = Engine::new_with_capabilities(crate::EngineConfig::default(), vec![]).unwrap();
+        let engine = Engine::new_with_capabilities(nmp::EngineConfig::default(), vec![]).unwrap();
         engine
             .add_private_key_account(&Keys::generate().secret_key().to_secret_bytes(), true)
             .unwrap();

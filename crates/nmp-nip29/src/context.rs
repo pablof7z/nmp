@@ -4,10 +4,10 @@
 //! This module owns NIP-29's group-context SEMANTICS and nothing else -- it
 //! contextualizes an unsigned draft, validates an already-signed event, and
 //! scopes one host's read branch to one group id. It holds no relay set, no
-//! route, no engine, no signer and no intent: the app-facing door that
-//! retains a scope and mints an opaque write lives in the `nmp` facade
-//! (`nmp::nip29`), which is what keeps this crate's dependencies at exactly
-//! `nostr` + `nmp-grammar`.
+//! route, no engine, no signer and no intent itself: the app-facing door
+//! that retains a scope and mints an opaque write lives elsewhere in this
+//! same crate (`crate::RelayScope`/`crate::Group`), which need `nmp`'s
+//! engine surface this module does not.
 //!
 //! Everything here is KIND-BLIND. It reads no kind, branches on no kind, and
 //! privileges none: NIP-29 permits any kind to carry an `h` and live in a
@@ -64,7 +64,7 @@ pub enum GroupContextError {
     /// construction, which is what keeps every method below infallible with
     /// respect to the group set -- the same shape
     /// [`crate::GroupContextError`]'s relay-side counterpart
-    /// (`nmp::nip29::RelayScopeError::EmptyRelaySet`) already has.
+    /// (`crate::RelayScopeError::EmptyRelaySet`) already has.
     NoGroupNamed,
     /// A pre-signed event carries no `h` at all. Appending one would change
     /// the bytes and therefore the `EventId`, so this is a refusal rather

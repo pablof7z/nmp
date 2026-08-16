@@ -1,6 +1,6 @@
 //! [`Groups`] -- the several groups one write belongs to (#1281).
 //!
-//! [`Group`](super::Group) is a room: an identity an app reads, watches,
+//! [`Group`](crate::Group) is a room: an identity an app reads, watches,
 //! moderates and writes into. `Groups` is none of those. It is the WRITE
 //! CONTEXT alone -- the hosts a scope named plus the set of group ids one
 //! event claims -- and it exists because a legitimate NIP-29 write had no
@@ -60,15 +60,15 @@
 //! that consumer adopted NMP's own publish queue.
 //!
 //! An app that wants NMP to SIGN without publishing already has a door:
-//! [`Engine::sign_event`](crate::Engine::sign_event) returns the signed
+//! [`Engine::sign_event`](nmp::Engine::sign_event) returns the signed
 //! event. That is a different question from routing, and it is answered
 //! elsewhere rather than duplicated here.
 //!
 //! # It is the same door, at a larger arity
 //!
-//! There is no second mechanism here. [`Group`](super::Group)'s whole write
+//! There is no second mechanism here. [`Group`](crate::Group)'s whole write
 //! half IS a one-element `Groups`: `Group::intent` builds one and calls
-//! [`Groups::intent`], and `nmp_nip29::contextualize` takes a set at every
+//! [`Groups::intent`], and `crate::contextualize` takes a set at every
 //! call site in the workspace. The one-group case is not a special path that
 //! happens to agree with this one -- it is literally this one.
 //!
@@ -81,8 +81,8 @@
 //! would have to invent a meaning for. A write is the one thing that is
 //! genuinely plural, and it is the only thing this type does.
 //!
-//! Nonempty by construction, the same shape [`nip29::on`](super::on) has for
-//! relays: [`RelayScope::groups`](super::RelayScope::groups) is the only way
+//! Nonempty by construction, the same shape [`nip29::on`](crate::on) has for
+//! relays: [`RelayScope::groups`](crate::RelayScope::groups) is the only way
 //! to make one and it refuses an empty set, because an event with no `h` row
 //! is not in a group at all.
 
@@ -91,14 +91,13 @@ use std::collections::BTreeSet;
 use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nostr::{PublicKey, RelayUrl};
 
-use super::group::GroupPublishError;
-use crate::engine::Engine;
-use nmp_nip29::GroupContextError;
-use nmp_runtime::ReceiptStream;
+use crate::group::GroupPublishError;
+use crate::GroupContextError;
+use nmp::{Engine, ReceiptStream};
 
 /// The groups one write belongs to, on the relays their scope named.
 ///
-/// Retains both privately, exactly as [`Group`](super::Group) does: no host
+/// Retains both privately, exactly as [`Group`](crate::Group) does: no host
 /// accessor, no id accessor, and no method that takes a per-call host, route,
 /// group id or raw `h` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,7 +109,7 @@ pub struct Groups {
 impl Groups {
     /// Form a write context over a nonempty set of group ids.
     ///
-    /// Fallible for the one reason [`nip29::on`](super::on) is: the set is
+    /// Fallible for the one reason [`nip29::on`](crate::on) is: the set is
     /// caller-supplied and a caller-supplied set can be empty. Refusing here
     /// is what makes every method below infallible with respect to the group
     /// set.
@@ -149,7 +148,7 @@ impl Groups {
         author: PublicKey,
         builder: EventBuilder,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        let contextualized = nmp_nip29::contextualize(&self.ids, builder)?;
+        let contextualized = crate::contextualize(&self.ids, builder)?;
         let intent = self.mint(
             WritePayload::Event(contextualized),
             Identity::Explicit(author),
@@ -180,7 +179,7 @@ impl Groups {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nip29;
+    use crate::on;
     use nostr::{Keys, Kind, Tag};
 
     fn host(n: u16) -> RelayUrl {
@@ -188,7 +187,7 @@ mod tests {
     }
 
     fn engine() -> Engine {
-        Engine::new(crate::config::EngineConfig::default()).expect("a temporary Redb engine builds")
+        Engine::new(nmp::EngineConfig::default()).expect("a temporary Redb engine builds")
     }
 
     fn author() -> PublicKey {
@@ -196,7 +195,7 @@ mod tests {
     }
 
     fn rooms() -> Groups {
-        nip29::on([host(1), host(2)])
+        on([host(1), host(2)])
             .expect("a nonempty scope")
             .groups(["darkroom", "photographers"])
             .expect("a nonempty group set")
@@ -210,10 +209,7 @@ mod tests {
     fn a_write_context_over_no_group_is_never_formed() {
         let empty: [&str; 0] = [];
         assert_eq!(
-            nip29::on([host(1)])
-                .expect("a nonempty scope")
-                .groups(empty)
-                .err(),
+            on([host(1)]).expect("a nonempty scope").groups(empty).err(),
             Some(GroupContextError::NoGroupNamed)
         );
     }
@@ -222,7 +218,7 @@ mod tests {
     /// same rooms differently hold the SAME value and compose the same bytes.
     #[test]
     fn duplicate_and_unsorted_ids_canonicalize_to_one_set() {
-        let scope = nip29::on([host(1)]).expect("a nonempty scope");
+        let scope = on([host(1)]).expect("a nonempty scope");
         assert_eq!(
             scope.groups(["b", "a", "b"]).expect("two rooms"),
             scope.groups(["a", "b"]).expect("two rooms")
@@ -287,7 +283,7 @@ mod tests {
     #[test]
     fn the_door_contextualizes_with_the_whole_retained_set() {
         let rooms = rooms();
-        let composed = nmp_nip29::contextualize(
+        let composed = crate::contextualize(
             &rooms.ids,
             nmp_grammar::EventBuilder::new(Kind::from(30315u16))
                 .tag(Tag::parse(["d", "status"]).unwrap()),
@@ -323,9 +319,8 @@ mod tests {
                 .tag(Tag::parse(["d", "status"]).unwrap())
         };
         let coordinate = |group_id: &str| {
-            let composed =
-                nmp_nip29::contextualize(&BTreeSet::from([group_id.to_string()]), draft())
-                    .expect("a plain draft contextualizes");
+            let composed = crate::contextualize(&BTreeSet::from([group_id.to_string()]), draft())
+                .expect("a plain draft contextualizes");
             (
                 composed.kind,
                 me,

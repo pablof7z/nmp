@@ -40,13 +40,16 @@ nmp-signer.workspace = true
 # and takes the same engine's `Handle` back out to fold the raw delta and
 # diagnostics channels its `Then` steps assert on. `nip65` drives the
 # feature-on coordinator scenarios through ordinary pinned queries.
-nmp = { workspace = true, features = ["unstable-mechanism", "nip29", "nip65"] }
+nmp = { workspace = true, features = ["unstable-mechanism", "nip65"] }
 # #1707: this harness drives a REAL `EngineCore` and a REAL `EngineThread`
 # directly, which it always did -- it used to do it through `nmp`'s
 # `#[doc(hidden)] pub mod mechanism` basement. That basement is deleted; the
 # two packages are named here instead, which is both honest and narrower.
 nmp-engine = { workspace = true, features = ["unstable-mechanism"] }
 nmp-runtime = { workspace = true, features = ["unstable-mechanism", "nip65"] }
+# #1707 step 4: NIP-29's Group/group-list-write door left `nmp`, so the group
+# scenarios reach it directly instead of through an `nmp` feature.
+nmp-nip29.workspace = true
 nmp-test-support.workspace = true
 
 cucumber = "0.21"

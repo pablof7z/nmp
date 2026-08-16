@@ -9,9 +9,6 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nmp::nip29::{
-    add_group_to_list, add_relay_in_use, group_list_capability, group_list_writes, SimpleGroupEntry,
-};
 use nmp::{
     AcquisitionEvidence, AuthDenialSource, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot,
     AuthPhase, Binding, CancelWriteOutcome, CorrelationToken, DiagnosticsSnapshot, Engine,
@@ -23,6 +20,9 @@ use nmp::{
 };
 use nmp_ffi::convert::{
     diagnostics_snapshot_to_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
+};
+use nmp_nip29::{
+    add_group_to_list, add_relay_in_use, group_list_capability, group_list_writes, SimpleGroupEntry,
 };
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 // #680: observers/callbacks are gone; the facade exposes pull-based async
@@ -4959,7 +4959,7 @@ async fn first_group_list_action_survives_restart_and_replays_over_later_truth()
         .observe_query(
             FfiLiveQuery {
                 branches: vec![nmp_ffi::convert::demand_to_ffi(
-                    nmp::nip29::current_account_group_list_demand(),
+                    nmp_nip29::current_account_group_list_demand(),
                 )],
                 aggregate_result_limit: None,
             },
@@ -4998,7 +4998,7 @@ async fn first_group_list_action_survives_restart_and_replays_over_later_truth()
         .observe_query(
             FfiLiveQuery {
                 branches: vec![nmp_ffi::convert::demand_to_ffi(
-                    nmp::nip29::current_account_group_list_demand(),
+                    nmp_nip29::current_account_group_list_demand(),
                 )],
                 aggregate_result_limit: None,
             },

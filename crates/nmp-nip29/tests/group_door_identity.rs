@@ -1,6 +1,6 @@
 //! #1122's PROTOCOL-GROUPISANIDENTITY-001/002/004 and
 //! PROTOCOL-NIP29OPERATIONS-009/010: the app-facing group door
-//! (`crates/nmp/src/nip29/{mod,group}.rs`, #1033) is an IDENTITY value, not
+//! (`crates/nmp-nip29/src/{scope,group}.rs`, #1033) is an IDENTITY value, not
 //! a subscription -- constructing one contacts nothing, writing through it
 //! never needs a prior read, one retained handle serves the room's whole
 //! lifetime with no lifecycle of its own, and a relay's own moderation
@@ -17,10 +17,10 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use nmp::nip29;
 use nmp::{
     Engine, EngineConfig, EventBuilder, Filter, RelayState, RelayWaiting, SigningState, WriteFact,
 };
+use nmp_nip29 as nip29;
 use nmp_runtime::FifoReceiver;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{Keys, Kind, PublicKey, RelayUrl};

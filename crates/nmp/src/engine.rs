@@ -59,17 +59,6 @@ use crate::auth::{AuthPolicy, EngineAuthPolicyAdapter};
 use crate::config::build_nip65_sources;
 use crate::config::{build_routing_fact_relays, EngineConfig};
 
-/// The feature-selected replaceable-capability built-ins the `nmp` crate owns
-/// and supplies at the [`Engine::new`] boundary per #1624. NIP-02's follow
-/// capability is not among them: `nmp` does not own NIP-02 at all (#1707),
-/// so a consumer that wants it adds `nmp_nip02::follow_capability()` to the
-/// vec passed to [`Engine::new_with_capabilities`] itself.
-pub(crate) fn default_capabilities() -> Vec<crate::ReplaceableMaterializerSpec> {
-    vec![
-        #[cfg(feature = "nip29")]
-        crate::nip29::group_list_capability(),
-    ]
-}
 use crate::error::EngineError;
 use crate::subscription::{AsyncDiagnosticsSubscription, DiagnosticsSubscription};
 #[cfg(test)]
@@ -166,15 +155,19 @@ impl Engine {
     /// router cap, everything `nmp-ffi`'s hand-rolled assembly used to
     /// duplicate independently.
     ///
-    /// Per #1624, normal Rust construction includes the feature-selected
-    /// replaceable-capability built-ins the `nmp` crate itself owns. The
-    /// NIP-29 group-list capability is compiled in when the `nip29` Cargo
-    /// feature is enabled. NIP-02's follow capability is not one of `nmp`'s
-    /// own built-ins at all (#1707): it is supplied at the consumer boundary
-    /// -- the FFI facade, or an app via [`Engine::new_with_capabilities`] --
-    /// from `nmp-nip02`.
+    /// Per #1624, normal Rust construction USED TO include the
+    /// feature-selected replaceable-capability built-ins `nmp` itself owned
+    /// (NIP-29's group-list capability, compiled in whenever the `nip29`
+    /// Cargo feature was enabled). #1707 removed the last of those: `nmp`
+    /// does not own any capability's meaning any more, NIP-29 included, so
+    /// it cannot auto-register one. Every capability -- NIP-02's
+    /// `nmp_nip02::follow_capability()`, NIP-29's
+    /// `nmp_nip29::group_list_capability()`, any future one -- is supplied
+    /// explicitly at the consumer boundary, in the vec passed to
+    /// [`Engine::new_with_capabilities`]: the FFI facade already does this
+    /// unconditionally, and a direct-Rust app does the same.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
-        Self::new_with_capabilities(config, default_capabilities())
+        Self::new_with_capabilities(config, Vec::new())
     }
 
     /// Construct an engine with the complete compiled replaceable-capability

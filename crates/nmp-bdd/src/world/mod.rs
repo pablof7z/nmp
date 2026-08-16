@@ -425,7 +425,7 @@ pub struct NmpWorld {
     group_hosts: BTreeMap<String, String>,
     /// One `nip29::Group` per id, built on first use and NEVER rebuilt: this
     /// map's insert count is what "no group had to be reconstructed" reads.
-    group_values: BTreeMap<String, nmp::nip29::Group>,
+    group_values: BTreeMap<String, nmp_nip29::Group>,
     group_builds: BTreeMap<String, usize>,
     /// The group an unqualified "through the group" means: the first staged.
     default_group: Option<String>,
@@ -442,7 +442,7 @@ pub struct NmpWorld {
     /// exactly what a binding proves.
     id_labels: BTreeMap<String, EventId>,
     /// The typed refusal the last group publication produced, if any.
-    group_refusal: Option<nmp::nip29::GroupContextError>,
+    group_refusal: Option<nmp_nip29::GroupContextError>,
     /// What the STEP itself named on the last group call.
     group_call: GroupCall,
     /// Relays that are bound (so they have a URL) and then severed, so a

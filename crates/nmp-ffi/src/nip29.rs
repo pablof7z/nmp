@@ -1,4 +1,4 @@
-//! Native projection of `nmp::nip29` -- the app-facing NIP-29 door (#1033,
+//! Native projection of `nmp_nip29` -- the app-facing NIP-29 door (#1033,
 //! Lane A of the #1033 FFI projection).
 //!
 //! Two objects, same narrowing the direct-Rust door uses:
@@ -8,8 +8,8 @@
 //! let group = scope.group("photographers")       // narrowed to one group
 //! ```
 //!
-//! [`FfiRelayScope`] wraps [`nmp::nip29::RelayScope`] and [`FfiGroup`] wraps
-//! [`nmp::nip29::Group`] -- both opaque UniFFI objects (the same idiom
+//! [`FfiRelayScope`] wraps [`nmp_nip29::RelayScope`] and [`FfiGroup`] wraps
+//! [`nmp_nip29::Group`] -- both opaque UniFFI objects (the same idiom
 //! [`crate::blossom::FfiBlossomAuthorization`] uses for a proven Rust value
 //! carried across the boundary), never a second mirrored copy of NIP-29's
 //! own vocabulary. Neither type exposes its retained hosts or group id back
@@ -17,7 +17,7 @@
 //! event under one group and routing it as though it came from another.
 //!
 //! [`FfiGroupPredicate`] and [`FfiGroupIds`] wrap
-//! [`nmp::nip29::GroupPredicate`] and [`nmp::nip29::GroupIds`] the same way.
+//! [`nmp_nip29::GroupPredicate`] and [`nmp_nip29::GroupIds`] the same way.
 //! They stay opaque for the same reason `FfiBinding::Derived`/`FfiBinding::
 //! SetOp` are UniFFI objects rather than records (see `types.rs`'s own doc):
 //! a caller composes them with [`member_list_includes`]/[`admin_list_includes`]/
@@ -43,10 +43,10 @@
 
 use std::sync::Arc;
 
-use nmp::nip29::{
-    self, Group, GroupAvailability, GroupIds, GroupMetadata, GroupMetadataEdit, GroupObservation,
-    GroupPredicate, GroupRecord, GroupSnapshot, JoinAccess, ListedRecord, ListedSubject,
-    ReadAccess, RelayScope,
+use nmp_nip29::{
+    self as nip29, Group, GroupAvailability, GroupIds, GroupMetadata, GroupMetadataEdit,
+    GroupObservation, GroupPredicate, GroupRecord, GroupSnapshot, JoinAccess, ListedRecord,
+    ListedSubject, ReadAccess, RelayScope,
 };
 use nostr::RelayUrl;
 
@@ -69,7 +69,7 @@ fn parse_host(host: String) -> Result<RelayUrl, FfiError> {
 }
 
 /// The relays a group lives on -- named once, retained privately inside the
-/// opaque handle, and never asked for again (`nmp::nip29::RelayScope`
+/// opaque handle, and never asked for again (`nmp_nip29::RelayScope`
 /// mirror). `hosts` crosses the boundary as raw strings, unlike the
 /// direct-Rust `on`'s `RelayUrl`s: fallibility (an empty set, or a host that
 /// does not parse) is restored HERE, because the boundary widens from one
@@ -82,7 +82,7 @@ pub struct FfiRelayScope {
 
 #[uniffi::export]
 impl FfiRelayScope {
-    /// Name the relays a NIP-29 group lives on (`nmp::nip29::on` mirror).
+    /// Name the relays a NIP-29 group lives on (`nmp_nip29::on` mirror).
     /// Each host is parsed with the same [`FfiError::InvalidRelayUrl`] rule
     /// every other relay-URL input in this crate uses; an empty set is
     /// [`FfiError::EmptyRelayScope`] -- a group must be hosted somewhere.
@@ -97,7 +97,7 @@ impl FfiRelayScope {
     }
 
     /// Narrow to one group id, keeping the same hosts
-    /// (`nmp::nip29::RelayScope::group` mirror). Contacts nothing.
+    /// (`nmp_nip29::RelayScope::group` mirror). Contacts nothing.
     pub fn group(&self, group_id: String) -> Arc<FfiGroup> {
         Arc::new(FfiGroup {
             inner: self.inner.group(group_id),
@@ -105,7 +105,7 @@ impl FfiRelayScope {
     }
 
     /// Narrow to the SEVERAL groups one write belongs to, keeping the same
-    /// hosts (`nmp::nip29::RelayScope::groups` mirror, #1281).
+    /// hosts (`nmp_nip29::RelayScope::groups` mirror, #1281).
     ///
     /// The write-only sibling of [`Self::group`], for the one event shape a
     /// single group id cannot express: a kind:30315 session status is
@@ -120,7 +120,7 @@ impl FfiRelayScope {
     }
 
     /// Watch the relay-signed records of every group matching `predicate`
-    /// (`nmp::nip29::RelayScope::observe` mirror). One complete branch per
+    /// (`nmp_nip29::RelayScope::observe` mirror). One complete branch per
     /// host, folded into ONE ordinary engine subscription; each delivery is
     /// the complete set of [`FfiGroupSnapshot`]s for the groups currently
     /// matching. The app never sees a row delta and never walks a `p` row.
@@ -146,7 +146,7 @@ impl FfiRelayScope {
     }
 }
 
-/// One NIP-29 group, on the relays its scope named (`nmp::nip29::Group`
+/// One NIP-29 group, on the relays its scope named (`nmp_nip29::Group`
 /// mirror). An identity, not a subscription: constructing one (via
 /// [`FfiRelayScope::group`]) contacts nothing. The same handle serves every
 /// read and every write for a room's whole lifetime.
@@ -158,7 +158,7 @@ pub struct FfiGroup {
 #[uniffi::export]
 impl FfiGroup {
     /// Mint the read declaration for an app-supplied selection
-    /// (`nmp::nip29::Group::read` mirror). A selection that already
+    /// (`nmp_nip29::Group::read` mirror). A selection that already
     /// constrains `#h` is refused with
     /// [`FfiError::GroupCallerSuppliedContextConstraint`] -- the retained
     /// group id is the sole semantic source of that row. Hand the result to
@@ -170,7 +170,7 @@ impl FfiGroup {
     }
 
     /// Watch THIS group's own relay-signed records
-    /// (`nmp::nip29::Group::observe` mirror). Each delivery carries exactly
+    /// (`nmp_nip29::Group::observe` mirror). Each delivery carries exactly
     /// one [`FfiGroupSnapshot`] -- this group's -- from the first delivery
     /// onward, including before any record has arrived.
     ///
@@ -189,7 +189,7 @@ impl FfiGroup {
     }
 
     /// Ask whether an already-signed event belongs to this group, without
-    /// building a write out of it (`nmp::nip29::Group::validate_context`
+    /// building a write out of it (`nmp_nip29::Group::validate_context`
     /// mirror).
     pub fn validate_context(&self, event: FfiSignedEvent) -> Result<(), FfiError> {
         let event = signed_event_from_ffi(
@@ -206,7 +206,7 @@ impl FfiGroup {
     }
 
     /// Publish an unsigned draft into the group, as `author`
-    /// (`nmp::nip29::Group::publish` mirror) -- the group's ONE write door
+    /// (`nmp_nip29::Group::publish` mirror) -- the group's ONE write door
     /// (#1292).
     ///
     /// The `h` row is appended before signing, the route is the scope's own
@@ -266,7 +266,7 @@ impl FfiGroup {
         let users = users
             .into_iter()
             .map(|user| {
-                Ok(nmp::nip29::GroupUser::new(
+                Ok(nmp_nip29::GroupUser::new(
                     parse_pubkey(&user.pubkey)?,
                     user.role,
                 ))
@@ -293,7 +293,7 @@ impl FfiGroup {
     }
 
     /// kind:9002 -- state part of the group's metadata
-    /// (`nmp::nip29::Group::edit_metadata` mirror, #1282).
+    /// (`nmp_nip29::Group::edit_metadata` mirror, #1282).
     ///
     /// Composes NIP-29's own 9002 rows and invents none: `name`, `about` and
     /// `picture`, plus the `public`/`private` and `open`/`closed` markers
@@ -332,7 +332,7 @@ impl FfiGroup {
     /// `parent` is the parent's group id -- a relay-scoped string, never an
     /// `naddr`. `None` creates a root group and composes no row at all. The
     /// relationship rides on the create and not on an edit; see
-    /// `nmp::nip29::Group::create_group` for why.
+    /// `nmp_nip29::Group::create_group` for why.
     pub fn create_group(
         &self,
         engine: Arc<NmpEngine>,
@@ -371,7 +371,7 @@ impl FfiGroup {
     }
 }
 
-/// The groups one write belongs to (`nmp::nip29::Groups` mirror, #1281),
+/// The groups one write belongs to (`nmp_nip29::Groups` mirror, #1281),
 /// built with [`FfiRelayScope::groups`].
 ///
 /// A WRITE CONTEXT and nothing else. There is no read door, no records
@@ -396,7 +396,7 @@ pub struct FfiGroups {
 #[uniffi::export]
 impl FfiGroups {
     /// Publish one event into every retained group, through the ONE publish
-    /// door (`nmp::nip29::Groups::publish` mirror).
+    /// door (`nmp_nip29::Groups::publish` mirror).
     ///
     /// The whole door: one `h` row per retained id appended before signing,
     /// the route minted from the scope's own hosts, an exact frozen author.
@@ -415,7 +415,7 @@ impl FfiGroups {
     }
 }
 
-/// Who may READ a group's messages (`nmp::nip29::ReadAccess` mirror, #1282).
+/// Who may READ a group's messages (`nmp_nip29::ReadAccess` mirror, #1282).
 ///
 /// NIP-29 spells the restricted state `["private"]` on kind:39000 and
 /// kind:9002; the reference relay's 9002 parser spells the permissive one
@@ -437,7 +437,7 @@ impl From<FfiReadAccess> for ReadAccess {
     }
 }
 
-/// Whether JOIN REQUESTS are honoured (`nmp::nip29::JoinAccess` mirror,
+/// Whether JOIN REQUESTS are honoured (`nmp_nip29::JoinAccess` mirror,
 /// #1282). Independent of [`FfiReadAccess`]: a group can be publicly readable
 /// and still closed to new members.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -458,7 +458,7 @@ impl From<FfiJoinAccess> for JoinAccess {
 }
 
 /// What one kind:9002 edit says about a group
-/// (`nmp::nip29::GroupMetadataEdit` mirror, #1282).
+/// (`nmp_nip29::GroupMetadataEdit` mirror, #1282).
 ///
 /// Every field is optional: `None` leaves that row out of the draft
 /// entirely, so it is not touched and never cleared. That is why the two
@@ -501,7 +501,7 @@ impl From<FfiGroupMetadataEdit> for GroupMetadataEdit {
     }
 }
 
-/// Which groups an observation covers (`nmp::nip29::GroupPredicate` mirror).
+/// Which groups an observation covers (`nmp_nip29::GroupPredicate` mirror).
 /// Opaque by design -- see this module's own doc for why -- built with
 /// [`Self::all`] or from an [`FfiGroupIds`] with [`Self::naming`], then handed
 /// to [`FfiRelayScope::observe_records`].
@@ -513,7 +513,7 @@ pub struct FfiGroupPredicate {
 #[uniffi::export]
 impl FfiGroupPredicate {
     /// Every group the host advertises among the selected records
-    /// (`nmp::nip29::all` mirror). The branch carries NO group-id row: this is
+    /// (`nmp_nip29::all` mirror). The branch carries NO group-id row: this is
     /// the ABSENCE of a constraint, which is what makes a directory
     /// expressible -- the ids a directory wants are the answer, not the input.
     ///
@@ -537,7 +537,7 @@ impl FfiGroupPredicate {
     }
 }
 
-/// Where a set of NIP-29 group ids comes from (`nmp::nip29::GroupIds`
+/// Where a set of NIP-29 group ids comes from (`nmp_nip29::GroupIds`
 /// mirror). Opaque by design, built with [`member_list_includes`]/
 /// [`admin_list_includes`]/[`any_of`]/[`groups_whose_record_matches`] and
 /// composed with [`Self::union`]/[`Self::intersect`]/[`Self::minus`].
@@ -584,7 +584,7 @@ impl FfiGroupIds {
 }
 
 /// Groups whose own relay-signed record matches `selection` at the branch
-/// host (`nmp::nip29::groups_whose_record_matches` mirror) -- THE general
+/// host (`nmp_nip29::groups_whose_record_matches` mirror) -- THE general
 /// spelling, of which every other id source is a shorthand.
 ///
 /// Refused when `selection` names no kind, or names a kind that is not one of
@@ -599,7 +599,7 @@ pub fn groups_whose_record_matches(selection: FfiFilter) -> Result<Arc<FfiGroupI
 }
 
 /// Groups whose observed kind:39002 member-list evidence names `subjects`
-/// (`nmp::nip29::member_list_includes` mirror). Inclusion is evidence,
+/// (`nmp_nip29::member_list_includes` mirror). Inclusion is evidence,
 /// never exact state -- absence is not evidence of non-membership.
 ///
 /// Shorthand for [`groups_whose_record_matches`] over
@@ -613,7 +613,7 @@ pub fn member_list_includes(subjects: FfiBinding) -> Result<Arc<FfiGroupIds>, Ff
 }
 
 /// Groups whose observed kind:39001 admin-list evidence names `subjects`
-/// (`nmp::nip29::admin_list_includes` mirror). Evidence-scoped exactly like
+/// (`nmp_nip29::admin_list_includes` mirror). Evidence-scoped exactly like
 /// [`member_list_includes`].
 #[uniffi::export]
 pub fn admin_list_includes(subjects: FfiBinding) -> Result<Arc<FfiGroupIds>, FfiError> {
@@ -624,7 +624,7 @@ pub fn admin_list_includes(subjects: FfiBinding) -> Result<Arc<FfiGroupIds>, Ffi
 }
 
 /// Which of NIP-29's three relay-signed group records an app is asking for
-/// (`nmp::nip29::GroupRecord` mirror).
+/// (`nmp_nip29::GroupRecord` mirror).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiGroupRecord {
     /// kind:39000 -- the group's own metadata.
@@ -656,7 +656,7 @@ impl From<GroupRecord> for FfiGroupRecord {
 }
 
 /// How much of what the app asked for has been established
-/// (`nmp::nip29::GroupAvailability` mirror). Says nothing about whether the
+/// (`nmp_nip29::GroupAvailability` mirror). Says nothing about whether the
 /// records themselves are complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiGroupAvailability {
@@ -667,7 +667,7 @@ pub enum FfiGroupAvailability {
 }
 
 /// One subject a relay-signed list names, and the hosts that named it
-/// (`nmp::nip29::ListedSubject` mirror). `role` is absent when the relay
+/// (`nmp_nip29::ListedSubject` mirror). `role` is absent when the relay
 /// wrote none -- never defaulted.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct FfiListedSubject {
@@ -676,7 +676,7 @@ pub struct FfiListedSubject {
     pub hosts: Vec<String>,
 }
 
-/// One relay-signed list record (`nmp::nip29::ListedRecord` mirror).
+/// One relay-signed list record (`nmp_nip29::ListedRecord` mirror).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct FfiListedRecord {
     pub subjects: Vec<FfiListedSubject>,
@@ -687,7 +687,7 @@ pub struct FfiListedRecord {
     pub host: String,
 }
 
-/// One relay-signed kind:39000 record (`nmp::nip29::GroupMetadata` mirror).
+/// One relay-signed kind:39000 record (`nmp_nip29::GroupMetadata` mirror).
 /// The three rows NIP-29 names are typed; `tags` carries the record's
 /// complete row list verbatim, so a row NIP-29 core does not define (a
 /// `parent`, say) needs no hand-parser on the native side.
@@ -703,7 +703,7 @@ pub struct FfiGroupMetadata {
 }
 
 /// Exactly what one host signed, folded with nothing
-/// (`nmp::nip29::HostRecords` mirror).
+/// (`nmp_nip29::HostRecords` mirror).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct FfiHostRecords {
     pub host: String,
@@ -714,7 +714,7 @@ pub struct FfiHostRecords {
 }
 
 /// One group, as the hosts in the scope currently describe it
-/// (`nmp::nip29::GroupSnapshot` mirror). A complete self-contained value,
+/// (`nmp_nip29::GroupSnapshot` mirror). A complete self-contained value,
 /// never a patch on a previous one.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct FfiGroupSnapshot {
@@ -733,7 +733,7 @@ pub struct FfiGroupSnapshot {
     pub disagreements: Vec<FfiGroupRecord>,
 }
 
-/// Pull-based group-records observation handle (`nmp::nip29::GroupObservation`
+/// Pull-based group-records observation handle (`nmp_nip29::GroupObservation`
 /// mirror). Each `next()` awaits the engine's waker-driven async row mailbox
 /// and folds a complete self-contained snapshot set inline. `None` is the
 /// terminal signal (the demand was withdrawn or the engine shut down);
@@ -839,7 +839,7 @@ pub(crate) fn snapshot_to_ffi(snapshot: &GroupSnapshot) -> FfiGroupSnapshot {
 }
 
 /// The groups `ids` names, whatever any list says about them
-/// (`nmp::nip29::any_of` mirror).
+/// (`nmp_nip29::any_of` mirror).
 ///
 /// `ids` is an ordinary [`FfiBinding`], which is the point: a literal set for
 /// rooms an app already knows, and a derived binding for rooms it has to look
@@ -883,7 +883,7 @@ mod tests {
 
     /// A multi-host group read is ONE live query with one complete branch
     /// per host, each pinned to that host alone and scoped by `#h` -- the
-    /// FFI mirror of `nmp::nip29::Group::read`'s own falsifier.
+    /// FFI mirror of `nmp_nip29::Group::read`'s own falsifier.
     #[test]
     fn a_group_read_is_one_branch_per_host_pinned_to_that_host() {
         let scope = FfiRelayScope::on(vec![host(1), host(2)]).expect("two hosts parse");
@@ -1045,7 +1045,7 @@ mod tests {
             availability: GroupAvailability::Ready,
             per_host: BTreeMap::from([(
                 relay.clone(),
-                nmp::nip29::HostRecords {
+                nmp_nip29::HostRecords {
                     metadata: Some(metadata),
                     admins: None,
                     members: None,
@@ -1232,7 +1232,7 @@ mod tests {
         }
         .into();
         assert_eq!(
-            nmp::nip29::edit_metadata(edit)
+            nmp_nip29::edit_metadata(edit)
                 .tags
                 .iter()
                 .map(|tag| tag.as_slice().to_vec())
@@ -1255,7 +1255,7 @@ mod tests {
     #[test]
     fn the_create_door_composes_the_parent_row_and_omits_it_for_a_root() {
         let rows = |parent: Option<String>| {
-            nmp::nip29::create_group(parent.as_deref())
+            nmp_nip29::create_group(parent.as_deref())
                 .tags
                 .iter()
                 .map(|tag| tag.as_slice().to_vec())

@@ -42,9 +42,9 @@
 //! (a `$myFollows`-shaped kind:3 lookup keeps its own `AuthorOutboxes` and its
 //! own cache mode).
 //!
-//! Assembling one branch per host into a single live query is the facade's
-//! job (`nmp::nip29`), not this crate's: this crate is engine-free and mints
-//! atomic values only.
+//! Assembling one branch per host into a single live query is
+//! `crate::RelayScope`'s job, not this module's: this module is engine-free
+//! and mints atomic values only.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -76,10 +76,9 @@ const SUBJECT_TAG: char = 'p';
 /// records, so projecting through anything else would yield values that are
 /// not group ids. That is a protocol fact and deliberately not a parameter.
 ///
-/// Which kinds a `selection` may name is the FACADE's refusal, not this
-/// function's: `nmp::nip29::groups_whose_record_matches` rejects a kind the
-/// group's host is not authoritative for, and every caller here has already
-/// passed it.
+/// Which kinds a `selection` may name is [`crate::groups_whose_record_matches`]'s
+/// refusal, not this function's: it rejects a kind the group's host is not
+/// authoritative for, and every caller here has already passed it.
 ///
 /// Returns an ordinary [`Binding`], so `Binding::SetOp` composes it with any
 /// other binding for free.
@@ -161,7 +160,7 @@ fn list_evidence_at(host: &RelayUrl, kind: u16, subjects: Binding) -> Binding {
 /// Infallible for the same reason the deleted single-host door was, and for
 /// that reason ONLY: a one-element pinned set cannot be empty, and the source
 /// is never `AuthorOutboxes`. The caller-suppliable relay SET is validated
-/// once, where it enters -- `nmp::nip29::on` -- and the nonempty scope proves
+/// once, where it enters -- [`crate::on`] -- and the nonempty scope proves
 /// every host handed down here.
 pub(crate) fn pinned_public_at(host: &RelayUrl, selection: Filter) -> Demand {
     let mut demand = Demand::new(

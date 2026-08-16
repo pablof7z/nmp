@@ -34,7 +34,7 @@ use crate::types::{FfiDemand, FfiRow, FfiSimpleGroupEntry, FfiSimpleGroupsList};
 
 /// A typed group-list action was refused before ordinary receipt custody.
 /// `EngineClosed` and `PublishRefused` name exactly what
-/// [`nmp::nip29::GroupListActionError`] itself can carry -- there is no
+/// [`nmp_nip29::GroupListActionError`] itself can carry -- there is no
 /// separate group-list-only fiction standing in for a receipt that failed to
 /// materialize for no named reason.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
@@ -62,12 +62,12 @@ impl std::fmt::Display for FfiGroupListActionError {
 
 impl std::error::Error for FfiGroupListActionError {}
 
-impl From<nmp::nip29::GroupListActionError> for FfiGroupListActionError {
-    fn from(error: nmp::nip29::GroupListActionError) -> Self {
+impl From<nmp_nip29::GroupListActionError> for FfiGroupListActionError {
+    fn from(error: nmp_nip29::GroupListActionError) -> Self {
         match error {
-            nmp::nip29::GroupListActionError::SignedOut => Self::SignedOut,
-            nmp::nip29::GroupListActionError::EngineClosed => Self::EngineClosed,
-            nmp::nip29::GroupListActionError::PublishRefused { reason } => {
+            nmp_nip29::GroupListActionError::SignedOut => Self::SignedOut,
+            nmp_nip29::GroupListActionError::EngineClosed => Self::EngineClosed,
+            nmp_nip29::GroupListActionError::PublishRefused { reason } => {
                 Self::PublishRefused { reason }
             }
         }
@@ -85,7 +85,7 @@ fn require_group_list_routing(engine: &NmpEngine) -> Result<(), FfiGroupListActi
     Ok(())
 }
 
-fn simple_group_entry_to_ffi(entry: &nmp::nip29::SimpleGroupEntry) -> FfiSimpleGroupEntry {
+fn simple_group_entry_to_ffi(entry: &nmp_nip29::SimpleGroupEntry) -> FfiSimpleGroupEntry {
     FfiSimpleGroupEntry {
         group_id: entry.group_id.clone(),
         host_relay: entry.host_relay.to_string(),
@@ -93,7 +93,7 @@ fn simple_group_entry_to_ffi(entry: &nmp::nip29::SimpleGroupEntry) -> FfiSimpleG
     }
 }
 
-fn simple_groups_list_to_ffi(list: &nmp::nip29::SimpleGroupsList) -> FfiSimpleGroupsList {
+fn simple_groups_list_to_ffi(list: &nmp_nip29::SimpleGroupsList) -> FfiSimpleGroupsList {
     FfiSimpleGroupsList {
         items: list.items.iter().map(simple_group_entry_to_ffi).collect(),
         relays_in_use: list.relays_in_use.iter().map(RelayUrl::to_string).collect(),
@@ -104,7 +104,7 @@ fn simple_groups_list_to_ffi(list: &nmp::nip29::SimpleGroupsList) -> FfiSimpleGr
 }
 
 /// The signed-in account's Simple-groups-list demand (#108,
-/// `nmp::nip29::current_account_group_list_demand` mirror): `kinds:[10009]`,
+/// `nmp_nip29::current_account_group_list_demand` mirror): `kinds:[10009]`,
 /// `AuthorOutboxes + Public`. Signed-out (no current account) resolves to
 /// zero atoms through the ordinary reactive-binding empty-resolution path
 /// -- no special case needed on either side of this boundary.
@@ -113,7 +113,7 @@ fn simple_groups_list_to_ffi(list: &nmp::nip29::SimpleGroupsList) -> FfiSimpleGr
 /// that consumes it, without changing which NIP defines kind:10009.
 #[uniffi::export]
 pub fn current_account_group_list_demand() -> FfiDemand {
-    demand_to_ffi(nmp::nip29::current_account_group_list_demand())
+    demand_to_ffi(nmp_nip29::current_account_group_list_demand())
 }
 
 /// Tolerantly parse Simple-groups-shaped public items out of a raw native
@@ -127,12 +127,10 @@ pub fn current_account_group_list_demand() -> FfiDemand {
 /// host or invents a fixed group-content catalog on the app's behalf.
 #[uniffi::export]
 pub fn parse_simple_groups_list_tolerant(row: FfiRow) -> FfiSimpleGroupsList {
-    simple_groups_list_to_ffi(
-        &nmp::nip29::parse_simple_groups_list_from_raw_tags_tolerant(
-            row.tags.iter().map(|tag| tag.as_slice()),
-            &row.content,
-        ),
-    )
+    simple_groups_list_to_ffi(&nmp_nip29::parse_simple_groups_list_from_raw_tags_tolerant(
+        row.tags.iter().map(|tag| tag.as_slice()),
+        &row.content,
+    ))
 }
 
 #[uniffi::export]
@@ -147,12 +145,12 @@ impl NmpEngine {
         name: Option<String>,
     ) -> Result<Arc<NmpReceiptStream>, FfiGroupListActionError> {
         require_group_list_routing(self)?;
-        let group = nmp::nip29::SimpleGroupEntry {
+        let group = nmp_nip29::SimpleGroupEntry {
             group_id,
             host_relay: parse_action_relay(host_relay)?,
             name,
         };
-        let receipt = nmp::nip29::add_group_to_list(&self.engine, &self.group_list_writes, group)?;
+        let receipt = nmp_nip29::add_group_to_list(&self.engine, &self.group_list_writes, group)?;
         Ok(NmpReceiptStream::new(self.engine.clone(), receipt))
     }
 
@@ -164,7 +162,7 @@ impl NmpEngine {
         host_relay: String,
     ) -> Result<Arc<NmpReceiptStream>, FfiGroupListActionError> {
         require_group_list_routing(self)?;
-        let receipt = nmp::nip29::remove_group_from_list(
+        let receipt = nmp_nip29::remove_group_from_list(
             &self.engine,
             &self.group_list_writes,
             group_id,
@@ -180,7 +178,7 @@ impl NmpEngine {
         relay: String,
     ) -> Result<Arc<NmpReceiptStream>, FfiGroupListActionError> {
         require_group_list_routing(self)?;
-        let receipt = nmp::nip29::add_relay_in_use(
+        let receipt = nmp_nip29::add_relay_in_use(
             &self.engine,
             &self.group_list_writes,
             parse_action_relay(relay)?,
@@ -195,7 +193,7 @@ impl NmpEngine {
         relay: String,
     ) -> Result<Arc<NmpReceiptStream>, FfiGroupListActionError> {
         require_group_list_routing(self)?;
-        let receipt = nmp::nip29::remove_relay_in_use(
+        let receipt = nmp_nip29::remove_relay_in_use(
             &self.engine,
             &self.group_list_writes,
             parse_action_relay(relay)?,

@@ -58,9 +58,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use nmp::{
-    nip29, AccessContext, AcquisitionEvidence, Engine, EngineConfig, EventId, Filter, PublicKey,
+    AccessContext, AcquisitionEvidence, Engine, EngineConfig, EventId, Filter, PublicKey,
     RelayState, Row, RowDelta, SourceStatus, Subscription, WriteFact,
 };
+use nmp_nip29 as nip29;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
 
