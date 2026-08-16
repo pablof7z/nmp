@@ -203,6 +203,62 @@ owners, zero crates — none of the clusters has an independent dependency,
 consumer, or lifecycle, so crate-ing one would only convert `pub(super)`
 into permanent public API.
 
+### The field census — picking the next owner by lookup, not judgement
+
+Every `EngineCore` field, with its accesses counted per production file. The
+number that decides things is **concentration**: the share of a field's
+accesses landing in its top file. Regenerate it rather than trusting this
+snapshot — the point is the method, and the counts move:
+
+```zsh
+fields=$(awk '/^pub struct EngineCore \{/{f=1;next} f&&/^\}/{exit} f' \
+  crates/nmp-engine/src/core/mod.rs \
+  | grep -oE '^[[:space:]]+[a-z_][a-z0-9_]*:' | tr -d ' :' | sort -u)
+for f in ${(f)fields}; do
+  for file in $(find crates/nmp-engine/src -name '*.rs' ! -name '*test*' ! -path '*tests*'); do
+    n=$(grep -c "self\.$f\b" $file); [[ $n -gt 0 ]] && echo "$f $n $(basename $file)"
+  done
+done
+```
+
+**114 fields.** 55 sit at ≥70% concentration; the tail below ~50% is the
+shared context, and the split between those two groups is the whole finding.
+
+Read it three ways:
+
+1. **≥85% in one file, several fields moving together → owner candidate.**
+   `HistorySessions` (#1695) and `RequestAttempts` (#1693) both came out of
+   this band. So does live-wire ownership: ten fields at 71–91%, ~75 accesses
+   essentially all in `query.rs`, and — the number that actually settles it —
+   **exactly one genuinely foreign reader** (`observation.rs`, a membership
+   predicate). The other apparently-foreign reads are the bench census
+   calling `.len()`, which is not a reader so much as a boundary violation
+   the owner is supposed to fix.
+2. **100% in one file but standing alone → not a cluster, leave it.** 22
+   fields are single-file, and most are counters (`history_rows_examined`,
+   `router_compiles`, `diagnostic_snapshots_built`). A lone field is already
+   as owned as it can get; wrapping it buys nothing.
+3. **Below ~50%, or high concentration with a foreign WRITER → shared
+   context.** `store` (49%, six files), `clock` (49%, seven), `router` (48%),
+   `resolver` (35%), `attempts` (40%), `connected_relays` (42%),
+   `live_wire_requests` (42%), `pending_request_evidence` (30%). These are
+   why the reducer stays one crate and one struct: no line drawn anywhere
+   puts them on one side.
+
+Two traps this table makes cheap to avoid, both of which cost real time
+before it existed:
+
+- **An adjacent name is not an adjacent field.** `live_wire_requests` reads
+  like part of live-wire ownership and is not — 42%, spread across three
+  files. `author_outbox_wire_owner_counts` reads like it too, and is a bridge
+  into the write plane's `author_outbox_route_needs`. Both stay out.
+- **High concentration is necessary, not sufficient.** `SessionRegistry`'s
+  fields concentrate well (`auth_sessions` 96%, `slot_to_relay` 83%) and it
+  still failed: 12 foreign functions, 9 AUTH types in the would-be
+  signatures, and `connected_relays` at 42% sitting in the middle of the
+  cluster. Concentration finds candidates; foreign *callers* and foreign
+  *writers* reject them.
+
 **Smaller boundaries are not the same as more crates.** Rust module privacy
 gives the identical compiler enforcement — `E0616` instead of an unresolved
 import — without freezing a churning internal surface as public API. So the
