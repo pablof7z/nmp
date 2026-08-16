@@ -88,7 +88,6 @@ mod ingest_attribution;
 mod negentropy;
 mod publish_queue;
 mod relay_information_service;
-mod replaceable_materializer;
 mod runtime;
 mod session;
 
@@ -215,11 +214,11 @@ pub use engine::{
     AuthPolicyRegistration, CancelWriteError, CancelWriteOutcome, Engine, SignEventRequest,
 };
 pub use error::EngineError;
-pub use observation::ObservationEvidence;
-pub use replaceable_materializer::{
+pub use nmp_grammar::{
     RegisteredReplaceableMaterializer, ReplaceableMaterializer, ReplaceableMaterializerOperation,
     ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec,
 };
+pub use observation::ObservationEvidence;
 pub use session::{
     SessionAccount, SessionMutationError, SessionPayload, SessionProvider, SessionRestoreError,
     SessionSnapshot, SigningAvailability,
