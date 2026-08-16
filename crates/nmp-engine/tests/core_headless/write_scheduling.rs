@@ -1,5 +1,16 @@
 use super::*;
 
+/// The replay page bound these tests hand the reducer.
+///
+/// It mirrors the runtime's `FACT_CHANNEL_CAPACITY`, which is the value
+/// production passes, but it is duplicated here deliberately rather than
+/// imported: this crate is BELOW the runtime and a reducer test that names
+/// `nmp-runtime` is an upward dependency. Nothing is lost by duplicating it,
+/// because the reducer's contract is "no page exceeds the bound you handed
+/// me" — the specific number is the caller's business, and these tests are
+/// the caller. If the runtime's constant changes, this one does not have to.
+const REPLAY_PAGE_CAPACITY: usize = 32;
+
 // ---- publish queue scheduling -------------------------------------------
 
 /// Test 4 analog: `enqueue_is_not_converged` (ledger #9). Acceptance is
@@ -914,10 +925,10 @@ fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
     let mut cursor = None;
     let mut replayed = Vec::new();
     loop {
-        let page = core.reattach_receipt_page(receipt, cursor, nmp_runtime::FACT_CHANNEL_CAPACITY);
+        let page = core.reattach_receipt_page(receipt, cursor, REPLAY_PAGE_CAPACITY);
         assert!(page.outcome.is_attached());
         assert!(
-            page.facts.len() <= nmp_runtime::FACT_CHANNEL_CAPACITY,
+            page.facts.len() <= REPLAY_PAGE_CAPACITY,
             "each durable replay page obeys the same finite delivery bound"
         );
         replayed.extend(page.facts);
@@ -927,7 +938,7 @@ fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
         }
     }
     assert!(
-        replayed.len() > nmp_runtime::FACT_CHANNEL_CAPACITY,
+        replayed.len() > REPLAY_PAGE_CAPACITY,
         "the cursor traverses more history than one in-memory page can retain"
     );
     assert!(replayed.iter().any(|status| matches!(
@@ -998,14 +1009,13 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
 
     let mut cursor = None;
     let mut replayed = Vec::new();
-    let first_page =
-        core.reattach_receipt_page(receipt, cursor, nmp_runtime::FACT_CHANNEL_CAPACITY);
+    let first_page = core.reattach_receipt_page(receipt, cursor, REPLAY_PAGE_CAPACITY);
     assert!(first_page.outcome.is_attached());
     cursor = first_page.next_cursor;
     replayed.extend(first_page.facts);
     assert_eq!(
         replayed.len(),
-        nmp_runtime::FACT_CHANNEL_CAPACITY,
+        REPLAY_PAGE_CAPACITY,
         "the first page must cross into the later relay's durable history"
     );
 
@@ -1018,11 +1028,7 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
     ));
 
     while let Some(page_cursor) = cursor {
-        let page = core.reattach_receipt_page(
-            receipt,
-            Some(page_cursor),
-            nmp_runtime::FACT_CHANNEL_CAPACITY,
-        );
+        let page = core.reattach_receipt_page(receipt, Some(page_cursor), REPLAY_PAGE_CAPACITY);
         assert!(page.outcome.is_attached());
         replayed.extend(page.facts);
         cursor = page.next_cursor;

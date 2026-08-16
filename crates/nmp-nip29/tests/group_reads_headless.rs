@@ -1,4 +1,123 @@
-use super::*;
+//! #1123's read half: NIP-29 reads stay pinned to their group hosts.
+//!
+//! Headless and zero-socket — every "relay" interaction is a scripted
+//! `EngineMsg` fed straight to `EngineCore::handle`.
+//!
+//! It lives HERE rather than in `nmp-engine`'s headless corpus (#1727 moved
+//! the other fourteen files of that corpus down into the reducer's own
+//! crate) for one reason, and it is the reason this file's header always
+//! gave: every `Demand` below is minted by the SAME pure
+//! `nmp_nip29::group_demand_at`/`group_records_at` constructors this crate's
+//! door calls, so that nothing here is a parallel or simplified
+//! re-implementation of the door. `nmp-nip29` sits ABOVE `nmp-engine`, so a
+//! test that insists on the real constructors cannot live below them. That
+//! makes this a capability falsifier which happens to drive the reducer, not
+//! a reducer falsifier — and this crate already dev-depends on `nmp-engine`
+//! precisely so its tests can do that.
+//!
+//! The fixture helpers below are copied from that corpus's `support.rs`
+//! rather than shared. Eight short functions is a smaller price than either
+//! a cross-package `#[path]` include or a dev-dependency running from the
+//! reducer UP to a capability crate.
+//!
+//! Provenance is not something these tests have to dig for: which relay
+//! served a row is a field on the row itself (`Row::sources`/`RowDelta`),
+//! and which relay a query currently trusts, and how, is a field on
+//! `AcquisitionEvidence` — both already flow through the ordinary
+//! `EmitRows`/subscription path.
+
+use std::collections::BTreeSet;
+
+use nmp_engine::core::{
+    AcquisitionEvidence, Effect, EngineCore, EngineMsg, ObservationId, RowDelta, SourceStatus,
+};
+use nmp_grammar::{ConcreteFilter, Filter, LiveQuery, RelaySessionKey};
+use nmp_router::{SubId, WireOp};
+use nmp_router_testkit::FixtureRoutingFacts;
+use nmp_store::RedbStore;
+use nmp_transport::{RelayFrame, RelayHandle};
+use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
+
+/// The headless corpus's admission shorthand, copied for the same reason the
+/// helpers below are: these scenarios model a completed admission boundary,
+/// not the runtime timer itself.
+trait HeadlessAdmission {
+    fn handle_and_flush(&mut self, message: EngineMsg) -> Vec<Effect>;
+}
+
+impl HeadlessAdmission for EngineCore {
+    fn handle_and_flush(&mut self, message: EngineMsg) -> Vec<Effect> {
+        let mut effects = self.handle(message);
+        effects.extend(self.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
+        effects
+    }
+}
+
+fn new_core(dir: FixtureRoutingFacts) -> EngineCore {
+    EngineCore::new_with_fixture_routing_facts(
+        RedbStore::temporary().expect("temporary Redb store"),
+        dir,
+        10,
+    )
+}
+
+fn activate(core: &mut EngineCore, keys: &Keys) {
+    core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+}
+
+fn req_for<'a>(effects: &'a [Effect], relay: &RelayUrl) -> (&'a SubId, &'a ConcreteFilter) {
+    for effect in effects {
+        if let Effect::Wire(delta) = effect {
+            for (r, ops) in &delta.ops {
+                if &r.relay == relay {
+                    for op in ops {
+                        if let WireOp::Req(sub_id, filter) = op {
+                            return (sub_id, filter);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    panic!("expected a WireOp::Req for {relay:?} in {effects:?}");
+}
+
+fn wire_sub_string(sub_id: &SubId) -> String {
+    format!("{}", sub_id.1)
+}
+
+fn public_session(relay: &RelayUrl) -> RelaySessionKey {
+    RelaySessionKey::public(relay.clone())
+}
+
+fn subscribed_handle(effects: &[Effect]) -> ObservationId {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(id, ..) => Some(*id),
+            _ => None,
+        })
+        .expect("subscribe emits its initial row snapshot")
+}
+
+fn connect(core: &mut EngineCore, slot: u32, url: &RelayUrl) -> Vec<Effect> {
+    let mut effects = core.handle(EngineMsg::RelayConnected(
+        RelayHandle {
+            slot,
+            generation: 1,
+        },
+        public_session(url),
+    ));
+    // Most legacy headless tests model a relay with no NIP-11 support list.
+    // Resolve that one-shot explicitly now that connection and HTTP
+    // capability acquisition are separate reducer inputs.
+    effects.extend(core.handle(EngineMsg::RelayInformationResolved(url.clone(), None)));
+    effects
+}
+
+fn event_frame(sub: &str, event: nostr::Event) -> RelayFrame {
+    RelayFrame::from(RelayMessage::event(SubscriptionId::new(sub), event))
+}
 
 // ---- #1123: NIP-29 reads stay pinned to their group hosts --------------
 //
