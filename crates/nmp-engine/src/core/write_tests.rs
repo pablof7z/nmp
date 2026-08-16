@@ -1493,6 +1493,176 @@ mod semantic_successor_tests {
         }));
     }
 
+    /// #1562: a replaceable-operation successor that rewrites an existing
+    /// member's `pending` row in place must not leave that member's OLD
+    /// generation naming it in `receipts_by_lane_relay`.
+    ///
+    /// Both successor-rewrite sites (`write.rs`'s
+    /// `install_materialized_replaceable_successor` and
+    /// `write/replaceable_operation.rs`'s member-rewrite branch) used to
+    /// assign `LaneWorkerProjection::default()` to `pending.lane_projection`
+    /// directly and never told this index. The owner's receipt would then
+    /// keep naming the relay its now-superseded generation had a persisted
+    /// lane on until the next full boot recovery -- a permanent phantom
+    /// wake candidate for a generation that no longer exists.
+    #[test]
+    fn a_successor_rewrite_releases_the_owners_old_lane_relay_index_entry() {
+        let author = Keys::generate();
+        let alice = Keys::generate().public_key();
+        let bob = Keys::generate().public_key();
+        let relay = RelayUrl::parse("wss://successor-leak-source.example").unwrap();
+        let destination_a = RelayUrl::parse("wss://successor-leak-a.example").unwrap();
+        let destination_b = RelayUrl::parse("wss://successor-leak-b.example").unwrap();
+        let base = source(&author, 1, "base", &[]);
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
+        store
+            .insert(
+                base.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(1)),
+            )
+            .unwrap();
+        let mut core = EngineCore::new(store, 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(
+            nmp_grammar::Filter {
+                kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
+                authors: Some(nmp_grammar::Binding::Literal(BTreeSet::from([author
+                    .public_key()
+                    .to_hex()]))),
+                ..nmp_grammar::Filter::default()
+            },
+        )));
+        core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
+            program: [9; 16],
+            format: [9; 16],
+            materializer: Arc::new(AddPeople),
+        });
+
+        let original = UnsignedEvent::from(base.clone());
+        let mut current = original.clone();
+        let mut receipts = Vec::new();
+        let mut e1_sign_request = None;
+        for (person, destination) in [(alice, destination_a.clone()), (bob, destination_b.clone())]
+        {
+            let payload = nmp_grammar::ReplaceableOperation::from_registered_parts(
+                [9; 16],
+                [9; 16],
+                original.clone(),
+                current.clone(),
+                person.to_bytes().to_vec(),
+            )
+            .unwrap();
+            let effects = core.handle(EngineMsg::Publish(WriteIntent {
+                payload: WritePayload::ReplaceableOperation(payload),
+                routing: WriteRouting::Explicit(vec![destination]),
+                identity: Identity::Active,
+                correlation: None,
+            }));
+            let (receipt, event_id) = effects
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::WriteAccepted(receipt, event_id) => Some((*receipt, *event_id)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("contribution was refused: {effects:#?}"));
+            receipts.push(receipt);
+            e1_sign_request = effects.iter().find_map(|effect| match effect {
+                Effect::RequestSign(receipt, generation, unsigned) => {
+                    Some((*receipt, *generation, unsigned.clone()))
+                }
+                _ => None,
+            });
+            current = UnsignedEvent::from(
+                core.store
+                    .query(&nostr::Filter::new().id(event_id))
+                    .unwrap()
+                    .pop()
+                    .unwrap()
+                    .event,
+            );
+        }
+        // #1562, the second index: publishing bob's contribution rewrote
+        // alice's already-pending row onto the new generation through
+        // `write/replaceable_operation.rs`'s member-rewrite branch. That
+        // branch retires the member's old frozen bytes, and it used to drop
+        // the receipt from `event_to_receipts` WITHOUT pruning the emptied
+        // set -- while the sibling rewrite site in `write.rs` pruned. One
+        // rewrite, two spellings, and the divergent one left an entry
+        // asserting that bytes no receipt owns are still owned, once per
+        // rewrite, until the next boot recovery.
+        assert!(
+            !core.event_to_receipts.is_empty(),
+            "precondition: the scenario must index some frozen bytes, or the emptiness \
+             assertion below is vacuous"
+        );
+        assert!(
+            core.event_to_receipts
+                .values()
+                .all(|receipts| !receipts.is_empty()),
+            "a retired generation's event id survives in event_to_receipts owned by no \
+             receipt -- the member rewrite released the receipt without pruning the \
+             entry: {:?}",
+            core.event_to_receipts
+        );
+
+        // Only the generation's first member -- the physical delivery
+        // owner -- ever carries routes and lanes; the request for E1's one
+        // signature names exactly who that is.
+        let owner_receipt = receipts[0];
+        let (e1_owner, e1_generation, e1_unsigned) =
+            e1_sign_request.expect("current E1 requests one signature");
+        assert_eq!(
+            e1_owner, owner_receipt,
+            "the first contributor is expected to own E1's signature and lanes"
+        );
+        let e1_signed = e1_unsigned.sign_with_keys(&author).unwrap();
+        core.handle(EngineMsg::SignerCompleted(
+            e1_owner,
+            e1_generation,
+            Ok(e1_signed),
+        ));
+
+        // Precondition, asserted before the fact that matters: signing E1
+        // resolved its explicit route and bootstrapped its lane, which is
+        // what populates `receipts_by_lane_relay` -- independent of any
+        // relay connection. Without this the test below could pass because
+        // the scenario never indexed the receipt in the first place, not
+        // because the rewrite released it.
+        assert!(
+            core.receipts_by_lane_relay
+                .get(&destination_a)
+                .is_some_and(|receipts| receipts.contains(&owner_receipt)),
+            "setup did not persist E1's lane for the owner's receipt on {destination_a}: {:?}",
+            core.receipts_by_lane_relay
+        );
+
+        // A newer relay-observed source triggers a successor materialization
+        // that rewrites the owner's `pending` row onto a new generation --
+        // through `install_materialized_replaceable_successor`, since the
+        // owner already exists in `pending`/`intent_receipts`.
+        let newer = source(&author, 5, "successor-leak-newer", &[]);
+        let mut effects = Vec::new();
+        core.ingest_relay_events(
+            vec![(
+                newer.clone(),
+                RelayObserved::new(relay.clone(), Timestamp::from(5)),
+            )],
+            &mut effects,
+        );
+        // The postcondition that matters: the owner's OLD generation is
+        // superseded and its lane_projection was reset, so its relay must
+        // not still be naming this receipt.
+        assert!(
+            !core
+                .receipts_by_lane_relay
+                .get(&destination_a)
+                .is_some_and(|receipts| receipts.contains(&owner_receipt)),
+            "the owner's receipt is still indexed under {destination_a} after its successor \
+             rewrite -- receipts_by_lane_relay leaked the superseded generation's lane: {:?}",
+            core.receipts_by_lane_relay
+        );
+    }
+
     #[test]
     fn stale_predecessor_delivery_callbacks_cannot_touch_the_current_successor() {
         let author = Keys::generate();
