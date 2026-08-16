@@ -23,6 +23,16 @@ struct Account: Identifiable {
     let sessionAccount: NMPSessionAccount
 }
 
+/// One write whose correlation token survived a restart, paired back with a
+/// live receipt stream via `reattachReceipt(correlation:)`. `AppModel` only
+/// recovers the handle at launch; `ComposeView` is the one place that
+/// iterates `receipt.status`, so a fresh publish and a reattached one are
+/// observed by the exact same code.
+struct ReattachedWrite {
+    let correlation: String
+    let receipt: Receipt
+}
+
 @Observable
 final class AppModel {
     /// Constructed ONCE, here, on the app's own model -- never re-created,
@@ -37,6 +47,11 @@ final class AppModel {
     private(set) var currentPubkey: Data?
     var kinds: [UInt16] = [1]
     var lastError: String?
+
+    /// Writes recovered from a persisted correlation on THIS launch.
+    /// `ComposeView` drains this once (`takeReattachedWrites()`) and starts
+    /// observing each the same way it observes a freshly published write.
+    private(set) var reattachedWrites: [ReattachedWrite] = []
 
     init() throws {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
@@ -63,6 +78,36 @@ final class AppModel {
                 currentPubkey = current.publicKey.bytes
             }
         }
+
+        // Crash-during-publication recovery (C9): a write whose correlation
+        // made it to disk before the app could durably note its receipt id
+        // is picked back up here, by that token, not by re-scanning anything.
+        for correlation in Self.loadPendingCorrelations() {
+            do {
+                switch try engine.reattachReceipt(correlation: correlation) {
+                case .attached(let receipt):
+                    reattachedWrites.append(ReattachedWrite(correlation: correlation, receipt: receipt))
+                case .notFound:
+                    // Nothing was ever durably accepted under this token --
+                    // there is nothing to recover, so stop tracking it.
+                    Self.forgetPendingCorrelation(correlation)
+                case .retainedButUnreadable:
+                    // Durable evidence exists but NMP could not read it back.
+                    // NOT the same as "gone" -- surface it, do not drop it
+                    // silently or invent a resolved state for it.
+                    lastError = "Write \(correlation) has retained but unreadable evidence."
+                }
+            } catch {
+                lastError = "\(error)"
+            }
+        }
+    }
+
+    /// One-shot drain so a `ComposeView` re-appearing (e.g. tab switch) never
+    /// re-observes the same reattached stream twice.
+    func takeReattachedWrites() -> [ReattachedWrite] {
+        defer { reattachedWrites = [] }
+        return reattachedWrites
     }
 
     /// Generate a local-key account inside NMP and select it atomically.
@@ -177,5 +222,42 @@ final class AppModel {
         attributes[kSecValueData as String] = payload.bytes
         attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         SecItemAdd(attributes as CFDictionary, nil)
+    }
+
+    // MARK: - Pending-write correlations
+    //
+    // A correlation token is an app-generated opaque label, not a secret, so
+    // `UserDefaults` (unlike the session payload above) is the ordinary place
+    // for it. `ComposeView` calls `rememberPendingWrite` BEFORE calling
+    // `engine.publish`, so a crash inside that call itself still leaves a
+    // token on disk for `reattachReceipt(correlation:)` to find on relaunch.
+
+    private static let pendingCorrelationsKey = "canary.pendingWriteCorrelations"
+
+    private static func loadPendingCorrelations() -> [String] {
+        UserDefaults.standard.stringArray(forKey: pendingCorrelationsKey) ?? []
+    }
+
+    private static func savePendingCorrelations(_ correlations: [String]) {
+        UserDefaults.standard.set(correlations, forKey: pendingCorrelationsKey)
+    }
+
+    private static func forgetPendingCorrelation(_ correlation: String) {
+        var pending = loadPendingCorrelations()
+        pending.removeAll { $0 == correlation }
+        savePendingCorrelations(pending)
+    }
+
+    func rememberPendingWrite(correlation: String) {
+        var pending = Self.loadPendingCorrelations()
+        guard !pending.contains(correlation) else { return }
+        pending.append(correlation)
+        Self.savePendingCorrelations(pending)
+    }
+
+    /// The write reached a terminal outcome, or was proven never accepted;
+    /// stop tracking its correlation.
+    func forgetPendingWrite(correlation: String) {
+        Self.forgetPendingCorrelation(correlation)
     }
 }
