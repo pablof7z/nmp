@@ -8,6 +8,7 @@ use nmp_store::RedbStore;
 use nmp_transport::{Pool, PoolConfig, PoolEvent};
 use nostr::RelayUrl;
 
+use nmp_engine::core::AuthorRouteProvider;
 use nmp_nip11::RelayInformationService;
 
 use crate::session::RestoredSession;
@@ -164,8 +165,6 @@ pub struct RuntimeConfig {
     /// The publish attempt ceiling (#1031) threaded from
     /// [`EngineConfig::max_publish_attempts`](crate::EngineConfig).
     pub max_publish_attempts: u64,
-    #[cfg(feature = "nip65")]
-    pub nip65_sources: Vec<RelayUrl>,
     /// Operator-configured relays the router reads as neutral routing facts,
     /// already parsed by the facade.
     ///
@@ -181,8 +180,6 @@ impl Default for RuntimeConfig {
         Self {
             max_auth_capabilities: DEFAULT_MAX_AUTH_CAPABILITIES,
             max_publish_attempts: nmp_engine::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
-            #[cfg(feature = "nip65")]
-            nip65_sources: Vec::new(),
             app_relays: Vec::new(),
             fallback_relays: Vec::new(),
         }
@@ -210,6 +207,7 @@ impl EngineThread {
             pool_config,
             RuntimeConfig::default(),
             Vec::new(),
+            None,
         )
     }
 
@@ -233,6 +231,7 @@ impl EngineThread {
             RuntimeConfig::default(),
             RestoredSession::empty(),
             Vec::new(),
+            None,
         )
     }
 
@@ -242,6 +241,7 @@ impl EngineThread {
         pool_config: PoolConfig,
         runtime_config: RuntimeConfig,
         capabilities: Vec<nmp_grammar::ReplaceableMaterializerSpec>,
+        route_provider: Option<Box<dyn AuthorRouteProvider>>,
     ) -> Result<(Self, Handle), EngineThreadError> {
         Self::spawn_with_runtime_config_and_session(
             store,
@@ -250,12 +250,21 @@ impl EngineThread {
             runtime_config,
             RestoredSession::empty(),
             capabilities,
+            route_provider,
         )
     }
 
     /// The ordinary door. Routing facts are built here, inside the engine,
     /// from the operator relays the facade parsed — the facade never names
     /// `RoutingFactStore`.
+    ///
+    /// `route_provider` is the application's chosen author-route algorithm,
+    /// beside its chosen capabilities and fixed for this engine's life. It is
+    /// an `Option`, never a `Vec`: an author's routes are replaced whole, so
+    /// two providers would silently last-write-win with no merge rule anyone
+    /// could state. `None` discovers no routes at all — operator lanes and
+    /// explicit routes still carry everything they carry.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_with_runtime_config_and_session(
         store: RedbStore,
         cap: usize,
@@ -263,6 +272,7 @@ impl EngineThread {
         runtime_config: RuntimeConfig,
         initial_session: RestoredSession,
         capabilities: Vec<nmp_grammar::ReplaceableMaterializerSpec>,
+        route_provider: Option<Box<dyn AuthorRouteProvider>>,
     ) -> Result<(Self, Handle), EngineThreadError> {
         let routing_facts = nmp_engine::core::RoutingFactStore::new(
             runtime_config.app_relays.clone(),
@@ -276,12 +286,14 @@ impl EngineThread {
             runtime_config,
             initial_session,
             capabilities,
+            route_provider,
         )
     }
 
     /// The fixture door (#52 Q3). Takes the fixture crate's own public type
     /// and builds the engine's store from it here, for the same reason.
     #[cfg(feature = "unstable-mechanism")]
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_with_fixture_routing_facts_and_runtime_config(
         store: RedbStore,
         facts: nmp_router_testkit::FixtureRoutingFacts,
@@ -290,6 +302,7 @@ impl EngineThread {
         runtime_config: RuntimeConfig,
         initial_session: RestoredSession,
         capabilities: Vec<nmp_grammar::ReplaceableMaterializerSpec>,
+        route_provider: Option<Box<dyn AuthorRouteProvider>>,
     ) -> Result<(Self, Handle), EngineThreadError> {
         Self::spawn_with_facts(
             store,
@@ -299,9 +312,11 @@ impl EngineThread {
             runtime_config,
             initial_session,
             capabilities,
+            route_provider,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_with_facts(
         store: RedbStore,
         routing_facts: nmp_engine::core::RoutingFactStore,
@@ -310,6 +325,7 @@ impl EngineThread {
         runtime_config: RuntimeConfig,
         initial_session: RestoredSession,
         capabilities: Vec<nmp_grammar::ReplaceableMaterializerSpec>,
+        route_provider: Option<Box<dyn AuthorRouteProvider>>,
     ) -> Result<(Self, Handle), EngineThreadError> {
         let supplied: std::collections::HashSet<_> = capabilities
             .iter()
@@ -465,8 +481,7 @@ impl EngineThread {
                                 relay_information: engine_relay_information,
                                 max_auth_capabilities: runtime_config.max_auth_capabilities,
                                 max_publish_attempts: runtime_config.max_publish_attempts,
-                                #[cfg(feature = "nip65")]
-                                nip65_sources: runtime_config.nip65_sources,
+                                route_provider,
                             },
                             EngineWiring {
                                 clock: &engine_clock,

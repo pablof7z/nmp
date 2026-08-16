@@ -131,7 +131,6 @@ fn main() {
 
     let engine = Engine::new(EngineConfig {
         store_path: None,
-        indexer_relays: Vec::new(),
         app_relays: relays.clone(),
         fallback_relays: Vec::new(),
         max_relays: relays.len().max(1),

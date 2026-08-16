@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use cucumber::{given, then, when, World as _};
 use nmp::{Binding, Engine, EngineConfig, Filter, LiveQuery, Subscription};
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay, WireReq};
-use nostr::{EventBuilder, EventId, Keys, Timestamp};
+use nostr::{EventBuilder, EventId, Keys, RelayUrl, Timestamp};
 
 const WAIT: Duration = Duration::from_secs(10);
 const NOTE: &str = "hello from Alice over her discovered relay";
@@ -103,10 +103,14 @@ async fn cold_public_engine_observes_alices_notes(world: &mut AcceptanceWorld) {
     let alice_hex = world.alice().public_key().to_hex();
     let expected_note = world.expected_note.expect("the note is staged");
 
-    let engine = Engine::new(EngineConfig {
-        indexer_relays: vec![indexer_url],
-        ..EngineConfig::default()
-    })
+    let engine = Engine::new_with_capabilities_and_routing(
+        EngineConfig::default(),
+        Vec::new(),
+        Some(Box::new(nmp_outbox::Nip65Outbox::new([RelayUrl::parse(
+            &indexer_url,
+        )
+        .expect("the scripted indexer URL parses")]))),
+    )
     .expect("the public engine starts");
     let query = LiveQuery::from_filter(Filter {
         kinds: Some(BTreeSet::from([1])),

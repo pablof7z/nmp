@@ -51,6 +51,8 @@ members = [
     "crates/nmp-nip02",
     "crates/nmp-nip65",
     "crates/nmp-nip65-consumer-check",
+    # The NIP-65 outbox algorithm as an installable `AuthorRouteProvider`.
+    "crates/nmp-outbox",
     "crates/nmp-nip29",
     # NIP-C7 kind:9 chat schema owner (#838): pure draft construction and
     # `q`-tag replies, with no NIP-29 group or client notification policy.
@@ -125,6 +127,7 @@ default-members = [
     "crates/nmp-ffi",
     "crates/nmp-nip02",
     "crates/nmp-nip65",
+    "crates/nmp-outbox",
     "crates/nmp-nip29",
     "crates/nmp-nipc7",
     "crates/nmp-asset",
@@ -173,6 +176,7 @@ nmp-ffi = { path = "crates/nmp-ffi" }
 nmp-bdd = { path = "crates/nmp-bdd" }
 nmp-nip02 = { path = "crates/nmp-nip02" }
 nmp-nip65 = { path = "crates/nmp-nip65" }
+nmp-outbox = { path = "crates/nmp-outbox" }
 nmp-nip29 = { path = "crates/nmp-nip29" }
 nmp-nipc7 = { path = "crates/nmp-nipc7" }
 nmp-asset = { path = "crates/nmp-asset" }

@@ -128,12 +128,19 @@ fn core_native_config_cannot_assemble_an_author_route_provider() {
         fallback_relays: vec!["wss://fallback.example".to_string()],
         ..NmpEngineConfig::default()
     };
-    let projected = nmp::EngineConfig::from(config);
-
+    // A config that names no routing algorithm installs none. The claim used
+    // to be "the projected config's indexer list is empty"; the projected
+    // config has no routing field at all now, so the claim is made where the
+    // decision is: the provider this artifact would install.
+    #[cfg(feature = "nip65")]
     assert!(
-        projected.indexer_relays.is_empty(),
+        super::route_provider(&config)
+            .expect("no outbox routing selected is not an error")
+            .is_none(),
         "core native has no discovery-source setting; optional providers own their sources"
     );
+    let projected = nmp::EngineConfig::from(config);
+
     assert_eq!(projected.app_relays, ["wss://app.example"]);
     assert_eq!(projected.fallback_relays, ["wss://fallback.example"]);
 }
@@ -162,8 +169,17 @@ fn selected_outbox_routing_projects_only_the_app_owned_indexers() {
         }),
         ..NmpEngineConfig::default()
     };
+    assert!(
+        super::route_provider(&config)
+            .expect("a well-formed indexer set builds a provider")
+            .is_some(),
+        "the selected indexers belong to the provider that was constructed from them"
+    );
     let projected = nmp::EngineConfig::from(config.clone());
-    assert_eq!(projected.indexer_relays, ["wss://indexer.example"]);
+    assert!(
+        projected.app_relays.is_empty() && projected.fallback_relays.is_empty(),
+        "an indexer must not become a generic operator lane"
+    );
 
     let engine = NmpEngine::new(config, None).expect("a nonempty app-owned indexer set is valid");
     engine.shutdown();

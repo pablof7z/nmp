@@ -154,13 +154,6 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
     fn from(config: NmpEngineConfig) -> Self {
         nmp::EngineConfig {
             store_path: config.store_path,
-            #[cfg(feature = "nip65")]
-            indexer_relays: config
-                .outbox_routing
-                .map(|outbox_routing| outbox_routing.indexers)
-                .unwrap_or_default(),
-            #[cfg(not(feature = "nip65"))]
-            indexer_relays: Vec::new(),
             app_relays: config.app_relays,
             fallback_relays: config.fallback_relays,
             max_publish_attempts: nmp::DEFAULT_MAX_PUBLISH_ATTEMPTS,
@@ -205,6 +198,27 @@ impl AutomaticRoutingAssembly {
             Some(_) => Ok(Self::Nip65),
         }
     }
+}
+
+/// Build the author-route provider this artifact installs. The indexer
+/// relays are app-owned strings, so they are parsed HERE -- `nmp` has no
+/// routing configuration to validate any more, and the crate whose concept
+/// an indexer is takes them as its constructor argument.
+#[cfg(feature = "nip65")]
+fn route_provider(
+    config: &NmpEngineConfig,
+) -> Result<Option<Box<dyn nmp::AuthorRouteProvider>>, FfiError> {
+    let Some(outbox_routing) = &config.outbox_routing else {
+        return Ok(None);
+    };
+    let indexers = outbox_routing
+        .indexers
+        .iter()
+        .map(|url| {
+            nmp::RelayUrl::parse(url).map_err(|_| FfiError::InvalidRelayUrl { got: url.clone() })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(Box::new(nmp_outbox::Nip65Outbox::new(indexers))))
 }
 
 #[uniffi::export]
@@ -278,6 +292,10 @@ impl NmpEngine {
     ) -> Result<Arc<Self>, FfiError> {
         #[cfg(feature = "nip65")]
         let automatic_routing = AutomaticRoutingAssembly::from_config(&config)?;
+        #[cfg(feature = "nip65")]
+        let route_provider = route_provider(&config)?;
+        #[cfg(not(feature = "nip65"))]
+        let route_provider: Option<Box<dyn nmp::AuthorRouteProvider>> = None;
         #[allow(unused_mut)]
         let mut capabilities = vec![
             #[cfg(feature = "nip02")]
@@ -286,13 +304,18 @@ impl NmpEngine {
             nmp_nip29::group_list_capability(),
         ];
         let engine = Arc::new(match session_payload {
-            Some(payload) => nmp::Engine::new_with_session_and_capabilities(
+            Some(payload) => nmp::Engine::new_with_session_capabilities_and_routing(
                 config.into(),
                 payload.payload(),
                 capabilities,
+                route_provider,
             )
             .map_err(FfiError::from)?,
-            None => nmp::Engine::new_with_capabilities(config.into(), capabilities)?,
+            None => nmp::Engine::new_with_capabilities_and_routing(
+                config.into(),
+                capabilities,
+                route_provider,
+            )?,
         });
         #[cfg(feature = "nip02")]
         let follow_writes = nmp_nip02::follow_writes();

@@ -872,13 +872,15 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
 
     let spec = ReplaceableMaterializerSpec::new([16; 16], [17; 16], AddPeople);
     let materializer = spec.handle();
-    let engine = Engine::new_with_capabilities(
+    let engine = Engine::new_with_capabilities_and_routing(
         EngineConfig {
-            indexer_relays: vec![indexer.url.to_string()],
             app_relays: vec![relay_a.url.to_string()],
             ..EngineConfig::default()
         },
         vec![spec],
+        Some(Box::new(nmp_outbox::Nip65Outbox::new([indexer
+            .url
+            .clone()]))),
     )
     .expect("engine opens with an app relay and one NIP-65 indexer");
     engine

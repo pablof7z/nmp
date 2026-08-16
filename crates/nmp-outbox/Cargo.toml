@@ -1,0 +1,23 @@
+[package]
+name = "nmp-outbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The outbox model, learned via NIP-65: one implementation of
+# `nmp_engine::core::AuthorRouteProvider`, and the unit an application names
+# to choose THIS routing algorithm. It holds no privilege the trait does not
+# give every other implementor — a competing algorithm is a crate exactly
+# like this one, and nothing in `nmp`, `nmp-engine` or `nmp-runtime` names
+# this crate.
+[dependencies]
+nostr.workspace = true
+nmp-grammar.workspace = true
+nmp-engine.workspace = true
+nmp-router.workspace = true
+# The kind:10002 vocabulary: winner selection, `r`-tag parsing, settlement.
+# This crate is where that vocabulary meets the engine's neutral seam.
+nmp-nip65.workspace = true
+
+[dev-dependencies]

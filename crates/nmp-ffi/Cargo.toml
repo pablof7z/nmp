@@ -35,7 +35,11 @@ nip25 = ["dep:nmp-nip25"]
 # #1707 step 4: nip29 no longer forwards into `nmp/nip29` -- `nmp-nip29`
 # owns its own door now, same shape as `nip02` above.
 nip29 = ["dep:nmp-nip29", "nip65"]
-nip65 = ["nmp/nip65"]
+# The NIP-65 outbox algorithm, compiled in as this artifact's author-route
+# provider. `nmp` itself has no routing feature and names no algorithm: the
+# provider is a constructor argument, so selecting a different one here would
+# be a different crate on this line and nothing else.
+nip65 = ["dep:nmp-outbox"]
 nipc7 = ["dep:nmp-nipc7"]
 asset = ["dep:nmp-asset"]
 blossom = ["dep:nmp-blossom", "asset"]
@@ -79,6 +83,8 @@ nmp-nip02 = { workspace = true, optional = true }
 # #1707 step 4: same reason, now that NIP-29's Group/group-list-write door
 # left `nmp` too.
 nmp-nip29 = { workspace = true, optional = true }
+# The author-route provider this artifact installs when `nip65` is selected.
+nmp-outbox = { workspace = true, optional = true }
 # #1707: same reason, for the media composition seam.
 nmp-media = { workspace = true, optional = true }
 # #1707: these eight used to be pure re-export doors in `nmp` (no engine

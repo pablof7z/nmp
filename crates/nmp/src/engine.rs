@@ -50,13 +50,11 @@ use nmp_store::{RedbStore, RedbStoreOpenError, RedbStoreResetError};
 use nmp_transport::PoolConfig;
 #[cfg(test)]
 use nostr::EventId;
-#[cfg(any(test, all(feature = "unstable-mechanism", feature = "nip65")))]
+#[cfg(test)]
 use nostr::RelayUrl;
 use nostr::{Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use crate::auth::{AuthPolicy, EngineAuthPolicyAdapter};
-#[cfg(feature = "nip65")]
-use crate::config::build_nip65_sources;
 use crate::config::{build_routing_fact_relays, EngineConfig};
 
 use crate::error::EngineError;
@@ -178,17 +176,44 @@ impl Engine {
         config: EngineConfig,
         capabilities: Vec<crate::ReplaceableMaterializerSpec>,
     ) -> Result<Self, EngineError> {
+        Self::new_with_capabilities_and_routing(config, capabilities, None)
+    }
+
+    /// Construct an engine that discovers author routes with the algorithm
+    /// the application chose.
+    ///
+    /// `route_provider` is an [`AuthorRouteProvider`] implementation, exactly
+    /// like the capability vec beside it: NMP compiles in no algorithm of its
+    /// own and installs no default. `nmp_outbox::Nip65Outbox::new(indexers)`
+    /// is the NIP-65 outbox model this workspace ships; a different outbox
+    /// algorithm is a different crate, and this facade names neither.
+    ///
+    /// `None` discovers nothing: every author stays `Unknown`, operator lanes
+    /// and explicit routes carry everything they carry, and an `Auto` write
+    /// whose author is unknown parks on knowledge rather than failing.
+    ///
+    /// The choice is fixed for this engine's life. There is deliberately no
+    /// way to install, replace, or remove a provider on a running engine --
+    /// "swap algorithms" is spelled: shut this engine down and construct
+    /// another one.
+    pub fn new_with_capabilities_and_routing(
+        config: EngineConfig,
+        capabilities: Vec<crate::ReplaceableMaterializerSpec>,
+        route_provider: Option<Box<dyn crate::AuthorRouteProvider>>,
+    ) -> Result<Self, EngineError> {
         Self::new_with_initial_session(
             config,
             nmp_runtime::session::RestoredSession::empty(),
             capabilities,
+            route_provider,
         )
     }
 
-    fn new_with_initial_session(
+    pub(crate) fn new_with_initial_session(
         config: EngineConfig,
         initial_session: nmp_runtime::session::RestoredSession,
         capabilities: Vec<crate::ReplaceableMaterializerSpec>,
+        route_provider: Option<Box<dyn crate::AuthorRouteProvider>>,
     ) -> Result<Self, EngineError> {
         let (app_relays, fallback_relays) = build_routing_fact_relays(&config)?;
         // #1624: capability identity is (program, format). A second spec for
@@ -218,8 +243,6 @@ impl Engine {
         let runtime_config = RuntimeConfig {
             max_auth_capabilities: config.max_auth_capabilities,
             max_publish_attempts: config.max_publish_attempts,
-            #[cfg(feature = "nip65")]
-            nip65_sources: build_nip65_sources(&config)?,
             app_relays,
             fallback_relays,
         };
@@ -271,6 +294,7 @@ impl Engine {
                     runtime_config,
                     initial_session,
                     capabilities,
+                    route_provider,
                 )
                 .map_err(EngineError::from_start_error)?
             }
@@ -286,6 +310,7 @@ impl Engine {
                     runtime_config,
                     initial_session,
                     capabilities,
+                    route_provider,
                 )
                 .map_err(EngineError::from_start_error)?
             }
@@ -349,35 +374,29 @@ impl Engine {
         })
     }
 
-    /// Feature-on scripted-harness variant that also supplies the exact
-    /// operator sources owned by the concrete NIP-65 assembly.
+    /// Scripted-harness variant that also installs an author-route provider.
     ///
     /// This remains a static-fixture/test door: applications use
-    /// [`Self::new`] and [`EngineConfig`].
-    #[cfg(all(feature = "unstable-mechanism", feature = "nip65"))]
+    /// [`Self::new_with_capabilities_and_routing`] and [`EngineConfig`].
+    #[cfg(feature = "unstable-mechanism")]
     #[doc(hidden)]
-    pub fn from_parts_with_fixture_routing_facts_and_nip65_sources(
+    pub fn from_parts_with_fixture_routing_facts_and_route_provider(
         store: RedbStore,
         facts: nmp_router_testkit::FixtureRoutingFacts,
-        nip65_sources: Vec<RelayUrl>,
+        route_provider: Option<Box<dyn crate::AuthorRouteProvider>>,
         cap: usize,
         pool_config: PoolConfig,
     ) -> Result<Self, EngineError> {
-        let runtime_config = RuntimeConfig {
-            max_auth_capabilities: nmp_runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
-            max_publish_attempts: nmp_engine::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
-            nip65_sources,
-            ..RuntimeConfig::default()
-        };
         let (engine_thread, handle) =
             EngineThread::spawn_with_fixture_routing_facts_and_runtime_config(
                 store,
                 facts,
                 cap,
                 pool_config,
-                runtime_config,
+                RuntimeConfig::default(),
                 nmp_runtime::session::RestoredSession::empty(),
                 Vec::new(),
+                route_provider,
             )
             .map_err(EngineError::from_start_error)?;
         Ok(Self {

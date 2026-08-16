@@ -22,9 +22,6 @@ pub struct EngineConfig {
     /// has acquired, never `synced`/`authoritativeEmpty` (ledger #7 is
     /// still TARGET).
     pub store_path: Option<String>,
-    /// Exact operator sources handed to the optional NIP-65 coordinator.
-    /// Generic routing never reads or adds these relays.
-    pub indexer_relays: Vec<String>,
     /// Operator app relay set (`Lane::OperatorApp`). Default empty.
     pub app_relays: Vec<String>,
     /// Operator fallback relay set (`Lane::OperatorFallback`). Default empty.
@@ -65,7 +62,6 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             store_path: None,
-            indexer_relays: Vec::new(),
             app_relays: Vec::new(),
             fallback_relays: Vec::new(),
             max_relays: nmp_transport::DEFAULT_MAX_RELAYS,
@@ -84,12 +80,6 @@ fn parse_relay_url(url: &str) -> Result<RelayUrl, EngineError> {
 pub(crate) fn build_routing_fact_relays(
     config: &EngineConfig,
 ) -> Result<(Vec<RelayUrl>, Vec<RelayUrl>), EngineError> {
-    // Validate optional-component configuration even when that component is
-    // not compiled in. Feature selection must not turn malformed input into
-    // a silently accepted configuration.
-    for url in &config.indexer_relays {
-        parse_relay_url(url)?;
-    }
     let app_relays = config
         .app_relays
         .iter()
@@ -103,46 +93,32 @@ pub(crate) fn build_routing_fact_relays(
     Ok((app_relays, fallback_relays))
 }
 
-#[cfg(feature = "nip65")]
-pub(crate) fn build_nip65_sources(config: &EngineConfig) -> Result<Vec<RelayUrl>, EngineError> {
-    config
-        .indexer_relays
-        .iter()
-        .map(|url| parse_relay_url(url))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn indexer_relays_are_not_generic_routing_facts() {
-        let indexer = "wss://indexer.example";
+    fn operator_relays_are_the_only_relays_configuration_states() {
+        let app = "wss://app.example";
+        let fallback = "wss://fallback.example";
         let config = EngineConfig {
-            indexer_relays: vec![indexer.to_string()],
+            app_relays: vec![app.to_string()],
+            fallback_relays: vec![fallback.to_string()],
             ..EngineConfig::default()
         };
 
         let (app_relays, fallback_relays) =
-            build_routing_fact_relays(&config).expect("valid indexer config");
+            build_routing_fact_relays(&config).expect("valid operator config");
 
-        assert!(
-            app_relays.is_empty(),
-            "a NIP-65 source must not become an operator app/content lane"
-        );
-        assert!(
-            fallback_relays.is_empty(),
-            "a NIP-65 source must not become a generic fallback lane"
-        );
-        // "Configuration must not fabricate an author route" used to be an
-        // assertion here. Configuration now yields two relay lists and no
-        // author channel at all, so there is nothing left to assert.
-        #[cfg(feature = "nip65")]
+        assert_eq!(app_relays, [RelayUrl::parse(app).expect("valid relay")]);
         assert_eq!(
-            build_nip65_sources(&config).expect("valid NIP-65 source"),
-            vec![RelayUrl::parse(indexer).expect("valid relay")],
-            "the same URL belongs only to the optional protocol assembly"
+            fallback_relays,
+            [RelayUrl::parse(fallback).expect("valid relay")]
         );
+        // Configuration yields two operator relay lists and no author channel
+        // at all. An author route is a fact some provider learned, never a
+        // value an operator typed -- which is why the indexer list that used
+        // to sit here is now the constructor argument of the provider whose
+        // concept it is.
     }
 }

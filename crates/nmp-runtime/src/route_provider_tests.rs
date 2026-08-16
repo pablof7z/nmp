@@ -1,5 +1,5 @@
 use super::*;
-use nmp_engine::core::{ReceiptId, Row};
+use nmp_engine::core::{AuthorRouteReplacement, ReceiptId, Row};
 use nmp_engine::publish_queue::{RelayState, RelayWaiting, WriteFact};
 use nmp_grammar::{
     AccessContext, Binding, Filter, Identity, RelaySessionKey, WriteIntent, WritePayload,
@@ -15,6 +15,12 @@ fn author() -> PublicKey {
 
 fn relay(port: u16) -> RelayUrl {
     RelayUrl::parse(&format!("ws://127.0.0.1:{port}")).expect("valid test relay")
+}
+
+/// The workspace's own provider, installed exactly the way an application
+/// installs one. Nothing in this crate names it outside these tests.
+fn outbox_slot(sources: impl IntoIterator<Item = RelayUrl>) -> RouteProviderSlot {
+    RouteProviderSlot::new(Box::new(nmp_outbox::Nip65Outbox::new(sources)))
 }
 
 fn publish_auto(
@@ -90,26 +96,43 @@ fn assert_parked_on_unknown_route(core: &mut EngineCore, receipt: ReceiptId, awa
 #[test]
 fn needs_open_one_exact_query_noop_when_unchanged_and_close_when_empty() {
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-    let mut assembly = nip65::RuntimeAssembly::new([relay(19_870), relay(19_871)]);
+    let mut slot = outbox_slot([relay(19_870), relay(19_871)]);
     let needs = BTreeSet::from([author()]);
 
-    let opened = nip65_reroot(&mut core, &mut assembly, needs.clone());
+    let app_observation = core
+        .handle(EngineMsg::Subscribe(LiveQuery::from_filter(
+            Filter::default(),
+        )))
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::EmitRows(id, ..) => Some(*id),
+            _ => None,
+        })
+        .expect("an ordinary app subscription opens");
+
+    let opened = provider_reroot(&mut core, &mut slot, needs.clone());
     assert!(
         opened
             .iter()
             .any(|effect| matches!(effect, Effect::EmitRows(..))),
         "ordinary subscribe must expose the internal query handle"
     );
-    assert!(assembly.bound().is_some(), "the internal query stays owned");
+    assert!(slot.bound.is_some(), "the internal query stays owned");
+    assert_ne!(
+        slot.bound,
+        Some(app_observation),
+        "the loop's ownership gate must never hand an app subscription's \
+         delivery to the provider"
+    );
 
     assert!(
-        nip65_reroot(&mut core, &mut assembly, needs).is_empty(),
+        provider_reroot(&mut core, &mut slot, needs).is_empty(),
         "an unchanged need set must not reopen the query"
     );
 
-    let _closed = nip65_reroot(&mut core, &mut assembly, BTreeSet::new());
+    let _closed = provider_reroot(&mut core, &mut slot, BTreeSet::new());
     assert!(
-        assembly.bound().is_none(),
+        slot.bound.is_none(),
         "empty needs must release the internal query"
     );
 }
@@ -117,13 +140,13 @@ fn needs_open_one_exact_query_noop_when_unchanged_and_close_when_empty() {
 #[test]
 fn zero_sources_leave_needs_unknown_without_opening_a_query() {
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-    let mut assembly = nip65::RuntimeAssembly::new([]);
+    let mut slot = outbox_slot([]);
 
     assert!(
-        nip65_reroot(&mut core, &mut assembly, BTreeSet::from([author()])).is_empty(),
+        provider_reroot(&mut core, &mut slot, BTreeSet::from([author()])).is_empty(),
         "without operator-selected sources there is no exact query to ask"
     );
-    assert!(assembly.bound().is_none());
+    assert!(slot.bound.is_none());
 }
 
 #[test]
@@ -152,16 +175,10 @@ fn someone_elses_local_relay_list_row_becomes_a_route_candidate() {
         event,
         BTreeSet::from([source.clone()]),
     ));
-    let mut assembly = nip65::RuntimeAssembly::new([source]);
-    nip65_reroot(
-        &mut core,
-        &mut assembly,
-        BTreeSet::from([author.public_key()]),
-    );
-    let handle = assembly.bound().expect("provider query opens");
-    assert!(assembly.owns(handle), "provider row is current");
-    let updates = assembly.observe_rows(&[row]);
-    let mut effects = nip65_apply(&mut core, updates);
+    let mut slot = outbox_slot([source]);
+    provider_reroot(&mut core, &mut slot, BTreeSet::from([author.public_key()]));
+    let updates = slot.provider.observe_rows(&[row]);
+    let mut effects = apply_author_routes(&mut core, updates);
     effects.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(2u64))));
 
     assert!(
@@ -261,14 +278,10 @@ fn fresh_and_recovered_auto_writes_share_one_later_author_route() {
         relay_list,
         BTreeSet::from([source.clone()]),
     ));
-    let mut assembly = nip65::RuntimeAssembly::new([source]);
-    let opened = nip65_reroot(
-        &mut core,
-        &mut assembly,
-        BTreeSet::from([author.public_key()]),
-    );
-    let handle = assembly
-        .bound()
+    let mut slot = outbox_slot([source]);
+    let opened = provider_reroot(&mut core, &mut slot, BTreeSet::from([author.public_key()]));
+    let handle = slot
+        .bound
         .expect("the exact author-route need opens one provider query");
     assert!(
         opened
@@ -276,12 +289,8 @@ fn fresh_and_recovered_auto_writes_share_one_later_author_route() {
             .any(|effect| matches!(effect, Effect::EmitRows(id, ..) if *id == handle)),
         "provider acquisition must run through the ordinary query owner"
     );
-    assert!(
-        assembly.owns(handle),
-        "the current provider row belongs to this assembly"
-    );
-    let updates = assembly.observe_rows(std::slice::from_ref(&row));
-    let route_effects = nip65_apply(&mut core, updates);
+    let updates = slot.provider.observe_rows(std::slice::from_ref(&row));
+    let route_effects = apply_author_routes(&mut core, updates);
     let routed_receipts = route_effects
         .iter()
         .filter_map(|effect| match effect {
@@ -377,4 +386,80 @@ fn fresh_and_recovered_auto_writes_share_one_later_author_route() {
             replay.facts
         );
     }
+}
+
+/// A provider that answers entirely from a fixed table, opening no query at
+/// all. The seam has to admit this shape or "supply your own algorithm"
+/// means "supply your own way of asking relays" — the acceptance case for a
+/// third-party algorithm that already knows the answer.
+struct FixedTable {
+    routes: BTreeMap<PublicKey, RelayUrl>,
+}
+
+impl AuthorRouteProvider for FixedTable {
+    fn reroot(
+        &mut self,
+        needs: BTreeSet<PublicKey>,
+    ) -> (ProviderReroot, Vec<nmp_engine::core::AuthorRouteUpdate>) {
+        let updates = needs
+            .into_iter()
+            .filter_map(|author| {
+                let relay = self.routes.get(&author)?;
+                Some(nmp_engine::core::AuthorRouteUpdate {
+                    author,
+                    replacement: AuthorRouteReplacement::Present(nmp_router::AuthorRoutes::new(
+                        [relay.clone()],
+                        [],
+                    )),
+                })
+            })
+            .collect();
+        (ProviderReroot::Closed, updates)
+    }
+
+    fn observe_rows(&mut self, _rows: &[RowDelta]) -> Vec<nmp_engine::core::AuthorRouteUpdate> {
+        unreachable!("a provider that opens no query is never delivered rows")
+    }
+
+    fn observe_evidence(
+        &mut self,
+        _evidence: &[ObservationEvidence],
+    ) -> Vec<nmp_engine::core::AuthorRouteUpdate> {
+        unreachable!("a provider that opens no query is never delivered evidence")
+    }
+}
+
+#[test]
+fn a_provider_that_asks_no_question_still_routes_an_auto_write() {
+    let author = Keys::generate();
+    let table_relay = relay(19_873);
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
+    core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+    let (receipt, _event, _effects) = publish_auto(&mut core, &author, 1, "table-routed");
+
+    let mut slot = RouteProviderSlot::new(Box::new(FixedTable {
+        routes: BTreeMap::from([(author.public_key(), table_relay.clone())]),
+    }));
+    let effects = provider_reroot(&mut core, &mut slot, BTreeSet::from([author.public_key()]));
+
+    assert!(
+        slot.bound.is_none(),
+        "an immediate answer opens no observation"
+    );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(
+                id,
+                WriteFact::Destinations {
+                    relays,
+                    complete: true,
+                    awaiting_author_routes,
+                }
+            ) if *id == receipt
+                && relays == &BTreeSet::from([table_relay.clone()])
+                && awaiting_author_routes.is_empty()
+        )),
+        "the fixed table must resolve the parked write in the same turn: {effects:?}"
+    );
 }

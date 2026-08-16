@@ -22,11 +22,6 @@ test-instrumentation = [
 ]
 unstable-mechanism = ["dep:nmp-router-testkit", "nmp-engine/unstable-mechanism"]
 
-# The automatic NIP-65 coordinator assembly. One of exactly TWO protocol edges
-# this crate is allowed (`nmp-nip11` is the other), and it is optional: a
-# core-only build contains no NIP-65 dependency or symbols.
-nip65 = ["dep:nmp-nip65"]
-
 # This is the crate that is ALLOWED to own threads and a runtime -- that is
 # what it is for. The split is what makes the reducer's manifest meaningful:
 # `tokio`, `crossbeam-channel` and the transport pool live here, and
@@ -42,7 +37,6 @@ nmp-transport.workspace = true
 nmp-signer.workspace = true
 nmp-local-signer.workspace = true
 nmp-nip11.workspace = true
-nmp-nip65 = { workspace = true, optional = true }
 nmp-router-testkit = { workspace = true, optional = true }
 crossbeam-channel = "0.5"
 # #704: the engine owns ONE multi-thread tokio runtime (2 workers) that hosts
@@ -56,11 +50,11 @@ libc = { version = "0.2", optional = true }
 zeroize = "1"
 
 [dev-dependencies]
-nmp-runtime = { path = ".", features = [
-    "nip65",
-    "test-instrumentation",
-    "unstable-mechanism",
-] }
+nmp-runtime = { path = ".", features = ["test-instrumentation", "unstable-mechanism"] }
+# Dev-only: the loop's provider-driving falsifiers need a REAL provider to
+# drive, and the NIP-65 outbox algorithm is the one this workspace ships.
+# Not a production edge — this crate names no routing protocol.
+nmp-outbox.workspace = true
 nmp-store = { workspace = true, features = ["test-instrumentation"] }
 nmp-router-testkit.workspace = true
 nmp-resolver-testkit.workspace = true
