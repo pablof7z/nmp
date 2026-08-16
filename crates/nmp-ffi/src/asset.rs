@@ -4,7 +4,7 @@
 /// bytes. This function performs no network I/O and trusts no claimed digest.
 #[uniffi::export]
 pub fn asset_sha256_hex(bytes: Vec<u8>) -> String {
-    nmp::asset::Sha256Hash::of(&bytes).to_hex()
+    nmp_asset::Sha256Hash::of(&bytes).to_hex()
 }
 
 #[cfg(test)]
