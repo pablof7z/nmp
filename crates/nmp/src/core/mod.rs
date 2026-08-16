@@ -439,6 +439,7 @@ pub use diagnostics::{
 };
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
+use history_lifecycle::HistorySessions;
 use observation::{
     ActiveRequestEvidence, LiveWireRequest, ObservationExecutionState, PendingRequestEvidence,
 };
@@ -2249,9 +2250,10 @@ pub struct EngineCore {
     /// and cancellation uses.
     observations: HashMap<ObservationId, ObservationState>,
     next_observation_id: u64,
-    histories: HashMap<HistorySessionId, HistoryState>,
-    history_by_handle: HashMap<HandleId, HistorySessionId>,
-    next_history_id: u64,
+    /// Every open history window and the handle index that mirrors it
+    /// (#1606 step 2). Private maps in `history_lifecycle.rs`, so I4 is
+    /// maintained by one owner rather than at seven hand-written sites.
+    history: HistorySessions,
     attribution: AttributionState,
     pending_request_evidence: HashMap<(RelaySessionKey, SubId), VecDeque<PendingRequestEvidence>>,
     /// Every local request-send attempt and the retries parked behind them
@@ -2697,9 +2699,7 @@ impl EngineCore {
             pending_wire_atoms: BTreeMap::new(),
             observations: HashMap::new(),
             next_observation_id: 0,
-            histories: HashMap::new(),
-            history_by_handle: HashMap::new(),
-            next_history_id: 1,
+            history: HistorySessions::new(),
             attribution: AttributionState::new(),
             pending_request_evidence: HashMap::new(),
             attempts: RequestAttempts::new(),
@@ -2960,6 +2960,7 @@ impl EngineCore {
         ) = self.attribution.ownership_census();
         let router = self.router.ownership_census();
         let attempts = self.attempts.counts();
+        let history = self.history.counts();
         CoreOwnershipCensus {
             observations: self.observations.len(),
             branch_handles: self.handles.len(),
@@ -2970,14 +2971,7 @@ impl EngineCore {
                 .filter_map(ScopeAcquisition::opening_evidence)
                 .map(|evidence| evidence.sources.len())
                 .sum::<usize>()
-                + self
-                    .histories
-                    .values()
-                    .flat_map(|state| &state.acquisitions_by_branch)
-                    .flat_map(|acquisition| &acquisition.scopes)
-                    .filter_map(ScopeAcquisition::opening_evidence)
-                    .map(|evidence| evidence.sources.len())
-                    .sum::<usize>(),
+                + history.freshness_source_edges,
             request_target_handles: self.request_targets_by_handle.len(),
             request_target_demand_keys: self.request_targets_by_demand.len(),
             request_target_edges: self
@@ -3008,8 +3002,8 @@ impl EngineCore {
                 .flat_map(BTreeMap::values)
                 .flat_map(BTreeMap::values)
                 .sum(),
-            history_sessions: self.histories.len(),
-            history_handles: self.history_by_handle.len(),
+            history_sessions: history.sessions,
+            history_handles: history.handles,
             resolver_active_atoms: self.resolver.active_demand().len(),
             pending_wire_atoms: self.pending_wire_atoms.len(),
             pending_resolver_wire_closes: self.pending_resolver_wire_closes.len(),
@@ -3182,10 +3176,11 @@ impl EngineCore {
 
     #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(crate) fn observation_ownership_census(&self) -> CoreObservationOwnershipCensus {
+        let history = self.history.counts();
         CoreObservationOwnershipCensus {
             handles: self.handles.len(),
-            histories: self.histories.len(),
-            history_handles: self.history_by_handle.len(),
+            histories: history.sessions,
+            history_handles: history.handles,
             resolver_nodes: self.resolver.graph_snapshot().nodes.len(),
             demand_atoms: self.active_demand().len(),
             planned_sessions: self.router.plan().reqs.len(),
