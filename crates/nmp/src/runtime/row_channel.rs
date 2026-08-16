@@ -391,7 +391,7 @@ mod tests {
     use nmp_grammar::ConcreteFilter;
 
     use super::*;
-    use crate::core::ShortfallFact;
+    use crate::core::{row_from_stored_event, ShortfallFact};
 
     fn row(keys: &Keys, created_at: u64, content: &str) -> Row {
         Row::from_relay_event(
@@ -559,7 +559,7 @@ mod tests {
     fn slow_observer_never_retains_a_pending_row_after_signature_promotion() {
         let keys = Keys::generate();
         let signed = row(&keys, 1, "promoted while observer is slow");
-        let pending = Row::from_stored_event(
+        let pending = row_from_stored_event(
             {
                 let mut event = signed.event_for_store();
                 event.sig = nmp_store::sentinel_signature();
@@ -588,7 +588,7 @@ mod tests {
             deltas.as_slice(),
             [RowDelta::Added(row)]
                 if row == &signed
-                    && matches!(row.signature, crate::core::RowSignature::Signed(_))
+                    && matches!(row.signature(), crate::core::RowSignature::Signed(_))
                     && row.signed_event().is_some_and(|event| event.verify().is_ok())
         ));
         assert_eq!(evidence, latest_evidence());

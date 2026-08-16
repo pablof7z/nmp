@@ -285,15 +285,11 @@ pub fn visible_under_pin<'a>(
 
 /// The sentinel signature every pending row's frozen body carries until
 /// [`RedbStore::promote_signed`] swaps in the real one (Fable checkpoint
-/// Q1, APPROVED): a NIP-01 id is `hash([0,pubkey,created_at,kind,tags,
-/// content])` — the signature is not an id input — so an all-zero 64-byte
-/// value round-trips through `nostr::Event`/JSON/`Filter::match_event`
-/// unverified (schnorr `Signature` parsing is length-checked only) and the
-/// id is final before a real signature exists.
-pub fn sentinel_signature() -> Signature {
-    Signature::from_slice(&[0u8; 64])
-        .expect("64 zero bytes is always a structurally valid (length-checked) schnorr signature")
-}
+/// Q1, APPROVED). Defined in `nmp-grammar` (#1707) beside `Row`, the other
+/// value that needs this exact constant to stay honest about what a
+/// pending row's frozen body looks like; re-exported here unchanged so
+/// every existing call site in this crate keeps working untouched.
+pub use nmp_grammar::sentinel_signature;
 
 /// The only thing [`RedbStore::promote_signed`] accepts (#768): a
 /// signature that a `nostr::Event::verify` call actually passed, carried

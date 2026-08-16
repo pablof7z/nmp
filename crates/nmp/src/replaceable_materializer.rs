@@ -76,15 +76,24 @@ impl RegisteredReplaceableMaterializer {
         current: &Row,
         operation: Vec<u8>,
     ) -> Result<WritePayload, ReplaceableOperationError> {
-        current
-            .body
-            .verify_id()
+        // `Row`'s body is private to `nmp-grammar` (#1707); rebuilt here from
+        // its public accessors rather than widening the field, exactly the
+        // shape `event_for_store`/`signed_event` already use internally.
+        let body = UnsignedEvent {
+            id: Some(current.id()),
+            pubkey: current.pubkey(),
+            created_at: current.created_at(),
+            kind: current.kind(),
+            tags: current.tags().clone(),
+            content: current.content().to_string(),
+        };
+        body.verify_id()
             .map_err(|_| ReplaceableOperationError::CurrentInvalid)?;
         nmp_grammar::ReplaceableOperation::from_registered_parts(
             self.program,
             self.format,
-            current.body.clone(),
-            current.body.clone(),
+            body.clone(),
+            body,
             operation,
         )
         .map(WritePayload::ReplaceableOperation)
