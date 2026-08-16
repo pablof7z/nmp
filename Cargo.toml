@@ -76,6 +76,43 @@ members = [
     "tools/fjall-journal-fault/harness",
 ]
 
+# #1564: `members` above is every package this repository ships evidence
+# from -- product libraries beside behavioral/parity harnesses, shared test
+# support, downstream compile fixtures, and a falsifier app. A bare
+# `cargo build`/`cargo test` at the root answers "build/test everything",
+# which makes the workspace look architecturally larger than the product it
+# ships and pulls verification-only dependencies (a second major version of
+# `nostr` via `nostr-relay-builder`, through `nmp-test-support`) into a build
+# nobody asked for. `default-members` narrows the unqualified command to
+# exactly the production package graph; `--workspace` still reaches every
+# member listed above, so no harness or fixture stops being built or tested
+# -- it only stops being what you get by asking for nothing in particular.
+default-members = [
+    "crates/nmp-grammar",
+    "crates/nmp-store",
+    "crates/nmp-resolver",
+    "crates/nmp-router",
+    "crates/nmp-transport",
+    "crates/nmp-signer",
+    "crates/nmp-local-signer",
+    "crates/nmp",
+    "crates/nmp-cli",
+    "crates/nmp-ffi",
+    "crates/nmp-nip02",
+    "crates/nmp-nip65",
+    "crates/nmp-nip29",
+    "crates/nmp-nipc7",
+    "crates/nmp-asset",
+    "crates/nmp-blossom",
+    "crates/nmp-nip68",
+    "crates/nmp-media",
+    "crates/nmp-content",
+    "crates/nmp-nip22",
+    "crates/nmp-nip73",
+    "crates/nmp-nip18",
+    "crates/nmp-nip25",
+]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
