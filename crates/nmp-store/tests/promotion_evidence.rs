@@ -55,8 +55,6 @@ fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) ->
     AcceptWrite {
         payload: AcceptWritePayload::Event {
             frozen: Box::new(frozen),
-            replaceable_base: None,
-            monotonic_stamp: false,
             routing: "auto".to_string(),
             sig_state: IntentSigState::Pending,
         },

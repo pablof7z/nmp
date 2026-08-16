@@ -324,16 +324,13 @@ pub enum FfiError {
     /// validation (empty, or over `CorrelationToken::MAX_LEN` bytes). Synchronous,
     /// before any engine call -- same discipline as `InvalidPublicKey`/
     /// `InvalidTag` above.
-    /// A composer returned a CAS-guarded replaceable edit, which has no
-    /// wire form on purpose: a replaceable precondition crosses this
-    /// boundary only inside a fused semantic method that owns its policy
+    /// A composer returned a registered replaceable operation, which has no
+    /// wire form on purpose: replay authority crosses this boundary only
+    /// inside a fused semantic method that owns its evidence policy
     /// (`NmpEngine::follow`/`unfollow`), never as a payload a native caller
-    /// could reassemble without the guard
-    /// (`docs/internals/writes/payload-and-replaceable-edits.md` §5). This
-    /// is the payload axis of #951's bug class: a projection door refuses
-    /// as a VALUE instead of panicking on an exported path.
-    #[cfg(feature = "nip22")]
-    ReplaceableEditHasNoWireForm,
+    /// could reassemble without it. This is the payload axis of #951's bug
+    /// class: a projection door refuses as a VALUE instead of panicking on
+    /// an exported path.
     ReplaceableOperationHasNoWireForm,
     InvalidCorrelationToken {
         got: String,
@@ -783,12 +780,6 @@ impl std::fmt::Display for FfiError {
                 write!(f, "outbox routing requires at least one app-owned indexer")
             }
             Self::InvalidTag { got } => write!(f, "invalid tag: {got:?}"),
-            #[cfg(feature = "nip22")]
-            Self::ReplaceableEditHasNoWireForm => write!(
-                f,
-                "a replaceable edit crosses this boundary only inside the semantic method that \
-                 owns its precondition, never as a payload"
-            ),
             Self::ReplaceableOperationHasNoWireForm => write!(
                 f,
                 "a registered replaceable operation has no standalone FFI payload"
@@ -2006,15 +1997,6 @@ fn refuse_reason_to_ffi(reason: GRefuseReason) -> FfiRefuseReason {
     match reason {
         GRefuseReason::AlreadyExpired => FfiRefuseReason::AlreadyExpired,
         GRefuseReason::Tombstoned => FfiRefuseReason::Tombstoned,
-        GRefuseReason::ReplaceableBaseOnRegularEvent => {
-            FfiRefuseReason::ReplaceableBaseOnRegularEvent
-        }
-        GRefuseReason::ReplaceableBaseChanged { expected, actual } => {
-            FfiRefuseReason::ReplaceableBaseChanged {
-                expected: expected.map(|id| id.to_hex()),
-                actual: actual.map(|id| id.to_hex()),
-            }
-        }
     }
 }
 
@@ -2595,24 +2577,6 @@ mod write_fact_tests {
                 },
             ),
             (
-                // Both ids survive the crossing. Reduced to a string, an app
-                // could only tell the user to redo the edit by hand.
-                GWriteStatus::Outcome(GWriteOutcome::Refused(
-                    GRefuseReason::ReplaceableBaseChanged {
-                        expected: Some(event_id),
-                        actual: None,
-                    },
-                )),
-                FfiWriteFact::Outcome {
-                    outcome: FfiWriteOutcome::Refused {
-                        reason: FfiRefuseReason::ReplaceableBaseChanged {
-                            expected: Some(event_id.to_hex()),
-                            actual: None,
-                        },
-                    },
-                },
-            ),
-            (
                 GWriteStatus::Outcome(GWriteOutcome::Refused(GRefuseReason::Tombstoned)),
                 FfiWriteFact::Outcome {
                     outcome: FfiWriteOutcome::Refused {
@@ -2756,7 +2720,7 @@ pub(crate) fn write_routing_to_ffi(routing: nmp::WriteRouting) -> FfiWriteRoutin
 /// faithfully instead of tripping a closed-contract assertion on an
 /// exported path (#951's bug class, on the payload axis). The one shape
 /// with no wire form refuses as a typed value -- see
-/// [`FfiError::ReplaceableEditHasNoWireForm`].
+/// [`FfiError::ReplaceableOperationHasNoWireForm`].
 #[cfg(feature = "nip22")]
 pub(crate) fn write_payload_to_ffi(payload: GWritePayload) -> Result<FfiWritePayload, FfiError> {
     match payload {
@@ -2776,7 +2740,6 @@ pub(crate) fn write_payload_to_ffi(payload: GWritePayload) -> Result<FfiWritePay
             content: event.content.clone(),
             sig: event.sig.to_string(),
         }),
-        GWritePayload::ReplaceableEdit { .. } => Err(FfiError::ReplaceableEditHasNoWireForm),
         GWritePayload::ReplaceableOperation(_) => Err(FfiError::ReplaceableOperationHasNoWireForm),
     }
 }
@@ -3723,9 +3686,6 @@ mod tests {
         let parsed = write_intent_from_ffi(intent).expect("well-formed intent must parse");
         match parsed.payload {
             GWritePayload::Event(builder) => assert_eq!(builder.tags.len(), 1),
-            GWritePayload::ReplaceableEdit { .. } => {
-                panic!("the raw FFI write surface must not mint guarded replaceable edits")
-            }
             GWritePayload::ReplaceableOperation(_) => {
                 panic!("the raw FFI write surface must not mint registered operations")
             }
@@ -3866,25 +3826,26 @@ mod tests {
         }
     }
 
-    /// A real signed event (`EventBuilder::sign_with_keys`), rendered field-
-    /// for-field into a `FfiWritePayload::Signed` the same way an app would
-    /// after receiving one from an external signer provider. Proves
-    /// [`FfiError::ReplaceableEditHasNoWireForm`] is reachable, not dead
-    /// surface, and is the falsifier for #951's payload axis: the projection door is
-    /// TOTAL, so the one payload shape with no wire form comes back as a
-    /// value instead of panicking on an exported path. A CAS-guarded
-    /// replacement crosses this boundary only inside the semantic method
-    /// that owns its precondition.
+    /// Proves [`FfiError::ReplaceableOperationHasNoWireForm`] is reachable,
+    /// not dead surface, and is the falsifier for #951's payload axis: the
+    /// projection door is TOTAL, so the one payload shape with no wire form
+    /// comes back as a value instead of panicking on an exported path. A
+    /// registered replaceable operation crosses this boundary only inside
+    /// the semantic method that owns its replay authority.
     #[test]
     #[cfg(feature = "nip22")]
-    fn a_replaceable_edit_refuses_as_a_value_rather_than_panicking() {
-        let edit = GWritePayload::ReplaceableEdit {
-            builder: GEventBuilder::new(nostr::Kind::ContactList).content("guarded"),
-            expected_base: None,
-        };
+    fn a_replaceable_operation_refuses_as_a_value_rather_than_panicking() {
+        let operation = nmp_grammar::ReplaceableOperation::from_registered_default_parts(
+            [1u8; 16],
+            [2u8; 16],
+            nostr::Kind::ContactList,
+            String::new(),
+            vec![0u8],
+        )
+        .expect("a well-formed registered operation builds");
         assert_eq!(
-            write_payload_to_ffi(edit),
-            Err(FfiError::ReplaceableEditHasNoWireForm)
+            write_payload_to_ffi(GWritePayload::ReplaceableOperation(operation)),
+            Err(FfiError::ReplaceableOperationHasNoWireForm)
         );
     }
 
@@ -3959,9 +3920,6 @@ mod tests {
             }
             GWritePayload::Event(_) => {
                 panic!("a Signed FfiWritePayload must build a Signed GWritePayload")
-            }
-            GWritePayload::ReplaceableEdit { .. } => {
-                panic!("the raw FFI write surface must not mint guarded replaceable edits")
             }
             GWritePayload::ReplaceableOperation(_) => {
                 panic!("the raw FFI write surface must not mint registered operations")

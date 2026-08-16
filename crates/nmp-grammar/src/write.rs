@@ -10,9 +10,7 @@
 //! Hard break, no compatibility alias: every caller in the workspace moved
 //! to `nmp_grammar::{WriteIntent, ...}` in the same change.
 
-use nostr::{
-    Event as SignedEvent, EventId, Kind, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent,
-};
+use nostr::{Event as SignedEvent, Kind, PublicKey, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
 /// Everything an app must say to publish an event, and everything it MAY
 /// say. The kind is the one thing NMP cannot invent, so the kind is the one
@@ -22,8 +20,8 @@ use nostr::{
 /// **It is a value, not an object**, and that is load-bearing. It carries no
 /// engine reference, no session and no signer handle: composing one is pure
 /// and infallible, and everything that can fail — no active account, no
-/// registered signer, a stale replaceable base — fails at the one publish
-/// door. More importantly it **structurally cannot carry an author**, so
+/// registered signer — fails at the one publish door. More importantly it
+/// **structurally cannot carry an author**, so
 /// [`WriteIntent`]'s identity is the only source of a builder's author and
 /// the author/identity mismatch class is unrepresentable rather than
 /// fail-closed.
@@ -126,29 +124,11 @@ impl EventBuilder {
 /// routing; a caller describing an event supplies a builder and the reducer
 /// stamps, freezes and requests the signer capability.
 ///
-/// The three variants are exactly the three places an author can come from:
-/// `Event` has none until identity resolution stamps one, `ReplaceableEdit`
-/// likewise plus a precondition, and `Signed` carries its author in its
-/// bytes. There is no fourth.
+/// The variants are exactly the places an author can come from: `Event` and
+/// `ReplaceableOperation` have none until identity resolution stamps one,
+/// and `Signed` carries its author in its bytes. There is no fourth.
 pub enum WritePayload {
     Event(EventBuilder),
-    /// A whole-value replacement whose acceptance is conditional on the
-    /// store still holding exactly `expected_base` at the write's
-    /// replaceable/addressable coordinate. `None` means "there is still no
-    /// local winner"; it never means that Nostr is globally empty.
-    ///
-    /// The precondition travels with the builder so a protocol module can
-    /// compose one closed, race-free write value. It is checked inside the
-    /// store's atomic acceptance transaction, before an intent/receipt id is
-    /// allocated or any canonical row is changed — and, when the builder
-    /// states no `created_at`, that same transaction stamps
-    /// `max(clock, winner.created_at + 1)` against the very row it is
-    /// comparing, so monotonicity is decided by the only component that
-    /// knows the winner.
-    ReplaceableEdit {
-        builder: EventBuilder,
-        expected_base: Option<EventId>,
-    },
     /// One capability-owned, replayable operation whose complete optimistic
     /// event is derived synchronously at acceptance. The opaque value is
     /// minted by the supported NMP facade; applications do not supply replay
@@ -450,9 +430,8 @@ pub struct WriteIntent {
     /// The identity this ONE write is published under, defaulting to
     /// [`Identity::Active`] ([`Identity`]'s own `Default`).
     ///
-    /// For a builder payload ([`WritePayload::Event`],
-    /// [`WritePayload::ReplaceableEdit`]) there is no author to compare
-    /// against, so the identity SELECTS one and is its only source.
+    /// For a builder payload ([`WritePayload::Event`]) there is no author to
+    /// compare against, so the identity SELECTS one and is its only source.
     /// [`Identity::Active`] resolves the CURRENT active account at
     /// acceptance and stamps it — failing closed pre-acceptance when no
     /// account is active, since an instruction that cannot resolve is a

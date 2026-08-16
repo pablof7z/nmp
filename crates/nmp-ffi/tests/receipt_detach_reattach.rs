@@ -174,8 +174,6 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
             .accept_write(AcceptWrite {
                 payload: AcceptWritePayload::Event {
                     frozen: Box::new(frozen),
-                    replaceable_base: None,
-                    monotonic_stamp: false,
                     routing: "auto".into(),
                     sig_state: IntentSigState::Pending,
                 },

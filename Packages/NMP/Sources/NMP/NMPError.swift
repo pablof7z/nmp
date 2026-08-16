@@ -182,14 +182,6 @@ public enum NMPError: Error, Sendable, Equatable {
     /// write.
     case invalidReaction(reason: String)
     // nmp-native:endif
-    // nmp-native:if nip22
-    /// #973: a composer returned a compare-and-swap replaceable edit, which
-    /// has no wire form on purpose -- a replaceable precondition crosses
-    /// this boundary only inside the semantic method that owns it
-    /// (`follow`/`unfollow`), never as a payload a native caller could
-    /// reassemble without the guard.
-    case replaceableEditHasNoWireForm
-    // nmp-native:endif
     /// #1437: registered replaceable operations are capability-owned internal
     /// write payloads. They cannot be projected as a standalone native payload
     /// without losing the registered materializer that gives the bytes their
@@ -332,9 +324,6 @@ public enum NMPError: Error, Sendable, Equatable {
         // nmp-native:if nip25
         case .InvalidReaction(let reason):
             self = .invalidReaction(reason: reason)
-        // nmp-native:endif
-        // nmp-native:if nip22
-        case .ReplaceableEditHasNoWireForm: self = .replaceableEditHasNoWireForm
         // nmp-native:endif
         case .ReplaceableOperationHasNoWireForm: self = .replaceableOperationHasNoWireForm
         // nmp-native:if nip29
@@ -507,10 +496,6 @@ extension NMPError: LocalizedError {
         // nmp-native:if nip25
         case .invalidReaction(let reason):
             "Invalid reaction: \(reason)"
-        // nmp-native:endif
-        // nmp-native:if nip22
-        case .replaceableEditHasNoWireForm:
-            "A replaceable edit crosses this boundary only inside the semantic method that owns its precondition, never as a payload"
         // nmp-native:endif
         case .replaceableOperationHasNoWireForm:
             "A registered replaceable operation has no standalone FFI payload"

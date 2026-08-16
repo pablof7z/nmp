@@ -123,8 +123,6 @@ fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) ->
     AcceptWrite {
         payload: AcceptWritePayload::Event {
             frozen: Box::new(frozen),
-            replaceable_base: None,
-            monotonic_stamp: false,
             routing: "auto".to_string(),
             sig_state: IntentSigState::Pending,
         },
@@ -132,15 +130,6 @@ fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) ->
         signing_identity_ref: "local".to_string(),
         accepted_at: Timestamp::from(accepted_at),
         correlation: None,
-    }
-}
-
-fn set_replaceable_base(write: &mut AcceptWrite, base: Option<EventId>) {
-    match &mut write.payload {
-        AcceptWritePayload::Event {
-            replaceable_base, ..
-        } => *replaceable_base = Some(base),
-        AcceptWritePayload::ReplaceableOperation(_) => panic!("expected ordinary event write"),
     }
 }
 
@@ -188,106 +177,6 @@ fn with_store(body: impl FnOnce(&mut RedbStore)) {
 }
 
 // ---------------------------------------------------------------------
-
-#[test]
-fn replaceable_base_precondition_rejects_a_concurrent_winner_atomically() {
-    with_store(|store| {
-        let k = keys();
-        let relay = RelayUrl::parse("wss://source.example").unwrap();
-        let (_base_frozen, base) = compose(&k, Kind::ContactList, "base", 10);
-        assert!(matches!(
-            store
-                .insert(
-                    base.clone(),
-                    RelayObserved::new(relay.clone(), Timestamp::from(10u64))
-                )
-                .unwrap(),
-            InsertOutcome::Inserted
-        ));
-
-        let (_concurrent_frozen, concurrent) = compose(&k, Kind::ContactList, "concurrent", 20);
-        assert!(matches!(
-            store
-                .insert(
-                    concurrent.clone(),
-                    RelayObserved::new(relay, Timestamp::from(20u64))
-                )
-                .unwrap(),
-            InsertOutcome::Superseded { .. }
-        ));
-
-        let (draft, _) = compose(&k, Kind::ContactList, "my edit", 30);
-        let mut guarded = accept(draft, k.public_key(), 30);
-        set_replaceable_base(&mut guarded, Some(base.id));
-        assert_eq!(
-            do_accept(store, guarded),
-            AcceptOutcome::Refused(RefuseReason::ReplaceableBaseChanged {
-                expected: Some(base.id),
-                actual: Some(concurrent.id),
-            })
-        );
-        assert!(store
-            .recover_publish_queue()
-            .expect("recover delivery")
-            .is_empty());
-        let rows = store
-            .query(&Filter::new().kind(Kind::ContactList).author(k.public_key()))
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].event.id, concurrent.id);
-    });
-}
-
-#[test]
-fn replaceable_base_precondition_accepts_the_exact_winner_and_none_means_none() {
-    with_store(|store| {
-        let k = keys();
-        let (first, _) = compose(&k, Kind::ContactList, "first", 10);
-        let mut create = accept(first.clone(), k.public_key(), 10);
-        set_replaceable_base(&mut create, None);
-        assert!(matches!(
-            do_accept(store, create),
-            AcceptOutcome::Inserted { .. }
-        ));
-
-        let (second, _) = compose(&k, Kind::ContactList, "second", 20);
-        let mut exact = accept(second, k.public_key(), 20);
-        set_replaceable_base(&mut exact, Some(first.id));
-        assert!(matches!(
-            do_accept(store, exact),
-            AcceptOutcome::Superseded { .. }
-        ));
-
-        let (third, _) = compose(&k, Kind::ContactList, "third", 30);
-        let mut falsely_empty = accept(third, k.public_key(), 30);
-        set_replaceable_base(&mut falsely_empty, None);
-        assert!(matches!(
-            do_accept(store, falsely_empty),
-            AcceptOutcome::Refused(RefuseReason::ReplaceableBaseChanged {
-                expected: None,
-                actual: Some(_),
-            })
-        ));
-    });
-}
-
-#[test]
-fn replaceable_base_precondition_on_regular_event_fails_closed() {
-    with_store(|store| {
-        let k = keys();
-        let (note, _) = compose(&k, Kind::TextNote, "not replaceable", 10);
-        let mut guarded = accept(note, k.public_key(), 10);
-        set_replaceable_base(&mut guarded, None);
-        assert_eq!(
-            do_accept(store, guarded),
-            AcceptOutcome::Refused(RefuseReason::ReplaceableBaseOnRegularEvent)
-        );
-        assert!(store
-            .recover_publish_queue()
-            .expect("recover delivery")
-            .is_empty());
-    });
-}
 
 #[test]
 fn accept_write_inserts_pending_row_and_journal_in_one_txn() {
@@ -1708,19 +1597,15 @@ fn terminal_receipt_still_reattachable_after_recover() {
 fn a_refused_write_is_taken_into_custody_as_one_permanently_failed_receipt() {
     // CUSTODY. `accept_write` answering `Refused` is the store WORKING and
     // saying no — an answer the app is entitled to read back — so the
-    // refusal is recorded as one retained receipt rather than thrown away.
-    // It survives restart, and `ReplaceableBaseChanged` keeps BOTH event ids
-    // so an app can fetch what is actually there, reapply the user's change
-    // and resubmit without ever troubling them.
+    // refusal is recorded as one retained receipt rather than thrown away,
+    // and it survives restart exactly.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.redb");
     let k = keys();
 
     let (frozen, _signed) = compose(&k, Kind::TextNote, "refused at the door", 100);
     let frozen_id = frozen.id;
-    let expected = Some(EventId::all_zeros());
-    let actual = Some(frozen_id);
-    let reason = RefuseReason::ReplaceableBaseChanged { expected, actual };
+    let reason = RefuseReason::Tombstoned;
 
     let receipt_id = {
         let mut store = RedbStore::open(&path).expect("open redb store");
@@ -1756,18 +1641,11 @@ fn a_refused_write_is_taken_into_custody_as_one_permanently_failed_receipt() {
         .reattach_receipt(receipt_id)
         .expect("receipt lookup must be readable")
         .expect("refused receipt still reattachable after reopen");
-    // The reason survives the restart WITH BOTH IDS. Reduced to a string an
-    // app could only tell the user to redo the edit by hand.
-    match event_receipt(&receipt).1 {
-        ReceiptState::Refused(RefuseReason::ReplaceableBaseChanged {
-            expected: got_expected,
-            actual: got_actual,
-        }) => {
-            assert_eq!(*got_expected, expected);
-            assert_eq!(*got_actual, actual);
-        }
-        other => panic!("refusal reason did not survive the restart: {other:?}"),
-    }
+    assert_eq!(
+        event_receipt(&receipt).1,
+        &ReceiptState::Refused(RefuseReason::Tombstoned),
+        "the refusal reason must survive the restart exactly"
+    );
 
     // RedbStore: same receipt-only, terminal-at-birth shape.
     let mut mem = RedbStore::temporary().expect("temporary Redb store");

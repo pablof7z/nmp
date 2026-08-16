@@ -21,43 +21,28 @@ use nmp_ffi::types::{
 use nmp_store::RefuseReason;
 
 /// Seed a real `RedbStore` with one write the acceptance door REFUSED: a
-/// whole-value replacement that lost its compare-and-swap. Publish took
-/// custody of it (one row, permanently failed), which is exactly the thing
-/// the enumeration door exists to show. There is no FFI payload that can
-/// express a CAS-guarded edit, so the custody row is seeded through the store
-/// the engine itself uses.
-fn seed_refused_entry(
-    path: &std::path::Path,
-    keys: &nostr::Keys,
-    expected: nostr::EventId,
-    actual: nostr::EventId,
-) -> (u64, nostr::EventId) {
+/// tombstoned target. Publish took custody of it (one row, permanently
+/// failed), which is exactly the thing the enumeration door exists to show.
+/// There is no FFI payload that can express this refusal directly, so the
+/// custody row is seeded through the store the engine itself uses.
+fn seed_refused_entry(path: &std::path::Path, keys: &nostr::Keys) -> (u64, nostr::EventId) {
     let mut store = nmp_store::RedbStore::open(path).expect("open store");
     let signed = nostr::EventBuilder::new(nostr::Kind::Custom(30_000), "refused edit")
         .custom_created_at(nostr::Timestamp::from(1_000u64))
         .sign_with_keys(keys)
         .expect("fixture event signs");
     let receipt_id = store
-        .accept_refused(
-            signed.id,
-            keys.public_key(),
-            RefuseReason::ReplaceableBaseChanged {
-                expected: Some(expected),
-                actual: Some(actual),
-            },
-        )
+        .accept_refused(signed.id, keys.public_key(), RefuseReason::Tombstoned)
         .expect("the refusal is taken into custody as a queue entry");
     (receipt_id, signed.id)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_refused_entry_is_enumerable_with_both_ids_and_removal_is_its_only_exit() {
+async fn a_refused_entry_is_enumerable_and_removal_is_its_only_exit() {
     let fixture = tempfile::tempdir().expect("tempdir");
     let path = fixture.path().join("refused-queue.redb");
     let keys = nostr::Keys::generate();
-    let expected = nostr::EventId::from_slice(&[0x11; 32]).unwrap();
-    let actual = nostr::EventId::from_slice(&[0x22; 32]).unwrap();
-    let (receipt_id, frozen_id) = seed_refused_entry(&path, &keys, expected, actual);
+    let (receipt_id, frozen_id) = seed_refused_entry(&path, &keys);
 
     let engine = NmpEngine::new(
         NmpEngineConfig {
@@ -81,15 +66,9 @@ async fn a_refused_entry_is_enumerable_with_both_ids_and_removal_is_its_only_exi
     assert_eq!(
         entry.outcome,
         Some(nmp_ffi::types::FfiWriteOutcome::Refused {
-            reason: FfiRefuseReason::ReplaceableBaseChanged {
-                // BOTH ids survive whole. Reduced to a string this failure
-                // could only tell a user to redo the edit; with the pair an
-                // app fetches `actual`, reapplies the change and resubmits.
-                expected: Some(expected.to_hex()),
-                actual: Some(actual.to_hex()),
-            }
+            reason: FfiRefuseReason::Tombstoned
         }),
-        "a refused entry reports WHY, with both event ids intact"
+        "a refused entry reports WHY"
     );
 
     engine

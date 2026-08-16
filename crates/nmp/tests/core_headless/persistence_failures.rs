@@ -1646,8 +1646,6 @@ fn a_failing_publish_queue_deadline_read_is_a_typed_error_not_a_false_none() {
             .accept_write(AcceptWrite {
                 payload: nmp_store::AcceptWritePayload::Event {
                     frozen: Box::new(frozen),
-                    replaceable_base: None,
-                    monotonic_stamp: false,
                     routing: "delivery-deadline-proof".into(),
                     sig_state: nmp_store::IntentSigState::Pending,
                 },

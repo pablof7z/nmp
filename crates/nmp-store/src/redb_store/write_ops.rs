@@ -32,7 +32,7 @@ use super::{
     address_key_for, candidate_wins, AcceptOutcome, AcceptWrite, BTreeMap, BTreeSet,
     CompensateOutcome, EventId, HashMap, HashSet, IntentId, IntentSigState, Kind, LocalOrigin,
     PersistenceError, PromoteOutcome, Provenance, ReceiptState, RefuseReason, SigState,
-    StoredEvent, Timestamp,
+    StoredEvent,
 };
 use crate::terminal_retention::{wall_clock_now, TerminalRetentionLimits};
 use crate::{handoff_may_have_occurred, RetiredIntent, VerifiedSignature};
@@ -287,8 +287,6 @@ pub(super) fn accept_write(
     }
     let crate::AcceptWritePayload::Event {
         frozen,
-        replaceable_base,
-        monotonic_stamp,
         routing,
         mut sig_state,
     } = payload
@@ -315,52 +313,6 @@ pub(super) fn accept_write(
         let mut publish_queue_correlations = write_txn
             .open_table(PUBLISH_QUEUE_CORRELATIONS)
             .map_err(persist_err)?;
-
-        if let Some(expected) = replaceable_base {
-            let Some(address) = address_key_for(&frozen) else {
-                return Ok(AcceptOutcome::Refused(
-                    RefuseReason::ReplaceableBaseOnRegularEvent,
-                ));
-            };
-            let address_key = address.to_redb_key();
-            let winner = match ingest
-                .addr_index
-                .get(address_key.as_str())
-                .map_err(persist_err)?
-                .map(|guard| guard.value())
-            {
-                Some(event_key) => ingest.canonical.load_by_key(event_key)?,
-                None => None,
-            };
-            let actual = winner.as_ref().map(|stored| stored.event.id);
-            if actual != expected {
-                return Ok(AcceptOutcome::Refused(
-                    RefuseReason::ReplaceableBaseChanged { expected, actual },
-                ));
-            }
-            // `max(clock, winner.created_at + 1)`, computed against the
-            // row the comparison just held — the whole reason the stamp
-            // belongs inside this transaction rather than in the caller.
-            // A stale base cannot produce a stale stamp because a stale
-            // base never gets this far.
-            if monotonic_stamp {
-                if let Some(winner) = &winner {
-                    if frozen.created_at <= winner.event.created_at {
-                        // `checked_add` rather than saturating: at
-                        // `u64::MAX` there is no greater second to move to,
-                        // so the write keeps the caller's clock and loses
-                        // through the ordinary stale door rather than
-                        // silently tying the winner. This also keeps
-                        // "restamped implies strictly greater" true, which
-                        // is what makes `Stale` unreachable for a stamped
-                        // write (see `AcceptOutcome::accepted_row`).
-                        if let Some(next) = winner.event.created_at.as_secs().checked_add(1) {
-                            frozen = crate::restamped(&frozen, Timestamp::from_secs(next));
-                        }
-                    }
-                }
-            }
-        }
 
         let existing = ingest.canonical.load_by_id(&frozen.id)?;
         let is_deletion = frozen.kind == Kind::EventDeletion;
@@ -754,15 +706,6 @@ pub(super) fn accept_write(
 
         Ok(result)
     })?;
-    if matches!(
-        outcome,
-        AcceptOutcome::Refused(
-            RefuseReason::ReplaceableBaseOnRegularEvent
-                | RefuseReason::ReplaceableBaseChanged { .. }
-        )
-    ) {
-        return Ok(outcome);
-    }
     super::publish_queue_ops::maintain_terminal_receipts_in_txn(
         write.transaction(),
         wall_clock_now(),

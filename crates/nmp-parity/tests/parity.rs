@@ -150,9 +150,7 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
 
     let direct_builder = match &direct.payload {
         WritePayload::Event(builder) => builder,
-        WritePayload::ReplaceableEdit { .. }
-        | WritePayload::ReplaceableOperation(_)
-        | WritePayload::Signed(_) => {
+        WritePayload::ReplaceableOperation(_) | WritePayload::Signed(_) => {
             panic!("NIP-22 must compose one ordinary builder payload")
         }
     };
@@ -160,9 +158,7 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
         .expect("the public FFI result must be accepted by generic publish");
     let projected_builder = match &projected.payload {
         WritePayload::Event(builder) => builder,
-        WritePayload::ReplaceableEdit { .. }
-        | WritePayload::ReplaceableOperation(_)
-        | WritePayload::Signed(_) => {
+        WritePayload::ReplaceableOperation(_) | WritePayload::Signed(_) => {
             panic!("the public FFI result must stay an ordinary builder payload")
         }
     };
@@ -234,8 +230,6 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
     let pubkey = nostr::Keys::generate().public_key;
     let awaited = nostr::Keys::generate().public_key;
     let relay_event_id = nostr::EventId::from_slice(&[0x7c; 32]).unwrap();
-    let expected_id = nostr::EventId::from_slice(&[0x5a; 32]).unwrap();
-    let actual_id = nostr::EventId::from_slice(&[0x6b; 32]).unwrap();
     let cases = [
         (
             WriteFact::Relay {
@@ -439,24 +433,6 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
                 outcome: FfiWriteOutcome::Superseded,
             },
         ),
-        // #1039: both event ids survive the boundary whole. Reduced to a
-        // string this failure could only tell a user to redo the edit.
-        (
-            WriteFact::Outcome(WriteOutcome::Refused(
-                RefuseReason::ReplaceableBaseChanged {
-                    expected: Some(expected_id),
-                    actual: Some(actual_id),
-                },
-            )),
-            FfiWriteFact::Outcome {
-                outcome: FfiWriteOutcome::Refused {
-                    reason: FfiRefuseReason::ReplaceableBaseChanged {
-                        expected: Some(expected_id.to_hex()),
-                        actual: Some(actual_id.to_hex()),
-                    },
-                },
-            },
-        ),
     ];
 
     for (direct, expected_ffi) in cases {
@@ -538,15 +514,11 @@ enum NormStatus {
     Refused(NormRefuseReason),
 }
 
-/// `nmp_store::RefuseReason` flattened. `ReplaceableBaseChanged` keeps BOTH
-/// ids: that pair is what makes the failure recoverable without troubling a
-/// user, so a boundary that dropped either half must fail here.
+/// `nmp_store::RefuseReason` flattened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NormRefuseReason {
     AlreadyExpired,
     Tombstoned,
-    ReplaceableBaseOnRegularEvent,
-    ReplaceableBaseChanged(Option<String>, Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -986,15 +958,6 @@ fn normalize_direct_refuse_reason(reason: RefuseReason) -> NormRefuseReason {
     match reason {
         RefuseReason::AlreadyExpired => NormRefuseReason::AlreadyExpired,
         RefuseReason::Tombstoned => NormRefuseReason::Tombstoned,
-        RefuseReason::ReplaceableBaseOnRegularEvent => {
-            NormRefuseReason::ReplaceableBaseOnRegularEvent
-        }
-        RefuseReason::ReplaceableBaseChanged { expected, actual } => {
-            NormRefuseReason::ReplaceableBaseChanged(
-                expected.map(|id| id.to_hex()),
-                actual.map(|id| id.to_hex()),
-            )
-        }
     }
 }
 
@@ -1002,12 +965,6 @@ fn normalize_ffi_refuse_reason(reason: FfiRefuseReason) -> NormRefuseReason {
     match reason {
         FfiRefuseReason::AlreadyExpired => NormRefuseReason::AlreadyExpired,
         FfiRefuseReason::Tombstoned => NormRefuseReason::Tombstoned,
-        FfiRefuseReason::ReplaceableBaseOnRegularEvent => {
-            NormRefuseReason::ReplaceableBaseOnRegularEvent
-        }
-        FfiRefuseReason::ReplaceableBaseChanged { expected, actual } => {
-            NormRefuseReason::ReplaceableBaseChanged(expected, actual)
-        }
     }
 }
 

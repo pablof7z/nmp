@@ -1,6 +1,7 @@
-//! #1137's wire capstone for `WritePayload::ReplaceableEdit`: a retired
-//! (superseded-before-any-attempt) lane must never reach a relay, proven by
-//! an INDEPENDENT socket witness rather than receipt facts alone.
+//! #1137's wire capstone for retired-lane suppression: a replaceable write
+//! superseded before its own first delivery attempt must never reach a
+//! relay, proven by an INDEPENDENT socket witness rather than receipt facts
+//! alone.
 //!
 //! #1137's own audit found every existing scenario for this claim stopped at
 //! the receipt stream: "the four-row outbox outline proves
@@ -12,14 +13,20 @@
 //! arrived -- not on what the reducer says happened.
 //!
 //! Sequence: with nothing listening on the target port, accept an OLDER
-//! `ReplaceableEdit` at a fresh coordinate, then accept a NEWER one naming
-//! the older as its `expected_base` -- both BEFORE the relay exists, so
-//! neither could possibly have started an attempt yet
+//! plain `WritePayload::Event` at a fresh replaceable coordinate, then
+//! accept a NEWER one at the same coordinate -- both BEFORE the relay
+//! exists, so neither could possibly have started an attempt yet
 //! (`retire_superseded_owners_in_txn`'s `handoff_may_have_occurred` check is
-//! trivially false for a port nothing has ever listened on). Only then does
-//! the relay come up on that exact port. The engine's retry loop reaches it
-//! and the independent socket witness sees exactly one `EVENT` -- the
-//! newer's -- ever, at any point, including rejected/pre-admission frames.
+//! trivially false for a port nothing has ever listened on). This is the
+//! ordinary address-index winner/retirement mechanism every replaceable or
+//! addressable write goes through -- it owed nothing to the CAS-guarded
+//! `WritePayload::ReplaceableEdit` mechanism #1137's own investigation found
+//! this test's ORIGINAL version had merely borrowed for convenience, and
+//! which is now deleted; the retirement machinery under test here is
+//! unaffected by that deletion. Only then does the relay come up on that
+//! exact port. The engine's retry loop reaches it and the independent
+//! socket witness sees exactly one `EVENT` -- the newer's -- ever, at any
+//! point, including rejected/pre-admission frames.
 //!
 //! nmp:falsifier=A replaceable-coordinate write retired before its own first
 //! delivery attempt never reaches the wire, proven by the relay's own
@@ -106,12 +113,11 @@ async fn a_lane_retired_before_its_first_attempt_never_reaches_the_wire() {
     // delivery attempt.
     let older = engine
         .publish(WriteIntent {
-            payload: WritePayload::ReplaceableEdit {
-                builder: nmp_grammar::EventBuilder::new(Kind::ContactList)
+            payload: WritePayload::Event(
+                nmp_grammar::EventBuilder::new(Kind::ContactList)
                     .content("older -- must never reach the wire")
                     .created_at(Timestamp::from(1_700_000_000)),
-                expected_base: None,
-            },
+            ),
             routing: WriteRouting::Explicit(vec![relay_url.clone()]),
             identity: Identity::Explicit(author.public_key()),
             correlation: None,
@@ -119,20 +125,22 @@ async fn a_lane_retired_before_its_first_attempt_never_reaches_the_wire() {
         .expect("the first write at a fresh coordinate is accepted");
     let older_id = older.event_id;
 
-    // Newer: names the older as its base, still before the relay exists.
+    // Newer: the same replaceable coordinate, still before the relay
+    // exists. No precondition is stated or needed -- the ordinary
+    // address-index winner/retirement mechanism supersedes the older write
+    // regardless of which payload variant accepted it.
     let newer = engine
         .publish(WriteIntent {
-            payload: WritePayload::ReplaceableEdit {
-                builder: nmp_grammar::EventBuilder::new(Kind::ContactList)
+            payload: WritePayload::Event(
+                nmp_grammar::EventBuilder::new(Kind::ContactList)
                     .content("newer -- the only one that may reach the wire")
                     .created_at(Timestamp::from(1_700_000_100)),
-                expected_base: Some(older_id),
-            },
+            ),
             routing: WriteRouting::Explicit(vec![relay_url.clone()]),
             identity: Identity::Explicit(author.public_key()),
             correlation: None,
         })
-        .expect("the CAS-guarded second write wins its compare-and-swap");
+        .expect("the second write at the same coordinate is accepted");
     let newer_id = newer.event_id;
     assert_ne!(older_id, newer_id, "fixture sanity: two distinct events");
 
