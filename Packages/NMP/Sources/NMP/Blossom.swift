@@ -382,6 +382,96 @@ public enum BlossomListError: Error, Sendable, Hashable {
     }
 }
 
+/// `NMPEngine.uploadBlossom`'s signing-stage failure (`FfiSignEventFailure`
+/// mirror, the sign-only cases only) -- its own typed case rather than
+/// folded into `signEvent`'s `NMPError`/`CancellationError` idiom, because
+/// this is one of EIGHT failure domains `UploadBlossomError` keeps
+/// separate, not the whole call's only failure mode.
+public enum UploadBlossomSignError: Sendable, Hashable {
+    case signerUnavailable(reason: String)
+    case signerRejected(reason: String)
+    case invalidSignerOutput(reason: String)
+    case cancelled
+
+    init(_ ffi: FfiSignEventFailure) {
+        switch ffi {
+        case .SignerUnavailable(let reason): self = .signerUnavailable(reason: reason)
+        case .SignerRejected(let reason): self = .signerRejected(reason: reason)
+        case .InvalidSignerOutput(let reason): self = .invalidSignerOutput(reason: reason)
+        case .Cancelled, .AlreadyConsumed:
+            // `AlreadyConsumed` cannot reach this boundary: `uploadBlossom`
+            // awaits the one-shot signer result exactly once, internally,
+            // and never exposes the handle a second await could race.
+            self = .cancelled
+        }
+    }
+}
+
+/// `NMPEngine.uploadBlossom`'s exhaustive failure taxonomy
+/// (`FfiUploadBlossomError` mirror) -- each stage keeps its own real
+/// upstream shape, reused wholesale from the types above, exactly as this
+/// file's other operations never collapse their taxonomies into one another.
+public enum UploadBlossomError: Error, Sendable, Hashable {
+    case signedOut
+    case engineClosed
+    case emptyContentType
+    case authorization(BlossomAuthError)
+    case sign(UploadBlossomSignError)
+    case invalidServerUrl(BlossomServerUrlError)
+    case clientBuild(reason: String)
+    case upload(BlossomUploadError)
+
+    init(_ ffi: FfiUploadBlossomError) {
+        switch ffi {
+        case .SignedOut: self = .signedOut
+        case .EngineClosed: self = .engineClosed
+        case .EmptyContentType: self = .emptyContentType
+        case .Authorization(let error): self = .authorization(BlossomAuthError(error))
+        case .Sign(let error): self = .sign(UploadBlossomSignError(error))
+        case .InvalidServerUrl(let error): self = .invalidServerUrl(BlossomServerUrlError(error))
+        case .ClientBuild(let reason): self = .clientBuild(reason: reason)
+        case .Upload(let error): self = .upload(BlossomUploadError(error))
+        }
+    }
+}
+
+extension NMPEngine {
+    /// Upload `blob` to `serverURL` end to end: hash the exact bytes, build
+    /// and sign a BUD-11 `upload` authorization through the current
+    /// account's registered signer, validate it, and perform the real
+    /// `PUT /upload` -- all as one call (#971). No author, timestamp,
+    /// expiration, draft, sign request, or authorization crosses this
+    /// boundary; NMP owns every one of those internally.
+    ///
+    /// `contentType` becomes the imeta `m` a later NIP-68 composition step
+    /// requires and must be non-empty. `description` is the human-readable
+    /// BUD-11 authorization reason shown to the server operator, not the
+    /// eventual post text.
+    ///
+    /// Returns the SAME verified-descriptor vocabulary
+    /// `BlossomClient.upload` already returns: its `sha256` was proven
+    /// equal to the hash of exactly the bytes uploaded.
+    public func uploadBlossom(
+        serverURL: String,
+        blob: Data,
+        contentType: String,
+        description: String
+    ) async throws -> BlobDescriptor {
+        do {
+            return BlobDescriptor(
+                try await ffi.uploadBlossom(
+                    serverUrl: serverURL,
+                    blob: blob,
+                    contentType: contentType,
+                    description: description
+                )
+            )
+        } catch let error as FfiUploadBlossomError {
+            throw UploadBlossomError(error)
+        }
+    }
+}
+
 /// An UNSIGNED kind:24242 authorization draft (`FfiBlossomAuthDraft`
 /// mirror). Sign it via the engine (`signRequest` ->
 /// `NMPEngine.signEvent`) or hand `unsignedEventJSON` to an external
