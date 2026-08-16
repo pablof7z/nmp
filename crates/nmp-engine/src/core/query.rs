@@ -1018,7 +1018,7 @@ impl EngineCore {
                         ) {
                             (true, Some(probed)) => {
                                 let prior_live_sub_id = self
-                                    .pending_request_replacements
+                                    .request_replacements
                                     .get(sub_id)
                                     .and_then(|transition| {
                                         self.nip77.live_for_plan(&transition.prior_sub_id).cloned()
@@ -1052,7 +1052,7 @@ impl EngineCore {
                         if transition_priors.contains(&(session.clone(), sub_id.clone())) {
                             continue;
                         }
-                        if self.pending_request_replacements.contains_key(sub_id) {
+                        if self.request_replacements.contains(sub_id) {
                             self.cancel_request_replacement(sub_id, effects);
                         } else {
                             kept_ops.extend(self.close_nip77_plan(sub_id, effects));
@@ -1766,7 +1766,7 @@ impl EngineCore {
     ) -> Vec<WireOp> {
         let mut closes = BTreeSet::new();
 
-        let pending = self.nip77.handoffs.take_plan(plan_sub_id);
+        let pending = self.nip77.handoffs.take_owner(plan_sub_id);
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.nip77_plan_children_touched.set(
             self.nip77_plan_children_touched
@@ -1778,7 +1778,7 @@ impl EngineCore {
             closes.insert(live_id);
         }
 
-        let neg_ids = self.nip77.sessions.take_plan(plan_sub_id);
+        let neg_ids = self.nip77.sessions.take_owner(plan_sub_id);
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.nip77_plan_children_touched.set(
             self.nip77_plan_children_touched
@@ -1810,7 +1810,7 @@ impl EngineCore {
         plan_sub_id: &SubId,
         closes: &mut BTreeSet<SubId>,
     ) {
-        let temporary = self.nip77.backfills.take_plan(plan_sub_id);
+        let temporary = self.nip77.backfills.take_owner(plan_sub_id);
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.nip77_plan_children_touched.set(
             self.nip77_plan_children_touched
@@ -1907,35 +1907,14 @@ impl EngineCore {
     }
 
     fn insert_request_replacement(&mut self, replacement: nmp_router::RequestReplacement) {
-        self.request_replacements_by_session
-            .entry(replacement.session.clone())
-            .or_default()
-            .insert(replacement.next_sub_id.clone());
-        let prior = self
-            .pending_request_replacements
-            .insert(replacement.next_sub_id.clone(), replacement);
-        assert!(
-            prior.is_none(),
-            "one successor owns one replacement transition"
-        );
+        self.request_replacements.insert(replacement);
     }
 
     fn take_request_replacement(
         &mut self,
         successor: &SubId,
     ) -> Option<nmp_router::RequestReplacement> {
-        let replacement = self.pending_request_replacements.remove(successor)?;
-        if let Some(successors) = self
-            .request_replacements_by_session
-            .get_mut(&replacement.session)
-        {
-            successors.remove(successor);
-            if successors.is_empty() {
-                self.request_replacements_by_session
-                    .remove(&replacement.session);
-            }
-        }
-        Some(replacement)
+        self.request_replacements.take(successor)
     }
 
     fn cancel_replacement_successor_work(&mut self, successor: &SubId, effects: &mut Vec<Effect>) {
@@ -2005,14 +1984,7 @@ impl EngineCore {
     }
 
     pub(super) fn abandon_request_replacements_for_session(&mut self, session: &RelaySessionKey) {
-        let successors = self
-            .request_replacements_by_session
-            .remove(session)
-            .unwrap_or_default();
-        for successor in successors {
-            let Some(replacement) = self.pending_request_replacements.remove(&successor) else {
-                continue;
-            };
+        for (_successor, replacement) in self.request_replacements.take_for_session(session) {
             self.attribution
                 .release_live_request_claims(&replacement.prior_sub_id);
             self.plan_execution_metadata
@@ -2031,10 +2003,7 @@ impl EngineCore {
     ) {
         self.nip77
             .set_live(handoff.plan_sub_id.clone(), handoff.live_sub_id.clone());
-        if self
-            .pending_request_replacements
-            .contains_key(&handoff.plan_sub_id)
-        {
+        if self.request_replacements.contains(&handoff.plan_sub_id) {
             self.complete_request_replacement(&handoff.plan_sub_id, effects);
         } else if let Some(prior) = handoff.prior_live_sub_id.as_ref() {
             if prior != &handoff.live_sub_id {

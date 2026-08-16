@@ -914,6 +914,20 @@ pub struct FfiRelayDiagnostics {
     pub relay: String,
     pub access: FfiAccessContext,
     pub wire_sub_count: u32,
+    /// This relay's own advertised concurrent-subscription budget (NIP-11
+    /// `limitation.max_subscriptions`, #931). `None` means the relay
+    /// advertised nothing and is therefore UNBUDGETED -- never a fabricated
+    /// default.
+    pub subscription_budget: Option<u32>,
+    /// Subscriptions this relay's advertised budget removed from the plan.
+    /// Non-zero means real demand did not reach the wire, and the affected
+    /// queries say so through their own acquisition evidence.
+    pub subscriptions_refused: u32,
+    /// This relay's advertised `limitation.max_subid_length`.
+    pub subid_length_limit: Option<u32>,
+    /// True iff that advertised length is shorter than the 64-character
+    /// subscription ids NMP sends, i.e. this relay rejects every REQ.
+    pub subid_length_rejects_our_ids: bool,
     pub authors_served: u32,
     pub by_lane: Vec<FfiLaneCount>,
     /// The EXACT wire JSON of every filter currently sent to this relay
@@ -941,6 +955,7 @@ pub struct FfiRelayDiagnostics {
 pub struct FfiAuthDiagnostics {
     pub relay: String,
     pub access: FfiAccessContext,
+    pub transport_slot: u32,
     pub transport_generation: u64,
     pub epoch_sequence: Option<u64>,
     pub challenge_descriptor: Option<String>,
@@ -1023,6 +1038,15 @@ pub struct FfiDiagnosticsSnapshot {
     /// `max_relays` ceiling was already reached (issue #121, worker-exhaustion
     /// defense). Always `0` when no cap is configured.
     pub sessions_rejected_over_cap: u64,
+    /// Relay sessions refused outright because the relay advertised ZERO
+    /// concurrent subscriptions (#931). Kept apart from
+    /// `sessions_rejected_over_cap`: one says the plan was too wide for the
+    /// operator's ceiling, the other says this relay will hold nothing open.
+    pub sessions_refused_by_subscription_budget: u64,
+    /// `Some(message)` once an ingest/read store door has degraded the local
+    /// cache to read-only (issue #122). Observer-visible only -- never a
+    /// routing input.
+    pub store_degraded: Option<String>,
     /// Latest transport acceptance/verifier failure, if any. This is
     /// observational diagnostics and never changes routing or trust policy.
     pub transport_degraded: Option<String>,

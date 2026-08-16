@@ -425,5 +425,7 @@ mod resolver_delta;
 mod routing_evidence;
 #[path = "admission_tests/scale_teardown.rs"]
 mod scale_teardown;
+#[path = "admission_tests/stalled_write_census_freshness.rs"]
+mod stalled_write_census_freshness;
 #[path = "admission_tests/wire_rebuild_agreement.rs"]
 mod wire_rebuild_agreement;

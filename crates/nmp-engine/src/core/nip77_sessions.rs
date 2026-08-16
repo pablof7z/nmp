@@ -11,11 +11,19 @@
 //! type and how the plan id was read off it. A fourth cluster would have been
 //! a seventh and eighth copy.
 //!
-//! They are one [`PlanIndexed`] now. It is also where the *other* removal
-//! direction lives: plan-scoped teardown used to `remove` the reverse-index
-//! entry and then loop removing children from the forward map, open-coded at
-//! three more sites. Both directions are one implementation, so the two maps
-//! cannot disagree about who owns whom.
+//! They are one [`PlanIndexed`] now — a NIP-77-flavored name for
+//! [`OwnerIndexed`](super::owner_index::OwnerIndexed) keyed by plan `SubId` on
+//! both sides. It is also where the *other* removal direction lives:
+//! plan-scoped teardown used to `remove` the reverse-index entry and then loop
+//! removing children from the forward map, open-coded at three more sites.
+//! Both directions are one implementation, so the two maps cannot disagree
+//! about who owns whom.
+//!
+//! `RequestReplacements` (#1562) needed the identical shape with a
+//! `RelaySessionKey` owner instead of a plan `SubId`, so the mechanism moved
+//! to `owner_index.rs`, generic over the owner key. This file keeps its own
+//! vocabulary — "plan", not "owner" — in the type alias and the trait impls
+//! below; the generic module itself knows nothing about plans.
 //!
 //! ## What is not indexed here, deliberately
 //!
@@ -30,207 +38,28 @@ use std::collections::{BTreeSet, HashMap};
 use nmp_router::SubId;
 use nostr::RelayUrl;
 
+use super::owner_index::{IndexedChild, OwnerIndexed};
 use super::{NegSession, PendingNegHandoff, TemporaryReq};
 
-/// A subscription that exists on behalf of exactly one router plan.
-pub(super) trait PlanChild {
-    fn plan_sub_id(&self) -> &SubId;
-}
+/// NIP-77's own name for the generic mirrored index, keyed by plan `SubId` on
+/// both the child and the owner side.
+pub(super) type PlanIndexed<V> = OwnerIndexed<SubId, SubId, V>;
 
-impl PlanChild for PendingNegHandoff {
-    fn plan_sub_id(&self) -> &SubId {
+impl IndexedChild<SubId> for PendingNegHandoff {
+    fn owner_key(&self) -> &SubId {
         &self.plan_sub_id
     }
 }
 
-impl PlanChild for NegSession {
-    fn plan_sub_id(&self) -> &SubId {
+impl IndexedChild<SubId> for NegSession {
+    fn owner_key(&self) -> &SubId {
         &self.plan_sub_id
     }
 }
 
-impl PlanChild for TemporaryReq {
-    fn plan_sub_id(&self) -> &SubId {
+impl IndexedChild<SubId> for TemporaryReq {
+    fn owner_key(&self) -> &SubId {
         TemporaryReq::plan_sub_id(self)
-    }
-}
-
-/// Children keyed by their own wire id, with the reverse index from the plan
-/// that owns them maintained as a consequence rather than by every caller.
-///
-/// Both maps are private. There is no spelling of "insert into one and forget
-/// the other", in either removal direction.
-pub(super) struct PlanIndexed<V: PlanChild> {
-    by_child: HashMap<SubId, V>,
-    by_plan: HashMap<SubId, BTreeSet<SubId>>,
-}
-
-impl<V: PlanChild> Default for PlanIndexed<V> {
-    fn default() -> Self {
-        Self {
-            by_child: HashMap::new(),
-            by_plan: HashMap::new(),
-        }
-    }
-}
-
-impl<V: PlanChild> PlanIndexed<V> {
-    /// Index one new child under the plan that owns it.
-    ///
-    /// A duplicate child id is refused rather than replaced. Every id here is
-    /// freshly minted from a role incarnation, so re-inserting one is not a
-    /// supported transition — and the permissive spelling was actively unsafe:
-    /// it added the new reverse edge, overwrote the forward value, and left
-    /// the OLD plan still naming the child. One child in two reverse sets,
-    /// silently.
-    pub(super) fn insert(&mut self, sub_id: SubId, value: V) {
-        assert!(
-            !self.by_child.contains_key(&sub_id),
-            "a NIP-77 child id was reused while still live"
-        );
-        self.by_plan
-            .entry(value.plan_sub_id().clone())
-            .or_default()
-            .insert(sub_id.clone());
-        self.by_child.insert(sub_id, value);
-    }
-
-    /// Remove one child and prune its plan's set.
-    ///
-    /// Absent is a valid answer for the CHILD -- callers legitimately probe
-    /// for one that has already gone. It is not a valid answer for its plan's
-    /// set: once the forward map says the child existed, the reverse edge is
-    /// required to exist too, and used to be allowed to be missing.
-    pub(super) fn take(&mut self, sub_id: &SubId) -> Option<V> {
-        let value = self.by_child.remove(sub_id)?;
-        let plan = value.plan_sub_id().clone();
-        let children = self
-            .by_plan
-            .get_mut(&plan)
-            .expect("a live child's plan owns a reverse-index set");
-        assert!(
-            children.remove(sub_id),
-            "a live child's plan did not name it in the reverse index"
-        );
-        if children.is_empty() {
-            self.by_plan.remove(&plan);
-        }
-        Some(value)
-    }
-
-    /// Remove every child of one plan. The returned order is the reverse
-    /// index's own, which is stable because `by_plan`'s sets are ordered.
-    pub(super) fn take_plan(&mut self, plan: &SubId) -> Vec<(SubId, V)> {
-        let children = self.by_plan.remove(plan).unwrap_or_default();
-        children
-            .into_iter()
-            .map(|child| {
-                // `filter_map` here used to make a reverse edge naming an
-                // absent child disappear quietly. That is the mirror being
-                // broken, and it should say so where it broke.
-                let value = self
-                    .by_child
-                    .remove(&child)
-                    .expect("a plan's reverse index names only live children");
-                (child, value)
-            })
-            .collect()
-    }
-
-    /// Remove every child matching `drop`, pruning the reverse index for each,
-    /// and hand back what was removed.
-    ///
-    /// Five sites used to write this as "collect the matching ids, then loop
-    /// calling take" — and, having thrown the values away in the collect,
-    /// three of them looked each one up a second time to act on it.
-    pub(super) fn take_where<F: Fn(&SubId, &V) -> bool>(&mut self, drop: F) -> Vec<(SubId, V)> {
-        let departing: Vec<_> = self
-            .by_child
-            .iter()
-            .filter(|(child, value)| drop(child, value))
-            .map(|(child, _)| child.clone())
-            .collect();
-        departing
-            .into_iter()
-            .filter_map(|child| self.take(&child).map(|value| (child, value)))
-            .collect()
-    }
-
-    pub(super) fn get(&self, sub_id: &SubId) -> Option<&V> {
-        self.by_child.get(sub_id)
-    }
-
-    pub(super) fn get_mut(&mut self, sub_id: &SubId) -> Option<&mut V> {
-        self.by_child.get_mut(sub_id)
-    }
-
-    pub(super) fn contains(&self, sub_id: &SubId) -> bool {
-        self.by_child.contains_key(sub_id)
-    }
-
-    pub(super) fn children_of(&self, plan: &SubId) -> BTreeSet<SubId> {
-        self.by_plan.get(plan).cloned().unwrap_or_default()
-    }
-
-    pub(super) fn iter(&self) -> impl Iterator<Item = (&SubId, &V)> {
-        self.by_child.iter()
-    }
-
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(super) fn len(&self) -> usize {
-        self.by_child.len()
-    }
-
-    #[cfg(test)]
-    pub(super) fn is_empty(&self) -> bool {
-        self.by_child.is_empty() && self.by_plan.is_empty()
-    }
-
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(super) fn plan_keys(&self) -> usize {
-        self.by_plan.len()
-    }
-
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(super) fn plan_edges(&self) -> usize {
-        self.by_plan.values().map(BTreeSet::len).sum()
-    }
-}
-
-/// Exact structural consistency for one mirrored index.
-///
-/// Both directions, by identity rather than by count. `plan_edges == len` is
-/// necessary and nowhere near sufficient: one child indexed under the wrong
-/// plan preserves both numbers exactly.
-#[cfg(any(test, feature = "bench-instrumentation"))]
-impl<V: PlanChild> PlanIndexed<V> {
-    pub(super) fn assert_consistent(&self, what: &str, at: &str) {
-        for (child, value) in &self.by_child {
-            let plan = value.plan_sub_id();
-            let children = self.by_plan.get(plan).unwrap_or_else(|| {
-                panic!("{at}: {what} child {child:?} has no reverse set for its own plan")
-            });
-            assert!(
-                children.contains(child),
-                "{at}: {what} child {child:?} is not named by the plan it reports"
-            );
-        }
-        for (plan, children) in &self.by_plan {
-            assert!(
-                !children.is_empty(),
-                "{at}: {what} kept an empty reverse set for plan {plan:?}"
-            );
-            for child in children {
-                let value = self.by_child.get(child).unwrap_or_else(|| {
-                    panic!("{at}: {what} plan {plan:?} names child {child:?}, which is not live")
-                });
-                assert_eq!(
-                    value.plan_sub_id(),
-                    plan,
-                    "{at}: {what} child {child:?} is indexed under a plan it does not report"
-                );
-            }
-        }
     }
 }
 
@@ -250,7 +79,6 @@ pub(super) struct Nip77Counts {
     pub(super) backfill_plan_edges: usize,
 }
 
-#[derive(Default)]
 pub(super) struct Nip77Sessions {
     /// Candidate live REQs waiting for their exact EOSE barrier.
     pub(super) handoffs: PlanIndexed<PendingNegHandoff>,
@@ -277,6 +105,23 @@ pub(super) struct Nip77Sessions {
     /// Private with no setter, so "only ever increments" is a property of
     /// this file rather than a request in a doc comment.
     next_incarnation: u64,
+}
+
+impl Default for Nip77Sessions {
+    /// `PlanIndexed` needs an owner label for its panic text (`what`), which
+    /// `#[derive(Default)]` cannot supply. Three distinct labels here, rather
+    /// than one shared "NIP-77" label, so a broken mirror in the handoff
+    /// index and a broken mirror in the reconciliation index read as
+    /// different failures.
+    fn default() -> Self {
+        Self {
+            handoffs: PlanIndexed::new("NIP-77 handoff"),
+            sessions: PlanIndexed::new("NIP-77 reconciliation"),
+            backfills: PlanIndexed::new("NIP-77 backfill"),
+            live: HashMap::new(),
+            next_incarnation: 0,
+        }
+    }
 }
 
 impl Nip77Sessions {
@@ -379,9 +224,9 @@ impl Nip77Sessions {
 
     #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
-        self.handoffs.assert_consistent("handoff", at);
-        self.sessions.assert_consistent("reconciliation", at);
-        self.backfills.assert_consistent("backfill", at);
+        self.handoffs.assert_consistent(at);
+        self.sessions.assert_consistent(at);
+        self.backfills.assert_consistent(at);
     }
 
     #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -389,14 +234,14 @@ impl Nip77Sessions {
         Nip77Counts {
             live: self.live.len(),
             handoffs: self.handoffs.len(),
-            handoff_plan_keys: self.handoffs.plan_keys(),
-            handoff_plan_edges: self.handoffs.plan_edges(),
+            handoff_plan_keys: self.handoffs.owner_keys(),
+            handoff_plan_edges: self.handoffs.owner_edges(),
             sessions: self.sessions.len(),
-            session_plan_keys: self.sessions.plan_keys(),
-            session_plan_edges: self.sessions.plan_edges(),
+            session_plan_keys: self.sessions.owner_keys(),
+            session_plan_edges: self.sessions.owner_edges(),
             backfills: self.backfills.len(),
-            backfill_plan_keys: self.backfills.plan_keys(),
-            backfill_plan_edges: self.backfills.plan_edges(),
+            backfill_plan_keys: self.backfills.owner_keys(),
+            backfill_plan_edges: self.backfills.owner_edges(),
         }
     }
 }
