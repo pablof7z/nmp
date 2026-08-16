@@ -1290,6 +1290,184 @@ fn terminal_destinations_close_every_semantic_receipt_and_compact_the_program() 
     );
 }
 
+/// #1692: the fix teaches `apply_plan`'s no-prior-generation branch to
+/// reconcile a CAPABILITY-DEFAULT write against a settled coordinate's real
+/// canonical event (no tracked generation, but a real winner in the address
+/// index). A QUALIFIED write -- one that names a specific prior event --
+/// must get no such grace: if the event it names is not the one actually
+/// there, that is a genuine conflict, and must still refuse, settlement or
+/// not. This drives a real generation through the full lifecycle
+/// (accept -> promote -> route -> lane -> close) so the row is genuinely
+/// retired, then proves the mismatched qualified write is refused for the
+/// real reason -- `apply_plan`'s branch, not the separate (and, per #1692's
+/// investigation, unreachable-here) `expected_source_revision` check.
+#[test]
+fn qualified_source_mismatch_still_refuses_after_settlement() {
+    let (_dir, path) = fixture();
+    let relay_one = RelayUrl::parse(RELAY).unwrap();
+    let mut store = RedbStore::open(&path).unwrap();
+
+    let (_receipt_id, e1_id, _first_source_id) = seed_qualified_semantic_generation(&mut store);
+
+    let (target, verified) = semantic_promotion_target(&store);
+    store.promote_signed(target, verified).unwrap();
+
+    let snapshot = store
+        .replaceable_operation_snapshot(&semantic_coordinate())
+        .unwrap()
+        .unwrap();
+    let generation = snapshot.current.generation.clone().unwrap();
+    let owner = *generation.members.first().unwrap();
+    store
+        .record_route_revision(owner, BTreeSet::from([relay_one]))
+        .unwrap();
+    let mut lane = store
+        .bootstrap_publish_queue_lanes(owner)
+        .unwrap()
+        .remove(0);
+    lane = store
+        .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(10))
+        .unwrap();
+    let signed = store
+        .query(&Filter::new().id(generation.materialization.event_id))
+        .unwrap()
+        .remove(0)
+        .event;
+    let (_, started) = store
+        .start_lane_attempt(&lane.key, lane.revision, signed, Timestamp::from(11))
+        .unwrap();
+    lane = store
+        .record_lane_handoff(
+            &started.key,
+            started.revision,
+            started.last_ordinal,
+            PublishQueueAttemptHandoff {
+                at: Timestamp::from(12),
+                result: HandoffEvidence::Written,
+            },
+            PublishQueuePostHandoffState::AwaitingAck {
+                deadline: Timestamp::from(20),
+            },
+        )
+        .unwrap();
+    store
+        .finish_lane_attempt(
+            &lane.key,
+            lane.revision,
+            lane.last_ordinal,
+            PublishQueueAttemptOutcome::Acked,
+            Timestamp::from(13),
+        )
+        .unwrap();
+
+    let close = crate::SemanticCohortClose {
+        coordinate: semantic_coordinate(),
+        expected_source_revision: snapshot.current.source_revision,
+        expected_program_digest: snapshot.current.program_digest,
+        expected_materialization: generation.materialization,
+        destination: crate::SemanticDestinationPlanClosure::AllCurrentDestinationsTerminal,
+    };
+    let close_outcome = store.close_replaceable_operation_cohort(close).unwrap();
+    assert!(
+        matches!(
+            close_outcome,
+            crate::SemanticCohortCloseOutcome::Closed { .. }
+        ),
+        "fixture must actually settle, or this test proves nothing about #1692: {close_outcome:?}"
+    );
+    assert!(
+        store
+            .replaceable_operation_snapshot(&semantic_coordinate())
+            .unwrap()
+            .is_none(),
+        "settlement must retire the SEMANTIC_RESOURCES row, or this test proves nothing about \
+         #1692's exact mechanism"
+    );
+
+    // A stale claim: names a specific, real, verifiably-signed prior event --
+    // just not the one that is actually canonical (`e1_id`). Built directly
+    // rather than via `store.insert`: kind:3 is a NIP-01 replaceable kind,
+    // so inserting it for real would itself replace the coordinate's
+    // address-index winner (ordinary replaceable-event semantics), silently
+    // destroying the exact settled state this test exists to probe.
+    let wrong_source = qualified_source("wrong-claim", 999);
+    assert_ne!(
+        wrong_source.id, e1_id,
+        "fixture must name a genuinely different event"
+    );
+    let wrong_stored = StoredEvent {
+        event: wrong_source.clone(),
+        provenance: Provenance {
+            seen: BTreeMap::new(),
+            local: None,
+        },
+    };
+    let evidence = crate::SourceEvidence {
+        plan: crate::SourcePlanId([3; 32]),
+        access: crate::AccessContextId([4; 32]),
+        qualified: crate::QualifiedSource::Event {
+            event_id: wrong_source.id,
+            created_at: wrong_source.created_at,
+        },
+    };
+    let outcome = store
+        .accept_write(AcceptWrite {
+            payload: crate::AcceptWritePayload::ReplaceableOperation(Box::new(
+                crate::SemanticAccept {
+                    coordinate: semantic_coordinate(),
+                    program: crate::ReplayProgramId([7; 16]),
+                    format: crate::ReplayFormatId([9; 16]),
+                    expected_source_revision: None,
+                    expected_program_digest: None,
+                    expected_current_materialization: None,
+                    starting_source: crate::StartingSourceRequirement {
+                        plan: crate::SourcePlanId([3; 32]),
+                        access: crate::AccessContextId([4; 32]),
+                        source: crate::StartingSource::Event(wrong_source.id),
+                    },
+                    source: evidence,
+                    source_event: Some(wrong_stored),
+                    plan: crate::SemanticPlan::new(1, vec![43]).unwrap(),
+                    materialized: Some(crate::MaterializationCandidate {
+                        event: UnsignedEvent::new(
+                            keys().public_key(),
+                            // Must equal max(operation accepted_at, source
+                            // timestamp + 1, prior generation timestamp + 1)
+                            // per `validate_exact_timestamp` -- accepted_at
+                            // is 1_000 and the wrong source's created_at is
+                            // 999, so 1_000 is the only value that clears
+                            // that unrelated gate and reaches the branch
+                            // this test actually targets.
+                            Timestamp::from(1_000),
+                            Kind::ContactList,
+                            Vec::new(),
+                            "E-should-be-refused",
+                        ),
+                        routing: "semantic-source-route".into(),
+                        sig_state: crate::PendingMaterializationState::Pending,
+                    }),
+                    contributing_operations: Vec::new(),
+                    resolved_operations: Vec::new(),
+                },
+            )),
+            expected_pubkey: keys().public_key(),
+            signing_identity_ref: "semantic-source-key".into(),
+            accepted_at: Timestamp::from(1_000),
+            correlation: None,
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            AcceptOutcome::ReplaceableOperationRefused(
+                crate::SemanticRefusal::InvalidSourceRevision
+            )
+        ),
+        "a qualified write naming the wrong prior event must still refuse after settlement -- \
+         #1692's fix must not have widened past the capability-default case: {outcome:?}"
+    );
+}
+
 fn event_and_request_coverage_state(path: &Path) -> (bool, bool, bool) {
     let (_, signed) = event_pair();
     let atom = retention_atom();
