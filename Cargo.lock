@@ -1937,6 +1937,7 @@ dependencies = [
  "nmp",
  "nmp-asset",
  "nmp-grammar",
+ "nmp-media",
  "nmp-store",
  "nmp-test-support",
  "nostr 0.44.4",
@@ -1969,6 +1970,17 @@ dependencies = [
  "nostr 0.44.4",
  "sha2",
  "zeroize",
+]
+
+[[package]]
+name = "nmp-media"
+version = "0.1.0"
+dependencies = [
+ "nmp-asset",
+ "nmp-blossom",
+ "nmp-nip68",
+ "nostr 0.44.4",
+ "tokio",
 ]
 
 [[package]]

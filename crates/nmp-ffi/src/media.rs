@@ -6,7 +6,7 @@
 //! window, build the kind:24242 draft, sign it, validate the signed
 //! authorization, and keep the hash paired with the exact bytes it
 //! authorized -- five separate calls a native app could get wrong in ways
-//! Rust already makes unrepresentable ([`nmp::media::PreparedUpload`]).
+//! Rust already makes unrepresentable ([`nmp_media::PreparedUpload`]).
 //!
 //! [`NmpEngine::upload_blossom`] is the one call: the app supplies only
 //! product inputs (server, bytes, content type, description) and NMP owns
@@ -16,7 +16,7 @@
 //! the SAME verified-descriptor vocabulary [`crate::blossom::
 //! FfiBlossomClient::upload`] already returns -- rather than a second
 //! verified-asset type; the exact-bytes proof that descriptor's `sha256`
-//! carries is exactly the one [`nmp::media::UploadedAsset`] proves (#898),
+//! carries is exactly the one [`nmp_media::UploadedAsset`] proves (#898),
 //! never a caller-suppliable claim.
 //!
 //! No author, event kind, tags, raw unsigned event, sign request, signed
@@ -55,10 +55,10 @@ pub enum FfiUploadBlossomError {
     EngineClosed,
     /// `content_type` was empty -- NIP-68 imeta requires a mime type, and
     /// this is refused before any signing or I/O
-    /// (`nmp::media::PrepareError::EmptyMimeType` mirror).
+    /// (`nmp_media::PrepareError::EmptyMimeType` mirror).
     EmptyContentType,
     /// The BUD-11 draft could not be built, or the signed authorization
-    /// failed validation -- `nmp::media::PrepareError::Authorization` and
+    /// failed validation -- `nmp_media::PrepareError::Authorization` and
     /// `nmp::blossom::AuthValidationError` share this one taxonomy exactly
     /// as [`crate::blossom::FfiBlossomAuthError`] already does for the
     /// low-level doors.
@@ -137,7 +137,7 @@ impl NmpEngine {
     ///
     /// Returns the [`FfiBlobDescriptor`] whose `sha256` was proven equal to
     /// the hash of exactly the bytes uploaded (#898) -- the same
-    /// exact-bytes guarantee `nmp::media::UploadedAsset` carries in Rust,
+    /// exact-bytes guarantee `nmp_media::UploadedAsset` carries in Rust,
     /// projected as the descriptor vocabulary already crossing this
     /// boundary rather than a second verified-asset type.
     pub async fn upload_blossom(
@@ -162,7 +162,7 @@ impl NmpEngine {
 
         let created_at = Timestamp::now();
         let expiration = Timestamp::from(created_at.as_secs() + UPLOAD_AUTHORIZATION_LIFETIME_SECS);
-        let prepared = nmp::media::prepare(
+        let prepared = nmp_media::prepare(
             blob,
             content_type,
             author,
@@ -171,12 +171,10 @@ impl NmpEngine {
             &description,
         )
         .map_err(|error| match error {
-            nmp::media::PrepareError::EmptyMimeType => FfiUploadBlossomError::EmptyContentType,
-            nmp::media::PrepareError::Authorization(error) => {
-                FfiUploadBlossomError::Authorization {
-                    error: auth_draft_error_to_ffi(error),
-                }
-            }
+            nmp_media::PrepareError::EmptyMimeType => FfiUploadBlossomError::EmptyContentType,
+            nmp_media::PrepareError::Authorization(error) => FfiUploadBlossomError::Authorization {
+                error: auth_draft_error_to_ffi(error),
+            },
         })?;
 
         // Sign the BUD-11 draft through the engine's own registered signer,
@@ -243,7 +241,7 @@ impl NmpEngine {
             .await
             .map_err(|_| FfiUploadBlossomError::EngineClosed)?
             .map_err(|error| match error {
-                nmp::media::MediaUploadError::Blossom(error) => FfiUploadBlossomError::Upload {
+                nmp_media::MediaUploadError::Blossom(error) => FfiUploadBlossomError::Upload {
                     error: upload_error_to_ffi(error),
                 },
             })?;
