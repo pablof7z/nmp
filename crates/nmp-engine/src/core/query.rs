@@ -1347,16 +1347,14 @@ impl EngineCore {
         self.author_outbox_wire_owner_counts.clear();
         let previous_author_outbox_route_needs =
             std::mem::take(&mut self.author_outbox_route_needs);
-        self.request_targets_by_demand.clear();
-        self.active_request_targets_by_handle_demand.clear();
+        self.request_targets.forget_activations();
         for (id, atoms) in contributions {
             self.wire.index_handle(id, atoms.clone());
             for atom in &atoms {
                 self.wire.retain(atom);
             }
         }
-        let ordinary_handles: Vec<_> = self.request_targets_by_handle.keys().copied().collect();
-        for id in ordinary_handles {
+        for id in self.request_targets.declared_handles() {
             self.activate_request_targets_for_handle(id);
         }
         self.rebuild_author_outbox_route_needs();

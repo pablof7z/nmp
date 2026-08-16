@@ -65,7 +65,9 @@ fn one_handle_partial_resolver_closes_touch_only_departing_refcounts_in_both_ord
         assert_eq!(core.resolver_surviving_atoms_examined.get(), 0);
         assert_eq!(core.wire.demand_refs(handle, &demand), 1);
         assert_eq!(core.wire.coverage_refs(handle, &claim), 1);
-        assert!(core.request_targets_by_demand[&demand]
+        assert!(core
+            .request_targets
+            .declared_live_for_demand(&demand)
             .keys()
             .any(|target| target.handle == handle));
 
@@ -94,23 +96,23 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
         let surviving_claim = coverage_key(&surviving);
 
         core.deactivate_request_targets_for_handle(handle);
-        let departing_target = core.request_targets_by_handle[&handle]
+        let departing_target = core
+            .request_targets
+            .declared_for_handle(handle)
             .keys()
             .next()
             .cloned()
             .unwrap();
-        core.request_targets_by_handle
-            .get_mut(&handle)
-            .unwrap()
-            .insert(
-                ActiveRequestTarget {
-                    demand: surviving_demand,
-                    scope: departing_target.scope,
-                    path: "$.surviving".to_string(),
-                    revision: departing_target.revision,
-                },
-                1,
-            );
+        core.request_targets.declare_for_handle(
+            handle,
+            ActiveRequestTarget {
+                demand: surviving_demand,
+                scope: departing_target.scope,
+                path: "$.surviving".to_string(),
+                revision: departing_target.revision,
+            },
+            1,
+        );
         atoms.insert(surviving.clone());
         core.wire.reindex_handle(handle, atoms);
         core.retain_wire_atom_owner(&surviving);
@@ -121,10 +123,8 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
         });
         let mut close_effects = Vec::new();
         core.flush_consumed_resolver_closes(&mut close_effects);
-        assert!(!core
-            .request_targets_by_demand
-            .contains_key(&departing_demand));
-        assert_eq!(core.request_targets_by_demand[&surviving_demand].len(), 1);
+        assert!(!core.request_targets.has_live_demand(&departing_demand));
+        assert_eq!(core.request_targets.live_target_count(&surviving_demand), 1);
 
         let sub_id = SubId::for_wire(
             relay,

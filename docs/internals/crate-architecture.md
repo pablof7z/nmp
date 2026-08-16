@@ -320,7 +320,8 @@ is a step this document used to take and no longer does; the two owner
 extractions that succeeded at zero visibility cost (`RequestAttempts` #1693,
 `HistorySessions` #1695) are the standing counter-example, because they
 demonstrate the reducer's internals *are* separable — the fact a permanent
-ruling talks past rather than answers.
+ruling talks past rather than answers. `WireOwnership` and `RequestTargets`
+(#1746) make it four.
 
 So the standing position is exactly this, and no more:
 
@@ -339,7 +340,7 @@ So the standing position is exactly this, and no more:
   not required. `nmp-query` is expected to meet that bar; the owner work is
   how it gets there, not a substitute for it.
 
-The census below is what the first bullet rests on, specifically its tail:
+The census below is what the plane-seam bullet rests on, specifically its tail:
 `store` is touched from six files, `clock` from seven, and neither reaches
 50% concentration; `router` 48%, `resolver` 35%, `attempts` 40%,
 `connected_relays` 42%. Those are not fields awaiting an owner; they are the
@@ -350,6 +351,7 @@ And read it knowing the instrument's limit: it counts per *file*, and a file
 holds both `impl SomeOwner` and `impl EngineCore`, so it charges root
 orchestration to whatever owner shares the file. "They all need the same four
 things" below is where that is measured properly and comes out differently.
+
 ### Owners extracted so far
 
 `RequestAttempts` (#1693), `HistorySessions` (#1695), `WireOwnership` and

@@ -69,6 +69,7 @@ mod request_attempt_tests;
 mod request_effects;
 #[cfg(test)]
 mod request_replacement_transition_tests;
+mod request_targets;
 mod semantic_delivery;
 #[cfg(test)]
 mod semantic_settlement_falsifier_tests;
@@ -453,6 +454,7 @@ pub use query::Nip77Frame;
 pub use request_attempt::{LocalSendRefusal, RequestAttemptId, RequestHandoffOutcome};
 use request_attempt::{RequestAttemptPurpose, RequestAttemptState, RequestAttempts, RequestSend};
 pub use request_effects::{AttemptedReplay, AttemptedWireDelta};
+use request_targets::{ActiveRequestTarget, RequestTargets};
 use wire_ownership::{AtomReleased, AtomRetained, WireOwnership};
 // `runtime` (C) needs the EXACT same wire subscription-id string
 // `attribution.rs` records at send time (`AttributionState::record_send`) so
@@ -1387,30 +1389,6 @@ struct BranchState {
     execution: ObservationExecutionState,
 }
 
-/// One current filter-resolution owner below a branch handle.
-///
-/// Exact relay demand and acquisition-scope identity are indexed separately
-/// from the execution target. Distinct windows must never alias through their
-/// shared durable coverage key, and two structural Demand occurrences may
-/// resolve the same exact relay atom while only one owns wire participation.
-/// The multiplicity in the owning maps makes replacement and teardown exact
-/// without rescanning remembered resolver nodes.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct ActiveRequestTarget {
-    demand: nmp_router::DemandKey,
-    scope: usize,
-    path: String,
-    revision: u64,
-}
-
-/// Reverse-index value for one current observation execution target.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct RequestTarget {
-    handle: HandleId,
-    path: String,
-    revision: u64,
-}
-
 /// The opaque identity of ONE live observation (#1108).
 ///
 /// An observation owns one or more complete [`nmp_grammar::Demand`] branches
@@ -1917,19 +1895,12 @@ pub struct EngineCore {
     /// Per-BRANCH bookkeeping for every live observation branch, keyed by
     /// the resolver handle that owns it.
     handles: HashMap<HandleId, BranchState>,
-    /// Complete current-snapshot request-evidence edges per ordinary handle.
-    /// A reconcile replaces only this handle's set, so paths absent from the
-    /// new resolver snapshot and stale revisions disappear immediately.
-    request_targets_by_handle: HashMap<HandleId, BTreeMap<ActiveRequestTarget, usize>>,
-    /// Wire-active request targets grouped by exact handle and DemandKey.
-    /// Partial resolver closes can remove one demand's edges without scanning
-    /// or dropping sibling execution targets owned by the same handle.
-    active_request_targets_by_handle_demand:
-        HashMap<HandleId, BTreeMap<nmp_router::DemandKey, BTreeMap<RequestTarget, usize>>>,
-    /// Exact logical demand -> wire-active execution targets reverse index.
-    /// REQ attribution retains since/until/limit and never aliases observers
-    /// merely because durable coverage erases those fields.
-    request_targets_by_demand: BTreeMap<nmp_router::DemandKey, BTreeMap<RequestTarget, usize>>,
+    /// Which branch executes which filter path against which demand, and
+    /// which of those are live. Three maps in two layers, private to
+    /// `request_targets.rs`, so "forget every activation, keep every
+    /// declaration" is one named operation rather than two hand-written
+    /// clears a caller has to get both of.
+    request_targets: RequestTargets,
     /// Which handles own which live-wire atoms, and which logical demands are
     /// therefore live. Ten maps, private to `wire_ownership.rs`, so owner
     /// counting has exactly one implementation instead of an incremental path
@@ -2380,9 +2351,7 @@ impl EngineCore {
             routing_facts,
             cap,
             handles: HashMap::new(),
-            request_targets_by_handle: HashMap::new(),
-            active_request_targets_by_handle_demand: HashMap::new(),
-            request_targets_by_demand: BTreeMap::new(),
+            request_targets: RequestTargets::default(),
             wire: WireOwnership::default(),
             author_outbox_wire_owner_counts: BTreeMap::new(),
             author_outbox_route_needs: BTreeSet::new(),
@@ -2652,6 +2621,7 @@ impl EngineCore {
         let attempts = self.attempts.counts();
         let history = self.history.counts();
         let wire = self.wire.counts();
+        let targets = self.request_targets.counts();
         CoreOwnershipCensus {
             observations: self.observations.len(),
             branch_handles: self.handles.len(),
@@ -2663,36 +2633,14 @@ impl EngineCore {
                 .map(|evidence| evidence.sources.len())
                 .sum::<usize>()
                 + self.history.freshness_source_edges(),
-            request_target_handles: self.request_targets_by_handle.len(),
-            request_target_demand_keys: self.request_targets_by_demand.len(),
-            request_target_edges: self
-                .request_targets_by_demand
-                .values()
-                .map(BTreeMap::len)
-                .sum(),
-            request_target_refs: self
-                .request_targets_by_demand
-                .values()
-                .flat_map(BTreeMap::values)
-                .sum(),
-            active_request_target_handles: self.active_request_targets_by_handle_demand.len(),
-            active_request_target_demand_keys: self
-                .active_request_targets_by_handle_demand
-                .values()
-                .map(BTreeMap::len)
-                .sum(),
-            active_request_target_edges: self
-                .active_request_targets_by_handle_demand
-                .values()
-                .flat_map(BTreeMap::values)
-                .map(BTreeMap::len)
-                .sum(),
-            active_request_target_refs: self
-                .active_request_targets_by_handle_demand
-                .values()
-                .flat_map(BTreeMap::values)
-                .flat_map(BTreeMap::values)
-                .sum(),
+            request_target_handles: targets.handles,
+            request_target_demand_keys: targets.demand_keys,
+            request_target_edges: targets.edges,
+            request_target_refs: targets.refs,
+            active_request_target_handles: targets.active_handles,
+            active_request_target_demand_keys: targets.active_demand_keys,
+            active_request_target_edges: targets.active_edges,
+            active_request_target_refs: targets.active_refs,
             history_sessions: history.sessions,
             history_handles: history.handles,
             resolver_active_atoms: self.resolver.active_demand().len(),

@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::coordinate_coverage::RequestReturnEvidence;
+use super::request_targets::ActiveRequestTarget;
 use super::{
     AttributionSendId, Effect, EngineCore, LocalSendRefusal, RequestAttemptId,
     RequestAttemptPurpose, RequestAttemptState, RequestHandoffOutcome, RequestSend,
@@ -405,30 +406,21 @@ impl EngineCore {
         &self,
         owner_demands: &BTreeSet<nmp_router::DemandKey>,
     ) -> Vec<(HandleId, String, u64)> {
-        let mut targets = BTreeSet::new();
-        for demand in owner_demands {
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+        let (targets, _walk) = self.request_targets.live_targets_for_demands(owner_demands);
+        #[cfg(any(test, feature = "bench-instrumentation"))]
+        {
             self.request_target_demand_keys_touched.set(
                 self.request_target_demand_keys_touched
                     .get()
-                    .saturating_add(1),
+                    .saturating_add(_walk.demand_keys_touched),
             );
-            let Some(indexed) = self.request_targets_by_demand.get(demand) else {
-                continue;
-            };
-            #[cfg(any(test, feature = "bench-instrumentation"))]
             self.request_target_candidates_examined.set(
                 self.request_target_candidates_examined
                     .get()
-                    .saturating_add(indexed.len() as u64),
-            );
-            targets.extend(
-                indexed
-                    .keys()
-                    .map(|target| (target.handle, target.path.clone(), target.revision)),
+                    .saturating_add(_walk.candidates_examined),
             );
         }
-        targets.into_iter().collect()
+        targets
     }
 
     /// Runtime/mechanism acknowledgement for one attempted REQ handoff.
@@ -956,70 +948,36 @@ impl EngineCore {
     fn replace_request_targets_for_handle(
         &mut self,
         id: HandleId,
-        current: BTreeMap<super::ActiveRequestTarget, usize>,
+        current: BTreeMap<ActiveRequestTarget, usize>,
     ) {
-        let wire_attached = self.wire.is_attached(id);
-        if wire_attached {
-            self.deactivate_request_targets_for_handle(id);
-        }
-        self.request_targets_by_handle.remove(&id);
-        if !current.is_empty() {
-            self.request_targets_by_handle.insert(id, current);
-        }
-        if wire_attached {
-            self.activate_request_targets_for_handle(id);
-        }
+        // Only a wire-attached branch has anything active to re-derive. The
+        // scope set is a freshness decision the branch owns; the target owner
+        // is handed it rather than reaching for the branch's acquisition.
+        let active_scopes = self
+            .wire
+            .is_attached(id)
+            .then(|| self.wire_contributing_scopes(id));
+        self.request_targets
+            .replace_for_handle(id, current, active_scopes.as_ref());
     }
 
-    pub(super) fn activate_request_targets_for_handle(&mut self, id: HandleId) {
-        let active_scopes: BTreeSet<_> = self
-            .handles
+    /// Which of one branch's Demand scopes currently contribute to the wire.
+    pub(super) fn wire_contributing_scopes(&self, id: HandleId) -> BTreeSet<usize> {
+        self.handles
             .get(&id)
             .into_iter()
             .flat_map(|state| state.acquisition.scopes.iter().enumerate())
             .filter_map(|(scope, acquisition)| acquisition.contributes_wire().then_some(scope))
-            .collect();
-        let current = self
-            .request_targets_by_handle
-            .get(&id)
-            .cloned()
-            .unwrap_or_default();
-        let mut active_by_demand: BTreeMap<_, BTreeMap<_, usize>> = BTreeMap::new();
-        for (target, count) in current {
-            if !active_scopes.contains(&target.scope) {
-                continue;
-            }
-            let reverse_target = super::RequestTarget {
-                handle: id,
-                path: target.path,
-                revision: target.revision,
-            };
-            *self
-                .request_targets_by_demand
-                .entry(target.demand)
-                .or_default()
-                .entry(reverse_target.clone())
-                .or_insert(0) += count;
-            *active_by_demand
-                .entry(target.demand)
-                .or_default()
-                .entry(reverse_target)
-                .or_insert(0) += count;
-        }
-        if !active_by_demand.is_empty() {
-            self.active_request_targets_by_handle_demand
-                .insert(id, active_by_demand);
-        }
+            .collect()
+    }
+
+    pub(super) fn activate_request_targets_for_handle(&mut self, id: HandleId) {
+        let scopes = self.wire_contributing_scopes(id);
+        self.request_targets.activate_handle(id, &scopes);
     }
 
     pub(super) fn deactivate_request_targets_for_handle(&mut self, id: HandleId) {
-        let prior = self
-            .active_request_targets_by_handle_demand
-            .remove(&id)
-            .unwrap_or_default();
-        for (demand, targets) in prior {
-            self.release_active_request_targets(demand, targets);
-        }
+        self.request_targets.deactivate_handle(id);
     }
 
     pub(super) fn deactivate_request_targets_for_handle_demand(
@@ -1027,47 +985,7 @@ impl EngineCore {
         id: HandleId,
         demand: nmp_router::DemandKey,
     ) {
-        let Some(targets) = self
-            .active_request_targets_by_handle_demand
-            .get_mut(&id)
-            .and_then(|by_demand| by_demand.remove(&demand))
-        else {
-            return;
-        };
-        if self
-            .active_request_targets_by_handle_demand
-            .get(&id)
-            .is_some_and(BTreeMap::is_empty)
-        {
-            self.active_request_targets_by_handle_demand.remove(&id);
-        }
-        self.release_active_request_targets(demand, targets);
-    }
-
-    fn release_active_request_targets(
-        &mut self,
-        demand: nmp_router::DemandKey,
-        targets: BTreeMap<super::RequestTarget, usize>,
-    ) {
-        for (reverse_target, count) in targets {
-            let indexed = self
-                .request_targets_by_demand
-                .get_mut(&demand)
-                .expect("per-handle request-target demand mirrors the reverse index");
-            let owned = indexed
-                .get_mut(&reverse_target)
-                .expect("per-handle request target mirrors the reverse index");
-            *owned = owned
-                .checked_sub(count)
-                .expect("per-handle request-target refs mirror the reverse index");
-            if *owned == 0 {
-                indexed.remove(&reverse_target);
-            }
-            let remove_demand = indexed.is_empty();
-            if remove_demand {
-                self.request_targets_by_demand.remove(&demand);
-            }
-        }
+        self.request_targets.deactivate_handle_demand(id, demand);
     }
 
     /// Issue one branch-scoped execution fact into its OBSERVATION's ordered
@@ -1345,7 +1263,9 @@ mod tests {
         let observation =
             opened_observation(&core.handle(EngineMsg::Subscribe(pinned_kind_one(&relay))));
         let handle = core.observations[&observation].branches[0];
-        let target = core.request_targets_by_handle[&handle]
+        let target = core
+            .request_targets
+            .declared_for_handle(handle)
             .keys()
             .next()
             .expect("one root filter target")
@@ -1408,27 +1328,32 @@ mod tests {
             pinned_articles_by_follows(&relay, Freshness::CacheOnly),
         )));
         let cache_only_handle = core.observations[&cache_only_observation].branches[0];
-        assert!(core.request_targets_by_handle[&handle]
+        assert!(core
+            .request_targets
+            .declared_for_handle(handle)
             .keys()
             .all(|target| target.revision == 1));
-        assert!(core.request_targets_by_handle[&cache_only_handle]
+        assert!(core
+            .request_targets
+            .declared_for_handle(cache_only_handle)
             .keys()
             .all(|target| target.revision == 1));
 
         core.handle(EngineMsg::SetActivePubkey(Some(account_b.public_key())));
-        assert!(core.request_targets_by_handle[&handle]
+        assert!(core
+            .request_targets
+            .declared_for_handle(handle)
             .keys()
             .all(|target| target.revision == 2));
-        assert!(core.request_targets_by_handle[&cache_only_handle]
+        assert!(core
+            .request_targets
+            .declared_for_handle(cache_only_handle)
             .keys()
             .all(|target| target.revision == 2));
-        let active_reverse_handles: BTreeSet<_> = core
-            .request_targets_by_demand
-            .values()
-            .flat_map(BTreeMap::keys)
-            .map(|target| target.handle)
-            .collect();
-        assert_eq!(active_reverse_handles, BTreeSet::from([handle]));
+        assert_eq!(
+            core.request_targets.live_handles(),
+            BTreeSet::from([handle])
+        );
         let pending_targets: Vec<_> = core
             .pending_request_evidence
             .values()
