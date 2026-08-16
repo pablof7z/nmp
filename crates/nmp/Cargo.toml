@@ -17,16 +17,21 @@ default = []
 # `nmp-router-testkit` (#1667) is the fixture-facts crate every constructor
 # this feature unlocks takes -- optional and pulled in ONLY by this feature,
 # so a default-features consumer never links a test-fixture crate.
-unstable-mechanism = ["dep:nmp-router-testkit"]
+unstable-mechanism = [
+    "dep:nmp-router-testkit",
+    "nmp-engine/unstable-mechanism",
+    "nmp-runtime/unstable-mechanism",
+]
 
 # Pure Rust NIP-65 values plus the private automatic coordinator assembly.
 # Off by default: core-only builds contain no protocol dependency or symbols.
-# NIP-65 is NOT #1707-reversed like every other family below used to be here:
-# its `impl Engine` publish method and `runtime::nip65`'s own deep
+# NIP-65 is NOT #1707-reversed like the eight re-export doors were: its
+# `impl Engine` publish method and `nmp-runtime`'s own deep
 # engine-routing-loop glue are a different problem from a bare re-export
 # door, unresolved so far. See `src/lib.rs`'s doc comment above `pub mod
-# nip65;`.
-nip65 = ["dep:nmp-nip65"]
+# nip65;`. The glue moved with the runtime, so the feature has to turn it on
+# there too.
+nip65 = ["dep:nmp-nip65", "nmp-runtime/nip65"]
 
 # #824: NIP-29 is selected like every other app-facing family. The facade
 # module remains the owner of the engine-bound Group door; making the pure
@@ -45,11 +50,18 @@ nip29 = ["dep:nmp-nip29"]
 # (`core`, `runtime`, `outbox`, `negentropy`). They stay non-default.
 bench-instrumentation = [
     "dep:libc",
+    "nmp-engine/bench-instrumentation",
+    "nmp-runtime/bench-instrumentation",
     "nmp-store/bench-instrumentation",
     "nmp-resolver/bench-instrumentation",
     "nmp-transport/bench-instrumentation",
 ]
-test-instrumentation = ["nmp-store/test-instrumentation", "nmp-nip11/test-instrumentation"]
+test-instrumentation = [
+    "nmp-engine/test-instrumentation",
+    "nmp-runtime/test-instrumentation",
+    "nmp-store/test-instrumentation",
+    "nmp-nip11/test-instrumentation",
+]
 
 [[example]]
 name = "incremental_delta_bench"
@@ -76,6 +88,17 @@ nmp-nip65 = { workspace = true, optional = true }
 nmp-nip29 = { workspace = true, optional = true }
 nmp-signer.workspace = true
 nmp-local-signer.workspace = true
+# The deterministic reducer (#1707). It left this crate so its own manifest
+# could be the proof that `EngineCore` links no async runtime and no HTTP
+# client -- a claim this crate's `Cargo.toml`, which names `tokio`, cannot
+# make about a module inside itself.
+nmp-engine.workspace = true
+# The async edge. `nmp` assembles and projects; it interprets no effects
+# itself, which is why `crossbeam-channel` is no longer named in this
+# manifest. `tokio` stays, but only for the two places the FACADE itself
+# touches it: `Engine::adapter_runtime()`, which hands a protocol adapter the
+# engine's own runtime handle, and `nip29::records`' await timeout.
+nmp-runtime.workspace = true
 nmp-store.workspace = true
 nmp-router.workspace = true
 nmp-router-testkit = { workspace = true, optional = true }
@@ -90,7 +113,6 @@ nmp-transport.workspace = true
 # into; it never names this crate's types.
 nmp-nip11.workspace = true
 blake3.workspace = true
-crossbeam-channel = "0.5"
 # The negentropy reconciler is an engine MODULE (`src/negentropy/`), not a
 # crate (§1: reducer-coupled, driven turn-by-turn by `EngineCore`) -- but it
 # wraps this external set-reconciliation crate. See
@@ -129,6 +151,11 @@ libc = { version = "0.2", optional = true }
 # fixture constructors (#1665, #1667) -- this crate's own test targets are
 # their only in-workspace callers.
 nmp = { path = ".", features = ["nip29", "nip65", "test-instrumentation", "unstable-mechanism"] }
+# The headless reducer corpus (`tests/core_headless/`) and the runtime
+# integration tests drive `EngineCore`/`EngineThread` directly. They reached
+# them through the deleted `mechanism` basement; they name the packages now.
+nmp-engine = { workspace = true, features = ["test-instrumentation", "unstable-mechanism"] }
+nmp-runtime = { workspace = true, features = ["test-instrumentation", "unstable-mechanism", "nip65"] }
 nmp-test-support.workspace = true
 nmp-resolver-testkit.workspace = true
 nmp-router-testkit.workspace = true

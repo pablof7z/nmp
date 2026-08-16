@@ -69,8 +69,8 @@ impl Default for EngineConfig {
             app_relays: Vec::new(),
             fallback_relays: Vec::new(),
             max_relays: nmp_transport::DEFAULT_MAX_RELAYS,
-            max_auth_capabilities: crate::runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
-            max_publish_attempts: crate::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
+            max_auth_capabilities: nmp_runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
+            max_publish_attempts: nmp_engine::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
         }
     }
 }

@@ -20,9 +20,9 @@ use std::time::{Duration, Instant};
 
 use nostr::PublicKey;
 
-use nmp::mechanism::publish_queue::{NotSentReason, SigningState, WriteFact, WriteOutcome};
-use nmp::mechanism::runtime::ReceiptReattachment;
+use nmp_engine::publish_queue::{NotSentReason, SigningState, WriteFact, WriteOutcome};
 use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
+use nmp_runtime::ReceiptReattachment;
 
 use super::budgets::{EVENTUALLY, NEVER};
 use super::observe::{is_failure_fact, ReceiptState};

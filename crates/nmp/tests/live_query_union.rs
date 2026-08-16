@@ -31,7 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp::mechanism::core::{
+use nmp_engine::core::{
     AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryQuery, ObservationEvidence,
     ObservationId, RowDelta, ShortfallFact,
 };

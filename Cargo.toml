@@ -14,6 +14,16 @@ members = [
     "crates/nmp-resolver-testkit",
     "crates/nmp-router-testkit",
     "crates/nmp-transport",
+    # The deterministic reducer: `EngineCore`, `handle(EngineMsg) -> Vec<Effect>`,
+    # and its reducer-coupled satellites. Its manifest is the point -- no
+    # `tokio`, no channels, no HTTP client, so determinism is a build error to
+    # violate rather than a comment.
+    "crates/nmp-engine",
+    # The async edge that interprets the reducer's effects: `EngineThread`,
+    # `Handle`, channels and mailboxes, the AUTH driver, the pool bridge. This
+    # is the crate that is ALLOWED threads and `tokio` -- which is what makes
+    # `nmp-engine` naming neither of them mean anything.
+    "crates/nmp-runtime",
     # NIP-11 relay information documents and their one-shot HTTP acquisition
     # service. The ONLY package in the engine's tree that names `reqwest`/
     # `httpdate`, which is the boundary this crate exists to prove: the
@@ -101,6 +111,8 @@ default-members = [
     "crates/nmp-resolver",
     "crates/nmp-router",
     "crates/nmp-transport",
+    "crates/nmp-engine",
+    "crates/nmp-runtime",
     "crates/nmp-nip11",
     "crates/nmp-signer",
     "crates/nmp-local-signer",
@@ -146,6 +158,8 @@ nmp-router = { path = "crates/nmp-router" }
 nmp-resolver-testkit = { path = "crates/nmp-resolver-testkit" }
 nmp-router-testkit = { path = "crates/nmp-router-testkit" }
 nmp-transport = { path = "crates/nmp-transport" }
+nmp-engine = { path = "crates/nmp-engine" }
+nmp-runtime = { path = "crates/nmp-runtime" }
 nmp-nip11 = { path = "crates/nmp-nip11" }
 nmp-signer = { path = "crates/nmp-signer" }
 nmp-local-signer = { path = "crates/nmp-local-signer" }

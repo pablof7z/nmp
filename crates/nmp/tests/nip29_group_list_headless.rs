@@ -4,7 +4,7 @@
 //! reconstructs it correctly. This is a cross-crate integration proof
 //! `nmp-nip29` itself cannot make (it is deliberately engine-free).
 
-use nmp::mechanism::core::{EngineCore, EngineMsg};
+use nmp_engine::core::{EngineCore, EngineMsg};
 use nmp_grammar::ContextualAtom;
 use nmp_grammar::LiveQuery;
 use nmp_router_testkit::FixtureRoutingFacts;

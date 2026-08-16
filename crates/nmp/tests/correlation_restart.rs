@@ -19,13 +19,11 @@ use std::borrow::Cow;
 
 use std::collections::BTreeSet;
 
-use nmp::mechanism::core::{
+use nmp_engine::core::{
     AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendCompletion,
     AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId,
 };
-use nmp::mechanism::publish_queue::{
-    NotSentReason, RelayState, SigningState, WriteFact, WriteOutcome,
-};
+use nmp_engine::publish_queue::{NotSentReason, RelayState, SigningState, WriteFact, WriteOutcome};
 use nmp_grammar::{
     AccessContext, CorrelationToken, Identity, RelaySessionKey, WriteIntent, WritePayload,
     WriteRouting,

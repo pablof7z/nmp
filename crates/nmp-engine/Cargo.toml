@@ -1,0 +1,71 @@
+[package]
+name = "nmp-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+
+# #827: instrumentation that came in with the folded engine modules. Both
+# stay non-default.
+bench-instrumentation = [
+    "dep:libc",
+    "nmp-store/bench-instrumentation",
+    "nmp-resolver/bench-instrumentation",
+    "nmp-transport/bench-instrumentation",
+]
+test-instrumentation = ["nmp-store/test-instrumentation"]
+
+# #1665/#1667: the gated fixture constructors every headless reducer test
+# seeds an `EngineCore` through. `nmp-router-testkit` is the fixture-facts
+# crate they take -- optional and pulled in ONLY by this feature, so a
+# default-features consumer never links a test-fixture crate.
+unstable-mechanism = ["dep:nmp-router-testkit"]
+
+# THE DEPENDENCY LIST IS THE POINT OF THIS CRATE.
+#
+# `EngineCore` is a synchronous reducer: `handle(EngineMsg) -> Vec<Effect>`,
+# `tick(Timestamp) -> Vec<Effect>`. It performs concrete redb I/O and owns no
+# threads, no sockets, and no imposed runtime. That used to be a sentence in
+# `nmp/src/lib.rs`; here it is a build error to violate. There is no `tokio`,
+# no `crossbeam-channel`, no `futures-channel`, no `reqwest` below, and
+# nothing in this package may add one -- the async edge that interprets these
+# effects is `nmp-runtime`, and the HTTP that produces NIP-11 documents is
+# `nmp-nip11`. Same play `nmp-signer` makes by naming `zeroize` alone.
+#
+# `nmp-transport` is here for its FRAME VALUE TYPES (`RelayFrame`,
+# `TransportRelayHandle`, disconnect reasons) -- the vocabulary the reducer
+# reduces over. It never opens a socket.
+[dependencies]
+nostr.workspace = true
+nmp-grammar.workspace = true
+nmp-store.workspace = true
+nmp-router.workspace = true
+nmp-resolver.workspace = true
+nmp-transport.workspace = true
+nmp-signer.workspace = true
+nmp-router-testkit = { workspace = true, optional = true }
+blake3.workspace = true
+# The set-reconciliation primitive the NIP-77 reconciler wraps. Pure
+# computation over byte slices -- no I/O, no runtime. See
+# `src/negentropy/mod.rs` for the name-shadowing gotcha `mod negentropy`
+# introduces.
+negentropy = { version = "0.5", default-features = false, features = ["std"] }
+# NEG-OPEN/NEG-MSG payloads and the durable relay-set encoding are lowercase
+# hex; `negentropy` itself is payload-agnostic (raw bytes only).
+hex = "0.4"
+libc = { version = "0.2", optional = true }
+
+[dev-dependencies]
+nmp-engine = { path = ".", features = [
+    "test-instrumentation",
+    "unstable-mechanism",
+] }
+nmp-store = { workspace = true, features = ["test-instrumentation"] }
+nmp-router-testkit.workspace = true
+nmp-resolver-testkit.workspace = true
+nmp-test-support.workspace = true
+# A throwaway on-disk `RedbStore` per reducer test run.
+tempfile = "3"

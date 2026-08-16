@@ -12,7 +12,7 @@
 //! transition bumps `PublishQueueLane::revision`, so an identical durable lane
 //! set either side of a boot is proof that boot wrote nothing.
 
-use nmp::mechanism::core::{EngineCore, EngineMsg};
+use nmp_engine::core::{EngineCore, EngineMsg};
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_store::{PublishQueueLane, PublishQueueLaneState, RedbStore};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};

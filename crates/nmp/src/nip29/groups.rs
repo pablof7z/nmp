@@ -93,8 +93,8 @@ use nostr::{PublicKey, RelayUrl};
 
 use super::group::GroupPublishError;
 use crate::engine::Engine;
-use crate::runtime::ReceiptStream;
 use nmp_nip29::GroupContextError;
+use nmp_runtime::ReceiptStream;
 
 /// The groups one write belongs to, on the relays their scope named.
 ///

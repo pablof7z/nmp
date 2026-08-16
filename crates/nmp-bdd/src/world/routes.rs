@@ -25,8 +25,8 @@ use nostr::{PublicKey, Timestamp};
 
 use nmp_router::RelayUrl;
 
-use nmp::mechanism::core::{DiagnosticsSnapshot, StalledWriteStage};
-use nmp::mechanism::publish_queue::{RelayState, WriteFact, WriteOutcome};
+use nmp_engine::core::{DiagnosticsSnapshot, StalledWriteStage};
+use nmp_engine::publish_queue::{RelayState, WriteFact, WriteOutcome};
 
 use super::budgets::EVENTUALLY;
 use super::observe::is_failure_fact;

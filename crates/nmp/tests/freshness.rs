@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::BTreeSet};
 
-use nmp::mechanism::core::{
+use nmp_engine::core::{
     AcquisitionEvidence, Effect, EngineCore, EngineMsg, HistoryQuery, ObservationId, RowDelta,
     ShortfallFact, SourceStatus,
 };

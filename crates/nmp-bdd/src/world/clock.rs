@@ -96,7 +96,7 @@ impl NmpWorld {
         self.engine_clock().set(at);
     }
 
-    fn engine_clock(&self) -> nmp::mechanism::runtime::EngineClock {
+    fn engine_clock(&self) -> nmp_runtime::EngineClock {
         self.engine
             .as_ref()
             .expect("nmp-bdd: the engine must be started before its clock can be stated")

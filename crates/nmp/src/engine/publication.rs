@@ -2,13 +2,13 @@ use nmp_grammar::WriteIntent;
 use nostr::EventId;
 
 use super::Engine;
-use crate::core::ReceiptId;
 use crate::error::EngineError;
-use crate::publish_queue::{
+use nmp_engine::core::ReceiptId;
+use nmp_engine::publish_queue::{
     PublishQueueEntry, PublishQueueReadError, ReceiptResult, ReceiptResultError,
     RemoveQueueEntryError,
 };
-use crate::runtime::{ReceiptReattachment, ReceiptReplayCursor, ReceiptStream};
+use nmp_runtime::{ReceiptReattachment, ReceiptReplayCursor, ReceiptStream};
 
 /// The only successful result from explicit pre-signature cancellation.
 /// The closed success type cannot carry a status that cancellation did not
@@ -47,40 +47,40 @@ pub enum CancelWriteError {
 }
 
 fn cancel_write_outcome_from_engine(
-    outcome: crate::publish_queue::CancelWriteOutcome,
+    outcome: nmp_engine::publish_queue::CancelWriteOutcome,
 ) -> CancelWriteOutcome {
     match outcome {
-        crate::publish_queue::CancelWriteOutcome::Cancelled => CancelWriteOutcome::Cancelled,
+        nmp_engine::publish_queue::CancelWriteOutcome::Cancelled => CancelWriteOutcome::Cancelled,
     }
 }
 
 fn cancel_write_error_from_engine(
-    error: crate::publish_queue::CancelWriteError,
+    error: nmp_engine::publish_queue::CancelWriteError,
 ) -> CancelWriteError {
     match error {
-        crate::publish_queue::CancelWriteError::UnknownReceipt { receipt_id } => {
+        nmp_engine::publish_queue::CancelWriteError::UnknownReceipt { receipt_id } => {
             CancelWriteError::UnknownReceipt { receipt_id }
         }
-        crate::publish_queue::CancelWriteError::AlreadySigned {
+        nmp_engine::publish_queue::CancelWriteError::AlreadySigned {
             receipt_id,
             event_id,
         } => CancelWriteError::AlreadySigned {
             receipt_id,
             event_id,
         },
-        crate::publish_queue::CancelWriteError::AlreadyCompensated { receipt_id } => {
+        nmp_engine::publish_queue::CancelWriteError::AlreadyCompensated { receipt_id } => {
             CancelWriteError::AlreadyCompensated { receipt_id }
         }
-        crate::publish_queue::CancelWriteError::AlreadySuperseded { receipt_id } => {
+        nmp_engine::publish_queue::CancelWriteError::AlreadySuperseded { receipt_id } => {
             CancelWriteError::AlreadySuperseded { receipt_id }
         }
-        crate::publish_queue::CancelWriteError::AlreadyRefused { receipt_id } => {
+        nmp_engine::publish_queue::CancelWriteError::AlreadyRefused { receipt_id } => {
             CancelWriteError::AlreadyRefused { receipt_id }
         }
-        crate::publish_queue::CancelWriteError::PersistenceFailed { receipt_id, reason } => {
+        nmp_engine::publish_queue::CancelWriteError::PersistenceFailed { receipt_id, reason } => {
             CancelWriteError::PersistenceFailed { receipt_id, reason }
         }
-        crate::publish_queue::CancelWriteError::EngineClosed => CancelWriteError::EngineClosed,
+        nmp_engine::publish_queue::CancelWriteError::EngineClosed => CancelWriteError::EngineClosed,
     }
 }
 

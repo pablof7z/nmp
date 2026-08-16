@@ -246,7 +246,7 @@ fn wait_for_row(
 }
 
 fn wait_for_generation_relay_facts(
-    statuses: &nmp::mechanism::runtime::FifoReceiver<WriteFact>,
+    statuses: &nmp_runtime::FifoReceiver<WriteFact>,
     event_id: EventId,
     relays: &BTreeSet<nostr::RelayUrl>,
 ) -> Vec<WriteFact> {
@@ -320,9 +320,7 @@ async fn unreachable_destination() -> nostr::RelayUrl {
     url
 }
 
-fn attached_statuses(
-    reattachment: ReceiptReattachment,
-) -> nmp::mechanism::runtime::FifoReceiver<WriteFact> {
+fn attached_statuses(reattachment: ReceiptReattachment) -> nmp_runtime::FifoReceiver<WriteFact> {
     match reattachment {
         ReceiptReattachment::Attached { statuses, .. } => statuses,
         ReceiptReattachment::NotFound => panic!("retained receipt disappeared"),
@@ -330,7 +328,7 @@ fn attached_statuses(
     }
 }
 
-fn wait_for_settled(statuses: &nmp::mechanism::runtime::FifoReceiver<WriteFact>) {
+fn wait_for_settled(statuses: &nmp_runtime::FifoReceiver<WriteFact>) {
     let deadline = Instant::now() + SETTLE;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());

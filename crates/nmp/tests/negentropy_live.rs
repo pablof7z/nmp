@@ -18,12 +18,12 @@ use std::net::TcpListener;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::core::RowDelta;
-use nmp::mechanism::runtime::{EngineThread, RowsReceiver};
+use nmp_engine::core::RowDelta;
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter};
 use nmp_local_signer::LocalKeySigner;
 use nmp_router_testkit::FixtureRoutingFacts;
+use nmp_runtime::{EngineThread, RowsReceiver};
 use nmp_store::RedbStore;
 use nmp_transport::PoolConfig;
 use nostr::{EventId, Keys, RelayUrl};
@@ -54,7 +54,7 @@ fn mirror_keys(k: &Keys) -> RelayKeys {
 
 /// Accumulates the channel's `Added`/`Removed` deltas into the row set they
 /// currently describe (exactly as a real app must -- the wire is deltas, not
-/// snapshots, per `nmp::mechanism::core::RowDelta`'s doc) and blocks until that
+/// snapshots, per `nmp_engine::core::RowDelta`'s doc) and blocks until that
 /// accumulated set + the latest acquisition evidence satisfy `pred`, or
 /// `timeout` lapses. Evidence and rows can change independently (a
 /// watermark advancing carries an empty row delta) -- `pred` is checked
@@ -63,7 +63,7 @@ fn mirror_keys(k: &Keys) -> RelayKeys {
 fn wait_for_rows(
     rx: &RowsReceiver,
     timeout: Duration,
-    pred: impl Fn(&[nostr::Event], &[nmp::mechanism::core::AcquisitionEvidence]) -> bool,
+    pred: impl Fn(&[nostr::Event], &[nmp_engine::core::AcquisitionEvidence]) -> bool,
 ) -> bool {
     let deadline = Instant::now() + timeout;
     let mut current: BTreeMap<EventId, nostr::Event> = BTreeMap::new();

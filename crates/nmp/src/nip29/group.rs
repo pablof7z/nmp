@@ -46,12 +46,12 @@ use super::read::{self, GroupReadError};
 use super::records::{GroupObservation, GroupObserveError};
 use crate::engine::Engine;
 use crate::error::EngineError;
-use crate::runtime::ReceiptStream;
 use crate::LiveQuery;
 use nmp_nip29::GroupContextError;
 use nmp_nip29::GroupMetadataEdit;
 use nmp_nip29::GroupRecord;
 use nmp_nip29::{GroupUser, GroupUsersError};
+use nmp_runtime::ReceiptStream;
 
 /// Why a group publication never reached the publish door, or what the door
 /// said when it did.

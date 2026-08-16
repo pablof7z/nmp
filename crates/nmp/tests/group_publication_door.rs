@@ -48,7 +48,6 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::runtime::FifoReceiver;
 use nmp::nip29::{
     self, member_list_includes, Group, GroupContextError, GroupObservation, GroupPublishError,
     GroupRecord, GroupSnapshot,
@@ -58,6 +57,7 @@ use nmp::{
     SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability, SigningState,
     WriteFact, WriteOutcome,
 };
+use nmp_runtime::FifoReceiver;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{Keys, Kind, RelayUrl, Tag, Timestamp, UnsignedEvent};
 
