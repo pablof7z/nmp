@@ -1,10 +1,18 @@
+//! The capability-write contract (#1707): what a replaceable-event
+//! capability (NIP-02 follow, NIP-29 saved groups, and every future one)
+//! implements to turn its own typed operations into the ordinary
+//! [`WritePayload`]. Moved here from `nmp` alongside [`crate::Row`] --
+//! `nmp` executes a compiled capability, it does not need to know what any
+//! capability means, and this trait's own signature was already
+//! `nmp_grammar`/`nostr` only. The one thing that looked like it might not
+//! be (`Row`) moved down in the same package first.
+
 use std::sync::Arc;
 
-use nmp_grammar::{EventBuilder, ReplaceableOperationError, WritePayload};
+use crate::{EventBuilder, ReplaceableOperationError, WritePayload};
+use crate::{ReplaceableOperation, Row};
 use nostr::nips::nip01::Coordinate;
 use nostr::{Kind, UnsignedEvent};
-
-use crate::Row;
 
 /// One opaque operation delivered to the capability implementation that owns
 /// its format.
@@ -14,7 +22,11 @@ pub struct ReplaceableMaterializerOperation<'a> {
 }
 
 impl<'a> ReplaceableMaterializerOperation<'a> {
-    pub(crate) fn new(bytes: &'a [u8]) -> Self {
+    /// `pub`, not `pub(crate)`: `nmp` constructs these on the opposite side
+    /// of the #1707 package boundary. Harmless -- apps only ever receive one
+    /// as a trait-method parameter, never construct one themselves, so this
+    /// widening bypasses nothing the engine protects.
+    pub fn new(bytes: &'a [u8]) -> Self {
         Self { bytes }
     }
 
@@ -52,10 +64,18 @@ pub trait ReplaceableMaterializer: Send + Sync + 'static {
     ) -> Result<EventBuilder, ReplaceableMaterializerRefusal>;
 }
 
-pub(crate) struct ReplaceableMaterializerRegistration {
-    pub(crate) program: [u8; 16],
-    pub(crate) format: [u8; 16],
-    pub(crate) materializer: Arc<dyn ReplaceableMaterializer>,
+/// The engine's own internal wiring from a compiled capability's identity to
+/// its implementation, keyed and stored inside `EngineCore`. Never
+/// re-exported from `nmp`'s own crate root -- an app reaches a capability
+/// only through [`ReplaceableMaterializerSpec`]/[`RegisteredReplaceableMaterializer`],
+/// never this type. Fields are `pub` (not `pub(crate)`) because `nmp`'s
+/// engine internals -- the only real readers -- sit in a different crate
+/// after #1707; the type staying unreachable from `nmp::` is what keeps
+/// this from being an app-facing widening.
+pub struct ReplaceableMaterializerRegistration {
+    pub program: [u8; 16],
+    pub format: [u8; 16],
+    pub materializer: Arc<dyn ReplaceableMaterializer>,
 }
 
 /// Constructor for the ordinary write payload bound to one compiled
@@ -76,9 +96,10 @@ impl RegisteredReplaceableMaterializer {
         current: &Row,
         operation: Vec<u8>,
     ) -> Result<WritePayload, ReplaceableOperationError> {
-        // `Row`'s body is private to `nmp-grammar` (#1707); rebuilt here from
-        // its public accessors rather than widening the field, exactly the
-        // shape `event_for_store`/`signed_event` already use internally.
+        // `Row`'s body is private even within this crate's own module
+        // boundary; rebuilt from its public accessors rather than reaching
+        // into it, exactly the shape `event_for_store`/`signed_event`
+        // already use internally.
         let body = UnsignedEvent {
             id: Some(current.id()),
             pubkey: current.pubkey(),
@@ -89,7 +110,7 @@ impl RegisteredReplaceableMaterializer {
         };
         body.verify_id()
             .map_err(|_| ReplaceableOperationError::CurrentInvalid)?;
-        nmp_grammar::ReplaceableOperation::from_registered_parts(
+        ReplaceableOperation::from_registered_parts(
             self.program,
             self.format,
             body.clone(),
@@ -110,7 +131,7 @@ impl RegisteredReplaceableMaterializer {
         identifier: String,
         operation: Vec<u8>,
     ) -> Result<WritePayload, ReplaceableOperationError> {
-        nmp_grammar::ReplaceableOperation::from_registered_default_parts(
+        ReplaceableOperation::from_registered_default_parts(
             self.program,
             self.format,
             kind,
@@ -123,9 +144,9 @@ impl RegisteredReplaceableMaterializer {
 
 /// One compiled capability implementation supplied before engine recovery.
 pub struct ReplaceableMaterializerSpec {
-    pub(crate) program: [u8; 16],
-    pub(crate) format: [u8; 16],
-    pub(crate) materializer: Arc<dyn ReplaceableMaterializer>,
+    program: [u8; 16],
+    format: [u8; 16],
+    materializer: Arc<dyn ReplaceableMaterializer>,
 }
 
 impl ReplaceableMaterializerSpec {
@@ -141,6 +162,22 @@ impl ReplaceableMaterializerSpec {
         }
     }
 
+    /// This spec's compiled program identity. `nmp`'s engine construction
+    /// reads this (and `format`) to refuse a duplicate program/format pair
+    /// before any engine thread starts -- an engine-internal read from a
+    /// different crate after #1707, not an app-facing need, which is why
+    /// this is a narrow accessor rather than a widened field.
+    #[must_use]
+    pub fn program(&self) -> [u8; 16] {
+        self.program
+    }
+
+    /// This spec's compiled format identity. See [`Self::program`].
+    #[must_use]
+    pub fn format(&self) -> [u8; 16] {
+        self.format
+    }
+
     #[must_use]
     pub fn handle(&self) -> RegisteredReplaceableMaterializer {
         RegisteredReplaceableMaterializer {
@@ -149,7 +186,11 @@ impl ReplaceableMaterializerSpec {
         }
     }
 
-    pub(crate) fn into_registration(self) -> ReplaceableMaterializerRegistration {
+    /// `pub`, not `pub(crate)`: `nmp`'s own engine construction is the only
+    /// caller, and it sits in a different crate after #1707. Not
+    /// re-exported from `nmp`'s own crate root, so an app never sees this
+    /// door -- see [`ReplaceableMaterializerRegistration`]'s own doc.
+    pub fn into_registration(self) -> ReplaceableMaterializerRegistration {
         ReplaceableMaterializerRegistration {
             program: self.program,
             format: self.format,

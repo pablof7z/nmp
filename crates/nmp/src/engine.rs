@@ -208,11 +208,11 @@ impl Engine {
         {
             let mut seen = std::collections::BTreeSet::new();
             for spec in &capabilities {
-                let key = (spec.program, spec.format);
+                let key = (spec.program(), spec.format());
                 if !seen.insert(key) {
                     return Err(EngineError::DuplicateReplaceableCapability {
-                        program: spec.program,
-                        format: spec.format,
+                        program: spec.program(),
+                        format: spec.format(),
                     });
                 }
             }

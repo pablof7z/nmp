@@ -89,7 +89,8 @@ use nostr::{
 
 use nmp_grammar::{
     fold_byte, AccessContext, CacheMode, ConcreteFilter, ContextualAtom, DemandDelta, DemandOp,
-    DescriptorHash, Freshness, Identity, LiveQuery, RelaySessionKey, RoutingEvidence,
+    DescriptorHash, Freshness, Identity, LiveQuery, RelaySessionKey,
+    ReplaceableMaterializerOperation, ReplaceableMaterializerRegistration, RoutingEvidence,
     SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{
@@ -129,9 +130,6 @@ use crate::publish_queue::{
     WriteOutcome,
 };
 use crate::relay_information_service::RelayInformationCapabilityEvidence;
-use crate::replaceable_materializer::{
-    ReplaceableMaterializerOperation, ReplaceableMaterializerRegistration,
-};
 
 type AttributedRelayObservation = (
     SignedEvent,
