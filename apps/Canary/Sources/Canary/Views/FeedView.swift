@@ -58,8 +58,8 @@ struct FeedView: View {
     }
 
     // Per-source facts only -- never a rolled-up completeness verdict
-    // (`docs/design/scoped-evidence-49-12-plan.md` §4). This falsifier's own
-    // rendering choice, not an NMP-provided aggregate.
+    // (`docs/design/scoped-evidence-49-12-plan.md` §4). This is the Canary's
+    // own rendering choice, not an NMP-provided aggregate.
     private var evidenceText: String {
         guard !evidence.isEmpty else {
             return "no evidence yet"

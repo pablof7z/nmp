@@ -1,11 +1,11 @@
-# M5 falsifier app -- xcodegen project spec (committed; the generated
+# The Canary -- xcodegen project spec (committed; the generated
 # .xcodeproj is NOT committed, see repo .gitignore / memory
 # xcodegen-pbxproj-churn: xcodegen churns pbxproj UUIDs on every regen).
 #
-# Regenerate with: (cd apps/Falsifier && xcodegen generate)
-name: Falsifier
+# Regenerate with: (cd apps/Canary && xcodegen generate)
+name: Canary
 options:
-  bundleIdPrefix: com.nmp.falsifier
+  bundleIdPrefix: com.nmp.canary
   deploymentTarget:
     iOS: "17.0"
 settings:
@@ -20,12 +20,12 @@ packages:
   NMP:
     path: ../../Packages/NMP
 targets:
-  Falsifier:
+  Canary:
     type: application
     platform: iOS
     deploymentTarget: "17.0"
     sources:
-      - path: Sources/Falsifier
+      - path: Sources/Canary
     dependencies:
       - package: NMP
         product: NMP
@@ -33,25 +33,25 @@ targets:
       path: Generated-Info.plist
       properties:
         UILaunchScreen: {}
-        CFBundleDisplayName: Falsifier
+        CFBundleDisplayName: Canary
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.nmp.falsifier
+        PRODUCT_BUNDLE_IDENTIFIER: com.nmp.canary
         TARGETED_DEVICE_FAMILY: "1"
-  FalsifierTests:
+  CanaryTests:
     # #1429: runtime-qualify a public-hostname NIP-11 acquisition through the
     # supported Swift facade on an actual iOS Simulator process.
     type: bundle.unit-test
     platform: iOS
     deploymentTarget: "17.0"
     sources:
-      - path: Tests/FalsifierTests
+      - path: Tests/CanaryTests
     dependencies:
-      - target: Falsifier
+      - target: Canary
       - package: NMP
         product: NMP
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.nmp.falsifier.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.nmp.canary.tests

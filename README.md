@@ -261,7 +261,7 @@ Diagnostics are a **permanent, read-only proof plane** — source plan, wire fil
 - `crates/nmp-{nip02,nip29,nip65,blossom,nip68,media}` — opt-in protocol modules
 - `crates/nmp-outbox` — the NIP-65 outbox algorithm as an installable `AuthorRouteProvider`
 - `Packages/NMP` (Swift) · `Packages/NMPKotlin` (Kotlin/JVM)
-- `apps/Falsifier`, `apps/UIGallery` — SwiftUI proving grounds
+- `apps/Canary`, `apps/UIGallery` — SwiftUI proving grounds
 - `docs/` — vision, design record, known gaps
 
 ## Start here

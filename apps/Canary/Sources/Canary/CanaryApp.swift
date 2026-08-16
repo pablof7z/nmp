@@ -1,11 +1,11 @@
-// M5 -- the iOS falsifier app's entry point. Plain SwiftUI `App`; NMP is
-// not in charge of this at all -- it only becomes a `let` inside
-// `AppModel`, constructed on first appearance.
+// The Canary's entry point. Plain SwiftUI `App`; NMP is not in charge of
+// this at all -- it only becomes a `let` inside `AppModel`, constructed on
+// first appearance.
 
 import SwiftUI
 
 @main
-struct FalsifierApp: App {
+struct CanaryApp: App {
     @State private var model: AppModel?
     @State private var initError: String?
 
