@@ -752,6 +752,208 @@ mod semantic_successor_tests {
         );
     }
 
+    /// #1683's residual cause, established: a covering coordinate REQ can
+    /// finish with its coverage authority POISONED -- here, an EVENT it
+    /// delivered failed to commit to the store -- so
+    /// `persist_attributed_completion` retires it without a coverage
+    /// interval (`Finished { committed_interval: None }`). A poisoned finish
+    /// proves neither presence nor absence, and the coverage door's
+    /// `Finished` arm only ever tries to prove absence, so it silently
+    /// contributes nothing: indistinguishable from "nothing ever asked" to a
+    /// caller reading `Uncovered`.
+    ///
+    /// This is a reachability/characterization proof, not a fix: two
+    /// alternatives (retry the ask instead of sending; always park) were
+    /// tried and rejected, because both deterministically stall
+    /// `relay_source_successors_resume_current_delivery_and_stay_open_after_restart`
+    /// and `source_session_replacement_wakes_every_signed_successor_destination`
+    /// -- see the long comment on `coordinate_is_current_for_lane`'s
+    /// `Uncovered` arm for why. Sending remains the deliberate, recorded
+    /// choice (`docs/known-gaps.md`). This test proves the state is
+    /// genuinely reachable through a real mechanism and confirms today's
+    /// actual behavior, so nobody re-derives "not established" from scratch.
+    ///
+    /// Driven through the real publish path -- prepare, sign, connect,
+    /// admission flush -- and never by calling the coverage door directly.
+    /// The poison is injected the way a store commit failure would compile
+    /// to it (`AttributionState::poison_event_commit_failure`, the same door
+    /// `on_relay_frame` calls on a real ingest failure), not by asserting on
+    /// `CoordinateCoverage` itself.
+    #[test]
+    fn a_poisoned_finished_coordinate_request_is_read_as_uncovered_and_the_lane_sends() {
+        let author = Keys::generate();
+        let existing_person = Keys::generate().public_key();
+        let added_person = Keys::generate().public_key();
+        let source_relay = RelayUrl::parse("wss://poison-source.example").unwrap();
+        let destination = RelayUrl::parse("wss://poison-destination.example").unwrap();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
+        store
+            .insert(
+                source(&author, 1, "base body", &[existing_person]),
+                RelayObserved::new(source_relay.clone(), Timestamp::from(1)),
+            )
+            .unwrap();
+        let mut core = EngineCore::new(store, 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
+            program: [21; 16],
+            format: [22; 16],
+            materializer: Arc::new(AddPeople),
+        });
+
+        let read_session = RelaySessionKey::public(destination.clone());
+        let read_handle = TransportRelayHandle {
+            slot: 40,
+            generation: 1,
+        };
+        let write_session = RelaySessionKey::new(
+            destination.clone(),
+            AccessContext::Nip42(author.public_key()),
+        );
+        let write_handle = TransportRelayHandle {
+            slot: 1,
+            generation: 1,
+        };
+        core.handle(EngineMsg::RelayConnected(read_handle, read_session.clone()));
+        core.handle(EngineMsg::RelayConnected(
+            write_handle,
+            write_session.clone(),
+        ));
+
+        let mut seen: Vec<Effect> = Vec::new();
+
+        let operation = nmp_grammar::ReplaceableOperation::from_registered_default_parts(
+            [21; 16],
+            [22; 16],
+            Kind::ContactList,
+            String::new(),
+            added_person.to_bytes().to_vec(),
+        )
+        .unwrap();
+        let mut preparation = core.prepare_publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(operation),
+            routing: WriteRouting::Explicit(vec![destination.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        });
+        let accepted = loop {
+            match preparation {
+                PublishPreparation::Complete(effects) => break effects,
+                PublishPreparation::Materialize(prepared) => {
+                    let PreparedReplaceableMaterialization { call, continuation } = *prepared;
+                    let outcome = core.run_replaceable_materialization(call);
+                    preparation =
+                        core.complete_body_complete_replaceable_operation(continuation, outcome);
+                }
+            }
+        };
+        let (owner, generation, unsigned) = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::RequestSign(receipt, generation, unsigned) => {
+                    Some((*receipt, *generation, unsigned.clone()))
+                }
+                _ => None,
+            })
+            .expect("the delta generation requests one signature");
+        let signed = unsigned.sign_with_keys(&author).unwrap();
+        seen.extend(core.handle(EngineMsg::SignerCompleted(
+            owner,
+            generation,
+            Ok(signed.clone()),
+        )));
+        seen.extend(core.handle(EngineMsg::AuthProbeReleased(write_handle, write_session)));
+
+        // The coverage door's own coordinate REQ is now live. Accept its
+        // handoff so it becomes a real, unlimited, unpoisoned wire owner --
+        // exactly what `coordinate_filter` always asks for.
+        let mut coordinate_sub_id = None;
+        for round in 0..3 {
+            if coordinate_sub_id.is_some() {
+                break;
+            }
+            let next = Timestamp::from(core.clock.as_secs().saturating_add(1));
+            let flushed = core.handle(EngineMsg::FlushWireAdmission(next));
+            let mut round_accepts = Vec::new();
+            for effect in &flushed {
+                if let Effect::Wire(delta) = effect {
+                    for (session, ops) in &delta.ops {
+                        if session != &read_session {
+                            continue;
+                        }
+                        for op in ops {
+                            let WireOp::Req(sub_id, filter) = op else {
+                                continue;
+                            };
+                            round_accepts.push(RequestHandoffOutcome::Accepted {
+                                attempt_id: delta.attempt_id(session, sub_id, filter),
+                                handle: read_handle,
+                            });
+                            coordinate_sub_id = Some(sub_id.clone());
+                        }
+                    }
+                }
+            }
+            for accept in round_accepts {
+                seen.extend(core.on_wire_request_handoff(accept));
+            }
+            seen.extend(flushed);
+            let _ = round;
+        }
+        let coordinate_sub_id =
+            coordinate_sub_id.expect("the coverage door places its own coordinate REQ");
+        assert!(
+            core.semantic_publish_coverage.values().next().is_some(),
+            "the lane must already own an open coordinate observation before the poison lands"
+        );
+
+        // Poison this exact request's coverage authority the way a real
+        // store commit failure would, then finish its stored-events phase.
+        // It delivered nothing and proves nothing -- Finished, no interval.
+        let wire_id = wire_sub_id_string(&coordinate_sub_id);
+        core.attribution
+            .poison_event_commit_failure(&read_session, &wire_id);
+        seen.extend(core.handle(EngineMsg::RelayFrame(
+            read_handle,
+            read_session.clone(),
+            RelayFrame::from_message(nostr::RelayMessage::EndOfStoredEvents(
+                std::borrow::Cow::Owned(nostr::SubscriptionId::new(wire_id.clone())),
+            )),
+        )));
+
+        let coordinate = nostr::nips::nip01::Coordinate {
+            kind: Kind::ContactList,
+            public_key: author.public_key(),
+            identifier: String::new(),
+        };
+        assert_eq!(
+            core.coordinate_coverage(&coordinate, &read_session),
+            crate::core::coordinate_coverage::CoordinateCoverage::Uncovered,
+            "a poisoned finish must be unable to prove absence, or this test proves nothing"
+        );
+
+        // Drain a few more admission passes: the wake-parked mechanism
+        // (EngineCore::handle) re-runs `schedule_ready` on every turn while
+        // this lane is parked, which is exactly where the escape fires.
+        for _ in 0..3 {
+            let next = Timestamp::from(core.clock.as_secs().saturating_add(1));
+            seen.extend(core.handle(EngineMsg::FlushWireAdmission(next)));
+        }
+
+        // Today's actual, deliberate behavior: the lane sends rather than
+        // parking forever. This is the residual #1683 records, not a
+        // regression -- see the comment this test is cited from.
+        let published = seen.iter().any(|effect| {
+            matches!(effect, Effect::PublishEvent(session, _, _) if session.relay == destination)
+        });
+        assert!(
+            published,
+            "the poisoned-finished coordinate request must read as Uncovered and let this \
+             already-asked lane send -- if this now fails, the escape changed and the comment \
+             on coordinate_is_current_for_lane's Uncovered arm needs to change with it"
+        );
+    }
+
     #[test]
     fn capability_default_fallback_uses_a_preexisting_canonical_source() {
         let author = Keys::generate();

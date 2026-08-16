@@ -467,14 +467,37 @@ impl EngineCore {
             // "nothing ever asked". That case is now `Reconciling` and is
             // handled above.
             //
-            // What is left here is the residual state, and the escape below
-            // is still load-bearing: making `Uncovered` always park hangs
+            // What is left here is the residual state, and its cause IS now
+            // established (measured, not guessed): a covering REQ can reach
+            // `Finished` with its coverage authority POISONED --
+            // `CoveragePoison::{LimitedRequest,EventCommitFailed,MissingShape}`
+            // (`core/attribution.rs`) -- so `persist_attributed_completion`
+            // retires it with `committed_interval: None`
+            // (`core/query.rs::persist_attributed_completion`). A poisoned
+            // Finished request proves neither presence nor absence, and this
+            // door's `Finished` arm only ever tries `proves_absence`, so it
+            // silently contributes nothing -- indistinguishable from "no
+            // request exists" to a caller reading `Uncovered`. Falsifier:
+            // `a_poisoned_finished_coordinate_request_is_read_as_uncovered`
+            // reaches this exact state through a real publish and confirms
+            // it, by injecting the `EventCommitFailed` poison the way a
+            // genuine store commit failure would (never by calling this
+            // door directly).
+            //
+            // The escape below is still load-bearing, and a safer-looking
+            // fix was tried and rejected: releasing this lane's stale
+            // observation and re-asking (`open_coordinate_observation`
+            // again) whenever `already_asked` reads a fresh `Uncovered`,
+            // instead of sending, deterministically stalls
             // `relay_source_successors_resume_current_delivery_and_stay_open_after_restart`
             // and `source_session_replacement_wakes_every_signed_successor_destination`
-            // -- a follow that can never leave, which is the same defect
-            // pointing the other way. Why the resolver declines to ask in
-            // the residual state is not established, and this comment does
-            // not guess.
+            // -- not by hanging forever, but by never letting an in-flight
+            // NIP-77 barrier/reconciliation reach its own `Reconciling`
+            // credit before this door's retry tears it down and restarts
+            // the handshake, repeating indefinitely. Simply always parking
+            // has the same failure shape in the other direction (the
+            // original "follow that can never leave" defect). Neither
+            // alternative was made safe within this pass.
             //
             // Sending is still chosen for it, on the same reasoning #1631
             // used: pre-#1631 EVERY semantic publish went out with no
