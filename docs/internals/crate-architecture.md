@@ -391,6 +391,21 @@ If the property ever stops holding, these moves stop being cheap — so treat a
 consumer that reaches around the facade for a re-exported type as a defect in
 that consumer, not a style choice.
 
+**That rule is for production code. Tests proving reducer-internal behaviour
+are a different rule, not an exception to this one.** `nmp-nip29`'s own
+production files (`group.rs`, `groups.rs`, `group_list_writes.rs`,
+`record_observation.rs`, `scope.rs`) reach every engine type through `nmp`
+alone, with no `nmp-engine`/`nmp-runtime` edge in the manifest at all. Five
+of its test files name `nmp_engine`/`nmp_runtime` directly instead —
+`nip29_group_list_headless.rs` drives `nmp_engine::core::{EngineCore,
+EngineMsg}` to prove a reducer-level demand shape, the same thing
+`nmp/tests` and `nmp-bdd` already do post-cut. That is not a hole in the
+facade: `nmp` deliberately does not expose `handle()`, so a test of
+reducer-internal behaviour has nowhere else to go. The test is over when it
+needs a mechanism door the facade will never open; the production defect is
+a consumer that names one anyway when the facade already offers what it
+needs.
+
 The one exception is `nmp-ffi`, which also names capability crates directly.
 It is not a hole: it does that only for things `nmp` deliberately never
 re-exports, because compiled materializers have to be linked into the
