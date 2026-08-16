@@ -109,7 +109,7 @@ pub struct FfiBlobDescriptor {
     pub uploaded: Option<u64>,
 }
 
-fn descriptor_to_ffi(descriptor: BlobDescriptor) -> FfiBlobDescriptor {
+pub(crate) fn descriptor_to_ffi(descriptor: BlobDescriptor) -> FfiBlobDescriptor {
     FfiBlobDescriptor {
         url: descriptor.url,
         sha256: descriptor.sha256.to_hex(),
@@ -164,7 +164,7 @@ pub enum FfiBlossomServerUrlError {
     QueryOrFragment,
 }
 
-fn server_url_error_to_ffi(error: ServerUrlError) -> FfiBlossomServerUrlError {
+pub(crate) fn server_url_error_to_ffi(error: ServerUrlError) -> FfiBlossomServerUrlError {
     match error {
         ServerUrlError::Parse { reason } => FfiBlossomServerUrlError::Parse { reason },
         ServerUrlError::MissingHost => FfiBlossomServerUrlError::MissingHost,
@@ -322,7 +322,7 @@ impl std::fmt::Display for FfiBlossomAuthError {
 
 impl std::error::Error for FfiBlossomAuthError {}
 
-fn auth_draft_error_to_ffi(error: AuthDraftError) -> FfiBlossomAuthError {
+pub(crate) fn auth_draft_error_to_ffi(error: AuthDraftError) -> FfiBlossomAuthError {
     match error {
         AuthDraftError::ExpirationNotAfterCreatedAt {
             created_at,
@@ -334,7 +334,7 @@ fn auth_draft_error_to_ffi(error: AuthDraftError) -> FfiBlossomAuthError {
     }
 }
 
-fn auth_validation_error_to_ffi(error: AuthValidationError) -> FfiBlossomAuthError {
+pub(crate) fn auth_validation_error_to_ffi(error: AuthValidationError) -> FfiBlossomAuthError {
     match error {
         AuthValidationError::WrongKind { found } => FfiBlossomAuthError::WrongKind { found },
         AuthValidationError::BadSignature { reason } => {
@@ -741,7 +741,7 @@ impl std::fmt::Display for FfiBlossomUploadError {
 
 impl std::error::Error for FfiBlossomUploadError {}
 
-fn upload_error_to_ffi(error: UploadError) -> FfiBlossomUploadError {
+pub(crate) fn upload_error_to_ffi(error: UploadError) -> FfiBlossomUploadError {
     match error {
         UploadError::AuthorizationBlobMismatch {
             expected,

@@ -32,6 +32,10 @@ nipc7 = ["nmp/nipc7"]
 asset = ["nmp/asset"]
 blossom = ["nmp/blossom", "asset"]
 content = ["nmp/content"]
+# #971: the one-shot engine-authorized Blossom upload. Needs `blossom` for
+# the client/authorization vocabulary and `nmp/media` for the exact-bytes
+# prepare/upload seam this call composes internally.
+media = ["nmp/media", "blossom"]
 
 # `cargo run -p nmp-ffi --bin uniffi-bindgen generate --library <staticlib> \
 #   --language swift --out-dir gen/` (M4 plan §3 step 3, library mode -- reads
@@ -89,6 +93,10 @@ tokio = { version = "1", features = ["rt", "time", "net"] }
 nmp-grammar.workspace = true
 nmp-test-support.workspace = true
 nmp-store = { workspace = true, features = ["test-instrumentation"] }
+# #971: `upload_blossom.rs` computes the fixture's expected sha256 to assert
+# against the returned descriptor. Test-only, same discipline as `nmp-grammar`
+# above: `cargo build -p nmp-ffi` cannot resolve `nmp_asset::` at all.
+nmp-asset.workspace = true
 tempfile = "3"
 tungstenite = "0.29"
 url = "2"
