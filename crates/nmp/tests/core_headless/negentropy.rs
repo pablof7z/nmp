@@ -1314,26 +1314,14 @@ fn relay_that_rejects_the_probe_is_classified_unsupported_and_stays_on_req() {
     );
 }
 
-/// Structural grep-guard (ledger #8, "not a runtime `if`"): the ONLY place
-/// in `core/mod.rs` that constructs a `ProbedRelay` value is inside
-/// `negentropy/mod.rs` (`Prober::probed`/`Prober::on_neg_msg`) -- reading
-/// `core/mod.rs`'s own source confirms it never spells the constructor
-/// itself, so the only way it can ever hold one is by receiving it back
-/// from `Prober`, exactly the compile-fence the plan asks for.
-#[test]
-fn core_never_constructs_a_probed_relay_directly() {
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/core/mod.rs"))
-        .expect("read core/mod.rs");
-    let code_lines: Vec<&str> = src
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with("//"))
-        .collect();
-    assert!(
-        !code_lines.iter().any(|l| l.contains("ProbedRelay(")),
-        "core/mod.rs must never construct a ProbedRelay literal itself -- only `negentropy::Prober` may"
-    );
-}
+// Ledger #8's "not a runtime `if`" used to be checked here, by reading
+// `core/mod.rs`'s source text and asserting it never spells `ProbedRelay(`.
+// That scan saw one file: a construction in `core/query.rs` or
+// `core/auth_transport.rs` would have passed it. `ProbedRelay`'s field is
+// private to `negentropy/mod.rs` now, so the whole crate is fenced by the
+// compiler instead (`E0603: tuple struct constructor 'ProbedRelay' is
+// private`), and a text scan that duplicates a compile error more narrowly
+// than the compiler does is not worth keeping warm.
 
 /// Test 10's liveness half (bounded, headless): a reconciliation open past
 /// [`NEG_LIVENESS_DEADLINE_SECS`]'s worth of synthetic clock advance is
