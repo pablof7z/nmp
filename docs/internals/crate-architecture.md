@@ -91,6 +91,19 @@ The reducer and the async edge left `crates/nmp` as **two crates**:
 `EngineThread::spawn` takes a `RestoredSession` and `Handle` owns the live
 session state, so the facade only encodes, decodes, and hands one over.
 
+**The line is DECIDE versus PERFORM.** The engine owns all protocol state and
+every invariant over it; the runtime owns zero protocol state and all OS
+resources. That is the whole rule, and it is about responsibility, not about
+execution style.
+
+Determinism is the **observable** of that responsibility, not the reason for
+it. Stating it the other way round — "synchronous therefore engine" — reads
+as a rule about code shape and takes you somewhere wrong: `nmp-nip11`'s
+value types and parsing are perfectly synchronous, and that framing would
+eventually argue them *into* the reducer, which this workspace has already
+refused for good reasons. Ask which side owns the state, not which side
+blocks.
+
 Why two and not one (measured at `64f14255`):
 
 - The seam is already clean and one-directional: `core → runtime` production
@@ -99,12 +112,20 @@ Why two and not one (measured at `64f14255`):
   **zero fields** directly. The cut freezes a door that already exists.
 - The reason is a dependency constraint only a manifest can enforce: `core/`
   names no `tokio` and no `reqwest` today, and nothing but review keeps it
-  that way. The reducer's determinism — the foundation of the entire
-  headless falsifier corpus and of `architecture-boundaries.md`'s
-  decision/effect split — becomes compiler-enforced: a timer, task, or HTTP
-  call inside the reducer stops being a review catch and becomes a build
-  error. This is the `nmp-signer`-depends-on-`zeroize`-only play at larger
-  scale, and with zero CI it is the only enforcement available.
+  that way. Because the reducer owns the protocol state, its behaviour must
+  be a pure function of the messages it is handed — the foundation of the
+  entire headless falsifier corpus and of `architecture-boundaries.md`'s
+  decision/effect split. The manifest makes that compiler-enforced: a timer,
+  task, or HTTP call inside the reducer stops being a review catch and
+  becomes a build error. This is the
+  `nmp-signer`-depends-on-`zeroize`-only play at larger scale, and with zero
+  CI it is the only enforcement available.
+- A corollary that has already had to be applied twice: **a coordinator earns
+  ownership of ORDERING between subsystems, not ownership of the subsystems
+  themselves.** That is the test every owner extraction in #1606 has been
+  passing, stated at package scale — and it is the standing check on
+  `nmp-runtime`, whose coordinator file has begun implementing the
+  subsystems it is supposed to be sequencing.
 - Sequencing: the cut lands after #1707 (capabilities out) and after #1606's
   first owner extractions, so the frozen door is the owner-shaped one, not
   the pre-decomposition one. See open question 1 for what could still
@@ -335,9 +356,46 @@ in each of them; the fourth by measuring #1720's real cost.
 A crate line earns itself when the boundary needs *manifest*-level proof: a
 dependency that must not exist. That is exactly why reducer-versus-runtime is
 a real crate line (zero `tokio`, zero threads, zero channels under `core/` —
-the cut makes determinism a build error) and why `nmp-nip11` is one (it is
-the only package in the engine's tree naming `reqwest`). Neither property is
-available to any cluster inside the reducer.
+the cut makes the reducer's purity a build error) and why `nmp-nip11` is one
+(it is the only package in the engine's tree naming `reqwest`). Neither
+property is available to any cluster inside the reducer.
+
+### Which package does a test belong to
+
+**"Drives `EngineCore`" does not make a test a reducer test. What decides it
+is which crate's vocabulary the test insists on.**
+
+The corpus move (#1728) put 157 headless tests into `nmp-engine` and two
+files refused, each in an instructive direction:
+
+- `nip29_group_reads.rs` mints every demand through
+  `nmp_nip29::group_demand_at`, and its own header says the point is that
+  nothing in it re-implements the door. `nmp-nip29` sits ABOVE `nmp-engine`,
+  so a test that insists on the real constructors cannot live below them.
+  It is a **capability falsifier that happens to drive the reducer**, and it
+  moved UP, to `crates/nmp-nip29/tests/`.
+- `write_scheduling.rs` imported `nmp_runtime::FACT_CHANNEL_CAPACITY` — a
+  reducer test naming the runtime. The reducer's contract is "no page exceeds
+  the bound you handed me", so the number is the caller's business and the
+  test is the caller: it became a local constant, and the test moved DOWN.
+
+Both were invisible while everything lived in one package. That is the split
+paying out in a way nobody predicted, and it is why the question is worth
+asking per file rather than per directory.
+
+Two fixes to reject when a test does not fit, both considered and refused
+for `nip29_group_reads.rs`:
+
+- **A cross-package `#[path]` include** reaching into another crate's
+  `tests/`. It compiles. It also makes one package's test layout load-bearing
+  for another's, invisibly.
+- **A dev-dependency running UP**, from the reducer to a capability crate.
+  Cargo permits the cycle, which is exactly the trap: it would make
+  `cargo test -p nmp-engine` build the entire facade and capability stack,
+  and it inverts the direction the split exists to establish. A dev-dependency
+  is still a dependency in the file that is supposed to be the proof.
+
+Copying eight short fixture helpers was cheaper than either.
 
 ### The facade
 
