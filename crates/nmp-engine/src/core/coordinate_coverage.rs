@@ -349,7 +349,7 @@ impl EngineCore {
             return None;
         }
         let mut found = None;
-        for (sub_id, neg) in &self.neg_sessions {
+        for (sub_id, neg) in self.nip77.sessions.iter() {
             if neg.relay != session.relay {
                 continue;
             }

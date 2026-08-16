@@ -25,8 +25,8 @@ fn probed_nip77_plan_closes_touch_only_their_exact_children() {
             .count(),
         PLANS as usize
     );
-    assert_eq!(core.pending_neg_handoffs.len(), PLANS as usize);
-    assert_eq!(core.pending_neg_handoffs_by_plan.len(), PLANS as usize);
+    assert_eq!(core.nip77.handoffs.len(), PLANS as usize);
+    assert_eq!(core.nip77.handoffs.plan_keys(), PLANS as usize);
 
     core.nip77_plan_children_touched.set(0);
     core.router.reset_withdrawal_work();

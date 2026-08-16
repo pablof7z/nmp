@@ -57,6 +57,7 @@ mod lane_bootstrap_retry_tests;
 mod lane_projection;
 #[cfg(test)]
 mod nip77_metadata_tests;
+mod nip77_sessions;
 mod observation;
 #[cfg(test)]
 mod outbox_tests;
@@ -444,6 +445,7 @@ pub use diagnostics::{
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
 use history_lifecycle::HistorySessions;
+use nip77_sessions::Nip77Sessions;
 use observation::{
     ActiveRequestEvidence, LiveWireRequest, ObservationExecutionState, PendingRequestEvidence,
 };
@@ -2131,31 +2133,11 @@ pub struct EngineCore {
     /// Router plan request -> current logical metadata used by every NIP-77
     /// role generation derived from that immutable physical request.
     plan_execution_metadata: HashMap<SubId, PlanExecutionMetadata>,
-    /// Router plan id -> exact NIP-01 subscription currently owning the live
-    /// tail. NIP-77 candidates use role-derived ids, so an old live selection
-    /// can overlap a replacement until the replacement's EOSE.
-    active_nip77_live: HashMap<SubId, SubId>,
-    /// Monotonic reincarnation counter for every NIP-77 role wire id
-    /// ([`nip77_role_sub_id`], #932). ONLY ever increments: it survives
-    /// recompiles, `AttributionState::clear_session`, and reconnects
-    /// untouched, because a counter that reset would re-mint a string a
-    /// straggler EOSE could still be addressed to -- exactly the defect it
-    /// exists to close. `u64` at one mint per repair phase is not a
-    /// wrap-around this process can reach.
-    next_nip77_incarnation: u64,
-    /// Candidate live REQs waiting for their exact EOSE barrier.
-    pending_neg_handoffs: HashMap<SubId, PendingNegHandoff>,
-    pending_neg_handoffs_by_plan: HashMap<SubId, BTreeSet<SubId>>,
-    /// Live reconciliation sessions keyed by their role-derived NIP-77 id.
-    /// NIP-01 REQ ids and NIP-77 ids are separate namespaces by protocol and
-    /// distinct values here, so closing one can never close the other.
-    neg_sessions: HashMap<SubId, NegSession>,
-    neg_sessions_by_plan: HashMap<SubId, BTreeSet<SubId>>,
-    /// Every temporary NIP-01 request outside router demand: missing-id
-    /// fetches and ordinary unlimited backlog fallbacks. The typed value
-    /// determines the exact EOSE consequence; no boolean lifecycle flag.
-    pending_backfills: HashMap<SubId, TemporaryReq>,
-    pending_backfills_by_plan: HashMap<SubId, BTreeSet<SubId>>,
+    /// Every child subscription a router plan currently owns, plus which live
+    /// REQ serves that plan's tail. Three (map, reverse index) pairs that had
+    /// six verbatim-copied insert/take functions between them are one
+    /// `PlanIndexed` in `nip77_sessions.rs`.
+    nip77: Nip77Sessions,
     /// The diagnostic surface's own counter (M5 plan §1.2 step 1) — events
     /// actually RECEIVED, per SESSION per kind. Bumped in the
     /// `RelayMessage::Event` arms of `on_relay_frame`/`on_relay_frames`;
@@ -2404,14 +2386,7 @@ impl EngineCore {
             planned_read_sessions: BTreeSet::new(),
             planned_read_session_counts_by_relay: BTreeMap::new(),
             plan_execution_metadata: HashMap::new(),
-            active_nip77_live: HashMap::new(),
-            next_nip77_incarnation: 0,
-            pending_neg_handoffs: HashMap::new(),
-            pending_neg_handoffs_by_plan: HashMap::new(),
-            neg_sessions: HashMap::new(),
-            neg_sessions_by_plan: HashMap::new(),
-            pending_backfills: HashMap::new(),
-            pending_backfills_by_plan: HashMap::new(),
+            nip77: Nip77Sessions::default(),
             events_by_session_kind: HashMap::new(),
             next_attempt_correlation: Some(0),
             attempt_correlations: HashMap::new(),
@@ -2622,6 +2597,7 @@ impl EngineCore {
         let history = self.history.counts();
         let wire = self.wire.counts();
         let targets = self.request_targets.counts();
+        let nip77 = self.nip77.counts();
         CoreOwnershipCensus {
             observations: self.observations.len(),
             branch_handles: self.handles.len(),
@@ -2719,24 +2695,16 @@ impl EngineCore {
                 .values()
                 .map(|metadata| metadata.owner_demands.len())
                 .sum(),
-            active_nip77_live: self.active_nip77_live.len(),
-            pending_neg_handoffs: self.pending_neg_handoffs.len(),
-            pending_neg_plan_keys: self.pending_neg_handoffs_by_plan.len(),
-            pending_neg_plan_edges: self
-                .pending_neg_handoffs_by_plan
-                .values()
-                .map(BTreeSet::len)
-                .sum(),
-            neg_sessions: self.neg_sessions.len(),
-            neg_session_plan_keys: self.neg_sessions_by_plan.len(),
-            neg_session_plan_edges: self.neg_sessions_by_plan.values().map(BTreeSet::len).sum(),
-            pending_backfills: self.pending_backfills.len(),
-            pending_backfill_plan_keys: self.pending_backfills_by_plan.len(),
-            pending_backfill_plan_edges: self
-                .pending_backfills_by_plan
-                .values()
-                .map(BTreeSet::len)
-                .sum(),
+            active_nip77_live: nip77.live,
+            pending_neg_handoffs: nip77.handoffs,
+            pending_neg_plan_keys: nip77.handoff_plan_keys,
+            pending_neg_plan_edges: nip77.handoff_plan_edges,
+            neg_sessions: nip77.sessions,
+            neg_session_plan_keys: nip77.session_plan_keys,
+            neg_session_plan_edges: nip77.session_plan_edges,
+            pending_backfills: nip77.backfills,
+            pending_backfill_plan_keys: nip77.backfill_plan_keys,
+            pending_backfill_plan_edges: nip77.backfill_plan_edges,
             router_active_demands: router.active_demands,
             router_request_demand_keys: router.requests_by_demand_keys,
             router_request_demand_edges: router.requests_by_demand_edges,
@@ -3007,7 +2975,7 @@ impl EngineCore {
                 crate::negentropy::ProbeState::Supported => "behaviorally_proven",
                 crate::negentropy::ProbeState::Unsupported => "behaviorally_rejected",
             };
-            relay.nip77_handoff = if self.pending_backfills.iter().any(|(sub_id, request)| {
+            relay.nip77_handoff = if self.nip77.backfills.iter().any(|(sub_id, request)| {
                 sub_id.0 == relay.relay
                     && matches!(
                         request,
@@ -3015,26 +2983,25 @@ impl EngineCore {
                     )
             }) {
                 "fallback_backlog"
-            } else if self.pending_backfills.iter().any(|(sub_id, request)| {
+            } else if self.nip77.backfills.iter().any(|(sub_id, request)| {
                 sub_id.0 == relay.relay && matches!(request, TemporaryReq::MissingIds { .. })
             }) {
                 "backfilling"
             } else if self
-                .neg_sessions
-                .values()
-                .any(|session| session.relay == relay.relay)
+                .nip77
+                .sessions
+                .iter()
+                .any(|(_, session)| session.relay == relay.relay)
             {
                 "reconciling"
             } else if self
-                .pending_neg_handoffs
-                .keys()
-                .any(|sub_id| sub_id.0 == relay.relay)
+                .nip77
+                .handoffs
+                .iter()
+                .any(|(sub_id, _)| sub_id.0 == relay.relay)
             {
                 "awaiting_live_eose"
-            } else if self
-                .active_nip77_live
-                .keys()
-                .any(|plan_sub_id| plan_sub_id.0 == relay.relay)
+            } else if self.nip77.has_live_on_relay(&relay.relay)
                 && self
                     .connected_relays
                     .contains(&RelaySessionKey::public(relay.relay.clone()))
@@ -3130,28 +3097,20 @@ impl EngineCore {
         // deadline, so `next_deadline()` recomputes without it and the loop
         // parks -- see #39's fix-up review and the regression test this
         // predicate exists to satisfy.
-        let stale_handoffs: Vec<SubId> = self
-            .pending_neg_handoffs
-            .iter()
-            .filter(|(_, handoff)| now >= handoff.started_at + NEG_LIVENESS_DEADLINE_SECS)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for live_sub_id in stale_handoffs {
-            if let Some(handoff) = self.take_pending_neg_handoff(&live_sub_id) {
-                self.handoff_fallback_to_req(handoff, &mut effects);
-            }
+        let stale_handoffs = self
+            .nip77
+            .handoffs
+            .take_where(|_, handoff| now >= handoff.started_at + NEG_LIVENESS_DEADLINE_SECS);
+        for (_, handoff) in stale_handoffs {
+            self.handoff_fallback_to_req(handoff, &mut effects);
         }
 
-        let stale_neg: Vec<SubId> = self
-            .neg_sessions
-            .iter()
-            .filter(|(_, s)| now >= s.started_at + NEG_LIVENESS_DEADLINE_SECS)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for sub_id in stale_neg {
-            if let Some(session) = self.take_neg_session(&sub_id) {
-                self.neg_session_fallback_to_req(sub_id, session, &mut effects);
-            }
+        let stale_neg = self
+            .nip77
+            .sessions
+            .take_where(|_, session| now >= session.started_at + NEG_LIVENESS_DEADLINE_SECS);
+        for (sub_id, session) in stale_neg {
+            self.neg_session_fallback_to_req(sub_id, session, &mut effects);
         }
 
         effects
@@ -3204,13 +3163,15 @@ impl EngineCore {
     pub fn next_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
         let expiry = self.store.next_expiration()?;
         let neg_liveness = self
-            .neg_sessions
-            .values()
-            .map(|session| session.started_at + NEG_LIVENESS_DEADLINE_SECS)
+            .nip77
+            .sessions
+            .iter()
+            .map(|(_, session)| session.started_at + NEG_LIVENESS_DEADLINE_SECS)
             .chain(
-                self.pending_neg_handoffs
-                    .values()
-                    .map(|handoff| handoff.started_at + NEG_LIVENESS_DEADLINE_SECS),
+                self.nip77
+                    .handoffs
+                    .iter()
+                    .map(|(_, handoff)| handoff.started_at + NEG_LIVENESS_DEADLINE_SECS),
             )
             .min();
         // A persistence failure already latched by the write plane suppresses
