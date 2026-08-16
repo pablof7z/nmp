@@ -21,7 +21,7 @@ use nmp_blossom::{
 };
 use nmp_nip68::{PictureImage, PictureImageError};
 
-use crate::prepare::PreparedUpload;
+use super::prepare::PreparedUpload;
 
 /// [`PreparedUpload::upload`]'s failure. A DISTINCT type from
 /// [`crate::PrepareError`] and [`crate::MediaComposeError`]: an upload failure
