@@ -540,11 +540,29 @@ about current code:
   `relay_source_successors_resume_current_delivery_and_stay_open_after_restart`
   and `source_session_replacement_wakes_every_signed_successor_destination`
   hang, which is the follow-that-can-never-leave defect in the other
-  direction. Why the resolver declines to ask in the residual state is not
-  established. Where it fires the publish still overwrites whatever the relay
-  held, and no successor can rebuild entries that were only in the relay's
-  copy. The relay-session-death case is NOT this one; that is released
-  explicitly on disconnect and re-asked on the session that replaces it.
+  direction. The cause is now established rather than guessed: a covering
+  request can reach `Finished` with its coverage authority POISONED
+  (`CoveragePoison::{LimitedRequest,EventCommitFailed,MissingShape}`,
+  `core/attribution.rs`), so `persist_attributed_completion` retires it with
+  `committed_interval: None` — proving neither presence nor absence, and
+  indistinguishable from "nothing ever asked" to a door whose `Finished` arm
+  only ever tries to prove absence. `core/write_tests.rs`'s
+  `a_poisoned_finished_coordinate_request_is_read_as_uncovered_and_the_lane_sends`
+  reaches this exact state through a real publish (injecting the
+  `EventCommitFailed` poison the way a genuine store commit failure would,
+  never by calling the coverage door directly) and confirms today's actual
+  behavior. Two candidate fixes were tried and rejected: releasing the
+  lane's stale observation and asking again instead of sending, and always
+  parking. Both deterministically stall the same two tests above — not by
+  hanging forever, but because the retry attempt tears down an in-flight
+  NIP-77 barrier/reconciliation handshake before it reaches its own
+  `Reconciling` credit, repeating indefinitely; always-parking reproduces
+  the original follow-that-can-never-leave defect directly. Neither
+  alternative was made safe. Where it fires the publish still overwrites
+  whatever the relay held, and no successor can rebuild entries that were
+  only in the relay's copy. The relay-session-death case is NOT this one;
+  that is released explicitly on disconnect and re-asked on the session
+  that replaces it.
   (2) The coverage question is asked on the relay's
   authenticated session only when AUTH already completed for it, and on the
   ordinary public session otherwise; a relay that serves an authenticated
