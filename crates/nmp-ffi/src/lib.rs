@@ -62,6 +62,8 @@ pub mod content;
 pub mod convert;
 pub mod entity;
 pub mod facade;
+#[cfg(feature = "media")]
+pub mod media;
 #[cfg(feature = "nip02")]
 pub mod nip02;
 #[cfg(feature = "nip22")]

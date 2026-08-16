@@ -1935,6 +1935,7 @@ version = "0.1.0"
 dependencies = [
  "k256",
  "nmp",
+ "nmp-asset",
  "nmp-grammar",
  "nmp-store",
  "nmp-test-support",
