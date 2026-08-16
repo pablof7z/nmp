@@ -27,7 +27,8 @@ use std::thread;
 use nmp_signer::{PendingSignerOp, SignerOp, SignerSignedEvent};
 use nostr::{Event as SignedEvent, EventId, PublicKey, UnsignedEvent};
 
-use super::{decode_signed_event, Cmd, Handle, SignerRegistry};
+use super::{Cmd, Handle};
+use crate::identity_sessions::{decode_signed_event, SignerRegistry};
 
 /// Typed outcome vocabulary for the governed sign-only operation. This is
 /// deliberately separate from write receipts: signing here never accepts a
@@ -605,7 +606,7 @@ impl Handle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SignerRegistry;
+    use crate::identity_sessions::SignerRegistry;
     use nmp_engine::core::AuthCapabilityInstance;
     use nostr::{Keys, Kind, Tag, Timestamp};
     use std::sync::atomic::AtomicUsize;

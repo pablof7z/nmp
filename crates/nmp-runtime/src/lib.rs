@@ -59,6 +59,10 @@ mod diagnostics_delivery;
 mod engine_thread;
 mod fifo_channel;
 mod history_mailbox;
+// The engine thread's owner for identity-session membership and signing
+// capability, moved beside the loop that drives it (#1731) — same treatment
+// as `nip11_decision`, `store_recovery`, and `wire_admission` below.
+mod identity_sessions;
 // The opaque app-owned session payload and its signer descriptors. It came
 // with the runtime rather than staying in `nmp` because `EngineThread::spawn`
 // takes a `RestoredSession` and `Handle` owns the live session state; the
@@ -71,17 +75,25 @@ pub mod session;
 // is an application-supplied `AuthorRouteProvider` now, so this crate names
 // no routing protocol at all.
 mod nip11;
+// The NIP-11 grace-fallback deadline (#1731) — a different concern from
+// `nip11` above: this is the state machine, not the value projection.
+mod nip11_decision;
 mod pool_bridge;
 mod receipt_stream;
 mod request_wire;
 mod row_channel;
 mod sign_event;
+// The exponential store-recovery backoff schedule (#1731).
+mod store_recovery;
+// The 10ms wire-admission window (#1731).
+mod wire_admission;
 
 pub use clock::EngineClock;
 pub use engine_thread::{
     EngineThread, EngineThreadError, RuntimeConfig, DEFAULT_MAX_AUTH_CAPABILITIES,
 };
 pub use history_mailbox::{AsyncHistoryReceiver, HistoryMsg, HistoryReceiver};
+pub use identity_sessions::RuntimeSessionExportSources;
 pub use receipt_stream::{ReceiptReattachment, ReceiptStream};
 pub use sign_event::{SignEventCancel, SignEventError, SignEventOperation};
 
@@ -105,16 +117,14 @@ use crossbeam_channel as cb;
 use nmp_grammar::ConcreteFilter;
 use nmp_grammar::LiveQuery;
 use nmp_router::{SubId, WireOp};
-use nmp_signer::{
-    SignerOp, SignerPublicKey, SignerSignedEvent, SignerSignedEventParts, SignerUnsignedEvent,
-    SigningCapability,
-};
+use nmp_signer::{SignerOp, SigningCapability};
+#[cfg(test)]
+use nmp_signer::{SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent};
 use nmp_store::RedbStore;
 #[cfg(test)]
 use nostr::RelayMessage;
 use nostr::{
-    ClientMessage, Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, SubscriptionId,
-    Tag, Timestamp, UnsignedEvent,
+    ClientMessage, EventId, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent,
 };
 
 use nmp_transport::{
@@ -160,6 +170,8 @@ pub use fifo_channel::{
     fifo_channel, AsyncFifoReceiver, FifoNextError, FifoReceiver, FifoRecvError,
     FifoRecvTimeoutError, FifoSender, FifoTryRecvError, FACT_CHANNEL_CAPACITY,
 };
+use identity_sessions::{decode_signed_event, RuntimeSessionState, SignerRegistry};
+use nip11_decision::Nip11DecisionState;
 #[cfg(test)]
 use pool_bridge::encoded_event_upper_bound;
 use pool_bridge::{pool_bridge_loop, translate_pool_event, EnginePoolSink};
@@ -170,13 +182,8 @@ use receipt_stream::{
 use request_wire::{apply_replay, apply_wire_delta, close_frame_text};
 use row_channel::{rows_channel, RowsSender};
 pub use row_channel::{AsyncRowsReceiver, RowsReceiver};
-
-/// NIP-11 may refine a capability decision, but a slow/unavailable HTTP
-/// endpoint must not hold the WebSocket protocol path hostage. This is a
-/// one-shot grace window, not polling; the eventual document still updates
-/// diagnostics/cache after the behavioral probe has begun.
-const NIP11_DECISION_GRACE: Duration = Duration::from_millis(250);
-const WIRE_ADMISSION_WINDOW: Duration = Duration::from_millis(10);
+use store_recovery::StoreRecoveryDriver;
+use wire_admission::WireAdmissionState;
 
 struct EnginePoolRuntime {
     pool: Pool,
@@ -437,381 +444,6 @@ pub struct ObservationOwnershipCensus {
     live_wire_owners: usize,
     row_channels: usize,
     history_channels: usize,
-}
-
-/// Every signing capability the engine thread currently holds, keyed by its
-/// own public key. `Effect::RequestSign` resolves the exact pubkey frozen in
-/// the accepted template; mutable current-account state can never redirect
-/// already-accepted work.
-/// #704: an idempotent cancel action for one outstanding remote-signer write
-/// wait. It wraps the op's `Canceller`; firing it wakes the awaiting async task
-/// to a disconnected end and runs the adapter cancel hook once.
-type PendingWriteCancel = Box<dyn Fn() + Send>;
-
-#[derive(Default)]
-struct SignerRegistry {
-    signers: HashMap<PublicKey, RegisteredSigner>,
-    pending_writes: RefCell<HashMap<(ReceiptId, u64), PendingWriteCancel>>,
-}
-
-/// The engine thread's single owner for identity-session membership and
-/// operational signing-provider availability. Every public session mutation is
-/// one command turn against this value.
-///
-/// It deliberately stores no current-account field (#1657). `EngineCore` holds
-/// the one copy, and every read here takes it as `core.active_pubkey()`. The
-/// two used to be written by adjacent statements at six sites with nothing
-/// typing the pairing, so deleting either half still compiled while the
-/// sign-event author check read one copy and reactive re-rooting read the
-/// other.
-#[derive(Default)]
-struct RuntimeSessionState {
-    signers: SignerRegistry,
-    accounts: HashMap<PublicKey, Option<SessionProvider>>,
-}
-
-impl std::ops::Deref for RuntimeSessionState {
-    type Target = SignerRegistry;
-
-    fn deref(&self) -> &Self::Target {
-        &self.signers
-    }
-}
-
-impl std::ops::DerefMut for RuntimeSessionState {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.signers
-    }
-}
-
-pub struct RuntimeSessionExportSources {
-    pub snapshot: SessionSnapshot,
-    pub providers: Vec<(PublicKey, Arc<nmp_local_signer::LocalKeySigner>)>,
-}
-
-impl RuntimeSessionState {
-    fn contains_account(&self, public_key: PublicKey) -> bool {
-        self.accounts.contains_key(&public_key)
-    }
-
-    /// `current` is the reducer's one copy, passed in rather than stored
-    /// (#1657); this value owns the account set, not the selection into it.
-    fn snapshot(&self, current: Option<PublicKey>) -> SessionSnapshot {
-        let mut accounts = self
-            .accounts
-            .iter()
-            .map(|(public_key, provider)| SessionAccount {
-                public_key: *public_key,
-                provider: *provider,
-                signing: match provider {
-                    None => SigningAvailability::Unsupported,
-                    Some(SessionProvider::LocalKey) if self.has_local_provider(*public_key) => {
-                        SigningAvailability::Available
-                    }
-                    Some(SessionProvider::LocalKey) => SigningAvailability::Unavailable {
-                        reason: "configured signing provider is currently unavailable".to_string(),
-                    },
-                },
-            })
-            .collect::<Vec<_>>();
-        accounts.sort_by_key(|account| account.public_key.to_bytes());
-        SessionSnapshot {
-            accounts,
-            current_pubkey: current,
-        }
-    }
-
-    fn export_sources(&self, current: Option<PublicKey>) -> RuntimeSessionExportSources {
-        let providers = self
-            .accounts
-            .iter()
-            .filter_map(|(public_key, provider)| match provider {
-                Some(SessionProvider::LocalKey) => self
-                    .local_provider(*public_key)
-                    .map(|provider| (*public_key, provider)),
-                None => None,
-            })
-            .collect();
-        RuntimeSessionExportSources {
-            snapshot: self.snapshot(current),
-            providers,
-        }
-    }
-
-    fn provider_pubkeys(&self) -> Vec<PublicKey> {
-        self.accounts
-            .iter()
-            .filter_map(|(public_key, provider)| provider.map(|_| *public_key))
-            .collect()
-    }
-
-    /// The signing capabilities this session holds, named rather than reached
-    /// through this value's `Deref`.
-    ///
-    /// The `Deref` below is convenience for code that already knows both
-    /// halves are the same value. A caller that depends only on the SIGNER
-    /// half — [`sign_event::ActiveSignEvents::admit`] is the one that matters
-    /// (#1628) — asks for it by name, so its dependency reads as a dependency
-    /// instead of a coercion.
-    fn signer_registry(&self) -> &SignerRegistry {
-        &self.signers
-    }
-}
-
-fn encode_unsigned_event(unsigned: &UnsignedEvent) -> SignerUnsignedEvent {
-    SignerUnsignedEvent::new(
-        SignerPublicKey::new(unsigned.pubkey.to_bytes()),
-        unsigned.created_at.as_secs(),
-        unsigned.kind.as_u16(),
-        unsigned
-            .tags
-            .clone()
-            .to_vec()
-            .into_iter()
-            .map(Tag::to_vec)
-            .collect(),
-        unsigned.content.clone(),
-    )
-}
-
-fn decode_signed_event(signed: SignerSignedEvent) -> Result<SignedEvent, nmp_signer::SignerError> {
-    let SignerSignedEventParts {
-        id,
-        public_key,
-        created_at,
-        kind,
-        tags,
-        content,
-        signature,
-    } = signed.into_parts();
-    let id = EventId::from_slice(&id).map_err(|error| {
-        nmp_signer::SignerError::InvalidResponse(format!("invalid event id: {error}"))
-    })?;
-    let public_key = PublicKey::from_slice(public_key.as_bytes()).map_err(|error| {
-        nmp_signer::SignerError::InvalidResponse(format!("invalid event public key: {error}"))
-    })?;
-    let tags = tags
-        .into_iter()
-        .map(Tag::parse)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            nmp_signer::SignerError::InvalidResponse(format!("invalid event tag: {error}"))
-        })?;
-    let signature =
-        nostr::secp256k1::schnorr::Signature::from_slice(&signature).map_err(|error| {
-            nmp_signer::SignerError::InvalidResponse(format!("invalid event signature: {error}"))
-        })?;
-    Ok(SignedEvent::new(
-        id,
-        public_key,
-        Timestamp::from(created_at),
-        nostr::Kind::from(kind),
-        tags,
-        content,
-        signature,
-    ))
-}
-
-struct RegisteredSigner {
-    identity: Arc<()>,
-    instance: core::AuthCapabilityInstance,
-    signer: SharedSigner,
-}
-
-#[derive(Clone)]
-enum SharedSigner {
-    Local(Arc<nmp_local_signer::LocalKeySigner>),
-    Shared(Arc<dyn SigningCapability + Send + Sync>),
-}
-
-impl SharedSigner {
-    fn sign(&self, unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent> {
-        match self {
-            Self::Local(signer) => signer.sign(unsigned),
-            Self::Shared(signer) => signer.sign(unsigned),
-        }
-    }
-
-    fn is_available(&self) -> bool {
-        match self {
-            Self::Local(_) => true,
-            Self::Shared(signer) => signer.is_available(),
-        }
-    }
-
-    fn local_provider(&self) -> Option<Arc<nmp_local_signer::LocalKeySigner>> {
-        match self {
-            Self::Local(signer) => Some(Arc::clone(signer)),
-            Self::Shared(_) => None,
-        }
-    }
-}
-
-impl SignerRegistry {
-    fn contains(&self, pk: PublicKey) -> bool {
-        self.signers.contains_key(&pk)
-    }
-
-    fn len(&self) -> usize {
-        self.signers.len()
-    }
-
-    fn track_pending_write(&self, id: ReceiptId, generation: u64, cancel: PendingWriteCancel) {
-        if let Some(stale) = self
-            .pending_writes
-            .borrow_mut()
-            .insert((id, generation), cancel)
-        {
-            stale();
-        }
-    }
-
-    fn finish_pending_write(&self, id: ReceiptId, generation: u64) {
-        self.pending_writes.borrow_mut().remove(&(id, generation));
-    }
-
-    fn cancel_pending_write(&self, id: ReceiptId) {
-        let mut pending = self.pending_writes.borrow_mut();
-        let keys = pending
-            .keys()
-            .filter(|(receipt, _)| *receipt == id)
-            .copied()
-            .collect::<Vec<_>>();
-        for key in keys {
-            if let Some(cancel) = pending.remove(&key) {
-                cancel();
-            }
-        }
-    }
-
-    fn cancel_all_pending_writes(&self) {
-        for (_, cancel) in self.pending_writes.borrow_mut().drain() {
-            cancel();
-        }
-    }
-
-    /// Register `signer` under its own `public_key()`, replacing any prior
-    /// capability already registered for that key.
-    fn add(
-        &mut self,
-        pk: PublicKey,
-        instance: core::AuthCapabilityInstance,
-        signer: Box<dyn SigningCapability + Send + Sync>,
-    ) -> (SignerRegistration, Option<core::AuthCapabilityInstance>) {
-        let identity = Arc::new(());
-        let replaced = self
-            .signers
-            .insert(
-                pk,
-                RegisteredSigner {
-                    identity: Arc::clone(&identity),
-                    instance,
-                    signer: SharedSigner::Shared(Arc::from(signer)),
-                },
-            )
-            .map(|old| old.instance);
-        (
-            SignerRegistration {
-                public_key: pk,
-                identity,
-                instance,
-            },
-            replaced,
-        )
-    }
-
-    fn add_local(
-        &mut self,
-        pk: PublicKey,
-        instance: core::AuthCapabilityInstance,
-        signer: nmp_local_signer::LocalKeySigner,
-    ) -> (SignerRegistration, Option<core::AuthCapabilityInstance>) {
-        let identity = Arc::new(());
-        let replaced = self
-            .signers
-            .insert(
-                pk,
-                RegisteredSigner {
-                    identity: Arc::clone(&identity),
-                    instance,
-                    signer: SharedSigner::Local(Arc::new(signer)),
-                },
-            )
-            .map(|old| old.instance);
-        (
-            SignerRegistration {
-                public_key: pk,
-                identity,
-                instance,
-            },
-            replaced,
-        )
-    }
-
-    /// Remove only the capability installed by this exact registration.
-    /// A stale remote session can therefore never detach a newer replacement
-    /// for the same account.
-    fn remove(
-        &mut self,
-        registration: &SignerRegistration,
-    ) -> Option<core::AuthCapabilityInstance> {
-        let is_current = self
-            .signers
-            .get(&registration.public_key)
-            .is_some_and(|current| {
-                current.instance == registration.instance
-                    && Arc::ptr_eq(&current.identity, &registration.identity)
-            });
-        if !is_current {
-            return None;
-        }
-        self.signers
-            .remove(&registration.public_key)
-            .map(|entry| entry.instance)
-    }
-
-    /// Resolve the signer frozen into this exact accepted template. An
-    /// account switch cannot redirect already-accepted work.
-    fn sign(&self, unsigned: UnsignedEvent) -> Option<SignerOp<SignerSignedEvent>> {
-        self.signers
-            .get(&unsigned.pubkey)
-            .map(|entry| entry.signer.sign(encode_unsigned_event(&unsigned)))
-    }
-
-    fn auth_snapshot(&self, pk: PublicKey) -> Option<(core::AuthCapabilityInstance, SharedSigner)> {
-        self.signers
-            .get(&pk)
-            .map(|entry| (entry.instance, entry.signer.clone()))
-    }
-
-    fn is_available(&self, pk: PublicKey) -> bool {
-        self.signers
-            .get(&pk)
-            .is_some_and(|entry| entry.signer.is_available())
-    }
-
-    fn has_local_provider(&self, pk: PublicKey) -> bool {
-        self.signers
-            .get(&pk)
-            .is_some_and(|entry| matches!(entry.signer, SharedSigner::Local(_)))
-    }
-
-    fn local_provider(&self, pk: PublicKey) -> Option<Arc<nmp_local_signer::LocalKeySigner>> {
-        self.signers
-            .get(&pk)
-            .and_then(|entry| entry.signer.local_provider())
-    }
-
-    fn remove_key(&mut self, public_key: PublicKey) -> Option<core::AuthCapabilityInstance> {
-        self.signers.remove(&public_key).map(|entry| entry.instance)
-    }
-
-    fn drain_instances(&mut self) -> Vec<(PublicKey, core::AuthCapabilityInstance)> {
-        self.signers
-            .drain()
-            .map(|(public_key, entry)| (public_key, entry.instance))
-            .collect()
-    }
 }
 
 /// Wall-clock `Duration` from `now` until `deadline` (§3.3's `recv_timeout`
@@ -1842,154 +1474,6 @@ impl RouteProviderSlot {
     }
 }
 
-#[derive(Default)]
-struct WireAdmissionState {
-    deadline: Option<Instant>,
-}
-
-impl WireAdmissionState {
-    fn arm(&mut self, now: Instant) {
-        if self.deadline.is_none() {
-            self.deadline = Some(now + WIRE_ADMISSION_WINDOW);
-        }
-    }
-
-    fn next_deadline(&self) -> Option<Instant> {
-        self.deadline
-    }
-
-    fn take_due(&mut self, now: Instant) -> bool {
-        if !self.deadline.is_some_and(|deadline| deadline <= now) {
-            return false;
-        }
-        self.deadline = None;
-        true
-    }
-}
-
-#[derive(Default)]
-struct Nip11DecisionState {
-    next_generation: u64,
-    pending: HashMap<RelayUrl, Nip11Decision>,
-}
-
-struct Nip11Decision {
-    generation: u64,
-    deadline: Instant,
-    fallback_sent: bool,
-}
-
-impl Nip11DecisionState {
-    fn begin(&mut self, url: RelayUrl, now: Instant) -> u64 {
-        self.next_generation = self.next_generation.wrapping_add(1).max(1);
-        let generation = self.next_generation;
-        self.pending.insert(
-            url,
-            Nip11Decision {
-                generation,
-                deadline: now + NIP11_DECISION_GRACE,
-                fallback_sent: false,
-            },
-        );
-        generation
-    }
-
-    fn next_deadline(&self) -> Option<Instant> {
-        self.pending
-            .values()
-            .filter(|decision| !decision.fallback_sent)
-            .map(|decision| decision.deadline)
-            .min()
-    }
-
-    fn take_due_fallbacks(&mut self, now: Instant) -> Vec<RelayUrl> {
-        let mut due = Vec::new();
-        for (url, decision) in &mut self.pending {
-            if !decision.fallback_sent && decision.deadline <= now {
-                decision.fallback_sent = true;
-                due.push(url.clone());
-            }
-        }
-        due
-    }
-
-    fn complete(&mut self, url: &RelayUrl, generation: u64) -> bool {
-        if !self
-            .pending
-            .get(url)
-            .is_some_and(|decision| decision.generation == generation)
-        {
-            return false;
-        }
-        self.pending.remove(url);
-        true
-    }
-
-    fn refuse(&mut self, url: &RelayUrl, generation: u64) {
-        if self
-            .pending
-            .get(url)
-            .is_some_and(|decision| decision.generation == generation)
-        {
-            self.pending.remove(url);
-        }
-    }
-}
-
-#[cfg(test)]
-mod nip11_decision_tests {
-    use super::*;
-
-    #[test]
-    fn grace_fallback_is_independent_and_eventual_completion_is_generation_guarded() {
-        let relay = RelayUrl::parse("wss://decision.example").unwrap();
-        let now = Instant::now();
-        let mut state = Nip11DecisionState::default();
-        let generation = state.begin(relay.clone(), now);
-
-        assert!(state
-            .take_due_fallbacks(now + NIP11_DECISION_GRACE - Duration::from_millis(1))
-            .is_empty());
-        assert_eq!(
-            state.take_due_fallbacks(now + NIP11_DECISION_GRACE),
-            vec![relay.clone()]
-        );
-        assert!(state
-            .take_due_fallbacks(now + NIP11_DECISION_GRACE + Duration::from_secs(1))
-            .is_empty());
-        assert!(!state.complete(&relay, generation.wrapping_add(1)));
-        assert!(state.complete(&relay, generation));
-        assert!(state.pending.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod wire_admission_tests {
-    use super::*;
-
-    #[test]
-    fn window_is_anchored_to_first_arrival_and_rearms_for_the_next_cohort() {
-        assert_eq!(WIRE_ADMISSION_WINDOW, Duration::from_millis(10));
-        let now = Instant::now();
-        let first_deadline = now + WIRE_ADMISSION_WINDOW;
-        let mut state = WireAdmissionState::default();
-
-        state.arm(now);
-        state.arm(now + WIRE_ADMISSION_WINDOW - Duration::from_millis(1));
-
-        assert_eq!(state.next_deadline(), Some(first_deadline));
-        assert!(!state.take_due(first_deadline - Duration::from_nanos(1)));
-        assert!(state.take_due(first_deadline));
-        assert_eq!(state.next_deadline(), None);
-
-        state.arm(first_deadline + Duration::from_millis(1));
-        assert_eq!(
-            state.next_deadline(),
-            Some(first_deadline + Duration::from_millis(1) + WIRE_ADMISSION_WINDOW)
-        );
-    }
-}
-
 #[cfg(test)]
 mod observation_clock_tests;
 
@@ -2007,86 +1491,6 @@ struct EngineWiring<'a> {
     cmd_rx: &'a Receiver<Cmd>,
     self_inbox: &'a Sender<Cmd>,
     startup_ready: Sender<()>,
-}
-
-const STORE_RECOVERY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
-const STORE_RECOVERY_MAX_BACKOFF: Duration = Duration::from_secs(30);
-
-/// Runtime-owned retry schedule for one failed durable-store generation.
-/// `next_attempt: Some` is the complete retry lifecycle state. `None` means
-/// this driver owns no retry; the core's typed diagnostic separately says
-/// whether that is because the store is healthy or the fault is permanent.
-#[derive(Default)]
-struct StoreRecoveryDriver {
-    next_attempt: Option<Instant>,
-    failures: u32,
-}
-
-impl StoreRecoveryDriver {
-    fn arm_now(&mut self, now: Instant) {
-        self.next_attempt.get_or_insert(now);
-    }
-
-    fn is_due(&self, now: Instant) -> bool {
-        self.next_attempt.is_some_and(|deadline| deadline <= now)
-    }
-
-    fn wait(&self, now: Instant) -> Option<Duration> {
-        self.next_attempt
-            .map(|deadline| deadline.saturating_duration_since(now))
-    }
-
-    fn record_failure(&mut self, now: Instant) {
-        self.failures = self.failures.saturating_add(1);
-        let shift = self.failures.saturating_sub(1).min(9);
-        let multiplier = 1u32 << shift;
-        let delay = STORE_RECOVERY_INITIAL_BACKOFF
-            .saturating_mul(multiplier)
-            .min(STORE_RECOVERY_MAX_BACKOFF);
-        self.next_attempt = Some(now + delay);
-    }
-
-    fn recovered(&mut self) {
-        self.next_attempt = None;
-        self.failures = 0;
-    }
-
-    fn stop_retrying(&mut self) {
-        self.next_attempt = None;
-        self.failures = 0;
-    }
-
-    fn is_active(&self) -> bool {
-        self.next_attempt.is_some()
-    }
-}
-
-#[cfg(test)]
-mod store_recovery_driver_tests {
-    use super::*;
-
-    #[test]
-    fn recovery_backoff_is_exponential_event_driven_and_capped() {
-        let now = Instant::now();
-        let mut driver = StoreRecoveryDriver::default();
-        driver.arm_now(now);
-        assert!(driver.is_due(now));
-
-        for expected_millis in [
-            100_u64, 200, 400, 800, 1_600, 3_200, 6_400, 12_800, 25_600, 30_000, 30_000,
-        ] {
-            driver.record_failure(now);
-            assert_eq!(
-                driver.wait(now),
-                Some(Duration::from_millis(expected_millis))
-            );
-            assert!(!driver.is_due(now));
-        }
-
-        driver.recovered();
-        assert!(!driver.is_active());
-        assert_eq!(driver.wait(now), None);
-    }
 }
 
 /// Shutdown is finished when no lifecycle can still run FOREIGN code.
@@ -2161,13 +1565,11 @@ fn engine_loop(
                 let instance = auth_instances
                     .mint()
                     .expect("preflighted initial session fits fresh capability instance space");
-                registry
-                    .accounts
-                    .insert(account.public_key, Some(SessionProvider::LocalKey));
+                registry.note_account(account.public_key, Some(SessionProvider::LocalKey));
                 registry.add_local(account.public_key, instance, signer);
             }
             None => {
-                registry.accounts.insert(account.public_key, None);
+                registry.note_account(account.public_key, None);
             }
         }
     }
@@ -2893,9 +2295,7 @@ fn engine_loop(
                     continue;
                 };
                 let (_, replaced) = registry.add_local(public_key, instance, signer);
-                registry
-                    .accounts
-                    .insert(public_key, Some(SessionProvider::LocalKey));
+                registry.note_account(public_key, Some(SessionProvider::LocalKey));
                 let mut effects = Vec::new();
                 if let Some(old_instance) = replaced {
                     auth_tasks.borrow_mut().cancel_capability(
@@ -2934,7 +2334,7 @@ fn engine_loop(
                 make_current,
                 reply,
             } => {
-                registry.accounts.entry(public_key).or_insert(None);
+                registry.ensure_account(public_key);
                 if make_current {
                     let effects = core.handle(EngineMsg::SetActivePubkey(Some(public_key)));
                     dispatch_core_effects(
@@ -2975,7 +2375,7 @@ fn engine_loop(
                 let _ = reply.send(found);
             }
             Cmd::RemoveSessionAccount { public_key, reply } => {
-                let existed = registry.accounts.remove(&public_key).is_some();
+                let existed = registry.remove_account(public_key);
                 let removed_instance = registry.remove_key(public_key);
                 let mut effects = Vec::new();
                 if let Some(instance) = removed_instance {
@@ -3006,8 +2406,7 @@ fn engine_loop(
                 let _ = reply.send(existed);
             }
             Cmd::ClearSession { reply } => {
-                let removed = registry.drain_instances();
-                registry.accounts.clear();
+                let removed = registry.clear();
                 let mut effects = core.handle(EngineMsg::SetActivePubkey(None));
                 for (public_key, instance) in removed {
                     auth_tasks.borrow_mut().cancel_capability(
