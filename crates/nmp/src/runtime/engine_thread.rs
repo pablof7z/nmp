@@ -313,7 +313,7 @@ impl EngineThread {
     ) -> Result<(Self, Handle), EngineThreadError> {
         let supplied: std::collections::HashSet<_> = capabilities
             .iter()
-            .map(|spec| (spec.program, spec.format))
+            .map(|spec| (spec.program(), spec.format()))
             .collect();
         match store.required_replaceable_programs() {
             Ok(required) => {

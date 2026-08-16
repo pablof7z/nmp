@@ -488,7 +488,7 @@ mod receipt_allocator_tests {
 #[cfg(test)]
 mod semantic_successor_tests {
     use super::*;
-    use crate::replaceable_materializer::{
+    use nmp_grammar::{
         ReplaceableMaterializer, ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal,
         ReplaceableMaterializerRegistration,
     };
