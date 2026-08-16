@@ -355,8 +355,9 @@ things" below is where that is measured properly and comes out differently.
 ### Owners extracted so far
 
 `RequestAttempts` (#1693), `HistorySessions` (#1695), `WireOwnership` and
-`RequestTargets` (#1746) all came out of the ≥85%-concentration band.
-`EngineCore` is **114 → 103 fields** across the last two. What they proved:
+`RequestTargets` (#1746), and `Nip77Sessions` (#1747) all came out of the
+≥85%-concentration band. `EngineCore` is **114 → 96 fields** across the last
+three. What they proved:
 
 **`WireOwnership` — ten fields.** `rebuild_wire_ownership` opened with
 **twelve consecutive `.clear()` calls** and then open-coded the owner counting
@@ -389,6 +390,28 @@ Activation had also been reaching into `self.handles` to derive which scopes
 contribute wire; that is a freshness decision the branch owns, so it now
 arrives as a passed-in fact.
 
+**`Nip77Sessions` — eight fields.** The candidate signal here was not
+concentration but *repetition*: three clusters with the identical
+`(map, reverse-index-by-plan)` shape, each carrying its own hand-written insert
+and take. Six functions, verbatim copies, differing only in the value type and
+how the plan id was read off it — a fourth cluster would have been copies seven
+and eight. One generic `PlanIndexed` replaced them, along with three open-coded
+plan-scoped teardowns (`take_plan`) and five "collect the matching ids, then
+loop calling take" sites (`take_where`), three of which had discarded the
+values in the collect and then looked each one up a second time.
+
+Two removals worth keeping separate from the count. `take_plan` deleted a
+`None => {}` arm — a silent no-op if the reverse index named a child the
+forward map had lost — by handing back the values, so the match is now
+exhaustive over the typed value. And `next_incarnation` became private with no
+setter, so "ONLY ever increments" is a property of the file rather than a
+request in a doc comment.
+
+**Repetition is a candidate signal in its own right.** The field census finds
+clusters by concentration; it cannot see that three *separate* clusters share
+one shape. When the same insert/remove dance appears with different types,
+count the copies before counting the accesses.
+
 ### The falsifier caught the census lying
 
 `rebuild == incremental` had never been asserted, though `recompile` runs the
@@ -403,10 +426,19 @@ default())` teardown proof in the suite was blind to a wrong-but-nonzero
 count. `wire_owner_refs` closes it. Both owners' deliberate breaks are now red
 on exactly the field that describes them:
 
-| deliberate break | red field |
+| deliberate break | red field / test |
 | --- | --- |
 | delete the wire rebuild's reset | `wire_owner_refs` 4 vs 2 |
 | clear one of `forget_activations`' two maps | `request_target_refs` 8 vs 4 |
+| `PlanIndexed::take` skips the reverse prune | mirror test, after disconnect |
+| `PlanIndexed::take_plan` leaves the reverse entry | mirror test, after unsubscribe |
+
+The last two are caught by *different* tests, neither of which catches the
+other's break. That is not redundancy missing — it is the two removal
+directions having disjoint call sites: the ordinary open/close lifecycle never
+routes through single-child `take` at all. An owner with more than one removal
+direction needs a falsifier per direction, and finding out which test catches
+which is how you learn the call graph you actually have.
 
 This is the shape of the general rule already stated below: a green test is
 evidence only once it has been shown to go red for the reason claimed. Here
