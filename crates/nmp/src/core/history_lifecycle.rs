@@ -1031,7 +1031,7 @@ impl EngineCore {
         for (event_id, row) in current {
             match state.last_rows.get(&event_id) {
                 None => deltas.push(RowDelta::Added(row)),
-                Some(previous) if previous.signature != row.signature => {
+                Some(previous) if previous.signature() != row.signature() => {
                     deltas.push(RowDelta::Updated(row));
                 }
                 Some(previous) if previous.sources != row.sources => {
@@ -1169,7 +1169,7 @@ impl EngineCore {
                     let sources: BTreeSet<RelayUrl> = stored.provenance.seen.into_keys().collect();
                     match by_id.entry(stored.event.id) {
                         std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert(Row::from_stored_event(
+                            entry.insert(row_from_stored_event(
                                 stored.event,
                                 stored
                                     .provenance
@@ -1274,7 +1274,7 @@ impl EngineCore {
                     let sources: BTreeSet<RelayUrl> = stored.provenance.seen.into_keys().collect();
                     match candidates.entry(stored.event.id) {
                         std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert(Row::from_stored_event(
+                            entry.insert(row_from_stored_event(
                                 stored.event,
                                 stored
                                     .provenance
@@ -1428,7 +1428,7 @@ impl EngineCore {
                             .local
                             .as_ref()
                             .map_or(SigState::Signed, |local| local.sig_state);
-                        Row::from_stored_event(
+                        row_from_stored_event(
                             stored.event,
                             signature_state,
                             stored.provenance.seen.into_keys().collect(),
@@ -1446,7 +1446,7 @@ impl EngineCore {
                 strict_promotions.insert(
                     changed.event.id,
                     current.unwrap_or_else(|| {
-                        Row::from_stored_event(
+                        row_from_stored_event(
                             {
                                 #[cfg(feature = "bench-instrumentation")]
                                 crate::ingest_attribution::projection_event_clone();
@@ -1502,7 +1502,7 @@ impl EngineCore {
                         .order
                         .remove(&(Reverse(previous.created_at().as_secs()), event_id));
                 }
-                let remembered = Row::from_stored_event(
+                let remembered = row_from_stored_event(
                     {
                         #[cfg(feature = "bench-instrumentation")]
                         crate::ingest_attribution::projection_event_clone();
@@ -1529,8 +1529,10 @@ impl EngineCore {
                     remembered
                         .sources
                         .extend(row.observed_relays.iter().cloned());
-                    remembered.signature =
-                        RowSignature::from_store(&row.event, row.signature_state);
+                    remembered.set_signature(row_signature_from_store_state(
+                        &row.event,
+                        row.signature_state,
+                    ));
                 } else if pinned_relays.is_some() && visible_under_pin(row) {
                     // An event already cached from an unpinned relay can
                     // enter a Strict projection when this committed duplicate
@@ -1558,7 +1560,7 @@ impl EngineCore {
                         .last_rows
                         .get_mut(&row.event.id)
                         .expect("same-id update target was checked above");
-                    *remembered = Row::from_stored_event(
+                    *remembered = row_from_stored_event(
                         row.event.clone(),
                         row.signature_state,
                         row.observed_relays.clone(),
@@ -1638,7 +1640,7 @@ impl EngineCore {
                     .local
                     .as_ref()
                     .map_or(SigState::Signed, |local| local.sig_state);
-                let row = Row::from_stored_event(stored.event, signature_state, sources.clone());
+                let row = row_from_stored_event(stored.event, signature_state, sources.clone());
                 let remembered = row.clone();
                 state
                     .order
@@ -1689,7 +1691,7 @@ impl EngineCore {
             match (prior, state.last_rows.get(event_id)) {
                 (None, Some(current)) => deltas.push(RowDelta::Added(current.clone())),
                 (Some(_), None) => deltas.push(RowDelta::Removed(*event_id)),
-                (Some(prior), Some(current)) if prior.signature != current.signature => {
+                (Some(prior), Some(current)) if prior.signature() != current.signature() => {
                     deltas.push(RowDelta::Updated(current.clone()));
                 }
                 (Some(prior), Some(current)) if prior.sources != current.sources => {
