@@ -259,7 +259,6 @@ final class AuthPolicyTests: XCTestCase {
                 FfiAuthDiagnostics(
                     relay: "wss://relay.example/",
                     access: .nip42(publicKey: publicKey),
-                    transportSlot: 4,
                     transportGeneration: 17,
                     epochSequence: 23,
                     challengeDescriptor: "blake3:challenge",
@@ -272,7 +271,6 @@ final class AuthPolicyTests: XCTestCase {
 
             XCTAssertEqual(projected.relay, "wss://relay.example/")
             XCTAssertEqual(projected.access, .nip42(publicKey: publicKey))
-            XCTAssertEqual(projected.transportSlot, 4)
             XCTAssertEqual(projected.transportGeneration, 17)
             XCTAssertEqual(projected.epochSequence, 23)
             XCTAssertEqual(projected.challengeDescriptor, "blake3:challenge")

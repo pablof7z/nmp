@@ -165,13 +165,14 @@ impl RelayDiagnosticsSnapshot {
 /// Bounded, session-scoped AUTH reducer facts (#8) — the documented
 /// projection of the engine's per-session AUTH read-out. Raw challenges and
 /// opaque capability identities are deliberately absent; the challenge is
-/// exposed only as a stable BLAKE3 descriptor.
+/// exposed only as a stable BLAKE3 descriptor. The engine's `transport_slot`
+/// (a connection-pool allocator index) is deliberately absent too — see the
+/// discard in [`AuthDiagnosticsSnapshot::from_engine`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthDiagnosticsSnapshot {
     pub relay: RelayUrl,
     /// Frozen access identity of the protected session this row describes.
     pub access: AccessContext,
-    pub transport_slot: u32,
     pub transport_generation: u64,
     /// The current challenge epoch's engine-global sequence; `None` before
     /// the session's first challenge.
@@ -192,7 +193,15 @@ impl AuthDiagnosticsSnapshot {
         let nmp_engine::core::AuthDiagnosticsSnapshot {
             relay,
             access,
-            transport_slot,
+            // `transport_slot` is deliberately absent from the facade: it is
+            // a connection-pool allocator index (which physical slot
+            // currently holds this session), meaningful only to the
+            // transport pool's own bookkeeping. No documented capability
+            // reads it, and exposing pool layout would make apps able to
+            // depend on it. The exhaustive destructure still forces this
+            // decision to be revisited if the engine ever repurposes the
+            // field.
+            transport_slot: _,
             transport_generation,
             epoch_sequence,
             challenge_hash,
@@ -204,7 +213,6 @@ impl AuthDiagnosticsSnapshot {
         Self {
             relay,
             access,
-            transport_slot,
             transport_generation,
             epoch_sequence,
             challenge_hash,
@@ -550,7 +558,6 @@ mod tests {
         let auth = &facade.auth_sessions[0];
         assert_eq!(auth.relay.to_string(), "wss://auth.example.com");
         assert!(matches!(auth.access, AccessContext::Nip42(_)));
-        assert_eq!(auth.transport_slot, 3);
         assert_eq!(auth.transport_generation, 7);
         assert_eq!(auth.epoch_sequence, Some(11));
         assert_eq!(auth.challenge_hash.as_deref(), Some("blake3:abc"));

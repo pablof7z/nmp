@@ -2265,7 +2265,6 @@ fn auth_diagnostics_to_ffi(snapshot: AuthDiagnosticsSnapshot) -> FfiAuthDiagnost
     let AuthDiagnosticsSnapshot {
         relay,
         access,
-        transport_slot,
         transport_generation,
         epoch_sequence,
         challenge_hash,
@@ -2277,7 +2276,6 @@ fn auth_diagnostics_to_ffi(snapshot: AuthDiagnosticsSnapshot) -> FfiAuthDiagnost
     FfiAuthDiagnostics {
         relay: relay.to_string(),
         access: access_context_to_ffi(access),
-        transport_slot,
         transport_generation,
         epoch_sequence,
         challenge_descriptor: challenge_hash,
@@ -3069,7 +3067,6 @@ mod tests {
             .map(|(index, phase)| AuthDiagnosticsSnapshot {
                 relay: relay.clone(),
                 access: GAccessContext::Nip42(public_key),
-                transport_slot: 900 + index as u32,
                 transport_generation: 40 + index as u64,
                 epoch_sequence: Some(80 + index as u64),
                 challenge_hash: Some(format!("challenge-descriptor-{index}")),
@@ -3238,7 +3235,6 @@ mod tests {
                 public_key: pk_hex()
             }
         );
-        assert_eq!(ffi.auth_sessions[0].transport_slot, 900);
         assert_eq!(ffi.auth_sessions[0].transport_generation, 40);
         assert_eq!(ffi.auth_sessions[0].epoch_sequence, Some(80));
         assert_eq!(
