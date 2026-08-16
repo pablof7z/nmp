@@ -50,4 +50,9 @@ nmp-engine = { workspace = true, features = ["unstable-mechanism"] }
 nmp-runtime = { workspace = true, features = ["unstable-mechanism"] }
 nmp-router-testkit.workspace = true
 nmp-store.workspace = true
+# `group_reads_headless.rs` scripts relay frames and reads wire ops straight
+# into `EngineCore`, so it names the two value-type crates that vocabulary
+# belongs to. Test-only: this crate ships neither.
+nmp-router.workspace = true
+nmp-transport.workspace = true
 nmp-test-support.workspace = true

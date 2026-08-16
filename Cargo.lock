@@ -1885,6 +1885,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nmp-bookmarks"
+version = "0.1.0"
+dependencies = [
+ "nmp",
+ "nmp-grammar",
+ "nostr 0.44.4",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nmp-cli"
 version = "0.1.0"
 dependencies = [
@@ -2078,10 +2089,12 @@ dependencies = [
  "nmp-engine",
  "nmp-grammar",
  "nmp-outbox",
+ "nmp-router",
  "nmp-router-testkit",
  "nmp-runtime",
  "nmp-store",
  "nmp-test-support",
+ "nmp-transport",
  "nostr 0.44.4",
  "serde",
  "serde_json",

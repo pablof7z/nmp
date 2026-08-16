@@ -1,0 +1,24 @@
+[package]
+name = "nmp-bookmarks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# #1715: this crate is #1707's own proof that a new capability is addable
+# without touching `crates/nmp`, `nmp-engine`, or `nmp-runtime` -- zero
+# lines in any of the three, verified by this addition's own diff. It owns
+# ALL of NIP-51 kind:10003's meaning: the reactive demand for the current
+# account's own list, the durable add/remove semantic operations, and the
+# materializer that composes them into the ordinary replaceable-edit path.
+# `nmp` supplies custody, storage, routing, signing, delivery, recovery and
+# receipts and knows nothing about what a bookmark is. The `nmp` dependency
+# below is the ordinary shape of "a capability crate composes the engine it
+# runs against" -- the same edge `nmp-nip02`/`nmp-nip29` already use, not a
+# reverse dependency: `nmp` never names this crate back.
+[dependencies]
+nostr.workspace = true
+nmp.workspace = true
+nmp-grammar.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true

@@ -231,6 +231,39 @@ impl HistorySessions {
 }
 
 impl EngineCore {
+    /// The refused-open unwind, shared by `open_history_observation`'s two
+    /// fallible projections (canonical rows, opening evidence). A window is
+    /// installed whole or not at all, so both retire the just-created session
+    /// and withdraw its handles from the resolver.
+    ///
+    /// Resolver-ONLY, deliberately: both callers run BEFORE the first
+    /// `attach_wire_handle`, so there is no wire demand to withdraw.
+    /// `on_unsubscribe_history` does both and stays separate for exactly that
+    /// reason — #1695 checked whether the three unwinds could collapse into
+    /// one and found that difference is a rule, not duplication. These two
+    /// were byte-identical apart from the message, which is the kind of
+    /// duplication the next divergence bug comes from.
+    fn refuse_history_open(
+        &mut self,
+        id: HistorySessionId,
+        error: PersistenceError,
+        reason: String,
+        mut effects: Vec<Effect>,
+    ) -> ObservationOpen<HistorySessionId, HistoryBatch> {
+        let withdrawn = self
+            .history
+            .retire(id)
+            .map(|state| state.live_handle_ids)
+            .unwrap_or_default();
+        for handle_id in withdrawn {
+            let delta = self.resolver.unsubscribe(handle_id);
+            self.consume_resolver_delta(delta);
+        }
+        self.flush_consumed_resolver_closes(&mut effects);
+        self.degrade_store(error, &mut effects);
+        ObservationOpen::Refused { reason, effects }
+    }
+
     pub fn open_history_observation(
         &mut self,
         query: HistoryQuery,
@@ -318,21 +351,7 @@ impl EngineCore {
             Ok(current) => current,
             Err(error) => {
                 let reason = format!("canonical history projection failed: {error}");
-                // Resolver-only, deliberately: this runs BEFORE the first
-                // `attach_wire_handle` below, so there is no wire demand to
-                // withdraw. `on_unsubscribe_history` does both.
-                let withdrawn = self
-                    .history
-                    .retire(id)
-                    .map(|state| state.live_handle_ids)
-                    .unwrap_or_default();
-                for handle_id in withdrawn {
-                    let delta = self.resolver.unsubscribe(handle_id);
-                    self.consume_resolver_delta(delta);
-                }
-                self.flush_consumed_resolver_closes(&mut effects);
-                self.degrade_store(error, &mut effects);
-                return ObservationOpen::Refused { reason, effects };
+                return self.refuse_history_open(id, error, reason, effects);
             }
         };
 
@@ -345,21 +364,7 @@ impl EngineCore {
             Ok(evidence) => evidence,
             Err(error) => {
                 let reason = format!("history evidence projection failed: {error}");
-                // Resolver-only, deliberately: this runs BEFORE the first
-                // `attach_wire_handle` below, so there is no wire demand to
-                // withdraw. `on_unsubscribe_history` does both.
-                let withdrawn = self
-                    .history
-                    .retire(id)
-                    .map(|state| state.live_handle_ids)
-                    .unwrap_or_default();
-                for handle_id in withdrawn {
-                    let delta = self.resolver.unsubscribe(handle_id);
-                    self.consume_resolver_delta(delta);
-                }
-                self.flush_consumed_resolver_closes(&mut effects);
-                self.degrade_store(error, &mut effects);
-                return ObservationOpen::Refused { reason, effects };
+                return self.refuse_history_open(id, error, reason, effects);
             }
         };
         let attachments: Vec<_> = {

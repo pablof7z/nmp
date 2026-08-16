@@ -570,8 +570,12 @@ mod derived_tag_fanout;
 mod live_queries;
 #[path = "negentropy.rs"]
 mod negentropy;
-#[path = "nip29_group_reads.rs"]
-mod nip29_group_reads;
+// `nip29_group_reads` is deliberately NOT here. It mints every demand through
+// `nmp_nip29::group_demand_at`, on purpose -- its own header says the point is
+// that nothing in it re-implements the door -- and `nmp-nip29` sits ABOVE this
+// crate. It stays in `crates/nmp/tests/nip29_group_reads_headless.rs`, which
+// is where a capability test belongs; see #1728 for moving it to `nmp-nip29`
+// with that crate's own fixtures.
 #[path = "optimistic_publish_projection.rs"]
 mod optimistic_publish_projection;
 #[path = "persistence_failures.rs"]
