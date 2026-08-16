@@ -60,11 +60,12 @@ use crate::config::build_nip65_sources;
 use crate::config::{build_routing_fact_relays, EngineConfig};
 
 /// The feature-selected replaceable-capability built-ins the `nmp` crate owns
-/// and supplies at the [`Engine::new`] boundary per #1624. The NIP-02 follow
-/// capability lives in the `nmp-nip02` `protocol-service` crate (which depends
-/// on `nmp`), so it cannot be compiled into `nmp` itself; a consumer that
-/// wants it adds `nmp_nip02::follow_capability()` to the vec passed to
-/// [`Engine::new_with_capabilities`].
+/// and supplies at the [`Engine::new`] boundary per #1624. Unlike NIP-29's
+/// group-list capability, NIP-02's follow capability is deliberately NOT
+/// auto-included here, `nip02` feature or not (#1143 moved where the door
+/// lives, not this asymmetry): a consumer that wants it adds
+/// `nmp::nip02::follow_capability()` to the vec passed to
+/// [`Engine::new_with_capabilities`] itself, same as before the move.
 pub(crate) fn default_capabilities() -> Vec<crate::ReplaceableMaterializerSpec> {
     vec![
         #[cfg(feature = "nip29")]
@@ -170,11 +171,11 @@ impl Engine {
     /// Per #1624, normal Rust construction includes the feature-selected
     /// replaceable-capability built-ins the `nmp` crate itself owns. The
     /// NIP-29 group-list capability is compiled in when the `nip29` Cargo
-    /// feature is enabled. `nmp-nip02` is a separate `protocol-service` crate
-    /// that depends on `nmp` (a cyclic edge forbids the reverse), so its
-    /// follow capability is supplied at the consumer boundary (the FFI
-    /// facade, or an app via [`Engine::new_with_capabilities`]) rather than
-    /// here.
+    /// feature is enabled. NIP-02's follow capability (`nmp::nip02`, behind
+    /// the `nip02` feature) is supplied at the consumer boundary instead --
+    /// the FFI facade, or an app via [`Engine::new_with_capabilities`] --
+    /// same as before #1143 moved the door itself into this facade; only its
+    /// package location changed, not this construction-time asymmetry.
     pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
         Self::new_with_capabilities(config, default_capabilities())
     }
