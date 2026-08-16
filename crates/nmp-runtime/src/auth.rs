@@ -25,7 +25,8 @@ use nmp_engine::core::{
     AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, EngineMsg,
 };
 
-use super::{Cmd, SignerRegistry};
+use super::Cmd;
+use crate::identity_sessions::{decode_signed_event, encode_unsigned_event, SignerRegistry};
 
 /// App policy's closed semantic answer for one exact AUTH request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -992,15 +993,13 @@ pub(super) fn dispatch(
                 bind,
                 move |terminal| {
                     Box::pin(async move {
-                        let op = signer.sign(super::encode_unsigned_event(&unsigned));
+                        let op = signer.sign(encode_unsigned_event(&unsigned));
                         let result: Option<Result<nostr::Event, SignerError>> = match op {
-                            SignerOp::Ready(result) => {
-                                Some(result.and_then(super::decode_signed_event))
-                            }
+                            SignerOp::Ready(result) => Some(result.and_then(decode_signed_event)),
                             SignerOp::Pending(pending) => {
                                 let canceller = pending.canceller();
                                 terminal.arm(Box::new(move || canceller.cancel()));
-                                Some(pending.await.and_then(super::decode_signed_event))
+                                Some(pending.await.and_then(decode_signed_event))
                             }
                         };
                         if !terminal.is_open() {
