@@ -174,14 +174,37 @@ Two facts about the starting position, established by survey:
 - **Session identity did not survive restart**, which silently blocked C2, C9
   and C12: there was no identity for a resumed write to remain frozen to.
 
-**C15 carries a recorded gap.** The challenge-and-deny half of NIP-42 is
-proven live and the fresh-challenge-per-connection property is proven from
-strfry's source, but *accept-after-AUTH recovery was not proven live* — the
-probe used `nak`'s CLI, which failed to read the pushed challenge before
-deciding it had none. This is believed to be a client-tool quirk rather than a
-relay defect, and the lab's own AUTH client should not hit it. Until that
-controller code exists and is exercised, **C15 recovery is unproven, and must
-not be marked proven on the strength of a source read.**
+**C15 is proven live**, and the route to proving it corrected an earlier
+mistake worth keeping.
+
+The first probe gated writes with a strfry `writePolicy` plugin that rejects
+unless the connection is authenticated. That denial is real — but
+`sendAuthChallenge()` is called from exactly three places in strfry's source,
+and **the writePolicy rejection path is not one of them**. A plugin can reject
+with a message that *says* `auth-required`, and no `["AUTH", challenge]` frame
+is ever emitted. Two separate true facts — the plugin denies, and strfry sends
+challenges — do not compose into "the plugin path triggers a challenge".
+
+The fix was to use strfry's actual native trigger: mark the event NIP-70
+protected (a `-` tag) rather than reach for a plugin. With the controller
+driving the handshake itself — connect once, send EVENT, read AUTH+OK, sign a
+kind:22242 event for that exact challenge and relay, send AUTH, resend the
+original EVENT on the *same* connection — the round trip closes. Proven across
+three runs, each with a different challenge nonce, which is also a second and
+independent live confirmation of the freshness property previously only read
+from source.
+
+**Scenario-design consequence.** strfry has two genuine NIP-42 trigger
+mechanisms — NIP-70 protected-event writes and `restrictedReadKinds` gated
+reads, both challenge-driven — and a third, writePolicy-plugin blanket write
+gating, which enforces access control for real but never goes through the
+challenge machinery. A scenario wanting "every write here requires AUTH" must
+mark its events `-`, or it gets a real rejection that is not a NIP-42 round
+trip.
+
+This also settles that the earlier failure was a client-tool limitation:
+`nak`'s one-shot `--auth` cannot do it, because the handshake requires owning
+the connection across all five steps.
 
 ## Nothing in this app has ever been compiled
 
