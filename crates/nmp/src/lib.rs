@@ -97,17 +97,21 @@ mod subscription;
 // way `nmp-ffi`/Swift/Kotlin already do and the same way `nmp-media`
 // already works.
 //
-// NIP-65's automatic-outbox-discovery ROUTING GLUE is a different thing
-// entirely and is the one deliberate exception left in this whole
-// reversal: `nmp-runtime::nip65` (feature-gated, `nmp-runtime/Cargo.toml`)
-// converts the coordinator's `CoordinatorUpdate` into the routing loop's
-// own neutral vocabulary. That is how the engine performs ITS OWN job of
-// discovering an author's relays for outbox routing, not a capability the
-// engine merely executes for an app -- moving it above the engine would
-// create the exact upward dependency this reversal exists to remove. One
-// declared, feature-gated edge, counted honestly rather than hidden behind
-// a trait: a second production implementor of author-route discovery is
-// what would change that answer, nothing else.
+// NIP-65's automatic-outbox-discovery ROUTING GLUE used to be the one
+// deliberate exception left in this reversal: a feature-gated
+// `nmp-runtime::nip65` module, argued for on the grounds that discovering
+// an author's relays is the engine's OWN job rather than a capability it
+// executes, and that "a second production implementor of author-route
+// discovery is what would change that answer".
+//
+// That is exactly what changed. An outbox algorithm is subjective, and
+// other developers must be able to supply their own, so author-route
+// discovery is now an adapter seam: `AuthorRouteProvider` (re-exported
+// below, declared by `nmp-engine`) is the interface, `nmp-outbox` is the
+// NIP-65 implementation of it, and an application picks one at construction
+// through `Engine::new_with_capabilities_and_routing` -- the same shape,
+// and the same manifest line, as every capability. The feature and the glue
+// are deleted; `nmp` names no routing protocol at all.
 
 pub use auth::{
     AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp, AuthPolicyPendingSender,
@@ -297,6 +301,13 @@ pub use nmp_engine::core::{
     AcquisitionEvidence, AuthDiagnosticsPhase, AuthPhase, Row, RowDelta, RowSignature,
     ShortfallFact, SourceEvidence, SourceStatus, WindowLoad,
 };
+
+// The construction-time adapter seam for author-route discovery. An app names
+// this trait to pass its chosen algorithm to
+// `Engine::new_with_capabilities_and_routing`; a crate that IMPLEMENTS one
+// names `nmp-engine` and never this facade, which is exactly why nothing here
+// mentions NIP-65 or any other routing protocol.
+pub use nmp_engine::core::AuthorRouteProvider;
 pub use nmp_router::Lane;
 pub use nmp_store::CoverageInterval;
 

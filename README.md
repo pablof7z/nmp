@@ -67,9 +67,15 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - ✅ Full connection lifecycle behind **one finite fan-out ceiling** over the whole read plan
 - ✅ Valid relay targets use ordinary platform resolution and connection semantics, including loopback, private, link-local, and `.onion` hosts; reachability is an observed connection outcome, not a configuration grant
 - ✅ Permanently-failing relays retire cleanly instead of wedging a connection slot; the send queue behind them is bounded
-- ✅ **Optional NIP-65 routing assembly** — core declares neutral author-route
-  provider needs; the `nip65` feature owns exact source queries, canonical
-  kind:10002 winners, marker parsing, settlement, and atomic fact replacement
+- ✅ **Author-route discovery is an adapter seam** — the engine declares
+  neutral author-route needs and applies neutral facts; WHICH algorithm answers
+  them is `AuthorRouteProvider`, an application-supplied implementation passed
+  to `Engine::new_with_capabilities_and_routing`. `nmp-outbox` is the NIP-65
+  outbox model (exact source queries, canonical kind:10002 winners, marker
+  parsing, settlement, atomic fact replacement); a competing algorithm is a
+  third-party crate depending on `nmp-engine`/`nmp-router`/`nmp-grammar` and
+  touching no NMP source at all. One provider per engine, chosen at
+  construction and fixed for its life — no registration, no swapping
 - ✅ Parse-once typed ingest with bounded parallel signature verification
 - ✅ NIP-11 relay metadata (single-flight, LRU-bounded, proven raw-body ceiling)
 - ✅ NIP-77 negentropy with a gap-free live handoff — a distinct `REQ {limit:0}` reaches EOSE first, remains open through reconciliation/backfill, and reconnect repeats the same order; deterministic boundary/timeout/error falsifiers plus a genuine NIP-77 relay prove the flow. A follow-up ([#579](https://github.com/pablof7z/nmp/pull/579)) closed a subscription leak in the live-EOSE-timeout fallback path, where an orphaned `limit:0` candidate REQ could linger and mint phantom coverage.
@@ -95,14 +101,14 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
 - ✅ NIP-02 following — durable tag-preserving follow/unfollow over cached,
   first-value, and later relay source truth, with one ordinary receipt on
   **Swift + Kotlin**
-- ✅ NIP-65 Rust module — engine-free values validate and compose the first
-  kind:10002; the optional `nmp/nip65` facade publishes it through the ordinary
-  tracked write door and privately assembles automatic route discovery. Swift
-  and Kotlin apps add the outbox-routing capability through the same committed
-  `.nmp.toml` as every other native family, then configure
-  `OutboxRoutingConfig(indexers:)` at engine runtime. Prepared cold-product
-  capstones prove the configured indexer discovers the outbox, the write reaches
-  only that learned relay, and no undeclared fixture relay is contacted.
+- ✅ NIP-65 Rust module — `nmp-nip65` holds engine-free kind:10002 values
+  (validation, composition, canonical winners, marker parsing); `nmp-outbox`
+  turns them into an installable `AuthorRouteProvider`. Swift and Kotlin apps
+  add the outbox-routing capability through the same committed `.nmp.toml` as
+  every other native family, then configure `OutboxRoutingConfig(indexers:)` at
+  engine runtime. Prepared cold-product capstones prove the configured indexer
+  discovers the outbox, the write reaches only that learned relay, and no
+  undeclared fixture relay is contacted.
 - ✅ NIP-73 external content ids — the `(i, k)` pair naming something that is
   not a Nostr event, in its own crate because several NIPs consume them and
   none owns them. Podcast episodes, `web` URLs (canonicalised: normalised, no
@@ -254,6 +260,7 @@ Diagnostics are a **permanent, read-only proof plane** — source plan, wire fil
 - `crates/nmp-{store,resolver,router,transport,signer}` — internal seams, not alternate APIs
 - `crates/nmp-content` — optional parser-only semantic document layer
 - `crates/nmp-{nip02,nip29,nip65,blossom,nip68,media}` — opt-in protocol modules
+- `crates/nmp-outbox` — the NIP-65 outbox algorithm as an installable `AuthorRouteProvider`
 - `Packages/NMP` (Swift) · `Packages/NMPKotlin` (Kotlin/JVM)
 - `apps/Falsifier`, `apps/UIGallery` — SwiftUI proving grounds
 - `docs/` — vision, design record, known gaps

@@ -27,12 +27,14 @@ publish.workspace = true
 # than pretending the whole workspace collapses into one `Cargo.toml` line;
 # that pretense is exactly what #1707 falsifies.
 #
-# NIP-65 is the one family still reachable ONLY as an `nmp` feature: its
-# `impl Engine` publish method and `runtime::nip65`'s deep engine-routing-loop
-# glue are a different problem from a bare re-export door or an ordinary
-# capability-composes-the-engine edge, and #1707 has not resolved it.
+# NIP-65 is no longer the exception it used to be. Its routing half was the
+# last thing reachable only as an `nmp` feature; it is `nmp-outbox` now --
+# an `AuthorRouteProvider` implementation an application names and passes to
+# `Engine::new_with_capabilities_and_routing`, exactly like every capability
+# line below.
 [dependencies]
-nmp = { workspace = true, features = ["nip65"] }
+nmp.workspace = true
+nmp-outbox.workspace = true
 nmp-nip02.workspace = true
 nmp-nip18.workspace = true
 nmp-nip22.workspace = true

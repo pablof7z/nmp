@@ -502,15 +502,15 @@ impl NmpWorld {
     /// the same engine's `Handle`. See `Engine::mechanism_handle`'s doc for
     /// why a fixture that owns both ends may hold both.
     fn spawn_over(&self, store: RedbStore, facts: FixtureRoutingFacts) -> (Engine, Handle) {
-        let nip65_sources = self
+        let indexers = self
             .indexer_names
             .iter()
             .map(|name| self.relays[name].url.clone())
-            .collect();
-        let engine = Engine::from_parts_with_fixture_routing_facts_and_nip65_sources(
+            .collect::<Vec<_>>();
+        let engine = Engine::from_parts_with_fixture_routing_facts_and_route_provider(
             store,
             facts,
-            nip65_sources,
+            Some(Box::new(nmp_outbox::Nip65Outbox::new(indexers))),
             20,
             PoolConfig {
                 reconnect_delay_initial: Some(Duration::from_millis(20)),

@@ -64,15 +64,13 @@ mod history_mailbox;
 // takes a `RestoredSession` and `Handle` owns the live session state; the
 // facade only encodes, decodes, and hands one over.
 pub mod session;
-// The NIP-11 snapshot -> reducer-evidence projection, for the same reason
-// `nip65` below is here: the glue belongs beside the loop, so the only edge
-// runs downward into the protocol crate.
+// The NIP-11 snapshot -> reducer-evidence projection: the glue belongs
+// beside the loop, so the only edge runs downward into the protocol crate.
+// It is now this crate's ONE declared protocol edge. The NIP-65 half used to
+// sit beside it as a second, cargo-feature-gated one; author-route discovery
+// is an application-supplied `AuthorRouteProvider` now, so this crate names
+// no routing protocol at all.
 mod nip11;
-// The NIP-65 route-source glue. Private and `pub(crate)` throughout: this
-// crate's public API is the explicit `pub use` list below, and glue is not on
-// it.
-#[cfg(feature = "nip65")]
-mod nip65;
 mod pool_bridge;
 mod receipt_stream;
 mod request_wire;
@@ -94,9 +92,7 @@ pub use auth::{
 };
 
 use std::cell::RefCell;
-#[cfg(any(test, feature = "nip65"))]
-use std::collections::BTreeSet;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 // #1624 removed this module's only production thread spawn; the inline
@@ -127,19 +123,17 @@ use nmp_transport::{
 #[cfg(test)]
 use nmp_transport::{PoolConfig, PoolEvent};
 
-#[cfg(feature = "nip65")]
-use nmp_engine::core::AuthorRouteReplacement;
-
 use crate::session::{
     RestoredSession, SessionAccount, SessionProvider, SessionSnapshot, SigningAvailability,
 };
 #[doc(hidden)]
 pub use nmp_engine::core::ReceiptReplayCursor;
 use nmp_engine::core::{
-    self, AcquisitionEvidence, DiagnosticsSnapshot, Effect, EngineCore, EngineMsg,
-    HistoryAdvanceError, HistoryQuery, HistorySessionId, LocalSendRefusal, Nip77Frame,
-    ObservationEvidence, ObservationId, ObservationOpen, PublishError, PublishPreparation,
-    ReattachOutcome, ReceiptId, RequestAttemptId, RequestHandoffOutcome, RowDelta,
+    self, AcquisitionEvidence, AuthorRouteProvider, DiagnosticsSnapshot, Effect, EngineCore,
+    EngineMsg, HistoryAdvanceError, HistoryQuery, HistorySessionId, LocalSendRefusal, Nip77Frame,
+    ObservationEvidence, ObservationId, ObservationOpen, ProviderReroot, PublishError,
+    PublishPreparation, ReattachOutcome, ReceiptId, RequestAttemptId, RequestHandoffOutcome,
+    RowDelta,
 };
 #[cfg(test)]
 use nmp_engine::core::{HistoryBatch, Row};
@@ -195,8 +189,10 @@ struct EnginePoolRuntime {
     relay_information: RelayInformationService,
     max_auth_capabilities: usize,
     max_publish_attempts: u64,
-    #[cfg(feature = "nip65")]
-    nip65_sources: Vec<RelayUrl>,
+    /// The application's chosen author-route algorithm, or `None` for an
+    /// engine that discovers no routes at all (operator lanes and explicit
+    /// routes still carry everything they carry).
+    route_provider: Option<Box<dyn AuthorRouteProvider>>,
 }
 
 /// One delivered batch for a live subscription: an exact row transition
@@ -838,10 +834,10 @@ fn duration_until(deadline: Timestamp, now: Timestamp) -> Duration {
 mod pool_bridge_tests;
 
 // Moved here with the wiring they exercise: these drive a real `EngineCore`
-// through the route source and the loop's own reroot/apply path, which is no
-// longer reachable from the facade module.
-#[cfg(all(test, feature = "nip65"))]
-mod nip65_tests;
+// through a provider and the loop's own reroot/apply path, which is not
+// reachable from anywhere else.
+#[cfg(test)]
+mod route_provider_tests;
 
 #[cfg(test)]
 // The closed-surface falsifier scans this module's code lines for the token
@@ -987,8 +983,7 @@ mod relay_worker_reconciliation_tests {
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
-        #[cfg(feature = "nip65")]
-        let nip65 = RefCell::new(nip65::RuntimeAssembly::new([]));
+        let route_provider = RefCell::new(None);
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
@@ -999,8 +994,7 @@ mod relay_worker_reconciliation_tests {
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
-            #[cfg(feature = "nip65")]
-            nip65: &nip65,
+            route_provider: &route_provider,
         };
 
         let mut first = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
@@ -1157,8 +1151,7 @@ mod relay_worker_reconciliation_tests {
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
-        #[cfg(feature = "nip65")]
-        let nip65 = RefCell::new(nip65::RuntimeAssembly::new([]));
+        let route_provider = RefCell::new(None);
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
@@ -1169,8 +1162,7 @@ mod relay_worker_reconciliation_tests {
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
-            #[cfg(feature = "nip65")]
-            nip65: &nip65,
+            route_provider: &route_provider,
         };
 
         let effects = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
@@ -1288,8 +1280,7 @@ mod relay_worker_reconciliation_tests {
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
-        #[cfg(feature = "nip65")]
-        let nip65 = RefCell::new(nip65::RuntimeAssembly::new([]));
+        let route_provider = RefCell::new(None);
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
@@ -1300,8 +1291,7 @@ mod relay_worker_reconciliation_tests {
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
-            #[cfg(feature = "nip65")]
-            nip65: &nip65,
+            route_provider: &route_provider,
         };
 
         let mut first = core.handle(EngineMsg::Subscribe(query(&author_a)));
@@ -1435,8 +1425,7 @@ mod relay_worker_reconciliation_tests {
         let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
         let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
         let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
-        #[cfg(feature = "nip65")]
-        let nip65 = RefCell::new(nip65::RuntimeAssembly::new([]));
+        let route_provider = RefCell::new(None);
         let dispatch_runtime = DispatchRuntime {
             self_inbox: &self_inbox,
             relay_information: &relay_information,
@@ -1447,8 +1436,7 @@ mod relay_worker_reconciliation_tests {
             auth_policies: &auth_policies,
             auth_tasks: &auth_tasks,
             receipt_deliveries: &receipt_deliveries,
-            #[cfg(feature = "nip65")]
-            nip65: &nip65,
+            route_provider: &route_provider,
         };
 
         dispatch_core_effects(
@@ -1571,6 +1559,7 @@ mod auth_registry_admission_tests {
                 ..RuntimeConfig::default()
             },
             Vec::new(),
+            None,
         )
         .unwrap()
     }
@@ -1829,8 +1818,28 @@ struct DispatchRuntime<'a> {
     auth_policies: &'a RefCell<auth::AuthPolicyRegistry>,
     auth_tasks: &'a RefCell<auth::AuthTaskRegistry>,
     receipt_deliveries: &'a RefCell<ReceiptDeliveryRegistry>,
-    #[cfg(feature = "nip65")]
-    nip65: &'a RefCell<nip65::RuntimeAssembly>,
+    route_provider: &'a RefCell<Option<RouteProviderSlot>>,
+}
+
+/// The provider the application constructed, plus the observation the LOOP
+/// opened on its behalf.
+///
+/// The handle lives HERE rather than inside the provider: it is loop
+/// mechanics, not provider policy. A provider therefore cannot mint an
+/// observation id, cannot keep a stale one, and cannot claim a delivery that
+/// is not its own — by construction rather than by review.
+struct RouteProviderSlot {
+    provider: Box<dyn AuthorRouteProvider>,
+    bound: Option<ObservationId>,
+}
+
+impl RouteProviderSlot {
+    fn new(provider: Box<dyn AuthorRouteProvider>) -> Self {
+        Self {
+            provider,
+            bound: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -2133,8 +2142,7 @@ fn engine_loop(
         relay_information,
         max_auth_capabilities,
         max_publish_attempts,
-        #[cfg(feature = "nip65")]
-        nip65_sources,
+        route_provider,
     } = pool_runtime;
     let runtime_handle = runtime.handle().clone();
     let runtime_handle = &runtime_handle;
@@ -2166,8 +2174,7 @@ fn engine_loop(
     let auth_policies = RefCell::new(auth::AuthPolicyRegistry::default());
     let auth_tasks = RefCell::new(auth::AuthTaskRegistry::default());
     let receipt_deliveries = RefCell::new(ReceiptDeliveryRegistry::default());
-    #[cfg(feature = "nip65")]
-    let nip65 = RefCell::new(nip65::RuntimeAssembly::new(nip65_sources));
+    let route_provider = RefCell::new(route_provider.map(RouteProviderSlot::new));
     let mut active_sign_events = sign_event::ActiveSignEvents::default();
     let nip11_decisions = RefCell::new(Nip11DecisionState::default());
     let wire_admission = RefCell::new(WireAdmissionState::default());
@@ -2182,8 +2189,7 @@ fn engine_loop(
         auth_policies: &auth_policies,
         auth_tasks: &auth_tasks,
         receipt_deliveries: &receipt_deliveries,
-        #[cfg(feature = "nip65")]
-        nip65: &nip65,
+        route_provider: &route_provider,
     };
 
     // The fully decoded session is installed before recovery. In particular,
@@ -4056,62 +4062,63 @@ fn dispatch_effects(
     runtime.receipt_deliveries.borrow_mut().finish_batch(core);
 }
 
-/// Re-root the NIP-65 route source onto the authors the reducer now needs.
+/// Re-root the author-route provider onto the authors the reducer now needs.
 ///
 /// The LOOP owns every reducer call here. `open_observation` is the same door
 /// `Cmd::Subscribe` uses and it RETURNS the id, so nothing reconstructs a
-/// handle by scanning emitted effects. The route source is told which id it
-/// was given; it can never mint one.
-#[cfg(feature = "nip65")]
-fn nip65_reroot(
+/// handle by scanning emitted effects. The provider is never told the id at
+/// all; it can neither mint one nor keep one.
+///
+/// A provider may also answer immediately — a static table, an app-managed
+/// cache — which is why `reroot` returns updates beside its instruction.
+fn provider_reroot(
     core: &mut EngineCore,
-    route_source: &mut nip65::RuntimeAssembly,
+    slot: &mut RouteProviderSlot,
     needs: BTreeSet<PublicKey>,
 ) -> Vec<Effect> {
-    let reroot = route_source.reroot(needs);
-    if matches!(reroot, nip65::Reroot::Unchanged) {
-        return Vec::new();
-    }
-    // Both remaining outcomes close the current observation. Only `Reopened`
-    // opens a replacement -- which is why `Reroot` is not an `Option`.
+    let (reroot, updates) = slot.provider.reroot(needs);
     let mut effects = Vec::new();
-    if let Some(handle) = route_source.unbind() {
-        effects.extend(core.handle(EngineMsg::Unsubscribe(handle)));
-    }
-    let nip65::Reroot::Reopened(query) = reroot else {
-        return effects;
-    };
-    let now = core.clock();
-    match core.open_observation(query, now) {
-        ObservationOpen::Opened {
-            id,
-            seed,
-            effects: opened,
-        } => {
-            route_source.bind(id);
-            effects.extend(opened);
-            effects.push(Effect::EmitRows(id, seed.deltas, seed.evidence));
+    if !matches!(reroot, ProviderReroot::Unchanged) {
+        // Both remaining outcomes close the current observation. Only
+        // `Reopened` opens a replacement -- which is why `ProviderReroot` is
+        // not an `Option`.
+        if let Some(handle) = slot.bound.take() {
+            effects.extend(core.handle(EngineMsg::Unsubscribe(handle)));
         }
-        // A refused route-source query leaves the source unbound, exactly as
-        // the previous path did when no handle could be found.
-        ObservationOpen::Refused {
-            effects: refused, ..
-        } => effects.extend(refused),
+        if let ProviderReroot::Reopened(query) = reroot {
+            let now = core.clock();
+            match core.open_observation(query, now) {
+                ObservationOpen::Opened {
+                    id,
+                    seed,
+                    effects: opened,
+                } => {
+                    slot.bound = Some(id);
+                    effects.extend(opened);
+                    effects.push(Effect::EmitRows(id, seed.deltas, seed.evidence));
+                }
+                // A refused provider query leaves the slot unbound, exactly
+                // as the previous path did when no handle could be found.
+                ObservationOpen::Refused {
+                    effects: refused, ..
+                } => effects.extend(refused),
+            }
+        }
     }
+    effects.extend(apply_author_routes(core, updates));
     effects
 }
 
-/// Apply the route source's neutral replacements through the one author-route
-/// writer. `AuthorRouteReplacement` never leaves this crate's reducer.
-#[cfg(feature = "nip65")]
-fn nip65_apply(core: &mut EngineCore, updates: Vec<nip65::AuthorRouteUpdate>) -> Vec<Effect> {
+/// Apply a provider's neutral replacements through the one author-route
+/// writer. `AuthorRouteReplacement` is the reducer's own vocabulary; the
+/// provider states the fact, the reducer decides what it means.
+fn apply_author_routes(
+    core: &mut EngineCore,
+    updates: Vec<core::AuthorRouteUpdate>,
+) -> Vec<Effect> {
     let mut effects = Vec::new();
     for update in updates {
-        let replacement = match update.routes {
-            Some(routes) => AuthorRouteReplacement::Present(routes),
-            None => AuthorRouteReplacement::Absent,
-        };
-        core.replace_author_routes(update.author, replacement, &mut effects);
+        core.replace_author_routes(update.author, update.replacement, &mut effects);
     }
     effects
 }
@@ -4134,22 +4141,25 @@ fn dispatch_effect(
             runtime.wire_admission.borrow_mut().arm(Instant::now());
         }
         Effect::AuthorRouteNeedsChanged(needs) => {
-            #[cfg(feature = "nip65")]
-            {
-                let followups = { nip65_reroot(core, &mut runtime.nip65.borrow_mut(), needs) };
-                dispatch_effects(
-                    core,
-                    followups,
-                    pool,
-                    row_channels,
-                    history_channels,
-                    diag_channels,
-                    registry,
-                    runtime,
-                );
-            }
-            #[cfg(not(feature = "nip65"))]
-            let _ = needs;
+            // No provider: the need is dropped and every author stays
+            // `Unknown`. Operator lanes and explicit routes are unaffected,
+            // and nothing anywhere converts the silence into a verdict.
+            let followups = {
+                let mut slot = runtime.route_provider.borrow_mut();
+                slot.as_mut()
+                    .map(|slot| provider_reroot(core, slot, needs))
+                    .unwrap_or_default()
+            };
+            dispatch_effects(
+                core,
+                followups,
+                pool,
+                row_channels,
+                history_channels,
+                diag_channels,
+                registry,
+                runtime,
+            );
         }
         Effect::UpdateCommittedObservations {
             invalidated,
@@ -4361,16 +4371,14 @@ fn dispatch_effect(
             }
         }
         Effect::EmitRows(id, rows, evidence) => {
-            #[cfg(feature = "nip65")]
-            let nip65_updates = {
-                let mut route_source = runtime.nip65.borrow_mut();
-                route_source
-                    .owns(id)
-                    .then(|| route_source.observe_rows(&rows))
+            let provider_updates = {
+                let mut slot = runtime.route_provider.borrow_mut();
+                slot.as_mut()
+                    .filter(|slot| slot.bound == Some(id))
+                    .map(|slot| slot.provider.observe_rows(&rows))
             };
-            #[cfg(feature = "nip65")]
-            if let Some(updates) = nip65_updates {
-                let followups = nip65_apply(core, updates);
+            if let Some(updates) = provider_updates {
+                let followups = apply_author_routes(core, updates);
                 dispatch_effects(
                     core,
                     followups,
@@ -4388,16 +4396,14 @@ fn dispatch_effect(
             }
         }
         Effect::EmitObservationEvidence(id, evidence) => {
-            #[cfg(feature = "nip65")]
-            let nip65_updates = {
-                let mut route_source = runtime.nip65.borrow_mut();
-                route_source
-                    .owns(id)
-                    .then(|| route_source.observe_evidence(&evidence))
+            let provider_updates = {
+                let mut slot = runtime.route_provider.borrow_mut();
+                slot.as_mut()
+                    .filter(|slot| slot.bound == Some(id))
+                    .map(|slot| slot.provider.observe_evidence(&evidence))
             };
-            #[cfg(feature = "nip65")]
-            if let Some(updates) = nip65_updates {
-                let followups = nip65_apply(core, updates);
+            if let Some(updates) = provider_updates {
+                let followups = apply_author_routes(core, updates);
                 dispatch_effects(
                     core,
                     followups,

@@ -1992,7 +1992,7 @@ fn config_with_store_path_selects_redb_store() {
 #[test]
 fn config_with_invalid_relay_url_is_a_typed_error() {
     let config = EngineConfig {
-        indexer_relays: vec!["not a url".to_string()],
+        app_relays: vec!["not a url".to_string()],
         ..EngineConfig::default()
     };
     match Engine::new(config) {

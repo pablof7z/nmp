@@ -89,7 +89,7 @@ impl Engine {
         // `Engine::new`'s own doc) -- a restored session still starts with an
         // empty compiled capability set unless the caller uses
         // `new_with_session_and_capabilities` instead.
-        Self::new_with_initial_session(config, restored, Vec::new())
+        Self::new_with_initial_session(config, restored, Vec::new(), None)
             .map_err(map_session_start_error)
     }
 
@@ -100,6 +100,20 @@ impl Engine {
         payload: crate::SessionPayload,
         capabilities: Vec<crate::ReplaceableMaterializerSpec>,
     ) -> Result<Self, crate::SessionRestoreError> {
+        Self::new_with_session_capabilities_and_routing(config, payload, capabilities, None)
+    }
+
+    /// Restore a session into an engine with both of its construction-time
+    /// choices made: its compiled replaceable capabilities and its
+    /// author-route algorithm. See
+    /// [`Engine::new_with_capabilities_and_routing`] for what the provider is
+    /// and why it cannot be changed afterwards.
+    pub fn new_with_session_capabilities_and_routing(
+        config: EngineConfig,
+        payload: crate::SessionPayload,
+        capabilities: Vec<crate::ReplaceableMaterializerSpec>,
+        route_provider: Option<Box<dyn crate::AuthorRouteProvider>>,
+    ) -> Result<Self, crate::SessionRestoreError> {
         let restored = nmp_runtime::session::decode(&payload)?;
         let provider_count = restored.provider_count();
         if provider_count > config.max_auth_capabilities {
@@ -107,7 +121,7 @@ impl Engine {
                 limit: config.max_auth_capabilities,
             });
         }
-        Self::new_with_initial_session(config, restored, capabilities)
+        Self::new_with_initial_session(config, restored, capabilities, route_provider)
             .map_err(map_session_start_error)
     }
 

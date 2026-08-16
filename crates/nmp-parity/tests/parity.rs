@@ -66,11 +66,24 @@ const WRITE_CREATED_AT: u64 = 1_700_000_200;
 const SECRET_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 const PARITY_INDEXER: &str = "wss://indexer.example";
 
-fn direct_outbox_routing_config() -> EngineConfig {
-    EngineConfig {
-        indexer_relays: vec![PARITY_INDEXER.to_string()],
-        ..EngineConfig::default()
-    }
+/// The direct-Rust side of every outbox-routing scenario installs the same
+/// algorithm the FFI side compiles in, from the same indexer.
+fn direct_outbox_provider() -> Option<Box<dyn nmp::AuthorRouteProvider>> {
+    Some(Box::new(nmp_outbox::Nip65Outbox::new([RelayUrl::parse(
+        PARITY_INDEXER,
+    )
+    .expect("the parity indexer URL parses")])))
+}
+
+fn new_direct_outbox_engine(config: EngineConfig) -> Result<Engine, nmp::EngineError> {
+    Engine::new_with_capabilities_and_routing(config, Vec::new(), direct_outbox_provider())
+}
+
+fn new_direct_outbox_engine_with_capabilities(
+    config: EngineConfig,
+    capabilities: Vec<nmp::ReplaceableMaterializerSpec>,
+) -> Result<Engine, nmp::EngineError> {
+    Engine::new_with_capabilities_and_routing(config, capabilities, direct_outbox_provider())
 }
 
 fn ffi_outbox_routing_config() -> NmpEngineConfig {
@@ -2517,10 +2530,10 @@ async fn run_direct_follow_scenario(
 ) -> FollowScenarioOutcome {
     let relay = setup_follow_relay(author, existing).await;
     let engine = Arc::new(
-        Engine::new_with_capabilities(
+        new_direct_outbox_engine_with_capabilities(
             EngineConfig {
                 app_relays: vec![relay.url.to_string()],
-                ..direct_outbox_routing_config()
+                ..EngineConfig::default()
             },
             vec![follow_capability()],
         )
@@ -2653,10 +2666,10 @@ async fn run_direct_missing_contact_list(
 ) {
     let relay = ScriptedRelay::start(&RelayConfig::default()).await;
     let engine = Arc::new(
-        Engine::new_with_capabilities(
+        new_direct_outbox_engine_with_capabilities(
             EngineConfig {
                 app_relays: vec![relay.url.to_string()],
-                ..direct_outbox_routing_config()
+                ..EngineConfig::default()
             },
             vec![follow_capability()],
         )
@@ -2725,10 +2738,10 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
     let relay = setup_relay(keys, query_event).await;
     let expected_row_id = query_event.id.to_hex();
     let relay_url = relay.url.to_string();
-    let engine = Engine::new(EngineConfig {
+    let engine = new_direct_outbox_engine(EngineConfig {
         app_relays: vec![relay_url.clone()],
         // Both facades assemble the same optional provider and app policy.
-        ..direct_outbox_routing_config()
+        ..EngineConfig::default()
     })
     .expect("direct engine must construct");
     let pubkey = engine
@@ -3003,9 +3016,9 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
     relay.seed_signed_event(&anchor).await;
     relay.seed_signed_event(query_event).await;
     let relay_url = relay.url.to_string();
-    let engine = Engine::new(EngineConfig {
+    let engine = new_direct_outbox_engine(EngineConfig {
         app_relays: vec![relay_url.clone()],
-        ..direct_outbox_routing_config()
+        ..EngineConfig::default()
     })
     .expect("direct auth-parked engine must construct");
     let pubkey = engine
@@ -3118,9 +3131,9 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
         .expect("source anchor fixture must sign");
     relay.seed_signed_event(&anchor).await;
     let relay_url = relay.url.to_string();
-    let engine = Engine::new(EngineConfig {
+    let engine = new_direct_outbox_engine(EngineConfig {
         app_relays: vec![relay_url.clone()],
-        ..direct_outbox_routing_config()
+        ..EngineConfig::default()
     })
     .expect("direct override engine must construct");
     let _active_account = engine
@@ -3215,9 +3228,9 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
 async fn run_direct_tampered(keys: &Keys) -> TamperedOutcome {
     let relay = ScriptedRelay::start(&RelayConfig::default()).await;
     let relay_url = relay.url.to_string();
-    let engine = Engine::new(EngineConfig {
+    let engine = new_direct_outbox_engine(EngineConfig {
         app_relays: vec![relay_url.clone()],
-        ..direct_outbox_routing_config()
+        ..EngineConfig::default()
     })
     .expect("direct tampered engine must construct");
     let mut event = nostr::EventBuilder::new(Kind::Custom(WRITE_KIND), "original")
@@ -3355,7 +3368,8 @@ async fn run_direct_reattach_live() -> ReattachProof {
     // A per-run `Keys::generate()` would make the two halves disagree by
     // construction; a shared fixed key makes the payload-parity real.
     let keys = fixed_keys();
-    let engine = Engine::new(direct_outbox_routing_config()).expect("direct engine must construct");
+    let engine =
+        new_direct_outbox_engine(EngineConfig::default()).expect("direct engine must construct");
     engine
         .add_public_key_account(keys.public_key(), true)
         .expect("direct public-key-only account must become current");
@@ -3509,7 +3523,8 @@ struct CorrelationProof {
 
 fn run_direct_correlation() -> CorrelationProof {
     let keys = fixed_keys();
-    let engine = Engine::new(direct_outbox_routing_config()).expect("direct engine must construct");
+    let engine =
+        new_direct_outbox_engine(EngineConfig::default()).expect("direct engine must construct");
     engine
         .add_public_key_account(keys.public_key(), true)
         .expect("direct public-key-only account must become current");
@@ -3653,7 +3668,8 @@ struct CancellationProof {
 
 fn run_direct_cancellation() -> CancellationProof {
     let keys = fixed_keys();
-    let engine = Engine::new(direct_outbox_routing_config()).expect("direct engine must construct");
+    let engine =
+        new_direct_outbox_engine(EngineConfig::default()).expect("direct engine must construct");
     engine
         .add_public_key_account(keys.public_key(), true)
         .expect("direct public-key-only account must become current");
@@ -4218,13 +4234,15 @@ async fn sequential_follows_after_full_settlement_do_not_refuse() {
         .await;
 
     let engine = Arc::new(
-        Engine::new_with_capabilities(
+        Engine::new_with_capabilities_and_routing(
             EngineConfig {
                 app_relays: vec![relay.url.to_string()],
-                indexer_relays: vec![indexer.url.to_string()],
                 ..EngineConfig::default()
             },
             vec![follow_capability()],
+            Some(Box::new(nmp_outbox::Nip65Outbox::new([indexer
+                .url
+                .clone()]))),
         )
         .expect("direct follow engine must construct"),
     );
@@ -4808,12 +4826,12 @@ async fn run_direct_group_list_scenario(author: &Keys) -> GroupListActionOutcome
         .seed_relay_list(author, &[outbox.url.to_string()], &[], QUERY_CREATED_AT)
         .await;
     let relay_in_use = "wss://relay-in-use.example";
-    let engine = Engine::new_with_capabilities(
-        EngineConfig {
-            indexer_relays: vec![indexer.url.to_string()],
-            ..EngineConfig::default()
-        },
+    let engine = Engine::new_with_capabilities_and_routing(
+        EngineConfig::default(),
         vec![group_list_capability()],
+        Some(Box::new(nmp_outbox::Nip65Outbox::new([indexer
+            .url
+            .clone()]))),
     )
     .expect("direct NIP-29 engine constructs");
     engine

@@ -581,15 +581,19 @@ about current code:
 
 ## Protocol modules
 
-- **NIP-65 is shipped as an engine-free Rust module plus feature-selected Rust
-  and native facade assembly (#719/#870/#824).** `nmp-nip65` owns kind:10002 bootstrap
+- **NIP-65 is shipped as an engine-free Rust module plus an installable
+  routing provider and native facade assembly (#719/#870/#824).** `nmp-nip65`
+  owns kind:10002 bootstrap
   composition, exact demand, canonical winner selection, marker parsing, and
   settlement without depending on `nmp`, router, store, resolver, or
   transport. `BootstrapRelayList::into_write_intent` returns an ordinary
-  explicit write; `Engine::publish_relay_list_bootstrap` binds that value to
-  the ordinary tracked receipt. The same optional feature privately turns generic
-  author needs into neutral atomic route facts. A deterministic public-facade
-  capstone starts through `Engine::new` with only an indexer, independently
+  explicit write. `nmp-outbox` implements `nmp_engine::core::AuthorRouteProvider`
+  over that vocabulary, turning generic author needs into neutral atomic route
+  facts; a Rust app installs it through
+  `Engine::new_with_capabilities_and_routing`, and the cargo feature that used
+  to select it inside `nmp`/`nmp-runtime` is deleted. A deterministic
+  public-facade capstone starts through that constructor with only an indexer,
+  independently
   witnesses Alice-scoped kind:10002 acquisition before any content-relay
   contact, then witnesses the discovered kind:1 request and public row without
   using the indexer as a content fallback (#1077). Native apps add the

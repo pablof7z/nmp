@@ -577,4 +577,36 @@ mod tests {
             .expect("exact registration must detach"));
         engine.shutdown();
     }
+
+    /// Routing acceptance proof: a direct-Rust app CHOOSES its author-route
+    /// algorithm through the explicit `nmp` + `nmp-outbox` pair, the same
+    /// two-crate shape every capability has. `nmp` names no routing
+    /// protocol and no algorithm; the provider is a constructor argument,
+    /// so choosing a different algorithm changes this crate's manifest and
+    /// nothing inside NMP.
+    #[test]
+    fn outbox_routing_is_chosen_from_nmp_and_nmp_outbox() {
+        let indexer: RelayUrl = "wss://indexer.example"
+            .parse()
+            .expect("fixed indexer URL must parse");
+        let engine = Engine::new_with_capabilities_and_routing(
+            EngineConfig::default(),
+            Vec::new(),
+            Some(Box::new(nmp_outbox::Nip65Outbox::new([indexer]))),
+        )
+        .expect("an engine with a chosen routing algorithm must build");
+
+        // And the same door takes NO algorithm at all, which is a supported
+        // choice rather than a missing feature: operator lanes and explicit
+        // routes still carry everything they carry.
+        let providerless = Engine::new_with_capabilities_and_routing(
+            EngineConfig::default(),
+            Vec::new(),
+            None,
+        )
+        .expect("an engine that discovers no routes must build");
+
+        engine.shutdown();
+        providerless.shutdown();
+    }
 }

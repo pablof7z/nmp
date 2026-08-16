@@ -4,8 +4,8 @@
 //! must not, so it consumes [`RelayInformationCapabilityEvidence`] — a value
 //! `core` defines itself — and this module is the one place the two
 //! vocabularies meet. It holds no `EngineCore`, issues no `EngineMsg`, and
-//! produces no `Effect`; it is exactly the shape [`super::nip65`] uses for
-//! `CoordinatorUpdate -> AuthorRouteUpdate`, for the same reason.
+//! produces no `Effect`; it is exactly the shape the loop's author-route
+//! provider seam uses, for the same reason.
 //!
 //! Direction matters more than size here. Were this projection a method on
 //! `RelayInformationSnapshot` back in `nmp-nip11`, that crate would have to

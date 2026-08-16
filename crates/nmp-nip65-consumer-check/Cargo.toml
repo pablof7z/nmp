@@ -9,5 +9,5 @@ publish.workspace = true
 # NMP facade plus the NIP-65 protocol module. It does not depend on
 # nmp-grammar, nmp-engine, nmp-router, nmp-store, or nmp-transport.
 [dependencies]
-nmp = { workspace = true, features = ["nip65"] }
+nmp.workspace = true
 nmp-nip65.workspace = true

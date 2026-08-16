@@ -36,9 +36,11 @@ serde_json.workspace = true
 # `test-instrumentation`: `group_publication_door.rs` (moved from `nmp`
 # alongside the door it proves) installs a scripted signing capability
 # through `Engine::install_test_signing_capability`.
-# `nip65`: the same file's `engine_reading_lists_from` fixture exercises
-# `WriteRouting::Auto`, which needs the automatic author-outbox coordinator.
-nmp = { workspace = true, features = ["test-instrumentation", "nip65"] }
+nmp = { workspace = true, features = ["test-instrumentation"] }
+# The same file's `engine_reading_lists_from` fixture exercises
+# `WriteRouting::Auto`, which needs a real author-route provider installed --
+# the NIP-65 outbox algorithm, named here as any application names it.
+nmp-outbox.workspace = true
 # `nip29_group_list_headless.rs` (moved from `nmp` alongside the demand
 # function it proves) drives `nmp-engine`'s reducer directly through its own
 # gated fixture constructor -- a direct dev-dependency edge, the same shape

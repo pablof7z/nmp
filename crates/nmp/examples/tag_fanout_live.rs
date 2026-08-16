@@ -85,7 +85,6 @@ fn main() {
 
     let engine = Engine::new(EngineConfig {
         store_path: None,
-        indexer_relays: Vec::new(),
         app_relays: vec![relay_arg.clone()],
         fallback_relays: Vec::new(),
         // A loopback dev relay must be opted into explicitly.
