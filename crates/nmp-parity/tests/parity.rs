@@ -4201,6 +4201,118 @@ async fn direct_and_ffi_follow_actions_are_identical_over_real_loopback() {
     }
 }
 
+/// Drain a follow action's receipt stream all the way to its cohort-wide
+/// `settled` fact, not merely its first per-relay terminal. `settled` is the
+/// signal that `close_cohort` has run for this coordinate's generation --
+/// the exact condition #1692's fix depends on actually being reached, not
+/// just possible.
+fn wait_for_settled_follow_action(receipt: ReceiptStream) -> Vec<NormFollowActionStatus> {
+    let deadline = Instant::now() + WAIT;
+    let mut result = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let status = match receipt.statuses.recv_timeout(remaining) {
+            Ok(status) => status,
+            Err(error) => panic!(
+                "follow action did not reach `settled` within the total {WAIT:?} bound \
+                 ({error:?}) -- {}",
+                stalled_axes(&result)
+            ),
+        };
+        let normalized = NormFollowActionStatus::Receipt(direct_follow_receipt_name(&status));
+        let is_settled = matches!(normalized, NormFollowActionStatus::Receipt("settled"));
+        result.push(normalized);
+        if is_settled {
+            return canonical_axes(result);
+        }
+    }
+}
+
+/// #1692: a capability-default write to an already-settled replaceable
+/// coordinate must not be refused as stale. Before the fix, `apply_plan`'s
+/// no-prior-generation branch recognized only "nothing exists yet" (a
+/// genuine first write); it had no arm for "the coordinate's real canonical
+/// event exists, but `close_cohort` already retired its SEMANTIC_RESOURCES
+/// tracking row because the first write's own generation fully settled" --
+/// which is the ordinary shape of `follow, wait, follow again`.
+///
+/// The parity fixture above (`direct_and_ffi_follow_actions_are_identical_over_real_loopback`)
+/// never reaches that state: its NIP-65 route deliberately points at a
+/// nonanswering indexer, so the routing axis never retires and the
+/// generation never fully settles. This fixture gives both routing axes a
+/// real, answering relay instead, so settlement is forced, not merely
+/// possible -- the assertion on `first_statuses` below is the proof that
+/// this test exercises the real race and would fail loudly (via timeout) if
+/// it stopped doing so.
+///
+/// This is a permanent acceptance test for the ordinary user story, not a
+/// diagnostic: a person follows someone, the write settles, then they follow
+/// someone else. That must keep working.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sequential_follows_after_full_settlement_do_not_refuse() {
+    let author = fixed_keys();
+    let first_target = Keys::generate();
+    let second_target = Keys::generate();
+
+    let indexer = ScriptedRelay::start(&RelayConfig::default()).await;
+    let relay = ScriptedRelay::start(&RelayConfig::default()).await;
+    indexer
+        .seed_relay_list(&author, &[relay.url.to_string()], &[], QUERY_CREATED_AT)
+        .await;
+
+    let engine = Arc::new(
+        Engine::new_with_capabilities(
+            EngineConfig {
+                app_relays: vec![relay.url.to_string()],
+                indexer_relays: vec![indexer.url.to_string()],
+                ..EngineConfig::default()
+            },
+            vec![follow_capability()],
+        )
+        .expect("direct follow engine must construct"),
+    );
+    engine
+        .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
+        .expect("direct follow account must register");
+    let writes = follow_writes();
+
+    let first = set_following(
+        &engine,
+        &writes,
+        first_target.public_key(),
+        FollowChange::Follow,
+    )
+    .expect("first direct follow enters ordinary custody");
+    let first_statuses = wait_for_settled_follow_action(first);
+    assert!(
+        first_statuses
+            .iter()
+            .any(|status| matches!(status, NormFollowActionStatus::Receipt("settled"))),
+        "the fixture must force full settlement before the second write, or this test proves \
+         nothing about #1692: {first_statuses:?}"
+    );
+
+    let second = set_following(
+        &engine,
+        &writes,
+        second_target.public_key(),
+        FollowChange::Follow,
+    )
+    .expect("second direct follow enters ordinary custody -- #1692");
+    let second_statuses = collect_direct_follow_action(second);
+    assert!(
+        !second_statuses
+            .iter()
+            .any(|status| matches!(status, NormFollowActionStatus::Receipt("refused"))),
+        "a sequential follow after full settlement must not be refused as stale -- #1692: \
+         {second_statuses:?}"
+    );
+
+    engine.shutdown();
+    indexer.shutdown();
+    relay.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn direct_and_ffi_first_follow_create_a_complete_contact_list() {
     let author = fixed_keys();

@@ -394,24 +394,28 @@ fn apply_plan(
             .source_revision
             .evidence()
             .qualified;
+        let is_capability_default = plan.next.as_ref().is_some_and(|next| {
+            next.operations.iter().all(|operation| {
+                matches!(
+                    &operation.source_requirement,
+                    crate::OperationSourceRequirement::CapabilityDefault(_)
+                )
+            })
+        });
         match (source, current_winner.as_ref()) {
             (crate::QualifiedSource::Absent, None) => None,
-            // A capability-defined first value is complete local truth, but
-            // it is not evidence that relays established absence. The
-            // operation requirement is what authorizes this one unresolved
-            // starting point; any later qualified source still replaces it
-            // through the ordinary source-install CAS path.
-            (crate::QualifiedSource::Unresolved, None)
-                if plan.next.as_ref().is_some_and(|next| {
-                    next.operations.iter().all(|operation| {
-                        matches!(
-                            &operation.source_requirement,
-                            crate::OperationSourceRequirement::CapabilityDefault(_)
-                        )
-                    })
-                }) =>
-            {
-                None
+            // A capability-defined write makes no assertion about prior
+            // state, so it is authorized to reconcile against whatever the
+            // address index actually holds -- nothing (a genuine first
+            // write) or a canonical event with no tracked generation (a
+            // write arriving after the previous generation fully settled
+            // and `close_cohort` retired its SEMANTIC_RESOURCES row --
+            // #1692). Either way there is no conflict to detect: the caller
+            // asserted nothing, so nothing it said can be stale. Any later
+            // qualified source still replaces this through the ordinary
+            // source-install CAS path below.
+            (crate::QualifiedSource::Unresolved, winner) if is_capability_default => {
+                winner.map(|(_key, row)| Box::new(row.clone()))
             }
             (
                 crate::QualifiedSource::Event {
