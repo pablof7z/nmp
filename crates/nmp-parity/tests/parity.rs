@@ -28,6 +28,10 @@ use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 // #680: observers/callbacks are gone; the facade exposes pull-based async
 // stream objects whose `next()` we bridge into the existing mpsc drains via a
 // forwarding Tokio task (all parity tests are `#[tokio::test(multi_thread)]`).
+use nmp::nip02::{
+    follow_capability, follow_writes, observe_following, set_following, FollowAvailability,
+    FollowChange, FollowObservation, FollowRelationship, FollowSnapshot,
+};
 use nmp_ffi::facade::{
     FfiOutboxRoutingConfig, NmpDiagnosticsStream, NmpEngine, NmpEngineConfig, NmpReceiptStream,
     NmpRowStream,
@@ -45,10 +49,6 @@ use nmp_ffi::types::{
     FfiWriteRouting,
 };
 use nmp_grammar::{AccessContext, Demand, Derived, Selector, SourceAuthority};
-use nmp_nip02::{
-    follow_capability, follow_writes, observe_following, set_following, FollowAvailability,
-    FollowChange, FollowObservation, FollowRelationship, FollowSnapshot,
-};
 use nmp_store::{RedbStore, RelayObserved};
 use nostr::PublicKey;
 use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Tag};

@@ -20,14 +20,16 @@ publish.workspace = true
 # `nmp-content` or `nmp-blossom` to this dependency list would not be, which is
 # exactly why this crate is where the claim gets checked rather than asserted.
 #
-# `nip02` is absent because it cannot be present: `nmp-nip02` depends on `nmp`,
-# so the follow service sits above this facade rather than behind a feature of
-# it, and no feature list here can reach it.
+# `nip02` closed #1143: the follow service used to sit above this facade
+# (`nmp-nip02` depended on `nmp`), the only upward edge in the workspace's
+# dependency graph and the reason this list could not name it. Now it is a
+# feature like every other retrofitted family below.
 [dependencies]
 nmp = { workspace = true, features = [
     "asset",
     "blossom",
     "content",
+    "nip02",
     "nip18",
     "nip22",
     "nip25",

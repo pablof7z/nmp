@@ -5,11 +5,9 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# #1143: pure vocabulary only -- `nostr` + `nmp-grammar`, no engine, no
+# mechanism. `nmp` must never appear here again; that reverse edge is the
+# exact defect #1143 closed.
 [dependencies]
 nostr.workspace = true
-nmp.workspace = true
 nmp-grammar.workspace = true
-
-[dev-dependencies]
-nmp-store.workspace = true
-tempfile = "3"

@@ -11,11 +11,10 @@ doctest = false
 
 [dependencies]
 nostr.workspace = true
-nmp = { workspace = true, features = ["nip29", "nip65"] }
+nmp = { workspace = true, features = ["nip02", "nip29", "nip65"] }
 nmp-ffi = { workspace = true, features = ["content", "nip02", "nip22", "nip29"] }
 nmp-content.workspace = true
 nmp-grammar.workspace = true
-nmp-nip02.workspace = true
 nmp-nip22.workspace = true
 
 [dev-dependencies]

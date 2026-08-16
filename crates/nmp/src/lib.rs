@@ -155,12 +155,6 @@ pub mod nip65;
 // linking one staticlib while a direct-Rust app named a second crate. Each is
 // behind its own non-default cargo feature for the same reason `nip22` is: one
 // owner of the values, and an app that never uses the family does not link it.
-//
-// `nip02` is deliberately absent. `nmp-nip02` depends on `nmp` -- sitting
-// ABOVE the facade rather than below it -- so an `nmp -> nmp-nip02` edge is a
-// cyclic package dependency cargo refuses to resolve. Reaching the follow
-// service through the facade means inverting its engine coupling first, which
-// is a different unit of work than this one.
 #[cfg(feature = "nip18")]
 pub mod nip18;
 
@@ -184,6 +178,17 @@ pub mod blossom;
 // native/direct-Rust product boundary just like every other app-facing family.
 #[cfg(feature = "nip29")]
 pub mod nip29;
+
+// #1143: the app-facing NIP-02 follow door, the identical shape to `nip29`'s
+// above -- a real facade module, not a re-export of `nmp-nip02`. `nmp-nip02`
+// stays pure vocabulary below it (the reactive kind:3 demand); this module
+// mints the ordinary `WriteIntent` and folds the live query into a
+// relationship snapshot, both of which need the engine. Closing this was the
+// last of #1239's family retrofits: it was also the only one that first
+// needed its engine coupling inverted, because `nmp-nip02` used to sit ABOVE
+// this facade rather than below it.
+#[cfg(feature = "nip02")]
+pub mod nip02;
 
 pub use auth::{
     AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp, AuthPolicyPendingSender,
@@ -302,9 +307,9 @@ pub use crate::runtime::{
     AsyncFifoReceiver, FifoNextError, FifoReceiver, FifoRecvError, FifoRecvTimeoutError,
     FifoTryRecvError, ReceiptReplayCursor, FACT_CHANNEL_CAPACITY,
 };
-// Producer-side FIFO mechanism, used only by protocol modules (e.g. nmp-nip02's
-// follow-action worker) to feed a receipt/status stream — not app public API,
-// so doc-hidden.
+// Producer-side FIFO mechanism, used only by protocol modules (e.g.
+// `nip02::observe`'s follow observation worker) to feed a receipt/status
+// stream — not app public API, so doc-hidden.
 #[doc(hidden)]
 pub use crate::runtime::{fifo_channel, FifoSender};
 // `EventBuilder` collides with `nostr::EventBuilder`, but only INSIDE this

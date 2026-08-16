@@ -1821,6 +1821,7 @@ dependencies = [
  "nmp-content",
  "nmp-grammar",
  "nmp-local-signer",
+ "nmp-nip02",
  "nmp-nip18",
  "nmp-nip22",
  "nmp-nip25",
@@ -1934,7 +1935,6 @@ dependencies = [
  "k256",
  "nmp",
  "nmp-grammar",
- "nmp-nip02",
  "nmp-store",
  "nmp-test-support",
  "nostr 0.44.4",
@@ -1984,11 +1984,8 @@ dependencies = [
 name = "nmp-nip02"
 version = "0.1.0"
 dependencies = [
- "nmp",
  "nmp-grammar",
- "nmp-store",
  "nostr 0.44.4",
- "tempfile",
 ]
 
 [[package]]
@@ -2074,7 +2071,6 @@ dependencies = [
  "nmp-content",
  "nmp-ffi",
  "nmp-grammar",
- "nmp-nip02",
  "nmp-nip22",
  "nmp-store",
  "nmp-test-support",

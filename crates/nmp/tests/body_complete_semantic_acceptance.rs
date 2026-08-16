@@ -1,17 +1,20 @@
 //! #1432 capability-owned public capstone: NIP-02 composes body-complete
 //! operations through the ordinary `WriteIntent` / `publish` / receipt /
-//! `LiveQuery` path.
+//! `LiveQuery` path. Moved up from `nmp-nip02` alongside the follow door
+//! itself (#1143) -- this proves the door end-to-end against a real engine.
+//! `nip02` is one of this crate's own `[dev-dependencies]` self-loop
+//! features, so it is always compiled in for `cargo test -p nmp`.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
+use nmp::nip02::{
+    follow_capability, follow_writes, set_following, FollowActionFailure, FollowChange,
+};
 use nmp::{
     Binding, Engine, EngineConfig, Filter, Identity, LiveQuery, ReceiptReattachment,
     ReplaceableMaterializer, ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, Row,
     RowDelta, RowSignature, SigningState, WriteIntent, WriteRouting,
-};
-use nmp_nip02::{
-    follow_capability, follow_writes, set_following, FollowActionFailure, FollowChange,
 };
 use nmp_store::{RedbStore, RelayObserved};
 use nostr::{EventBuilder, EventId, Keys, Kind, RelayUrl, Timestamp};

@@ -47,7 +47,7 @@
 //! engine/runtime, the whole test drives `nmp::Engine` directly — the object the
 //! FFI `NmpEngine` wraps 1:1; each unrelated operation calls the precise engine
 //! method the corresponding facade method delegates to (`observe_async`,
-//! `relay_information`, `nmp_nip02::observe_following_async`, `sign_event_with_
+//! `relay_information`, `nmp::nip02::observe_following_async`, `sign_event_with_
 //! completion`, `shutdown`). This is the harness of `mixed_load_704.rs` /
 //! `thread_scaling.rs` one thin layer below the FFI wrapper types.
 //!
@@ -316,7 +316,7 @@ async fn blocking_foreign_completion_never_stalls_unrelated_engine_work() {
     assert_eq!(info.document().name.as_deref(), Some("mock-704-relay"));
 
     // (c) A follow observation delivers its initial relationship snapshot.
-    let follow = nmp_nip02::observe_following_async(Arc::clone(&engine), author)
+    let follow = nmp::nip02::observe_following_async(Arc::clone(&engine), author)
         .expect("follow observation opens without a capacity refusal");
     let snapshot = tokio::time::timeout(OP_BOUND, follow.next())
         .await

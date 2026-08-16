@@ -399,7 +399,7 @@ impl Accumulator {
 }
 
 /// One host's acquisition state, read off the frame's own per-branch
-/// evidence. Mirrors `nmp_nip02::service::availability`'s ladder, narrowed to
+/// evidence. Mirrors `nip02::observe::availability`'s ladder, narrowed to
 /// the sources that name THIS host.
 fn availability_at(host: &RelayUrl, evidence: &[AcquisitionEvidence]) -> GroupAvailability {
     let hard_shortfall = evidence

@@ -22,7 +22,7 @@ default = []
 # #824: these are the stable app-facing selection keys consumed by the native
 # feature manifest. Each key only forwards into its real Cargo dependency;
 # Cargo remains the sole dependency graph.
-nip02 = ["dep:nmp-nip02", "nip65"]
+nip02 = ["nmp/nip02", "nip65"]
 nip18 = ["nmp/nip18"]
 nip22 = ["nmp/nip22", "nip65"]
 nip25 = ["nmp/nip25"]
@@ -64,14 +64,6 @@ nmp = { workspace = true }
 uniffi = { workspace = true, features = ["cli"] }
 zeroize = "1"
 k256 = { version = "0.13.4", default-features = false }
-# The ONE family that cannot come through the facade: `nmp-nip02` depends on
-# `nmp`, sitting above the facade rather than below it, so `nmp -> nmp-nip02`
-# is a cyclic package dependency cargo refuses to resolve. #1239 records this
-# as its own unit of work: the follow service's engine coupling has to be
-# inverted before the facade can own its vocabulary. Until then this edge is
-# the only way the staticlib every Swift and Kotlin app links can project the
-# follow door.
-nmp-nip02 = { workspace = true, optional = true }
 # #555: `FfiBlossomAuthorization::validate_signed_event` reassembles an
 # `FfiSignedEvent` record into canonical event JSON for nostr's strict
 # `Event::from_json` parser (typed refusal on malformed id/sig hex).
