@@ -51,8 +51,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nmp::asset::{Sha256Hash, Sha256HexError};
-use nmp::blossom::{
+use nmp_asset::{Sha256Hash, Sha256HexError};
+use nmp_blossom::{
     AuthDraftError, AuthValidationError, BlobDescriptor, BlossomClient, BlossomClientConfig,
     BlossomServerUrl, BlossomVerb, DeleteError, DescriptorError, ExpectedAuthorization, ListError,
     ListPage, MirrorError, ServerUrlError, SignedAuthorization, UploadError,
@@ -62,7 +62,7 @@ use nostr::{JsonUtil, PublicKey, Timestamp, UnsignedEvent};
 
 use crate::types::FfiSignedEvent;
 
-/// The BUD-11 authorization verbs (`nmp::blossom::BlossomVerb` mirror).
+/// The BUD-11 authorization verbs (`nmp_blossom::BlossomVerb` mirror).
 /// `get` is modeled totally (the Rust enum is total) but has no draft
 /// builder yet -- the `get`/`media` endpoints are epic-#216 follow-ups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -91,7 +91,7 @@ fn verb_from_ffi(verb: FfiBlossomVerb) -> BlossomVerb {
     }
 }
 
-/// A BUD-02 blob descriptor (`nmp::blossom::BlobDescriptor` mirror). When
+/// A BUD-02 blob descriptor (`nmp_blossom::BlobDescriptor` mirror). When
 /// returned by [`FfiBlossomClient::upload`] its `sha256` was PROVEN equal to
 /// the hash of the exact bytes this client uploaded. A
 /// [`FfiBlossomClient::mirror`] result was checked only against the hash the
@@ -119,7 +119,7 @@ pub(crate) fn descriptor_to_ffi(descriptor: BlobDescriptor) -> FfiBlobDescriptor
     }
 }
 
-/// `nmp::asset::Sha256HexError` mirror -- the strict lowercase-hex parse
+/// `nmp_asset::Sha256HexError` mirror -- the strict lowercase-hex parse
 /// refusals, carried as a typed field by the variants that wrap it (never
 /// flattened into a message string).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -144,7 +144,7 @@ fn sha256_hex_error_to_ffi(error: Sha256HexError) -> FfiBlossomSha256HexError {
     }
 }
 
-/// `nmp::blossom::ServerUrlError` mirror -- every base-URL admission
+/// `nmp_blossom::ServerUrlError` mirror -- every base-URL admission
 /// refusal, variant-for-variant.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiBlossomServerUrlError {
@@ -177,7 +177,7 @@ pub(crate) fn server_url_error_to_ffi(error: ServerUrlError) -> FfiBlossomServer
     }
 }
 
-/// `nmp::blossom::DescriptorError` mirror -- the strict BUD-02 descriptor
+/// `nmp_blossom::DescriptorError` mirror -- the strict BUD-02 descriptor
 /// parse refusals, variant-for-variant.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiBlossomDescriptorError {
@@ -211,7 +211,7 @@ fn descriptor_error_to_ffi(error: DescriptorError) -> FfiBlossomDescriptorError 
 }
 
 /// The draft-construction + validation failure taxonomy
-/// (`nmp::blossom::AuthDraftError` + `nmp::blossom::AuthValidationError`
+/// (`nmp_blossom::AuthDraftError` + `nmp_blossom::AuthValidationError`
 /// mirrors, plus the boundary-re-introduced input parses). One enum for
 /// both stages because both answer the same caller question -- "why is
 /// there no usable authorization?" -- while every underlying check keeps
@@ -230,7 +230,7 @@ pub enum FfiBlossomAuthError {
     /// covers malformed JSON and malformed id/pubkey/sig hex, from either
     /// validation door (boundary-re-introduced fallibility).
     InvalidEventJson { reason: String },
-    /// `nmp::blossom::AuthDraftError::ExpirationNotAfterCreatedAt` mirror:
+    /// `nmp_blossom::AuthDraftError::ExpirationNotAfterCreatedAt` mirror:
     /// such a window is expired at birth.
     ExpirationNotAfterCreatedAt {
         created_at_secs: u64,
@@ -428,7 +428,7 @@ fn draft_to_ffi(
 }
 
 /// Compose an UNSIGNED BUD-11 `upload` authorization draft (kind 24242) --
-/// `nmp::blossom::upload_authorization_draft` mirror. BUD-04 NOTE: a mirror
+/// `nmp_blossom::upload_authorization_draft` mirror. BUD-04 NOTE: a mirror
 /// is authorized with THIS builder (the spec assigns mirroring the
 /// `upload` verb); there is deliberately no separate mirror builder.
 /// Engine-less free function ([`crate::entity`]'s precedent).
@@ -442,7 +442,7 @@ pub fn blossom_upload_authorization_draft(
 ) -> Result<FfiBlossomAuthDraft, FfiBlossomAuthError> {
     let author = parse_author_pubkey(&author_pubkey_hex)?;
     let blob = parse_auth_blob_sha256(&blob_sha256_hex)?;
-    let unsigned = nmp::blossom::upload_authorization_draft(
+    let unsigned = nmp_blossom::upload_authorization_draft(
         author,
         blob,
         Timestamp::from(created_at_secs),
@@ -454,7 +454,7 @@ pub fn blossom_upload_authorization_draft(
 }
 
 /// Compose an UNSIGNED BUD-12 `delete` authorization draft --
-/// `nmp::blossom::delete_authorization_draft` mirror. Exactly ONE blob is
+/// `nmp_blossom::delete_authorization_draft` mirror. Exactly ONE blob is
 /// bound (BUD-12 forbids multi-blob deletes via extra `x` tags).
 #[uniffi::export]
 pub fn blossom_delete_authorization_draft(
@@ -466,7 +466,7 @@ pub fn blossom_delete_authorization_draft(
 ) -> Result<FfiBlossomAuthDraft, FfiBlossomAuthError> {
     let author = parse_author_pubkey(&author_pubkey_hex)?;
     let blob = parse_auth_blob_sha256(&blob_sha256_hex)?;
-    let unsigned = nmp::blossom::delete_authorization_draft(
+    let unsigned = nmp_blossom::delete_authorization_draft(
         author,
         blob,
         Timestamp::from(created_at_secs),
@@ -478,7 +478,7 @@ pub fn blossom_delete_authorization_draft(
 }
 
 /// Compose an UNSIGNED BUD-12 `list` authorization draft --
-/// `nmp::blossom::list_authorization_draft` mirror. No `x` tag: listing is
+/// `nmp_blossom::list_authorization_draft` mirror. No `x` tag: listing is
 /// scoped to a pubkey by the request path, not to any blob.
 #[uniffi::export]
 pub fn blossom_list_authorization_draft(
@@ -488,7 +488,7 @@ pub fn blossom_list_authorization_draft(
     description: String,
 ) -> Result<FfiBlossomAuthDraft, FfiBlossomAuthError> {
     let author = parse_author_pubkey(&author_pubkey_hex)?;
-    let unsigned = nmp::blossom::list_authorization_draft(
+    let unsigned = nmp_blossom::list_authorization_draft(
         author,
         Timestamp::from(created_at_secs),
         Timestamp::from(expiration_secs),
@@ -499,7 +499,7 @@ pub fn blossom_list_authorization_draft(
 }
 
 /// A signed kind:24242 event PROVEN (at construction) to satisfy every
-/// BUD-11 check -- `nmp::blossom::SignedAuthorization`'s
+/// BUD-11 check -- `nmp_blossom::SignedAuthorization`'s
 /// type-over-convention witness, carried across the boundary as an opaque
 /// object so an unvalidated event can never enter a client operation.
 #[derive(uniffi::Object)]
@@ -605,7 +605,7 @@ impl FfiBlossomAuthorization {
 }
 
 /// [`FfiBlossomClient`] construction knobs
-/// (`nmp::blossom::BlossomClientConfig` mirror). `None` means the crate
+/// (`nmp_blossom::BlossomClientConfig` mirror). `None` means the crate
 /// default.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct FfiBlossomClientConfig {
@@ -638,7 +638,7 @@ fn client_config_from_ffi(config: FfiBlossomClientConfig) -> BlossomClientConfig
     }
 }
 
-/// `nmp::blossom::UploadError` mirror plus the boundary-re-introduced
+/// `nmp_blossom::UploadError` mirror plus the boundary-re-introduced
 /// parse/machinery variants. Exhaustive; never collapsed with the other
 /// operations' taxonomies.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
@@ -648,7 +648,7 @@ pub enum FfiBlossomUploadError {
     InvalidServerUrl { error: FfiBlossomServerUrlError },
     /// The per-call current-thread tokio runtime could not be built.
     RuntimeUnavailable { reason: String },
-    /// `nmp::blossom::ClientBuildError` mirror: the HTTP stack could not be
+    /// `nmp_blossom::ClientBuildError` mirror: the HTTP stack could not be
     /// constructed (system DNS configuration unreadable, or reqwest client
     /// construction failed).
     ClientBuild { reason: String },
@@ -780,7 +780,7 @@ pub(crate) fn upload_error_to_ffi(error: UploadError) -> FfiBlossomUploadError {
     }
 }
 
-/// `nmp::blossom::MirrorError` mirror plus the boundary-re-introduced
+/// `nmp_blossom::MirrorError` mirror plus the boundary-re-introduced
 /// parse/machinery variants. Deliberately its own enum: mirror has failure
 /// modes with no upload analogue (the 409 hash refusal, the 502
 /// origin-fetch failure) and operation failures are never collapsed.
@@ -793,7 +793,7 @@ pub enum FfiBlossomMirrorError {
     InvalidExpectedSha256 { error: FfiBlossomSha256HexError },
     /// The per-call current-thread tokio runtime could not be built.
     RuntimeUnavailable { reason: String },
-    /// `nmp::blossom::ClientBuildError` mirror.
+    /// `nmp_blossom::ClientBuildError` mirror.
     ClientBuild { reason: String },
     /// Not an `upload` grant (BUD-04 mirrors under the `upload` verb)
     /// bound to EXACTLY the expected blob -- refused before any I/O.
@@ -949,7 +949,7 @@ fn mirror_error_to_ffi(error: MirrorError) -> FfiBlossomMirrorError {
     }
 }
 
-/// `nmp::blossom::DeleteError` mirror plus the boundary-re-introduced
+/// `nmp_blossom::DeleteError` mirror plus the boundary-re-introduced
 /// parse/machinery variants. Exhaustive.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum FfiBlossomDeleteError {
@@ -960,7 +960,7 @@ pub enum FfiBlossomDeleteError {
     InvalidBlobSha256 { error: FfiBlossomSha256HexError },
     /// The per-call current-thread tokio runtime could not be built.
     RuntimeUnavailable { reason: String },
-    /// `nmp::blossom::ClientBuildError` mirror.
+    /// `nmp_blossom::ClientBuildError` mirror.
     ClientBuild { reason: String },
     /// Not a `delete` grant for EXACTLY the blob named in the request path
     /// -- refused before any admission or I/O.
@@ -1066,7 +1066,7 @@ fn delete_error_to_ffi(error: DeleteError) -> FfiBlossomDeleteError {
     }
 }
 
-/// `nmp::blossom::ListError` mirror plus the boundary-re-introduced
+/// `nmp_blossom::ListError` mirror plus the boundary-re-introduced
 /// parse/machinery variants. Exhaustive.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum FfiBlossomListError {
@@ -1080,7 +1080,7 @@ pub enum FfiBlossomListError {
     InvalidCursor { error: FfiBlossomSha256HexError },
     /// The per-call current-thread tokio runtime could not be built.
     RuntimeUnavailable { reason: String },
-    /// `nmp::blossom::ClientBuildError` mirror.
+    /// `nmp_blossom::ClientBuildError` mirror.
     ClientBuild { reason: String },
     /// An authorization was supplied but is not a `list` grant -- refused
     /// before any admission or I/O (no cross-verb replay).
@@ -1204,7 +1204,7 @@ fn blocking_runtime() -> Result<tokio::runtime::Runtime, String> {
         .map_err(|error| format!("Blossom HTTP runtime: {error}"))
 }
 
-/// The BUD-02/04/12 blob client (`nmp::blossom::BlossomClient` mirror).
+/// The BUD-02/04/12 blob client (`nmp_blossom::BlossomClient` mirror).
 /// Every method BLOCKS the calling thread for up to the configured request
 /// deadline -- call OFF the main thread (the hand-written Swift/Kotlin
 /// wrappers dispatch for you). Construction is infallible: the config is
@@ -1235,7 +1235,7 @@ impl FfiBlossomClient {
     }
 
     /// BLOCKING `PUT /upload` of `blob`'s exact bytes -- self-verifying end
-    /// to end (`nmp::blossom::BlossomClient::upload`): the returned
+    /// to end (`nmp_blossom::BlossomClient::upload`): the returned
     /// descriptor's sha256 was PROVEN equal to the hash of the uploaded
     /// bytes. Call off the main thread.
     pub fn upload(
@@ -1266,7 +1266,7 @@ impl FfiBlossomClient {
 
     /// BLOCKING `PUT /mirror` (BUD-04): ask `server_url` to download the
     /// blob at `source_url` itself, integrity-gated against
-    /// `expected_sha256_hex` (`nmp::blossom::BlossomClient::mirror`). The
+    /// `expected_sha256_hex` (`nmp_blossom::BlossomClient::mirror`). The
     /// authorization is an `upload` grant bound to that hash. Call off the
     /// main thread.
     pub fn mirror(
@@ -1301,7 +1301,7 @@ impl FfiBlossomClient {
     }
 
     /// BLOCKING `DELETE /<sha256>` (BUD-12)
-    /// (`nmp::blossom::BlossomClient::delete`). The authorization is a
+    /// (`nmp_blossom::BlossomClient::delete`). The authorization is a
     /// `delete` grant bound to EXACTLY `blob_sha256_hex`. Call off the main
     /// thread.
     pub fn delete(
@@ -1334,7 +1334,7 @@ impl FfiBlossomClient {
     }
 
     /// BLOCKING `GET /list/<pubkey>` (BUD-12)
-    /// (`nmp::blossom::BlossomClient::list`): the blobs `server_url` stores
+    /// (`nmp_blossom::BlossomClient::list`): the blobs `server_url` stores
     /// for `owner_pubkey_hex`, newest first. `auth` is optional -- a server
     /// that requires a `list` authorization answers 401 on an auth-less
     /// call, surfaced as `AuthRejected`. `cursor_sha256_hex`/`limit` are

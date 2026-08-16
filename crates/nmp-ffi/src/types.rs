@@ -726,7 +726,7 @@ pub enum FfiContentPart {
     Quote { target: FfiRow },
 }
 
-/// What a NIP-25 reaction SAYS (`nmp::nip25::Reaction` mirror, #155).
+/// What a NIP-25 reaction SAYS (`nmp_nip25::Reaction` mirror, #155).
 ///
 /// Not a string, because NIP-25 assigns fixed meanings to fixed bytes: *"A
 /// reaction with `content` set to `+` or an empty string MUST be interpreted
