@@ -160,10 +160,7 @@ fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candida
             nostr::SubscriptionId::new(wire_sub_id_string(&old_child)),
         ))),
     );
-    assert_eq!(
-        core.active_nip77_live.get(&first_plan_sub),
-        Some(&old_child)
-    );
+    assert_eq!(core.nip77.live_for_plan(&first_plan_sub), Some(&old_child));
 
     core.attribution.observe_atom(&second);
     core.attribution.release_atom(&first);
@@ -174,10 +171,7 @@ fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candida
         .iter()
         .all(|op| !matches!(op, WireOp::Close(sub_id) if sub_id == &old_child)));
     assert_eq!(core.bench_ownership_census().request_replacement_jobs, 1);
-    assert_eq!(
-        core.active_nip77_live.get(&first_plan_sub),
-        Some(&old_child)
-    );
+    assert_eq!(core.nip77.live_for_plan(&first_plan_sub), Some(&old_child));
 
     let accepted = core.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
         attempt_id: second_attempt,
@@ -186,10 +180,7 @@ fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candida
     assert!(wire_ops(&accepted)
         .iter()
         .all(|op| !matches!(op, WireOp::Close(sub_id) if sub_id == &old_child)));
-    assert_eq!(
-        core.active_nip77_live.get(&first_plan_sub),
-        Some(&old_child)
-    );
+    assert_eq!(core.nip77.live_for_plan(&first_plan_sub), Some(&old_child));
     assert_eq!(core.bench_ownership_census().request_replacement_jobs, 1);
 
     let promoted = core.on_relay_frame(
@@ -206,7 +197,7 @@ fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candida
             .count(),
         1
     );
-    assert!(!core.active_nip77_live.contains_key(&first_plan_sub));
+    assert!(!core.nip77.has_live(&first_plan_sub));
     assert_eq!(core.bench_ownership_census().request_replacement_jobs, 0);
 }
 

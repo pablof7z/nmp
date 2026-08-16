@@ -110,7 +110,7 @@ impl Fixture {
         );
         let child = self.accept(&effects);
         self.eose(&child);
-        assert_eq!(self.core.active_nip77_live.get(&plan_sub_id), Some(&child));
+        assert_eq!(self.core.nip77.live_for_plan(&plan_sub_id), Some(&child));
         (plan_sub_id, child)
     }
 }
@@ -239,7 +239,7 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
         .sub_id
         .clone();
     assert_eq!(
-        fixture.core.active_nip77_live.get(&first_plan),
+        fixture.core.nip77.live_for_plan(&first_plan),
         Some(&old_child)
     );
 
@@ -250,10 +250,7 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
     let third_plan = fixture.core.router.plan().reqs[&fixture.session][0]
         .sub_id
         .clone();
-    assert!(!fixture
-        .core
-        .pending_neg_handoffs
-        .contains_key(&second_candidate));
+    assert!(!fixture.core.nip77.handoffs.contains(&second_candidate));
     assert!(!fixture
         .core
         .pending_request_evidence
@@ -267,7 +264,7 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
         first_plan
     );
     assert_eq!(
-        fixture.core.active_nip77_live.get(&first_plan),
+        fixture.core.nip77.live_for_plan(&first_plan),
         Some(&old_child)
     );
 
@@ -280,7 +277,7 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
         .unwrap()
         .is_none());
     assert_eq!(
-        fixture.core.active_nip77_live.get(&first_plan),
+        fixture.core.nip77.live_for_plan(&first_plan),
         Some(&old_child)
     );
 

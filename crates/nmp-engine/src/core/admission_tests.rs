@@ -413,6 +413,8 @@ mod diagnostics_scale;
 mod execution_targets;
 #[path = "admission_tests/lifecycle.rs"]
 mod lifecycle;
+#[path = "admission_tests/plan_index_mirror.rs"]
+mod plan_index_mirror;
 #[path = "admission_tests/request_filter_sharing.rs"]
 mod request_filter_sharing;
 #[path = "admission_tests/resolver_delta.rs"]

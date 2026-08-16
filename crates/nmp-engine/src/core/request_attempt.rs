@@ -440,49 +440,12 @@ impl RequestAttempts {
 impl EngineCore {
     /// Which role subscriptions one plan's metadata update applies to.
     ///
-    /// This is the NIP-77 fan-out the attempt owner deliberately cannot see:
-    /// a plan's live candidate, its reconciliation session, and its backlog
-    /// children all carry the plan's claims. Computed here, where that state
-    /// lives, and handed to the owner as a set. Cluster 11's owner will
-    /// provide this directly once it exists.
+    /// The NIP-77 fan-out the attempt owner deliberately cannot see. It used
+    /// to be computed here by reaching into four of the repair owner's maps;
+    /// it now comes from that owner directly, as the comment here always
+    /// said it eventually would.
     fn role_sub_ids_for_plan(&self, plan_sub_id: &SubId) -> BTreeSet<SubId> {
-        let mut role_sub_ids = BTreeSet::from([plan_sub_id.clone()]);
-        role_sub_ids.extend(
-            self.pending_neg_handoffs_by_plan
-                .get(plan_sub_id)
-                .into_iter()
-                .flatten()
-                .cloned(),
-        );
-        role_sub_ids.extend(
-            self.neg_sessions_by_plan
-                .get(plan_sub_id)
-                .into_iter()
-                .flatten()
-                .cloned(),
-        );
-        for child in self
-            .pending_backfills_by_plan
-            .get(plan_sub_id)
-            .cloned()
-            .unwrap_or_default()
-        {
-            match self.pending_backfills.get(&child) {
-                // The ids-only fetch is not coverage proof and deliberately
-                // owns no plan claims. The retained NEG snapshot is extended
-                // separately by `extend_plan_execution_metadata`.
-                Some(super::TemporaryReq::MissingIds { .. }) => {}
-                Some(super::TemporaryReq::Backlog { .. }) => {
-                    role_sub_ids.insert(child);
-                }
-                Some(super::TemporaryReq::BacklogActivatesLive { live_sub_id, .. }) => {
-                    role_sub_ids.insert(child);
-                    role_sub_ids.insert(live_sub_id.clone());
-                }
-                None => {}
-            }
-        }
-        role_sub_ids
+        self.nip77.role_sub_ids_for_plan(plan_sub_id)
     }
 
     pub(super) fn extend_request_attempt_metadata(
@@ -545,14 +508,16 @@ impl EngineCore {
                 .get(&attempt.sub_id)
                 .is_some_and(|metadata| metadata.filter == attempt.filter),
             RequestAttemptPurpose::Nip77LiveCandidate { plan_sub_id } => self
-                .pending_neg_handoffs_by_plan
-                .get(plan_sub_id)
-                .is_some_and(|children| children.contains(&attempt.sub_id)),
+                .nip77
+                .handoffs
+                .children_of(plan_sub_id)
+                .contains(&attempt.sub_id),
             RequestAttemptPurpose::Nip77MissingIds { plan_sub_id }
             | RequestAttemptPurpose::Nip77Backlog { plan_sub_id } => self
-                .pending_backfills_by_plan
-                .get(plan_sub_id)
-                .is_some_and(|children| children.contains(&attempt.sub_id)),
+                .nip77
+                .backfills
+                .children_of(plan_sub_id)
+                .contains(&attempt.sub_id),
             RequestAttemptPurpose::Nip77Open { .. }
             | RequestAttemptPurpose::Nip77Probe
             | RequestAttemptPurpose::Nip77Continue => false,

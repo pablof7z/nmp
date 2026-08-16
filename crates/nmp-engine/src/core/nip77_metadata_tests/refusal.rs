@@ -7,9 +7,13 @@ fn refused_live_candidate_never_becomes_active_and_keeps_one_owned_retry_deadlin
     let mut fixture = Fixture::new();
     let candidate = fixture.begin_candidate();
     fixture.refuse(&candidate);
-    assert!(fixture.core.active_nip77_live.is_empty());
+    assert!(fixture.core.nip77.live_is_empty());
     assert_eq!(
-        fixture.core.pending_neg_handoffs_by_plan[&fixture.plan_sub_id],
+        fixture
+            .core
+            .nip77
+            .handoffs
+            .children_of(&fixture.plan_sub_id),
         BTreeSet::from([candidate.clone()])
     );
     assert_eq!(fixture.core.attempts.counts().retry_jobs, 1);
@@ -20,7 +24,7 @@ fn refused_live_candidate_never_becomes_active_and_keeps_one_owned_retry_deadlin
     assert!(retried
         .iter()
         .any(|effect| matches!(effect, Effect::Wire(_))));
-    assert!(fixture.core.active_nip77_live.is_empty());
+    assert!(fixture.core.nip77.live_is_empty());
     assert_eq!(fixture.core.attempts.counts().attempts, 1);
     fixture.finish();
 }
@@ -71,11 +75,8 @@ fn stray_eose_cannot_advance_refused_candidate_missing_id_or_backlog_roles() {
     let candidate_id = candidate.begin_candidate();
     candidate.refuse(&candidate_id);
     assert!(candidate.stray_eose(&candidate_id).is_empty());
-    assert!(candidate
-        .core
-        .pending_neg_handoffs
-        .contains_key(&candidate_id));
-    assert!(candidate.core.active_nip77_live.is_empty());
+    assert!(candidate.core.nip77.handoffs.contains(&candidate_id));
+    assert!(candidate.core.nip77.live_is_empty());
     assert_eq!(candidate.core.attempts.counts().retry_jobs, 1);
     candidate.finish();
 
@@ -84,7 +85,11 @@ fn stray_eose_cannot_advance_refused_candidate_missing_id_or_backlog_roles() {
     let handoff = missing.core.take_pending_neg_handoff(&live).unwrap();
     missing.core.abandon_sub(&live);
     missing.core.open_neg_session(handoff, &mut Vec::new());
-    let neg = missing.core.neg_sessions_by_plan[&missing.plan_sub_id]
+    let neg = missing
+        .core
+        .nip77
+        .sessions
+        .children_of(&missing.plan_sub_id)
         .iter()
         .next()
         .cloned()
@@ -97,14 +102,18 @@ fn stray_eose_cannot_advance_refused_candidate_missing_id_or_backlog_roles() {
         BTreeSet::from([EventId::from_byte_array([11; 32])]),
         &mut Vec::new(),
     );
-    let missing_id = missing.core.pending_backfills_by_plan[&missing.plan_sub_id]
+    let missing_id = missing
+        .core
+        .nip77
+        .backfills
+        .children_of(&missing.plan_sub_id)
         .iter()
         .next()
         .cloned()
         .unwrap();
     missing.refuse(&missing_id);
     assert!(missing.stray_eose(&missing_id).is_empty());
-    assert!(missing.core.pending_backfills.contains_key(&missing_id));
+    assert!(missing.core.nip77.backfills.contains(&missing_id));
     assert_eq!(missing.core.attempts.counts().retry_jobs, 1);
     missing.finish();
 
@@ -114,14 +123,18 @@ fn stray_eose_cannot_advance_refused_candidate_missing_id_or_backlog_roles() {
     backlog
         .core
         .handoff_fallback_to_req(handoff, &mut Vec::new());
-    let backlog_id = backlog.core.pending_backfills_by_plan[&backlog.plan_sub_id]
+    let backlog_id = backlog
+        .core
+        .nip77
+        .backfills
+        .children_of(&backlog.plan_sub_id)
         .iter()
         .next()
         .cloned()
         .unwrap();
     backlog.refuse(&backlog_id);
     assert!(backlog.stray_eose(&backlog_id).is_empty());
-    assert!(backlog.core.pending_backfills.contains_key(&backlog_id));
+    assert!(backlog.core.nip77.backfills.contains(&backlog_id));
     assert_eq!(backlog.core.attempts.counts().retry_jobs, 1);
     backlog.finish();
 }
@@ -133,7 +146,11 @@ fn refused_missing_id_and_backlog_roles_each_keep_one_retry_and_teardown_exactly
     let handoff = missing.core.take_pending_neg_handoff(&candidate).unwrap();
     missing.core.abandon_sub(&candidate);
     missing.core.open_neg_session(handoff, &mut Vec::new());
-    let neg = missing.core.neg_sessions_by_plan[&missing.plan_sub_id]
+    let neg = missing
+        .core
+        .nip77
+        .sessions
+        .children_of(&missing.plan_sub_id)
         .iter()
         .next()
         .cloned()
@@ -146,14 +163,18 @@ fn refused_missing_id_and_backlog_roles_each_keep_one_retry_and_teardown_exactly
         BTreeSet::from([EventId::from_byte_array([9; 32])]),
         &mut Vec::new(),
     );
-    let missing_id = missing.core.pending_backfills_by_plan[&missing.plan_sub_id]
+    let missing_id = missing
+        .core
+        .nip77
+        .backfills
+        .children_of(&missing.plan_sub_id)
         .iter()
         .next()
         .cloned()
         .unwrap();
     missing.refuse(&missing_id);
     assert_eq!(missing.core.attempts.counts().retry_jobs, 1);
-    assert!(missing.core.active_nip77_live.is_empty());
+    assert!(missing.core.nip77.live_is_empty());
     missing.finish();
 
     let mut backlog = Fixture::new();
@@ -162,14 +183,18 @@ fn refused_missing_id_and_backlog_roles_each_keep_one_retry_and_teardown_exactly
     backlog
         .core
         .handoff_fallback_to_req(handoff, &mut Vec::new());
-    let backlog_id = backlog.core.pending_backfills_by_plan[&backlog.plan_sub_id]
+    let backlog_id = backlog
+        .core
+        .nip77
+        .backfills
+        .children_of(&backlog.plan_sub_id)
         .iter()
         .next()
         .cloned()
         .unwrap();
     backlog.refuse(&backlog_id);
     assert_eq!(backlog.core.attempts.counts().retry_jobs, 1);
-    assert!(backlog.core.active_nip77_live.is_empty());
+    assert!(backlog.core.nip77.live_is_empty());
     backlog.finish();
 }
 
@@ -180,7 +205,11 @@ fn missing_id_retry_stays_claimless_when_plan_metadata_grows() {
     let handoff = fixture.core.take_pending_neg_handoff(&candidate).unwrap();
     fixture.core.abandon_sub(&candidate);
     fixture.core.open_neg_session(handoff, &mut Vec::new());
-    let neg = fixture.core.neg_sessions_by_plan[&fixture.plan_sub_id]
+    let neg = fixture
+        .core
+        .nip77
+        .sessions
+        .children_of(&fixture.plan_sub_id)
         .iter()
         .next()
         .cloned()
@@ -193,7 +222,11 @@ fn missing_id_retry_stays_claimless_when_plan_metadata_grows() {
         BTreeSet::from([EventId::from_byte_array([13; 32])]),
         &mut Vec::new(),
     );
-    let missing_id = fixture.core.pending_backfills_by_plan[&fixture.plan_sub_id]
+    let missing_id = fixture
+        .core
+        .nip77
+        .backfills
+        .children_of(&fixture.plan_sub_id)
         .iter()
         .next()
         .cloned()
