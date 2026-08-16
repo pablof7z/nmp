@@ -355,12 +355,32 @@ Mechanical, no checker required:
    #1707's falsifier and the primary number: it is rule 2 stated as an `ls`.
 2. **Protocol crates named in `crates/nmp/Cargo.toml`** — today **11**
    optional dependencies. Target **0**.
-3. **Lines in `crates/nmp`** — today **46,898**, down from 73,032 when the
-   engine left. Target ≈ **7,500** (~4,000 production + facade tests). Crude,
-   gameable by moving code, so secondary to (1).
+3. **Lines in `crates/nmp`** — **7,254** across 14 files, down from 73,598
+   at the start of 2026-08-16. Target ≈ **7,500**, so this one is reached.
+   Crude and gameable by moving code, which is exactly why it is secondary
+   to (1) — see the warning below.
 4. **Crates changed by adding a capability** — today three (`nmp`,
    `nmp-ffi`, the capability crate). Target **one** for direct-Rust apps
    (+`nmp-ffi` only when a native projection is wanted).
+
+### What the crate work did and did not fix
+
+**The crate cut fixed coupling and provability. It did not fix size, and size
+was never going to be fixed by moving files between crates.** Anyone reading
+measure (3)'s drop from 73,598 to 7,254 and concluding the hard part is done
+has read the wrong number.
+
+What actually happened is that ~66,000 lines moved to packages where their
+dependencies could be constrained. `nmp-engine` is still ~27,000 production
+lines built around one struct that eleven files write to, and no further
+crate line addresses that — four candidates were measured and rejected
+precisely because a crate boundary is the wrong instrument for it.
+
+What shrinks the reducer is finishing the owner program (#1606: module owners
+with private fields, so the compiler finds every violating access, including
+in tests, at zero visibility cost) and pushing state-machine transitions onto
+the value types — `PendingWrite` owning its own transitions rather than
+`write.rs` performing them on it. Neither is a packaging change.
 
 ## Decided — not to be relitigated without new facts
 
