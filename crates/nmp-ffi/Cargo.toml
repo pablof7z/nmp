@@ -22,24 +22,28 @@ default = []
 # #824: these are the stable app-facing selection keys consumed by the native
 # feature manifest. Each key only forwards into its real Cargo dependency;
 # Cargo remains the sole dependency graph.
-nip02 = ["nmp/nip02", "nip65"]
-nip18 = ["nmp/nip18"]
-nip22 = ["nmp/nip22", "nip65"]
-nip25 = ["nmp/nip25"]
+#
+# #1707: nip18/nip22/nip25/nipc7/asset/blossom/content used to forward into
+# `nmp/<feature>` -- `nmp` re-exporting each as a pure door with no engine
+# coupling. `nmp` no longer does (those eight doors are deleted, #1707), so
+# each key now pulls its own capability crate directly, same shape NIP-02
+# and media already use.
+nip02 = ["dep:nmp-nip02", "nip65"]
+nip18 = ["dep:nmp-nip18"]
+nip22 = ["dep:nmp-nip22", "nip65"]
+nip25 = ["dep:nmp-nip25"]
 nip29 = ["nmp/nip29", "nip65"]
 nip65 = ["nmp/nip65"]
-nipc7 = ["nmp/nipc7"]
-asset = ["nmp/asset"]
-blossom = ["nmp/blossom", "asset"]
-content = ["nmp/content"]
+nipc7 = ["dep:nmp-nipc7"]
+asset = ["dep:nmp-asset"]
+blossom = ["dep:nmp-blossom", "asset"]
+content = ["dep:nmp-content"]
 # #971: the one-shot engine-authorized Blossom upload. Needs `blossom` for
 # the client/authorization vocabulary and `dep:nmp-media` for the exact-bytes
-# prepare/upload seam this call composes internally. `nmp-media` is a
-# deliberate exception to the "always through `nmp`" rule below (#1707):
-# `nmp` does not re-export it and must not -- the facade contains no
-# capability's implementation, reachable or not. This is a direct edge to
-# the capability crate itself, the same shape every native app already uses
-# to reach `nmp-media` directly.
+# prepare/upload seam this call composes internally -- the ordinary shape
+# every capability now has (#1707): `nmp` never re-exports a capability's
+# implementation, so `nmp-ffi` binds it directly, the same edge every native
+# app already uses to reach `nmp-media` directly.
 media = ["dep:nmp-media", "blossom"]
 
 # `cargo run -p nmp-ffi --bin uniffi-bindgen generate --library <staticlib> \
@@ -51,30 +55,37 @@ path = "uniffi-bindgen.rs"
 
 [dependencies]
 nostr.workspace = true
-# #851: every engine, query, receipt, signer and typed write value this crate
-# projects is reached through the canonical `nmp` facade -- `nmp-grammar` and
-# `nmp-signer` are transitive implementation detail behind it, not direct
-# normal edges. `nmp-ffi` is the ONE staticlib/cdylib every Swift and Kotlin
-# app links, so a direct mechanism edge here would let the native product
-# boundary bind a type the facade never projected or governed.
+# `nmp-ffi` is an assembly over every crate a native app needs, not a
+# consumer of one facade (#1707): engine/query/receipt/signer nouns and every
+# family `nmp` itself still owns (NIP-29's group door, NIP-65, ...) come
+# through the canonical `nmp` facade below, gated by the matching feature.
+# But `nmp` deliberately does not and must not re-export a capability's own
+# implementation or meaning -- that lives only in the capability's own crate
+# under #1707 -- so this crate binds `nmp-nip02`/`nmp-media`/every other
+# capability crate directly, the same edge a direct-Rust app already uses to
+# reach them. Neither shape is an exception to the other; a Swift/Kotlin app
+# reaches a capability exactly the way a direct-Rust app does, just through
+# the one staticlib/cdylib instead of a second `Cargo.toml` line.
 #
-# The feature list is how this crate reaches every optional protocol and
-# content family (#572/#907 for NIP-22, #1239 for the rest): one owner, turned
-# on, rather than a second edge to the mechanism crate alongside the facade.
-#
-# Before #1239 these were direct edges here and nowhere in the facade, on the
-# reasoning that they are "app-chosen protocol modules, not engine/query/
-# signer/write concepts the canonical facade governs". That reasoning decided
-# what `nmp-ffi` may BIND and never what the facade must OFFER, so it left the
-# families reachable from Swift and not from direct Rust. Now that the facade
-# offers each one, a direct edge here would be a second owner of the same
-# values -- exactly what #851 closed for `nmp-nip22`.
+# The feature list is how this crate turns each optional protocol/content
+# family on: one owner per family, gated, rather than an unconditional edge
+# to every capability crate whether an app uses it or not.
 nmp = { workspace = true }
-# #1707: the one deliberate exception to the paragraph above. `nmp` does not
-# and must not re-export the media composition seam, so this is a direct
-# edge to the capability crate, not a second owner of values `nmp` also
-# offers.
+# #1707: NIP-02's own crate, bound directly for the reason in the paragraph
+# above -- `nmp` does not re-export `nmp-nip02`'s implementation.
+nmp-nip02 = { workspace = true, optional = true }
+# #1707: same reason, for the media composition seam.
 nmp-media = { workspace = true, optional = true }
+# #1707: these eight used to be pure re-export doors in `nmp` (no engine
+# coupling forced them there); now each is bound directly, same reason as
+# `nmp-nip02` above.
+nmp-nip18 = { workspace = true, optional = true }
+nmp-nip22 = { workspace = true, optional = true }
+nmp-nip25 = { workspace = true, optional = true }
+nmp-nipc7 = { workspace = true, optional = true }
+nmp-asset = { workspace = true, optional = true }
+nmp-blossom = { workspace = true, optional = true }
+nmp-content = { workspace = true, optional = true }
 uniffi = { workspace = true, features = ["cli"] }
 zeroize = "1"
 k256 = { version = "0.13.4", default-features = false }

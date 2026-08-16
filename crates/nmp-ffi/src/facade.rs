@@ -44,7 +44,7 @@ use nmp::ReceiptReattachment;
 
 /// Parse a caller-supplied hex target and refuse before ordinary receipt
 /// custody when it does not decode -- the one refusal this boundary adds to
-/// [`nmp::nip02::set_following`], which the Rust-native API never has to name
+/// [`nmp_nip02::set_following`], which the Rust-native API never has to name
 /// because its `target` is already a typed [`nmp::PublicKey`].
 #[cfg(feature = "nip02")]
 fn parse_follow_target(target: &str) -> Result<nmp::PublicKey, FfiFollowActionError> {
@@ -180,7 +180,7 @@ impl From<NmpEngineConfig> for nmp::EngineConfig {
 pub struct NmpEngine {
     pub(crate) engine: Arc<nmp::Engine>,
     #[cfg(feature = "nip02")]
-    follow_writes: nmp::nip02::FollowWrites,
+    follow_writes: nmp_nip02::FollowWrites,
     #[cfg(feature = "nip29")]
     pub(crate) group_list_writes: nmp::nip29::GroupListWrites,
     #[cfg(feature = "nip65")]
@@ -281,7 +281,7 @@ impl NmpEngine {
         #[allow(unused_mut)]
         let mut capabilities = vec![
             #[cfg(feature = "nip02")]
-            nmp::nip02::follow_capability(),
+            nmp_nip02::follow_capability(),
             #[cfg(feature = "nip29")]
             nmp::nip29::group_list_capability(),
         ];
@@ -295,7 +295,7 @@ impl NmpEngine {
             None => nmp::Engine::new_with_capabilities(config.into(), capabilities)?,
         });
         #[cfg(feature = "nip02")]
-        let follow_writes = nmp::nip02::follow_writes();
+        let follow_writes = nmp_nip02::follow_writes();
         #[cfg(feature = "nip29")]
         let group_list_writes = nmp::nip29::group_list_writes();
         Ok(Arc::new(Self {
@@ -592,7 +592,7 @@ impl NmpEngine {
     /// self-contained snapshots.
     pub fn observe_following(&self, target: String) -> Result<Arc<NmpFollowStream>, FfiError> {
         let target = parse_pubkey(&target)?;
-        let observation = nmp::nip02::observe_following_async(self.engine.clone(), target)?;
+        let observation = nmp_nip02::observe_following_async(self.engine.clone(), target)?;
         Ok(NmpFollowStream::new(observation))
     }
 
@@ -603,11 +603,11 @@ impl NmpEngine {
     pub fn follow(&self, target: String) -> Result<Arc<NmpReceiptStream>, FfiFollowActionError> {
         require_follow_routing(self)?;
         let target = parse_follow_target(&target)?;
-        let receipt = nmp::nip02::set_following(
+        let receipt = nmp_nip02::set_following(
             &self.engine,
             &self.follow_writes,
             target,
-            nmp::nip02::FollowChange::Follow,
+            nmp_nip02::FollowChange::Follow,
         )?;
         Ok(NmpReceiptStream::new(self.engine.clone(), receipt))
     }
@@ -617,11 +617,11 @@ impl NmpEngine {
     pub fn unfollow(&self, target: String) -> Result<Arc<NmpReceiptStream>, FfiFollowActionError> {
         require_follow_routing(self)?;
         let target = parse_follow_target(&target)?;
-        let receipt = nmp::nip02::set_following(
+        let receipt = nmp_nip02::set_following(
             &self.engine,
             &self.follow_writes,
             target,
-            nmp::nip02::FollowChange::Unfollow,
+            nmp_nip02::FollowChange::Unfollow,
         )?;
         Ok(NmpReceiptStream::new(self.engine.clone(), receipt))
     }

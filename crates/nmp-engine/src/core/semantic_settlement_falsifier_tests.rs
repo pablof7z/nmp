@@ -9,8 +9,9 @@
 //!   `let SemanticSourcePolicy::Finite(round) = &state.source_policy else { return Ok(SourceRoundOpen); }`
 //!
 //! `ReplaceableSourcePolicy::Continuing` -- the value NIP-02's and NIP-29's
-//! write doors (`nmp/src/nip02/writes.rs`, #1143; `nmp/src/nip29/
-//! group_list_writes.rs`) both unconditionally constructed -- could never
+//! write doors (`nmp-nip02`'s `writes.rs`, moved out of this crate by
+//! #1707; `nmp/src/nip29/group_list_writes.rs`) both unconditionally
+//! constructed -- could never
 //! satisfy either gate, so neither
 //! `WriteFact::Outcome(WriteOutcome::Settled)` nor any durable
 //! semantic-state deletion was reachable for a real semantic write.
@@ -26,9 +27,11 @@
 //! result evidence rather than a shortcut.
 //!
 //! It uses a minimal in-crate materializer (`Kind::ContactList`) rather than
-//! the real NIP-02/NIP-29 write doors (`nmp::nip02`/`nmp::nip29`, #1143):
-//! both live behind their own optional Cargo feature, and this core-level
-//! test must run regardless of which protocol features are enabled. The
+//! the real NIP-02/NIP-29 write doors (`nmp-nip02`'s `writes` module,
+//! `nmp::nip29`) because this reducer-level test must not depend on either
+//! (#1707 moved NIP-02's write door out of `nmp` entirely, and this crate
+//! sits BELOW `nmp`, so neither door is nameable from here at all) and must
+//! run regardless of which protocol features are enabled. The
 //! defect lived in the generic mechanism every semantic capability shares,
 //! not in either protocol module's tag/kind logic.
 //!

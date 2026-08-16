@@ -59,7 +59,7 @@ pub enum FfiUploadBlossomError {
     EmptyContentType,
     /// The BUD-11 draft could not be built, or the signed authorization
     /// failed validation -- `nmp_media::PrepareError::Authorization` and
-    /// `nmp::blossom::AuthValidationError` share this one taxonomy exactly
+    /// `nmp_blossom::AuthValidationError` share this one taxonomy exactly
     /// as [`crate::blossom::FfiBlossomAuthError`] already does for the
     /// low-level doors.
     Authorization { error: FfiBlossomAuthError },
@@ -154,7 +154,7 @@ impl NmpEngine {
             .current_pubkey
             .ok_or(FfiUploadBlossomError::SignedOut)?;
 
-        let server = nmp::blossom::BlossomServerUrl::parse(&server_url).map_err(|error| {
+        let server = nmp_blossom::BlossomServerUrl::parse(&server_url).map_err(|error| {
             FfiUploadBlossomError::InvalidServerUrl {
                 error: server_url_error_to_ffi(error),
             }
@@ -206,10 +206,10 @@ impl NmpEngine {
             }
         };
 
-        let auth = nmp::blossom::SignedAuthorization::validate(
+        let auth = nmp_blossom::SignedAuthorization::validate(
             signed,
-            &nmp::blossom::ExpectedAuthorization {
-                verb: nmp::blossom::BlossomVerb::Upload,
+            &nmp_blossom::ExpectedAuthorization {
+                verb: nmp_blossom::BlossomVerb::Upload,
                 blob: Some(prepared.sha256()),
             },
             created_at,
@@ -218,10 +218,10 @@ impl NmpEngine {
             error: auth_validation_error_to_ffi(error),
         })?;
 
-        let client = nmp::blossom::BlossomClient::new(nmp::blossom::BlossomClientConfig::default())
+        let client = nmp_blossom::BlossomClient::new(nmp_blossom::BlossomClientConfig::default())
             .map_err(|error| FfiUploadBlossomError::ClientBuild {
-                reason: error.reason,
-            })?;
+            reason: error.reason,
+        })?;
         // `reqwest`'s async transport needs an actual tokio I/O reactor
         // polling it, which uniffi's Swift/Kotlin async bridge does not
         // provide for an exported `async fn`. #704 replaced the old

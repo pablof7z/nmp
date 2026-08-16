@@ -38,7 +38,7 @@
 //!   taxonomy crossing as its own typed error enum.
 //! - [`nip22`] -- typed NIP-22 comments over NIP-73 external targets
 //!   (#572): root-thread demand and decode as top-level free functions
-//!   (`nmp::nip22` needs no engine dependency at all -- `comment_intent`
+//!   (`nmp_nip22` needs no engine dependency at all -- `comment_intent`
 //!   takes its author/time as explicit caller parameters). The composer
 //!   returns an ordinary [`types::FfiWriteIntent`]; generic
 //!   [`facade::NmpEngine::publish`] owns the receipt lifecycle.

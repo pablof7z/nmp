@@ -5,40 +5,33 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# The point of this crate: it depends on `nmp` and NOTHING else -- not even
-# `nostr` directly, since every value type an app needs (including the
-# unsigned-write path and every `DiagnosticsSnapshot` field type) must be
-# reachable through `nmp`'s own re-exports. If a caller ever needs a second
-# `use` line naming a mechanism crate or `nostr` itself, the facade's
-# re-export inventory has a gap -- this crate existing and compiling IS the
-# acceptance proof for #52's "an app's Cargo.toml names `nmp` alone".
+# The point of this crate: every GENERIC engine/query/write/diagnostics noun
+# below is reachable from `nmp` alone -- not even `nostr` directly, since
+# every such value type is reached through `nmp`'s own re-exports. If a
+# caller ever needs a second `use` line naming a mechanism crate or `nostr`
+# itself for one of THOSE nouns, the facade's re-export inventory has a gap
+# -- this crate existing and compiling IS the acceptance proof for #52's "an
+# app's Cargo.toml names `nmp` alone" for the engine surface, not for any
+# one capability's meaning.
 #
-# The protocol/content features are switched on here for the same reason: #851
-# made `nmp::nip22` the ONE owner of the NIP-22 comment vocabulary, and #1239
-# did the same for the families that were reachable from `nmp-ffi` and not from
-# this facade. Turning a facade feature on is still "names `nmp` alone"; adding
-# `nmp-content` or `nmp-blossom` to this dependency list would not be, which is
-# exactly why this crate is where the claim gets checked rather than asserted.
-#
-# `nip02` closed #1143: the follow service used to sit above this facade
-# (`nmp-nip02` depended on `nmp`), the only upward edge in the workspace's
-# dependency graph and the reason this list could not name it. Now it is a
-# feature like every other retrofitted family below.
-#
-# `media` is deliberately ABSENT: #1707 reversed #1563's absorption of
-# `nmp-media` into the facade. `nmp` must not contain any capability's
-# implementation, so a picture-composing app depends on `nmp-media` directly
-# -- this crate's whole point is proving what IS reachable from `nmp` alone,
-# and media composition no longer is, on purpose.
+# Every capability below is a SEPARATE, EXPLICIT dependency line, not a
+# facade feature: #1707 finished what #1143's NIP-02 reversal and #1563's
+# media reversal started -- `nmp` must not contain a single capability's own
+# meaning, re-export door or not (NIP-22/25/18/NIP-C7/content/asset/blossom
+# were pure re-export doors with no engine coupling at all, deleted here;
+# NIP-29 stays a facade feature only because its own reversal, #1707 step 4,
+# has not landed yet). A direct-Rust app that wants any of these names the
+# capability's own crate alongside `nmp` -- the uniform two-crate cost every
+# capability now pays for direct-Rust reach. This crate names each
+# explicitly rather than pretending the whole workspace collapses into one
+# `Cargo.toml` line; that pretense is exactly what #1707 falsifies.
 [dependencies]
-nmp = { workspace = true, features = [
-    "asset",
-    "blossom",
-    "content",
-    "nip02",
-    "nip18",
-    "nip22",
-    "nip25",
-    "nip29",
-    "nipc7",
-] }
+nmp = { workspace = true, features = ["nip29"] }
+nmp-nip02.workspace = true
+nmp-nip18.workspace = true
+nmp-nip22.workspace = true
+nmp-nip25.workspace = true
+nmp-nipc7.workspace = true
+nmp-content.workspace = true
+nmp-asset.workspace = true
+nmp-blossom.workspace = true

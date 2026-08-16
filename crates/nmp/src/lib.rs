@@ -82,55 +82,22 @@ mod subscription;
 // glob of this one's internals. `nmp`'s public API is now exactly the
 // re-export list below — visible, and the whole of it.
 
-// #851: the NIP-22 comment vocabulary and its write operation, owned here so
-// direct Rust and `nmp-ffi` cannot end up with two owners of the same values.
-// Behind the `nip22` cargo feature: an app that never composes a comment does
-// not link the mechanism crate.
-#[cfg(feature = "nip22")]
-pub mod nip22;
-
-// #155: NIP-25 reactions, projected here for the same reason NIP-22 is --
-// #1239 records four protocol families that `nmp-ffi` reaches and the `nmp`
-// facade does not, so a direct-Rust app needs a second Cargo dependency for
-// something a Swift app gets for free. A new family is wired through the
-// facade at birth rather than added to that list. Behind the `nip25` feature:
-// an app that never composes a reaction does not link the mechanism crate.
-#[cfg(feature = "nip25")]
-pub mod nip25;
-
 #[cfg(feature = "nip65")]
 pub mod nip65;
 
-// #1239: the retrofit the two comments above anticipated. Each module below is
-// a family `nmp-ffi` reached and this facade did not, so a Swift app got it by
-// linking one staticlib while a direct-Rust app named a second crate. Each is
-// behind its own non-default cargo feature for the same reason `nip22` is: one
-// owner of the values, and an app that never uses the family does not link it.
-#[cfg(feature = "nip18")]
-pub mod nip18;
-
-#[cfg(feature = "nipc7")]
-pub mod nipc7;
-
-#[cfg(feature = "content")]
-pub mod content;
-
-#[cfg(feature = "asset")]
-pub mod asset;
-
-#[cfg(feature = "blossom")]
-pub mod blossom;
-
-#[cfg(feature = "nip68")]
-pub mod nip68;
-
-// #1707: the media composition seam lives in `nmp-media`, not here. #1563
-// absorbed it as `nmp::media` on the reasoning that reachability required a
-// facade module; it did not -- the seam's own doc always said it touches no
-// engine, facade, outbox, or store. `nmp` must not contain any capability's
-// implementation, reachable or not. An app that wants it depends on
-// `nmp-media` directly, the same way it already depends on `nmp-blossom` or
-// `nmp-nip68` directly for their own composition primitives.
+// #1707 deleted `nip22`/`nip25`/`nip18`/`nipc7`/`content`/`asset`/`blossom`/
+// `nip68`: each was a pure re-export door over its own engine-free mechanism
+// crate -- no `WriteIntent`/`Engine`/`Row` construction, nothing the engine
+// needed to execute, just vocabulary a caller could equally well reach by
+// naming `nmp-nip22`/`nmp-nip25`/`nmp-nip18`/`nmp-nipc7`/`nmp-content`/
+// `nmp-asset`/`nmp-blossom`/`nmp-nip68` directly. `nmp` must not contain a
+// single line of any capability's meaning, re-export door or not; a
+// direct-Rust app now names the mechanism crate directly, the same way
+// `nmp-ffi`/Swift/Kotlin already do and the same way `nmp-media` already
+// works. NIP-65 stays (`nip65` above): unlike these eight, it has a real
+// engine-bound `impl Engine` publish method AND `runtime::nip65`'s own
+// deep engine-routing-loop glue, which is a different problem from a bare
+// re-export door and is not resolved here.
 
 // #1033/#824: the app-facing NIP-29 door. A real facade module, not a re-export of
 // `nmp-nip29`: the door retains a relay scope AND mints the one opaque
@@ -140,17 +107,6 @@ pub mod nip68;
 // native/direct-Rust product boundary just like every other app-facing family.
 #[cfg(feature = "nip29")]
 pub mod nip29;
-
-// #1143: the app-facing NIP-02 follow door, the identical shape to `nip29`'s
-// above -- a real facade module, not a re-export of `nmp-nip02`. `nmp-nip02`
-// stays pure vocabulary below it (the reactive kind:3 demand); this module
-// mints the ordinary `WriteIntent` and folds the live query into a
-// relationship snapshot, both of which need the engine. Closing this was the
-// last of #1239's family retrofits: it was also the only one that first
-// needed its engine coupling inverted, because `nmp-nip02` used to sit ABOVE
-// this facade rather than below it.
-#[cfg(feature = "nip02")]
-pub mod nip02;
 
 pub use auth::{
     AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp, AuthPolicyPendingSender,
@@ -272,8 +228,8 @@ pub use nmp_runtime::{
     AsyncFifoReceiver, FifoNextError, FifoReceiver, FifoRecvError, FifoRecvTimeoutError,
     FifoTryRecvError, ReceiptReplayCursor, FACT_CHANNEL_CAPACITY,
 };
-// Producer-side FIFO mechanism, used only by protocol modules (e.g.
-// `nip02::observe`'s follow observation worker) to feed a receipt/status
+// Producer-side FIFO mechanism, used only by protocol crates (e.g.
+// `nmp-nip02`'s follow observation worker, #1707) to feed a receipt/status
 // stream — not app public API, so doc-hidden.
 #[doc(hidden)]
 pub use nmp_runtime::{fifo_channel, FifoSender};

@@ -23,23 +23,14 @@ unstable-mechanism = [
     "nmp-runtime/unstable-mechanism",
 ]
 
-# #851: NIP-22 comment composition/decode, projected through the canonical
-# facade so direct Rust and `nmp-ffi` share ONE owner for those values. The
-# mechanism crate stays optional -- an app that never composes a comment does
-# not link it -- but an app that does gets it through `nmp`, never as a
-# second direct dependency alongside the facade. Non-default.
-nip22 = ["dep:nmp-nip22"]
-
-# #155/#1239: NIP-25 reaction composition, projected through the canonical
-# facade for the same reason `nip22` is -- a direct-Rust app reaches a protocol
-# family through `nmp`, never as a second direct dependency alongside the
-# facade, which is the split #1239 records for four other families. The
-# mechanism crate stays optional: an app that never composes a reaction does
-# not link it. Non-default.
-nip25 = ["dep:nmp-nip25"]
-
 # Pure Rust NIP-65 values plus the private automatic coordinator assembly.
 # Off by default: core-only builds contain no protocol dependency or symbols.
+# NIP-65 is NOT #1707-reversed like the eight re-export doors were: its
+# `impl Engine` publish method and `nmp-runtime`'s own deep
+# engine-routing-loop glue are a different problem from a bare re-export
+# door, unresolved so far. See `src/lib.rs`'s doc comment above `pub mod
+# nip65;`. The glue moved with the runtime, so the feature has to turn it on
+# there too.
 nip65 = ["dep:nmp-nip65", "nmp-runtime/nip65"]
 
 # #824: NIP-29 is selected like every other app-facing family. The facade
@@ -47,42 +38,13 @@ nip65 = ["dep:nmp-nip65", "nmp-runtime/nip65"]
 # vocabulary dependency optional physically removes both when unselected.
 nip29 = ["dep:nmp-nip29"]
 
-# #1143: NIP-02 follows the `nip29` shape immediately above -- the facade
-# module owns the engine-bound follow door (write + observation), and the
-# pure `nmp-nip02` vocabulary dependency is optional so it physically leaves
-# a core-only build when unselected. This was the last family to close: it
-# used to sit ABOVE this facade (`nmp-nip02` depended on `nmp`, the only
-# upward edge in the workspace's dependency graph), so a direct-Rust app
-# could not reach it through `nmp` at all and had to name `nmp-nip02`
-# directly while a Swift/Kotlin app got it for free through `nmp-ffi`. That
-# coupling is inverted now.
-nip02 = ["dep:nmp-nip02"]
-
-# #1239: the retrofit. Each family below was reachable from `nmp-ffi` and NOT
-# from this facade, so a Swift app linking the one staticlib got it while a
-# direct-Rust app had to name a second crate in its own `Cargo.toml` -- the
-# exact shape `nmp-consumer-check` exists to forbid, in the direction that
-# penalises the tier NMP calls primary. Each follows the `nip22` shape above
-# for the same reason it does: ONE owner of the values, and an app that never
-# uses the family does not link its crate. All non-default.
-nip18 = ["dep:nmp-nip18"]
-nipc7 = ["dep:nmp-nipc7"]
-content = ["dep:nmp-content"]
-
-# Exact-byte asset identity (#884's one protocol-neutral owner). Separate from
-# `blossom` because an app can hash and verify bytes without ever speaking to a
-# Blossom server -- mosaico does exactly that. `blossom` turns it on because
-# `BlobDescriptor`/`VerifiedUpload` name `Sha256Hash` in their public
-# signatures: a Blossom door whose own types the caller cannot name would be
-# the second Cargo line this feature exists to remove.
-asset = ["dep:nmp-asset"]
-blossom = ["dep:nmp-blossom", "asset"]
-
-# NIP-68 picture-first (kind:20) schema (#558). Read-only decoding of a
-# kind:20 seen on a relay needs no Blossom/asset machinery at all; composing
-# and uploading a new picture is `nmp-media`'s own seam (#1707), not this
-# facade's.
-nip68 = ["dep:nmp-nip68"]
+# #1707 deleted the `nip22`/`nip25`/`nip18`/`nipc7`/`content`/`asset`/
+# `blossom`/`nip68` features and their `dep:nmp-*` optional dependencies
+# below: each was a pure re-export door with no engine coupling at all, so
+# `nmp` re-exporting it was never required -- a direct-Rust app names the
+# mechanism crate directly, same as `nmp-ffi`/Swift/Kotlin already do and
+# same as `nmp-media` already works (step 0). `nmp` must not contain a
+# single line of any capability's meaning, re-export door or not.
 
 # #827: both instrumentation features came in with the folded engine modules
 # (`core`, `runtime`, `outbox`, `negentropy`). They stay non-default.
@@ -117,32 +79,13 @@ required-features = ["nip65"]
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
-nmp-nip22 = { workspace = true, optional = true }
-nmp-nip25 = { workspace = true, optional = true }
 nmp-nip65 = { workspace = true, optional = true }
-# #1239: the families the facade did not offer and `nmp-ffi` did. Optional for
-# the same reason `nmp-nip22` is -- see the feature block above.
-nmp-nip18 = { workspace = true, optional = true }
-nmp-nipc7 = { workspace = true, optional = true }
-nmp-content = { workspace = true, optional = true }
-nmp-asset = { workspace = true, optional = true }
-nmp-blossom = { workspace = true, optional = true }
-# NIP-68 (kind:20) read-only decoding. #1562 confirmed it does not fold into
-# a consolidated protocol package. The media composition seam that consumes
-# it lives in `nmp-media`, not here (#1707).
-nmp-nip68 = { workspace = true, optional = true }
 # #977: the NIP-29 `Group` door. The dependency runs THIS WAY ROUND and
 # only this way round -- `Group` is pure composition over `nostr` +
 # `nmp-grammar`, and `crate::nip29`'s extension trait is what binds it to
 # the one publish door. `crates/nmp-nip29/Cargo.toml` must never gain the
 # reverse edge.
 nmp-nip29 = { workspace = true, optional = true }
-# #1143: the NIP-02 follow door. The dependency runs THIS WAY ROUND and only
-# this way round -- `current_account_demand` is pure composition over
-# `nostr` + `nmp-grammar`, and `crate::nip02`'s door is what mints the
-# `WriteIntent` and binds it to the one publish path. `crates/nmp-nip02/
-# Cargo.toml` must never gain the reverse edge again.
-nmp-nip02 = { workspace = true, optional = true }
 nmp-signer.workspace = true
 nmp-local-signer.workspace = true
 # The deterministic reducer (#1707). It left this crate so its own manifest
@@ -207,10 +150,7 @@ libc = { version = "0.2", optional = true }
 # integration test seeds its `EngineCore`/`EngineThread` through the gated
 # fixture constructors (#1665, #1667) -- this crate's own test targets are
 # their only in-workspace callers.
-# `nip02`: `body_complete_semantic_acceptance.rs` (#1143, moved up from
-# `nmp-nip02` alongside the follow door itself) proves the door end-to-end
-# against a real engine.
-nmp = { path = ".", features = ["nip02", "nip29", "nip65", "test-instrumentation", "unstable-mechanism"] }
+nmp = { path = ".", features = ["nip29", "nip65", "test-instrumentation", "unstable-mechanism"] }
 # The headless reducer corpus (`tests/core_headless/`) and the runtime
 # integration tests drive `EngineCore`/`EngineThread` directly. They reached
 # them through the deleted `mechanism` basement; they name the packages now.

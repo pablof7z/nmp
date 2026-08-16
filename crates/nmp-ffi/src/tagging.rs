@@ -106,7 +106,7 @@ pub fn reply_to(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
 #[uniffi::export]
 #[cfg(feature = "nipc7")]
 pub fn chat() -> FfiEventBuilder {
-    builder_to_ffi(nmp::nipc7::chat())
+    builder_to_ffi(nmp_nipc7::chat())
 }
 
 /// State what a composed draft SAYS, and emit the rows its inline references
@@ -179,7 +179,7 @@ fn interpolate(mention: &dyn Mention, into: &mut InterpolatedContent) {
 #[uniffi::export]
 #[cfg(feature = "nipc7")]
 pub fn chat_reply(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
-    Ok(builder_to_ffi(nmp::nipc7::chat_reply(&row_from_ffi(
+    Ok(builder_to_ffi(nmp_nipc7::chat_reply(&row_from_ffi(
         target,
     )?)))
 }
@@ -199,7 +199,7 @@ pub fn repost(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
         .ok_or_else(|| FfiError::InvalidSignature {
             got: "pending row has no signature".to_owned(),
         })?;
-    Ok(builder_to_ffi(nmp::nip18::repost(&event, hint)))
+    Ok(builder_to_ffi(nmp_nip18::repost(&event, hint)))
 }
 
 /// Compose a NIP-25 reaction to `target`.
@@ -218,10 +218,10 @@ pub fn repost(target: FfiRow) -> Result<FfiEventBuilder, FfiError> {
 #[cfg(feature = "nip25")]
 pub fn react_to(target: FfiRow, reaction: FfiReaction) -> Result<FfiEventBuilder, FfiError> {
     let reaction = match reaction {
-        FfiReaction::Like => nmp::nip25::Reaction::Like,
-        FfiReaction::Dislike => nmp::nip25::Reaction::Dislike,
+        FfiReaction::Like => nmp_nip25::Reaction::Like,
+        FfiReaction::Dislike => nmp_nip25::Reaction::Dislike,
         FfiReaction::Emoji { emoji } => {
-            nmp::nip25::Reaction::emoji(emoji).map_err(|error| FfiError::InvalidReaction {
+            nmp_nip25::Reaction::emoji(emoji).map_err(|error| FfiError::InvalidReaction {
                 reason: error.to_string(),
             })?
         }
@@ -233,7 +233,7 @@ pub fn react_to(target: FfiRow, reaction: FfiReaction) -> Result<FfiEventBuilder
         .ok_or_else(|| FfiError::InvalidSignature {
             got: "pending row has no signature".to_owned(),
         })?;
-    Ok(builder_to_ffi(nmp::nip25::react(&event, hint, reaction)))
+    Ok(builder_to_ffi(nmp_nip25::react(&event, hint, reaction)))
 }
 
 #[cfg(all(

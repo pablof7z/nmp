@@ -1,9 +1,16 @@
 //! External-consumer closure proof for the `nmp` facade (#52 acceptance:
-//! "an app's `Cargo.toml` names `nmp` alone"). This crate's own
-//! `Cargo.toml` depends on `nmp` ONLY -- no mechanism crate, and not even
-//! `nostr` directly: every value type below is reached through `nmp`'s own
-//! re-exports. If this crate fails to compile, the facade's re-export
-//! inventory has a gap.
+//! "an app's `Cargo.toml` names `nmp` alone" for the GENERIC engine surface
+//! -- custody, storage, routing, signing, delivery, recovery, receipts).
+//! This crate's `Cargo.toml` depends on `nmp` for every one of those nouns
+//! and nothing else in that half -- no mechanism crate, and not even
+//! `nostr` directly. `nmp` never re-exports a capability's own meaning
+//! (#1707), so every capability -- `nmp-nip02`, `nmp-nip18`, `nmp-nip22`,
+//! `nmp-nip25`, `nmp-nipc7`, `nmp-content`, `nmp-asset`, `nmp-blossom` --
+//! is its own SEPARATE, EXPLICIT dependency line below, not a facade
+//! feature. If a generic engine noun ever needs a second `use` line naming
+//! a mechanism crate or `nostr` itself, the facade's re-export inventory
+//! has a gap; if a capability crate needs a second line, that is the
+//! target shape working as designed, not a gap.
 //!
 //! Every fixture here uses ARBITRARY caller-owned kinds (9998/9999), never
 //! kind:1/kind:3 or any other NIP-01 core schema. `docs/known-gaps.md`'s v2
@@ -29,23 +36,23 @@
 //!   by [`describe_evidence`], so both halves of the read surface are closure-
 //!   checked from an `nmp`-only dependency rather than merely imported.
 //!   imported and left unused past one field read.
-//! - NIP-22 comment composition ([`build_comment_intent`]) -- the vocabulary
-//!   #851 moved behind this facade so `nmp-ffi` could drop its direct
-//!   `nmp-nip22` edge. It is the exact value the FFI projection composes,
-//!   proving one owner rather than two aligned by convention.
-//! - every protocol/content family #1239 retrofitted onto the facade
-//!   ([`compose_every_retrofitted_family`]) -- NIP-C7 chat, NIP-18 reposts,
-//!   NIP-25 reactions, NIP-51 simple groups, content parsing, exact-byte asset
-//!   identity and Blossom. `nmp-ffi` bound all of them directly and the facade
-//!   offered none, so a Swift app got them by linking one staticlib while a
-//!   direct-Rust app named six more crates. This crate's `Cargo.toml` still
-//!   names `nmp` alone.
-//! - NIP-02 follow/unfollow ([`follow_someone`]) -- #1143's retrofit, and the
-//!   one family that took a package-graph inversion rather than a feature
-//!   flag: `nmp-nip02` used to depend on `nmp`, the only upward edge in the
-//!   workspace's dependency graph, so a direct-Rust app could not reach the
-//!   follow door through `nmp` at all. The `#[cfg(test)]` module below
-//!   drives it against a real `Engine`, proving usable, not just nameable.
+//! - NIP-22 comment composition ([`build_comment_intent`]) -- reachable
+//!   through `nmp-nip22`, an EXPLICIT dependency (#1707 reversed #851's
+//!   absorption of the comment vocabulary into this facade).
+//! - every other protocol/content family #1239 once retrofitted onto the
+//!   facade ([`compose_every_retrofitted_family`]) -- NIP-C7 chat, NIP-18
+//!   reposts, NIP-25 reactions, content parsing, exact-byte asset identity
+//!   and Blossom -- each reachable the same way: its own explicit
+//!   `nmp-nip18`/`nmp-nipc7`/`nmp-nip25`/`nmp-content`/`nmp-asset`/
+//!   `nmp-blossom` dependency line, not a facade feature (#1707 deleted
+//!   each of these eight pure re-export doors -- no engine coupling, so
+//!   nothing forced them into `nmp` in the first place).
+//! - NIP-02 follow/unfollow ([`follow_someone`]) -- reachable through
+//!   `nmp-nip02`, an EXPLICIT second dependency (#1707 reversed #1143's
+//!   absorption of the follow door into this facade: `nmp` must not know
+//!   what a kind:3 contact list or a follow/unfollow edit means). The
+//!   `#[cfg(test)]` module below drives it against a real `Engine`, proving
+//!   usable, not just nameable, from the two-crate combination.
 //! - media composition is deliberately ABSENT from this crate (#1707
 //!   reversed #1563's absorption of `nmp-media` into the facade): `nmp` must
 //!   not contain any capability's implementation, and the seam itself never
@@ -188,72 +195,72 @@ pub fn describe_evidence(evidence: &AcquisitionEvidence) -> String {
     )
 }
 
-/// Names the NIP-22 comment vocabulary and composes its write operation from
-/// `nmp` alone (#851): `nmp::nip22` is the ONE owner, so a direct-Rust app
-/// reaches exactly what `nmp-ffi`'s `comment_intent` projection reaches --
-/// neither needs an `nmp-nip22` line of its own. What comes back is an
-/// ordinary [`WriteIntent`] (#907), published through the same
-/// `Engine::publish` lifecycle as any other write. Uses an external NIP-73
-/// content id so no NIP-01 core kind is baked into this proof. The vocabulary is
-/// engine-free and still reads no ambient clock or current account -- it no
-/// longer needs an author or an event time to say so, because the engine
-/// resolves both at acceptance.
+/// Names the NIP-22 comment vocabulary and composes its write operation
+/// through `nmp-nip22`, an explicit second dependency (#1707): a direct-Rust
+/// app reaches exactly what `nmp-ffi`'s `comment_intent` projection reaches,
+/// `nmp-nip22` the ONE owner either way. What comes back is an ordinary
+/// [`WriteIntent`] (#907), published through the same `Engine::publish`
+/// lifecycle as any other write. Uses an external NIP-73 content id so no
+/// NIP-01 core kind is baked into this proof. The vocabulary is engine-free
+/// and still reads no ambient clock or current account -- it no longer
+/// needs an author or an event time to say so, because the engine resolves
+/// both at acceptance.
 pub fn build_comment_intent(
     guid: &str,
     content: &str,
-) -> Result<WriteIntent, nmp::nip22::Nip73Error> {
-    let root = nmp::nip22::CommentRoot::External(nmp::nip22::Nip73::podcast_episode(guid)?);
-    Ok(nmp::nip22::comment_intent(&root, content.to_string(), None))
+) -> Result<WriteIntent, nmp_nip22::Nip73Error> {
+    let root = nmp_nip22::CommentRoot::External(nmp_nip22::Nip73::podcast_episode(guid)?);
+    Ok(nmp_nip22::comment_intent(&root, content.to_string(), None))
 }
 
-/// Names every protocol/content family #1239 retrofitted onto the facade, from
-/// `nmp` alone.
+/// Names every protocol/content family #1239 once retrofitted onto the
+/// facade and #1707 later moved back out to its own crate, plus NIP-29
+/// (still a facade feature -- its own #1707 reversal has not landed).
 ///
-/// This is the acceptance proof for that issue, and it is deliberately one
-/// function rather than six: the claim is not "each family compiles" but "an
-/// app reaching all of them still names `nmp` alone", and only a single
-/// `Cargo.toml` with no second crate in it can say that. Before #1239 the same
-/// code needed six more dependency lines that a Swift app never needed,
-/// because `nmp-ffi` bound the crates directly and the facade offered nothing.
+/// This is deliberately one function rather than several: every family here
+/// is usable in combination, not just individually nameable. `nmp-nip18`/
+/// `nmp-nipc7`/`nmp-nip25`/`nmp-content`/`nmp-asset`/`nmp-blossom` are each
+/// an explicit dependency line (#1707: none of these needed engine coupling,
+/// so nothing forced them into `nmp` as re-export doors in the first place).
 ///
 /// Every door here composes and returns rather than merely being imported, so
-/// removing any one re-export breaks this crate instead of leaving a stale
+/// removing any one import breaks this crate instead of leaving a stale
 /// claim in a doc comment. `nip02` is proven separately, by
 /// [`follow_someone`] and this crate's `#[cfg(test)]` module: its write door
 /// needs a live `Engine`, not a target event, so it does not fit this
 /// function's pure-composition shape.
 pub fn compose_every_retrofitted_family(target: &Event, source: Option<RelayUrl>) -> Vec<String> {
-    // NIP-C7 kind:9 chat, top-level and threaded (`nmp::nipc7`).
-    let chat = nmp::nipc7::chat();
-    let chat_reply = nmp::nipc7::chat_reply(target);
+    // NIP-C7 kind:9 chat, top-level and threaded (`nmp_nipc7`).
+    let chat = nmp_nipc7::chat();
+    let chat_reply = nmp_nipc7::chat_reply(target);
     // NIP-18 repost, whose whole value is that the caller never picks between
-    // kind:6 and kind:16 (`nmp::nip18`).
-    let repost = nmp::nip18::repost(target, source.clone());
-    // NIP-25 reaction (`nmp::nip25`), wired at birth by #155 and named here so
+    // kind:6 and kind:16 (`nmp_nip18`).
+    let repost = nmp_nip18::repost(target, source.clone());
+    // NIP-25 reaction (`nmp_nip25`), wired at birth by #155 and named here so
     // the retrofit and the family that avoided it are proven the same way.
-    let reaction = nmp::nip25::react(target, source, nmp::nip25::Reaction::Like);
+    let reaction = nmp_nip25::react(target, source, nmp_nip25::Reaction::Like);
     // NIP-51 kind:10009: the demand that reads it and the tolerant codec that
     // decodes what came back (`nmp::nip29`).
     let groups_demand: Demand = nmp::nip29::current_account_group_list_demand();
     let groups: nmp::nip29::SimpleGroupsList =
         nmp::nip29::parse_simple_groups_list_tolerant(target);
     let first_group: Option<&nmp::nip29::SimpleGroupEntry> = groups.items.first();
-    // Content parsing (`nmp::content`) -- the door mosaico hand-rolled a
+    // Content parsing (`nmp_content`) -- the door mosaico hand-rolled a
     // `find("nostr:")` scanner for, because it could not reach this one.
-    let document: nmp::content::ContentDocument =
-        nmp::content::parse_content(&target.content, nmp::content::ContentSyntax::PlainText);
+    let document: nmp_content::ContentDocument =
+        nmp_content::parse_content(&target.content, nmp_content::ContentSyntax::PlainText);
     let references: Vec<&NostrEntity> = document
         .references()
         .into_iter()
-        .map(|occurrence: &nmp::content::ReferenceOccurrence| &occurrence.target)
+        .map(|occurrence: &nmp_content::ReferenceOccurrence| &occurrence.target)
         .collect();
     // Exact-byte identity and the Blossom vocabulary built on it
-    // (`nmp::asset`, `nmp::blossom`).
-    let digest: nmp::asset::Sha256Hash = nmp::asset::Sha256Hash::of(target.content.as_bytes());
+    // (`nmp_asset`, `nmp_blossom`).
+    let digest: nmp_asset::Sha256Hash = nmp_asset::Sha256Hash::of(target.content.as_bytes());
     let verbs = [
-        nmp::blossom::BlossomVerb::Upload,
-        nmp::blossom::BlossomVerb::Delete,
-        nmp::blossom::BlossomVerb::List,
+        nmp_blossom::BlossomVerb::Upload,
+        nmp_blossom::BlossomVerb::Delete,
+        nmp_blossom::BlossomVerb::List,
     ];
 
     vec![
@@ -282,38 +289,34 @@ pub fn compose_every_retrofitted_family(target: &Event, source: Option<RelayUrl>
     ]
 }
 
-/// The demand `nmp::nip02` reads the current account's kind:3 contact list
-/// through -- reachable from `nmp` alone since #1143 closed the reverse
-/// `nmp-nip02 -> nmp` edge.
+/// The demand `nmp_nip02` reads the current account's kind:3 contact list
+/// through -- reachable from the explicit `nmp` + `nmp-nip02` pair, the
+/// uniform two-crate cost #1707 restored for every capability.
 #[must_use]
 pub fn follow_demand() -> Demand {
-    nmp::nip02::current_account_demand()
+    nmp_nip02::current_account_demand()
 }
 
-/// Follows `target` through the ordinary NIP-02 write door, entirely from
-/// `nmp`. This is #1143's acceptance proof: before the fix, a direct-Rust
-/// app could not reach `set_following` through this facade at all --
-/// `nmp-nip02` depended on `nmp`, so an app wanting to follow someone had to
-/// name a second, upward-pointing crate. `writes` composes once (typically
-/// held for the process lifetime); this function takes it by reference so a
-/// caller following many targets does not re-register the capability handle
-/// each time.
+/// Follows `target` through the ordinary NIP-02 write door. `writes`
+/// composes once (typically held for the process lifetime); this function
+/// takes it by reference so a caller following many targets does not
+/// re-register the capability handle each time.
 pub fn follow_someone(
     engine: &Engine,
-    writes: &nmp::nip02::FollowWrites,
+    writes: &nmp_nip02::FollowWrites,
     target: PublicKey,
-) -> Result<ReceiptStream, nmp::nip02::FollowActionFailure> {
-    nmp::nip02::set_following(engine, writes, target, nmp::nip02::FollowChange::Follow)
+) -> Result<ReceiptStream, nmp_nip02::FollowActionFailure> {
+    nmp_nip02::set_following(engine, writes, target, nmp_nip02::FollowChange::Follow)
 }
 
 /// The unfollow half of [`follow_someone`], proving both directions of
-/// [`nmp::nip02::FollowChange`] are reachable from `nmp` alone.
+/// [`nmp_nip02::FollowChange`] are reachable from the same two-crate pair.
 pub fn unfollow_someone(
     engine: &Engine,
-    writes: &nmp::nip02::FollowWrites,
+    writes: &nmp_nip02::FollowWrites,
     target: PublicKey,
-) -> Result<ReceiptStream, nmp::nip02::FollowActionFailure> {
-    nmp::nip02::set_following(engine, writes, target, nmp::nip02::FollowChange::Unfollow)
+) -> Result<ReceiptStream, nmp_nip02::FollowActionFailure> {
+    nmp_nip02::set_following(engine, writes, target, nmp_nip02::FollowChange::Unfollow)
 }
 
 /// Names and reads the observation-scoped execution envelope from an
@@ -450,23 +453,21 @@ mod tests {
         engine.shutdown();
     }
 
-    /// #1143 acceptance proof: a direct-Rust app follows and unfollows
-    /// through this `nmp`-only facade, and opens the reactive contact-list
-    /// demand [`follow_demand`] reads it through -- the exact user story
-    /// that was unreachable before the follow door's package-graph
-    /// inversion (`nmp-nip02` used to depend on `nmp`, so an app wanting to
-    /// follow someone had to name that second, upward-pointing crate).
+    /// #1707 acceptance proof: a direct-Rust app follows and unfollows
+    /// through the explicit `nmp` + `nmp-nip02` pair, and opens the
+    /// reactive contact-list demand [`follow_demand`] reads it through --
+    /// proving the two-crate combination usable, not just nameable.
     #[test]
-    fn follow_and_unfollow_are_usable_from_nmp_alone() {
+    fn follow_and_unfollow_are_usable_from_nmp_and_nmp_nip02() {
         let engine = Engine::new_with_capabilities(
             EngineConfig::default(),
-            vec![nmp::nip02::follow_capability()],
+            vec![nmp_nip02::follow_capability()],
         )
         .expect("temporary Redb engine must build");
         engine
             .add_private_key_account(&TEST_SECRET_KEY_BYTES, true)
             .expect("fixed decoded test secret key must validate");
-        let writes = nmp::nip02::follow_writes();
+        let writes = nmp_nip02::follow_writes();
         let target: PublicKey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
             .parse()
             .expect("fixed public key must parse");
