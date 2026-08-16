@@ -58,12 +58,15 @@ xcuserdata/
 /apps/Canary/build/
 /apps/Canary/DerivedData/
 
-# RelayLabKit -- SwiftPM's own build cache, same discipline as
-# /Packages/NMP/.build above. The strfry binary it builds/runs against
-# lives outside the repo entirely (setup-strfry.sh's own cache dir,
-# $HOME/Library/Caches/nmp-canary-relay-lab by default) -- never vendored.
+# RelayLabKit and CanaryScenarios -- SwiftPM's own build cache, same
+# discipline as /Packages/NMP/.build above. The strfry binary they
+# build/run against lives outside the repo entirely (setup-strfry.sh's
+# own cache dir, $HOME/Library/Caches/nmp-canary-relay-lab by default)
+# -- never vendored.
 /apps/Canary/RelayLabKit/.build
 /apps/Canary/RelayLabKit/.swiftpm
+/apps/Canary/CanaryScenarios/.build
+/apps/Canary/CanaryScenarios/.swiftpm
 
 # NMP UI Gallery -- same xcodegen/build-output discipline as the Canary.
 /apps/UIGallery/NMPUIGallery.xcodeproj

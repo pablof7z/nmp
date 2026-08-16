@@ -5,7 +5,9 @@
 // This scenario drives `WriteIntent`/`Receipt` directly, the same public
 // door the Compose screen uses, without going through any SwiftUI code.
 //
-// Same platform note as C1ColdStartLiveFeedTests: macOS, because
+// Run with `swift test` from apps/Canary/CanaryScenarios -- same entry
+// point and prerequisites as C1ColdStartLiveFeedTests (see that
+// package's README.md). Same platform note too: macOS, because
 // RelayLabKit spawns the relay via `Foundation.Process`, unavailable on
 // iOS. Plain `import NMP`, no `@testable`, no internal crate, no direct
 // Redb inspection -- the relay is reached only over a real `ws://` URL to
