@@ -190,7 +190,7 @@ fn predecessor_candidate_eose_during_replacement_keeps_its_plan_metadata() {
     fixture.core.attribution.release_atom(&first);
     let replacement = fixture.compile(BTreeSet::from([second.clone()]));
     let (_, second_candidate, _, second_attempt) = only_request(&replacement);
-    assert!(fixture.core.pending_request_replacements.len() == 1);
+    assert!(fixture.core.request_replacements.len() == 1);
     assert!(fixture
         .core
         .plan_execution_metadata
@@ -255,12 +255,14 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
         .core
         .pending_request_evidence
         .contains_key(&(fixture.session.clone(), second_candidate.clone(),)));
-    assert!(!fixture
-        .core
-        .pending_request_replacements
-        .contains_key(&second_plan));
+    assert!(!fixture.core.request_replacements.contains(&second_plan));
     assert_eq!(
-        fixture.core.pending_request_replacements[&third_plan].prior_sub_id,
+        fixture
+            .core
+            .request_replacements
+            .get(&third_plan)
+            .unwrap()
+            .prior_sub_id,
         first_plan
     );
     assert_eq!(
@@ -324,7 +326,7 @@ fn withdrawing_an_accepted_nip77_candidate_before_eose_closes_candidate_and_pred
             attempt_id: successor_attempt,
             handle: fixture.handle,
         });
-    assert_eq!(fixture.core.pending_request_replacements.len(), 1);
+    assert_eq!(fixture.core.request_replacements.len(), 1);
 
     let withdrawn = fixture.compile(BTreeSet::new());
     for expected in [&successor_child, &old_child] {
@@ -361,7 +363,7 @@ fn withdrawing_a_refused_nip77_successor_retires_its_predecessor_and_every_trans
             cause: LocalSendRefusal::SessionUnavailable,
         });
     assert_eq!(fixture.core.attempts.counts().retry_jobs, 1);
-    assert_eq!(fixture.core.pending_request_replacements.len(), 1);
+    assert_eq!(fixture.core.request_replacements.len(), 1);
     assert!(!fixture
         .core
         .live_wire_requests

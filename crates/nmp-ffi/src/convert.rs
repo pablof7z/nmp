@@ -2178,40 +2178,66 @@ fn lane_to_ffi_string(lane: Lane) -> String {
 }
 
 fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics {
+    // Exhaustive destructure: a new facade diagnostics fact cannot be
+    // silently dropped at this boundary -- adding a field to
+    // `nmp::RelayDiagnosticsSnapshot` breaks this conversion until the FFI
+    // record carries it too.
+    let RelayDiagnosticsSnapshot {
+        relay,
+        access,
+        wire_sub_count,
+        subscription_budget,
+        subscriptions_refused,
+        subid_length_limit,
+        subid_length_rejects_our_ids,
+        authors_served,
+        by_lane,
+        filters,
+        events_by_kind,
+        coverage,
+        nip11_supported_nips,
+        nip11_document_revision,
+        nip11_freshness,
+        nip11_last_error,
+        nip77_advertisement,
+        nip77_behavior,
+        nip77_handoff,
+    } = r;
     FfiRelayDiagnostics {
-        relay: r.relay.to_string(),
-        access: access_context_to_ffi(r.access),
-        wire_sub_count: r.wire_sub_count as u32,
-        authors_served: r.authors_served as u32,
-        by_lane: r
-            .by_lane
+        relay: relay.to_string(),
+        access: access_context_to_ffi(access),
+        wire_sub_count: wire_sub_count as u32,
+        subscription_budget: subscription_budget.map(|budget| budget as u32),
+        subscriptions_refused: subscriptions_refused as u32,
+        subid_length_limit: subid_length_limit.map(|limit| limit as u32),
+        subid_length_rejects_our_ids,
+        authors_served: authors_served as u32,
+        by_lane: by_lane
             .into_iter()
             .map(|(lane, count)| FfiLaneCount {
                 lane: lane_to_ffi_string(lane),
                 count: count as u32,
             })
             .collect(),
-        filters: r.filters,
-        events_by_kind: r
-            .events_by_kind
+        filters,
+        events_by_kind: events_by_kind
             .into_iter()
             .map(|(kind, count)| FfiKindCount { kind, count })
             .collect(),
-        coverage: r
-            .coverage
+        coverage: coverage
             .into_iter()
             .map(|entry: FilterCoverageEntry| FfiFilterCoverage {
                 filter: entry.filter,
                 coverage: entry.coverage.map(coverage_interval_to_ffi),
             })
             .collect(),
-        nip11_supported_nips: r.nip11_supported_nips,
-        nip11_document_revision: r.nip11_document_revision,
-        nip11_freshness: r.nip11_freshness.map(str::to_string),
-        nip11_last_error: r.nip11_last_error,
-        nip77_advertisement: r.nip77_advertisement.to_string(),
-        nip77_behavior: r.nip77_behavior.to_string(),
-        nip77_handoff: r.nip77_handoff.to_string(),
+        nip11_supported_nips,
+        nip11_document_revision,
+        nip11_freshness: nip11_freshness.map(str::to_string),
+        nip11_last_error,
+        nip77_advertisement: nip77_advertisement.to_string(),
+        nip77_behavior: nip77_behavior.to_string(),
+        nip77_handoff: nip77_handoff.to_string(),
     }
 }
 
@@ -2232,16 +2258,33 @@ pub fn auth_diagnostics_phase_to_ffi(phase: AuthDiagnosticsPhase) -> FfiAuthPhas
 }
 
 fn auth_diagnostics_to_ffi(snapshot: AuthDiagnosticsSnapshot) -> FfiAuthDiagnostics {
+    // Exhaustive destructure: a new facade AUTH diagnostics fact cannot be
+    // silently dropped at this boundary -- adding a field to
+    // `nmp::AuthDiagnosticsSnapshot` breaks this conversion until the FFI
+    // record carries it too.
+    let AuthDiagnosticsSnapshot {
+        relay,
+        access,
+        transport_slot,
+        transport_generation,
+        epoch_sequence,
+        challenge_hash,
+        phase,
+        policy_bound,
+        signer_bound,
+        auth_event_id,
+    } = snapshot;
     FfiAuthDiagnostics {
-        relay: snapshot.relay.to_string(),
-        access: access_context_to_ffi(snapshot.access),
-        transport_generation: snapshot.transport_generation,
-        epoch_sequence: snapshot.epoch_sequence,
-        challenge_descriptor: snapshot.challenge_hash,
-        phase: auth_diagnostics_phase_to_ffi(snapshot.phase),
-        policy_bound: snapshot.policy_bound,
-        signer_bound: snapshot.signer_bound,
-        auth_event_id: snapshot.auth_event_id.map(|id| id.to_hex()),
+        relay: relay.to_string(),
+        access: access_context_to_ffi(access),
+        transport_slot,
+        transport_generation,
+        epoch_sequence,
+        challenge_descriptor: challenge_hash,
+        phase: auth_diagnostics_phase_to_ffi(phase),
+        policy_bound,
+        signer_bound,
+        auth_event_id: auth_event_id.map(|id| id.to_hex()),
     }
 }
 
@@ -2277,27 +2320,42 @@ fn stalled_write_totals_to_ffi(totals: StalledWriteTotals) -> FfiStalledWriteTot
 /// FFI boundary. Every number/string here is copied straight off the
 /// engine-owned snapshot, never recomputed/estimated at this layer.
 pub fn diagnostics_snapshot_to_ffi(s: DiagnosticsSnapshot) -> FfiDiagnosticsSnapshot {
+    // Exhaustive destructure: a new facade diagnostics fact cannot be
+    // silently dropped at this boundary -- adding a field to
+    // `nmp::DiagnosticsSnapshot` breaks this conversion until the FFI
+    // snapshot carries it too.
+    let DiagnosticsSnapshot {
+        relays,
+        auth_sessions,
+        uncovered_author_count,
+        dropped_merge_rules,
+        sessions_rejected_over_cap,
+        sessions_refused_by_subscription_budget,
+        store_degraded,
+        transport_degraded,
+        stalled_writes,
+        stalled_write_totals,
+    } = s;
     FfiDiagnosticsSnapshot {
-        relays: s.relays.into_iter().map(relay_diagnostics_to_ffi).collect(),
-        auth_sessions: s
-            .auth_sessions
+        relays: relays.into_iter().map(relay_diagnostics_to_ffi).collect(),
+        auth_sessions: auth_sessions
             .into_iter()
             .map(auth_diagnostics_to_ffi)
             .collect(),
-        uncovered_author_count: s.uncovered_author_count as u32,
-        dropped_merge_rules: s
-            .dropped_merge_rules
+        uncovered_author_count: uncovered_author_count as u32,
+        dropped_merge_rules: dropped_merge_rules
             .into_iter()
             .map(|s| s.to_string())
             .collect(),
-        sessions_rejected_over_cap: s.sessions_rejected_over_cap,
-        transport_degraded: s.transport_degraded,
-        stalled_writes: s
-            .stalled_writes
+        sessions_rejected_over_cap,
+        sessions_refused_by_subscription_budget,
+        store_degraded,
+        transport_degraded,
+        stalled_writes: stalled_writes
             .into_iter()
             .map(stalled_write_to_ffi)
             .collect(),
-        stalled_write_totals: stalled_write_totals_to_ffi(s.stalled_write_totals),
+        stalled_write_totals: stalled_write_totals_to_ffi(stalled_write_totals),
     }
 }
 
@@ -3028,9 +3086,9 @@ mod tests {
                 access: GAccessContext::Public,
                 wire_sub_count: 2,
                 subscription_budget: Some(20),
-                subscriptions_refused: 0,
-                subid_length_limit: None,
-                subid_length_rejects_our_ids: false,
+                subscriptions_refused: 3,
+                subid_length_limit: Some(16),
+                subid_length_rejects_our_ids: true,
                 authors_served: 1,
                 by_lane: vec![(Lane::OperatorApp, 2)],
                 filters: vec!["{\"kinds\":[9999]}".to_string()],
@@ -3059,8 +3117,8 @@ mod tests {
             uncovered_author_count: 7,
             dropped_merge_rules: vec!["limit"],
             sessions_rejected_over_cap: 0,
-            sessions_refused_by_subscription_budget: 0,
-            store_degraded: None,
+            sessions_refused_by_subscription_budget: 2,
+            store_degraded: Some("read-only".to_string()),
             transport_degraded: Some("signature verification worker unavailable".to_string()),
             stalled_writes: vec![
                 StalledWrite {
@@ -3092,6 +3150,12 @@ mod tests {
         });
 
         assert_eq!(ffi.relays[0].relay, relay.to_string());
+        assert_eq!(ffi.relays[0].subscription_budget, Some(20));
+        assert_eq!(ffi.relays[0].subscriptions_refused, 3);
+        assert_eq!(ffi.relays[0].subid_length_limit, Some(16));
+        assert!(ffi.relays[0].subid_length_rejects_our_ids);
+        assert_eq!(ffi.sessions_refused_by_subscription_budget, 2);
+        assert_eq!(ffi.store_degraded.as_deref(), Some("read-only"));
         assert_eq!(
             ffi.relays[0].coverage[0].coverage,
             Some(FfiCoverageInterval {
@@ -3174,6 +3238,7 @@ mod tests {
                 public_key: pk_hex()
             }
         );
+        assert_eq!(ffi.auth_sessions[0].transport_slot, 900);
         assert_eq!(ffi.auth_sessions[0].transport_generation, 40);
         assert_eq!(ffi.auth_sessions[0].epoch_sequence, Some(80));
         assert_eq!(

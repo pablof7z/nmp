@@ -283,12 +283,7 @@ impl EngineCore {
 
         self.quarantined_auth_receipts.clear();
         self.pending.clear();
-        self.last_stalled_write_census.clear();
-        self.cached_stalled_writes.clear();
-        self.cached_stalled_write_totals = StalledWriteTotals {
-            detail_limit: u64::try_from(STALLED_WRITE_DETAIL_LIMIT).unwrap_or(u64::MAX),
-            ..StalledWriteTotals::default()
-        };
+        self.stalled_writes = StalledWriteCensus::default();
         self.event_to_receipts.clear();
         self.intent_receipts.clear();
         self.receipts_by_lane_relay.clear();
@@ -632,105 +627,19 @@ impl EngineCore {
         !self.semantic_publish_coverage_parked.is_empty()
     }
 
-    /// Where one open obligation is stuck, if it is stuck at all (#756/#968).
+    /// Which receipts this turn could have changed the stalled stage of,
+    /// and the census refresh that answers whether any of them did.
     ///
-    /// Read entirely off the reducer state that already owns this intent's
-    /// canonical facts — no store read, no second retry ledger, and no
-    /// re-derivation of anything the write plane did not already commit. The
-    /// three stages are asked in lifecycle order, because a write with no
-    /// signature has no route to be missing and a write with no route has no
-    /// destination to be unreachable.
-    fn stalled_write_stage(&self, pending: &PendingWrite) -> Option<(StalledWriteStage, String)> {
-        if !pending.target.accepts_ordinary_signer() {
-            return None;
-        }
-        if pending.event_id.is_none() && !pending.already_signed {
-            // A signer request still outstanding is work in progress, not a
-            // stall. Only the durable `AwaitingCapability` park -- request
-            // answered "no capability", nothing left running -- is stuck, and
-            // it names the FROZEN author rather than whichever account is current now.
-            if pending.sign_request_in_flight {
-                return None;
-            }
-            return Some((
-                StalledWriteStage::Unsignable,
-                format!(
-                    "no signer is registered for {}",
-                    pending.signing_pubkey.to_hex()
-                ),
-            ));
-        }
-
-        if pending.durable_routes.is_empty() && pending.route_blocked_relays.is_empty() {
-            // Parked with nothing resolved. This is the ONE stall that no
-            // clock may ever end (#1136): "we have not learned where this
-            // goes" is ignorance, and a deadline over ignorance is a verdict.
-            // It is reported so an operator can see it, never so anything
-            // can abandon it.
-            return Some((
-                StalledWriteStage::Unroutable,
-                "no destination has been resolved yet".to_string(),
-            ));
-        }
-
-        // Destinations exist. Stuck iff nothing is in flight and not one of
-        // them is a relay this process currently holds a session to -- the
-        // `wss://non-existent.example` case, and every ordinary outage.
-        if !pending.pending_relays.is_empty() {
-            return None;
-        }
-        let access = AccessContext::Nip42(pending.signing_pubkey);
-        let live: BTreeSet<&RelayUrl> = pending
-            .lane_projection
-            .required_relays()
-            .chain(&pending.unstarted_relays)
-            .chain(&pending.route_blocked_relays)
-            .collect();
-        if live.is_empty() {
-            return None;
-        }
-        if live.iter().any(|relay| {
-            self.connected_relays
-                .contains(&RelaySessionKey::new((*relay).clone(), access))
-        }) {
-            return None;
-        }
-        let named = live
-            .iter()
-            .map(|relay| relay.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        Some((
-            StalledWriteStage::Undeliverable,
-            format!("no destination is reachable: {named}"),
-        ))
-    }
-
-    /// Which obligations are stalled, and at which stage — the allocation-
-    /// light half of [`Self::stalled_write_stage`], used to decide whether a
-    /// turn changed anything an observer of this section would notice.
+    /// The touched set is derived here, not inside the owner: reading
+    /// `Effect::EmitReceipt` as "this obligation's write facts moved" is a
+    /// property of how this reducer emits, and the census owner must not
+    /// know what an `Effect` is.
     ///
-    /// Deliberately not the detail strings or the descriptors: this runs on
-    /// every write-plane turn, and a change detector that formatted a
-    /// sentence and hashed two ids per obligation to decide whether to do
-    /// nothing would cost more than the snapshot it was avoiding.
-    pub(super) fn stalled_write_census(&self) -> Vec<(ReceiptId, StalledWriteStage)> {
-        let mut census: Vec<(ReceiptId, StalledWriteStage)> = self
-            .pending
-            .iter()
-            .filter_map(|(id, pending)| {
-                self.stalled_write_stage(pending)
-                    .map(|(stage, _)| (*id, stage))
-            })
-            .collect();
-        census.sort();
-        census
-    }
-
-    /// Refresh only receipts whose write facts changed this reducer turn.
-    /// The full census is rebuilt once at boot; afterward an unrelated write
-    /// must not rescan every durable obligation merely to discover that none
-    /// of their stalled stages changed.
+    /// This is also the exact place the change detector's coverage is
+    /// visible: `stalled_write_stage` reads connectivity as well as the
+    /// obligation, and a connectivity change carries no `EmitReceipt` of its
+    /// own. Every path that ends a session drives a receipt-shaped fact for
+    /// each lane it interrupts, so the set is currently complete.
     pub(super) fn refresh_stalled_write_cache_for_effects(&mut self, effects: &[Effect]) -> bool {
         let touched: BTreeSet<ReceiptId> = effects
             .iter()
@@ -739,84 +648,22 @@ impl EngineCore {
                 _ => None,
             })
             .collect();
-        let mut changed = false;
-        for id in touched {
-            let next = self
-                .pending
-                .get(&id)
-                .and_then(|pending| self.stalled_write_stage(pending))
-                .map(|(stage, _)| stage);
-            let position = self
-                .last_stalled_write_census
-                .binary_search_by_key(&id, |(receipt, _)| *receipt);
-            match (position, next) {
-                (Ok(index), Some(stage)) if self.last_stalled_write_census[index].1 == stage => {}
-                (Ok(index), Some(stage)) => {
-                    self.last_stalled_write_census[index].1 = stage;
-                    changed = true;
-                }
-                (Ok(index), None) => {
-                    self.last_stalled_write_census.remove(index);
-                    changed = true;
-                }
-                (Err(index), Some(stage)) => {
-                    self.last_stalled_write_census.insert(index, (id, stage));
-                    changed = true;
-                }
-                (Err(_), None) => {}
-            }
-        }
-        if changed {
-            let (rows, totals) = self.stalled_write_projection();
-            self.cached_stalled_writes = rows;
-            self.cached_stalled_write_totals = totals;
-        }
-        changed
+        self.stalled_writes.refresh(
+            &touched,
+            StalledWriteInputs {
+                pending: &self.pending,
+                connected: &self.connected_relays,
+            },
+        )
     }
 
-    /// The bounded stalled-write section of [`Self::diagnostics_snapshot`].
-    ///
-    /// One pass over the reducer's own open obligations produces both the
-    /// exact totals and the detail window, so a row outside the window still
-    /// counts — a bound on bytes is never allowed to become a lie about how
-    /// much is stuck. Ordering is (stage, acceptance instant, descriptor):
-    /// a documented display order, independent of map iteration and of
-    /// anything the scheduler reads.
-    pub(super) fn stalled_write_projection(&self) -> (Vec<StalledWrite>, StalledWriteTotals) {
-        let mut totals = StalledWriteTotals {
-            detail_limit: u64::try_from(STALLED_WRITE_DETAIL_LIMIT).unwrap_or(u64::MAX),
-            ..StalledWriteTotals::default()
-        };
-        let mut rows = Vec::new();
-        for pending in self.pending.values() {
-            let Some((stage, detail)) = self.stalled_write_stage(pending) else {
-                continue;
-            };
-            let counter = match stage {
-                StalledWriteStage::Unroutable => &mut totals.unroutable,
-                StalledWriteStage::Unsignable => &mut totals.unsignable,
-                StalledWriteStage::Undeliverable => &mut totals.undeliverable,
-            };
-            *counter = counter.saturating_add(1);
-            let intent_id = pending.intent_id;
-            rows.push(StalledWrite {
-                id: stalled_write_id(intent_id.0, &pending.frozen.id),
-                stage,
-                detail,
-                stalled_since: pending.accepted_at,
-            });
-        }
-        rows.sort_by(|a, b| {
-            a.stage
-                .cmp(&b.stage)
-                .then(a.stalled_since.cmp(&b.stalled_since))
-                .then_with(|| a.id.cmp(&b.id))
+    /// Rebuild the census from scratch after `pending` was rebuilt from the
+    /// store.
+    pub(super) fn rebuild_stalled_write_cache(&mut self) {
+        self.stalled_writes.rebuild(StalledWriteInputs {
+            pending: &self.pending,
+            connected: &self.connected_relays,
         });
-        let total = u64::try_from(rows.len()).unwrap_or(u64::MAX);
-        rows.truncate(STALLED_WRITE_DETAIL_LIMIT);
-        totals.omitted_details =
-            total.saturating_sub(u64::try_from(rows.len()).unwrap_or(u64::MAX));
-        (rows, totals)
     }
 
     /// Deliver one fact about a write.
@@ -2427,10 +2274,7 @@ impl EngineCore {
         // stateless; replay the rebuilt set through the same typed effect
         // live rewrites use so NIP-65 can reopen discovery after a crash.
         self.resync_route_needs(&mut effects);
-        self.last_stalled_write_census = self.stalled_write_census();
-        let (rows, totals) = self.stalled_write_projection();
-        self.cached_stalled_writes = rows;
-        self.cached_stalled_write_totals = totals;
+        self.rebuild_stalled_write_cache();
         // A process can die after its last lane went terminal but before the
         // cohort close committed. Recovery re-asks for every semantic
         // coordinate it rebuilt; the store's exact-generation CAS makes a
