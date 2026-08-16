@@ -1882,3 +1882,87 @@ fn a_failing_coverage_peek_never_republishes_live_evidence_as_unproven() {
         "a failed reactive coverage read must not republish evidence"
     );
 }
+
+/// I7: a reopen-required store failure must REBUILD the write plane from
+/// durable keys, not merely retain whatever the in-memory projection already
+/// held. `recover_store_after_failure` clears every volatile write-plane
+/// index before `recover_on_boot` repopulates them (write.rs); this is the
+/// one reducer-level door that exercises it -- nothing else in this corpus
+/// calls it, so a change that quietly turned the clear-then-rebuild into a
+/// no-op currently passes `cargo test -p nmp-engine` unnoticed.
+///
+/// The observable consequence of "retained rather than rebuilt": a lane
+/// already dispatched (`AwaitingAck`, its in-flight wire correlation known
+/// only to this process) survives a reopen with THAT stale correlation
+/// intact, so nothing ever re-establishes it -- the write silently stops
+/// making progress. A genuine rebuild has no such correlation to retain: it
+/// re-derives the lane from the durable route revision alone and re-arms it,
+/// which is observable as a fresh `EnsureWriteRelay` for the exact relay
+/// already in flight before the failure.
+///
+/// nmp:falsifier=A dispatched, unacknowledged write is re-armed for delivery
+/// after a reopen-required store failure, not left waiting on a wire
+/// correlation that failure destroyed.
+#[test]
+fn a_reopen_required_store_failure_rearms_a_dispatched_lane_from_durable_keys() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://store-recovery.example").unwrap();
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
+    connect_signer(&mut core, 0, &relay, author.public_key());
+    authenticate_signer(&mut core, 0, &relay, &author);
+
+    let (id, signed, dispatched) = publish_explicit(&mut core, &author, [relay.clone()]);
+    assert!(
+        dispatched.iter().any(|effect| matches!(
+            effect,
+            Effect::PublishEvent(session, event, _)
+                if session == &signer_session(&relay, event.pubkey)
+        )),
+        "fixture sanity: the write must actually dispatch to its one relay before the \
+         failure, got {dispatched:?}"
+    );
+    mark_written(&mut core, &dispatched, &relay);
+    // Fixture sanity: the lane is now durably `AwaitingAck` and this
+    // process is the only place its wire correlation exists -- nothing
+    // re-dispatches it while the store is healthy.
+    assert!(
+        core.reattach_receipt(id).is_attached(),
+        "fixture sanity: the write is live before the failure"
+    );
+
+    let mut effects = Vec::new();
+    core.degrade_store(
+        nmp_store::PersistenceError::new(PersistenceFault::Io, "fixture reopen-required fault"),
+        &mut effects,
+    );
+    assert_eq!(
+        core.take_store_recovery_request(),
+        Some(PersistenceFault::Io),
+        "fixture sanity: an I/O fault must arm reconstruction"
+    );
+
+    let recovery = core
+        .recover_store_after_failure()
+        .expect("fixture recovery against a healthy backend must succeed");
+    assert!(
+        recovery.iter().any(|effect| matches!(
+            effect,
+            Effect::EnsureWriteRelay(session)
+                if session == &signer_session(&relay, author.public_key())
+        )),
+        "I7: recovery must re-arm the relay this dispatched-but-unacked write was already \
+         waiting on, rebuilt from the durable route revision -- not silently retain the \
+         stale in-flight state and never re-establish it, got {recovery:?}"
+    );
+    assert!(
+        core.reattach_receipt(id).is_attached(),
+        "the write itself must still be live and reattachable after recovery"
+    );
+    assert_eq!(
+        core.reattach_receipt(id).facts.first(),
+        Some(&WriteFact::Signing(SigningState::Signed {
+            event_id: signed.id
+        })),
+        "recovery must rebuild the SAME durable write, not a coincidentally similar one"
+    );
+}
