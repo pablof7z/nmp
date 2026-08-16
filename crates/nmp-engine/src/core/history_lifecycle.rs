@@ -33,13 +33,20 @@ pub(super) struct HistorySessions {
 /// The census contribution, so the root counts this owner's state without
 /// naming its maps. `pub(super)`, and deliberately not nested into the flat
 /// `pub CoreOwnershipCensus`.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+///
+/// Two censuses read this owner and they want different things:
+/// `observation_ownership_census` wants the two counts below,
+/// `ownership_census` also wants retained freshness edges. The second lives
+/// in its own bench-gated method rather than as a third field here, so the
+/// struct has no field that is dead in the shape the first one builds under.
+#[cfg(any(
+    test,
+    feature = "bench-instrumentation",
+    feature = "test-instrumentation"
+))]
 pub(super) struct HistorySessionCounts {
     pub(super) sessions: usize,
     pub(super) handles: usize,
-    /// Opening-evidence source edges every frozen branch acquisition still
-    /// retains, for the census's retained-freshness total.
-    pub(super) freshness_source_edges: usize,
 }
 
 /// The two shapes the unlink callers already hold: a set from the rollback
@@ -196,20 +203,30 @@ impl HistorySessions {
         self.by_handle.clone()
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(any(
+        test,
+        feature = "bench-instrumentation",
+        feature = "test-instrumentation"
+    ))]
     pub(super) fn counts(&self) -> HistorySessionCounts {
         HistorySessionCounts {
             sessions: self.sessions.len(),
             handles: self.by_handle.len(),
-            freshness_source_edges: self
-                .sessions
-                .values()
-                .flat_map(|state| &state.acquisitions_by_branch)
-                .flat_map(|acquisition| &acquisition.scopes)
-                .filter_map(ScopeAcquisition::opening_evidence)
-                .map(|evidence| evidence.sources.len())
-                .sum(),
         }
+    }
+
+    /// Opening-evidence source edges every frozen branch acquisition still
+    /// retains, for the bench census's retained-freshness total. Separate
+    /// from [`Self::counts`] because only that census reads it.
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) fn freshness_source_edges(&self) -> usize {
+        self.sessions
+            .values()
+            .flat_map(|state| &state.acquisitions_by_branch)
+            .flat_map(|acquisition| &acquisition.scopes)
+            .filter_map(ScopeAcquisition::opening_evidence)
+            .map(|evidence| evidence.sources.len())
+            .sum()
     }
 }
 
