@@ -18,5 +18,10 @@ pub fn bootstrap_new_account(
         vec![bootstrap_relay],
         vec![RelayListEntry::new(outbox_relay, RelayUsage::ReadWrite)],
     )?;
-    Ok(engine.publish_relay_list_bootstrap(request))
+    // #1707: `Engine::publish_relay_list_bootstrap` is deleted -- it was
+    // capability convenience (`engine.publish(request.into_write_intent())`,
+    // the exact statement below), the same shape every other deleted door
+    // was. An app composes the intent itself and publishes it like any
+    // other write.
+    Ok(engine.publish(request.into_write_intent()))
 }
