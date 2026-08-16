@@ -50,12 +50,8 @@ nip65 = ["nmp-runtime/nip65"]
 # #827: both instrumentation features came in with the folded engine modules
 # (`core`, `runtime`, `outbox`, `negentropy`). They stay non-default.
 bench-instrumentation = [
-    "dep:libc",
     "nmp-engine/bench-instrumentation",
     "nmp-runtime/bench-instrumentation",
-    "nmp-store/bench-instrumentation",
-    "nmp-resolver/bench-instrumentation",
-    "nmp-transport/bench-instrumentation",
 ]
 test-instrumentation = [
     "nmp-engine/test-instrumentation",
@@ -96,7 +92,6 @@ nmp-runtime.workspace = true
 nmp-store.workspace = true
 nmp-router.workspace = true
 nmp-router-testkit = { workspace = true, optional = true }
-nmp-resolver.workspace = true
 nmp-transport.workspace = true
 # NIP-11 relay information: the values an app reads and the one-shot HTTP
 # acquisition service the runtime drives. It is a crate, not a module here,
@@ -107,20 +102,8 @@ nmp-transport.workspace = true
 # into; it never names this crate's types.
 nmp-nip11.workspace = true
 blake3.workspace = true
-# The negentropy reconciler is an engine MODULE (`src/negentropy/`), not a
-# crate (§1: reducer-coupled, driven turn-by-turn by `EngineCore`) -- but it
-# wraps this external set-reconciliation crate. See
-# `src/negentropy/mod.rs` for a naming gotcha this introduces.
-negentropy = { version = "0.5", default-features = false, features = ["std"] }
-# NEG-OPEN/NEG-MSG wire payloads are lowercase hex (NIP-77) -- already a
-# transitive dependency (via `nostr`/`negentropy`'s own dependency graph);
-# named directly here because `negentropy/mod.rs` encodes/decodes reconcile
-# messages itself (the external `negentropy` crate is payload-agnostic: it
-# only deals in raw bytes, never hex text).
+# The opaque session payload's hex round-trip in `engine/session.rs`.
 hex = "0.4"
-serde.workspace = true
-serde_json.workspace = true
-zeroize = "1"
 # #704: the engine owns ONE multi-thread tokio runtime (2 workers) that hosts
 # every adapter task (NIP-11 fetches, signer/AUTH completion awaits, optional
 # provider sessions, follow-action acquisition) -- replacing the deleted
@@ -129,7 +112,6 @@ zeroize = "1"
 # hands protocol adapters that same runtime handle; only the `Handle` type
 # crosses the facade boundary.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sync"] }
-libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 # #1105: `group_publication_door.rs` proves a group write never reaches the
@@ -156,6 +138,16 @@ nmp-runtime = { workspace = true, features = ["test-instrumentation", "unstable-
 nmp-nip29.workspace = true
 nmp-test-support.workspace = true
 nmp-resolver-testkit.workspace = true
+# #1731: these four were declared as production dependencies with zero uses in
+# `crates/nmp/src`. They are real, and test-only: the relay-ingest probe under
+# `examples/support/` names `nmp-resolver` and `serde_json`, the negentropy
+# live test names `negentropy`, and `runtime_integration`'s `getrusage` check
+# names `libc`. A manifest that claims a production edge it does not have is
+# corrosive precisely because manifest-as-proof is what the crate split rests
+# on.
+nmp-resolver.workspace = true
+negentropy = { version = "0.5", default-features = false, features = ["std"] }
+serde_json.workspace = true
 nmp-router-testkit.workspace = true
 nmp-store = { workspace = true, features = ["test-instrumentation"] }
 cucumber = "0.21"
