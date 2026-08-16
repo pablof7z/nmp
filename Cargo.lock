@@ -2042,7 +2042,6 @@ name = "nmp-nip68"
 version = "0.1.0"
 dependencies = [
  "nmp-asset",
- "nmp-blossom",
  "nostr 0.44.4",
 ]
 

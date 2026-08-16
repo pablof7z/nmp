@@ -2,21 +2,22 @@
 //! T15-B-NIP68-IMETA).
 //!
 //! [`PictureImage`] is a TYPE WITNESS: its fields are private and its only
-//! constructors ([`PictureImage::from_descriptor`],
-//! [`PictureImage::from_verified_upload`]) take their `url`/`sha256`/`m` from a
-//! Blossom [`BlobDescriptor`] -- so every `PictureImage` carries the
+//! constructor ([`PictureImage::from_verified_asset`]) takes its
+//! `url`/`sha256`/`m` from an [`nmp_asset::VerifiedAsset`] -- a proof that
+//! `sha256` was computed from exact bytes some constructor actually saw
+//! (#884). A caller-claimed hash, a raw BUD-02 descriptor, or a URL cannot
+//! mint one: the private-field witness makes that a compile error, not a
+//! runtime check (#898). Every `PictureImage` therefore carries the
 //! content-addressed provenance NIP-68 imeta requires (`url`, `m`, `x`) BY
-//! CONSTRUCTION. There is no public struct literal; you cannot mint a NIP-68
-//! image artifact without the mandatory content-addressed fields (the #421
-//! "protected kind without artifact provenance fails" contract).
+//! CONSTRUCTION -- the #421 "protected kind without artifact provenance
+//! fails" contract, now anchored to proven bytes rather than a server claim.
 //!
-//! CRITICAL DOCTRINE (carried from the #545 review): `descriptor.url` is
+//! CRITICAL DOCTRINE (carried from the #545 review): `asset.url()` is
 //! SERVER-CONTROLLED, UNTRUSTED text. It is carried verbatim into the imeta
 //! `url` field and never parsed, resolved, or trusted -- only `sha256` is
 //! content-addressed provenance.
 
-use nmp_asset::Sha256Hash;
-use nmp_blossom::{BlobDescriptor, VerifiedUpload};
+use nmp_asset::{Sha256Hash, VerifiedAsset};
 
 /// An image's pixel dimensions, the imeta `dim` value. Wire form is exactly
 /// `WIDTHxHEIGHT` (decimal, single lowercase `x`).
@@ -116,9 +117,35 @@ fn parse_decimal(component: &str) -> Result<u32, ImageDimError> {
 }
 
 /// A NIP-68 image artifact reference -- one imeta row's worth of picture
-/// metadata. Private fields + provenance-only constructors: every value
-/// carries `url`/`m`/`x` from a content-addressed Blossom descriptor by
-/// construction (#421). Optionals are added through the builder-style setters.
+/// metadata. Private fields + one provenance-only constructor
+/// ([`PictureImage::from_verified_asset`]): every value carries `url`/`m`/`x`
+/// from a proven-by-bytes [`VerifiedAsset`] by construction (#421, #898).
+/// Optionals are added through the builder-style setters.
+///
+/// A raw BUD-02 descriptor, a caller-claimed hash, or a bare url+hash tuple
+/// cannot mint one -- there is no public struct literal and no constructor
+/// that accepts anything less than a [`VerifiedAsset`]:
+///
+/// ```compile_fail,E0451
+/// use nmp_asset::Sha256Hash;
+/// use nmp_nip68::PictureImage;
+///
+/// // Even a syntactically perfect BUD-02 shape -- url, sha256, mime type --
+/// // cannot mint a `PictureImage`: the fields are private, and no untrusted
+/// // input reaches this struct literal from outside the crate.
+/// let forged = PictureImage {
+///     url: "https://cdn.example/blob".to_string(),
+///     mime_type: "image/png".to_string(),
+///     sha256: Sha256Hash::from_hex(
+///         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+///     ).unwrap(),
+///     dim: None,
+///     alt: None,
+///     blurhash: None,
+///     thumbhash: None,
+///     fallbacks: Vec::new(),
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PictureImage {
     url: String,
@@ -131,11 +158,12 @@ pub struct PictureImage {
     fallbacks: Vec<String>,
 }
 
-/// [`PictureImage::from_descriptor`]'s failure mode. Exhaustive; constructed
-/// by the `a_descriptor_without_mime_cannot_mint_an_image` falsifier.
+/// [`PictureImage::from_verified_asset`]'s failure mode. Exhaustive;
+/// constructed by the `a_verified_asset_without_mime_cannot_mint_an_image`
+/// falsifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PictureImageError {
-    /// The descriptor has no `mime_type` (`m`), which NIP-68 imeta REQUIRES.
+    /// The asset carries no `mime_type` (`m`), which NIP-68 imeta REQUIRES.
     /// A NIP-68 image artifact cannot be minted without the mandatory
     /// content-addressed fields (`url`, `m`, `x`) -- #421.
     MissingMimeType,
@@ -145,7 +173,7 @@ impl std::fmt::Display for PictureImageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingMimeType => f.write_str(
-                "cannot mint a NIP-68 image: descriptor has no mime type, but imeta requires `m`",
+                "cannot mint a NIP-68 image: asset has no mime type, but imeta requires `m`",
             ),
         }
     }
@@ -154,34 +182,35 @@ impl std::fmt::Display for PictureImageError {
 impl std::error::Error for PictureImageError {}
 
 impl PictureImage {
-    /// Mint an image artifact from a content-addressed Blossom descriptor.
-    /// `url`/`sha256` come from the descriptor; `mime_type` comes from
-    /// `descriptor.mime_type`, and its absence is [`PictureImageError::
-    /// MissingMimeType`] -- NO `PictureImage` is constructed (the
-    /// protected-kind-without-provenance contract, #421). `descriptor.url` is
-    /// carried VERBATIM as untrusted server text; only `sha256` is trusted.
-    pub fn from_descriptor(descriptor: &BlobDescriptor) -> Result<Self, PictureImageError> {
-        let mime_type = descriptor
-            .mime_type
-            .clone()
+    /// Mint an image artifact from a [`VerifiedAsset`] -- a witness whose
+    /// `sha256` was computed from exact bytes some constructor actually saw
+    /// (#884), never from a caller-claimed hash or an unverified BUD-02
+    /// descriptor (#898: `nmp_blossom::BlossomClient::upload` is the one
+    /// place that mints a `VerifiedAsset` for an uploaded blob, by hashing
+    /// the bytes it sent and cross-checking the server's claim against that
+    /// hash before ever surfacing it).
+    ///
+    /// `url`/`sha256` come from the asset; `mime_type` comes from
+    /// `asset.mime_type()`, and its absence is
+    /// [`PictureImageError::MissingMimeType`] -- NO `PictureImage` is
+    /// constructed (the protected-kind-without-provenance contract, #421).
+    /// `asset.url()` is carried VERBATIM as untrusted server text; only
+    /// `sha256` is trusted.
+    pub fn from_verified_asset(asset: &VerifiedAsset) -> Result<Self, PictureImageError> {
+        let mime_type = asset
+            .mime_type()
+            .map(str::to_string)
             .ok_or(PictureImageError::MissingMimeType)?;
         Ok(Self {
-            url: descriptor.url.clone(),
+            url: asset.url().to_string(),
             mime_type,
-            sha256: descriptor.sha256,
+            sha256: asset.sha256(),
             dim: None,
             alt: None,
             blurhash: None,
             thumbhash: None,
             fallbacks: Vec::new(),
         })
-    }
-
-    /// Mint an image artifact from a [`VerifiedUpload`] -- the descriptor whose
-    /// `sha256` was PROVEN against the uploaded bytes. Delegates to
-    /// [`Self::from_descriptor`] on the verified descriptor.
-    pub fn from_verified_upload(upload: &VerifiedUpload) -> Result<Self, PictureImageError> {
-        Self::from_descriptor(upload.descriptor())
     }
 
     /// Attach pixel dimensions (imeta `dim`).
@@ -289,14 +318,12 @@ impl PictureImage {
 mod tests {
     use super::*;
 
-    fn descriptor_with_mime(mime: Option<&str>) -> BlobDescriptor {
-        BlobDescriptor {
-            url: "https://cdn.example.com/blob".to_string(),
-            sha256: Sha256Hash::of(b"blob"),
-            size: 4,
-            mime_type: mime.map(str::to_string),
-            uploaded: None,
-        }
+    fn asset_with_mime(mime: Option<&str>) -> VerifiedAsset {
+        VerifiedAsset::from_bytes(
+            b"blob",
+            "https://cdn.example.com/blob".to_string(),
+            mime.map(str::to_string),
+        )
     }
 
     /// Invariant (#558): `dim` wire form is strict `WIDTHxHEIGHT` -- the
@@ -358,25 +385,26 @@ mod tests {
         ));
     }
 
-    /// Invariant (#558): `a_descriptor_without_mime_cannot_mint_an_image` --
-    /// a descriptor with `mime_type: None` yields `MissingMimeType` and NO
-    /// `PictureImage` (#421 protected-kind-without-provenance).
+    /// Invariant (#558, #898): `a_verified_asset_without_mime_cannot_mint_an_image`
+    /// -- an asset with `mime_type: None` yields `MissingMimeType` and NO
+    /// `PictureImage` (#421 protected-kind-without-provenance). Survives from
+    /// the deleted `from_descriptor` suite as an asset-level refusal.
     #[test]
-    fn a_descriptor_without_mime_cannot_mint_an_image() {
+    fn a_verified_asset_without_mime_cannot_mint_an_image() {
         assert_eq!(
-            PictureImage::from_descriptor(&descriptor_with_mime(None)),
+            PictureImage::from_verified_asset(&asset_with_mime(None)),
             Err(PictureImageError::MissingMimeType)
         );
     }
 
-    /// Invariant (#558): a well-formed descriptor mints an image carrying the
-    /// server url verbatim and the content-addressed sha256, and its imeta row
-    /// leads with `url`/`m`/`x` in order.
+    /// Invariant (#558, #898): a well-formed verified asset mints an image
+    /// carrying the server url verbatim and the content-addressed sha256, and
+    /// its imeta row leads with `url`/`m`/`x` in order.
     #[test]
-    fn from_descriptor_binds_provenance_into_the_imeta_row() {
-        let descriptor = descriptor_with_mime(Some("image/png"));
-        let image = PictureImage::from_descriptor(&descriptor)
-            .expect("descriptor with mime mints an image")
+    fn from_verified_asset_binds_provenance_into_the_imeta_row() {
+        let asset = asset_with_mime(Some("image/png"));
+        let image = PictureImage::from_verified_asset(&asset)
+            .expect("verified asset with mime mints an image")
             .with_dim(ImageDim {
                 width: 10,
                 height: 20,

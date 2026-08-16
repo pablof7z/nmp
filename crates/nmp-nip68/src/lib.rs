@@ -5,8 +5,11 @@
 //! the NIP-68 photo event schema exclusively: "Composition does not transfer
 //! ownership: a context owner may wrap an artifact, but only the artifact owner
 //! may define the artifact." It builds an immutable UNSIGNED kind:20 draft from
-//! content-addressed image artifacts (the Blossom [`nmp_blossom::BlobDescriptor`]
-//! seam) and decodes a kind:20 event into typed picture facts.
+//! content-addressed image artifacts (an [`nmp_asset::VerifiedAsset`] proven
+//! from exact bytes, #898) and decodes a kind:20 event into typed picture
+//! facts. This crate names no storage-protocol crate: minting an artifact
+//! needs only the protocol-neutral proof, never the Blossom upload/mirror
+//! machinery that produced it.
 //!
 //! Same discipline as `nmp-nip29`/`nmp-blossom`: this crate NEVER signs (it
 //! emits an [`nostr::UnsignedEvent`] for the caller's existing `nmp-signer`

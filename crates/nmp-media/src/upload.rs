@@ -116,16 +116,17 @@ impl UploadedAsset {
     }
 
     /// Mint a NIP-68 [`PictureImage`] artifact reference from this verified
-    /// asset (delegates to `PictureImage::from_verified_upload`). Fails with
-    /// [`PictureImageError::MissingMimeType`] if the server's descriptor
-    /// carried no mime type -- NIP-68 imeta requires `m`.
+    /// asset (delegates to `PictureImage::from_verified_asset` on the
+    /// exact-byte proof, #898 -- never on the server's raw, unverified
+    /// descriptor claim). Fails with [`PictureImageError::MissingMimeType`]
+    /// if the server carried no mime type -- NIP-68 imeta requires `m`.
     pub fn picture_image(&self) -> Result<PictureImage, PictureImageError> {
-        PictureImage::from_verified_upload(&self.verified)
+        PictureImage::from_verified_asset(self.asset())
     }
 
     /// Consume into a NIP-68 [`PictureImage`] artifact reference. Same
     /// provenance rule as [`Self::picture_image`].
     pub fn into_picture_image(self) -> Result<PictureImage, PictureImageError> {
-        PictureImage::from_verified_upload(&self.verified)
+        PictureImage::from_verified_asset(&self.verified.into_asset())
     }
 }

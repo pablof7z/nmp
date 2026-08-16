@@ -132,8 +132,7 @@ pub fn build_picture(
 mod tests {
     use super::*;
     use crate::image::ImageDim;
-    use nmp_asset::Sha256Hash;
-    use nmp_blossom::BlobDescriptor;
+    use nmp_asset::{Sha256Hash, VerifiedAsset};
 
     fn author() -> PublicKey {
         nostr::Keys::generate().public_key()
@@ -144,14 +143,12 @@ mod tests {
     }
 
     fn image(seed: &[u8]) -> PictureImage {
-        let descriptor = BlobDescriptor {
-            url: format!("https://cdn.example.com/{}", Sha256Hash::of(seed).to_hex()),
-            sha256: Sha256Hash::of(seed),
-            size: seed.len() as u64,
-            mime_type: Some("image/jpeg".to_string()),
-            uploaded: None,
-        };
-        PictureImage::from_descriptor(&descriptor).expect("descriptor with mime")
+        let asset = VerifiedAsset::from_bytes(
+            seed,
+            format!("https://cdn.example.com/{}", Sha256Hash::of(seed).to_hex()),
+            Some("image/jpeg".to_string()),
+        );
+        PictureImage::from_verified_asset(&asset).expect("verified asset with mime")
     }
 
     fn tag_name(tag: &Tag) -> &str {
