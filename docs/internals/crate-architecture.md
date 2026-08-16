@@ -479,6 +479,25 @@ in tests, at zero visibility cost) and pushing state-machine transitions onto
 the value types — `PendingWrite` owning its own transitions rather than
 `write.rs` performing them on it. Neither is a packaging change.
 
+### What the crate work did and did not fix
+
+**The crate cut fixed coupling and provability. It did not fix size, and size
+was never going to be fixed by moving files between crates.** Anyone reading
+measure (3)'s drop from 73,598 to 7,254 and concluding the hard part is done
+has read the wrong number.
+
+What actually happened is that ~66,000 lines moved to packages where their
+dependencies could be constrained. `nmp-engine` is still ~27,000 production
+lines built around one struct that eleven files write to, and no further
+crate line addresses that — four candidates were measured and rejected
+precisely because a crate boundary is the wrong instrument for it.
+
+What shrinks the reducer is finishing the owner program (#1606: module owners
+with private fields, so the compiler finds every violating access, including
+in tests, at zero visibility cost) and pushing state-machine transitions onto
+the value types — `PendingWrite` owning its own transitions rather than
+`write.rs` performing them on it. Neither is a packaging change.
+
 ## Decided — not to be relitigated without new facts
 
 - Capabilities live above `nmp`; the absorption direction of #1143/#1563 was

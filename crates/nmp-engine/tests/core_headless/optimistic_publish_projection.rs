@@ -85,7 +85,7 @@ fn publish_signed_explicit(
 /// batch addressed to it, plus how many times each row was announced as new.
 #[derive(Default)]
 struct Projected {
-    rows: BTreeMap<nostr::EventId, nmp::Row>,
+    rows: BTreeMap<nostr::EventId, nmp_grammar::Row>,
     added: BTreeMap<nostr::EventId, usize>,
 }
 
@@ -124,7 +124,7 @@ impl Projected {
         self.rows.get(id).map(|row| &row.sources)
     }
 
-    fn row(&self, id: &nostr::EventId) -> Option<&nmp::Row> {
+    fn row(&self, id: &nostr::EventId) -> Option<&nmp_grammar::Row> {
         self.rows.get(id)
     }
 
@@ -453,7 +453,7 @@ fn an_unsigned_write_is_still_explicitly_pending_after_a_restart() {
         let row = projected
             .row(&expected_id)
             .expect("acceptance inserts the pending canonical row");
-        assert_eq!(row.signature(), nmp::RowSignature::Pending);
+        assert_eq!(row.signature(), nmp_grammar::RowSignature::Pending);
         assert!(
             row.signed_event().is_none(),
             "the pending app row must not expose the storage sentinel"
@@ -469,7 +469,7 @@ fn an_unsigned_write_is_still_explicitly_pending_after_a_restart() {
     let row = recovered
         .row(&expected_id)
         .expect("the cold snapshot returns the accepted canonical row");
-    assert_eq!(row.signature(), nmp::RowSignature::Pending);
+    assert_eq!(row.signature(), nmp_grammar::RowSignature::Pending);
     assert!(
         row.signed_event().is_none(),
         "restart must preserve pending without exposing the storage sentinel"
