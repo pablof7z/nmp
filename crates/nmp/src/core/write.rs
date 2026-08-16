@@ -1237,6 +1237,30 @@ impl EngineCore {
             }
             HandoffResult::NotHandedOff => {
                 self.remove_active_lane(target.receipt, &target.session.relay);
+                // `NotHandedOff` is the transport reporting it has NO session
+                // for this relay -- `pool.ensure_session` failed, so nothing
+                // was sent and no socket was observed closing. That is a
+                // connectivity fact, so the session leaves `connected_relays`.
+                //
+                // It deliberately does NOT touch `slot_to_relay` or
+                // `auth_sessions`, and the resulting two-thirds state is safe
+                // in exactly one direction. Every predicate over those three
+                // (`exact_current_auth_epoch`, `is_current_transport_session`
+                // in `auth_transport.rs`) is a CONJUNCTION, so a missing term
+                // can only cause a rejection, never an acceptance: the cost
+                // is a discarded AUTH operation, never an accepted stale one.
+                //
+                // The state repairs itself through the `EnsureWriteRelay`
+                // below. A protected reconnect runs `invalidate_auth_epoch`
+                // BEFORE re-inserting into `connected_relays`, so the auth
+                // entries left behind here are cleared by the same edge that
+                // restores connectivity -- in that order, which is what makes
+                // it safe.
+                //
+                // Do not "complete" this by also clearing `slot_to_relay` or
+                // `auth_sessions`: this path never observed a generation end,
+                // so retiring one here would discard a socket that is still
+                // live for reads.
                 self.connected_relays.remove(&target.session);
                 self.emit_write_fact(
                     target.receipt,
