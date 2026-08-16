@@ -130,10 +130,23 @@ Policed by review only:
 
 One implementation, two consumers. The lifecycle logic — start, stop, kill,
 restart, partition, heal, seed, ephemeral port, isolated temp directory,
-bounded-poll readiness rather than sleeps — belongs in a small library target
-under `apps/Canary`. It is consumed by a thin CLI a developer runs to bring
-the lab up, and by the app's own test target, so there is never a second
-hand-rolled notion of "what a real relay process lifecycle looks like".
+bounded-poll readiness rather than sleeps — lives at `apps/Canary/RelayLabKit`,
+a local SwiftPM package. It is consumed by two thin CLI targets a developer
+runs directly (`swift run relay-lab-lifecycle <strfry-binary>`,
+`relay-lab-nip42`) to bring the lab up and drive it by hand, and by
+`CanaryRelayLabTests`, so there is never a second hand-rolled notion of "what
+a real relay process lifecycle looks like". `apps/Canary/setup-strfry.sh`
+builds the pinned relay binary alongside it.
+
+`CanaryRelayLabTests` is a **macOS** target, not the iOS `CanaryTests` bundle.
+This is a platform-sandbox fact, not an NMP one: `RelayLabKit` spawns the
+relay via `Foundation.Process`, which the iOS SDK does not expose at all,
+device or simulator — there is no way to launch an arbitrary child process
+from code built against the iOS SDK. `NMP`'s own `Package.swift` already
+declares `macOS(.v13)` alongside `iOS(.v16)`, so `CanaryRelayLabTests` drives
+the identical public `NMP` module the iOS `Canary` app links, built for the
+host platform instead of the simulator — the app's real read/write path, not
+a different one.
 
 The relay binary is built by a documented, commit-pinned script into a
 gitignored cache directory. It is **not** vendored: a committed
@@ -164,6 +177,19 @@ relays fail; C9 crash/restart during publication; C10 offline write then
 convergence; C11 semantic capability; C12 identity freeze; C13 relay
 disconnect/reconnect; C14 NIP-77 reconciliation; C15 NIP-42 AUTH; C16 slow
 consumer and backpressure; C17 repeated lifecycle churn; C18 clean shutdown.
+
+**C1 is proven live** against a real strfry child process:
+`apps/Canary/Tests/CanaryRelayLabTests/C1ColdStartLiveFeedTests.swift` seeds
+one event over a real `EVENT` frame before the engine exists (empty store,
+already-seeded relay), constructs `NMPEngine` normally, opens one
+`engine.observe(NMPFilter(kinds:authors:))`, waits (bounded, no sleep-as-oracle)
+for the historical row, then — from inside that SAME still-open subscription —
+seeds a second event through the relay and waits for it to arrive live with no
+duplicate canonical row (`Set(rows.map(\.id)).count == rows.count == 2`).
+Passed in ~1s. Deliberately sabotaged (pointed the filter at a wrong-but-valid
+64-hex pubkey) to confirm it is a real falsifier, not a vacuous pass: it failed
+red with the exact expected timeout message rather than passing regardless of
+relay behaviour, then was restored and re-confirmed green.
 
 Two facts about the starting position, established by survey:
 
