@@ -360,6 +360,55 @@ the cut makes the reducer's purity a build error) and why `nmp-nip11` is one
 (it is the only package in the engine's tree naming `reqwest`). Neither
 property is available to any cluster inside the reducer.
 
+### A guard whose failure mode is fail-open is probably untested
+
+> **The corpus proves that correct inputs produce correct outputs. It does not
+> prove that the guards which exist to reject stale, hostile, or degraded
+> inputs actually reject them.**
+
+Measured, not suspected. Each of `EngineCore`'s eight named invariants was
+broken in the reducer — the maintaining line deleted — and
+`cargo test -p nmp-engine --all-features` run against the 414-test corpus
+(#1727):
+
+| invariant | what it maintains | result |
+|---|---|---|
+| **I1** insertion + removal | publish-queue index mirror | **green — not caught** |
+| I2 | wire owner counts / routing-evidence union | red, **38 failures** |
+| **I3** | exact-generation session conjunction | **green — not caught** |
+| I4 | history session ↔ handle inversion | red, 2 |
+| I5 | request-attempt reverse indexes | red, 2 |
+| I6 | coverage/parked asymmetry | red, 1 |
+| **I7** | store recovery clears every derived projection | **green — not caught** |
+| **I8** | per-turn `retry_scheduler_blocked` reset | **green — not caught** |
+
+The line is not read-plane versus write-plane. It is:
+
+- **Caught invariants are STRUCTURAL.** Index mirrors and refcounts that
+  ordinary traffic reads on the happy path. Break one and the very next
+  normal operation misbehaves, so the corpus trips over it without trying.
+  I2's 38 failures is what "unavoidable on the normal path" looks like.
+- **Uncovered invariants are GUARDS on abnormal paths.** They exist to
+  *reject* something — a stale auth epoch, state surviving a store failure,
+  a persistent I/O error becoming a `recv_timeout(0)` busy-spin. Every break
+  makes the code **more permissive**: I3 drops a conjunct, I8 drops a reset.
+  Nothing fails until a hostile or degraded input arrives, and the corpus
+  never constructs one. (I1 is the exception that proves the rule: it is
+  structural, but its only readers live one package up, so the reducer's own
+  tests never observe it either.)
+
+**This is a habit, not a testing gap, and it is the same one that got an
+entire verification apparatus deleted on 2026-08-15.** Every check removed
+that day failed identically: an SDK-parity gate that passed against an SDK of
+one comment, a source-text scan for `ProbedRelay(` that read one file, two
+assertions of the form `x == x`. All green while the thing they protected was
+violated. The reducer's guards are the same class one level down — which is
+why the rule generalises past the eight named invariants:
+
+**Any guard whose failure mode is fail-open is probably untested.** When you
+add one, the falsifier is not optional, and it must construct the input the
+guard exists to reject. See #1727.
+
 ### Which package does a test belong to
 
 **"Drives `EngineCore`" does not make a test a reducer test. What decides it
