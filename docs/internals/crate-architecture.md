@@ -203,6 +203,14 @@ owners, zero crates — none of the clusters has an independent dependency,
 consumer, or lifecycle, so crate-ing one would only convert `pub(super)`
 into permanent public API.
 
+The evidence for that is the census below, specifically its tail: `store` is
+touched from six files, `clock` from seven, and neither reaches 50%
+concentration; `router` 48%, `resolver` 35%, `attempts` 40%,
+`connected_relays` 42%. Those are not fields awaiting an owner. They are the
+context every plane runs in, and **no line drawn anywhere puts them on one
+side** — which is the same fact as "the reducer is one thing", measured
+rather than asserted.
+
 ### The field census — picking the next owner by lookup, not judgement
 
 Every `EngineCore` field, with its accesses counted per production file. The
