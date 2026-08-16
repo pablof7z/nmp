@@ -126,34 +126,73 @@ Policed by review only:
   exported database instead of driving the app through the public facade.
 - The harness loophole above.
 
-### Where the controller lives
+### Where the controller lives, and how the scenarios run
 
-One implementation, two consumers. The lifecycle logic — start, stop, kill,
-restart, partition, heal, seed, ephemeral port, isolated temp directory,
-bounded-poll readiness rather than sleeps — lives at `apps/Canary/RelayLabKit`,
-a local SwiftPM package. It is consumed by two thin CLI targets a developer
-runs directly (`swift run relay-lab-lifecycle <strfry-binary>`,
-`relay-lab-nip42`) to bring the lab up and drive it by hand, and by
-`CanaryRelayLabTests`, so there is never a second hand-rolled notion of "what
-a real relay process lifecycle looks like". `apps/Canary/setup-strfry.sh`
-builds the pinned relay binary alongside it.
+Three SwiftPM packages, not the Xcode project. `apps/Canary/RelayLabKit` is
+the relay-lab controller itself — start, stop, kill, restart, partition,
+heal, seed, ephemeral port, isolated temp directory, bounded-poll readiness
+rather than sleeps. It knows nothing about NMP; it is a generic real-relay
+lifecycle library, reusable outside this app entirely. It is consumed by two
+thin CLI targets a developer runs directly (`swift run relay-lab-lifecycle
+<strfry-binary>`, `relay-lab-nip42`) to bring the lab up and drive it by
+hand, and by `apps/Canary/CanaryScenarios`, a sibling SwiftPM package that
+depends on both `RelayLabKit` and the local `NMP` package — the one place
+that is both NMP-aware and relay-lab-aware, which is exactly what a scenario
+has to be. `apps/Canary/setup-strfry.sh` builds the pinned relay binary
+alongside `RelayLabKit`.
 
-`CanaryRelayLabTests` is a **macOS** target, not the iOS `CanaryTests` bundle.
-This is a platform-sandbox fact, not an NMP one: `RelayLabKit` spawns the
-relay via `Foundation.Process`, which the iOS SDK does not expose at all,
-device or simulator — there is no way to launch an arbitrary child process
-from code built against the iOS SDK. `NMP`'s own `Package.swift` already
-declares `macOS(.v13)` alongside `iOS(.v16)`, so `CanaryRelayLabTests` drives
-the identical public `NMP` module the iOS `Canary` app links, built for the
-host platform instead of the simulator — the app's real read/write path, not
-a different one.
+**`swift test` from `apps/Canary/CanaryScenarios` is the whole entry point
+for running scenarios** — no `xcodegen`, no `xcodebuild`, no simulator, no
+Xcode project involved anywhere in that path. This was a deliberate
+correction: the scenarios first landed as an Xcode test target
+(`CanaryRelayLabTests`), which worked, but made "run the evidence" cost an
+`xcodegen generate` plus an `xcodebuild test` invocation — heavy and
+Xcode-shaped for what is supposed to be the cheap, constant source of truth.
+They moved to plain SwiftPM for exactly that reason: an agent or a person
+with nothing but a Swift toolchain runs one command, repeatedly, for free.
 
-The relay binary is built by a documented, commit-pinned script into a
-gitignored cache directory. It is **not** vendored: a committed
-platform-specific binary is dead weight in git history forever, and a build
-script is small text that reproduces it on demand. Note honestly that a clean
-machine also needs the Homebrew dependency line, which costs real time beyond
-the strfry build itself.
+macOS only, and this has not changed: `RelayLabKit` spawns the relay via
+`Foundation.Process`, which the iOS SDK does not expose at all, device or
+simulator — there is no way to launch an arbitrary child process from code
+built against the iOS SDK. `NMP`'s own `Package.swift` already declares
+`macOS(.v13)` alongside `iOS(.v16)`, so `CanaryScenarios` drives the
+identical public `NMP` module the iOS `Canary` app links, built for the host
+platform instead of the simulator — the app's real read/write path, not a
+different one. The iOS `Canary`/`CanaryTests` Xcode targets are unaffected
+and unchanged by any of this; they are not on the scenario-running path and
+never were meant to be.
+
+**Two one-time prerequisites**, both fail loudly and by name if skipped
+rather than producing a confusing failure (see
+`apps/Canary/CanaryScenarios/README.md` for the full detail):
+
+- The `NMP` xcframework must exist (`Packages/NMP/NMP.xcframework`,
+  gitignored, not committed). `swift test` fails immediately with a missing
+  binary-target error if it does not. Build it once from the repository
+  root: `scripts/build-swift-xcframework.sh --macos-only` — the
+  `--macos-only` mode, not the `--sim-only` this repository's other Swift
+  consumers use, because nothing here ever runs on an iOS simulator or
+  device. Documented as "a few minutes on a cold `cargo` cache"
+  (`Packages/NMP/README.md`); measured on a warm cache in this repository at
+  2-20s for the Swift/link half once the Rust artifacts already existed.
+- `strfry` must already be built: `apps/Canary/setup-strfry.sh`. Each
+  scenario locates it at `$RELAY_LAB_CACHE_DIR` (default
+  `~/Library/Caches/nmp-canary-relay-lab`) itself and calls `XCTSkip` by
+  name if it is missing — proven by pointing `RELAY_LAB_CACHE_DIR` at a
+  nonexistent path and confirming both scenarios report `Test skipped -
+  strfry is not built at <path> -- run apps/Canary/setup-strfry.sh first`
+  rather than crashing or hanging.
+
+Once both exist, `swift test` from `apps/Canary/CanaryScenarios` measured at
+~20s on a cold local SwiftPM build cache (prerequisites already built) and
+~3s fully warm — genuinely cheap enough to run after every change.
+
+The relay binary itself is built by a documented, commit-pinned script into
+a gitignored cache directory outside the repository entirely. It is **not**
+vendored: a committed platform-specific binary is dead weight in git history
+forever, and a build script is small text that reproduces it on demand.
+Note honestly that a clean machine also needs the Homebrew dependency line,
+which costs real time beyond the strfry build itself.
 
 ## Two environments
 
@@ -179,7 +218,7 @@ disconnect/reconnect; C14 NIP-77 reconciliation; C15 NIP-42 AUTH; C16 slow
 consumer and backpressure; C17 repeated lifecycle churn; C18 clean shutdown.
 
 **C1 is proven live** against a real strfry child process:
-`apps/Canary/Tests/CanaryRelayLabTests/C1ColdStartLiveFeedTests.swift` seeds
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C1ColdStartLiveFeedTests.swift` seeds
 one event over a real `EVENT` frame before the engine exists (empty store,
 already-seeded relay), constructs `NMPEngine` normally, opens one
 `engine.observe(NMPFilter(kinds:authors:))`, waits (bounded, no sleep-as-oracle)
@@ -190,6 +229,33 @@ Passed in ~1s. Deliberately sabotaged (pointed the filter at a wrong-but-valid
 64-hex pubkey) to confirm it is a real falsifier, not a vacuous pass: it failed
 red with the exact expected timeout message rather than passing regardless of
 relay behaviour, then was restored and re-confirmed green.
+
+**C7 is proven live**, the write path's first real end-to-end exercise:
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C7NormalPublishTests.swift` opens a read
+query before publishing, then `engine.publish(WriteIntent(...))`s a real
+signed event under a real local-key account through `.explicit(relays:)` to
+the same strfry process. Two independent consuming tasks (one over the
+already-open read query, one over `receipt.status`) run concurrently, sharing
+only the one cross-cutting fact that matters: whether the row was visible
+before this relay's confirmation reached the receipt stream. It was, every
+run. The row's `sources` then grow to include the relay once its echo
+arrives — the SAME canonical row gaining provenance, never a second row — and
+the row query and the receipt stream independently agree on the exact event
+id. Terminal outcome reached `.settled`. Passed in under 1.5s.
+
+Falsified three ways, each restored afterward: routing the write to a dead
+address (`ws://127.0.0.1:1`) timed out with the expected message, since the
+echo can never arrive if the write never reaches the relay; inverting the
+acceptance-visibility assertion failed with the real captured value
+(`Optional(true)` vs. the deliberately wrong `Optional(false)`) rather than
+passing regardless; inverting the echo/dedup assertion failed showing the
+real `sources` array containing the relay URL. All three prove the scenario's
+assertions are live and would catch a real regression in any of these three
+independent ways, not just the one that happened to get exercised.
+
+No API finding this time — `WriteIntent`, `Receipt`/`ReceiptStatus`, and the
+local-acceptance-then-echo behavior all worked exactly as documented, with no
+app-side polling or retry required anywhere in the scenario.
 
 Two facts about the starting position, established by survey:
 
@@ -321,6 +387,8 @@ relay".
 
 ## Related
 
+- `apps/Canary/CanaryScenarios/README.md` — the `swift test` entry point,
+  spelled out command by command, including both prerequisites.
 - `docs/known-gaps.md` — unproven scenarios and unexplained failures stay
   visible there until resolved.
 - `skills/nmp-dev/references/testing/` — the three-layer testing model the

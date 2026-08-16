@@ -3,12 +3,21 @@
 # xcodegen-pbxproj-churn: xcodegen churns pbxproj UUIDs on every regen).
 #
 # Regenerate with: (cd apps/Canary && xcodegen generate)
+#
+# The real-relay scenario suite (docs/internals/canary.md's C1-C18) does
+# NOT live here. It's `apps/Canary/CanaryScenarios`, a standalone SwiftPM
+# package run with plain `swift test` -- no xcodegen, no xcodebuild, no
+# simulator. This project spec is the iOS app only: does it compile,
+# does it feel like an ordinary app someone would write. `RelayLabKit`
+# (docs/internals/canary.md "Where the controller lives") is consumed
+# from CanaryScenarios, not from here -- `Process`/child-process spawning
+# does not exist on the iOS SDK at all, so it could never link into an
+# iOS target anyway.
 name: Canary
 options:
   bundleIdPrefix: com.nmp.canary
   deploymentTarget:
     iOS: "17.0"
-    macOS: "13.0"
 settings:
   base:
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
@@ -20,15 +29,6 @@ settings:
 packages:
   NMP:
     path: ../../Packages/NMP
-  # The relay-lab controller (docs/internals/canary.md "Where the
-  # controller lives"): one implementation, two consumers -- the CLI
-  # targets it ships (a developer runs `swift run relay-lab-lifecycle
-  # <strfry-binary>` directly from RelayLabKit/) and CanaryRelayLabTests
-  # below. `Process`/child-process spawning does not exist on iOS, so this
-  # can only be consumed from a macOS target -- never linked into the
-  # iOS `Canary`/`CanaryTests` targets.
-  RelayLabKit:
-    path: RelayLabKit
 targets:
   Canary:
     type: application
@@ -65,28 +65,3 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nmp.canary.tests
-  CanaryRelayLabTests:
-    # Real-relay scenarios (docs/internals/canary.md's C1-C18) against a
-    # real strfry child process, driving the exact same public `NMP`
-    # Swift API the app itself uses. A macOS target, not iOS: RelayLabKit
-    # spawns the relay via `Foundation.Process`, which does not exist on
-    # the iOS SDK at all (device or simulator) -- this is a platform-
-    # sandbox fact, not an NMP one. `NMP`'s own Package.swift already
-    # supports macOS(.v13), so this exercises the identical NMP source,
-    # just built for the host platform instead of the simulator.
-    type: bundle.unit-test
-    platform: macOS
-    deploymentTarget: "13.0"
-    sources:
-      - path: Tests/CanaryRelayLabTests
-    dependencies:
-      - package: NMP
-        product: NMP
-      - package: RelayLabKit
-        product: RelayLabKit
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.nmp.canary.relaylabtests
-        CODE_SIGN_STYLE: Automatic
-        CODE_SIGNING_REQUIRED: "NO"
-        CODE_SIGNING_ALLOWED: "NO"

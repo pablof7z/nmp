@@ -1,7 +1,10 @@
 // C1 (docs/internals/canary.md "Scenario status"): cold start and live
 // feed, against a real strfry child process launched by RelayLabKit.
 //
-// This target is macOS, not iOS -- RelayLabKit spawns the relay via
+// Run with `swift test` from apps/Canary/CanaryScenarios -- no xcodegen,
+// no xcodebuild, no simulator; see that package's README.md for the two
+// one-time prerequisites (the NMP xcframework, strfry). This package is
+// macOS-only, not iOS -- RelayLabKit spawns the relay via
 // `Foundation.Process`, which the iOS SDK does not expose at all (device
 // or simulator). It drives the exact same public `NMP` Swift module the
 // iOS `Canary` app links (`NMP`'s own Package.swift already declares
