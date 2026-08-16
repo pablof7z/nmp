@@ -796,18 +796,10 @@ impl EngineCore {
                 // names them. Fresh-generation teardown above retires that
                 // state before this replay is built.
                 if !same_wire_generation {
-                    self.active_nip77_live
-                        .retain(|plan_sub_id, _| plan_sub_id.0 != session.relay);
-                    let stale_handoffs: Vec<_> = self
-                        .pending_neg_handoffs
-                        .iter()
-                        .filter_map(|(sub_id, handoff)| {
-                            (handoff.probed.url() == &session.relay).then_some(sub_id.clone())
-                        })
-                        .collect();
-                    for sub_id in stale_handoffs {
-                        self.take_pending_neg_handoff(&sub_id);
-                    }
+                    self.nip77.drop_live_for_relay(&session.relay);
+                    self.nip77
+                        .handoffs
+                        .take_where(|_, handoff| handoff.probed.url() == &session.relay);
                 }
 
                 let mut plain_reqs = Vec::new();
@@ -1063,45 +1055,32 @@ impl EngineCore {
             // session's disconnect must not kill a reconciliation still
             // healthy on the URL's live Public socket.
             if session.access == AccessContext::Public {
-                self.active_nip77_live
-                    .retain(|plan_sub_id, _| plan_sub_id.0 != session.relay);
+                self.nip77.drop_live_for_relay(&session.relay);
                 // Any reconciliation open against this relay dies with the
                 // connection -- there is nothing left to `NEG-CLOSE` (the
                 // socket is already gone), so this is a silent drop, not a
                 // fallback REQ: the relay's own `Supported` verdict stays
                 // cached, and the NEXT `recompile()`/reconnect naturally
                 // re-opens whatever demand still wants this shape.
-                let stale_neg: Vec<_> = self
-                    .neg_sessions
-                    .iter()
-                    .filter(|(_, neg)| neg.relay == session.relay)
-                    .map(|(sub_id, _)| sub_id.clone())
-                    .collect();
-                for sub_id in stale_neg {
-                    self.take_neg_session(&sub_id);
-                }
-                let stale_handoffs: Vec<_> = self
-                    .pending_neg_handoffs
-                    .keys()
-                    .filter(|sub_id| sub_id.0 == session.relay)
-                    .cloned()
-                    .collect();
-                for sub_id in stale_handoffs {
-                    self.take_pending_neg_handoff(&sub_id);
-                }
+                self.nip77
+                    .sessions
+                    .take_where(|_, neg| neg.relay == session.relay);
+                self.nip77
+                    .handoffs
+                    .take_where(|sub_id, _| sub_id.0 == session.relay);
 
                 // One-shot repair REQs are reducer-owned even though the
                 // router never planned them. Remove their state when the
                 // socket generation dies. The socket is already gone, so the
                 // CLOSE is bookkeeping rather than a wire expectation.
                 let stale_temporary: Vec<SubId> = self
-                    .pending_backfills
-                    .keys()
-                    .filter(|sub_id| sub_id.0 == session.relay)
-                    .cloned()
+                    .nip77
+                    .backfills
+                    .take_where(|sub_id, _| sub_id.0 == session.relay)
+                    .into_iter()
+                    .map(|(sub_id, _)| sub_id)
                     .collect();
                 for sub_id in &stale_temporary {
-                    self.take_pending_backfill(sub_id);
                     self.abandon_sub(sub_id);
                 }
                 if !stale_temporary.is_empty() {
@@ -1774,7 +1753,7 @@ impl EngineCore {
                 // absence before NEG (and any missing-id backfill) finished.
                 let opens_neg = resolved
                     .as_ref()
-                    .is_some_and(|sub_id| self.pending_neg_handoffs.contains_key(sub_id));
+                    .is_some_and(|sub_id| self.nip77.handoffs.contains(sub_id));
                 let committed_coverage = completed.and_then(|completed| {
                     self.persist_attributed_completion(completed, &session.relay, &mut effects)
                 });
@@ -1860,8 +1839,7 @@ impl EngineCore {
                                 prior_live_sub_id,
                             } => {
                                 self.abandon_sub(&live_sub_id);
-                                self.active_nip77_live
-                                    .insert(plan_sub_id, live_sub_id.clone());
+                                self.nip77.set_live(plan_sub_id, live_sub_id.clone());
                                 if let Some(prior) = prior_live_sub_id {
                                     if prior != live_sub_id {
                                         self.abandon_sub(&prior);

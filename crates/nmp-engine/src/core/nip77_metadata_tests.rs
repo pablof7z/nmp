@@ -85,7 +85,10 @@ impl Fixture {
             self.incumbent.filter.clone(),
             &mut Vec::new(),
         );
-        self.core.pending_neg_handoffs_by_plan[&self.plan_sub_id]
+        self.core
+            .nip77
+            .handoffs
+            .children_of(&self.plan_sub_id)
             .iter()
             .next()
             .cloned()
@@ -188,7 +191,11 @@ fn zero_wire_metadata_attach_extends_the_open_neg_generation() {
     let handoff = fixture.core.take_pending_neg_handoff(&candidate).unwrap();
     fixture.core.abandon_sub(&candidate);
     fixture.core.open_neg_session(handoff, &mut Vec::new());
-    let neg = fixture.core.neg_sessions_by_plan[&fixture.plan_sub_id]
+    let neg = fixture
+        .core
+        .nip77
+        .sessions
+        .children_of(&fixture.plan_sub_id)
         .iter()
         .next()
         .cloned()
@@ -205,7 +212,11 @@ fn zero_wire_metadata_attach_extends_the_retained_neg_owner_during_missing_id_ba
     let handoff = fixture.core.take_pending_neg_handoff(&candidate).unwrap();
     fixture.core.abandon_sub(&candidate);
     fixture.core.open_neg_session(handoff, &mut Vec::new());
-    let neg = fixture.core.neg_sessions_by_plan[&fixture.plan_sub_id]
+    let neg = fixture
+        .core
+        .nip77
+        .sessions
+        .children_of(&fixture.plan_sub_id)
         .iter()
         .next()
         .cloned()
@@ -231,7 +242,11 @@ fn zero_wire_metadata_attach_extends_candidate_and_backlog_generations() {
     fixture
         .core
         .handoff_fallback_to_req(handoff, &mut Vec::new());
-    let backlog = fixture.core.pending_backfills_by_plan[&fixture.plan_sub_id]
+    let backlog = fixture
+        .core
+        .nip77
+        .backfills
+        .children_of(&fixture.plan_sub_id)
         .iter()
         .next()
         .cloned()
@@ -272,21 +287,21 @@ fn exact_public_disconnect_retires_the_active_nip77_child_and_every_reverse_owne
         .core
         .activate_live_and_open_neg(handoff, &mut Vec::new());
     assert_eq!(
-        fixture.core.active_nip77_live.get(&fixture.plan_sub_id),
+        fixture.core.nip77.live_for_plan(&fixture.plan_sub_id),
         Some(&candidate)
     );
-    assert!(!fixture.core.neg_sessions_by_plan.is_empty());
+    assert!(!fixture.core.nip77.sessions.is_empty());
 
     fixture
         .core
         .on_relay_disconnected(handle, fixture.session.clone(), DisconnectReason::Error);
-    assert!(fixture.core.active_nip77_live.is_empty());
-    assert!(fixture.core.pending_neg_handoffs.is_empty());
-    assert!(fixture.core.pending_neg_handoffs_by_plan.is_empty());
-    assert!(fixture.core.neg_sessions.is_empty());
-    assert!(fixture.core.neg_sessions_by_plan.is_empty());
-    assert!(fixture.core.pending_backfills.is_empty());
-    assert!(fixture.core.pending_backfills_by_plan.is_empty());
+    assert!(fixture.core.nip77.live_is_empty());
+    assert!(fixture.core.nip77.handoffs.is_empty());
+    assert!(fixture.core.nip77.handoffs.is_empty());
+    assert!(fixture.core.nip77.sessions.is_empty());
+    assert!(fixture.core.nip77.sessions.is_empty());
+    assert!(fixture.core.nip77.backfills.is_empty());
+    assert!(fixture.core.nip77.backfills.is_empty());
     assert_eq!(fixture.core.attempts.counts().attempts, 0);
     assert_eq!(fixture.core.attempts.counts().session_keys, 0);
     assert_eq!(fixture.core.attempts.counts().retry_jobs, 0);
