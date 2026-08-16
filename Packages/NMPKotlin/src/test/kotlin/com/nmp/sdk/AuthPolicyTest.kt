@@ -170,6 +170,7 @@ class AuthPolicyTest {
                         relay = "wss://auth.example",
                         access = FfiAccessContext.Nip42(publicKey),
                         transportGeneration = 17uL,
+                        transportSlot = 5u,
                         epochSequence = 23uL,
                         challengeDescriptor = "blake3:challenge",
                         phase = ffiPhase,
@@ -182,6 +183,11 @@ class AuthPolicyTest {
             assertEquals("wss://auth.example", projected.relay)
             assertEquals(NMPAccessContext.Nip42(publicKey), projected.access)
             assertEquals(17uL, projected.transportGeneration)
+            // The slot half of the exact-socket identity. Present in Rust and
+            // in the FFI record, and silently dropped by this projection until
+            // it was carried through -- generation alone names a socket
+            // lifetime, not which socket.
+            assertEquals(5u, projected.transportSlot)
             assertEquals(23uL, projected.epochSequence)
             assertEquals("blake3:challenge", projected.challengeDescriptor)
             assertEquals(expected.getValue(ffiPhase), projected.phase)

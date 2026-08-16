@@ -419,8 +419,8 @@ sealed class RefuseReason {
     companion object {
         internal fun from(ffi: FfiRefuseReason): RefuseReason =
             when (ffi) {
-                is FfiRefuseReason.AlreadyExpired -> AlreadyExpired
-                is FfiRefuseReason.Tombstoned -> Tombstoned
+                FfiRefuseReason.ALREADY_EXPIRED -> AlreadyExpired
+                FfiRefuseReason.TOMBSTONED -> Tombstoned
             }
     }
 }

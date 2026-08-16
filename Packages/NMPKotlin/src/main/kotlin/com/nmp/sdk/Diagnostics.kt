@@ -64,6 +64,17 @@ data class RelayDiagnostics(
      * row. */
     val access: NMPAccessContext,
     val wireSubCount: UInt,
+    /** This relay's own advertised subscription ceiling, when it publishes
+     * one, and how many of our subscriptions it has refused. Capacity
+     * pressure an application can act on: a relay refusing subscriptions is
+     * a different problem from one that is merely slow. */
+    val subscriptionBudget: UInt?,
+    val subscriptionsRefused: UInt,
+    /** This relay's advertised subscription-id length limit, and whether our
+     * ids exceed it. When true, our subscriptions are being rejected for a
+     * reason no amount of retrying will fix. */
+    val subidLengthLimit: UInt?,
+    val subidLengthRejectsOurIds: Boolean,
     val authorsServed: UInt,
     val byLane: List<LaneCount>,
     /** The EXACT wire JSON of every filter currently sent to this relay. */
@@ -84,6 +95,10 @@ data class RelayDiagnostics(
                 relay = ffi.relay,
                 access = NMPAccessContext.from(ffi.access),
                 wireSubCount = ffi.wireSubCount,
+                subscriptionBudget = ffi.subscriptionBudget,
+                subscriptionsRefused = ffi.subscriptionsRefused,
+                subidLengthLimit = ffi.subidLengthLimit,
+                subidLengthRejectsOurIds = ffi.subidLengthRejectsOurIds,
                 authorsServed = ffi.authorsServed,
                 byLane = ffi.byLane.map { LaneCount.from(it) },
                 filters = ffi.filters,
@@ -110,6 +125,10 @@ data class AuthDiagnostics(
     val relay: String,
     val access: NMPAccessContext,
     val transportGeneration: ULong,
+    /** Which physical pool slot this session occupies. Paired with
+     * [transportGeneration] it names the exact socket a diagnostics row
+     * describes, rather than merely the relay. */
+    val transportSlot: UInt,
     val epochSequence: ULong?,
     val challengeDescriptor: String?,
     val phase: AuthPhase,
@@ -123,6 +142,7 @@ data class AuthDiagnostics(
                 relay = ffi.relay,
                 access = NMPAccessContext.from(ffi.access),
                 transportGeneration = ffi.transportGeneration,
+                transportSlot = ffi.transportSlot,
                 epochSequence = ffi.epochSequence,
                 challengeDescriptor = ffi.challengeDescriptor,
                 phase = AuthPhase.from(ffi.phase),
@@ -225,6 +245,19 @@ data class DiagnosticsSnapshot(
     val authSessions: List<AuthDiagnostics> = emptyList(),
     val uncoveredAuthorCount: UInt = 0u,
     val droppedMergeRules: List<String> = emptyList(),
+    /** Session dials the transport pool refused because the configured
+     * relay ceiling was already reached. Always `0` when no cap is set. */
+    val sessionsRejectedOverCap: ULong = 0uL,
+    /** Relay sessions refused outright because the relay advertised ZERO
+     * concurrent subscriptions. Deliberately separate from
+     * [sessionsRejectedOverCap]: one says the plan was too wide for the
+     * operator's ceiling, the other says this relay will hold nothing
+     * open. An app acts on them differently. */
+    val sessionsRefusedBySubscriptionBudget: ULong = 0uL,
+    /** Set when the local durable store is degraded. Reads may be serving
+     * stale data and writes may not be durable -- the one condition an app
+     * cannot infer from any other field here. */
+    val storeDegraded: String? = null,
     val transportDegraded: String? = null,
     /** Every durable write obligation that cannot progress, bounded to
      * `stalledWriteTotals.detailLimit` rows in a deterministic display
@@ -240,6 +273,9 @@ data class DiagnosticsSnapshot(
                 authSessions = ffi.authSessions.map { AuthDiagnostics.from(it) },
                 uncoveredAuthorCount = ffi.uncoveredAuthorCount,
                 droppedMergeRules = ffi.droppedMergeRules,
+                sessionsRejectedOverCap = ffi.sessionsRejectedOverCap,
+                sessionsRefusedBySubscriptionBudget = ffi.sessionsRefusedBySubscriptionBudget,
+                storeDegraded = ffi.storeDegraded,
                 transportDegraded = ffi.transportDegraded,
                 stalledWrites = ffi.stalledWrites.map { StalledWrite.from(it) },
                 stalledWriteTotals = StalledWriteTotals.from(ffi.stalledWriteTotals),
