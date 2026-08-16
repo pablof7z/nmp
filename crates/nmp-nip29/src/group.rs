@@ -1,4 +1,4 @@
-//! [`Group`] -- one group id within a [`RelayScope`](super::RelayScope)
+//! [`Group`] -- one group id within a [`RelayScope`](crate::RelayScope)
 //! (#1033).
 //!
 //! A group is an IDENTITY, not a subscription: the hosts its scope named plus
@@ -29,7 +29,7 @@
 //! group-shaped receipt and no group-shaped retry, and no surface hands an
 //! unpublished intent back to an app. The returned [`ReceiptStream`] is the
 //! ordinary one every other write returns, store-issued
-//! [`ReceiptId`](crate::ReceiptId) included (#1244).
+//! [`ReceiptId`](nmp::ReceiptId) included (#1244).
 //!
 //! An app that needs a signed event without publishing it asks the engine
 //! for exactly that: [`Engine::sign_event`] creates no write intent, pending
@@ -42,16 +42,13 @@ use std::collections::BTreeSet;
 use nmp_grammar::{EventBuilder, Filter, Identity, WriteIntent, WritePayload, WriteRouting};
 use nostr::{Event, EventId, PublicKey, RelayUrl};
 
-use super::read::{self, GroupReadError};
-use super::records::{GroupObservation, GroupObserveError};
-use crate::engine::Engine;
-use crate::error::EngineError;
-use crate::LiveQuery;
-use nmp_nip29::GroupContextError;
-use nmp_nip29::GroupMetadataEdit;
-use nmp_nip29::GroupRecord;
-use nmp_nip29::{GroupUser, GroupUsersError};
-use nmp_runtime::ReceiptStream;
+use crate::read::{self, GroupReadError};
+use crate::record_observation::{GroupObservation, GroupObserveError};
+use crate::GroupContextError;
+use crate::GroupMetadataEdit;
+use crate::GroupRecord;
+use crate::{GroupUser, GroupUsersError};
+use nmp::{Engine, EngineError, LiveQuery, ReceiptStream};
 
 /// Why a group publication never reached the publish door, or what the door
 /// said when it did.
@@ -126,7 +123,7 @@ impl Group {
 
     /// One complete read branch per host, in canonical host order. Split out
     /// for the same reason as
-    /// [`RelayScope::records_branches`](super::RelayScope::records_branches):
+    /// [`RelayScope::records_branches`](crate::RelayScope::records_branches):
     /// the per-branch scoping property must be assertable for a MULTI-host
     /// group independently of how branches are aggregated.
     pub(crate) fn read_branches(
@@ -135,7 +132,7 @@ impl Group {
     ) -> Result<Vec<nmp_grammar::Demand>, GroupContextError> {
         self.hosts
             .iter()
-            .map(|host| nmp_nip29::group_demand_at(host, &self.id, selection.clone()))
+            .map(|host| crate::group_demand_at(host, &self.id, selection.clone()))
             .collect()
     }
 
@@ -170,13 +167,13 @@ impl Group {
             return Err(GroupObserveError::NoRecordSelected);
         }
         let this_id = nmp_grammar::Binding::Literal(BTreeSet::from([self.id.clone()]));
-        let predicate: super::GroupPredicate = super::any_of(this_id).into();
+        let predicate: crate::GroupPredicate = crate::any_of(this_id).into();
         let branches = self
             .hosts
             .iter()
-            .map(|host| nmp_nip29::group_records_at(host, &records, predicate.lower_at(host), None))
+            .map(|host| crate::group_records_at(host, &records, predicate.lower_at(host), None))
             .collect();
-        super::records::observe(
+        crate::record_observation::observe(
             engine,
             self.hosts.clone(),
             BTreeSet::from([self.id.clone()]),
@@ -187,7 +184,7 @@ impl Group {
     /// Ask whether an already-signed event belongs to this group, without
     /// building a write out of it.
     pub fn validate_context(&self, event: &Event) -> Result<(), GroupContextError> {
-        nmp_nip29::validate_context(&BTreeSet::from([self.id.clone()]), event)
+        crate::validate_context(&BTreeSet::from([self.id.clone()]), event)
     }
 
     /// Publish an unsigned draft into the group, as `author`. The group's
@@ -206,7 +203,7 @@ impl Group {
     /// (#878). Recurrent identity remains entirely valid on the READ side.
     ///
     /// The returned [`ReceiptStream`] is the ordinary one every other write
-    /// returns, store-issued [`ReceiptId`](crate::ReceiptId) included
+    /// returns, store-issued [`ReceiptId`](nmp::ReceiptId) included
     /// (#1244).
     ///
     /// Kind-blind: no kind is privileged, refused, or read.
@@ -216,7 +213,7 @@ impl Group {
         author: PublicKey,
         builder: EventBuilder,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        let contextualized = nmp_nip29::contextualize(&BTreeSet::from([self.id.clone()]), builder)?;
+        let contextualized = crate::contextualize(&BTreeSet::from([self.id.clone()]), builder)?;
         let intent = self.mint(
             WritePayload::Event(contextualized),
             Identity::Explicit(author),
@@ -233,7 +230,7 @@ impl Group {
         author: PublicKey,
         invite_code: Option<&str>,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        self.publish(engine, author, nmp_nip29::join_request(invite_code))
+        self.publish(engine, author, crate::join_request(invite_code))
     }
 
     /// kind:9022 -- leave.
@@ -242,7 +239,7 @@ impl Group {
         engine: &Engine,
         author: PublicKey,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        self.publish(engine, author, nmp_nip29::leave_request())
+        self.publish(engine, author, crate::leave_request())
     }
 
     /// kind:9000 -- add several members in one event, optionally with a role
@@ -253,7 +250,7 @@ impl Group {
         author: PublicKey,
         users: impl IntoIterator<Item = GroupUser>,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        let builder = nmp_nip29::add_users(users).map_err(GroupPublishError::Users)?;
+        let builder = crate::add_users(users).map_err(GroupPublishError::Users)?;
         self.publish(engine, author, builder)
     }
 
@@ -264,7 +261,7 @@ impl Group {
         author: PublicKey,
         pubkeys: impl IntoIterator<Item = PublicKey>,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        let builder = nmp_nip29::remove_users(pubkeys).map_err(GroupPublishError::Users)?;
+        let builder = crate::remove_users(pubkeys).map_err(GroupPublishError::Users)?;
         self.publish(engine, author, builder)
     }
 
@@ -282,7 +279,7 @@ impl Group {
         author: PublicKey,
         edit: GroupMetadataEdit,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        self.publish(engine, author, nmp_nip29::edit_metadata(edit))
+        self.publish(engine, author, crate::edit_metadata(edit))
     }
 
     /// kind:9005 -- delete one group-hosted event.
@@ -292,7 +289,7 @@ impl Group {
         author: PublicKey,
         event_id: EventId,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        self.publish(engine, author, nmp_nip29::delete_event(event_id))
+        self.publish(engine, author, crate::delete_event(event_id))
     }
 
     /// kind:9007 -- create the group at its hosts, optionally as a SUBGROUP
@@ -308,14 +305,14 @@ impl Group {
     /// subgroups reads `parent` on the kind:9007 create -- validating there
     /// that the parent exists and that the signer administers it -- while
     /// ignoring the row entirely on a kind:9002.
-    /// [`nmp_nip29::create_group`] records the probe.
+    /// [`crate::create_group`] records the probe.
     pub fn create_group(
         &self,
         engine: &Engine,
         author: PublicKey,
         parent: Option<&str>,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        self.publish(engine, author, nmp_nip29::create_group(parent))
+        self.publish(engine, author, crate::create_group(parent))
     }
 
     /// kind:9008 -- delete the group from its hosts.
@@ -324,7 +321,7 @@ impl Group {
         engine: &Engine,
         author: PublicKey,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        self.publish(engine, author, nmp_nip29::delete_group())
+        self.publish(engine, author, crate::delete_group())
     }
 
     /// kind:9009 -- mint an invite code redeemable by
@@ -335,7 +332,7 @@ impl Group {
         author: PublicKey,
         code: &str,
     ) -> Result<ReceiptStream, GroupPublishError> {
-        self.publish(engine, author, nmp_nip29::create_invite(code))
+        self.publish(engine, author, crate::create_invite(code))
     }
 
     /// The one shape a group write has. `Explicit(every host)` is minted
@@ -361,7 +358,7 @@ impl Group {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nip29;
+    use crate::on;
     use nostr::{Keys, Kind, Tag};
 
     const GROUP: &str = "photographers";
@@ -371,7 +368,7 @@ mod tests {
     }
 
     fn engine() -> Engine {
-        Engine::new(crate::config::EngineConfig::default()).expect("a temporary Redb engine builds")
+        Engine::new(nmp::EngineConfig::default()).expect("a temporary Redb engine builds")
     }
 
     fn author() -> PublicKey {
@@ -379,7 +376,7 @@ mod tests {
     }
 
     fn group(hosts: impl IntoIterator<Item = RelayUrl>) -> Group {
-        nip29::on(hosts).expect("a nonempty scope").group(GROUP)
+        on(hosts).expect("a nonempty scope").group(GROUP)
     }
 
     fn routed(intent: &WriteIntent) -> Vec<RelayUrl> {

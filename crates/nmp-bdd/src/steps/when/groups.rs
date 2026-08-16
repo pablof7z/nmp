@@ -1,7 +1,7 @@
 //! `When` — the NIP-29 `Group` door.
 //!
 //! Every write below goes through the REAL product door -- INHERENT methods
-//! on `nmp::nip29::Group` -- and every read through `group.read(filter)` (one
+//! on `nmp_nip29::Group` -- and every read through `group.read(filter)` (one
 //! ordinary `LiveQuery`) and the ordinary subscription call. The harness
 //! reimplements neither, because both are the thing under test.
 //!
@@ -123,7 +123,7 @@ async fn add_user_with_role(w: &mut NmpWorld, pubkey: String, role: Option<Strin
     let pubkey = w.member_pubkey(&pubkey);
     let author = w.me_pubkey();
     w.group_operation(None, GroupCall::default(), move |group, engine| {
-        group.add_users(engine, author, [nmp::nip29::GroupUser { pubkey, role }])
+        group.add_users(engine, author, [nmp_nip29::GroupUser { pubkey, role }])
     })
     .await;
 }
@@ -150,10 +150,10 @@ async fn edit_metadata_name_only(w: &mut NmpWorld, name: String) {
 
 async fn edit_metadata(w: &mut NmpWorld, name: Option<String>, about: Option<String>) {
     let author = w.me_pubkey();
-    let edit = nmp::nip29::GroupMetadataEdit {
+    let edit = nmp_nip29::GroupMetadataEdit {
         name,
         about,
-        ..nmp::nip29::GroupMetadataEdit::default()
+        ..nmp_nip29::GroupMetadataEdit::default()
     };
     w.group_operation(None, GroupCall::default(), move |group, engine| {
         group.edit_metadata(engine, author, edit.clone())

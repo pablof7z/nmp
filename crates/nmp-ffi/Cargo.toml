@@ -32,7 +32,9 @@ nip02 = ["dep:nmp-nip02", "nip65"]
 nip18 = ["dep:nmp-nip18"]
 nip22 = ["dep:nmp-nip22", "nip65"]
 nip25 = ["dep:nmp-nip25"]
-nip29 = ["nmp/nip29", "nip65"]
+# #1707 step 4: nip29 no longer forwards into `nmp/nip29` -- `nmp-nip29`
+# owns its own door now, same shape as `nip02` above.
+nip29 = ["dep:nmp-nip29", "nip65"]
 nip65 = ["nmp/nip65"]
 nipc7 = ["dep:nmp-nipc7"]
 asset = ["dep:nmp-asset"]
@@ -56,12 +58,12 @@ path = "uniffi-bindgen.rs"
 [dependencies]
 nostr.workspace = true
 # `nmp-ffi` is an assembly over every crate a native app needs, not a
-# consumer of one facade (#1707): engine/query/receipt/signer nouns and every
-# family `nmp` itself still owns (NIP-29's group door, NIP-65, ...) come
-# through the canonical `nmp` facade below, gated by the matching feature.
-# But `nmp` deliberately does not and must not re-export a capability's own
-# implementation or meaning -- that lives only in the capability's own crate
-# under #1707 -- so this crate binds `nmp-nip02`/`nmp-media`/every other
+# consumer of one facade (#1707): engine/query/receipt/signer nouns and
+# NIP-65 (the one family `nmp` itself still owns) come through the canonical
+# `nmp` facade below, gated by the matching feature. But `nmp` deliberately
+# does not and must not re-export a capability's own implementation or
+# meaning -- that lives only in the capability's own crate under #1707 --
+# so this crate binds `nmp-nip02`/`nmp-nip29`/`nmp-media`/every other
 # capability crate directly, the same edge a direct-Rust app already uses to
 # reach them. Neither shape is an exception to the other; a Swift/Kotlin app
 # reaches a capability exactly the way a direct-Rust app does, just through
@@ -74,6 +76,9 @@ nmp = { workspace = true }
 # #1707: NIP-02's own crate, bound directly for the reason in the paragraph
 # above -- `nmp` does not re-export `nmp-nip02`'s implementation.
 nmp-nip02 = { workspace = true, optional = true }
+# #1707 step 4: same reason, now that NIP-29's Group/group-list-write door
+# left `nmp` too.
+nmp-nip29 = { workspace = true, optional = true }
 # #1707: same reason, for the media composition seam.
 nmp-media = { workspace = true, optional = true }
 # #1707: these eight used to be pure re-export doors in `nmp` (no engine

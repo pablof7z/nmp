@@ -3,12 +3,13 @@ use std::fs;
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
-use nmp::nip29::GroupAvailability;
 use nmp::{
-    nip29, AccessContext, Binding, CacheMode, Demand, Derived, DiagnosticsSnapshot, Engine,
-    EngineConfig, EventBuilder, Filter, IdentityField, Kind, PublicKey, RelayState, RelayUrl,
-    Selector, SourceAuthority, SourceStatus, Tag, Window, WriteFact,
+    AccessContext, Binding, CacheMode, Demand, Derived, DiagnosticsSnapshot, Engine, EngineConfig,
+    EventBuilder, Filter, IdentityField, Kind, PublicKey, RelayState, RelayUrl, Selector,
+    SourceAuthority, SourceStatus, Tag, Window, WriteFact,
 };
+use nmp_nip29 as nip29;
+use nmp_nip29::GroupAvailability;
 
 use crate::args::{Args, Mode};
 use crate::observe::{wait_until, Observed};

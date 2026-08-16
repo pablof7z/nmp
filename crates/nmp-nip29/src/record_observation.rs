@@ -56,10 +56,10 @@
 //! is therefore a ceiling on HOSTS and never on groups. The pressure a large
 //! watch list actually creates is on the `#d` value set inside one filter,
 //! which a relay may refuse or silently truncate; see
-//! [`GroupIds`](super::GroupIds), which owns that caveat for every id source
+//! [`GroupIds`](crate::GroupIds), which owns that caveat for every id source
 //! rather than for one leaf.
 //!
-//! [`all`](super::all) has no `#d` set at all, so nothing bounds it from
+//! [`all`](crate::all) has no `#d` set at all, so nothing bounds it from
 //! inside the filter. Its bound is the observation's own per-host `limit`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -67,19 +67,17 @@ use std::time::Duration;
 
 use nostr::{Event, EventId, RelayUrl};
 
-use nmp_nip29::{
+use crate::{
     group_metadata_at, join_key_of, listed_record_at, GroupMetadata, GroupRecord, ListedRecord,
     ListedSubject,
 };
 
-use crate::engine::Engine;
-use crate::error::EngineError;
-use crate::subscription::AsyncSubscription;
-use crate::{
-    AcquisitionEvidence, ConcurrentNext, ObservationCancel, RowDelta, ShortfallFact, SourceStatus,
+use nmp::{
+    AcquisitionEvidence, AsyncSubscription, ConcurrentNext, Engine, EngineError, ObservationCancel,
+    RowDelta, ShortfallFact, SourceStatus,
 };
 
-use super::read::GroupReadError;
+use crate::read::GroupReadError;
 
 /// Why a group-records observation never opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,7 +254,7 @@ impl GroupObservation {
     ///
     /// A scope-wide observation delivers one [`GroupSnapshot`] per group the
     /// predicate currently matches, in group-id order. A group-scoped one
-    /// (via [`Group::observe`](super::Group::observe)) delivers exactly one,
+    /// (via [`Group::observe`](crate::Group::observe)) delivers exactly one,
     /// for the id it was narrowed to, from the first delivery onward --
     /// including before any record has arrived, so an app has an
     /// [`GroupAvailability::Acquiring`] snapshot to render immediately.
@@ -340,7 +338,7 @@ pub(super) fn observe(
     seed_ids: BTreeSet<String>,
     branches: Vec<nmp_grammar::Demand>,
 ) -> Result<GroupObservation, GroupObserveError> {
-    let query = super::read::one_live_query(branches)?;
+    let query = crate::read::one_live_query(branches)?;
     let subscription = engine.observe_async(query, None)?;
     Ok(GroupObservation {
         subscription,

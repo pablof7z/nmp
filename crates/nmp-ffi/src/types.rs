@@ -483,7 +483,7 @@ impl std::fmt::Display for FfiSignEventFailure {
 impl std::error::Error for FfiSignEventFailure {}
 
 /// One tolerantly parsed NIP-51 Simple-groups item exposed through NMP's
-/// NIP-29 product capability (#863, `nmp::nip29::SimpleGroupEntry` mirror) --
+/// NIP-29 product capability (#863, `nmp_nip29::SimpleGroupEntry` mirror) --
 /// group id, host relay, optional name.
 /// `host_relay` is a canonically SPELLED observed string; it is not a
 /// routing permission and no NIP-29 constructor accepts it implicitly.
@@ -496,7 +496,7 @@ pub struct FfiSimpleGroupEntry {
 }
 
 /// NIP-51's tolerantly parsed Simple groups list, exposed through NMP's NIP-29
-/// product capability (#863, `nmp::nip29::SimpleGroupsList` mirror), with every
+/// product capability (#863, `nmp_nip29::SimpleGroupsList` mirror), with every
 /// evidence field preserved across the FFI boundary. OBSERVATIONAL DATA ONLY: it may be
 /// produced from a caller-constructed [`FfiRow`] of any kind, and it asserts
 /// no signature, canonical-store, provenance, routing, or mutation

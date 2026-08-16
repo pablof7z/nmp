@@ -214,14 +214,17 @@ pub fn build_comment_intent(
 }
 
 /// Names every protocol/content family #1239 once retrofitted onto the
-/// facade and #1707 later moved back out to its own crate, plus NIP-29
-/// (still a facade feature -- its own #1707 reversal has not landed).
+/// facade and #1707 later moved back out to its own crate.
 ///
 /// This is deliberately one function rather than several: every family here
 /// is usable in combination, not just individually nameable. `nmp-nip18`/
 /// `nmp-nipc7`/`nmp-nip25`/`nmp-content`/`nmp-asset`/`nmp-blossom` are each
 /// an explicit dependency line (#1707: none of these needed engine coupling,
 /// so nothing forced them into `nmp` as re-export doors in the first place).
+/// `nmp-nip29` is the same shape for a different reason: its Group/
+/// group-list-write door DID need `nmp`'s engine surface, but that need
+/// runs `nmp-nip29 -> nmp`, an ordinary capability-composes-the-engine
+/// edge, not the reverse `nmp -> nmp-nip29` a facade feature would be.
 ///
 /// Every door here composes and returns rather than merely being imported, so
 /// removing any one import breaks this crate instead of leaving a stale
@@ -240,11 +243,10 @@ pub fn compose_every_retrofitted_family(target: &Event, source: Option<RelayUrl>
     // the retrofit and the family that avoided it are proven the same way.
     let reaction = nmp_nip25::react(target, source, nmp_nip25::Reaction::Like);
     // NIP-51 kind:10009: the demand that reads it and the tolerant codec that
-    // decodes what came back (`nmp::nip29`).
-    let groups_demand: Demand = nmp::nip29::current_account_group_list_demand();
-    let groups: nmp::nip29::SimpleGroupsList =
-        nmp::nip29::parse_simple_groups_list_tolerant(target);
-    let first_group: Option<&nmp::nip29::SimpleGroupEntry> = groups.items.first();
+    // decodes what came back (`nmp_nip29`).
+    let groups_demand: Demand = nmp_nip29::current_account_group_list_demand();
+    let groups: nmp_nip29::SimpleGroupsList = nmp_nip29::parse_simple_groups_list_tolerant(target);
+    let first_group: Option<&nmp_nip29::SimpleGroupEntry> = groups.items.first();
     // Content parsing (`nmp_content`) -- the door mosaico hand-rolled a
     // `find("nostr:")` scanner for, because it could not reach this one.
     let document: nmp_content::ContentDocument =

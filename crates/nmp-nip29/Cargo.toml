@@ -6,9 +6,46 @@ license.workspace = true
 publish.workspace = true
 
 # #1551: NIP-51 defines kind:10009; `nmp-nip29` exposes NMP's observational
-# value and query beside the group vocabulary that consumes it. It remains a
-# pure `nostr` + `nmp-grammar` package: no router, resolver, engine, signer, or
-# write dependency.
+# value and query beside the group vocabulary that consumes it.
+#
+# #1707 reversed #1033: this crate owns ALL of NIP-29's meaning again, not
+# just its engine-free schema/predicate half. `nmp` must not contain a single
+# NIP-29-specific line -- it supplies custody, storage, routing, signing,
+# delivery, recovery and receipts, and nothing about what a group or a
+# kind:10009 saved-groups list means. That makes the `nmp` dependency below
+# the ordinary shape of "a capability crate composes the engine it runs
+# against", the same upward edge #1707 also restored for `nmp-nip02`: a
+# direct-Rust app that wants NIP-29 names two crates (`nmp` + `nmp-nip29`)
+# instead of one, the uniform two-crate cost every capability now pays for
+# direct-Rust reach. `nmp-ffi`/Swift/Kotlin still get NIP-29 for free through
+# the one staticlib.
 [dependencies]
 nostr.workspace = true
+nmp.workspace = true
 nmp-grammar.workspace = true
+# `GroupObservation::next_within` (moved from `nmp` alongside the rest of the
+# records observation) times a bounded wait over the engine's own async
+# runtime handle -- production code, not a dev/test-only need.
+tokio = { version = "1", features = ["time"] }
+# `group_list_writes.rs`'s wire codec for the kind:10009 semantic operation
+# bytes (moved from `nmp` alongside the rest of the write door).
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+# `test-instrumentation`: `group_publication_door.rs` (moved from `nmp`
+# alongside the door it proves) installs a scripted signing capability
+# through `Engine::install_test_signing_capability`.
+# `nip65`: the same file's `engine_reading_lists_from` fixture exercises
+# `WriteRouting::Auto`, which needs the automatic author-outbox coordinator.
+nmp = { workspace = true, features = ["test-instrumentation", "nip65"] }
+# `nip29_group_list_headless.rs` (moved from `nmp` alongside the demand
+# function it proves) drives `nmp-engine`'s reducer directly through its own
+# gated fixture constructor -- a direct dev-dependency edge, the same shape
+# `nmp`'s own headless reducer tests use, rather than routing through `nmp`'s
+# doc-hidden mechanism door.
+nmp-engine = { workspace = true, features = ["unstable-mechanism"] }
+nmp-runtime = { workspace = true, features = ["unstable-mechanism"] }
+nmp-router-testkit.workspace = true
+nmp-store.workspace = true
+nmp-test-support.workspace = true

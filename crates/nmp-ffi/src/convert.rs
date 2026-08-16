@@ -354,32 +354,32 @@ pub enum FfiError {
         reason: String,
     },
     /// #1033 `FfiRelayScope::on` was called with no host at all
-    /// (`nmp::nip29::RelayScopeError::EmptyRelaySet` mirror). A group must
+    /// (`nmp_nip29::RelayScopeError::EmptyRelaySet` mirror). A group must
     /// be hosted somewhere -- there is nothing to read from, nothing to
     /// write to, and no honest evidence to report.
     #[cfg(feature = "nip29")]
     EmptyRelayScope,
-    /// #1033 (`nmp::nip29::GroupContextError::CallerSuppliedContext`
+    /// #1033 (`nmp_nip29::GroupContextError::CallerSuppliedContext`
     /// mirror). An unsigned draft handed to `FfiGroup::publish` already
     /// carried an `h` row -- the group id retained by the scope is the only
     /// source of that row, so a caller's own is refused whether it matches
     /// this group or not.
     #[cfg(feature = "nip29")]
     GroupCallerSuppliedContext,
-    /// #1033 (`nmp::nip29::GroupContextError::CallerSuppliedContextConstraint`
+    /// #1033 (`nmp_nip29::GroupContextError::CallerSuppliedContextConstraint`
     /// mirror). A read selection handed to `FfiGroup::read` already
     /// constrained `#h` -- the retained group id is the sole semantic
     /// source of that row.
     #[cfg(feature = "nip29")]
     GroupCallerSuppliedContextConstraint,
-    /// #1281 (`nmp::nip29::GroupContextError::NoGroupNamed` mirror).
+    /// #1281 (`nmp_nip29::GroupContextError::NoGroupNamed` mirror).
     /// `FfiRelayScope::groups` was called with no group id at all. An event
     /// with no `h` row is not in a group, so there is nothing to
     /// contextualize and no honest route to mint -- the same refusal shape
     /// [`Self::EmptyRelayScope`] makes on the relay axis.
     #[cfg(feature = "nip29")]
     EmptyGroupSet,
-    /// #1033/#1281 (`nmp::nip29::GroupContextError::MissingContext` mirror).
+    /// #1033/#1281 (`nmp_nip29::GroupContextError::MissingContext` mirror).
     /// A signed event handed to `FfiGroup::validate_context` carries no `h`
     /// row at all. `expected` is
     /// the whole set the door was asked for, in canonical order -- one id
@@ -388,7 +388,7 @@ pub enum FfiError {
     GroupContextMissing {
         expected: Vec<String>,
     },
-    /// #1033/#1281 (`nmp::nip29::GroupContextError::MismatchedContext`
+    /// #1033/#1281 (`nmp_nip29::GroupContextError::MismatchedContext`
     /// mirror). A signed event names a different SET of groups than the
     /// one validating it -- too few, too many, or the wrong
     /// ones. An event carrying a second `h` row beside the right one reports
@@ -398,14 +398,14 @@ pub enum FfiError {
         found: Vec<String>,
         expected: Vec<String>,
     },
-    /// #1281 (`nmp::nip29::GroupContextError::RepeatedContext` mirror). A
+    /// #1281 (`nmp_nip29::GroupContextError::RepeatedContext` mirror). A
     /// pre-signed event names the right groups but repeats one of them in a
     /// second `h` row, which is not a row the door would ever mint.
     #[cfg(feature = "nip29")]
     GroupContextRepeated {
         repeated: Vec<String>,
     },
-    /// #1245 (`nmp::nip29::GroupContextError::RecordsAreNotContextScoped`
+    /// #1245 (`nmp_nip29::GroupContextError::RecordsAreNotContextScoped`
     /// mirror). A selection handed to `FfiGroup::read` named one of NIP-29's
     /// own relay-signed group records (39000/39001/39002). Those key
     /// themselves by `d`, never by `h`, so the read would match nothing
@@ -415,7 +415,7 @@ pub enum FfiError {
     GroupRecordsNotContextScoped {
         kinds: Vec<u16>,
     },
-    /// #1233 (`nmp::nip29::GroupObserveError::NoRecordSelected` mirror). A
+    /// #1233 (`nmp_nip29::GroupObserveError::NoRecordSelected` mirror). A
     /// records observation named none of the three records, which would
     /// deliver a permanently empty snapshot.
     #[cfg(feature = "nip29")]
@@ -428,13 +428,13 @@ pub enum FfiError {
     GroupUserBatchConflictingRoles {
         pubkey: String,
     },
-    /// #1252 (`nmp::nip29::GroupPredicateError::NoKindSelected` mirror). A
+    /// #1252 (`nmp_nip29::GroupPredicateError::NoKindSelected` mirror). A
     /// selection handed to `groups_whose_record_matches` named no kind. It is
     /// evaluated with NIP-29's own pin, so it would match every event the
     /// group's host holds and key the listing on their `d` rows.
     #[cfg(feature = "nip29")]
     GroupIdSelectionNamesNoKind,
-    /// #1252 (`nmp::nip29::GroupPredicateError::NotAGroupRecordKind` mirror).
+    /// #1252 (`nmp_nip29::GroupPredicateError::NotAGroupRecordKind` mirror).
     /// A selection handed to `groups_whose_record_matches` named a kind that
     /// is not one of NIP-29's three relay-signed group records. That leaf is
     /// evaluated AT the group's host, which is not authoritative for anything
@@ -448,42 +448,40 @@ pub enum FfiError {
 }
 
 #[cfg(feature = "nip29")]
-impl From<nmp::nip29::RelayScopeError> for FfiError {
-    fn from(err: nmp::nip29::RelayScopeError) -> Self {
+impl From<nmp_nip29::RelayScopeError> for FfiError {
+    fn from(err: nmp_nip29::RelayScopeError) -> Self {
         match err {
-            nmp::nip29::RelayScopeError::EmptyRelaySet => Self::EmptyRelayScope,
+            nmp_nip29::RelayScopeError::EmptyRelaySet => Self::EmptyRelayScope,
         }
     }
 }
 
 #[cfg(feature = "nip29")]
-impl From<nmp::nip29::GroupContextError> for FfiError {
-    fn from(err: nmp::nip29::GroupContextError) -> Self {
+impl From<nmp_nip29::GroupContextError> for FfiError {
+    fn from(err: nmp_nip29::GroupContextError) -> Self {
         match err {
-            nmp::nip29::GroupContextError::CallerSuppliedContext => {
-                Self::GroupCallerSuppliedContext
-            }
-            nmp::nip29::GroupContextError::CallerSuppliedContextConstraint => {
+            nmp_nip29::GroupContextError::CallerSuppliedContext => Self::GroupCallerSuppliedContext,
+            nmp_nip29::GroupContextError::CallerSuppliedContextConstraint => {
                 Self::GroupCallerSuppliedContextConstraint
             }
-            nmp::nip29::GroupContextError::NoGroupNamed => Self::EmptyGroupSet,
-            nmp::nip29::GroupContextError::MissingContext { expected } => {
+            nmp_nip29::GroupContextError::NoGroupNamed => Self::EmptyGroupSet,
+            nmp_nip29::GroupContextError::MissingContext { expected } => {
                 Self::GroupContextMissing {
                     expected: expected.into_iter().collect(),
                 }
             }
-            nmp::nip29::GroupContextError::MismatchedContext { found, expected } => {
+            nmp_nip29::GroupContextError::MismatchedContext { found, expected } => {
                 Self::GroupContextMismatched {
                     found: found.into_iter().collect(),
                     expected: expected.into_iter().collect(),
                 }
             }
-            nmp::nip29::GroupContextError::RepeatedContext { repeated } => {
+            nmp_nip29::GroupContextError::RepeatedContext { repeated } => {
                 Self::GroupContextRepeated {
                     repeated: repeated.into_iter().collect(),
                 }
             }
-            nmp::nip29::GroupContextError::RecordsAreNotContextScoped { kinds } => {
+            nmp_nip29::GroupContextError::RecordsAreNotContextScoped { kinds } => {
                 Self::GroupRecordsNotContextScoped {
                     kinds: kinds.into_iter().collect(),
                 }
@@ -493,11 +491,11 @@ impl From<nmp::nip29::GroupContextError> for FfiError {
 }
 
 #[cfg(feature = "nip29")]
-impl From<nmp::nip29::GroupPredicateError> for FfiError {
-    fn from(err: nmp::nip29::GroupPredicateError) -> Self {
+impl From<nmp_nip29::GroupPredicateError> for FfiError {
+    fn from(err: nmp_nip29::GroupPredicateError) -> Self {
         match err {
-            nmp::nip29::GroupPredicateError::NoKindSelected => Self::GroupIdSelectionNamesNoKind,
-            nmp::nip29::GroupPredicateError::NotAGroupRecordKind { kind } => {
+            nmp_nip29::GroupPredicateError::NoKindSelected => Self::GroupIdSelectionNamesNoKind,
+            nmp_nip29::GroupPredicateError::NotAGroupRecordKind { kind } => {
                 Self::GroupIdSelectionNotAGroupRecordKind { kind }
             }
         }
@@ -507,12 +505,12 @@ impl From<nmp::nip29::GroupPredicateError> for FfiError {
 /// Same re-dispatch discipline as `GroupReadError`: the only variant that is
 /// this door's OWN is the empty record selection.
 #[cfg(feature = "nip29")]
-impl From<nmp::nip29::GroupObserveError> for FfiError {
-    fn from(err: nmp::nip29::GroupObserveError) -> Self {
+impl From<nmp_nip29::GroupObserveError> for FfiError {
+    fn from(err: nmp_nip29::GroupObserveError) -> Self {
         match err {
-            nmp::nip29::GroupObserveError::NoRecordSelected => Self::GroupNoRecordSelected,
-            nmp::nip29::GroupObserveError::Declaration(error) => Self::from(error),
-            nmp::nip29::GroupObserveError::Engine(error) => Self::from(error),
+            nmp_nip29::GroupObserveError::NoRecordSelected => Self::GroupNoRecordSelected,
+            nmp_nip29::GroupObserveError::Declaration(error) => Self::from(error),
+            nmp_nip29::GroupObserveError::Engine(error) => Self::from(error),
         }
     }
 }
@@ -522,11 +520,11 @@ impl From<nmp::nip29::GroupObserveError> for FfiError {
 /// `Declaration` through the existing `LiveQueryError` mapping (#1108) --
 /// so this is a plain re-dispatch, never a second error taxonomy.
 #[cfg(feature = "nip29")]
-impl From<nmp::nip29::GroupReadError> for FfiError {
-    fn from(err: nmp::nip29::GroupReadError) -> Self {
+impl From<nmp_nip29::GroupReadError> for FfiError {
+    fn from(err: nmp_nip29::GroupReadError) -> Self {
         match err {
-            nmp::nip29::GroupReadError::Context(error) => Self::from(error),
-            nmp::nip29::GroupReadError::Declaration(error) => Self::from(error),
+            nmp_nip29::GroupReadError::Context(error) => Self::from(error),
+            nmp_nip29::GroupReadError::Declaration(error) => Self::from(error),
         }
     }
 }
@@ -535,19 +533,19 @@ impl From<nmp::nip29::GroupReadError> for FfiError {
 /// `GroupContextError`, `Engine` through the existing `nmp::EngineError`
 /// mapping.
 #[cfg(feature = "nip29")]
-impl From<nmp::nip29::GroupPublishError> for FfiError {
-    fn from(err: nmp::nip29::GroupPublishError) -> Self {
+impl From<nmp_nip29::GroupPublishError> for FfiError {
+    fn from(err: nmp_nip29::GroupPublishError) -> Self {
         match err {
-            nmp::nip29::GroupPublishError::Context(error) => Self::from(error),
-            nmp::nip29::GroupPublishError::Users(error) => match error {
-                nmp::nip29::GroupUsersError::NoUsers => Self::GroupUserBatchEmpty,
-                nmp::nip29::GroupUsersError::ConflictingRoles { pubkey } => {
+            nmp_nip29::GroupPublishError::Context(error) => Self::from(error),
+            nmp_nip29::GroupPublishError::Users(error) => match error {
+                nmp_nip29::GroupUsersError::NoUsers => Self::GroupUserBatchEmpty,
+                nmp_nip29::GroupUsersError::ConflictingRoles { pubkey } => {
                     Self::GroupUserBatchConflictingRoles {
                         pubkey: pubkey.to_hex(),
                     }
                 }
             },
-            nmp::nip29::GroupPublishError::Engine(error) => Self::from(error),
+            nmp_nip29::GroupPublishError::Engine(error) => Self::from(error),
         }
     }
 }

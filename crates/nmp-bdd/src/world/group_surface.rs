@@ -8,17 +8,19 @@
 //! for the absence of a parameter is the declaration itself.
 //!
 //! #1033 split the door across two files with no `GroupOperations` trait left
-//! anywhere: `crates/nmp/src/nip29/group.rs` declares `Group`'s inherent read
-//! and write methods (`door` below), and `crates/nmp/src/nip29/mod.rs`
+//! anywhere: `crates/nmp-nip29/src/group.rs` declares `Group`'s inherent read
+//! and write methods (`door` below), and `crates/nmp-nip29/src/scope.rs`
 //! declares the `RelayScope` door an app narrows to a `Group` through
 //! (`binding` below, repurposed from "the engine binding" to "the scope
 //! door" -- the field name survives because every consuming `Then` step still
-//! reads it as "the other half of the surface").
+//! reads it as "the other half of the surface"). #1707 moved both files from
+//! `crates/nmp/src/nip29/` into `crates/nmp-nip29/src/`, `mod.rs` renamed to
+//! `scope.rs`; this surface reads their new location.
 
 use std::collections::BTreeSet;
 
-use nmp::nip29::GroupContextError;
 use nmp_grammar::EventBuilder;
+use nmp_nip29::GroupContextError;
 use nostr::{Kind, Tag};
 
 use super::NmpWorld;
@@ -74,7 +76,7 @@ impl NmpWorld {
     /// (`Group::publish` calls `nmp_nip29::contextualize` first), so handing
     /// this to the real engine still answers the question the old pure-door
     /// call answered: no signature, no journal row, no receipt, and no relay
-    /// contact -- see [`nmp::nip29::GroupPublishError::Context`].
+    /// contact -- see [`nmp_nip29::GroupPublishError::Context`].
     pub async fn door_refuses_a_caller_supplied_context(&mut self) -> GroupContextError {
         // The group value needs a bound host, and starting the world contacts
         // nothing on its own -- which the sibling identity scenario proves.
@@ -90,12 +92,12 @@ impl NmpWorld {
             .as_ref()
             .expect("nmp-bdd: the engine must be started before probing the door");
         match group.publish(engine, author, draft) {
-            Err(nmp::nip29::GroupPublishError::Context(error)) => error,
-            Err(nmp::nip29::GroupPublishError::Engine(error)) => panic!(
+            Err(nmp_nip29::GroupPublishError::Context(error)) => error,
+            Err(nmp_nip29::GroupPublishError::Engine(error)) => panic!(
                 "the group door must refuse a caller-supplied h row before reaching the \
                  publish door, but the publish door itself refused instead: {error:?}"
             ),
-            Err(nmp::nip29::GroupPublishError::Users(error)) => panic!(
+            Err(nmp_nip29::GroupPublishError::Users(error)) => panic!(
                 "an ordinary contextualized publication has no user batch to reject: {error:?}"
             ),
             Ok(_) => panic!(
@@ -123,14 +125,14 @@ impl NmpWorld {
     ///
     /// #1033 deleted the `GroupOperations` extension trait: every read and
     /// write method the app calls is now INHERENT on `Group`
-    /// (`crates/nmp/src/nip29/group.rs`, `door` below), narrowed from a
-    /// `RelayScope` (`crates/nmp/src/nip29/mod.rs`, `binding` below). Both are
-    /// read verbatim rather than compiled against, because the claims this
-    /// surface answers are about the SOURCE TEXT declaring a parameter or a
-    /// verb, not about anything a call site could exercise.
+    /// (`crates/nmp-nip29/src/group.rs`, `door` below), narrowed from a
+    /// `RelayScope` (`crates/nmp-nip29/src/scope.rs`, `binding` below). Both
+    /// are read verbatim rather than compiled against, because the claims
+    /// this surface answers are about the SOURCE TEXT declaring a parameter
+    /// or a verb, not about anything a call site could exercise.
     pub fn group_surface(&self) -> GroupSurface {
-        let door = shipped_half(&workspace_source("crates/nmp/src/nip29/group.rs"));
-        let binding = shipped_half(&workspace_source("crates/nmp/src/nip29/mod.rs"));
+        let door = shipped_half(&workspace_source("crates/nmp-nip29/src/group.rs"));
+        let binding = shipped_half(&workspace_source("crates/nmp-nip29/src/scope.rs"));
         let composers = shipped_half(&workspace_source("crates/nmp-nip29/src/operations.rs"));
 
         let mut write_signatures = Vec::new();

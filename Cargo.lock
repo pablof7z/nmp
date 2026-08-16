@@ -1856,6 +1856,7 @@ dependencies = [
  "nmp-engine",
  "nmp-grammar",
  "nmp-local-signer",
+ "nmp-nip29",
  "nmp-resolver",
  "nmp-router",
  "nmp-router-testkit",
@@ -1909,6 +1910,7 @@ dependencies = [
  "nmp-nip18",
  "nmp-nip22",
  "nmp-nip25",
+ "nmp-nip29",
  "nmp-nipc7",
 ]
 
@@ -1917,6 +1919,7 @@ name = "nmp-consumer-nip29"
 version = "0.1.0"
 dependencies = [
  "nmp",
+ "nmp-nip29",
 ]
 
 [[package]]
@@ -1966,6 +1969,7 @@ dependencies = [
  "nmp-nip18",
  "nmp-nip22",
  "nmp-nip25",
+ "nmp-nip29",
  "nmp-nipc7",
  "nmp-store",
  "nmp-test-support",
@@ -2067,8 +2071,17 @@ dependencies = [
 name = "nmp-nip29"
 version = "0.1.0"
 dependencies = [
+ "nmp",
+ "nmp-engine",
  "nmp-grammar",
+ "nmp-router-testkit",
+ "nmp-runtime",
+ "nmp-store",
+ "nmp-test-support",
  "nostr 0.44.4",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2122,6 +2135,7 @@ dependencies = [
  "nmp-grammar",
  "nmp-nip02",
  "nmp-nip22",
+ "nmp-nip29",
  "nmp-store",
  "nmp-test-support",
  "nostr 0.44.4",

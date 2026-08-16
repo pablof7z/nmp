@@ -18,19 +18,26 @@ publish.workspace = true
 # facade feature: #1707 finished what #1143's NIP-02 reversal and #1563's
 # media reversal started -- `nmp` must not contain a single capability's own
 # meaning, re-export door or not (NIP-22/25/18/NIP-C7/content/asset/blossom
-# were pure re-export doors with no engine coupling at all, deleted here;
-# NIP-29 stays a facade feature only because its own reversal, #1707 step 4,
-# has not landed yet). A direct-Rust app that wants any of these names the
-# capability's own crate alongside `nmp` -- the uniform two-crate cost every
-# capability now pays for direct-Rust reach. This crate names each
-# explicitly rather than pretending the whole workspace collapses into one
-# `Cargo.toml` line; that pretense is exactly what #1707 falsifies.
+# were pure re-export doors with no engine coupling at all; NIP-29's own
+# Group/group-list-write door genuinely needed the engine, but that need
+# runs `nmp-nip29 -> nmp`, not the reverse, same as every other capability
+# here). A direct-Rust app that wants any of these names the capability's
+# own crate alongside `nmp` -- the uniform two-crate cost every capability
+# now pays for direct-Rust reach. This crate names each explicitly rather
+# than pretending the whole workspace collapses into one `Cargo.toml` line;
+# that pretense is exactly what #1707 falsifies.
+#
+# NIP-65 is the one family still reachable ONLY as an `nmp` feature: its
+# `impl Engine` publish method and `runtime::nip65`'s deep engine-routing-loop
+# glue are a different problem from a bare re-export door or an ordinary
+# capability-composes-the-engine edge, and #1707 has not resolved it.
 [dependencies]
-nmp = { workspace = true, features = ["nip29"] }
+nmp = { workspace = true, features = ["nip65"] }
 nmp-nip02.workspace = true
 nmp-nip18.workspace = true
 nmp-nip22.workspace = true
 nmp-nip25.workspace = true
+nmp-nip29.workspace = true
 nmp-nipc7.workspace = true
 nmp-content.workspace = true
 nmp-asset.workspace = true
