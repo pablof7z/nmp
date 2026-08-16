@@ -1,7 +1,7 @@
 # The target crate architecture
 
 Where the workspace is going: the crate set NMP is converging on, what each
-crate owns, which boundaries are already correct, and which questions are
+crate owns, which outward seams are settled, and which questions are
 genuinely open. `AGENTS.md` points here from the cold-start reading order.
 
 This document exists because of a specific failure mode, observed 2026-08-15:
@@ -18,10 +18,27 @@ which way is forward. Where it marks a question open, the honest state is
 "open" — an agent that needs the answer designs it and updates this document
 in the same change, rather than inferring a decision that was never made.
 
-Enforcement is structural only. This repository has zero CI by decision, so
-nothing below depends on a checker: every boundary is enforced by what a
-crate's manifest can and cannot declare, and by module privacy. A crate that
-does not declare a dependency cannot use it.
+A crate is first a unit of responsibility and authority. Cargo is one way of
+making that boundary structural.
+
+A crate is justified by an independently coherent responsibility: a lifecycle
+or state machine, durable authority, independently consumable capability,
+external-resource owner, or composition/artifact boundary. Dependency
+isolation is one powerful way a crate can enforce that responsibility, but it
+is neither necessary nor sufficient. Identical dependency lists do not imply
+identical responsibilities.
+
+Do not ask "what dependency does this split remove?" before establishing
+whether the candidate owns a coherent responsibility. A package may be
+justified even when both sides use the same lower-level mechanisms.
+
+Enforcement is still structural, and this repository has zero CI by decision,
+so nothing below depends on a checker. Manifest exclusion is one mechanism: a
+crate that does not declare a dependency cannot use it. Many important
+boundaries are enforced by other structural means — private fields, opaque
+types, ownership, state machines, typed messages, constructors, transaction
+APIs, consuming APIs, and package boundaries themselves even when the two
+sides declare the same dependencies.
 
 ## The two rules that generate the shape
 
@@ -39,18 +56,21 @@ does not declare a dependency cannot use it.
    `crates/nmp`** — and the compiler enforces it, because `nmp` has no
    dependency edge to any capability crate. (#1707 is the eviction epic.)
 
-A crate earns its existence by a real reason — independent dependency
-constraints, an independently consumed artifact, a genuine ownership
-boundary, breaking a cycle, an independent lifecycle, or a platform/build
-boundary — never by size or symmetry (#882, #1627). Splitting anything that
-shares mutable state across the seam is worse than leaving it.
+A crate earns its existence by a real reason — a genuine ownership
+boundary, an independent lifecycle, an independently consumed artifact, a
+platform/build boundary, breaking a cycle, or a dependency that must not
+exist — never by size or symmetry (#882, #1627). Splitting anything that
+shares mutable state across the seam is worse than leaving it. A missing
+forbidden dependency is not a veto.
 
 ## The target crate set
 
-Status column: **correct today** = exists and must not be "improved";
-**in flight** = decided, being executed under the named issue; **target** =
-decided destination, not yet built; **open** = see the open-questions
-section.
+Status column: **correct today** = this crate's named job and its outward
+seams exist and should not be undone; it is not a claim that the crate
+cannot later be decomposed along a responsibility that has not yet been
+packaged. **in flight** = decided, being executed under the named issue;
+**target** = decided destination, not yet built; **open** = see the
+open-questions section.
 
 ### Contracts and neutral values
 
@@ -107,7 +127,7 @@ The reducer and the async edge left `crates/nmp` as **two crates**:
 
 | crate | owns | must never depend on | status |
 |---|---|---|---|
-| `nmp-engine` | the deterministic reducer: `EngineCore`, `handle(EngineMsg) → Vec<Effect>` / `tick()`, plus its reducer-coupled satellites (the negentropy FSM it drives turn-by-turn, the publish-queue fact vocabulary, bench hooks) | **`tokio`, `reqwest`, `nmp-nip11`,** the runtime, the facade, any capability crate. Allowed: grammar, store, resolver, router, transport (nine value and observation types — see the fence), signer, `negentropy`, `nostr` | correct today |
+| `nmp-engine` | the deterministic reducer: `EngineCore`, `handle(EngineMsg) → Vec<Effect>` / `tick()`, plus its reducer-coupled satellites (the negentropy FSM it drives turn-by-turn, the publish-queue fact vocabulary, bench hooks) | **`tokio`, `reqwest`, `nmp-nip11`,** the runtime, the facade, any capability crate. Allowed: grammar, store, resolver, router, transport (nine value and observation types — see the fence), signer, `negentropy`, `nostr` | runtime seam correct today; internals open |
 | `nmp-runtime` | the async edge that interprets effects: `EngineThread`, `Handle`, channels/mailboxes, the AUTH driver, sign-event completion, signer registry, pool bridge, the opaque session payload, NIP-11 service wiring, and driving whichever `AuthorRouteProvider` the application constructed | the facade, any capability crate, **any routing protocol** (`nmp-nip11` is its ONE declared protocol edge; author-route discovery is a contract it drives, not a crate it names) | correct today |
 
 `session.rs` went with the runtime rather than staying in the facade:
@@ -133,16 +153,23 @@ Why two and not one (measured at `64f14255`):
   edges are **zero** (#1684), the runtime drives `EngineCore` through **33
   distinct methods** (75 of 107 call sites are `handle()`), and it touches
   **zero fields** directly. The cut freezes a door that already exists.
-- The reason is a dependency constraint only a manifest can enforce: `core/`
-  names no `tokio` and no `reqwest` today, and nothing but review keeps it
-  that way. Because the reducer owns the protocol state, its behaviour must
-  be a pure function of the messages it is handed — the foundation of the
-  entire headless falsifier corpus and of `architecture-boundaries.md`'s
-  decision/effect split. The manifest makes that compiler-enforced: a timer,
-  task, or HTTP call inside the reducer stops being a review catch and
-  becomes a build error. This is the
+- The reason *this* seam is two crates is a dependency constraint only a
+  manifest can enforce: `core/` names no `tokio` and no `reqwest` today, and
+  nothing but review keeps it that way. Because the reducer owns the protocol
+  state, its behaviour must be a pure function of the messages it is handed
+  — the foundation of the entire headless falsifier corpus and of
+  `architecture-boundaries.md`'s decision/effect split. The manifest makes
+  that compiler-enforced: a timer, task, or HTTP call inside the reducer
+  stops being a review catch and becomes a build error. This is the
   `nmp-signer`-depends-on-`zeroize`-only play at larger scale, and with zero
-  CI it is the only enforcement available.
+  CI it is the only *dependency* enforcement available.
+
+  That argument is why the engine/runtime cut is two crates. It is not the
+  general package rule. Query, publication, synchronization, AUTH, session
+  state, and other owners inside the deterministic engine are evaluated by
+  responsibility, lifecycle coherence, and the facts that must cross.
+  Package extraction is allowed when one of those owners develops a stable
+  independent interface; a distinct dependency list is not required.
 - A corollary that has already had to be applied twice: **a coordinator earns
   ownership of ORDERING between subsystems, not ownership of the subsystems
   themselves.** That is the test every owner extraction in #1606 has been
@@ -283,16 +310,20 @@ ruling talks past rather than answers.
 
 So the standing position is exactly this, and no more:
 
-- The reducer remains one crate **today**.
+- The engine/runtime boundary is settled.
+- The reducer remains one crate **today**. That is a statement about current
+  evidence, not a blessing of the current internals.
 - The current read/write split and the examined owner extractions **do not
-  earn package boundaries**. Crate-ing any of them would convert
-  `pub(super)` into permanent public API and buy no dependency.
-- **#1606 continues through private concrete owners.** That is the work, and
-  it is not waiting on any packaging question.
-- **A future crate requires new evidence**: a stable independent lifecycle,
-  an independent consumer, an independently consumed artifact, or a
-  dependency that must not exist. Absent one of those the answer stays one
-  crate — and going looking for one is legitimate work, not relitigation.
+  earn package boundaries**. Those seams failed for the reasons measured
+  below, not because they would leave both sides depending on the same
+  lower-level crates.
+- **#1606 continues through private concrete owners.** That work is not
+  waiting on any packaging question.
+- **A future crate requires new evidence**: a coherent responsibility with a
+  stable independent interface, an independent lifecycle, an independent
+  consumer, an independently consumed artifact, or a dependency that must
+  not exist. A distinct dependency list is not required. Going looking for
+  one of those is legitimate work, not relitigation.
 
 The census below is what the first bullet rests on, specifically its tail:
 `store` is touched from six files, `clock` from seven, and neither reaches
@@ -401,8 +432,13 @@ nominations during #1606:
 - *Does it deserve an owner module?* Count foreign versus own accesses to the
   fields. A cluster the rest of the reducer reaches into more than it reaches
   into itself is not a cluster.
-- *Does it deserve a crate?* Follow the type dependencies and the teardown
-  reach. Zero foreign readers is necessary and nowhere near sufficient.
+- *Does it deserve a crate?* First ask whether it owns a coherent
+  responsibility — a lifecycle, exclusive state, and an independently
+  falsifiable interface. Then ask whether a package would enforce that
+  better than module privacy. Follow the type dependencies and the teardown
+  reach; those can reject a premature cut. They cannot, by themselves, prove
+  that a coherent owner must stay a module because it still needs
+  `nmp-store` or `nmp-router`.
 
 Measured against the second test, the three strongest candidates all failed,
 each in a different way, and the failures are the useful part:
@@ -645,10 +681,12 @@ extraction, and none is proposed here; see open question 3. What it changes is
 what may be *inferred*: "no cluster earns a boundary because they all need the
 same four things" was doing work it had not earned, and with it gone, the
 reason no crate is justified today is the plain one — **no cluster has yet
-been shown to have an independent lifecycle, an independent consumer, an
-independently consumed artifact, or a dependency that must not exist.** That
-is a statement about evidence not yet produced, which is falsifiable, rather
-than a claim about a space known to be empty, which was not.
+been shown to own a coherent responsibility with a stable independent
+interface, an independent lifecycle, an independent consumer, an independently
+consumed artifact, or a dependency that must not exist.** That is a statement
+about evidence not yet produced, which is falsifiable, rather than a claim
+about a space known to be empty, which was not. Sharing `nmp-store` or
+`nmp-router` with a neighbor is not, by itself, that missing evidence.
 
 ### What crosses a boundary
 
@@ -676,15 +714,18 @@ in each of them; the fourth by measuring #1720's real cost.
      runtime destructures; a "count the methods" estimate cannot see them,
      which is how ~35 became 96.
 
-A crate line earns itself when the boundary needs *manifest*-level proof: a
-dependency that must not exist. That is exactly why reducer-versus-runtime is
-a real crate line (no direct `tokio`, no threads, no channels under `core/` —
-the cut makes a whole class of impurity a build error) and why `nmp-nip11` is
-one (it is the only package in the engine's tree naming `reqwest`). **No
-cluster inside the reducer has yet been shown to have either property** —
-which is a statement about what has been looked for, not a proof that none
-does. Producing that proof for some cluster is exactly the new evidence open
-question 3 asks for.
+A crate line can also earn itself when one owner needs a stable independent
+interface — a lifecycle, a fact/effect vocabulary, an independently
+falsifiable public surface — even if both sides still depend on the same
+lower-level crates. Manifest-level proof is the reason reducer-versus-runtime
+is a crate line today (no direct `tokio`, no threads, no channels under
+`core/` — the cut makes a whole class of impurity a build error) and why
+`nmp-nip11` is one (it is the only package in the engine's tree naming
+`reqwest`). That is one kind of evidence, not the only kind. **No cluster
+inside the reducer has yet been shown to have a stable independent interface
+or a dependency that must not exist** — which is a statement about what has
+been looked for, not a proof that none does. Producing that evidence for some
+cluster is exactly what open question 3 asks for.
 
 ### A guard whose failure mode is fail-open is probably untested
 
@@ -1003,31 +1044,40 @@ Marked open on purpose; do not infer answers.
    decision. When a second NIP-51 family arrives (bookmarks), decide
    whether an `nmp-nip51` crate owns the list schemas — do not decide it
    by precedent-matching either way.
-3. **Whether any package boundary inside `nmp-engine` ever earns itself.**
-   Open, and deliberately moved back here from "Decided" (#1739). Today's
-   answer is no, on today's evidence: the plane seam is refuted by shared
-   mutable state, and four owner-shaped candidates were each measured and
-   rejected. But that is a statement about four proposals, and the cluster
-   table above shows the "they all need the same four things" argument does
-   not hold in the blanket form it was asserted in. **The reopening
-   condition is a specific fact, not a fresh opinion about size**: an
-   independent lifecycle that outlives or precedes the reducer's, a consumer
-   that wants the cluster without the reducer, an independently consumed
-   artifact, or a dependency the cluster must be forbidden — the last being
-   the only one a manifest can enforce and the only one `nmp-nip11` and the
-   engine/runtime cut actually had. Until one of those is produced, the
-   answer is one crate and #1606's private owners are the whole programme.
-   Do not read this question as an invitation; read it as the honest state.
+3. **What constitutes the deterministic engine, and whether any owner
+   inside it earns a package.**
+   The engine/runtime boundary is settled. The internal package
+   decomposition is not. Today's packaging is one crate because the measured
+   seams (the plane split and the four examined owner-shaped candidates) did
+   not earn a package on *their* evidence. That bounds those proposals, not
+   the space.
+
+   Evaluate Query, publication, synchronization, AUTH, session state, and
+   other owners by responsibility, lifecycle coherence, and the facts that
+   must cross. Ask what state each exclusively owns, what causes that
+   responsibility to change, and whether it can be reasoned about through an
+   independent interface. A distinct dependency list is not required. #1627
+   already names this distinction: query/publication lifecycle owners may
+   become packages while related protocol vocabularies with identical
+   dependency/artifact shapes remain feature-gated modules.
+
+   #1606 continues through private concrete owners regardless. A package
+   extraction is allowed when one of those owners develops a stable
+   independent interface; it is not an invitation to split by size,
+   symmetry, or a target crate count (#1627).
 
 ## Related epics
 
 - #1707 — capability eviction (rule 2 executed; steps 0–4).
-- #1606 — `EngineCore` internal owner decomposition (module owners, zero
-  new crates; sequenced before the engine cut freezes the door).
+- #1606 — `EngineCore` internal owner decomposition (module owners first;
+  packages when an owner has a stable independent interface; sequenced
+  before the engine cut froze the runtime door).
 - #882 — package and lifecycle ownership (the crate-reason criteria this
   document applies).
 - #1627 — records the boundary criteria and rejects metric-driven
   decomposition; this document is bound by it.
+- #1745 — corrects the manifest-first framing that made agents treat a
+  distinct dependency list as a crate prerequisite.
 - #1739 — the correction that produced the cluster table, the two-guarantees
   wording, and open question 3: this document had ruled out a future reducer
   crate on evidence that only rejected four specific seams.

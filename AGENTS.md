@@ -10,7 +10,7 @@ Canonical contributor guide for the NMP repo. Every rule here applies to agents 
 4. `docs/bug-class-ledger.md` — the bug classes structurally ruled out, and the mechanism that rules each out. This replaces governance-by-policing: correctness lives in the shape of the API, not a police force patrolling it.
 5. `docs/known-gaps.md` — the truth-anchor companion: everything built-but-incomplete or deliberately deferred, so nothing hides.
 6. `docs/internals/architecture-boundaries.md` — where a decision ends, where a commit begins, and what may happen before it. What "functional" and "reactive" mean *here*, the transaction/effect rules, and the ownership rules — plus the current honest exceptions to each.
-7. `docs/internals/crate-architecture.md` — the target crate set: what each crate owns, which boundaries are already correct and must not be "improved", the capability rule (`nmp` knows no event-kind capability) with its measure, and the questions that are genuinely open. Issues encode older decisions; this is the destination they are checked against.
+7. `docs/internals/crate-architecture.md` — the target crate set: what each crate owns, which *seams* are settled (engine/runtime, capability eviction, the store transaction), which questions are still open (including the internal decomposition of the deterministic engine), the capability rule (`nmp` knows no event-kind capability) with its measure, and the rule that a crate is first a unit of responsibility and authority. A distinct dependency list is not required. Issues encode older decisions; this is the destination they are checked against.
 8. **GitHub Issues** — the single tactical tracker: what is being worked on, what is queued, and the *why* behind each.
 
 ## Internal-development skill

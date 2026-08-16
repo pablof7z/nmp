@@ -139,6 +139,13 @@ happened), **effects** (work a decision authorized), and **committed facts**
 distinction into a framework of tiny traits — introduce a type when it excludes
 a real bad path or makes a real ownership boundary testable, and not otherwise.
 
+Package extraction is a later question than ownership. Before asking whether
+Query or Publication should be a crate, answer: what state belongs to each,
+what lifecycle each owns, what decisions each can make independently, what
+facts must cross, and what ordering belongs to the coordinator. Cargo
+packaging enters only after those answers. A distinct dependency list is not
+required. See `docs/internals/crate-architecture.md`.
+
 **Current honest exceptions.** The engine command inbox is unbounded (**#786**),
 and AUTH state is entirely in-process with no durable backing — a restart loses
 it. Both are known and tracked; neither is a licence to add a third.
