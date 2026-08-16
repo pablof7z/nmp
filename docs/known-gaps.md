@@ -652,10 +652,24 @@ about current code:
   `auth_transport.rs:1057`, and uncovered call sites at `query.rs:158` and
   `:780`) no longer match this tree — the file has moved since that note was
   written, and none of those exact lines currently contain an `abandon_sub`
-  reference. The underlying question is unresolved and needs re-establishing
-  against the current line numbers above: whether every call site's precondition
-  is independently guaranteed by its caller, or whether some call `abandon_sub`
-  on state a caller hasn't verified, has never been checked either way.
+  reference.
+
+  Reframed 2026-08-16 rather than chased. `abandon_sub` retires five things
+  at once — request attempts, attribution, claim transfers, pending request
+  evidence, and the `active_request_revisions_by_sub` →
+  `active_request_evidence` → `live_wire_requests` chain. Those are exactly
+  the fields the field census ranks as the next owner candidate
+  (`active_request_evidence` 56%, `active_request_revisions_by_sub` 50%,
+  `live_wire_requests` 42%, `pending_request_evidence` 30%, all topping out
+  in `observation.rs`). So "does every path that retires a subscription go
+  through one door" is not a question to answer by grepping nineteen call
+  sites against a note whose line numbers rotted — it is a question that
+  stops being askable once that cluster has an owner, because the door
+  becomes the only way in.
+
+  Tracked here so it is not lost, but the fix is the extraction, not an
+  audit. Re-open it as a real finding only if the extraction surfaces a
+  caller that cannot go through the owner's door.
 
 ## Process / tooling
 
