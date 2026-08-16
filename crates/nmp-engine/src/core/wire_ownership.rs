@@ -56,13 +56,19 @@ fn coverage_claim_keys(atom: &ContextualAtom) -> BTreeSet<CoverageKey> {
 }
 
 /// Drop one reference and report whether the key became unreferenced.
-fn release_ref<K: Ord + Copy>(refs: &mut BTreeMap<K, usize>, key: K) -> bool {
-    let remove = refs.get_mut(&key).is_some_and(|count| {
-        *count = count
-            .checked_sub(1)
-            .expect("per-handle ownership refcount cannot underflow");
-        *count == 0
-    });
+/// Drop one reference and report whether the key became unreferenced.
+///
+/// The key must be there. `is_some_and` used to turn "this handle's refcount
+/// for a key it demonstrably owns is missing" into a quiet "nothing was
+/// released", which is the mirror already being broken with nothing saying so.
+fn release_ref<K: Ord + Copy + std::fmt::Debug>(refs: &mut BTreeMap<K, usize>, key: K) -> bool {
+    let count = refs
+        .get_mut(&key)
+        .unwrap_or_else(|| panic!("a handle owning {key:?} owns a refcount for it"));
+    *count = count
+        .checked_sub(1)
+        .expect("per-handle ownership refcount cannot underflow");
+    let remove = *count == 0;
     if remove {
         refs.remove(&key);
     }
@@ -205,27 +211,42 @@ impl WireOwnership {
     /// Remove one owner of `atom`'s logical demand.
     pub(super) fn release(&mut self, atom: &ContextualAtom) -> AtomReleased {
         let key = DemandKey::for_atom(atom);
-        let effective_evidence = self
+        // Decide `Unowned` BEFORE touching routing evidence.
+        //
+        // The two maps are created and destroyed together, so an unowned key
+        // has no evidence entry either -- but deciding ownership second meant
+        // this function could mutate the evidence mirror and then report that
+        // nothing was owned, and it forced the mirror to tolerate being
+        // absent. That tolerance is what cost the ability to demand it is
+        // present.
+        if !self.owner_counts.contains_key(&key) {
+            debug_assert!(
+                !self.routing_evidence_owner_counts.contains_key(&key),
+                "routing evidence outlived its demand's owner count"
+            );
+            return AtomReleased::Unowned;
+        }
+        let evidence = self
             .routing_evidence_owner_counts
             .get_mut(&key)
-            .map(|evidence| {
-                for fact in &atom.routing_evidence {
-                    if let Some(count) = evidence.get_mut(fact) {
-                        *count = count
-                            .checked_sub(1)
-                            .expect("routing-evidence owner count cannot underflow");
-                        if *count == 0 {
-                            evidence.remove(fact);
-                        }
-                    }
-                }
-                evidence.keys().cloned().collect()
-            })
-            .unwrap_or_default();
+            .expect("an owned demand has a routing-evidence mirror");
+        for fact in &atom.routing_evidence {
+            let count = evidence
+                .get_mut(fact)
+                .expect("a released atom's routing fact is indexed by its demand");
+            *count = count
+                .checked_sub(1)
+                .expect("routing-evidence owner count cannot underflow");
+            if *count == 0 {
+                evidence.remove(fact);
+            }
+        }
+        let effective_evidence: BTreeSet<_> = evidence.keys().cloned().collect();
 
-        let Some((effective_atom, count)) = self.owner_counts.get_mut(&key) else {
-            return AtomReleased::Unowned;
-        };
+        let (effective_atom, count) = self
+            .owner_counts
+            .get_mut(&key)
+            .expect("checked present above");
         *count = count
             .checked_sub(1)
             .expect("wire owner count cannot underflow");
@@ -251,6 +272,13 @@ impl WireOwnership {
     /// produces a router and attribution consequence this owner cannot
     /// perform.
     pub(super) fn index_handle(&mut self, id: HandleId, atoms: BTreeSet<ContextualAtom>) {
+        // Replace, do not overwrite. Indexing a handle twice used to insert
+        // fresh per-handle maps while leaving the three reverse indexes
+        // naming it under its OLD atoms forever -- silent corruption
+        // reachable by nothing more exotic than calling attach twice.
+        if self.atoms_by_handle.contains_key(&id) {
+            self.unindex_handle(id);
+        }
         let mut demand_refs: BTreeMap<DemandKey, usize> = BTreeMap::new();
         let mut coverage_refs: BTreeMap<CoverageKey, usize> = BTreeMap::new();
         for atom in &atoms {
