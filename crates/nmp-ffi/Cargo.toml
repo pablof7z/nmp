@@ -22,16 +22,22 @@ default = []
 # #824: these are the stable app-facing selection keys consumed by the native
 # feature manifest. Each key only forwards into its real Cargo dependency;
 # Cargo remains the sole dependency graph.
+#
+# #1707: nip18/nip22/nip25/nipc7/asset/blossom/content used to forward into
+# `nmp/<feature>` -- `nmp` re-exporting each as a pure door with no engine
+# coupling. `nmp` no longer does (those eight doors are deleted, #1707), so
+# each key now pulls its own capability crate directly, same shape NIP-02
+# and media already use.
 nip02 = ["dep:nmp-nip02", "nip65"]
-nip18 = ["nmp/nip18"]
-nip22 = ["nmp/nip22", "nip65"]
-nip25 = ["nmp/nip25"]
+nip18 = ["dep:nmp-nip18"]
+nip22 = ["dep:nmp-nip22", "nip65"]
+nip25 = ["dep:nmp-nip25"]
 nip29 = ["nmp/nip29", "nip65"]
 nip65 = ["nmp/nip65"]
-nipc7 = ["nmp/nipc7"]
-asset = ["nmp/asset"]
-blossom = ["nmp/blossom", "asset"]
-content = ["nmp/content"]
+nipc7 = ["dep:nmp-nipc7"]
+asset = ["dep:nmp-asset"]
+blossom = ["dep:nmp-blossom", "asset"]
+content = ["dep:nmp-content"]
 # #971: the one-shot engine-authorized Blossom upload. Needs `blossom` for
 # the client/authorization vocabulary and `dep:nmp-media` for the exact-bytes
 # prepare/upload seam this call composes internally -- the ordinary shape
@@ -70,6 +76,16 @@ nmp = { workspace = true }
 nmp-nip02 = { workspace = true, optional = true }
 # #1707: same reason, for the media composition seam.
 nmp-media = { workspace = true, optional = true }
+# #1707: these eight used to be pure re-export doors in `nmp` (no engine
+# coupling forced them there); now each is bound directly, same reason as
+# `nmp-nip02` above.
+nmp-nip18 = { workspace = true, optional = true }
+nmp-nip22 = { workspace = true, optional = true }
+nmp-nip25 = { workspace = true, optional = true }
+nmp-nipc7 = { workspace = true, optional = true }
+nmp-asset = { workspace = true, optional = true }
+nmp-blossom = { workspace = true, optional = true }
+nmp-content = { workspace = true, optional = true }
 uniffi = { workspace = true, features = ["cli"] }
 zeroize = "1"
 k256 = { version = "0.13.4", default-features = false }

@@ -343,7 +343,7 @@ pub enum FfiError {
     InvalidNip73 {
         reason: String,
     },
-    /// #155: an `FfiReaction::Emoji` failed `nmp::nip25::Reaction::emoji`'s
+    /// #155: an `FfiReaction::Emoji` failed `nmp_nip25::Reaction::emoji`'s
     /// validation. Two states reach here, both of which would otherwise
     /// publish a reaction whose content says something the caller did not:
     /// the empty string, which NIP-25 reads as `+` and therefore as a LIKE,
