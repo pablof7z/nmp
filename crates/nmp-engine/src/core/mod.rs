@@ -1933,9 +1933,13 @@ pub struct EngineCore {
     attribution: AttributionState,
     pending_request_evidence: HashMap<(RelaySessionKey, SubId), VecDeque<PendingRequestEvidence>>,
     /// Every local request-send attempt and the retries parked behind them
-    /// (#1606 step 1). Its maps are private to `request_attempt.rs`, so the
-    /// reverse-index invariants are enforced by the compiler rather than by
-    /// every caller remembering them.
+    /// (#1606 step 1). Its maps are private to `request_attempt.rs`: privacy
+    /// is compiler-enforced, but the reverse-index invariants over those
+    /// maps are not -- they are enforced by asserts in
+    /// `RequestAttempts::remove`/`remove_retry` and the owner-scoped bulk
+    /// removals that call them, and checked structurally by
+    /// `RequestAttempts::assert_consistent` (wired into
+    /// `assert_owner_consistency` below).
     attempts: RequestAttempts,
     /// Every accepted-open-before-close transition still waiting on its
     /// successor's admission, keyed by successor and mirrored by owning
@@ -2582,6 +2586,7 @@ impl EngineCore {
         self.request_targets.assert_consistent(at);
         self.nip77.assert_consistent(at);
         self.request_replacements.assert_consistent(at);
+        self.attempts.assert_consistent(at);
         self.stalled_writes.assert_consistent(
             at,
             StalledWriteInputs {

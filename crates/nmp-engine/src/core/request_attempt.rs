@@ -143,8 +143,11 @@ impl RequestAttemptPurpose {
 ///
 /// Fields are PRIVATE and this is a sibling module of `write`, `query`,
 /// `observation` and `auth_transport`, so none of them can reach the maps —
-/// only this file can, and the reverse-index invariants below are therefore
-/// enforceable rather than merely documented (#1606).
+/// only this file can. Privacy alone only makes the reverse-index invariants
+/// below ENFORCEABLE rather than every caller remembering them (#1606); what
+/// actually enforces them is the asserts in `remove`/`remove_retry` and the
+/// owner-scoped bulk removals that call them, checked structurally by
+/// `assert_consistent`.
 ///
 /// It holds state and the invariants over that state, and nothing else: no
 /// `store`, no `router`, no `resolver`, no `Effect`. Anything that has to
@@ -212,40 +215,89 @@ impl RequestAttempts {
         self.remove(outcome.attempt_id())
     }
 
+    /// Retire every attempt this sub owns.
+    ///
+    /// This owns the `by_sub` bucket wholesale, so the per-attempt cleanup
+    /// below must never re-probe `by_sub` for an id it just tore the bucket
+    /// out from under -- that used to be exactly the disagreement `remove`
+    /// tolerated silently. Only the OTHER mirror (`by_session`) is still
+    /// live for each attempt, so only it gets forgotten here, and forgetting
+    /// it panics rather than tolerates absence.
     pub(super) fn retire_for_sub(&mut self, sub_id: &SubId) {
-        let attempts = self.by_sub.remove(sub_id).unwrap_or_default();
-        for attempt_id in attempts {
-            self.remove(attempt_id);
+        let attempt_ids = self.by_sub.remove(sub_id).unwrap_or_default();
+        for attempt_id in attempt_ids {
+            let attempt = self.attempts.remove(&attempt_id).unwrap_or_else(|| {
+                panic!("RequestAttempts: by_sub named attempt {attempt_id:?}, which is not live")
+            });
+            self.forget_session_edge(attempt_id, &attempt.session);
         }
         self.cancel_retry_for_sub(sub_id);
     }
 
+    /// Retire every attempt and every parked retry this session owns.
+    ///
+    /// Same shape as `retire_for_sub`, mirrored: `by_session` and
+    /// `retries_by_session` are torn out wholesale first, so only the
+    /// `by_sub` / `retry_by_sub` mirrors are still live per element and are
+    /// the only ones forgotten below.
     pub(super) fn retire_for_session(&mut self, session: &RelaySessionKey) {
-        let attempts = self.by_session.remove(session).unwrap_or_default();
-        for attempt_id in attempts {
-            self.remove(attempt_id);
+        let attempt_ids = self.by_session.remove(session).unwrap_or_default();
+        for attempt_id in attempt_ids {
+            let attempt = self.attempts.remove(&attempt_id).unwrap_or_else(|| {
+                panic!(
+                    "RequestAttempts: by_session named attempt {attempt_id:?}, which is not live"
+                )
+            });
+            self.forget_sub_edge(attempt_id, &attempt.sub_id);
         }
-        let retries = self.retries_by_session.remove(session).unwrap_or_default();
-        for retry in retries {
-            self.remove_retry(&retry);
+        let retry_keys = self.retries_by_session.remove(session).unwrap_or_default();
+        for key in retry_keys {
+            let pending = self.retries.remove(&key).unwrap_or_else(|| {
+                panic!("RequestAttempts: retries_by_session named retry {key:?}, which is not live")
+            });
+            self.forget_retry_sub_edge(&pending.attempt.sub_id, &key);
         }
     }
 
+    /// Remove one attempt id from BOTH reverse indexes. Used only where
+    /// neither mirror has already been torn out for this id (the solo
+    /// removal path); the owner-scoped bulk paths above forget exactly one
+    /// mirror each, because the other one is already gone.
     fn remove(&mut self, attempt_id: RequestAttemptId) -> Option<RequestAttemptState> {
         let attempt = self.attempts.remove(&attempt_id)?;
-        if let Some(ids) = self.by_sub.get_mut(&attempt.sub_id) {
-            ids.remove(&attempt_id);
-            if ids.is_empty() {
-                self.by_sub.remove(&attempt.sub_id);
-            }
-        }
-        if let Some(ids) = self.by_session.get_mut(&attempt.session) {
-            ids.remove(&attempt_id);
-            if ids.is_empty() {
-                self.by_session.remove(&attempt.session);
-            }
-        }
+        self.forget_sub_edge(attempt_id, &attempt.sub_id);
+        self.forget_session_edge(attempt_id, &attempt.session);
         Some(attempt)
+    }
+
+    /// Remove `attempt_id` from its `by_sub` bucket. Absent is not a valid
+    /// answer once the forward map said the attempt existed under this sub
+    /// -- that disagreement is exactly what silent-tolerance used to hide.
+    fn forget_sub_edge(&mut self, attempt_id: RequestAttemptId, sub_id: &SubId) {
+        let ids = self.by_sub.get_mut(sub_id).unwrap_or_else(|| {
+            panic!("RequestAttempts: a live attempt's sub has no by_sub reverse set")
+        });
+        assert!(
+            ids.remove(&attempt_id),
+            "RequestAttempts: a live attempt's sub did not name it in by_sub"
+        );
+        if ids.is_empty() {
+            self.by_sub.remove(sub_id);
+        }
+    }
+
+    /// `forget_sub_edge`'s twin for `by_session`.
+    fn forget_session_edge(&mut self, attempt_id: RequestAttemptId, session: &RelaySessionKey) {
+        let ids = self.by_session.get_mut(session).unwrap_or_else(|| {
+            panic!("RequestAttempts: a live attempt's session has no by_session reverse set")
+        });
+        assert!(
+            ids.remove(&attempt_id),
+            "RequestAttempts: a live attempt's session did not name it in by_session"
+        );
+        if ids.is_empty() {
+            self.by_session.remove(session);
+        }
     }
 
     /// `now` is an argument rather than a read of `EngineCore::clock`: the
@@ -278,22 +330,56 @@ impl RequestAttempts {
         }
     }
 
+    /// Cancel the retry parked behind `sub_id`, if any. `retry_by_sub` is
+    /// torn out wholesale first, so only the OTHER mirror
+    /// (`retries_by_session`) is still live for it -- same shape as
+    /// `retire_for_sub`, one owner smaller.
     pub(super) fn cancel_retry_for_sub(&mut self, sub_id: &SubId) {
-        if let Some(key) = self.retry_by_sub.remove(sub_id) {
-            self.remove_retry(&key);
-        }
+        let Some(key) = self.retry_by_sub.remove(sub_id) else {
+            return;
+        };
+        let pending = self.retries.remove(&key).unwrap_or_else(|| {
+            panic!("RequestAttempts: retry_by_sub named retry {key:?}, which is not live")
+        });
+        self.forget_retry_session_edge(&pending.attempt.session, &key);
     }
 
+    /// Remove one retry from BOTH reverse indexes. Used only where neither
+    /// mirror has already been torn out for this key.
     fn remove_retry(&mut self, key: &RequestRetryKey) -> Option<PendingRequestRetry> {
         let pending = self.retries.remove(key)?;
-        self.retry_by_sub.remove(&pending.attempt.sub_id);
-        if let Some(keys) = self.retries_by_session.get_mut(&pending.attempt.session) {
-            keys.remove(key);
-            if keys.is_empty() {
-                self.retries_by_session.remove(&pending.attempt.session);
-            }
-        }
+        self.forget_retry_sub_edge(&pending.attempt.sub_id, key);
+        self.forget_retry_session_edge(&pending.attempt.session, key);
         Some(pending)
+    }
+
+    /// Remove `sub_id`'s `retry_by_sub` entry, asserting it named exactly
+    /// `key`. At most one retry is ever parked per sub (`schedule_retry`
+    /// clears any prior entry under the same `RequestRetryKey` before
+    /// inserting), so a live retry's sub either names it or the mirror has
+    /// already diverged.
+    fn forget_retry_sub_edge(&mut self, sub_id: &SubId, key: &RequestRetryKey) {
+        let mapped = self.retry_by_sub.remove(sub_id).unwrap_or_else(|| {
+            panic!("RequestAttempts: a live retry's sub has no retry_by_sub entry")
+        });
+        assert_eq!(
+            &mapped, key,
+            "RequestAttempts: retry_by_sub for this sub named a different retry"
+        );
+    }
+
+    /// `forget_retry_sub_edge`'s twin for `retries_by_session`.
+    fn forget_retry_session_edge(&mut self, session: &RelaySessionKey, key: &RequestRetryKey) {
+        let keys = self.retries_by_session.get_mut(session).unwrap_or_else(|| {
+            panic!("RequestAttempts: a live retry's session has no retries_by_session reverse set")
+        });
+        assert!(
+            keys.remove(key),
+            "RequestAttempts: a live retry's session did not name it in retries_by_session"
+        );
+        if keys.is_empty() {
+            self.retries_by_session.remove(session);
+        }
     }
 
     /// When the retry parked behind `sub_id` is due, for the deferred-request
@@ -435,6 +521,117 @@ impl RequestAttempts {
             retry_session_edges: self.retries_by_session.values().map(BTreeSet::len).sum(),
         }
     }
+
+    /// Exact structural consistency for every mirror this owner keeps, by
+    /// identity rather than by count.
+    ///
+    /// `counts()` next to this counts things -- the right instrument for
+    /// leaks and boundedness, and the wrong one for structure: an attempt
+    /// indexed under the wrong sub, or a retry under the wrong session,
+    /// preserves every number `counts()` reports (`OwnerIndexed`'s own
+    /// `assert_consistent` doc makes the same point). Four mirrors are
+    /// checked in both directions: `by_sub`, `by_session`,
+    /// `retry_by_sub`, `retries_by_session`.
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) fn assert_consistent(&self, at: &str) {
+        for (attempt_id, attempt) in &self.attempts {
+            let ids = self.by_sub.get(&attempt.sub_id).unwrap_or_else(|| {
+                panic!(
+                    "{at}: request attempt {attempt_id:?} has no by_sub reverse set for its own sub {:?}",
+                    attempt.sub_id
+                )
+            });
+            assert!(
+                ids.contains(attempt_id),
+                "{at}: request attempt {attempt_id:?} is not named by its own sub's reverse index"
+            );
+            let ids = self.by_session.get(&attempt.session).unwrap_or_else(|| {
+                panic!(
+                    "{at}: request attempt {attempt_id:?} has no by_session reverse set for its own session"
+                )
+            });
+            assert!(
+                ids.contains(attempt_id),
+                "{at}: request attempt {attempt_id:?} is not named by its own session's reverse index"
+            );
+        }
+        for (sub_id, ids) in &self.by_sub {
+            assert!(
+                !ids.is_empty(),
+                "{at}: request attempts kept an empty by_sub reverse set for sub {sub_id:?}"
+            );
+            for attempt_id in ids {
+                let attempt = self.attempts.get(attempt_id).unwrap_or_else(|| {
+                    panic!("{at}: by_sub names attempt {attempt_id:?}, which is not live")
+                });
+                assert_eq!(
+                    &attempt.sub_id, sub_id,
+                    "{at}: attempt {attempt_id:?} is indexed under a sub it does not report"
+                );
+            }
+        }
+        for (session, ids) in &self.by_session {
+            assert!(
+                !ids.is_empty(),
+                "{at}: request attempts kept an empty by_session reverse set for session {session:?}"
+            );
+            for attempt_id in ids {
+                let attempt = self.attempts.get(attempt_id).unwrap_or_else(|| {
+                    panic!("{at}: by_session names attempt {attempt_id:?}, which is not live")
+                });
+                assert_eq!(
+                    &attempt.session, session,
+                    "{at}: attempt {attempt_id:?} is indexed under a session it does not report"
+                );
+            }
+        }
+        for (key, pending) in &self.retries {
+            let sub_id = &pending.attempt.sub_id;
+            let mapped = self.retry_by_sub.get(sub_id).unwrap_or_else(|| {
+                panic!("{at}: retry {key:?} has no retry_by_sub entry for its own sub {sub_id:?}")
+            });
+            assert_eq!(
+                mapped, key,
+                "{at}: retry_by_sub for sub {sub_id:?} does not name retry {key:?}"
+            );
+            let session = &pending.attempt.session;
+            let keys = self.retries_by_session.get(session).unwrap_or_else(|| {
+                panic!(
+                    "{at}: retry {key:?} has no retries_by_session reverse set for its own session"
+                )
+            });
+            assert!(
+                keys.contains(key),
+                "{at}: retry {key:?} is not named by its own session's reverse index"
+            );
+        }
+        for (sub_id, key) in &self.retry_by_sub {
+            let pending = self.retries.get(key).unwrap_or_else(|| {
+                panic!(
+                    "{at}: retry_by_sub names retry {key:?} for sub {sub_id:?}, which is not live"
+                )
+            });
+            assert_eq!(
+                &pending.attempt.sub_id, sub_id,
+                "{at}: retry {key:?} is indexed under a sub it does not report"
+            );
+        }
+        for (session, keys) in &self.retries_by_session {
+            assert!(
+                !keys.is_empty(),
+                "{at}: request attempts kept an empty retries_by_session reverse set for session {session:?}"
+            );
+            for key in keys {
+                let pending = self.retries.get(key).unwrap_or_else(|| {
+                    panic!("{at}: retries_by_session names retry {key:?}, which is not live")
+                });
+                assert_eq!(
+                    &pending.attempt.session, session,
+                    "{at}: retry {key:?} is indexed under a session it does not report"
+                );
+            }
+        }
+    }
 }
 
 impl EngineCore {
@@ -522,5 +719,208 @@ impl EngineCore {
             | RequestAttemptPurpose::Nip77Probe
             | RequestAttemptPurpose::Nip77Continue => false,
         }
+    }
+}
+
+/// This owner's own falsifiers, in the same spirit as
+/// `owner_index::tests::take_owner_panics_on_a_reverse_edge_the_forward_map_already_lost`:
+/// two reach past every public method to corrupt a mirror by hand (only
+/// possible from inside this module, since the maps are private to it), and
+/// two drive the real `pub(super)` surface `EngineCore` itself calls.
+#[cfg(test)]
+mod tests {
+    use nmp_grammar::{AccessContext, SourceAuthority};
+    use nostr::RelayUrl;
+
+    use super::*;
+
+    fn filter(kind: u16) -> ConcreteFilter {
+        ConcreteFilter {
+            kinds: Some(BTreeSet::from([kind])),
+            ..ConcreteFilter::default()
+        }
+    }
+
+    /// A minimal, valid `Ordinary` attempt on `relay`, distinguished from any
+    /// other by its filter's kind (so two calls with different `kind`s on the
+    /// same relay mint distinct `SubId`s).
+    fn attempt(relay: &RelayUrl, kind: u16) -> (RelaySessionKey, SubId, RequestAttemptState) {
+        let session = RelaySessionKey::public(relay.clone());
+        let filter = filter(kind);
+        let filter_hash = filter.hash();
+        let sub_id = SubId::for_wire(
+            relay.clone(),
+            &filter,
+            &SourceAuthority::Public,
+            AccessContext::Public,
+        );
+        let state = RequestAttemptState {
+            session: session.clone(),
+            sub_id: sub_id.clone(),
+            filter_hash,
+            filter,
+            coverage_claims: BTreeSet::new(),
+            owner_demands: BTreeSet::new(),
+            replay: false,
+            event_failure_target: EventFailureTarget::ThisSend,
+            request_revision: None,
+            retry_failures: 0,
+            purpose: RequestAttemptPurpose::Ordinary,
+        };
+        (session, sub_id, state)
+    }
+
+    /// The exact disagreement `remove` used to tolerate silently: the
+    /// forward map (`attempts`) and the OTHER mirror (`by_session`) both
+    /// still name a live attempt, but its `by_sub` bucket has already been
+    /// torn out from under it. Before this change `remove` skipped `by_sub`
+    /// via `if let` and returned the attempt as if nothing were wrong; now
+    /// it panics naming exactly the mirror that disagreed.
+    #[test]
+    #[should_panic(expected = "a live attempt's sub has no by_sub reverse set")]
+    fn remove_panics_when_by_sub_mirror_already_disagrees() {
+        let mut attempts = RequestAttempts::new();
+        let relay = RelayUrl::parse("wss://remove-disagree.example").expect("valid url");
+        let (_, _, state) = attempt(&relay, 1);
+        let id = attempts.mint(state);
+
+        // Precondition: the mirror is intact before corrupting it.
+        assert_eq!(
+            attempts.by_sub.values().map(BTreeSet::len).sum::<usize>(),
+            1
+        );
+        assert!(attempts.attempts.contains_key(&id));
+
+        // Corrupt only `by_sub`, bypassing every real removal path. `by_session`
+        // and `attempts` still agree the attempt is live.
+        attempts.by_sub.clear();
+
+        let _ = attempts.remove(id);
+    }
+
+    /// `assert_consistent`'s falsifier: swap which attempt each of two subs'
+    /// `by_sub` buckets names, WITHOUT changing key count (2) or edge count
+    /// (2). A census that only counts keys and edges cannot see this --
+    /// that is the whole point of checking identity instead.
+    #[test]
+    #[should_panic(expected = "is not named by its own sub's reverse index")]
+    fn assert_consistent_catches_a_cardinality_preserving_owner_swap() {
+        let mut attempts = RequestAttempts::new();
+        let relay_a = RelayUrl::parse("wss://swap-a.example").expect("valid url");
+        let relay_b = RelayUrl::parse("wss://swap-b.example").expect("valid url");
+        let (_, sub_a, state_a) = attempt(&relay_a, 1);
+        let (_, sub_b, state_b) = attempt(&relay_b, 1);
+        let id_a = attempts.mint(state_a);
+        let id_b = attempts.mint(state_b);
+
+        // Precondition: the mirror is intact and each attempt is under its
+        // own reported sub.
+        attempts.assert_consistent("precondition");
+
+        // Swap membership between the two owners' buckets. Total sub keys
+        // (2) and total edges (2) are unchanged -- only identity moved.
+        attempts
+            .by_sub
+            .get_mut(&sub_a)
+            .expect("sub_a bucket")
+            .clear();
+        attempts
+            .by_sub
+            .get_mut(&sub_a)
+            .expect("sub_a bucket")
+            .insert(id_b);
+        attempts
+            .by_sub
+            .get_mut(&sub_b)
+            .expect("sub_b bucket")
+            .clear();
+        attempts
+            .by_sub
+            .get_mut(&sub_b)
+            .expect("sub_b bucket")
+            .insert(id_a);
+        assert_eq!(
+            attempts.by_sub.len(),
+            2,
+            "owner-key count must be unchanged"
+        );
+        assert_eq!(
+            attempts.by_sub.values().map(BTreeSet::len).sum::<usize>(),
+            2,
+            "edge count must be unchanged"
+        );
+
+        attempts.assert_consistent("after swap");
+    }
+
+    /// The real behaviour, driven entirely through the same `pub(super)`
+    /// surface `EngineCore` calls: retiring one sub removes only that sub's
+    /// attempt and its parked retry, leaves the other sub's attempt live,
+    /// prunes the vacated `by_sub` bucket, and leaves the shared session's
+    /// `by_session` bucket correctly shrunk rather than destroyed.
+    #[test]
+    fn retire_for_sub_removes_only_that_subs_attempt_and_retry() {
+        let mut attempts = RequestAttempts::new();
+        let relay = RelayUrl::parse("wss://retire-sub.example").expect("valid url");
+        let (_session, sub_a, state_a) = attempt(&relay, 1);
+        let (_, _sub_b, state_b) = attempt(&relay, 2);
+        let id_a = attempts.mint(state_a.clone());
+        let id_b = attempts.mint(state_b);
+        attempts.schedule_retry(state_a, Timestamp::from(0u64));
+
+        let before = attempts.counts();
+        assert_eq!(before.attempts, 2);
+        assert_eq!(before.sub_keys, 2);
+        assert_eq!(before.session_keys, 1);
+        assert_eq!(before.session_edges, 2);
+        assert_eq!(before.retry_jobs, 1);
+        attempts.assert_consistent("before retire_for_sub");
+
+        attempts.retire_for_sub(&sub_a);
+
+        assert!(attempts.get(id_a).is_none(), "sub_a's attempt is gone");
+        assert!(attempts.get(id_b).is_some(), "sub_b's attempt survives");
+        let after = attempts.counts();
+        assert_eq!(after.attempts, 1);
+        assert_eq!(after.sub_keys, 1, "sub_a's now-empty bucket is pruned");
+        assert_eq!(after.session_keys, 1, "session still holds sub_b's attempt");
+        assert_eq!(after.session_edges, 1);
+        assert_eq!(after.retry_jobs, 0, "sub_a's retry is cancelled with it");
+        assert_eq!(after.retry_sub_keys, 0);
+        assert_eq!(after.retry_session_keys, 0);
+        attempts.assert_consistent("after retire_for_sub");
+    }
+
+    /// `retire_for_session`'s twin proof: retiring the session removes every
+    /// attempt and every parked retry it owns, across different subs, and
+    /// leaves no dangling `by_sub`/`retry_by_sub` mirrors behind.
+    #[test]
+    fn retire_for_session_removes_every_attempt_and_retry_it_owns() {
+        let mut attempts = RequestAttempts::new();
+        let relay = RelayUrl::parse("wss://retire-session.example").expect("valid url");
+        let (session, _sub_a, state_a) = attempt(&relay, 1);
+        let (_, _sub_b, state_b) = attempt(&relay, 2);
+        let id_a = attempts.mint(state_a.clone());
+        let id_b = attempts.mint(state_b.clone());
+        attempts.schedule_retry(state_a, Timestamp::from(0u64));
+        attempts.schedule_retry(state_b, Timestamp::from(0u64));
+
+        let before = attempts.counts();
+        assert_eq!(before.attempts, 2);
+        assert_eq!(before.retry_jobs, 2);
+        attempts.assert_consistent("before retire_for_session");
+
+        attempts.retire_for_session(&session);
+
+        assert!(attempts.get(id_a).is_none());
+        assert!(attempts.get(id_b).is_none());
+        let after = attempts.counts();
+        assert_eq!(after.attempts, 0);
+        assert_eq!(after.sub_keys, 0);
+        assert_eq!(after.session_keys, 0);
+        assert_eq!(after.retry_jobs, 0);
+        assert_eq!(after.retry_sub_keys, 0);
+        assert_eq!(after.retry_session_keys, 0);
+        attempts.assert_consistent("after retire_for_session");
     }
 }
