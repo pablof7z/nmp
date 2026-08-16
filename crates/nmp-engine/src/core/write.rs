@@ -5152,7 +5152,7 @@ impl EngineCore {
             .filter(|pending| !pending.route_complete)
             .flat_map(|pending| pending.route_needs.iter().copied())
             .collect();
-        needs.extend(self.author_outbox_route_needs.iter().copied());
+        needs.extend(self.author_outbox_route_needs.needs());
         needs
     }
 
@@ -5180,59 +5180,46 @@ impl EngineCore {
 
     pub(super) fn retain_author_outbox_wire_owner(&mut self, atom: &ContextualAtom) {
         for author in Self::author_outbox_authors(atom) {
-            let owners = self
-                .author_outbox_wire_owner_counts
-                .entry(author)
-                .or_insert(0);
-            *owners = owners.saturating_add(1);
-            if *owners == 1
-                && !self.author_has_positive_outbox(&author)
-                && self.author_outbox_route_needs.insert(author)
-            {
-                self.author_outbox_route_needs_changed = true;
-            }
+            let has_positive_outbox = self.author_has_positive_outbox(&author);
+            self.author_outbox_route_needs.retain(author, has_positive_outbox);
         }
     }
 
     pub(super) fn release_author_outbox_wire_owner(&mut self, atom: &ContextualAtom) {
         for author in Self::author_outbox_authors(atom) {
-            let Some(owners) = self.author_outbox_wire_owner_counts.get_mut(&author) else {
-                continue;
-            };
-            *owners = owners.saturating_sub(1);
-            if *owners == 0 {
-                self.author_outbox_wire_owner_counts.remove(&author);
-                if self.author_outbox_route_needs.remove(&author) {
-                    self.author_outbox_route_needs_changed = true;
+            self.author_outbox_route_needs.release(author);
+        }
+    }
+
+    /// Rebuild from the current live wire demand: reset to empty and replay
+    /// through the same [`AuthorRouteNeeds::retain`] door the incremental
+    /// path uses, one unit per contributed owner. There is no separate
+    /// wholesale algorithm to drift from the incremental one, and no map for
+    /// a caller to clear first -- the reset lives inside this method, not in
+    /// `query.rs`.
+    ///
+    /// `finish_rebuild` (not the replay loop) decides the pending-change
+    /// flag, from the exact before/after difference: an author whose route
+    /// just turned positive drops out of the rebuilt set without a single
+    /// `retain` call touching `needs` for that reason, so replay-time flag
+    /// writes alone cannot be trusted here. See `AuthorRouteNeeds`'s module
+    /// doc.
+    pub(super) fn rebuild_author_outbox_route_needs(&mut self) {
+        let needs_before_rebuild = self.author_outbox_route_needs.reset_for_rebuild();
+        for (atom, count) in self.wire.owner_contributions() {
+            for author in Self::author_outbox_authors(&atom) {
+                let has_positive_outbox = self.author_has_positive_outbox(&author);
+                for _ in 0..count {
+                    self.author_outbox_route_needs.retain(author, has_positive_outbox);
                 }
             }
         }
-    }
-
-    pub(super) fn rebuild_author_outbox_route_needs(&mut self) {
-        for (atom, count) in self.wire.owner_contributions() {
-            for author in Self::author_outbox_authors(&atom) {
-                let total = self
-                    .author_outbox_wire_owner_counts
-                    .entry(author)
-                    .or_insert(0);
-                *total = total.saturating_add(count);
-            }
-        }
-        let authors: Vec<_> = self
-            .author_outbox_wire_owner_counts
-            .keys()
-            .copied()
-            .collect();
-        for author in authors {
-            if !self.author_has_positive_outbox(&author) {
-                self.author_outbox_route_needs.insert(author);
-            }
-        }
+        self.author_outbox_route_needs
+            .finish_rebuild(needs_before_rebuild);
     }
 
     pub(super) fn flush_author_outbox_route_need_changes(&mut self, effects: &mut Vec<Effect>) {
-        if self.author_outbox_route_needs_changed {
+        if self.author_outbox_route_needs.take_pending_change() {
             self.resync_route_needs(effects);
         }
     }
@@ -5543,7 +5530,7 @@ impl EngineCore {
     /// A need is not a subscription. Optional protocol assembly reads this
     /// neutral set and owns any exact query it opens.
     pub(super) fn resync_route_needs(&mut self, effects: &mut Vec<Effect>) {
-        self.author_outbox_route_needs_changed = false;
+        self.author_outbox_route_needs.take_pending_change();
         let current = self.author_route_needs();
         if current != self.last_author_route_needs {
             self.last_author_route_needs = current.clone();

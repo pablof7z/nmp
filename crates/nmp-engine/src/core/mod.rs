@@ -34,6 +34,7 @@
 #[cfg(test)]
 mod admission_tests;
 mod attribution;
+mod author_route_needs;
 mod author_route_provider;
 pub use author_route_provider::{AuthorRouteProvider, AuthorRouteUpdate, ProviderReroot};
 #[cfg(test)]
@@ -458,6 +459,7 @@ pub use query::Nip77Frame;
 pub use request_attempt::{LocalSendRefusal, RequestAttemptId, RequestHandoffOutcome};
 use request_attempt::{RequestAttemptPurpose, RequestAttemptState, RequestAttempts, RequestSend};
 pub use request_effects::{AttemptedReplay, AttemptedWireDelta};
+use author_route_needs::AuthorRouteNeeds;
 use request_replacements::RequestReplacements;
 use request_targets::{ActiveRequestTarget, RequestTargets};
 use stalled_write_census::{StalledWriteCensus, StalledWriteInputs};
@@ -1912,16 +1914,12 @@ pub struct EngineCore {
     /// counting has exactly one implementation instead of an incremental path
     /// and a rebuild that open-coded it a second time.
     wire: WireOwnership,
-    /// Exact live-wire owner count per author contributed by
-    /// `AuthorOutboxes` demand. This keeps neutral provider work incremental:
-    /// unrelated handle teardown never scans the complete wire-demand set.
-    author_outbox_wire_owner_counts: BTreeMap<PublicKey, usize>,
-    /// Authors with live `AuthorOutboxes` demand and no positive outbound
-    /// route. This is the read half of `AuthorRouteNeedsChanged`.
-    author_outbox_route_needs: BTreeSet<PublicKey>,
-    /// Whether an incremental wire-owner change altered that read half since
-    /// the last provider-work edge was published.
-    author_outbox_route_needs_changed: bool,
+    /// Live-wire owner count per author contributed by `AuthorOutboxes`
+    /// demand, which authors still lack a positive outbound route, and the
+    /// pending-change flag for `AuthorRouteNeedsChanged`. Private to
+    /// `author_route_needs.rs`, so the incremental and wholesale-rebuild
+    /// paths share one algorithm instead of two that can drift.
+    author_outbox_route_needs: AuthorRouteNeeds,
     /// Per-OBSERVATION delivered projection, keyed by the id every mailbox
     /// and cancellation uses.
     observations: HashMap<ObservationId, ObservationState>,
@@ -2376,9 +2374,7 @@ impl EngineCore {
             handles: HashMap::new(),
             request_targets: RequestTargets::default(),
             wire: WireOwnership::default(),
-            author_outbox_wire_owner_counts: BTreeMap::new(),
-            author_outbox_route_needs: BTreeSet::new(),
-            author_outbox_route_needs_changed: false,
+            author_outbox_route_needs: AuthorRouteNeeds::default(),
             observations: HashMap::new(),
             next_observation_id: 0,
             history: HistorySessions::new(),
@@ -2628,6 +2624,7 @@ impl EngineCore {
     #[cfg(any(test, feature = "bench-instrumentation"))]
     pub fn assert_owner_consistency(&self, at: &str) {
         self.wire.assert_consistent(at);
+        self.author_outbox_route_needs.assert_consistent(at);
         self.request_targets.assert_consistent(at);
         self.nip77.assert_consistent(at);
         self.request_replacements.assert_consistent(at);
