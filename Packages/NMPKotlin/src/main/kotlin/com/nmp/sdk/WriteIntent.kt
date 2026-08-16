@@ -416,23 +416,11 @@ sealed class RefuseReason {
 
     object Tombstoned : RefuseReason()
 
-    object ReplaceableBaseOnRegularEvent : RefuseReason()
-
-    /** A whole-value replacement lost its compare-and-swap.
-     *
-     * BOTH ids are kept, and that is what makes the failure recoverable
-     * without the user: fetch [actual], reapply the change and resubmit
-     * silently. Reduced to a string you could only tell them to redo it. */
-    data class ReplaceableBaseChanged(val expected: String?, val actual: String?) : RefuseReason()
-
     companion object {
         internal fun from(ffi: FfiRefuseReason): RefuseReason =
             when (ffi) {
                 is FfiRefuseReason.AlreadyExpired -> AlreadyExpired
                 is FfiRefuseReason.Tombstoned -> Tombstoned
-                is FfiRefuseReason.ReplaceableBaseOnRegularEvent -> ReplaceableBaseOnRegularEvent
-                is FfiRefuseReason.ReplaceableBaseChanged ->
-                    ReplaceableBaseChanged(ffi.expected, ffi.actual)
             }
     }
 }

@@ -763,10 +763,10 @@ pub enum FfiReaction {
 /// `nostr::Event`) plus `sig`, deliberately: the write side stays symmetric
 /// with the read side rather than introducing a JSON-blob shape.
 ///
-/// There is no `ReplaceableEdit` mirror and never was: a CAS-guarded
-/// replacement crosses this boundary only as a fused semantic method
+/// There is no `ReplaceableOperation` mirror either: a registered replaceable
+/// operation crosses this boundary only as a fused semantic method
 /// (`NmpEngine::follow`/`unfollow`), which owns the evidence policy, the
-/// precondition and the routing together. The native surface learns
+/// replay authority and the routing together. The native surface learns
 /// `follow(target)`, not the pieces it would otherwise have to reassemble.
 ///
 /// `Signed`'s fields are PARSED at this FFI boundary (typed hex/signature-
@@ -1270,17 +1270,6 @@ pub struct FfiReceiptResult {
 pub enum FfiRefuseReason {
     AlreadyExpired,
     Tombstoned,
-    ReplaceableBaseOnRegularEvent,
-    /// A whole-value replacement lost its compare-and-swap.
-    ///
-    /// BOTH ids are kept, and that is what makes the failure recoverable
-    /// without the user: an app fetches `actual`, reapplies the change and
-    /// resubmits silently. Reduced to a string it could only tell them to
-    /// redo it.
-    ReplaceableBaseChanged {
-        expected: Option<String>,
-        actual: Option<String>,
-    },
 }
 
 /// `nmp::PublishQueueEntry` mirror: one write in the queue, as the app reads

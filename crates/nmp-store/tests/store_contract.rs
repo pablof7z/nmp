@@ -1893,8 +1893,6 @@ fn coverage_remains_exact_across_all_retractions_and_only_gc_lowers_it() {
             .accept_write(AcceptWrite {
                 payload: AcceptWritePayload::Event {
                     frozen: Box::new(frozen_pending),
-                    replaceable_base: None,
-                    monotonic_stamp: false,
                     routing: "coverage-proof".into(),
                     sig_state: IntentSigState::Pending,
                 },
@@ -2071,8 +2069,6 @@ fn a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_b
             .accept_write(AcceptWrite {
                 payload: AcceptWritePayload::Event {
                     frozen: Box::new(frozen),
-                    replaceable_base: None,
-                    monotonic_stamp: false,
                     routing: "optimistic-1182".into(),
                     sig_state: IntentSigState::Pending,
                 },

@@ -28,34 +28,6 @@ error has unknown durability: reconstruction and correlation lookup may reveal
 that the transaction committed one pending row. `Accepted` never means merely
 queued in memory.
 
-### Guarded whole-value replacement
-
-A protocol module composing a destructive whole-value replaceable/addressable edit may
-attach the exact canonical base event id it observed. `None` means the module
-established no local winner under its explicit source-evidence policy; it does
-not assert global Nostr absence. This remains the contract for
-`ReplaceableEdit`; NIP-02 follow/unfollow now uses the separate replayable
-`ReplaceableOperation` path, whose capability explicitly defines its complete
-empty first value and retains the operation for later source truth.
-
-The store compares that expected base with the current winner inside the same
-acceptance transaction, before allocating a journaled intent and its receipt id
-and before changing the canonical row. A mismatch returns
-`AcceptOutcome::Refused(RefuseReason::ReplaceableBaseChanged { expected,
-actual })` atomically. The reducer then takes that semantic refusal into
-receipt-only custody: `accept_refused` allocates one durable receipt id and
-the receipt stream ends with
-`WriteOutcome::Refused(RefuseReason::ReplaceableBaseChanged { expected,
-actual })`. There is no accepted intent, optimistic event, signer request,
-route, delivery work, or retry obligation. It never silently rebases the
-draft, and a precondition attached to a regular non-replaceable event fails
-closed.
-
-This mechanism closes the local read/accept race. It does not turn EOSE or a
-watermark into global completeness. Raw FFI writes cannot mint either guarded
-whole-value edits or replayable operations; native callers reach them through
-typed protocol actions.
-
 ### Replaceable delivery coalescing
 
 Acceptance uses the same NIP-01 coordinate as canonical replacement:

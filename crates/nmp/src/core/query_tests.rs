@@ -453,17 +453,14 @@ mod affected_handle_invalidation_tests {
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
         let accepted = core.on_publish(WriteIntent {
-            payload: WritePayload::ReplaceableEdit {
-                builder: nmp_grammar::EventBuilder {
-                    kind: Kind::ContactList,
-                    tags: (vec![Tag::public_key(Keys::generate().public_key())])
-                        .into_iter()
-                        .collect(),
-                    content: ("new").into(),
-                    created_at: Some(Timestamp::from(20u64)),
-                },
-                expected_base: Some(predecessor.id),
-            },
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::ContactList,
+                tags: (vec![Tag::public_key(Keys::generate().public_key())])
+                    .into_iter()
+                    .collect(),
+                content: ("new").into(),
+                created_at: Some(Timestamp::from(20u64)),
+            }),
             routing: WriteRouting::Explicit(vec![relay]),
             identity: Identity::Active,
             correlation: None,

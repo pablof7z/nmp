@@ -374,24 +374,15 @@ class EvidenceMappingTest {
     }
 
     @Test
-    fun replaceableBaseChangedPreservesBothWinnerIds() {
+    fun tombstonedRefusalMapsThroughTheOutcome() {
         val refused =
             WriteFact.from(
                 FfiWriteFact.Outcome(
-                    FfiWriteOutcome.Refused(
-                        FfiRefuseReason.ReplaceableBaseChanged(
-                            expected = "expected-event",
-                            actual = "actual-event",
-                        ),
-                    ),
+                    FfiWriteOutcome.Refused(FfiRefuseReason.Tombstoned),
                 ),
             )
         assertEquals(
-            WriteFact.Outcome(
-                WriteOutcome.Refused(
-                    RefuseReason.ReplaceableBaseChanged("expected-event", "actual-event"),
-                ),
-            ),
+            WriteFact.Outcome(WriteOutcome.Refused(RefuseReason.Tombstoned)),
             refused,
         )
     }

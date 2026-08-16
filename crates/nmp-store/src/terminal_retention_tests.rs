@@ -45,8 +45,6 @@ fn accept(
         .accept_write(AcceptWrite {
             payload: AcceptWritePayload::Event {
                 frozen: Box::new(frozen(keys, content, created_at)),
-                replaceable_base: None,
-                monotonic_stamp: false,
                 routing: "auto".to_owned(),
                 sig_state: IntentSigState::Pending,
             },

@@ -187,8 +187,6 @@ fn accept_write(signed: &Event, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
         payload: AcceptWritePayload::Event {
             frozen: Box::new(frozen_from_signed(signed)),
-            replaceable_base: None,
-            monotonic_stamp: false,
             routing: "local-mutation-benchmark".to_owned(),
             sig_state: IntentSigState::Pending,
         },

@@ -632,8 +632,6 @@ fn assert_persisted_routing_fails_closed_without_dropping(
             .accept_write(AcceptWrite {
                 payload: AcceptWritePayload::Event {
                     frozen: Box::new(frozen),
-                    replaceable_base: None,
-                    monotonic_stamp: false,
                     routing,
                     sig_state: IntentSigState::Pending,
                 },
@@ -744,8 +742,6 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
             .accept_write(AcceptWrite {
                 payload: AcceptWritePayload::Event {
                     frozen: Box::new(frozen),
-                    replaceable_base: None,
-                    monotonic_stamp: false,
                     routing: "auto".to_string(),
                     sig_state: IntentSigState::Pending,
                 },
@@ -1213,8 +1209,6 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
                         event.content.clone(),
                         sentinel_signature(),
                     )),
-                    replaceable_base: None,
-                    monotonic_stamp: false,
                     routing: "auto".to_string(),
                     sig_state: IntentSigState::Pending,
                 },

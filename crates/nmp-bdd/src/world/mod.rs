@@ -383,27 +383,6 @@ pub struct NmpWorld {
     /// including a deliberately corrupted one.
     handed_over: Option<nostr::Event>,
 
-    // ---- the replaceable plane (`world::replaceable`) -------------------
-    /// A replacement composed against a base and not yet published, so a
-    /// scenario can move the winner underneath it first. The gap between
-    /// composing and publishing is what makes "checked at acceptance, not at
-    /// compose time" a claim with two distinguishable answers.
-    pending_replacement: Option<(
-        nmp_grammar::Identity,
-        Option<EventId>,
-        nmp_grammar::EventBuilder,
-    )>,
-    /// Contact lists by an author this world cannot sign for, which reached
-    /// the store the only way a foreign event ever does -- observed from a
-    /// relay -- keyed by whose they are.
-    foreign_contact_lists: BTreeMap<String, String>,
-    /// What the scenario SAID each staged version's timestamp was, keyed by
-    /// the word it named it with. Held rather than read back off the wire
-    /// because #995 retires a displaced predecessor's delivery obligation, so a
-    /// version that is legitimately the store's may correctly never reach any
-    /// relay.
-    stated_created_at: BTreeMap<String, Timestamp>,
-
     /// The relay every `watch` step pins its demand to -- the subject of the
     /// subscription-collapse scenarios.
     watch_relay: Option<String>,

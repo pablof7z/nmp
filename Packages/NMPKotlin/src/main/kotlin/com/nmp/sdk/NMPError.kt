@@ -253,19 +253,6 @@ sealed class NMPError(message: String) : Exception(message) {
         NMPError("invalid reaction: $reason")
     // nmp-native:endif
 
-    // nmp-native:if nip22
-    /** #973: a composer returned a compare-and-swap replaceable edit, which
-     * has no wire form on purpose -- a replaceable precondition crosses this
-     * boundary only inside the semantic method that owns it
-     * (`follow`/`unfollow`), never as a payload a native caller could
-     * reassemble without the guard. */
-    object ReplaceableEditHasNoWireForm :
-        NMPError(
-            "a replaceable edit crosses this boundary only inside the semantic method that owns " +
-                "its precondition, never as a payload",
-        )
-    // nmp-native:endif
-
     /** #1437: registered replaceable operations are capability-owned internal
      * write payloads. They cannot be projected as a standalone native payload
      * without losing the registered materializer that gives the bytes their
@@ -448,9 +435,6 @@ sealed class NMPError(message: String) : Exception(message) {
                 // nmp-native:endif
                 // nmp-native:if nip25
                 is FfiException.InvalidReaction -> InvalidReaction(ffi.reason)
-                // nmp-native:endif
-                // nmp-native:if nip22
-                is FfiException.ReplaceableEditHasNoWireForm -> ReplaceableEditHasNoWireForm
                 // nmp-native:endif
                 is FfiException.ReplaceableOperationHasNoWireForm ->
                     ReplaceableOperationHasNoWireForm

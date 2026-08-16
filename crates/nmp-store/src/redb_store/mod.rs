@@ -737,8 +737,7 @@ impl RedbStore {
     /// `PUBLISH_QUEUE_RECEIPTS` row with `intent_id: None` (nothing backs it
     /// — no intent, no journal, no pending event row, no signer request, no
     /// relay write) and [`ReceiptState::Refused`] carrying `reason`
-    /// verbatim, including a [`RefuseReason::ReplaceableBaseChanged`]'s two
-    /// event ids. [`RefuseReason::AlreadyExpired`] never reaches this door:
+    /// verbatim. [`RefuseReason::AlreadyExpired`] never reaches this door:
     /// expiry is a pre-custody refusal with no retained receipt.
     ///
     /// Terminal at birth. Custody is not viability: the entry exists so the

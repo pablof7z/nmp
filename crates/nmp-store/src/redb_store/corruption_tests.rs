@@ -86,8 +86,6 @@ fn accept_of(frozen: Event) -> AcceptWrite {
     AcceptWrite {
         payload: crate::AcceptWritePayload::Event {
             frozen: Box::new(frozen),
-            replaceable_base: None,
-            monotonic_stamp: false,
             routing: "auto".to_owned(),
             sig_state: IntentSigState::Pending,
         },

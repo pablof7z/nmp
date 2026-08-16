@@ -265,10 +265,6 @@ pub enum WriteOutcome {
     /// The store answered the acceptance instruction with a semantic no. The
     /// write is in custody as a permanently-failed entry: one row, payload
     /// intact, readable and removable through the enumeration door.
-    ///
-    /// [`RefuseReason::ReplaceableBaseChanged`] keeps BOTH event ids, which
-    /// is what makes the failure recoverable without troubling the user: an
-    /// app fetches `actual`, reapplies the change and resubmits silently.
     Refused(RefuseReason),
 }
 

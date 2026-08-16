@@ -1737,8 +1737,6 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
                         unsigned.content,
                         sentinel_signature(),
                     )),
-                    replaceable_base: None,
-                    monotonic_stamp: false,
                     routing: "auto".into(),
                     sig_state: IntentSigState::AwaitingSigner,
                 },
