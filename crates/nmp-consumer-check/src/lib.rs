@@ -599,12 +599,9 @@ mod tests {
         // And the same door takes NO algorithm at all, which is a supported
         // choice rather than a missing feature: operator lanes and explicit
         // routes still carry everything they carry.
-        let providerless = Engine::new_with_capabilities_and_routing(
-            EngineConfig::default(),
-            Vec::new(),
-            None,
-        )
-        .expect("an engine that discovers no routes must build");
+        let providerless =
+            Engine::new_with_capabilities_and_routing(EngineConfig::default(), Vec::new(), None)
+                .expect("an engine that discovers no routes must build");
 
         engine.shutdown();
         providerless.shutdown();
