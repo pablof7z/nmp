@@ -8,6 +8,44 @@
 use super::*;
 
 impl EngineCore {
+    /// Move `receipts_by_lane_relay` from one persisted-relay set to another
+    /// for one receipt: drop it from every relay it no longer persists to,
+    /// add it to every relay it newly does.
+    ///
+    /// The ONLY writer of `receipts_by_lane_relay`, in both directions. Its
+    /// four callers are `replace_lane_projection` (an exact rebuild against a
+    /// freshly recovered lane set), [`Self::reset_lane_projection_for_successor`]
+    /// (a reset to the empty set, with no recovered lanes to diff against),
+    /// and the two single-relay additions `apply_committed_lane` and
+    /// `mark_lane_projection_uncertain`.
+    ///
+    /// The last two used to insert into the index directly. That was safe --
+    /// they only ever add -- but it made this "the one door" true for removal
+    /// and false for addition, which is how the divergence this function
+    /// exists to end began: one rewrite site pruning and its sibling not
+    /// (#1562). A door that is only sometimes the door is not a door.
+    fn update_lane_relay_index(
+        &mut self,
+        id: ReceiptId,
+        previous: &BTreeSet<RelayUrl>,
+        next: &BTreeSet<RelayUrl>,
+    ) {
+        for relay in previous.difference(next) {
+            if let Some(receipts) = self.receipts_by_lane_relay.get_mut(relay) {
+                receipts.remove(&id);
+                if receipts.is_empty() {
+                    self.receipts_by_lane_relay.remove(relay);
+                }
+            }
+        }
+        for relay in next.difference(previous) {
+            self.receipts_by_lane_relay
+                .entry(relay.clone())
+                .or_default()
+                .insert(id);
+        }
+    }
+
     /// Replace one intent's projection from a complete recovered lane set.
     ///
     /// Bootstrap returns every retained lane for the intent, so this is an
@@ -26,22 +64,36 @@ impl EngineCore {
             .map(|pending| pending.lane_projection.persisted.clone())
             .unwrap_or_default();
 
-        for relay in previous.difference(&next.persisted) {
-            if let Some(receipts) = self.receipts_by_lane_relay.get_mut(relay) {
-                receipts.remove(&id);
-                if receipts.is_empty() {
-                    self.receipts_by_lane_relay.remove(relay);
-                }
-            }
-        }
-        for relay in next.persisted.difference(&previous) {
-            self.receipts_by_lane_relay
-                .entry(relay.clone())
-                .or_default()
-                .insert(id);
-        }
+        self.update_lane_relay_index(id, &previous, &next.persisted);
         if let Some(pending) = self.pending.get_mut(&id) {
             pending.lane_projection = next;
+        }
+    }
+
+    /// Reset one pending write's lane projection to empty ahead of a
+    /// replaceable-operation successor rewrite, releasing every relay it
+    /// currently persists to in `receipts_by_lane_relay`.
+    ///
+    /// A member rewritten onto a new generation owns no lane the old
+    /// generation minted: nothing may re-attach to them, so the projection
+    /// resets to empty exactly as `replace_lane_projection` would reset it
+    /// against an empty recovered lane set. Both call sites that rewrite an
+    /// existing member in place (`write.rs`'s
+    /// `install_materialized_replaceable_successor` and
+    /// `write/replaceable_operation.rs`'s member-rewrite branch) used to
+    /// assign `LaneWorkerProjection::default()` to the field directly and
+    /// never told this index, so every relay the old generation had
+    /// persisted lanes on kept naming the receipt in
+    /// `receipts_by_lane_relay` until the next full boot recovery (#1562).
+    pub(super) fn reset_lane_projection_for_successor(&mut self, id: ReceiptId) {
+        let previous = self
+            .pending
+            .get(&id)
+            .map(|pending| pending.lane_projection.persisted.clone())
+            .unwrap_or_default();
+        self.update_lane_relay_index(id, &previous, &BTreeSet::new());
+        if let Some(pending) = self.pending.get_mut(&id) {
+            pending.lane_projection = LaneWorkerProjection::default();
         }
     }
 
@@ -57,10 +109,11 @@ impl EngineCore {
         };
         let newly_persisted = pending.lane_projection.apply(lane);
         if newly_persisted {
-            self.receipts_by_lane_relay
-                .entry(lane.key.relay.clone())
-                .or_default()
-                .insert(id);
+            self.update_lane_relay_index(
+                id,
+                &BTreeSet::new(),
+                &BTreeSet::from([lane.key.relay.clone()]),
+            );
         }
     }
 
@@ -80,10 +133,11 @@ impl EngineCore {
         };
         let newly_persisted = pending.lane_projection.mark_uncertain(key.relay.clone());
         if newly_persisted {
-            self.receipts_by_lane_relay
-                .entry(key.relay.clone())
-                .or_default()
-                .insert(id);
+            self.update_lane_relay_index(
+                id,
+                &BTreeSet::new(),
+                &BTreeSet::from([key.relay.clone()]),
+            );
         }
     }
 

@@ -340,6 +340,39 @@ impl EngineCore {
         self.intent_receipts.get(&intent_id).copied()
     }
 
+    /// Name one receipt as owning these exact frozen bytes.
+    ///
+    /// The one door into `event_to_receipts`, paired with
+    /// [`Self::unindex_receipt_from_event`]. Six sites used to spell this
+    /// `entry(id).or_default().insert(receipt)` by hand.
+    pub(super) fn index_receipt_under_event(&mut self, event_id: EventId, id: ReceiptId) {
+        self.event_to_receipts
+            .entry(event_id)
+            .or_default()
+            .insert(id);
+    }
+
+    /// Release one receipt's claim on these frozen bytes, dropping the entry
+    /// entirely once no receipt names them.
+    ///
+    /// Pruning is not housekeeping. `event_to_receipts` answers "which live
+    /// obligations own these exact bytes", so an entry surviving with an
+    /// empty set asserts that bytes nothing owns are still owned. Three sites
+    /// used to spell the removal by hand and only two of them pruned: the
+    /// successor rewrite in `write/replaceable_operation.rs` left an empty
+    /// set under every retired generation's event id, once per rewrite, until
+    /// the next boot recovery (#1562). One door, so the two spellings cannot
+    /// diverge again.
+    pub(super) fn unindex_receipt_from_event(&mut self, event_id: EventId, id: ReceiptId) {
+        let Some(receipts) = self.event_to_receipts.get_mut(&event_id) else {
+            return;
+        };
+        receipts.remove(&id);
+        if receipts.is_empty() {
+            self.event_to_receipts.remove(&event_id);
+        }
+    }
+
     /// Remove a permanently-discarded pending write's entries from the
     /// `intent_receipts`, `event_to_receipts`, and `receipts_by_lane_relay`
     /// indexes (epic #507 finding E5, #903). Call this at every REAL removal
@@ -403,10 +436,7 @@ impl EngineCore {
             return;
         };
         self.intent_receipts.insert(intent_id, id);
-        self.event_to_receipts
-            .entry(event_id)
-            .or_default()
-            .insert(id);
+        self.index_receipt_under_event(event_id, id);
     }
 
     /// Ask the ordinary query owner whether this relay's current value for
@@ -1463,10 +1493,7 @@ impl EngineCore {
                     .attempt_ordinals
                     .insert(lane.key.relay.clone(), attempt.ordinal);
             }
-            self.event_to_receipts
-                .entry(event.id)
-                .or_default()
-                .insert(id);
+            self.index_receipt_under_event(event.id, id);
             self.attempt_correlations.insert(
                 correlation,
                 AttemptCorrelationTarget {
@@ -2075,10 +2102,7 @@ impl EngineCore {
                         frozen: frozen.clone(),
                     },
                 );
-                self.event_to_receipts
-                    .entry(frozen.id)
-                    .or_default()
-                    .insert(id);
+                self.index_receipt_under_event(frozen.id, id);
                 effects.push(Effect::EmitReceipt(
                     id,
                     WriteFact::Signing(SigningState::Refused { reason }),
@@ -3325,17 +3349,27 @@ impl EngineCore {
             }));
         for (member, receipt) in member_receipts {
             debug_assert!(generation.members.contains(&member));
+            // Releases every relay this member's old generation had
+            // persisted lanes on from `receipts_by_lane_relay`, through the
+            // one diff `replace_lane_projection` also uses (#1562). Run
+            // first, as its own `&mut self` call, because it cannot run
+            // while `pending` below holds `self.pending`'s only mutable
+            // borrow.
+            self.reset_lane_projection_for_successor(receipt);
+            // Release the retired generation's bytes through the one door,
+            // read and released before taking `pending` because the door
+            // borrows all of `self`.
+            let old_event_id = self
+                .pending
+                .get(&receipt)
+                .expect("semantic runtime members were preflighted before commit")
+                .frozen
+                .id;
+            self.unindex_receipt_from_event(old_event_id, receipt);
             let pending = self
                 .pending
                 .get_mut(&receipt)
                 .expect("semantic runtime members were preflighted before commit");
-            let old_event_id = pending.frozen.id;
-            if let Some(receipts) = self.event_to_receipts.get_mut(&old_event_id) {
-                receipts.remove(&receipt);
-                if receipts.is_empty() {
-                    self.event_to_receipts.remove(&old_event_id);
-                }
-            }
             pending.frozen = installed.event.clone();
             pending.target = target.clone();
             pending.already_signed = false;
@@ -3346,11 +3380,8 @@ impl EngineCore {
             pending.unstarted_relays.clear();
             pending.route_blocked_relays.clear();
             pending.attempt_ordinals.clear();
-            pending.lane_projection = LaneWorkerProjection::default();
-            self.event_to_receipts
-                .entry(installed.event.id)
-                .or_default()
-                .insert(receipt);
+            // `lane_projection` was already reset above.
+            self.index_receipt_under_event(installed.event.id, receipt);
         }
         let owner_receipt = self
             .intent_receipts
@@ -4282,12 +4313,7 @@ impl EngineCore {
                             Err(error) => self.degrade_store(error, &mut effects),
                         }
                         self.quarantined_auth_receipts.remove(&id);
-                        if let Some(receipts) = self.event_to_receipts.get_mut(&event_id) {
-                            receipts.remove(&id);
-                            if receipts.is_empty() {
-                                self.event_to_receipts.remove(&event_id);
-                            }
-                        }
+                        self.unindex_receipt_from_event(event_id, id);
                         effects.push(Effect::EmitReceipt(
                             id,
                             WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Cancelled)),
@@ -4625,10 +4651,7 @@ impl EngineCore {
         // lane, and a parked intent has none, but the index must be complete
         // the moment the bytes are final so a LATER resolution's lanes need
         // no second registration step.
-        self.event_to_receipts
-            .entry(event.id)
-            .or_default()
-            .insert(id);
+        self.index_receipt_under_event(event.id, id);
         let RouteResolution {
             answer,
             parent_provenance_error,
