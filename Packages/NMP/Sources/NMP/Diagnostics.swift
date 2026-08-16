@@ -79,6 +79,20 @@ public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
     /// identity is a distinct session with its own row.
     public let access: NMPAccessContext
     public let wireSubCount: UInt32
+    /// This relay's own advertised concurrent-subscription budget (NIP-11
+    /// `limitation.max_subscriptions`, #931). `nil` means the relay
+    /// advertised nothing and is therefore UNBUDGETED -- never a fabricated
+    /// default.
+    public let subscriptionBudget: UInt32?
+    /// Subscriptions this relay's advertised budget removed from the plan.
+    /// Non-zero means real demand did not reach the wire, and the affected
+    /// queries say so through their own acquisition evidence.
+    public let subscriptionsRefused: UInt32
+    /// This relay's advertised `limitation.max_subid_length`.
+    public let subidLengthLimit: UInt32?
+    /// True iff that advertised length is shorter than the 64-character
+    /// subscription ids NMP sends, i.e. this relay rejects every REQ.
+    public let subidLengthRejectsOurIds: Bool
     public let authorsServed: UInt32
     public let byLane: [LaneCount]
     /// The EXACT wire JSON of every filter currently sent to this relay.
@@ -97,6 +111,10 @@ public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
         relay = ffi.relay
         access = NMPAccessContext(ffi.access)
         wireSubCount = ffi.wireSubCount
+        subscriptionBudget = ffi.subscriptionBudget
+        subscriptionsRefused = ffi.subscriptionsRefused
+        subidLengthLimit = ffi.subidLengthLimit
+        subidLengthRejectsOurIds = ffi.subidLengthRejectsOurIds
         authorsServed = ffi.authorsServed
         byLane = ffi.byLane.map(LaneCount.init)
         filters = ffi.filters
@@ -122,6 +140,7 @@ public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
 public struct AuthDiagnostics: Sendable, Hashable {
     public let relay: String
     public let access: NMPAccessContext
+    public let transportSlot: UInt32
     public let transportGeneration: UInt64
     public let epochSequence: UInt64?
     public let challengeDescriptor: String?
@@ -133,6 +152,7 @@ public struct AuthDiagnostics: Sendable, Hashable {
     init(_ ffi: FfiAuthDiagnostics) {
         relay = ffi.relay
         access = NMPAccessContext(ffi.access)
+        transportSlot = ffi.transportSlot
         transportGeneration = ffi.transportGeneration
         epochSequence = ffi.epochSequence
         challengeDescriptor = ffi.challengeDescriptor
@@ -241,6 +261,18 @@ public struct DiagnosticsSnapshot: Sendable {
     public let authSessions: [AuthDiagnostics]
     public let uncoveredAuthorCount: UInt32
     public let droppedMergeRules: [String]
+    /// Relay session candidates refused by the single whole-demand ceiling,
+    /// plus any defense-in-depth dial refusal at the transport boundary.
+    public let sessionsRejectedOverCap: UInt64
+    /// Relay sessions refused outright because the relay advertised ZERO
+    /// concurrent subscriptions. Kept apart from `sessionsRejectedOverCap`:
+    /// one says the plan was too wide for the operator's ceiling, the other
+    /// says this relay will hold nothing open.
+    public let sessionsRefusedBySubscriptionBudget: UInt64
+    /// Non-`nil` once an ingest/read store door has degraded the local
+    /// cache to read-only (issue #122). Observer-visible only -- never a
+    /// routing input.
+    public let storeDegraded: String?
     public let transportDegraded: String?
     /// Every durable write obligation that cannot progress, bounded to
     /// `stalledWriteTotals.detailLimit` rows in a deterministic display
@@ -256,6 +288,9 @@ public struct DiagnosticsSnapshot: Sendable {
         authSessions = ffi.authSessions.map(AuthDiagnostics.init)
         uncoveredAuthorCount = ffi.uncoveredAuthorCount
         droppedMergeRules = ffi.droppedMergeRules
+        sessionsRejectedOverCap = ffi.sessionsRejectedOverCap
+        sessionsRefusedBySubscriptionBudget = ffi.sessionsRefusedBySubscriptionBudget
+        storeDegraded = ffi.storeDegraded
         transportDegraded = ffi.transportDegraded
         stalledWrites = ffi.stalledWrites.map(StalledWrite.init)
         stalledWriteTotals = StalledWriteTotals(ffi.stalledWriteTotals)
@@ -269,6 +304,9 @@ public struct DiagnosticsSnapshot: Sendable {
         authSessions: [AuthDiagnostics] = [],
         uncoveredAuthorCount: UInt32 = 0,
         droppedMergeRules: [String] = [],
+        sessionsRejectedOverCap: UInt64 = 0,
+        sessionsRefusedBySubscriptionBudget: UInt64 = 0,
+        storeDegraded: String? = nil,
         transportDegraded: String? = nil,
         stalledWrites: [StalledWrite] = [],
         stalledWriteTotals: StalledWriteTotals = StalledWriteTotals()
@@ -277,6 +315,9 @@ public struct DiagnosticsSnapshot: Sendable {
         self.authSessions = authSessions
         self.uncoveredAuthorCount = uncoveredAuthorCount
         self.droppedMergeRules = droppedMergeRules
+        self.sessionsRejectedOverCap = sessionsRejectedOverCap
+        self.sessionsRefusedBySubscriptionBudget = sessionsRefusedBySubscriptionBudget
+        self.storeDegraded = storeDegraded
         self.transportDegraded = transportDegraded
         self.stalledWrites = stalledWrites
         self.stalledWriteTotals = stalledWriteTotals

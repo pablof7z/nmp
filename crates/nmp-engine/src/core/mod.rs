@@ -61,6 +61,7 @@ mod nip77_sessions;
 mod observation;
 #[cfg(test)]
 mod outbox_tests;
+mod owner_index;
 mod query;
 #[cfg(test)]
 mod query_tests;
@@ -70,6 +71,7 @@ mod request_attempt_tests;
 mod request_effects;
 #[cfg(test)]
 mod request_replacement_transition_tests;
+mod request_replacements;
 mod request_targets;
 mod semantic_delivery;
 #[cfg(test)]
@@ -456,6 +458,7 @@ pub use query::Nip77Frame;
 pub use request_attempt::{LocalSendRefusal, RequestAttemptId, RequestHandoffOutcome};
 use request_attempt::{RequestAttemptPurpose, RequestAttemptState, RequestAttempts, RequestSend};
 pub use request_effects::{AttemptedReplay, AttemptedWireDelta};
+use request_replacements::RequestReplacements;
 use request_targets::{ActiveRequestTarget, RequestTargets};
 use wire_ownership::{AtomReleased, AtomRetained, WireOwnership};
 // `runtime` (C) needs the EXACT same wire subscription-id string
@@ -1933,8 +1936,11 @@ pub struct EngineCore {
     /// reverse-index invariants are enforced by the compiler rather than by
     /// every caller remembering them.
     attempts: RequestAttempts,
-    pending_request_replacements: BTreeMap<SubId, nmp_router::RequestReplacement>,
-    request_replacements_by_session: HashMap<RelaySessionKey, BTreeSet<SubId>>,
+    /// Every accepted-open-before-close transition still waiting on its
+    /// successor's admission, keyed by successor and mirrored by owning
+    /// session (#774, #1562). Private maps in `request_replacements.rs`,
+    /// reusing the mirrored-index mechanism `nip77_sessions.rs` introduced.
+    request_replacements: RequestReplacements,
     active_request_evidence: HashMap<u64, ActiveRequestEvidence>,
     active_request_revisions_by_sub: HashMap<(RelaySessionKey, SubId), BTreeSet<u64>>,
     /// Exact REQs accepted by a live transport generation. Unlike request
@@ -2344,8 +2350,7 @@ impl EngineCore {
             attribution: AttributionState::new(),
             pending_request_evidence: HashMap::new(),
             attempts: RequestAttempts::new(),
-            pending_request_replacements: BTreeMap::new(),
-            request_replacements_by_session: HashMap::new(),
+            request_replacements: RequestReplacements::default(),
             active_request_evidence: HashMap::new(),
             active_request_revisions_by_sub: HashMap::new(),
             live_wire_requests: HashMap::new(),
@@ -2590,6 +2595,7 @@ impl EngineCore {
         self.wire.assert_consistent(at);
         self.request_targets.assert_consistent(at);
         self.nip77.assert_consistent(at);
+        self.request_replacements.assert_consistent(at);
     }
 
     #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -2614,6 +2620,7 @@ impl EngineCore {
         let wire = self.wire.counts();
         let targets = self.request_targets.counts();
         let nip77 = self.nip77.counts();
+        let replacements = self.request_replacements.counts();
         CoreOwnershipCensus {
             observations: self.observations.len(),
             branch_handles: self.handles.len(),
@@ -2671,13 +2678,9 @@ impl EngineCore {
             request_retry_sub_keys: attempts.retry_sub_keys,
             request_retry_session_keys: attempts.retry_session_keys,
             request_retry_session_edges: attempts.retry_session_edges,
-            request_replacement_jobs: self.pending_request_replacements.len(),
-            request_replacement_session_keys: self.request_replacements_by_session.len(),
-            request_replacement_session_edges: self
-                .request_replacements_by_session
-                .values()
-                .map(BTreeSet::len)
-                .sum(),
+            request_replacement_jobs: replacements.jobs,
+            request_replacement_session_keys: replacements.session_keys,
+            request_replacement_session_edges: replacements.session_edges,
             active_execution_owners: self.active_request_evidence.len(),
             active_execution_owner_keys: self.active_request_revisions_by_sub.len(),
             live_wire_owners: self.live_wire_requests.len(),
