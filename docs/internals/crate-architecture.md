@@ -110,6 +110,27 @@ Why two and not one (measured at `64f14255`):
   the pre-decomposition one. See open question 1 for what could still
   reverse the two-crate answer.
 
+**The fence, and how it was checked (#1720).** A manifest claim is only worth
+making if someone verified it, and verifying it needs both directions —
+a clean dependency list proves nothing if the source reaches an async runtime
+some other way, and clean source proves nothing about what the next edit may
+add:
+
+- *Manifest:* `crates/nmp-engine/Cargo.toml` names no `tokio`, no
+  `crossbeam-channel`, no `futures-channel`, no `reqwest`. Adding one is a
+  reviewable line in a file whose whole purpose is that list.
+- *Source:* grepping `crates/nmp-engine/src` for
+  `tokio|crossbeam|futures_channel|std::thread|std::sync::mpsc|std::net|reqwest`
+  returns only the two doc comments that assert the property. Zero real uses.
+
+`crossbeam-channel` also left `crates/nmp`'s manifest. `tokio` stays there for
+exactly two facade uses — `Engine::adapter_runtime()`, which hands a protocol
+adapter the engine's own runtime handle, and `nip29::records`' await timeout.
+
+Do the same two checks whenever a manifest is the proof. `nmp-nip11`'s
+`reqwest`/`httpdate` claim and `nmp-signer`'s zeroize-only claim rest on the
+identical pair.
+
 What the cut actually cost, measured rather than estimated: **96 declarations
 went from `pub(crate)` to `pub`** — 62 in `nmp-engine` (29 functions, 11
 types, 18 struct fields, 4 re-exports), 21 in `nmp-runtime` (14 functions, 3
@@ -121,8 +142,13 @@ and its account mutators (11, unforeseen because `session.rs` moving was not
 in the estimate), and struct **fields** rather than methods (20, on five
 structs the runtime destructures — `CoreObservationOwnershipCensus`,
 `RelayWorkerRequirements`, `RowsSeed`, `RuntimeConfig`,
-`PreparedReplaceableMaterialization`). Field types and destructuring sites
-are a boundary cost that a "count the methods" estimate does not see.
+`PreparedReplaceableMaterialization`; #1721 revisits their shape). Every
+widening was chosen by the compiler: the pass only touched declarations
+`rustc` reported as private across the new boundary, iterated to a fixed
+point, so none was widened by hand or opportunistically.
+
+The third of those is the one that generalises, and it is the rule below's
+fourth item arriving from the manifest side. See "what crosses a boundary".
 
 **The reducer stays one crate.** This is a defended "one thing, merely
 large", not a default: a field-level scan of `EngineCore` shows **15 fields
@@ -168,6 +194,42 @@ each in a different way, and the failures are the useful part:
 - `CoordinateCoverage` — `release_coordinate_coverage` calls
   `self.on_unsubscribe(..)`. Teardown reaches into the query plane, which is
   I6 stated as a call graph.
+
+`nmp-nip77` was a fourth rejection, on a different failure again: the reducer
+holds `Prober` and `Reconciler` as its own fields and matches `NegStep`
+directly, so `nmp-engine` would name `nmp-nip77` and `nmp-nip77` would name
+`negentropy` — the dependency gains a hop rather than leaving the manifest,
+and `negentropy` is on the reducer's allowed list anyway. The contrast with
+`nmp-nip11` is the whole lesson: there, the RUNTIME owned the service and the
+reducer saw only a value `core` defines itself, which is what let the crate
+line remove `reqwest` from the reducer's future manifest. Ask which side owns
+the state before asking whether the cluster is self-contained.
+
+### What crosses a boundary
+
+Four places to look, in this order, before concluding anything about a
+proposed boundary. The first three were learned by having the coupling hide
+in each of them; the fourth by measuring #1720's real cost.
+
+1. **Constructors** — who can make one, and from what.
+2. **Teardowns** — `Drop`, `close`, `release_*`; where the reach goes on the
+   way out is not where it goes on the way in.
+3. **Trait impls** — a blanket impl or a `From` can carry a whole vocabulary
+   across.
+4. **Public struct fields — both their types and their visibility.**
+   - *Types* decide what dependencies come with a value. This is what nearly
+     put `reqwest` back inside the reducer in #1716:
+     `RelayInformationCapabilityEvidence` carried an
+     `Option<RelayInformationError>`, one line inside a struct being moved
+     wholesale, and naming it from `core` would have recreated the exact edge
+     the cut existed to remove. It became `Option<String>` — the reducer never
+     matched a variant — and the whole type dependency went away for a
+     `Display` call at the boundary.
+   - *Visibility* decides what the cut costs. **What crosses a boundary is
+     not only what you call but what you destructure, and both are public
+     API.** 20 of #1720's 96 widenings were fields, on five structs the
+     runtime destructures; a "count the methods" estimate cannot see them,
+     which is how ~35 became 96.
 
 A crate line earns itself when the boundary needs *manifest*-level proof: a
 dependency that must not exist. That is exactly why reducer-versus-runtime is
@@ -259,28 +321,24 @@ Mechanical, no checker required:
 - No backend abstraction over the store without a real second backend
   (#1495), and no invented seams: a trait with one production implementor
   and no cycle to break is dead surface.
+- **The reducer/runtime cut is two crates, and it is done (#1720).** Open
+  question 1 asked what would reverse it — a door still churning fast enough
+  that the boundary forces cross-crate rework catching no drift. It did not:
+  the cut cost 96 compiler-chosen widenings once, and the fence is verified
+  in both the manifest and the source. Reopening needs new facts about
+  churn, not a fresh opinion about size.
+- **`RelayInformationCapabilityEvidence` is reducer-side** with the
+  snapshot→evidence projection in `nmp-runtime` (#1716). Former open
+  question 2; feasible as believed, with one correction the attempt found —
+  its `last_error` had to become `Option<String>`, because carrying
+  `nmp_nip11::RelayInformationError` would have put the HTTP crate back in
+  the reducer's imports for a `Display` call the runtime can make itself.
 
 ## Open questions
 
 Marked open on purpose; do not infer answers.
 
-1. **Reducer/runtime as two crates: final confirmation and timing.** The
-   two-crate target above is this design's answer, argued from the zero
-   back-edge, the 33-method door, and the tokio-absence manifest constraint.
-   What would reverse it into a single `nmp-engine` crate: evidence at cut
-   time that the door is still churning fast enough that the crate boundary
-   forces weekly cross-crate API rework with no drift actually being caught
-   — i.e. re-run the door census (distinct `EngineCore` methods called from
-   `runtime/`) after #1606 steps 1–3 land; if it has grown materially past
-   ~33, cut one crate first and split second. Either way the cut follows
-   #1707 and the first #1606 owners; it never precedes them.
-2. **Where `RelayInformationCapabilityEvidence` lands.** The reducer
-   consumes it (`core/mod.rs`); the `nmp-nip11` service produces it. For
-   the reducer's manifest to stay `reqwest`-free, the evidence type must be
-   defined reducer-side with the snapshot→evidence conversion in
-   `nmp-runtime`. Believed feasible (the type is plain data); unverified
-   until the extraction is attempted.
-3. **FFI scaling for hundreds of capabilities.** Compiled materializers must
+1. **FFI scaling for hundreds of capabilities.** Compiled materializers must
    be linked into the native staticlib, so per-capability accumulation
    moves to `nmp-ffi` rather than disappearing. Hand-written per-NIP
    Swift/Kotlin projection does not scale to hundreds of kinds; the likely
@@ -288,7 +346,7 @@ Marked open on purpose; do not infer answers.
    minting) with typed capability vocabulary in native packages, but nobody
    has designed it. Do not treat today's per-NIP FFI modules as the pattern
    to extend indefinitely.
-4. **Where NIP-51 list kinds live.** `nmp-nip29` ships the kind:10009
+2. **Where NIP-51 list kinds live.** `nmp-nip29` ships the kind:10009
    simple-groups list (NIP-51's schema) as a documented product-capability
    decision. When a second NIP-51 family arrives (bookmarks), decide
    whether an `nmp-nip51` crate owns the list schemas — do not decide it
@@ -303,3 +361,7 @@ Marked open on purpose; do not infer answers.
   document applies).
 - #1627 — records the boundary criteria and rejects metric-driven
   decomposition; this document is bound by it.
+- #1721 — revisit the 20 public struct fields the engine/runtime cut froze.
+  Not a defect; a public field is forever in a way a method is not, and five
+  structs destructured across a package boundary is a shape worth a second
+  look once the dust settles.
