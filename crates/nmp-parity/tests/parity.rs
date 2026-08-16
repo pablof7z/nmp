@@ -546,14 +546,14 @@ struct NormRelayDiagnostics {
 }
 
 /// One `DiagnosticsSnapshot.auth_sessions` row, reduced to the facts both
-/// surfaces claim to carry (#1616). `transport_slot` now crosses the FFI
-/// boundary too (#1562 boundary audit), so it is compared like every other
-/// field here.
+/// surfaces claim to carry (#1616). `transport_slot` is deliberately
+/// absent: it is a connection-pool allocator index, not a fact either
+/// surface documents a use for, so it does not cross the FFI boundary and
+/// has nothing to compare here (#1562 boundary audit).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct NormAuthSession {
     relay: String,
     access: String,
-    transport_slot: u32,
     transport_generation: u64,
     epoch_sequence: Option<u64>,
     challenge_descriptor: Option<String>,
@@ -1243,7 +1243,6 @@ fn normalize_direct_diagnostics(snapshot: DiagnosticsSnapshot, relay: &str) -> N
         .map(|session| NormAuthSession {
             relay: normalize_url(session.relay.as_str(), relay),
             access: direct_access_name(session.access),
-            transport_slot: session.transport_slot,
             transport_generation: session.transport_generation,
             epoch_sequence: session.epoch_sequence,
             challenge_descriptor: session.challenge_hash,
@@ -1336,7 +1335,6 @@ fn normalize_ffi_diagnostics(snapshot: FfiDiagnosticsSnapshot, relay: &str) -> N
         .map(|session| NormAuthSession {
             relay: normalize_url(&session.relay, relay),
             access: ffi_access_name(session.access),
-            transport_slot: session.transport_slot,
             transport_generation: session.transport_generation,
             epoch_sequence: session.epoch_sequence,
             challenge_descriptor: session.challenge_descriptor,
@@ -1416,7 +1414,6 @@ fn auth_diagnostics_phase_survives_the_ffi_boundary_intact() {
             .map(|(index, phase)| AuthDiagnosticsSnapshot {
                 relay: relay.clone(),
                 access: AccessContext::Nip42(public_key),
-                transport_slot: 7,
                 transport_generation: 11 + index as u64,
                 epoch_sequence: Some(23 + index as u64),
                 challenge_hash: Some(format!("blake3:challenge-{index}")),

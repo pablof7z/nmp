@@ -125,10 +125,6 @@ data class AuthDiagnostics(
     val relay: String,
     val access: NMPAccessContext,
     val transportGeneration: ULong,
-    /** Which physical pool slot this session occupies. Paired with
-     * [transportGeneration] it names the exact socket a diagnostics row
-     * describes, rather than merely the relay. */
-    val transportSlot: UInt,
     val epochSequence: ULong?,
     val challengeDescriptor: String?,
     val phase: AuthPhase,
@@ -142,7 +138,6 @@ data class AuthDiagnostics(
                 relay = ffi.relay,
                 access = NMPAccessContext.from(ffi.access),
                 transportGeneration = ffi.transportGeneration,
-                transportSlot = ffi.transportSlot,
                 epochSequence = ffi.epochSequence,
                 challengeDescriptor = ffi.challengeDescriptor,
                 phase = AuthPhase.from(ffi.phase),

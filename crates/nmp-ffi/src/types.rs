@@ -955,7 +955,6 @@ pub struct FfiRelayDiagnostics {
 pub struct FfiAuthDiagnostics {
     pub relay: String,
     pub access: FfiAccessContext,
-    pub transport_slot: u32,
     pub transport_generation: u64,
     pub epoch_sequence: Option<u64>,
     pub challenge_descriptor: Option<String>,
