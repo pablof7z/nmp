@@ -257,6 +257,65 @@ No API finding this time — `WriteIntent`, `Receipt`/`ReceiptStatus`, and the
 local-acceptance-then-echo behavior all worked exactly as documented, with no
 app-side polling or retry required anywhere in the scenario.
 
+**C9 is proven live** across all three of the contract's kill points, against
+a real `kill -9` of a real separate OS process — not an in-process `Engine`
+drop, which proves almost nothing about crash safety (ordinary Swift cleanup
+still runs).
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C9CrashDuringPublicationTests.swift`
+spawns a sibling executable, `canary-c9-publisher`, that constructs an engine
+over a store path handed to it, adds and persists a local-key account
+(needed so the SAME signer exists again after restart), publishes one real
+signed event under a caller-supplied correlation token, prints
+machine-readable stdout markers as it reaches each fact the parent needs,
+then parks doing nothing further. The parent waits for a marker with a
+bounded timeout, `kill -9`s the child for real, then opens a FRESH engine
+in-process over the SAME store path with the persisted session restored,
+reattaches the receipt by correlation, and proves recovery through the
+public API only:
+
+1. **After local acceptance, before delivery completes** (relay reachable,
+   killed as fast as possible after the acceptance marker — a real race
+   against real network timing, not a deterministic setup). Obligation
+   found by `reattachReceipt(correlation:)`; canonical row visible; delivery
+   resumes and settles with no further app action; no duplicate row.
+2. **While the relay is unreachable** (`RelayHandle.partition()` before the
+   child ever starts, so nothing was ever sent — deterministic by
+   construction, not a timing race). Same recovery proof, plus: healing the
+   relay only AFTER the crash is what lets delivery complete (falsified
+   below).
+3. **After one relay succeeded and another did not** (two relays; the
+   second partitioned from the start; the child watches its own
+   `receipt.status` and prints its marker the instant the first relay
+   reaches `.published`). After restart, the sharpest assertion: the relay
+   that already succeeded is tracked for any regression from `.published`
+   back to `.waiting`/`.sent` — none observed, across every run — while the
+   still-pending relay (healed after the crash) completes normally.
+
+All three passed on every run (4 consecutive full-suite runs, ~1s each).
+Falsified three ways, each restored afterward: pointing the restarted
+engine at a different store path made `reattachReceipt` correctly report
+`.notFound`; skipping the post-crash `heal()` in case 2 made recovery
+correctly fail to complete (the failure surfaced as "canonical state did
+not survive" rather than a more precise "delivery never resumed" — an
+honest imprecision in the test's own failure labeling, not a false
+result, noted rather than smoothed over); inverting case 3's no-resend
+assertion failed on the real captured `false` value.
+
+Reused `RelayHandle`'s own process-control mechanism rather than a second
+hand-rolled one: `RelayLabKit` gained a small shared `ChildProcess.killAndWaitForExit`
+(SIGKILL + bounded poll for real exit), used both by the C9 harness for its
+publisher child and available to `RelayHandle` itself.
+
+No API finding — every step was expressible through `NMPEngine`,
+`NMPSessionPayload`, `WriteIntent`'s `correlation`, and `reattachReceipt(correlation:)`
+exactly as documented. The one thing worth naming precisely: a restarted
+app that lost the account's session payload cannot resume a still-unsigned
+write at all (there is no signer), which is why persisting the session
+payload is not optional plumbing but a hard prerequisite for any of this to
+work — exactly the case the shipped `AppModel`/Compose session persistence
+already covers, but worth stating as a discovered fact here rather than an
+assumption.
+
 Two facts about the starting position, established by survey:
 
 - **The app has never called `publish`.** Six scenarios (C5, C7, C8, C9, C10,

@@ -21,12 +21,26 @@ let package = Package(
         .package(path: "../../../Packages/NMP"),
     ],
     targets: [
+        // C9's real-process-death half. `Foundation.Process`/`kill -9`
+        // proves nothing about crash safety against an in-process
+        // `Engine` drop -- cleanup still runs. This executable is the
+        // thing that actually gets `kill -9`ed, in a separate OS
+        // process, by C9CrashDuringPublicationTests. It only needs NMP
+        // (it talks to relay URLs directly over the wire); it has no
+        // RelayLabKit dependency -- lifecycle control of the RELAY is
+        // the parent test's job.
+        .executableTarget(
+            name: "canary-c9-publisher",
+            dependencies: [
+                .product(name: "NMP", package: "NMP")
+            ]
+        ),
         .testTarget(
             name: "CanaryScenariosTests",
             dependencies: [
                 "RelayLabKit",
                 .product(name: "NMP", package: "NMP"),
             ]
-        )
+        ),
     ]
 )
