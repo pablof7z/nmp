@@ -382,6 +382,38 @@ impl EngineCore {
         self.release_all_coordinate_coverage(id);
     }
 
+    /// I1's INSERTION half, the mirror of [`Self::forget_pending_indexes`].
+    ///
+    /// Same rule, stated once instead of open-coded at three call sites: call
+    /// this at every REAL insertion into `self.pending`, never at
+    /// `fail_and_compensate`'s transient remove-then-reinsert, which never
+    /// changes which intent a receipt owns or which event it materializes.
+    /// Having only the removal half be a door is what let three copies of the
+    /// insertion drift apart unnoticed; two indexes are few enough to
+    /// hand-write and exactly enough to forget one of.
+    ///
+    /// `intent_id` is `None` only for Ephemeral, which owns no pending row
+    /// and no lane, so there is nothing to index for it (epic #507 finding
+    /// E5). `receipts_by_lane_relay` and `lane_bootstrap_retries` are
+    /// deliberately absent: neither exists yet at insertion time — a lane is
+    /// indexed when its projection persists, and a bootstrap retry when one
+    /// is actually armed.
+    pub(super) fn remember_pending_indexes(
+        &mut self,
+        id: ReceiptId,
+        intent_id: Option<IntentId>,
+        event_id: EventId,
+    ) {
+        let Some(intent_id) = intent_id else {
+            return;
+        };
+        self.intent_receipts.insert(intent_id, id);
+        self.event_to_receipts
+            .entry(event_id)
+            .or_default()
+            .insert(id);
+    }
+
     /// Ask the ordinary query owner whether this relay's current value for
     /// `coordinate` is known before the lane takes a publish attempt.
     ///
@@ -2166,11 +2198,11 @@ impl EngineCore {
                         route_needs: BTreeSet::new(),
                     },
                 );
-                self.intent_receipts.insert(intent.intent_id, id);
-                self.event_to_receipts
-                    .entry(generation.materialization.event_id)
-                    .or_default()
-                    .insert(id);
+                self.remember_pending_indexes(
+                    id,
+                    Some(intent.intent_id),
+                    generation.materialization.event_id,
+                );
                 recovered_ids.push(id);
                 if is_owner {
                     recovered_semantic_owners.push((id, intent.intent_id, already_signed));
@@ -2247,13 +2279,8 @@ impl EngineCore {
                     route_needs: BTreeSet::new(),
                 },
             );
-            self.intent_receipts.insert(intent.intent_id, id);
+            self.remember_pending_indexes(id, Some(intent.intent_id), frozen.id);
             recovered_ids.push(id);
-
-            self.event_to_receipts
-                .entry(frozen.id)
-                .or_default()
-                .insert(id);
 
             if !already_signed {
                 continue;
@@ -3875,16 +3902,7 @@ impl EngineCore {
                 route_needs: BTreeSet::new(),
             },
         );
-        // `intent_id` is `None` only for Ephemeral, which never owns a
-        // pending row or a lane -- nothing to index for it (epic #507
-        // finding E5).
-        if let Some(intent_id) = intent_id {
-            self.intent_receipts.insert(intent_id, id);
-            self.event_to_receipts
-                .entry(frozen.id)
-                .or_default()
-                .insert(id);
-        }
+        self.remember_pending_indexes(id, intent_id, frozen.id);
 
         for retired in retired_intents {
             let retired_id = ReceiptId(retired.receipt_id);
