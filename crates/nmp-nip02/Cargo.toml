@@ -5,9 +5,22 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# #1143: pure vocabulary only -- `nostr` + `nmp-grammar`, no engine, no
-# mechanism. `nmp` must never appear here again; that reverse edge is the
-# exact defect #1143 closed.
+# #1707 reversed #1143: this crate owns ALL of NIP-02's meaning again, not
+# just its engine-free reactive demand. `nmp` must not contain a single
+# NIP-02-specific line -- it supplies custody, storage, routing, signing,
+# delivery, recovery and receipts, and nothing about what a kind:3 contact
+# list or a follow/unfollow edit means. That makes the `nmp` dependency
+# below the ordinary shape of "a capability crate composes the engine it
+# runs against", the ONE upward edge #1143 closed and #1707 reopens
+# deliberately: a direct-Rust app that wants NIP-02 names two crates
+# (`nmp` + `nmp-nip02`) instead of one, the uniform two-crate cost every
+# capability now pays for direct-Rust reach. `nmp-ffi`/Swift/Kotlin still
+# get NIP-02 for free through the one staticlib.
 [dependencies]
 nostr.workspace = true
+nmp.workspace = true
 nmp-grammar.workspace = true
+
+[dev-dependencies]
+nmp-store.workspace = true
+tempfile = "3"
