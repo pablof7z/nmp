@@ -140,7 +140,6 @@ public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
 public struct AuthDiagnostics: Sendable, Hashable {
     public let relay: String
     public let access: NMPAccessContext
-    public let transportSlot: UInt32
     public let transportGeneration: UInt64
     public let epochSequence: UInt64?
     public let challengeDescriptor: String?
@@ -152,7 +151,6 @@ public struct AuthDiagnostics: Sendable, Hashable {
     init(_ ffi: FfiAuthDiagnostics) {
         relay = ffi.relay
         access = NMPAccessContext(ffi.access)
-        transportSlot = ffi.transportSlot
         transportGeneration = ffi.transportGeneration
         epochSequence = ffi.epochSequence
         challengeDescriptor = ffi.challengeDescriptor
