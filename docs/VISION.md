@@ -242,6 +242,41 @@ constraint. The core validates the combined value, signs once, and publishes.
 Blossom upload failure and Nostr publication failure remain separate outcomes.
 No app closure or module registration callback enters the decision path.
 
+### 4.1 Semantic edits: a capability owns meaning, the core owns execution
+
+A small user action on replaceable state — Follow(Bob), Save(Group Y) — is not
+a caller-supplied whole event to fetch and rewrite. A capability such as NIP-02
+or NIP-29 owns what the action means and what it preserves; the app supplies
+only the typed action, never a source event, an expected version, or a raw
+replacement body. Generic NMP owns custody, storage, routing, signing,
+delivery, recovery, and receipts, identically to every other write: one
+`WriteIntent` in, one ordinary receipt out. There is no protocol-specific
+action stream, second receipt lifecycle, or capability-owned cancellation
+path.
+
+Built-in capability code that turns an action into an event is compiled
+product code supplied at engine construction and run directly, on the engine
+thread, outside the storage transaction. It is not a callback or plugin
+system: there is no late registration, no OS-thread or worker-pool isolation,
+no timeout policy, and nothing an app installs at runtime. A capability whose
+compiled code is absent from that construction-time set fails engine
+construction itself rather than parking work it cannot honor later.
+
+Before an unresolved relay's delta generation is sent, NMP does not open a
+private subscription to check that relay's current value. It asks the same
+ordinary query system every live read uses for that coordinate's current
+coverage on that relay, reuses a finished or in-flight answer, and opens one
+ordinary request only when nothing already covers it. If that relay turns out
+to hold a newer value, the same capability reapplies over it and NMP sends one
+successor to the original routed relay set under the original receipt. There
+is no source-policy mode, no durable source-round table, and no permanent
+per-coordinate watcher: the check is a step inside publishing, not a second
+read lifecycle beside live queries.
+
+An action stays active only while its routed delivery is unresolved. Once
+every routed relay reaches a terminal outcome, NMP retires the replay state;
+an unrelated later event at that coordinate does not reopen or reapply it.
+
 ## 5. Cache, accounts, and local trust
 
 One engine instance is one local trust domain. Verified public events, pending
