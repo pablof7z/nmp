@@ -40,6 +40,12 @@
 //!   offered none, so a Swift app got them by linking one staticlib while a
 //!   direct-Rust app named six more crates. This crate's `Cargo.toml` still
 //!   names `nmp` alone.
+//! - NIP-02 follow/unfollow ([`follow_someone`]) -- #1143's retrofit, and the
+//!   one family that took a package-graph inversion rather than a feature
+//!   flag: `nmp-nip02` used to depend on `nmp`, the only upward edge in the
+//!   workspace's dependency graph, so a direct-Rust app could not reach the
+//!   follow door through `nmp` at all. The `#[cfg(test)]` module below
+//!   drives it against a real `Engine`, proving usable, not just nameable.
 //!
 //! The `#[cfg(test)]` module below additionally drives a real `Engine`
 //! end-to-end (construct, `add_private_key_account`, `observe`, `publish`,
@@ -48,10 +54,10 @@
 
 use nmp::{
     AcquisitionEvidence, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, CoverageInterval, Demand,
-    Derived, DiagnosticsSnapshot, Event, EventBuilder, Filter, FilterCoverageEntry, Identity,
-    IdentityField, IndexedTagName, Kind, Lane, LiveQuery, NostrEntity, ObservationEvidence,
-    PublicKey, RelayDiagnosticsSnapshot, RelayUrl, Selector, Tag, Timestamp, WriteIntent,
-    WritePayload, WriteRouting,
+    Derived, DiagnosticsSnapshot, Engine, Event, EventBuilder, Filter, FilterCoverageEntry,
+    Identity, IdentityField, IndexedTagName, Kind, Lane, LiveQuery, NostrEntity,
+    ObservationEvidence, PublicKey, ReceiptStream, RelayDiagnosticsSnapshot, RelayUrl, Selector,
+    Tag, Timestamp, WriteIntent, WritePayload, WriteRouting,
 };
 
 /// The reactive index kind an app might declare its own membership list
@@ -207,8 +213,10 @@ pub fn build_comment_intent(
 ///
 /// Every door here composes and returns rather than merely being imported, so
 /// removing any one re-export breaks this crate instead of leaving a stale
-/// claim in a doc comment. `nip02` is absent by construction, not oversight:
-/// `nmp-nip02` depends on `nmp`, so no feature of this facade can reach it.
+/// claim in a doc comment. `nip02` is proven separately, by
+/// [`follow_someone`] and this crate's `#[cfg(test)]` module: its write door
+/// needs a live `Engine`, not a target event, so it does not fit this
+/// function's pure-composition shape.
 pub fn compose_every_retrofitted_family(target: &Event, source: Option<RelayUrl>) -> Vec<String> {
     // NIP-C7 kind:9 chat, top-level and threaded (`nmp::nipc7`).
     let chat = nmp::nipc7::chat();
@@ -267,6 +275,40 @@ pub fn compose_every_retrofitted_family(target: &Event, source: Option<RelayUrl>
         digest.to_hex(),
         format!("{verbs:?}"),
     ]
+}
+
+/// The demand `nmp::nip02` reads the current account's kind:3 contact list
+/// through -- reachable from `nmp` alone since #1143 closed the reverse
+/// `nmp-nip02 -> nmp` edge.
+#[must_use]
+pub fn follow_demand() -> Demand {
+    nmp::nip02::current_account_demand()
+}
+
+/// Follows `target` through the ordinary NIP-02 write door, entirely from
+/// `nmp`. This is #1143's acceptance proof: before the fix, a direct-Rust
+/// app could not reach `set_following` through this facade at all --
+/// `nmp-nip02` depended on `nmp`, so an app wanting to follow someone had to
+/// name a second, upward-pointing crate. `writes` composes once (typically
+/// held for the process lifetime); this function takes it by reference so a
+/// caller following many targets does not re-register the capability handle
+/// each time.
+pub fn follow_someone(
+    engine: &Engine,
+    writes: &nmp::nip02::FollowWrites,
+    target: PublicKey,
+) -> Result<ReceiptStream, nmp::nip02::FollowActionFailure> {
+    nmp::nip02::set_following(engine, writes, target, nmp::nip02::FollowChange::Follow)
+}
+
+/// The unfollow half of [`follow_someone`], proving both directions of
+/// [`nmp::nip02::FollowChange`] are reachable from `nmp` alone.
+pub fn unfollow_someone(
+    engine: &Engine,
+    writes: &nmp::nip02::FollowWrites,
+    target: PublicKey,
+) -> Result<ReceiptStream, nmp::nip02::FollowActionFailure> {
+    nmp::nip02::set_following(engine, writes, target, nmp::nip02::FollowChange::Unfollow)
 }
 
 /// Names and reads the observation-scoped execution envelope from an
@@ -352,7 +394,7 @@ pub fn describe_snapshot(snapshot: &DiagnosticsSnapshot) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp::{Engine, EngineConfig};
+    use nmp::EngineConfig;
 
     /// A fixed, valid secp256k1 secret key -- generated once via `openssl
     /// rand -hex 32`. Hardcoded rather than derived from `nostr::Keys`
@@ -399,6 +441,53 @@ mod tests {
         assert!(!engine
             .remove_account(&account)
             .expect("repeated removal must no-op, not error"));
+
+        engine.shutdown();
+    }
+
+    /// #1143 acceptance proof: a direct-Rust app follows and unfollows
+    /// through this `nmp`-only facade, and opens the reactive contact-list
+    /// demand [`follow_demand`] reads it through -- the exact user story
+    /// that was unreachable before the follow door's package-graph
+    /// inversion (`nmp-nip02` used to depend on `nmp`, so an app wanting to
+    /// follow someone had to name that second, upward-pointing crate).
+    #[test]
+    fn follow_and_unfollow_are_usable_from_nmp_alone() {
+        let engine = Engine::new_with_capabilities(
+            EngineConfig::default(),
+            vec![nmp::nip02::follow_capability()],
+        )
+        .expect("temporary Redb engine must build");
+        engine
+            .add_private_key_account(&TEST_SECRET_KEY_BYTES, true)
+            .expect("fixed decoded test secret key must validate");
+        let writes = nmp::nip02::follow_writes();
+        let target: PublicKey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            .parse()
+            .expect("fixed public key must parse");
+
+        let subscription = engine
+            .observe(LiveQuery::single(follow_demand()), None)
+            .expect("the reactive contact-list demand is reachable and usable from nmp alone");
+        drop(subscription);
+
+        let follow_receipt = follow_someone(&engine, &writes, target)
+            .expect("follow must enter ordinary custody from nmp alone");
+        drop(follow_receipt);
+        assert_eq!(
+            engine.publish_queue(None, 10).unwrap().len(),
+            1,
+            "the follow write reached ordinary custody"
+        );
+
+        let unfollow_receipt = unfollow_someone(&engine, &writes, target)
+            .expect("unfollow must enter ordinary custody from nmp alone");
+        drop(unfollow_receipt);
+        assert_eq!(
+            engine.publish_queue(None, 10).unwrap().len(),
+            2,
+            "the unfollow write reached ordinary custody as its own entry"
+        );
 
         engine.shutdown();
     }

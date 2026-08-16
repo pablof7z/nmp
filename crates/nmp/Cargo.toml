@@ -43,6 +43,17 @@ nip65 = ["dep:nmp-nip65"]
 # vocabulary dependency optional physically removes both when unselected.
 nip29 = ["dep:nmp-nip29"]
 
+# #1143: NIP-02 follows the `nip29` shape immediately above -- the facade
+# module owns the engine-bound follow door (write + observation), and the
+# pure `nmp-nip02` vocabulary dependency is optional so it physically leaves
+# a core-only build when unselected. This was the last family to close: it
+# used to sit ABOVE this facade (`nmp-nip02` depended on `nmp`, the only
+# upward edge in the workspace's dependency graph), so a direct-Rust app
+# could not reach it through `nmp` at all and had to name `nmp-nip02`
+# directly while a Swift/Kotlin app got it for free through `nmp-ffi`. That
+# coupling is inverted now.
+nip02 = ["dep:nmp-nip02"]
+
 # #1239: the retrofit. Each family below was reachable from `nmp-ffi` and NOT
 # from this facade, so a Swift app linking the one staticlib got it while a
 # direct-Rust app had to name a second crate in its own `Cargo.toml` -- the
@@ -50,11 +61,6 @@ nip29 = ["dep:nmp-nip29"]
 # penalises the tier NMP calls primary. Each follows the `nip22` shape above
 # for the same reason it does: ONE owner of the values, and an app that never
 # uses the family does not link its crate. All non-default.
-#
-# `nmp-nip02` is NOT here and cannot be: it sits ABOVE the facade and depends
-# on `nmp` itself. An `nmp -> nmp-nip02` edge is a cyclic package dependency
-# cargo refuses to resolve, so reaching the follow service through the facade
-# needs the service's engine coupling inverted first, not a feature.
 nip18 = ["dep:nmp-nip18"]
 nipc7 = ["dep:nmp-nipc7"]
 content = ["dep:nmp-content"]
@@ -110,6 +116,12 @@ nmp-blossom = { workspace = true, optional = true }
 # the one publish door. `crates/nmp-nip29/Cargo.toml` must never gain the
 # reverse edge.
 nmp-nip29 = { workspace = true, optional = true }
+# #1143: the NIP-02 follow door. The dependency runs THIS WAY ROUND and only
+# this way round -- `current_account_demand` is pure composition over
+# `nostr` + `nmp-grammar`, and `crate::nip02`'s door is what mints the
+# `WriteIntent` and binds it to the one publish path. `crates/nmp-nip02/
+# Cargo.toml` must never gain the reverse edge again.
+nmp-nip02 = { workspace = true, optional = true }
 nmp-signer.workspace = true
 nmp-local-signer.workspace = true
 nmp-store.workspace = true
@@ -161,7 +173,10 @@ libc = { version = "0.2", optional = true }
 # integration test seeds its `EngineCore`/`EngineThread` through the gated
 # fixture constructors (#1665, #1667) -- this crate's own test targets are
 # their only in-workspace callers.
-nmp = { path = ".", features = ["nip29", "nip65", "test-instrumentation", "unstable-mechanism"] }
+# `nip02`: `body_complete_semantic_acceptance.rs` (#1143, moved up from
+# `nmp-nip02` alongside the follow door itself) proves the door end-to-end
+# against a real engine.
+nmp = { path = ".", features = ["nip02", "nip29", "nip65", "test-instrumentation", "unstable-mechanism"] }
 nmp-test-support.workspace = true
 nmp-resolver-testkit.workspace = true
 nmp-router-testkit.workspace = true

@@ -1,15 +1,14 @@
-//! Optional NIP-02 support: one schema owner for kind:3, one ordinary live
-//! demand, one exact tag-preserving editor, and an NMP-owned following
-//! resource/action. UI packages consume the projected state and invoke the
-//! action; they never parse contact lists or manufacture replacement events.
+//! Pure NIP-02 vocabulary: the one reactive live demand for the current
+//! account's kind:3 contact list. `nostr` + `nmp-grammar` only, no engine, no
+//! mechanism.
+//!
+//! The follow/unfollow write door, the kind:3 materializer, and the
+//! following observation all need the engine itself (`WriteIntent`,
+//! `Row`, receipt custody, live-query folding), so they live one layer up
+//! at `nmp::nip02` (#1143) rather than here -- the identical split
+//! `nmp::nip29`/`nmp-nip29` already uses. This crate depends on nothing that
+//! depends on it; `nmp -> nmp-nip02` is the only edge, never the reverse.
 
 mod demand;
-mod edit;
-mod service;
 
 pub use demand::current_account_demand;
-pub use edit::{follow_capability, follow_writes, follows, FollowChange, FollowWrites};
-pub use service::{
-    observe_following, observe_following_async, set_following, AsyncFollowObservation,
-    FollowActionFailure, FollowAvailability, FollowObservation, FollowRelationship, FollowSnapshot,
-};

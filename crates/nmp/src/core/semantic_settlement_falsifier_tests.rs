@@ -8,9 +8,10 @@
 //! - the store, `close_cohort` (`nmp-store/redb_store/semantic_edit_ops.rs`):
 //!   `let SemanticSourcePolicy::Finite(round) = &state.source_policy else { return Ok(SourceRoundOpen); }`
 //!
-//! `ReplaceableSourcePolicy::Continuing` -- the value `nmp-nip02/src/edit.rs`
-//! and `nmp/src/nip29/group_list_writes.rs` both unconditionally constructed
-//! -- could never satisfy either gate, so neither
+//! `ReplaceableSourcePolicy::Continuing` -- the value NIP-02's and NIP-29's
+//! write doors (`nmp/src/nip02/writes.rs`, #1143; `nmp/src/nip29/
+//! group_list_writes.rs`) both unconditionally constructed -- could never
+//! satisfy either gate, so neither
 //! `WriteFact::Outcome(WriteOutcome::Settled)` nor any durable
 //! semantic-state deletion was reachable for a real semantic write.
 //! #1631 deleted the source-policy concept entirely; settlement now keys on
@@ -25,11 +26,11 @@
 //! result evidence rather than a shortcut.
 //!
 //! It uses a minimal in-crate materializer (`Kind::ContactList`) rather than
-//! the real `nmp-nip02`/`nmp-nip29` crates: both depend on `nmp`, so an
-//! `nmp -> nmp-nip02` edge is the exact cyclic dependency
-//! `crates/nmp/src/lib.rs`'s own doc comment says must not exist. The defect
-//! lived in the generic mechanism every semantic capability shares, not in
-//! either protocol module's tag/kind logic.
+//! the real NIP-02/NIP-29 write doors (`crate::nip02`/`crate::nip29`, #1143):
+//! both live behind their own optional Cargo feature, and this core-level
+//! test must run regardless of which protocol features are enabled. The
+//! defect lived in the generic mechanism every semantic capability shares,
+//! not in either protocol module's tag/kind logic.
 //!
 //! The fixture also has to answer #1631's per-relay coordinate question
 //! before any delta reaches the wire, because a lane that never learns the

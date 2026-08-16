@@ -1,9 +1,22 @@
-use nmp::{
-    EventBuilder, Identity, RegisteredReplaceableMaterializer, ReplaceableMaterializer,
-    ReplaceableMaterializerOperation, ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec,
-    Row, WriteIntent, WriteRouting,
-};
+//! Durable NIP-02 follow/unfollow semantic operations over the current
+//! account's kind:3 contact list.
+//!
+//! `nmp-nip02` owns the pure reactive-query vocabulary
+//! ([`current_account_demand`](nmp_nip02::current_account_demand)). This
+//! module lives one layer up because a durable operation must also mint the
+//! ordinary [`WriteIntent`](crate::WriteIntent), freeze the selected
+//! account, and enter the engine's receipt lifecycle -- the exact shape
+//! `nmp::nip29`'s `group_list_writes` module already uses for the same
+//! reason. The dependency remains `nmp -> nmp-nip02`, never the reverse
+//! (#1143).
+
+use nmp_grammar::{EventBuilder, Identity, WriteIntent, WriteRouting};
 use nostr::{Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
+
+use crate::{
+    RegisteredReplaceableMaterializer, ReplaceableMaterializer, ReplaceableMaterializerOperation,
+    ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec, Row,
+};
 
 /// The requested relationship after a NIP-02 edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,7 +242,7 @@ mod tests {
             event.kind,
             event.tags,
             event.content,
-            nmp::RowSignature::Signed(event.sig),
+            crate::RowSignature::Signed(event.sig),
             Default::default(),
         )
     }
