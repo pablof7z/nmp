@@ -9,8 +9,8 @@
 //! consumer, matching every other #1239-retrofitted family.
 //!
 //! Read-only consumption (decoding a kind:20 seen on a relay) needs only this
-//! feature. Composing and uploading a new picture from raw bytes needs the
-//! `media` feature too, which depends on this one and adds `nmp::media`.
+//! feature. Composing and uploading a new picture from raw bytes is
+//! `nmp-media`'s own seam (#1707) -- a separate crate, not a facade feature.
 //!
 //! The crate is engine-free by construction: neither building nor decoding a
 //! picture touches the engine, router, resolver, or store.
