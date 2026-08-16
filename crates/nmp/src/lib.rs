@@ -170,6 +170,21 @@ pub mod asset;
 #[cfg(feature = "blossom")]
 pub mod blossom;
 
+#[cfg(feature = "nip68")]
+pub mod nip68;
+
+// #1563: the app-facing media composition seam, absorbed bodily from the
+// standalone `nmp-media` crate (deleted in the same change, no re-export
+// shim). Unlike `nip29`/`nip02`'s doors, this module is engine-free and
+// composes `nmp-asset` + `nmp-blossom` + `nmp-nip68` into an unsigned
+// kind:20 draft; the app still does its own `WriteIntent`/`publish` through
+// the existing path. It stayed unreachable from this facade (and therefore
+// unreachable from any app, in any language) until #898 unblocked it and
+// #1562 confirmed NIP-68 was staying its own crate rather than folding into
+// a consolidated protocol package.
+#[cfg(feature = "media")]
+pub mod media;
+
 // #1033/#824: the app-facing NIP-29 door. A real facade module, not a re-export of
 // `nmp-nip29`: the door retains a relay scope AND mints the one opaque
 // `WriteIntent`, and a crate that is engine-free by construction cannot do the

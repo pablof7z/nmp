@@ -1827,6 +1827,7 @@ dependencies = [
  "nmp-nip25",
  "nmp-nip29",
  "nmp-nip65",
+ "nmp-nip68",
  "nmp-nipc7",
  "nmp-resolver",
  "nmp-resolver-testkit",
@@ -1967,17 +1968,6 @@ dependencies = [
  "nostr 0.44.4",
  "sha2",
  "zeroize",
-]
-
-[[package]]
-name = "nmp-media"
-version = "0.1.0"
-dependencies = [
- "nmp-asset",
- "nmp-blossom",
- "nmp-nip68",
- "nostr 0.44.4",
- "tokio",
 ]
 
 [[package]]

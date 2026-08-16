@@ -46,6 +46,14 @@
 //!   workspace's dependency graph, so a direct-Rust app could not reach the
 //!   follow door through `nmp` at all. The `#[cfg(test)]` module below
 //!   drives it against a real `Engine`, proving usable, not just nameable.
+//! - the composed media path (`tests/media_reachability.rs`, #1563) -- before
+//!   that PR, `nmp-media` had no facade feature at all, so ~1,600 lines of
+//!   media composition (it plus `nmp-nip68`) were unreachable from any app.
+//!   The test drives `prepare -> sign -> upload -> compose_picture` end to
+//!   end against a real scripted loopback server, signing through the
+//!   engine's own `sign_event` and uploading on its own `adapter_runtime()`
+//!   handle -- no second signer, no `tokio` dependency of that test crate's
+//!   own.
 //!
 //! The `#[cfg(test)]` module below additionally drives a real `Engine`
 //! end-to-end (construct, `add_private_key_account`, `observe`, `publish`,

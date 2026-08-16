@@ -22,7 +22,7 @@ use nmp_nip68::{
     build_picture, ContentWarning, ImageDim, PictureBuildError, PictureImageError, PictureSpec,
 };
 
-use crate::upload::UploadedAsset;
+use super::upload::UploadedAsset;
 
 /// One verified asset paired with its NIP-68 imeta presentation metadata --
 /// the per-image optionals (`dim`/`alt`/`blurhash`/`thumbhash`/`fallback`)
