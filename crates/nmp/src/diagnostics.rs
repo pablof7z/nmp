@@ -27,7 +27,7 @@
 
 use nmp_grammar::AccessContext;
 
-use crate::core::AuthDiagnosticsPhase;
+use nmp_engine::core::AuthDiagnosticsPhase;
 use nmp_router::Lane;
 use nmp_store::CoverageInterval;
 use nostr::{EventId, RelayUrl, Timestamp};
@@ -51,8 +51,8 @@ pub struct FilterCoverageEntry {
 }
 
 impl FilterCoverageEntry {
-    fn from_engine(value: crate::core::FilterCoverageEntry) -> Self {
-        let crate::core::FilterCoverageEntry { filter, coverage } = value;
+    fn from_engine(value: nmp_engine::core::FilterCoverageEntry) -> Self {
+        let nmp_engine::core::FilterCoverageEntry { filter, coverage } = value;
         Self { filter, coverage }
     }
 }
@@ -110,11 +110,11 @@ pub struct RelayDiagnosticsSnapshot {
 }
 
 impl RelayDiagnosticsSnapshot {
-    fn from_engine(value: crate::core::RelayDiagnosticsSnapshot) -> Self {
+    fn from_engine(value: nmp_engine::core::RelayDiagnosticsSnapshot) -> Self {
         // Exhaustive destructure: a new engine diagnostics fact cannot be
         // silently dropped by this mirror — adding a field there breaks
         // this conversion until the mirror carries it too.
-        let crate::core::RelayDiagnosticsSnapshot {
+        let nmp_engine::core::RelayDiagnosticsSnapshot {
             relay,
             access,
             wire_sub_count,
@@ -188,8 +188,8 @@ pub struct AuthDiagnosticsSnapshot {
 }
 
 impl AuthDiagnosticsSnapshot {
-    fn from_engine(value: crate::core::AuthDiagnosticsSnapshot) -> Self {
-        let crate::core::AuthDiagnosticsSnapshot {
+    fn from_engine(value: nmp_engine::core::AuthDiagnosticsSnapshot) -> Self {
+        let nmp_engine::core::AuthDiagnosticsSnapshot {
             relay,
             access,
             transport_slot,
@@ -232,11 +232,11 @@ pub enum StalledWriteStage {
 }
 
 impl StalledWriteStage {
-    fn from_engine(value: crate::core::StalledWriteStage) -> Self {
+    fn from_engine(value: nmp_engine::core::StalledWriteStage) -> Self {
         match value {
-            crate::core::StalledWriteStage::Unroutable => Self::Unroutable,
-            crate::core::StalledWriteStage::Unsignable => Self::Unsignable,
-            crate::core::StalledWriteStage::Undeliverable => Self::Undeliverable,
+            nmp_engine::core::StalledWriteStage::Unroutable => Self::Unroutable,
+            nmp_engine::core::StalledWriteStage::Unsignable => Self::Unsignable,
+            nmp_engine::core::StalledWriteStage::Undeliverable => Self::Undeliverable,
         }
     }
 }
@@ -283,8 +283,8 @@ pub struct StalledWrite {
 }
 
 impl StalledWrite {
-    fn from_engine(value: crate::core::StalledWrite) -> Self {
-        let crate::core::StalledWrite {
+    fn from_engine(value: nmp_engine::core::StalledWrite) -> Self {
+        let nmp_engine::core::StalledWrite {
             id,
             stage,
             detail,
@@ -316,8 +316,8 @@ pub struct StalledWriteTotals {
 }
 
 impl StalledWriteTotals {
-    fn from_engine(value: crate::core::StalledWriteTotals) -> Self {
-        let crate::core::StalledWriteTotals {
+    fn from_engine(value: nmp_engine::core::StalledWriteTotals) -> Self {
+        let nmp_engine::core::StalledWriteTotals {
             unroutable,
             unsignable,
             undeliverable,
@@ -380,8 +380,8 @@ pub struct DiagnosticsSnapshot {
 }
 
 impl DiagnosticsSnapshot {
-    pub(crate) fn from_engine(value: crate::core::DiagnosticsSnapshot) -> Self {
-        let crate::core::DiagnosticsSnapshot {
+    pub(crate) fn from_engine(value: nmp_engine::core::DiagnosticsSnapshot) -> Self {
+        let nmp_engine::core::DiagnosticsSnapshot {
             relays,
             auth_sessions,
             uncovered_author_count,
@@ -422,9 +422,9 @@ mod tests {
     use super::*;
 
     fn engine_auth_session(
-        phase: crate::core::AuthDiagnosticsPhase,
-    ) -> crate::core::AuthDiagnosticsSnapshot {
-        crate::core::AuthDiagnosticsSnapshot {
+        phase: nmp_engine::core::AuthDiagnosticsPhase,
+    ) -> nmp_engine::core::AuthDiagnosticsSnapshot {
+        nmp_engine::core::AuthDiagnosticsSnapshot {
             relay: RelayUrl::parse("wss://auth.example.com").unwrap(),
             access: AccessContext::Nip42(
                 "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
@@ -453,11 +453,11 @@ mod tests {
         // and the engine's are ONE type, so there is no conversion left to get
         // wrong. This binding is the proof: it does not compile if the facade
         // ever grows a second declaration of the phase vocabulary again.
-        let _: fn(crate::core::AuthDiagnosticsPhase) -> AuthDiagnosticsPhase = |phase| phase;
+        let _: fn(nmp_engine::core::AuthDiagnosticsPhase) -> AuthDiagnosticsPhase = |phase| phase;
 
         let relay = RelayUrl::parse("wss://mirror.example.com").unwrap();
-        let engine = crate::core::DiagnosticsSnapshot {
-            relays: vec![crate::core::RelayDiagnosticsSnapshot {
+        let engine = nmp_engine::core::DiagnosticsSnapshot {
+            relays: vec![nmp_engine::core::RelayDiagnosticsSnapshot {
                 relay: relay.clone(),
                 access: AccessContext::Public,
                 wire_sub_count: 2,
@@ -470,14 +470,14 @@ mod tests {
                 filters: vec!["{\"kinds\":[9999]}".to_string()],
                 events_by_kind: vec![(9999, 3)],
                 coverage: vec![
-                    crate::core::FilterCoverageEntry {
+                    nmp_engine::core::FilterCoverageEntry {
                         filter: "proven".to_string(),
                         coverage: Some(CoverageInterval {
                             from: nostr::Timestamp::from(4),
                             through: nostr::Timestamp::from(9),
                         }),
                     },
-                    crate::core::FilterCoverageEntry {
+                    nmp_engine::core::FilterCoverageEntry {
                         filter: "unproven".to_string(),
                         coverage: None,
                     },
@@ -491,7 +491,7 @@ mod tests {
                 nip77_handoff: "reconciling",
             }],
             auth_sessions: vec![engine_auth_session(
-                crate::core::AuthDiagnosticsPhase::AwaitingRelayAck,
+                nmp_engine::core::AuthDiagnosticsPhase::AwaitingRelayAck,
             )],
             uncovered_author_count: 7,
             dropped_merge_rules: vec!["limit"],
@@ -499,13 +499,13 @@ mod tests {
             sessions_refused_by_subscription_budget: 2,
             store_degraded: Some("read-only".to_string()),
             transport_degraded: Some("verifier unavailable".to_string()),
-            stalled_writes: vec![crate::core::StalledWrite {
+            stalled_writes: vec![nmp_engine::core::StalledWrite {
                 id: "descriptor".to_string(),
-                stage: crate::core::StalledWriteStage::Undeliverable,
+                stage: nmp_engine::core::StalledWriteStage::Undeliverable,
                 detail: "no destination is reachable: wss://nowhere.example".to_string(),
                 stalled_since: nostr::Timestamp::from(1_700_000_000u64),
             }],
-            stalled_write_totals: crate::core::StalledWriteTotals {
+            stalled_write_totals: nmp_engine::core::StalledWriteTotals {
                 unroutable: 1,
                 unsignable: 2,
                 undeliverable: 3,
@@ -590,15 +590,15 @@ mod tests {
         );
         for (engine_stage, facade_stage) in [
             (
-                crate::core::StalledWriteStage::Unroutable,
+                nmp_engine::core::StalledWriteStage::Unroutable,
                 StalledWriteStage::Unroutable,
             ),
             (
-                crate::core::StalledWriteStage::Unsignable,
+                nmp_engine::core::StalledWriteStage::Unsignable,
                 StalledWriteStage::Unsignable,
             ),
             (
-                crate::core::StalledWriteStage::Undeliverable,
+                nmp_engine::core::StalledWriteStage::Undeliverable,
                 StalledWriteStage::Undeliverable,
             ),
         ] {

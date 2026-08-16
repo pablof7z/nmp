@@ -25,11 +25,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::core::{AcquisitionEvidence, RowDelta, SourceStatus};
-use nmp::mechanism::publish_queue::{RelayState, WriteFact};
-use nmp::mechanism::runtime::{AuthPolicy, AuthPolicyOp, AuthPolicyRequest};
-use nmp::mechanism::runtime::{EngineThread, FifoReceiver, RowsReceiver};
 use nmp::{Engine, EngineConfig};
+use nmp_engine::core::{AcquisitionEvidence, RowDelta, SourceStatus};
+use nmp_engine::publish_queue::{RelayState, WriteFact};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{
     AccessContext, Binding, CacheMode, Demand, Derived, Filter, Freshness, IdentityField, Selector,
@@ -38,6 +36,8 @@ use nmp_grammar::{
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_router_testkit::FixtureRoutingFacts;
+use nmp_runtime::{AuthPolicy, AuthPolicyOp, AuthPolicyRequest};
+use nmp_runtime::{EngineThread, FifoReceiver, RowsReceiver};
 use nmp_store::{RedbStore, RelayObserved};
 use nmp_transport::PoolConfig;
 use nostr::filter::MatchEventOptions;
@@ -80,7 +80,7 @@ fn literal_kind1(author_hex: &str) -> LiveQuery {
 
 /// Accumulates the channel's `Added`/`Removed` deltas into the row set they
 /// currently describe (exactly as a real app must -- `Handle::subscribe`'s
-/// wire is deltas, not snapshots, per `nmp::mechanism::core::RowDelta`'s doc) and
+/// wire is deltas, not snapshots, per `nmp_engine::core::RowDelta`'s doc) and
 /// blocks until that accumulated set + the latest acquisition evidence
 /// satisfy `pred`, or `timeout` lapses. Replaying `Removed` deltas (not just
 /// tracking "ever added") is load-bearing for `follows_minus_mutes_resolves_
@@ -145,22 +145,22 @@ fn wait_for_status(
         match rx.recv_timeout(remaining) {
             Ok(status) if pred(&status) => return true,
             Ok(_) => {}
-            Err(nmp::mechanism::runtime::FifoRecvTimeoutError::Timeout)
-            | Err(nmp::mechanism::runtime::FifoRecvTimeoutError::Closed) => return false,
-            Err(nmp::mechanism::runtime::FifoRecvTimeoutError::Lagged) => {
+            Err(nmp_runtime::FifoRecvTimeoutError::Timeout)
+            | Err(nmp_runtime::FifoRecvTimeoutError::Closed) => return false,
+            Err(nmp_runtime::FifoRecvTimeoutError::Lagged) => {
                 panic!("fixture receipt stream must not lag")
             }
         }
     }
 }
 
-/// Find `relay`'s [`nmp::mechanism::core::SourceEvidence`] entry, if any, inside
+/// Find `relay`'s [`nmp_engine::core::SourceEvidence`] entry, if any, inside
 /// `evidence` -- test-fixture convenience mirroring `core_headless.rs`'s
 /// identically-named helper.
 fn source_for<'a>(
     evidence: &'a [AcquisitionEvidence],
     relay: &RelayUrl,
-) -> Option<&'a nmp::mechanism::core::SourceEvidence> {
+) -> Option<&'a nmp_engine::core::SourceEvidence> {
     evidence
         .iter()
         .flat_map(|branch| branch.sources.iter())
@@ -1062,7 +1062,7 @@ async fn watermark_cold_start_offline() {
 /// a second stored row) already lives at the store's own public surface --
 /// `nmp-store/tests/store_contract.rs::provenance_merges_across_relays`,
 /// exercised against this exact `RedbStore` backend
-/// -- because `nmp::mechanism::core::RowDelta` deliberately carries no
+/// -- because `nmp_engine::core::RowDelta` deliberately carries no
 /// provenance field (M3 plan §7: raw rows + coverage only; provenance is a
 /// store-internal fact, not part of the two-noun read result), so there is
 /// no live `Handle`-level surface to assert the provenance field against.

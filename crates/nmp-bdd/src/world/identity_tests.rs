@@ -7,8 +7,8 @@
 use std::thread;
 use std::time::Duration;
 
-use nmp::mechanism::publish_queue::{SigningState, WriteFact};
-use nmp::mechanism::runtime::fifo_channel;
+use nmp_engine::publish_queue::{SigningState, WriteFact};
+use nmp_runtime::fifo_channel;
 
 use super::{NmpWorld, ReceiptState};
 

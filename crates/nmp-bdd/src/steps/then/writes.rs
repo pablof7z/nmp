@@ -23,9 +23,7 @@
 
 use cucumber::then;
 
-use nmp::mechanism::publish_queue::{
-    NotSentReason, RelayState, RelayWaiting, WriteFact, WriteOutcome,
-};
+use nmp_engine::publish_queue::{NotSentReason, RelayState, RelayWaiting, WriteFact, WriteOutcome};
 use nostr::JsonUtil;
 
 use crate::world::{NmpWorld, ME};

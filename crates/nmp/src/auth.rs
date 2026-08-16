@@ -8,7 +8,7 @@
 //!
 //! Every type here is a newtype over runtime machinery, including the two
 //! semantic answer types: [`AuthPolicyDecision`] and [`AuthPolicyError`] are
-//! defined by [`crate::runtime`], which is what evaluates a policy and
+//! defined by [`nmp_runtime`], which is what evaluates a policy and
 //! produces them, and are re-exported through this facade for apps to name.
 //! [`AuthPolicyRequest`], [`AuthPolicyOp`], and [`AuthPolicyPendingSender`]
 //! are newtypes over runtime request and cancellation machinery. The
@@ -20,7 +20,7 @@
 
 use nostr::{PublicKey, RelayUrl};
 
-pub use crate::runtime::{AuthPolicyDecision, AuthPolicyError, AuthPolicyResult};
+pub use nmp_runtime::{AuthPolicyDecision, AuthPolicyError, AuthPolicyResult};
 
 /// Immutable input to one app-owned NIP-42 authorization decision: the
 /// frozen expected identity, the exact canonical relay, the exact challenge
@@ -30,11 +30,11 @@ pub use crate::runtime::{AuthPolicyDecision, AuthPolicyError, AuthPolicyResult};
 /// session, generation, epoch, and token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthPolicyRequest {
-    inner: crate::runtime::AuthPolicyRequest,
+    inner: nmp_runtime::AuthPolicyRequest,
 }
 
 impl AuthPolicyRequest {
-    pub(crate) fn from_engine(inner: crate::runtime::AuthPolicyRequest) -> Self {
+    pub(crate) fn from_engine(inner: nmp_runtime::AuthPolicyRequest) -> Self {
         Self { inner }
     }
 
@@ -76,7 +76,7 @@ impl AuthPolicyRequest {
 /// back instead of silently dropping it.
 #[derive(Clone)]
 pub struct AuthPolicyPendingSender {
-    inner: crate::runtime::AuthPolicyPendingSender,
+    inner: nmp_runtime::AuthPolicyPendingSender,
 }
 
 impl AuthPolicyPendingSender {
@@ -102,12 +102,12 @@ pub enum AuthPolicyResolveError {
 }
 
 impl AuthPolicyResolveError {
-    fn from_runtime(error: crate::runtime::AuthPolicyResolveError) -> Self {
+    fn from_runtime(error: nmp_runtime::AuthPolicyResolveError) -> Self {
         match error {
-            crate::runtime::AuthPolicyResolveError::AlreadyResolved(result) => {
+            nmp_runtime::AuthPolicyResolveError::AlreadyResolved(result) => {
                 Self::AlreadyResolved(result)
             }
-            crate::runtime::AuthPolicyResolveError::ReceiverDropped(result) => {
+            nmp_runtime::AuthPolicyResolveError::ReceiverDropped(result) => {
                 Self::ReceiverDropped(result)
             }
         }
@@ -119,11 +119,11 @@ impl AuthPolicyResolveError {
 /// operation: the pending channel, the cancel handshake, and their
 /// linearization live in the engine and are inherited by delegation.
 pub struct AuthPolicyOp {
-    inner: crate::runtime::AuthPolicyOp,
+    inner: nmp_runtime::AuthPolicyOp,
 }
 
 impl AuthPolicyOp {
-    pub(crate) fn into_engine(self) -> crate::runtime::AuthPolicyOp {
+    pub(crate) fn into_engine(self) -> nmp_runtime::AuthPolicyOp {
         self.inner
     }
 
@@ -131,7 +131,7 @@ impl AuthPolicyOp {
     #[must_use]
     pub fn ready(result: AuthPolicyResult) -> Self {
         Self {
-            inner: crate::runtime::AuthPolicyOp::ready(result),
+            inner: nmp_runtime::AuthPolicyOp::ready(result),
         }
     }
 
@@ -139,7 +139,7 @@ impl AuthPolicyOp {
     #[must_use]
     pub fn allow() -> Self {
         Self {
-            inner: crate::runtime::AuthPolicyOp::allow(),
+            inner: nmp_runtime::AuthPolicyOp::allow(),
         }
     }
 
@@ -147,7 +147,7 @@ impl AuthPolicyOp {
     #[must_use]
     pub fn deny(reason: impl Into<String>) -> Self {
         Self {
-            inner: crate::runtime::AuthPolicyOp::deny(reason),
+            inner: nmp_runtime::AuthPolicyOp::deny(reason),
         }
     }
 
@@ -156,7 +156,7 @@ impl AuthPolicyOp {
     /// [`AuthPolicyResolveError::ReceiverDropped`].
     #[must_use]
     pub fn pending_channel() -> (AuthPolicyPendingSender, Self) {
-        let (sender, op) = crate::runtime::AuthPolicyOp::pending_channel();
+        let (sender, op) = nmp_runtime::AuthPolicyOp::pending_channel();
         (
             AuthPolicyPendingSender { inner: sender },
             Self { inner: op },
@@ -172,7 +172,7 @@ impl AuthPolicyOp {
     pub fn pending_channel_with_cancel(
         cancel: impl FnOnce() + Send + 'static,
     ) -> (AuthPolicyPendingSender, Self) {
-        let (sender, op) = crate::runtime::AuthPolicyOp::pending_channel_with_cancel(cancel);
+        let (sender, op) = nmp_runtime::AuthPolicyOp::pending_channel_with_cancel(cancel);
         (
             AuthPolicyPendingSender { inner: sender },
             Self { inner: op },
@@ -203,8 +203,8 @@ impl<P> EngineAuthPolicyAdapter<P> {
     }
 }
 
-impl<P: AuthPolicy> crate::runtime::AuthPolicy for EngineAuthPolicyAdapter<P> {
-    fn evaluate(&self, request: crate::runtime::AuthPolicyRequest) -> crate::runtime::AuthPolicyOp {
+impl<P: AuthPolicy> nmp_runtime::AuthPolicy for EngineAuthPolicyAdapter<P> {
+    fn evaluate(&self, request: nmp_runtime::AuthPolicyRequest) -> nmp_runtime::AuthPolicyOp {
         self.policy
             .evaluate(AuthPolicyRequest::from_engine(request))
             .into_engine()
@@ -221,8 +221,8 @@ mod tests {
     fn runtime_uses_the_same_auth_decision_and_error_types() {
         fn same_type<T>(_: T, _: T) {}
         let runtime_result = match AuthPolicyOp::allow().into_engine() {
-            crate::runtime::AuthPolicyOp::Ready(result) => result,
-            crate::runtime::AuthPolicyOp::Pending(_) => {
+            nmp_runtime::AuthPolicyOp::Ready(result) => result,
+            nmp_runtime::AuthPolicyOp::Pending(_) => {
                 panic!("ready constructor must produce a ready runtime op")
             }
         };
@@ -299,8 +299,8 @@ mod tests {
             ),
         ] {
             match op.into_engine() {
-                crate::runtime::AuthPolicyOp::Ready(result) => assert_eq!(result, expected),
-                crate::runtime::AuthPolicyOp::Pending(_) => {
+                nmp_runtime::AuthPolicyOp::Ready(result) => assert_eq!(result, expected),
+                nmp_runtime::AuthPolicyOp::Pending(_) => {
                     panic!("ready constructor must produce a ready engine op")
                 }
             }

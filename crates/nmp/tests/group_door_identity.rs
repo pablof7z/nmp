@@ -17,11 +17,11 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::runtime::FifoReceiver;
 use nmp::nip29;
 use nmp::{
     Engine, EngineConfig, EventBuilder, Filter, RelayState, RelayWaiting, SigningState, WriteFact,
 };
+use nmp_runtime::FifoReceiver;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{Keys, Kind, PublicKey, RelayUrl};
 

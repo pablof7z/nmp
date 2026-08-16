@@ -26,7 +26,7 @@
 
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::runtime::ReceiptReattachment;
+use nmp_runtime::ReceiptReattachment;
 
 use super::budgets::EVENTUALLY;
 use super::observe::{FeedState, ReceiptState};

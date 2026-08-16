@@ -1808,12 +1808,12 @@ name = "nmp"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "crossbeam-channel",
  "cucumber",
  "hex",
  "libc",
  "negentropy",
  "nmp",
+ "nmp-engine",
  "nmp-grammar",
  "nmp-local-signer",
  "nmp-nip11",
@@ -1823,6 +1823,7 @@ dependencies = [
  "nmp-resolver-testkit",
  "nmp-router",
  "nmp-router-testkit",
+ "nmp-runtime",
  "nmp-signer",
  "nmp-store",
  "nmp-test-support",
@@ -1852,11 +1853,13 @@ version = "0.1.0"
 dependencies = [
  "cucumber",
  "nmp",
+ "nmp-engine",
  "nmp-grammar",
  "nmp-local-signer",
  "nmp-resolver",
  "nmp-router",
  "nmp-router-testkit",
+ "nmp-runtime",
  "nmp-signer",
  "nmp-store",
  "nmp-test-support",
@@ -1924,6 +1927,28 @@ dependencies = [
  "proptest",
  "pulldown-cmark",
  "regex",
+]
+
+[[package]]
+name = "nmp-engine"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "hex",
+ "libc",
+ "negentropy",
+ "nmp-engine",
+ "nmp-grammar",
+ "nmp-resolver",
+ "nmp-resolver-testkit",
+ "nmp-router",
+ "nmp-router-testkit",
+ "nmp-signer",
+ "nmp-store",
+ "nmp-test-support",
+ "nmp-transport",
+ "nostr 0.44.4",
+ "tempfile",
 ]
 
 [[package]]
@@ -2146,6 +2171,34 @@ version = "0.1.0"
 dependencies = [
  "nmp-router",
  "nostr 0.44.4",
+]
+
+[[package]]
+name = "nmp-runtime"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "hex",
+ "libc",
+ "nmp-engine",
+ "nmp-grammar",
+ "nmp-local-signer",
+ "nmp-nip11",
+ "nmp-nip65",
+ "nmp-resolver",
+ "nmp-resolver-testkit",
+ "nmp-router",
+ "nmp-router-testkit",
+ "nmp-runtime",
+ "nmp-signer",
+ "nmp-store",
+ "nmp-test-support",
+ "nmp-transport",
+ "nostr 0.44.4",
+ "tempfile",
+ "tokio",
+ "tungstenite 0.29.0",
+ "zeroize",
 ]
 
 [[package]]

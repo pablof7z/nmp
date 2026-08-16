@@ -10,14 +10,14 @@
 use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::core::{
+use nmp_engine::core::{
     AcquisitionEvidence, AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome,
     AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg,
     LocalSendRefusal, Nip77Frame, ObservationFact, ObservationId, PublishError, ReceiptId,
     RequestAttemptId, RequestHandoffOutcome, RequestTerminal, RowDelta, ShortfallFact,
     SourceEvidence, SourceStatus,
 };
-use nmp::mechanism::publish_queue::{
+use nmp_engine::publish_queue::{
     NotSentReason, RelayState, RelayWaiting, RetryCause, SigningState, WriteFact, WriteOutcome,
 };
 use nmp_grammar::LiveQuery;
@@ -357,7 +357,7 @@ fn finish_authentication(
     handle: RelayHandle,
     session: RelaySessionKey,
     signer: &Keys,
-    policy_token: nmp::mechanism::core::AuthOpToken,
+    policy_token: nmp_engine::core::AuthOpToken,
 ) -> Vec<Effect> {
     let policy_instance = AuthCapabilityInstance(1);
     core.handle(EngineMsg::AuthCapabilityBound {
@@ -421,15 +421,15 @@ fn finish_authentication(
 
 fn nip11_evidence(
     supported_nips: Option<Vec<u16>>,
-) -> nmp::mechanism::core::RelayInformationCapabilityEvidence {
+) -> nmp_engine::core::RelayInformationCapabilityEvidence {
     nip11_evidence_until(supported_nips, u64::MAX)
 }
 
 fn nip11_evidence_until(
     supported_nips: Option<Vec<u16>>,
     fresh_until: u64,
-) -> nmp::mechanism::core::RelayInformationCapabilityEvidence {
-    nmp::mechanism::core::RelayInformationCapabilityEvidence {
+) -> nmp_engine::core::RelayInformationCapabilityEvidence {
+    nmp_engine::core::RelayInformationCapabilityEvidence {
         supported_nips,
         max_subscriptions: None,
         max_subid_length: None,
@@ -539,7 +539,7 @@ fn neg_msg_frame(sub: &str, message_hex: &str) -> RelayFrame {
     })
 }
 
-fn find_sign_request(effects: &[Effect]) -> (nmp::mechanism::core::ReceiptId, u64, UnsignedEvent) {
+fn find_sign_request(effects: &[Effect]) -> (nmp_engine::core::ReceiptId, u64, UnsignedEvent) {
     effects
         .iter()
         .find_map(|effect| match effect {

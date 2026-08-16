@@ -1655,7 +1655,7 @@ fn reconnect_repeats_live_first_and_only_the_fresh_generation_eose_opens_neg() {
     #[cfg(feature = "bench-instrumentation")]
     assert_eq!(
         core.bench_ownership_census(),
-        nmp::mechanism::core::CoreOwnershipCensus::default()
+        nmp_engine::core::CoreOwnershipCensus::default()
     );
 }
 

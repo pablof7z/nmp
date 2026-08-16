@@ -22,12 +22,10 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::publish_queue::{PublishQueueEntry, SigningState, WriteFact};
-use nmp::mechanism::runtime::{
-    EngineThread, FifoReceiver, FifoRecvTimeoutError, ReceiptReattachment,
-};
+use nmp_engine::publish_queue::{PublishQueueEntry, SigningState, WriteFact};
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_router_testkit::FixtureRoutingFacts;
+use nmp_runtime::{EngineThread, FifoReceiver, FifoRecvTimeoutError, ReceiptReattachment};
 use nmp_signer::{
     PendingSignerSender, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,
     SigningCapability,

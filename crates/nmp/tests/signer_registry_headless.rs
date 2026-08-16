@@ -1,5 +1,5 @@
 //! M4 §5 — `SignerRegistry` headless falsifier: two accounts registered via
-//! [`nmp::mechanism::runtime::Handle::add_signer`]. `set_current_account` re-roots
+//! [`nmp_runtime::Handle::add_signer`]. `set_current_account` re-roots
 //! reactive reads and authorizes default unsigned acceptance. Once accepted,
 //! a write resolves the exact signer frozen at that boundary; later read-root
 //! changes cannot redirect it. Deliberately
@@ -19,15 +19,15 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::core::PublishError;
-use nmp::mechanism::core::RowDelta;
-use nmp::mechanism::publish_queue::{SigningState, WriteFact};
-use nmp::mechanism::runtime::{EngineThread, FifoReceiver, FifoRecvTimeoutError, RowsReceiver};
+use nmp_engine::core::PublishError;
+use nmp_engine::core::RowDelta;
+use nmp_engine::publish_queue::{SigningState, WriteFact};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, IdentityField};
 use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_router_testkit::FixtureRoutingFacts;
+use nmp_runtime::{EngineThread, FifoReceiver, FifoRecvTimeoutError, RowsReceiver};
 use nmp_signer::{
     SignerError, SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent,
     SigningCapability,
@@ -74,7 +74,7 @@ impl SigningCapability for PubkeylessSigner {
 }
 
 /// Same accumulate-deltas-into-a-snapshot idiom as the other runtime tests
-/// (`nmp::mechanism::core::RowDelta`'s doc: the wire is deltas, never snapshots).
+/// (`nmp_engine::core::RowDelta`'s doc: the wire is deltas, never snapshots).
 fn wait_for_rows(
     rx: &RowsReceiver,
     timeout: Duration,
@@ -940,7 +940,7 @@ fn pubkeyless_capability_is_a_typed_registration_error() {
     .expect("test engine thread construction");
     assert_eq!(
         handle.add_signer(PubkeylessSigner),
-        Err(nmp::mechanism::runtime::AddSignerError::MissingPublicKey)
+        Err(nmp_runtime::AddSignerError::MissingPublicKey)
     );
     handle.shutdown();
     engine_thread.join();

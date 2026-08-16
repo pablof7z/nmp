@@ -31,8 +31,8 @@ use std::sync::mpsc::{RecvError, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::core::{AcquisitionEvidence, HistoryAdvanceError, Row, RowDelta, WindowLoad};
-use crate::runtime::{
+use nmp_engine::core::{AcquisitionEvidence, HistoryAdvanceError, Row, RowDelta, WindowLoad};
+use nmp_runtime::{
     AsyncHistoryReceiver, AsyncLatestReceiver, AsyncRowsReceiver, ConcurrentNext,
     DiagnosticsHandle, Handle, HistoryHandle, HistoryReceiver, LatestReceiver, QueryHandle,
     RowsReceiver,
@@ -385,13 +385,13 @@ impl Drop for Subscription {
 /// A live diagnostics stream. Same `Drop` discipline as [`Subscription`].
 pub struct DiagnosticsSubscription {
     cancel: ObservationCancel,
-    snapshots: LatestReceiver<crate::core::DiagnosticsSnapshot>,
+    snapshots: LatestReceiver<nmp_engine::core::DiagnosticsSnapshot>,
 }
 
 impl DiagnosticsSubscription {
     pub(crate) fn new(
         diag_handle: DiagnosticsHandle,
-        snapshots: LatestReceiver<crate::core::DiagnosticsSnapshot>,
+        snapshots: LatestReceiver<nmp_engine::core::DiagnosticsSnapshot>,
     ) -> Self {
         Self {
             cancel: ObservationCancel::new(move || diag_handle.cancel()),
@@ -565,13 +565,13 @@ impl Drop for AsyncSubscription {
 /// `Drop`/cancel discipline as [`AsyncSubscription`].
 pub struct AsyncDiagnosticsSubscription {
     cancel: ObservationCancel,
-    snapshots: AsyncLatestReceiver<crate::core::DiagnosticsSnapshot>,
+    snapshots: AsyncLatestReceiver<nmp_engine::core::DiagnosticsSnapshot>,
 }
 
 impl AsyncDiagnosticsSubscription {
     pub(crate) fn new(
         diag_handle: DiagnosticsHandle,
-        snapshots: LatestReceiver<crate::core::DiagnosticsSnapshot>,
+        snapshots: LatestReceiver<nmp_engine::core::DiagnosticsSnapshot>,
     ) -> Self {
         Self {
             cancel: ObservationCancel::new(move || diag_handle.cancel()),

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use nostr::{EventId, Timestamp};
 
-use nmp::mechanism::publish_queue::{SigningState, WriteFact};
+use nmp_engine::publish_queue::{SigningState, WriteFact};
 use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 
 use super::budgets::EVENTUALLY;

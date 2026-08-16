@@ -9,7 +9,7 @@
 
 use cucumber::then;
 
-use nmp::mechanism::core::{StalledWrite, StalledWriteStage};
+use nmp_engine::core::{StalledWrite, StalledWriteStage};
 use nmp_router::RelayUrl;
 
 use crate::world::NmpWorld;
@@ -223,9 +223,9 @@ async fn nothing_abandoned_it(w: &mut NmpWorld) {
             seen.iter().any(|status| {
                 matches!(
                     status,
-                    nmp::mechanism::publish_queue::WriteFact::Outcome(
-                        nmp::mechanism::publish_queue::WriteOutcome::NotSent(
-                            nmp::mechanism::publish_queue::NotSentReason::Cancelled
+                    nmp_engine::publish_queue::WriteFact::Outcome(
+                        nmp_engine::publish_queue::WriteOutcome::NotSent(
+                            nmp_engine::publish_queue::NotSentReason::Cancelled
                         )
                     )
                 )
@@ -297,8 +297,8 @@ async fn nothing_durable_was_recorded(w: &mut NmpWorld) {
     assert!(
         !after.iter().any(|status| matches!(
             status,
-            nmp::mechanism::publish_queue::WriteFact::Relay {
-                state: nmp::mechanism::publish_queue::RelayState::Published,
+            nmp_engine::publish_queue::WriteFact::Relay {
+                state: nmp_engine::publish_queue::RelayState::Published,
                 ..
             }
         )),

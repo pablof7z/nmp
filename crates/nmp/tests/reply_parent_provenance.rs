@@ -9,11 +9,11 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::runtime::FifoReceiver;
 use nmp::{
     AccessContext, Binding, CacheMode, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery,
     RelayState, RowDelta, SourceAuthority, WriteFact, WriteIntent, WritePayload, WriteRouting,
 };
+use nmp_runtime::FifoReceiver;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{EventBuilder as NostrEventBuilder, Keys, Kind, Tag, Timestamp};
 

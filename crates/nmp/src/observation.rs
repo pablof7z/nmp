@@ -35,10 +35,10 @@ pub struct ObservationEvidence {
     pub attributes: Vec<(String, String)>,
 }
 
-fn resolved_value_string(value: crate::core::ResolvedBindingValue) -> String {
+fn resolved_value_string(value: nmp_engine::core::ResolvedBindingValue) -> String {
     match value {
-        crate::core::ResolvedBindingValue::Scalar(value) => value,
-        crate::core::ResolvedBindingValue::AddressCoordinate {
+        nmp_engine::core::ResolvedBindingValue::Scalar(value) => value,
+        nmp_engine::core::ResolvedBindingValue::AddressCoordinate {
             kind,
             author,
             identifier,
@@ -64,8 +64,8 @@ fn attribute(key: &str, value: impl ToString) -> (String, String) {
 }
 
 impl ObservationEvidence {
-    pub(crate) fn from_engine(value: crate::core::ObservationEvidence) -> Self {
-        let crate::core::ObservationEvidence {
+    pub(crate) fn from_engine(value: nmp_engine::core::ObservationEvidence) -> Self {
+        let nmp_engine::core::ObservationEvidence {
             sequence,
             branch,
             fact,
@@ -81,7 +81,7 @@ impl ObservationEvidence {
             attributes: vec![],
         };
         match fact {
-            crate::core::ObservationFact::ReactiveInput {
+            nmp_engine::core::ObservationFact::ReactiveInput {
                 path,
                 field,
                 revision,
@@ -98,7 +98,7 @@ impl ObservationEvidence {
                     .attributes
                     .push(attribute("field", identity_field_string(field)));
             }
-            crate::core::ObservationFact::DerivedSet {
+            nmp_engine::core::ObservationFact::DerivedSet {
                 path,
                 revision,
                 values,
@@ -111,7 +111,7 @@ impl ObservationEvidence {
                 evidence.values = values.into_iter().map(resolved_value_string).collect();
                 evidence.fingerprint = Some(fingerprint);
             }
-            crate::core::ObservationFact::ConcreteFilter {
+            nmp_engine::core::ObservationFact::ConcreteFilter {
                 path,
                 revision,
                 filters,
@@ -127,7 +127,7 @@ impl ObservationEvidence {
                     .collect();
                 evidence.fingerprint = Some(fingerprint);
             }
-            crate::core::ObservationFact::RelayRequest {
+            nmp_engine::core::ObservationFact::RelayRequest {
                 path,
                 filter_revision,
                 relay,
@@ -149,7 +149,7 @@ impl ObservationEvidence {
                     attribute("replay", replay),
                 ];
             }
-            crate::core::ObservationFact::RequestSettled {
+            nmp_engine::core::ObservationFact::RequestSettled {
                 path,
                 filter_revision,
                 relay,
@@ -171,13 +171,13 @@ impl ObservationEvidence {
                     attribute(
                         "terminal",
                         match terminal {
-                            crate::core::RequestTerminal::Eose => "eose",
-                            crate::core::RequestTerminal::Nip77 => "nip77",
+                            nmp_engine::core::RequestTerminal::Eose => "eose",
+                            nmp_engine::core::RequestTerminal::Nip77 => "nip77",
                         },
                     ),
                 ];
             }
-            crate::core::ObservationFact::RelayClosed {
+            nmp_engine::core::ObservationFact::RelayClosed {
                 path,
                 filter_revision,
                 relay,
@@ -201,7 +201,7 @@ impl ObservationEvidence {
                 }
                 evidence.attributes.push(attribute("reason", reason));
             }
-            crate::core::ObservationFact::RequestDeferred {
+            nmp_engine::core::ObservationFact::RequestDeferred {
                 path,
                 filter_revision,
                 relay,
@@ -220,12 +220,12 @@ impl ObservationEvidence {
                     attribute("retry_at", retry_at.as_secs()),
                 ];
                 match cause {
-                    crate::core::LocalSendRefusal::SessionUnavailable => {
+                    nmp_engine::core::LocalSendRefusal::SessionUnavailable => {
                         evidence
                             .attributes
                             .push(attribute("cause", "session_unavailable"));
                     }
-                    crate::core::LocalSendRefusal::WorkerAdmissionRefused { handle } => {
+                    nmp_engine::core::LocalSendRefusal::WorkerAdmissionRefused { handle } => {
                         evidence
                             .attributes
                             .push(attribute("cause", "worker_admission_refused"));
@@ -235,10 +235,10 @@ impl ObservationEvidence {
                     }
                 }
             }
-            crate::core::ObservationFact::Withdrawn => {
+            nmp_engine::core::ObservationFact::Withdrawn => {
                 evidence.kind = "withdrawn";
             }
-            crate::core::ObservationFact::Overflow {
+            nmp_engine::core::ObservationFact::Overflow {
                 first_sequence,
                 last_sequence,
                 dropped,

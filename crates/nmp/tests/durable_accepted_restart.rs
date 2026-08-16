@@ -5,11 +5,11 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use nmp::mechanism::core::{
+use nmp_engine::core::{
     AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome, AuthSendCompletion,
     AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg, ReattachOutcome, ReceiptId,
 };
-use nmp::mechanism::publish_queue::{
+use nmp_engine::publish_queue::{
     NotSentReason, RelayState, RelayWaiting, SigningState, WriteFact, WriteOutcome,
 };
 use nmp_grammar::{
@@ -805,7 +805,7 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
     let (cancelled, cancellation) = core.cancel_write(receipt);
     assert_eq!(
         cancelled,
-        Ok(nmp::mechanism::publish_queue::CancelWriteOutcome::Cancelled)
+        Ok(nmp_engine::publish_queue::CancelWriteOutcome::Cancelled)
     );
     assert!(cancellation.iter().any(
         |effect| matches!(effect, Effect::EmitReceipt(id, WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Cancelled))) if *id == receipt)
@@ -883,7 +883,7 @@ fn signed_receipt_replays_signed_and_refuses_cancellation_after_reopen() {
     let (refused, effects) = reopened.cancel_write(receipt);
     assert!(matches!(
         refused,
-        Err(nmp::mechanism::publish_queue::CancelWriteError::AlreadySigned {
+        Err(nmp_engine::publish_queue::CancelWriteError::AlreadySigned {
             receipt_id,
             event_id,
         }) if receipt_id == receipt && event_id == event.id
@@ -1038,7 +1038,7 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
     let (refused, effects) = core.cancel_write(receipt_id);
     assert!(matches!(
         refused,
-        Err(nmp::mechanism::publish_queue::CancelWriteError::PersistenceFailed {
+        Err(nmp_engine::publish_queue::CancelWriteError::PersistenceFailed {
             receipt_id: failed_id,
             reason,
         }) if failed_id == receipt_id && reason.contains("decode publish queue receipt")

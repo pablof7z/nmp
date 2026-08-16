@@ -5,7 +5,7 @@
 //! step that actually needs the engine calls
 //! [`ensure_started`](NmpWorld::ensure_started), which starts every staged
 //! `ScriptedRelay`, seeds their fixture events, and spawns the real
-//! `nmp::mechanism::runtime::EngineThread` against them -- never a mocked
+//! `nmp_runtime::EngineThread` against them -- never a mocked
 //! engine, never a resolver-only shortcut (§2.1).
 //!
 //! Everything under this module is internal plumbing for the step catalog
@@ -140,9 +140,9 @@ use std::sync::{Arc, Mutex};
 
 use nostr::{EventId, Keys, PublicKey, Timestamp};
 
-use nmp::mechanism::runtime::Handle;
 use nmp::Engine;
 use nmp_local_signer::LocalKeySigner;
+use nmp_runtime::Handle;
 
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 
@@ -330,7 +330,7 @@ pub struct NmpWorld {
     /// mean now.
     last_publish_label: Option<String>,
     /// The stable id the publish door returned, for cancel and reattach.
-    last_receipt_id: Option<nmp::mechanism::core::ReceiptId>,
+    last_receipt_id: Option<nmp_engine::core::ReceiptId>,
     /// The frozen body's id as it stood before a restart, so the far side
     /// can be compared against it byte for byte.
     last_receipt_body: Option<nostr::EventId>,
@@ -455,7 +455,7 @@ pub struct NmpWorld {
     told_route: Vec<nmp_router::RelayUrl>,
     /// The snapshot the last `I read diagnostics` returned -- "the list"
     /// every following assertion reads.
-    last_diagnostics: Option<nmp::mechanism::core::DiagnosticsSnapshot>,
+    last_diagnostics: Option<nmp_engine::core::DiagnosticsSnapshot>,
     /// One fingerprint per read of a repeated read, so "reading changed
     /// nothing" compares every answer instead of only the last.
     repeated_diagnostics: Vec<Vec<(String, String, u64)>>,
