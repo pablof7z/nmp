@@ -12,11 +12,13 @@ publish.workspace = true
 # in this unit that would consume a router/resolver/store.
 default = []
 
-# nmp-blossom is the artifact seam: a NIP-68 image is minted only from a
-# content-addressed BlobDescriptor / VerifiedUpload (the #421 "protected kind
-# without artifact provenance fails" contract). nmp-asset owns the exact-byte
-# `Sha256Hash` that seam carries (#884).
+# #898: a NIP-68 image is minted only from `nmp_asset::VerifiedAsset` -- a
+# proof computed from exact bytes some constructor actually saw, never from a
+# caller-claimed hash or an unverified BUD-02 descriptor (the #421 "protected
+# kind without artifact provenance fails" contract). This crate names NO
+# storage-protocol crate: `nmp-blossom` is how a `VerifiedAsset` gets minted
+# for an uploaded blob, but that is `nmp-blossom`'s/its callers' business, not
+# a dependency the NIP-68 schema owner needs to describe an image.
 [dependencies]
 nostr.workspace = true
 nmp-asset.workspace = true
-nmp-blossom.workspace = true

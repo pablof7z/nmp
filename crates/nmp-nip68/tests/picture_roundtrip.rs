@@ -2,22 +2,15 @@
 //! epic #216 T15-B-NIP68-IMETA). Each test names the invariant it would
 //! falsify.
 
-use nmp_asset::Sha256Hash;
-use nmp_blossom::BlobDescriptor;
+use nmp_asset::{Sha256Hash, VerifiedAsset};
 use nmp_nip68::{
     build_picture, decode_picture, ContentWarning, ImageDim, PictureBuildError, PictureDiagnostic,
     PictureImage, PictureImageError, PictureSpec, PICTURE_KIND,
 };
 use nostr::{Keys, Kind, Timestamp};
 
-fn descriptor(url: &str, seed: &[u8], mime: Option<&str>) -> BlobDescriptor {
-    BlobDescriptor {
-        url: url.to_string(),
-        sha256: Sha256Hash::of(seed),
-        size: seed.len() as u64,
-        mime_type: mime.map(str::to_string),
-        uploaded: None,
-    }
+fn asset(url: &str, seed: &[u8], mime: Option<&str>) -> VerifiedAsset {
+    VerifiedAsset::from_bytes(seed, url.to_string(), mime.map(str::to_string))
 }
 
 /// A built kind:20 must be a valid signable draft: signing it with a real key
@@ -40,7 +33,7 @@ fn sign_and_decode(spec: &PictureSpec, keys: &Keys) -> nmp_nip68::Picture {
 #[test]
 fn build_picture_binds_every_image_sha256_into_its_imeta() {
     let keys = Keys::generate();
-    let first = PictureImage::from_descriptor(&descriptor(
+    let first = PictureImage::from_verified_asset(&asset(
         "https://cdn.example.com/one",
         b"one",
         Some("image/png"),
@@ -51,7 +44,7 @@ fn build_picture_binds_every_image_sha256_into_its_imeta() {
         height: 4032,
     })
     .with_alt("first".to_string());
-    let second = PictureImage::from_descriptor(&descriptor(
+    let second = PictureImage::from_verified_asset(&asset(
         "https://cdn.example.com/two",
         b"two",
         Some("image/jpeg"),
@@ -107,7 +100,7 @@ fn build_picture_binds_every_image_sha256_into_its_imeta() {
 fn server_controlled_url_is_carried_verbatim_never_interpreted() {
     let keys = Keys::generate();
     let odd_url = "https://cdn.example.com/blob?token=a~b%20c&x=1!;(v=2)";
-    let image = PictureImage::from_descriptor(&descriptor(odd_url, b"blob", Some("image/webp")))
+    let image = PictureImage::from_verified_asset(&asset(odd_url, b"blob", Some("image/webp")))
         .expect("mime present");
     let spec = PictureSpec {
         images: vec![image],
@@ -133,7 +126,7 @@ fn imeta_values_containing_real_spaces_round_trip_intact() {
     let alt = "a red bicycle leaning by the sea at dawn";
     let fallback = "https://mirror.example.com/a photo.jpg";
     let image =
-        PictureImage::from_descriptor(&descriptor(spaced_url, b"spaced", Some("image/jpeg")))
+        PictureImage::from_verified_asset(&asset(spaced_url, b"spaced", Some("image/jpeg")))
             .expect("mime present")
             .with_alt(alt.to_string())
             .with_fallback(fallback.to_string());
@@ -174,12 +167,12 @@ fn a_picture_with_no_images_is_refused() {
     );
 }
 
-/// Falsifier 2 (#558): `a_descriptor_without_mime_cannot_mint_an_image`.
+/// Falsifier 2 (#558, #898): `a_verified_asset_without_mime_cannot_mint_an_image`.
 #[test]
-fn a_descriptor_without_mime_cannot_mint_an_image() {
-    let no_mime = descriptor("https://cdn.example.com/x", b"x", None);
+fn a_verified_asset_without_mime_cannot_mint_an_image() {
+    let no_mime = asset("https://cdn.example.com/x", b"x", None);
     assert_eq!(
-        PictureImage::from_descriptor(&no_mime),
+        PictureImage::from_verified_asset(&no_mime),
         Err(PictureImageError::MissingMimeType)
     );
 }
@@ -188,7 +181,7 @@ fn a_descriptor_without_mime_cannot_mint_an_image() {
 #[test]
 fn content_warning_round_trips_and_empty_hashtag_is_refused() {
     let keys = Keys::generate();
-    let image = PictureImage::from_descriptor(&descriptor(
+    let image = PictureImage::from_verified_asset(&asset(
         "https://cdn.example.com/x",
         b"x",
         Some("image/png"),
