@@ -14,7 +14,8 @@ fn one_handle_partial_resolver_closes_touch_only_departing_refcounts_in_both_ord
             Freshness::Live,
         ))));
         let handle = core.observations[&observation].branches[0];
-        let base = core.wire_atoms_by_handle[&handle]
+        let mut atoms = core.wire.atoms_for_handle(handle);
+        let base = atoms
             .iter()
             .next()
             .cloned()
@@ -29,26 +30,20 @@ fn one_handle_partial_resolver_closes_touch_only_departing_refcounts_in_both_ord
                     .unwrap(),
                 origin: nmp_grammar::RoutingEvidenceKind::Hint,
             });
-            assert!(core
-                .wire_atoms_by_handle
-                .get_mut(&handle)
-                .unwrap()
-                .insert(atom.clone()));
-            core.wire_handles_by_atom
-                .entry(atom.clone())
-                .or_default()
-                .insert(handle);
+            assert!(atoms.insert(atom.clone()));
             departing.push(atom);
         }
-        core.wire_demand_refs_by_handle
-            .get_mut(&handle)
-            .unwrap()
-            .insert(demand, ATOMS);
-        core.wire_coverage_refs_by_handle
-            .get_mut(&handle)
-            .unwrap()
-            .insert(claim, ATOMS);
-        core.wire_owner_counts.get_mut(&demand).unwrap().1 = ATOMS;
+        // Build the fixture through the owner's own doors: re-indexing derives
+        // the per-handle refcounts, and one retain per added atom derives the
+        // owner count. Both then equal ATOMS because every atom here shares
+        // one DemandKey and one claim -- a state the production path reaches,
+        // not one assigned into the maps.
+        core.wire.reindex_handle(handle, atoms);
+        for atom in &departing {
+            core.wire.retain(atom);
+        }
+        assert_eq!(core.wire.demand_refs(handle, &demand), ATOMS);
+        assert_eq!(core.wire.coverage_refs(handle, &claim), ATOMS);
 
         if reverse {
             departing.reverse();
@@ -68,9 +63,11 @@ fn one_handle_partial_resolver_closes_touch_only_departing_refcounts_in_both_ord
             2 * (ATOMS - 1) as u64
         );
         assert_eq!(core.resolver_surviving_atoms_examined.get(), 0);
-        assert_eq!(core.wire_demand_refs_by_handle[&handle][&demand], 1);
-        assert_eq!(core.wire_coverage_refs_by_handle[&handle][&claim], 1);
-        assert!(core.request_targets_by_demand[&demand]
+        assert_eq!(core.wire.demand_refs(handle, &demand), 1);
+        assert_eq!(core.wire.coverage_refs(handle, &claim), 1);
+        assert!(core
+            .request_targets
+            .declared_live_for_demand(&demand)
             .keys()
             .any(|target| target.handle == handle));
 
@@ -91,58 +88,33 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
         let observation =
             observation_id(&core.handle(EngineMsg::Subscribe(bounded_query(&relay, "departing"))));
         let handle = core.observations[&observation].branches[0];
-        let departing = core.wire_atoms_by_handle[&handle]
-            .iter()
-            .next()
-            .cloned()
-            .unwrap();
+        let mut atoms = core.wire.atoms_for_handle(handle);
+        let departing = atoms.iter().next().cloned().unwrap();
         let departing_demand = DemandKey::for_atom(&departing);
         let surviving = bounded_atom(&relay, "surviving");
         let surviving_demand = DemandKey::for_atom(&surviving);
         let surviving_claim = coverage_key(&surviving);
 
         core.deactivate_request_targets_for_handle(handle);
-        let departing_target = core.request_targets_by_handle[&handle]
+        let departing_target = core
+            .request_targets
+            .declared_for_handle(handle)
             .keys()
             .next()
             .cloned()
             .unwrap();
-        core.request_targets_by_handle
-            .get_mut(&handle)
-            .unwrap()
-            .insert(
-                ActiveRequestTarget {
-                    demand: surviving_demand,
-                    scope: departing_target.scope,
-                    path: "$.surviving".to_string(),
-                    revision: departing_target.revision,
-                },
-                1,
-            );
-        core.wire_atoms_by_handle
-            .get_mut(&handle)
-            .unwrap()
-            .insert(surviving.clone());
-        core.wire_demand_refs_by_handle
-            .get_mut(&handle)
-            .unwrap()
-            .insert(surviving_demand, 1);
-        core.wire_coverage_refs_by_handle
-            .get_mut(&handle)
-            .unwrap()
-            .insert(surviving_claim, 1);
-        core.wire_handles_by_atom
-            .entry(surviving.clone())
-            .or_default()
-            .insert(handle);
-        core.wire_handles_by_demand
-            .entry(surviving_demand)
-            .or_default()
-            .insert(handle);
-        core.wire_handles_by_coverage
-            .entry(surviving_claim)
-            .or_default()
-            .insert(handle);
+        core.request_targets.declare_for_handle(
+            handle,
+            ActiveRequestTarget {
+                demand: surviving_demand,
+                scope: departing_target.scope,
+                path: "$.surviving".to_string(),
+                revision: departing_target.revision,
+            },
+            1,
+        );
+        atoms.insert(surviving.clone());
+        core.wire.reindex_handle(handle, atoms);
         core.retain_wire_atom_owner(&surviving);
         core.activate_request_targets_for_handle(handle);
 
@@ -151,10 +123,8 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
         });
         let mut close_effects = Vec::new();
         core.flush_consumed_resolver_closes(&mut close_effects);
-        assert!(!core
-            .request_targets_by_demand
-            .contains_key(&departing_demand));
-        assert_eq!(core.request_targets_by_demand[&surviving_demand].len(), 1);
+        assert!(!core.request_targets.has_live_demand(&departing_demand));
+        assert_eq!(core.request_targets.live_target_count(&surviving_demand), 1);
 
         let sub_id = SubId::for_wire(
             relay,

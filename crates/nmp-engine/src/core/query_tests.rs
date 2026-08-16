@@ -1885,11 +1885,10 @@ mod coverage_evidence_refresh_tests {
             .iter()
             .any(|effect| matches!(effect, Effect::EmitHistory(..))));
         assert_eq!(core.active_request_evidence.len(), 1);
-        assert!(history.owner_demands.iter().all(|demand| {
-            core.wire_handles_by_demand
-                .get(demand)
-                .is_some_and(|handles| !handles.is_empty())
-        }));
+        assert!(history
+            .owner_demands
+            .iter()
+            .all(|demand| core.wire.has_demand_handles(demand)));
 
         core.attribution
             .poison_event_commit_failure(&session, &wire_sub_id_string(&history.sub_id));

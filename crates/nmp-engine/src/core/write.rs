@@ -5343,12 +5343,7 @@ impl EngineCore {
     }
 
     pub(super) fn rebuild_author_outbox_route_needs(&mut self) {
-        let owners: Vec<_> = self
-            .wire_owner_counts
-            .values()
-            .map(|(atom, count)| (atom.clone(), *count))
-            .collect();
-        for (atom, count) in owners {
+        for (atom, count) in self.wire.owner_contributions() {
             for author in Self::author_outbox_authors(&atom) {
                 let total = self
                     .author_outbox_wire_owner_counts

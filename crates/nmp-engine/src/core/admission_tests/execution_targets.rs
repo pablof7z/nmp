@@ -423,16 +423,13 @@ fn reactive_nested_same_demand_replaces_only_the_live_scope_target_revision() {
         let handle = core.observations[&observation].branches[0];
 
         let switched = core.handle(EngineMsg::SetActivePubkey(Some(account_b.public_key())));
-        assert_eq!(core.request_targets_by_handle[&handle].len(), 2);
-        assert!(core.request_targets_by_handle[&handle]
+        assert_eq!(core.request_targets.declared_for_handle(handle).len(), 2);
+        assert!(core
+            .request_targets
+            .declared_for_handle(handle)
             .keys()
             .all(|target| target.revision == 2));
-        let active_targets: Vec<_> = core
-            .request_targets_by_demand
-            .values()
-            .flat_map(BTreeMap::keys)
-            .cloned()
-            .collect();
+        let active_targets = core.request_targets.live_targets();
         assert_eq!(active_targets.len(), 1);
         assert_eq!(active_targets[0].handle, handle);
         assert_eq!(active_targets[0].path, "$.authors.inner");

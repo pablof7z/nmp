@@ -69,11 +69,13 @@ mod request_attempt_tests;
 mod request_effects;
 #[cfg(test)]
 mod request_replacement_transition_tests;
+mod request_targets;
 mod semantic_delivery;
 #[cfg(test)]
 mod semantic_settlement_falsifier_tests;
 #[cfg(test)]
 mod transport_tests;
+mod wire_ownership;
 mod write;
 pub use write::{PreparedReplaceableMaterialization, PublishPreparation};
 #[cfg(test)]
@@ -89,11 +91,15 @@ use nostr::{
     PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
 };
 
+/// Only the wire owner names routing-evidence facts in production now; the
+/// admission tests still construct them directly through this module's glob.
+#[cfg(test)]
+use nmp_grammar::RoutingEvidence;
 use nmp_grammar::{
     fold_byte, AccessContext, CacheMode, ConcreteFilter, ContextualAtom, DemandDelta, DemandOp,
     DescriptorHash, Freshness, Identity, LiveQuery, RelaySessionKey,
-    ReplaceableMaterializerOperation, ReplaceableMaterializerRegistration, RoutingEvidence,
-    SourceAuthority, WriteIntent, WritePayload, WriteRouting,
+    ReplaceableMaterializerOperation, ReplaceableMaterializerRegistration, SourceAuthority,
+    WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{
     CommittedCurrentRow, CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine,
@@ -448,6 +454,8 @@ pub use query::Nip77Frame;
 pub use request_attempt::{LocalSendRefusal, RequestAttemptId, RequestHandoffOutcome};
 use request_attempt::{RequestAttemptPurpose, RequestAttemptState, RequestAttempts, RequestSend};
 pub use request_effects::{AttemptedReplay, AttemptedWireDelta};
+use request_targets::{ActiveRequestTarget, RequestTargets};
+use wire_ownership::{AtomReleased, AtomRetained, WireOwnership};
 // `runtime` (C) needs the EXACT same wire subscription-id string
 // `attribution.rs` records at send time (`AttributionState::record_send`) so
 // that a REQ actually placed on the wire under this string round-trips back
@@ -1088,6 +1096,10 @@ pub struct CoreOwnershipCensus {
     pub wire_handle_coverage_ref_keys: usize,
     pub wire_handle_coverage_refs: usize,
     pub wire_owner_keys: usize,
+    /// The sum of every live demand's owner count, not just how many demands
+    /// are live. Without it the census cannot tell an owner count of two from
+    /// one of four, and a rebuild that double-counted was invisible.
+    pub wire_owner_refs: usize,
     pub wire_reverse_owner_keys: usize,
     pub wire_coverage_keys: usize,
     pub wire_coverage_edges: usize,
@@ -1375,30 +1387,6 @@ struct BranchState {
     /// another branch's evidence.
     index: usize,
     execution: ObservationExecutionState,
-}
-
-/// One current filter-resolution owner below a branch handle.
-///
-/// Exact relay demand and acquisition-scope identity are indexed separately
-/// from the execution target. Distinct windows must never alias through their
-/// shared durable coverage key, and two structural Demand occurrences may
-/// resolve the same exact relay atom while only one owns wire participation.
-/// The multiplicity in the owning maps makes replacement and teardown exact
-/// without rescanning remembered resolver nodes.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct ActiveRequestTarget {
-    demand: nmp_router::DemandKey,
-    scope: usize,
-    path: String,
-    revision: u64,
-}
-
-/// Reverse-index value for one current observation execution target.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct RequestTarget {
-    handle: HandleId,
-    path: String,
-    revision: u64,
 }
 
 /// The opaque identity of ONE live observation (#1108).
@@ -1907,28 +1895,17 @@ pub struct EngineCore {
     /// Per-BRANCH bookkeeping for every live observation branch, keyed by
     /// the resolver handle that owns it.
     handles: HashMap<HandleId, BranchState>,
-    /// Complete current-snapshot request-evidence edges per ordinary handle.
-    /// A reconcile replaces only this handle's set, so paths absent from the
-    /// new resolver snapshot and stale revisions disappear immediately.
-    request_targets_by_handle: HashMap<HandleId, BTreeMap<ActiveRequestTarget, usize>>,
-    /// Wire-active request targets grouped by exact handle and DemandKey.
-    /// Partial resolver closes can remove one demand's edges without scanning
-    /// or dropping sibling execution targets owned by the same handle.
-    active_request_targets_by_handle_demand:
-        HashMap<HandleId, BTreeMap<nmp_router::DemandKey, BTreeMap<RequestTarget, usize>>>,
-    /// Exact logical demand -> wire-active execution targets reverse index.
-    /// REQ attribution retains since/until/limit and never aliases observers
-    /// merely because durable coverage erases those fields.
-    request_targets_by_demand: BTreeMap<nmp_router::DemandKey, BTreeMap<RequestTarget, usize>>,
-    /// Immutable per-handle live-wire atoms plus exact active owner counts.
-    /// Ordinary withdrawal consults only the departing handle and these
-    /// reverse counts; it never reconstructs sibling demand.
-    wire_atoms_by_handle: HashMap<HandleId, BTreeSet<ContextualAtom>>,
-    /// Exact per-handle multiplicity after DemandKey erases routing evidence.
-    wire_demand_refs_by_handle: HashMap<HandleId, BTreeMap<nmp_router::DemandKey, usize>>,
-    /// Exact per-handle multiplicity of normalized durable claim keys.
-    wire_coverage_refs_by_handle: HashMap<HandleId, BTreeMap<CoverageKey, usize>>,
-    wire_owner_counts: BTreeMap<nmp_router::DemandKey, (ContextualAtom, usize)>,
+    /// Which branch executes which filter path against which demand, and
+    /// which of those are live. Three maps in two layers, private to
+    /// `request_targets.rs`, so "forget every activation, keep every
+    /// declaration" is one named operation rather than two hand-written
+    /// clears a caller has to get both of.
+    request_targets: RequestTargets,
+    /// Which handles own which live-wire atoms, and which logical demands are
+    /// therefore live. Ten maps, private to `wire_ownership.rs`, so owner
+    /// counting has exactly one implementation instead of an incremental path
+    /// and a rebuild that open-coded it a second time.
+    wire: WireOwnership,
     /// Exact live-wire owner count per author contributed by
     /// `AuthorOutboxes` demand. This keeps neutral provider work incremental:
     /// unrelated handle teardown never scans the complete wire-demand set.
@@ -1939,27 +1916,6 @@ pub struct EngineCore {
     /// Whether an incremental wire-owner change altered that read half since
     /// the last provider-work edge was published.
     author_outbox_route_needs_changed: bool,
-    /// Exact per-demand ownership of routing facts erased by `DemandKey`.
-    /// The aggregate atom in `wire_owner_counts` always carries this map's
-    /// live union, while each fact remains independently removable.
-    wire_routing_evidence_owner_counts:
-        BTreeMap<nmp_router::DemandKey, BTreeMap<RoutingEvidence, usize>>,
-    /// Exact reverse edge used only when a resolver call reports a handle
-    /// drop that happened before core could run its ordinary detach path.
-    wire_handles_by_atom: BTreeMap<ContextualAtom, BTreeSet<HandleId>>,
-    /// Exact evidence-refresh candidates by immutable coverage identity.
-    wire_handles_by_coverage: BTreeMap<CoverageKey, BTreeSet<HandleId>>,
-    /// Exact request-phase refresh candidates by relay-lifecycle identity.
-    /// Unlike coverage, this retains since/until/limit and includes both
-    /// ordinary observations and history handles.
-    wire_handles_by_demand: BTreeMap<nmp_router::DemandKey, BTreeSet<HandleId>>,
-    /// Resolver-reported final closes wait until the current open transaction
-    /// has attached any replacement live owner. That lets close+open of the
-    /// same atom reattach to retained physical coverage without wire churn.
-    pending_resolver_wire_closes: BTreeMap<nmp_router::DemandKey, ContextualAtom>,
-    /// Active exact demand not yet covered on every required physical
-    /// session. Refused opens stay here until a real close frees capacity.
-    pending_wire_atoms: BTreeMap<nmp_router::DemandKey, ContextualAtom>,
     /// Per-OBSERVATION delivered projection, keyed by the id every mailbox
     /// and cancellation uses.
     observations: HashMap<ObservationId, ObservationState>,
@@ -2395,22 +2351,11 @@ impl EngineCore {
             routing_facts,
             cap,
             handles: HashMap::new(),
-            request_targets_by_handle: HashMap::new(),
-            active_request_targets_by_handle_demand: HashMap::new(),
-            request_targets_by_demand: BTreeMap::new(),
-            wire_atoms_by_handle: HashMap::new(),
-            wire_demand_refs_by_handle: HashMap::new(),
-            wire_coverage_refs_by_handle: HashMap::new(),
-            wire_owner_counts: BTreeMap::new(),
+            request_targets: RequestTargets::default(),
+            wire: WireOwnership::default(),
             author_outbox_wire_owner_counts: BTreeMap::new(),
             author_outbox_route_needs: BTreeSet::new(),
             author_outbox_route_needs_changed: false,
-            wire_routing_evidence_owner_counts: BTreeMap::new(),
-            wire_handles_by_atom: BTreeMap::new(),
-            wire_handles_by_coverage: BTreeMap::new(),
-            wire_handles_by_demand: BTreeMap::new(),
-            pending_resolver_wire_closes: BTreeMap::new(),
-            pending_wire_atoms: BTreeMap::new(),
             observations: HashMap::new(),
             next_observation_id: 0,
             history: HistorySessions::new(),
@@ -2675,6 +2620,8 @@ impl EngineCore {
         let router = self.router.ownership_census();
         let attempts = self.attempts.counts();
         let history = self.history.counts();
+        let wire = self.wire.counts();
+        let targets = self.request_targets.counts();
         CoreOwnershipCensus {
             observations: self.observations.len(),
             branch_handles: self.handles.len(),
@@ -2686,89 +2633,36 @@ impl EngineCore {
                 .map(|evidence| evidence.sources.len())
                 .sum::<usize>()
                 + self.history.freshness_source_edges(),
-            request_target_handles: self.request_targets_by_handle.len(),
-            request_target_demand_keys: self.request_targets_by_demand.len(),
-            request_target_edges: self
-                .request_targets_by_demand
-                .values()
-                .map(BTreeMap::len)
-                .sum(),
-            request_target_refs: self
-                .request_targets_by_demand
-                .values()
-                .flat_map(BTreeMap::values)
-                .sum(),
-            active_request_target_handles: self.active_request_targets_by_handle_demand.len(),
-            active_request_target_demand_keys: self
-                .active_request_targets_by_handle_demand
-                .values()
-                .map(BTreeMap::len)
-                .sum(),
-            active_request_target_edges: self
-                .active_request_targets_by_handle_demand
-                .values()
-                .flat_map(BTreeMap::values)
-                .map(BTreeMap::len)
-                .sum(),
-            active_request_target_refs: self
-                .active_request_targets_by_handle_demand
-                .values()
-                .flat_map(BTreeMap::values)
-                .flat_map(BTreeMap::values)
-                .sum(),
+            request_target_handles: targets.handles,
+            request_target_demand_keys: targets.demand_keys,
+            request_target_edges: targets.edges,
+            request_target_refs: targets.refs,
+            active_request_target_handles: targets.active_handles,
+            active_request_target_demand_keys: targets.active_demand_keys,
+            active_request_target_edges: targets.active_edges,
+            active_request_target_refs: targets.active_refs,
             history_sessions: history.sessions,
             history_handles: history.handles,
             resolver_active_atoms: self.resolver.active_demand().len(),
-            pending_wire_atoms: self.pending_wire_atoms.len(),
-            pending_resolver_wire_closes: self.pending_resolver_wire_closes.len(),
-            wire_handles: self.wire_atoms_by_handle.len(),
-            wire_handle_demand_ref_handles: self.wire_demand_refs_by_handle.len(),
-            wire_handle_demand_ref_keys: self
-                .wire_demand_refs_by_handle
-                .values()
-                .map(BTreeMap::len)
-                .sum(),
-            wire_handle_demand_refs: self
-                .wire_demand_refs_by_handle
-                .values()
-                .flat_map(BTreeMap::values)
-                .sum(),
-            wire_handle_coverage_ref_handles: self.wire_coverage_refs_by_handle.len(),
-            wire_handle_coverage_ref_keys: self
-                .wire_coverage_refs_by_handle
-                .values()
-                .map(BTreeMap::len)
-                .sum(),
-            wire_handle_coverage_refs: self
-                .wire_coverage_refs_by_handle
-                .values()
-                .flat_map(BTreeMap::values)
-                .sum(),
-            wire_owner_keys: self.wire_owner_counts.len(),
-            wire_reverse_owner_keys: self.wire_handles_by_atom.len(),
-            wire_coverage_keys: self.wire_handles_by_coverage.len(),
-            wire_coverage_edges: self
-                .wire_handles_by_coverage
-                .values()
-                .map(BTreeSet::len)
-                .sum(),
-            wire_demand_keys: self.wire_handles_by_demand.len(),
-            wire_demand_edges: self
-                .wire_handles_by_demand
-                .values()
-                .map(BTreeSet::len)
-                .sum(),
-            wire_routing_evidence_keys: self.wire_routing_evidence_owner_counts.len(),
-            wire_routing_evidence_facts: self
-                .wire_routing_evidence_owner_counts
-                .values()
-                .map(BTreeMap::len)
-                .sum(),
-            wire_routing_evidence_refs: self
-                .wire_routing_evidence_owner_counts
-                .values()
-                .flat_map(BTreeMap::values)
-                .sum(),
+            pending_wire_atoms: wire.pending_atoms,
+            pending_resolver_wire_closes: wire.pending_resolver_closes,
+            wire_handles: wire.handles,
+            wire_handle_demand_ref_handles: wire.demand_ref_handles,
+            wire_handle_demand_ref_keys: wire.demand_ref_keys,
+            wire_handle_demand_refs: wire.demand_refs,
+            wire_handle_coverage_ref_handles: wire.coverage_ref_handles,
+            wire_handle_coverage_ref_keys: wire.coverage_ref_keys,
+            wire_handle_coverage_refs: wire.coverage_refs,
+            wire_owner_keys: wire.owner_keys,
+            wire_owner_refs: wire.owner_refs,
+            wire_reverse_owner_keys: wire.reverse_owner_keys,
+            wire_coverage_keys: wire.coverage_keys,
+            wire_coverage_edges: wire.coverage_edges,
+            wire_demand_keys: wire.demand_keys,
+            wire_demand_edges: wire.demand_edges,
+            wire_routing_evidence_keys: wire.routing_evidence_keys,
+            wire_routing_evidence_facts: wire.routing_evidence_facts,
+            wire_routing_evidence_refs: wire.routing_evidence_refs,
             active_physical_requests: router.plan_requests,
             pending_execution_owner_keys: self.pending_request_evidence.len(),
             pending_execution_owners: self
