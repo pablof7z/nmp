@@ -1,9 +1,15 @@
 //! External-consumer closure proof for the `nmp` facade (#52 acceptance:
-//! "an app's `Cargo.toml` names `nmp` alone"). This crate's own
-//! `Cargo.toml` depends on `nmp` ONLY -- no mechanism crate, and not even
-//! `nostr` directly: every value type below is reached through `nmp`'s own
-//! re-exports. If this crate fails to compile, the facade's re-export
-//! inventory has a gap.
+//! "an app's `Cargo.toml` names `nmp` alone" for the GENERIC engine surface
+//! -- custody, storage, routing, signing, delivery, recovery, receipts).
+//! This crate's `Cargo.toml` depends on `nmp` for every one of those nouns
+//! and nothing else in that half -- no mechanism crate, and not even
+//! `nostr` directly. `nmp` never re-exports a capability's own meaning
+//! (#1707), so a capability the facade does not own -- today, `nmp-nip02`
+//! -- is a second, EXPLICIT dependency line rather than a facade feature.
+//! If a generic engine noun ever needs a second `use` line naming a
+//! mechanism crate or `nostr` itself, the facade's re-export inventory has
+//! a gap; if a capability crate needs a second line, that is the target
+//! shape working as designed, not a gap.
 //!
 //! Every fixture here uses ARBITRARY caller-owned kinds (9998/9999), never
 //! kind:1/kind:3 or any other NIP-01 core schema. `docs/known-gaps.md`'s v2
@@ -40,12 +46,12 @@
 //!   offered none, so a Swift app got them by linking one staticlib while a
 //!   direct-Rust app named six more crates. This crate's `Cargo.toml` still
 //!   names `nmp` alone.
-//! - NIP-02 follow/unfollow ([`follow_someone`]) -- #1143's retrofit, and the
-//!   one family that took a package-graph inversion rather than a feature
-//!   flag: `nmp-nip02` used to depend on `nmp`, the only upward edge in the
-//!   workspace's dependency graph, so a direct-Rust app could not reach the
-//!   follow door through `nmp` at all. The `#[cfg(test)]` module below
-//!   drives it against a real `Engine`, proving usable, not just nameable.
+//! - NIP-02 follow/unfollow ([`follow_someone`]) -- reachable through
+//!   `nmp-nip02`, an EXPLICIT second dependency (#1707 reversed #1143's
+//!   absorption of the follow door into this facade: `nmp` must not know
+//!   what a kind:3 contact list or a follow/unfollow edit means). The
+//!   `#[cfg(test)]` module below drives it against a real `Engine`, proving
+//!   usable, not just nameable, from the two-crate combination.
 //! - media composition is deliberately ABSENT from this crate (#1707
 //!   reversed #1563's absorption of `nmp-media` into the facade): `nmp` must
 //!   not contain any capability's implementation, and the seam itself never
@@ -282,38 +288,34 @@ pub fn compose_every_retrofitted_family(target: &Event, source: Option<RelayUrl>
     ]
 }
 
-/// The demand `nmp::nip02` reads the current account's kind:3 contact list
-/// through -- reachable from `nmp` alone since #1143 closed the reverse
-/// `nmp-nip02 -> nmp` edge.
+/// The demand `nmp_nip02` reads the current account's kind:3 contact list
+/// through -- reachable from the explicit `nmp` + `nmp-nip02` pair, the
+/// uniform two-crate cost #1707 restored for every capability.
 #[must_use]
 pub fn follow_demand() -> Demand {
-    nmp::nip02::current_account_demand()
+    nmp_nip02::current_account_demand()
 }
 
-/// Follows `target` through the ordinary NIP-02 write door, entirely from
-/// `nmp`. This is #1143's acceptance proof: before the fix, a direct-Rust
-/// app could not reach `set_following` through this facade at all --
-/// `nmp-nip02` depended on `nmp`, so an app wanting to follow someone had to
-/// name a second, upward-pointing crate. `writes` composes once (typically
-/// held for the process lifetime); this function takes it by reference so a
-/// caller following many targets does not re-register the capability handle
-/// each time.
+/// Follows `target` through the ordinary NIP-02 write door. `writes`
+/// composes once (typically held for the process lifetime); this function
+/// takes it by reference so a caller following many targets does not
+/// re-register the capability handle each time.
 pub fn follow_someone(
     engine: &Engine,
-    writes: &nmp::nip02::FollowWrites,
+    writes: &nmp_nip02::FollowWrites,
     target: PublicKey,
-) -> Result<ReceiptStream, nmp::nip02::FollowActionFailure> {
-    nmp::nip02::set_following(engine, writes, target, nmp::nip02::FollowChange::Follow)
+) -> Result<ReceiptStream, nmp_nip02::FollowActionFailure> {
+    nmp_nip02::set_following(engine, writes, target, nmp_nip02::FollowChange::Follow)
 }
 
 /// The unfollow half of [`follow_someone`], proving both directions of
-/// [`nmp::nip02::FollowChange`] are reachable from `nmp` alone.
+/// [`nmp_nip02::FollowChange`] are reachable from the same two-crate pair.
 pub fn unfollow_someone(
     engine: &Engine,
-    writes: &nmp::nip02::FollowWrites,
+    writes: &nmp_nip02::FollowWrites,
     target: PublicKey,
-) -> Result<ReceiptStream, nmp::nip02::FollowActionFailure> {
-    nmp::nip02::set_following(engine, writes, target, nmp::nip02::FollowChange::Unfollow)
+) -> Result<ReceiptStream, nmp_nip02::FollowActionFailure> {
+    nmp_nip02::set_following(engine, writes, target, nmp_nip02::FollowChange::Unfollow)
 }
 
 /// Names and reads the observation-scoped execution envelope from an
@@ -450,23 +452,21 @@ mod tests {
         engine.shutdown();
     }
 
-    /// #1143 acceptance proof: a direct-Rust app follows and unfollows
-    /// through this `nmp`-only facade, and opens the reactive contact-list
-    /// demand [`follow_demand`] reads it through -- the exact user story
-    /// that was unreachable before the follow door's package-graph
-    /// inversion (`nmp-nip02` used to depend on `nmp`, so an app wanting to
-    /// follow someone had to name that second, upward-pointing crate).
+    /// #1707 acceptance proof: a direct-Rust app follows and unfollows
+    /// through the explicit `nmp` + `nmp-nip02` pair, and opens the
+    /// reactive contact-list demand [`follow_demand`] reads it through --
+    /// proving the two-crate combination usable, not just nameable.
     #[test]
-    fn follow_and_unfollow_are_usable_from_nmp_alone() {
+    fn follow_and_unfollow_are_usable_from_nmp_and_nmp_nip02() {
         let engine = Engine::new_with_capabilities(
             EngineConfig::default(),
-            vec![nmp::nip02::follow_capability()],
+            vec![nmp_nip02::follow_capability()],
         )
         .expect("temporary Redb engine must build");
         engine
             .add_private_key_account(&TEST_SECRET_KEY_BYTES, true)
             .expect("fixed decoded test secret key must validate");
-        let writes = nmp::nip02::follow_writes();
+        let writes = nmp_nip02::follow_writes();
         let target: PublicKey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
             .parse()
             .expect("fixed public key must parse");

@@ -5,13 +5,14 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# The point of this crate: it depends on `nmp` and NOTHING else -- not even
-# `nostr` directly, since every value type an app needs (including the
-# unsigned-write path and every `DiagnosticsSnapshot` field type) must be
-# reachable through `nmp`'s own re-exports. If a caller ever needs a second
-# `use` line naming a mechanism crate or `nostr` itself, the facade's
-# re-export inventory has a gap -- this crate existing and compiling IS the
-# acceptance proof for #52's "an app's Cargo.toml names `nmp` alone".
+# The point of this crate: every GENERIC engine/query/write/diagnostics noun
+# below is reachable from `nmp` alone -- not even `nostr` directly, since
+# every such value type is reached through `nmp`'s own re-exports. If a
+# caller ever needs a second `use` line naming a mechanism crate or `nostr`
+# itself for one of THOSE nouns, the facade's re-export inventory has a gap
+# -- this crate existing and compiling IS the acceptance proof for #52's "an
+# app's Cargo.toml names `nmp` alone" for the engine surface, not for any
+# one capability's meaning.
 #
 # The protocol/content features are switched on here for the same reason: #851
 # made `nmp::nip22` the ONE owner of the NIP-22 comment vocabulary, and #1239
@@ -20,25 +21,23 @@ publish.workspace = true
 # `nmp-content` or `nmp-blossom` to this dependency list would not be, which is
 # exactly why this crate is where the claim gets checked rather than asserted.
 #
-# `nip02` closed #1143: the follow service used to sit above this facade
-# (`nmp-nip02` depended on `nmp`), the only upward edge in the workspace's
-# dependency graph and the reason this list could not name it. Now it is a
-# feature like every other retrofitted family below.
-#
-# `media` is deliberately ABSENT: #1707 reversed #1563's absorption of
-# `nmp-media` into the facade. `nmp` must not contain any capability's
-# implementation, so a picture-composing app depends on `nmp-media` directly
-# -- this crate's whole point is proving what IS reachable from `nmp` alone,
-# and media composition no longer is, on purpose.
+# `nmp-nip02` is a SEPARATE, EXPLICIT dependency line below, not a feature:
+# #1707 reversed #1143/#1563 and reopened the rule that `nmp` must not
+# contain a single capability-specific line, NIP-02 included. A direct-Rust
+# app that wants NIP-02 -- or media composition, already handled the same
+# way -- names `nmp-nip02` alongside `nmp`, the uniform two-crate cost every
+# capability now pays for direct-Rust reach. This crate names it explicitly
+# rather than pretending the whole workspace collapses into one `Cargo.toml`
+# line; that pretense is exactly what #1707 falsifies.
 [dependencies]
 nmp = { workspace = true, features = [
     "asset",
     "blossom",
     "content",
-    "nip02",
     "nip18",
     "nip22",
     "nip25",
     "nip29",
     "nipc7",
 ] }
+nmp-nip02.workspace = true

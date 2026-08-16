@@ -1,19 +1,18 @@
 //! Durable NIP-02 follow/unfollow semantic operations over the current
 //! account's kind:3 contact list.
 //!
-//! `nmp-nip02` owns the pure reactive-query vocabulary
-//! ([`current_account_demand`](nmp_nip02::current_account_demand)). This
-//! module lives one layer up because a durable operation must also mint the
-//! ordinary [`WriteIntent`](crate::WriteIntent), freeze the selected
-//! account, and enter the engine's receipt lifecycle -- the exact shape
-//! `nmp::nip29`'s `group_list_writes` module already uses for the same
-//! reason. The dependency remains `nmp -> nmp-nip02`, never the reverse
-//! (#1143).
+//! Moved back here from `nmp` by #1707: `nmp` must not know what a kind:3
+//! contact list or a follow/unfollow edit means, only how to carry it
+//! through custody. This module composes the ordinary
+//! [`WriteIntent`](nmp::WriteIntent), freezes the selected account, and
+//! enters the engine's receipt lifecycle over `nmp`'s own engine surface --
+//! the same capability-owns-its-meaning shape every other protocol crate
+//! now uses.
 
 use nmp_grammar::{EventBuilder, Identity, WriteIntent, WriteRouting};
 use nostr::{Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
-use crate::{
+use nmp::{
     RegisteredReplaceableMaterializer, ReplaceableMaterializer, ReplaceableMaterializerOperation,
     ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec, Row,
 };
@@ -242,7 +241,7 @@ mod tests {
             event.kind,
             event.tags,
             event.content,
-            crate::RowSignature::Signed(event.sig),
+            nmp::RowSignature::Signed(event.sig),
             Default::default(),
         )
     }

@@ -187,17 +187,6 @@ pub mod nip68;
 #[cfg(feature = "nip29")]
 pub mod nip29;
 
-// #1143: the app-facing NIP-02 follow door, the identical shape to `nip29`'s
-// above -- a real facade module, not a re-export of `nmp-nip02`. `nmp-nip02`
-// stays pure vocabulary below it (the reactive kind:3 demand); this module
-// mints the ordinary `WriteIntent` and folds the live query into a
-// relationship snapshot, both of which need the engine. Closing this was the
-// last of #1239's family retrofits: it was also the only one that first
-// needed its engine coupling inverted, because `nmp-nip02` used to sit ABOVE
-// this facade rather than below it.
-#[cfg(feature = "nip02")]
-pub mod nip02;
-
 pub use auth::{
     AuthPolicy, AuthPolicyDecision, AuthPolicyError, AuthPolicyOp, AuthPolicyPendingSender,
     AuthPolicyRequest, AuthPolicyResolveError, AuthPolicyResult,
@@ -318,8 +307,8 @@ pub use crate::runtime::{
     AsyncFifoReceiver, FifoNextError, FifoReceiver, FifoRecvError, FifoRecvTimeoutError,
     FifoTryRecvError, ReceiptReplayCursor, FACT_CHANNEL_CAPACITY,
 };
-// Producer-side FIFO mechanism, used only by protocol modules (e.g.
-// `nip02::observe`'s follow observation worker) to feed a receipt/status
+// Producer-side FIFO mechanism, used only by protocol crates (e.g.
+// `nmp-nip02`'s follow observation worker, #1707) to feed a receipt/status
 // stream — not app public API, so doc-hidden.
 #[doc(hidden)]
 pub use crate::runtime::{fifo_channel, FifoSender};
