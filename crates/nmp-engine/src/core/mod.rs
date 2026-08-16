@@ -76,6 +76,7 @@ mod request_targets;
 mod semantic_delivery;
 #[cfg(test)]
 mod semantic_settlement_falsifier_tests;
+mod stalled_write_census;
 #[cfg(test)]
 mod transport_tests;
 mod wire_ownership;
@@ -439,7 +440,6 @@ fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
 }
 
 use attribution::{AttributionSendId, AttributionState, CompletedAttribution, EventFailureTarget};
-use diagnostics::{stalled_write_id, STALLED_WRITE_DETAIL_LIMIT};
 pub use diagnostics::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
     RelayDiagnosticsSnapshot, StalledWrite, StalledWriteStage, StalledWriteTotals,
@@ -460,6 +460,7 @@ use request_attempt::{RequestAttemptPurpose, RequestAttemptState, RequestAttempt
 pub use request_effects::{AttemptedReplay, AttemptedWireDelta};
 use request_replacements::RequestReplacements;
 use request_targets::{ActiveRequestTarget, RequestTargets};
+use stalled_write_census::{StalledWriteCensus, StalledWriteInputs};
 use wire_ownership::{AtomReleased, AtomRetained, WireOwnership};
 // `runtime` (C) needs the EXACT same wire subscription-id string
 // `attribution.rs` records at send time (`AttributionState::record_send`) so
@@ -2039,21 +2040,11 @@ pub struct EngineCore {
     /// synchronization an edge rather than a repeated side effect of every
     /// unrelated recompile.
     last_author_route_needs: BTreeSet<PublicKey>,
-    /// The stalled-obligation census as of the last diagnostics snapshot
-    /// this reducer PUSHED for a write-plane reason.
-    ///
-    /// A change detector for an observer, never a ledger: it holds no retry
-    /// state, no history, and no fact that is not re-derivable from
-    /// `pending` in one pass. Its only job is to keep an ordinary healthy
-    /// publish from rebuilding an engine-global snapshot at every beat of a
-    /// lifecycle in which nothing was ever stuck.
-    last_stalled_write_census: Vec<(ReceiptId, StalledWriteStage)>,
-    /// Materialized only when the stalled-write census changes. Diagnostics
-    /// snapshots can be requested by unrelated read/query activity, so
-    /// rebuilding and sorting every durable write on each request would put
-    /// the entire publish queue on the read-plane hot path.
-    cached_stalled_writes: Vec<StalledWrite>,
-    cached_stalled_write_totals: StalledWriteTotals,
+    /// Which open obligations are stuck and the bounded projection of them
+    /// diagnostics snapshots carry (#1743). Its three fields are private to
+    /// `stalled_write_census.rs`, so the cache can never drift from the
+    /// census it is a projection of.
+    stalled_writes: StalledWriteCensus,
     /// Active durable obligations grouped by their final frozen event id.
     /// Used both to correlate relay OK frames after signing and, #903, to
     /// join an ordinary query row directly to every live receipt that owns
@@ -2374,12 +2365,7 @@ impl EngineCore {
             active_pubkey: None,
             pending: HashMap::new(),
             last_author_route_needs: BTreeSet::new(),
-            last_stalled_write_census: Vec::new(),
-            cached_stalled_writes: Vec::new(),
-            cached_stalled_write_totals: StalledWriteTotals {
-                detail_limit: u64::try_from(STALLED_WRITE_DETAIL_LIMIT).unwrap_or(u64::MAX),
-                ..StalledWriteTotals::default()
-            },
+            stalled_writes: StalledWriteCensus::default(),
             event_to_receipts: HashMap::new(),
             intent_receipts: HashMap::new(),
             receipts_by_lane_relay: HashMap::new(),
@@ -2596,6 +2582,13 @@ impl EngineCore {
         self.request_targets.assert_consistent(at);
         self.nip77.assert_consistent(at);
         self.request_replacements.assert_consistent(at);
+        self.stalled_writes.assert_consistent(
+            at,
+            StalledWriteInputs {
+                pending: &self.pending,
+                connected: &self.connected_relays,
+            },
+        );
     }
 
     #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -2958,8 +2951,8 @@ impl EngineCore {
             );
         }
         snapshot.auth_sessions = auth_sessions.into_values().collect();
-        snapshot.stalled_writes = self.cached_stalled_writes.clone();
-        snapshot.stalled_write_totals = self.cached_stalled_write_totals;
+        snapshot.stalled_writes = self.stalled_writes.rows().to_vec();
+        snapshot.stalled_write_totals = self.stalled_writes.totals();
         for relay in &mut snapshot.relays {
             // NIP-11 advertisement and the NIP-77 behavioral probe are both
             // PUBLIC-session evidence (#8): the one-shot HTTP document and
