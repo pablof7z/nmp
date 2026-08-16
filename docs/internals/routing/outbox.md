@@ -73,8 +73,11 @@ unpark the write instead of stranding it behind a retired `Auto`.
 
 The complete current provider-need set is emitted as
 `AuthorRouteNeedsChanged`. Generic core never translates it into a protocol
-query. An optional component may satisfy it; `nmp/nip65` is the current Rust
-assembly.
+query. The `AuthorRouteProvider` the application constructed may satisfy it;
+`nmp-outbox` is the NIP-65 implementation this workspace ships, and a
+third-party algorithm satisfies the same need through the same three
+moments. With no provider installed, the need is simply dropped and every
+author stays `Unknown`.
 
 ## Atomic replacement
 

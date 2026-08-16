@@ -11,7 +11,10 @@ doctest = false
 
 [dependencies]
 nostr.workspace = true
-nmp = { workspace = true, features = ["nip65"] }
+nmp.workspace = true
+# The direct-Rust side of the parity harness installs the same routing
+# algorithm the FFI side compiles in, so both facades answer with one model.
+nmp-outbox.workspace = true
 nmp-ffi = { workspace = true, features = ["content", "nip02", "nip22", "nip29"] }
 nmp-content.workspace = true
 nmp-grammar.workspace = true

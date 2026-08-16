@@ -70,9 +70,9 @@ The component never teaches the router its event kind or marker vocabulary.
 The router never calls a protocol parser.
 
 `nmp-nip65` is the first implementation of this shape. It is engine-free and
-depends only on `nostr` plus `nmp-grammar`. The optional `nmp/nip65` feature
-assembles it at runtime. Feature-disabled `nmp` has no normal dependency on
-the protocol crate.
+depends only on `nostr` plus `nmp-grammar`. `nmp-outbox` wraps it as an
+`AuthorRouteProvider` an application installs at construction. `nmp` names
+neither crate.
 
 ## Settlement
 

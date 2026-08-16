@@ -10,8 +10,9 @@
 //! What crosses back into the engine is a value, not a client. `nmp`'s runtime
 //! projects a [`RelayInformationSnapshot`] into the reducer's own capability
 //! vocabulary (`nmp::mechanism::core::RelayInformationCapabilityEvidence`) --
-//! the same shape `runtime/nip65.rs` uses for `CoordinatorUpdate ->
-//! AuthorRouteUpdate`. This crate deliberately does not know that type exists.
+//! the same shape `nmp-runtime`'s loop uses to turn an author-route
+//! provider's answer into an `AuthorRouteUpdate`. This crate deliberately
+//! does not know that type exists.
 //!
 //! The service owns its state (a bounded cache, a per-relay single flight, an
 //! active-fetch semaphore), its lifecycle ([`RelayInformationService::close`],

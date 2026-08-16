@@ -73,10 +73,13 @@ const SETTLE: Duration = Duration::from_secs(20);
 /// A live engine with ONE operator input: where to look for relay lists.
 /// Everything else about routing is discovered or minted.
 fn engine_reading_lists_from(indexer: &ScriptedRelay, keys: &Keys) -> Engine {
-    let engine = Engine::new(EngineConfig {
-        indexer_relays: vec![indexer.url.to_string()],
-        ..EngineConfig::default()
-    })
+    let engine = Engine::new_with_capabilities_and_routing(
+        EngineConfig::default(),
+        Vec::new(),
+        Some(Box::new(nmp_outbox::Nip65Outbox::new([indexer
+            .url
+            .clone()]))),
+    )
     .expect("a temporary Redb engine builds");
     engine
         .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)

@@ -23,16 +23,15 @@ unstable-mechanism = [
     "nmp-runtime/unstable-mechanism",
 ]
 
-# NIP-65 IS #1707-reversed now, mostly: `impl Engine { publish_relay_list_
-# bootstrap }` was capability convenience -- one line of `engine.publish(...)`
-# wearing an engine-bound signature, not routing mechanism -- and is deleted,
-# same as the eight bare re-export doors. `nmp` itself needs no NIP-65
-# dependency at all any more. What this feature still turns on is
-# `nmp-runtime`'s own deep automatic-outbox-discovery routing glue, the one
-# deliberate exception left in this reversal: that is how the engine
-# performs ITS OWN job of discovering an author's relays, not a capability
-# it merely executes. See `src/lib.rs`'s doc comment for the reasoning.
-nip65 = ["nmp-runtime/nip65"]
+# #1707's NIP-65 reversal is FINISHED. The last exception was this crate's
+# `nip65` feature, which turned on `nmp-runtime`'s hard-wired outbox
+# discovery glue -- "how the engine performs ITS OWN job of discovering an
+# author's relays" was the argument, and it did not survive the owner's
+# requirement that a third party be able to supply a different algorithm.
+# Author-route discovery is an `AuthorRouteProvider` an application
+# constructs and hands to `Engine::new_with_capabilities_and_routing`, same
+# as every capability. The feature, and the whole cfg-shape break class that
+# came with it, are deleted.
 
 # #1707 deleted the `nip29`/`nip22`/`nip25`/`nip18`/`nipc7`/`content`/`asset`/
 # `blossom`/`nip68` features and their `dep:nmp-*` optional dependencies
@@ -75,7 +74,6 @@ required-features = ["bench-instrumentation"]
 [[test]]
 name = "acceptance"
 path = "tests/acceptance/main.rs"
-required-features = ["nip65"]
 
 [dependencies]
 nostr.workspace = true
@@ -132,22 +130,22 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sy
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
-# #1105: `group_publication_door.rs` proves a group write never reaches the
-# AUTHOR'S OWN outbox, which is only a claim worth making when that outbox is
-# real -- discovered from a kind:10002 the engine fetched itself, not
-# configured. That discovery is the optional NIP-65 coordinator, so this
-# crate's own test targets enable it. Test-only: the default feature set a
-# consumer links is unchanged.
 # `unstable-mechanism`: every headless/`_headless.rs` and `core_headless/`
 # integration test seeds its `EngineCore`/`EngineThread` through the gated
 # fixture constructors (#1665, #1667) -- this crate's own test targets are
 # their only in-workspace callers.
-nmp = { path = ".", features = ["nip65", "test-instrumentation", "unstable-mechanism"] }
+nmp = { path = ".", features = ["test-instrumentation", "unstable-mechanism"] }
+# Dev-only: several tests need a REAL author-route provider to install --
+# `acceptance/` observes a cold engine discovering Alice's relays, and
+# `semantic_delivery_witnesses.rs` needs a discovered outbox to prove a write
+# never reaches it. The NIP-65 outbox algorithm is the one this workspace
+# ships; nothing in `nmp` itself names it, which is the whole point.
+nmp-outbox.workspace = true
 # The headless reducer corpus (`tests/core_headless/`) and the runtime
 # integration tests drive `EngineCore`/`EngineThread` directly. They reached
 # them through the deleted `mechanism` basement; they name the packages now.
 nmp-engine = { workspace = true, features = ["test-instrumentation", "unstable-mechanism"] }
-nmp-runtime = { workspace = true, features = ["test-instrumentation", "unstable-mechanism", "nip65"] }
+nmp-runtime = { workspace = true, features = ["test-instrumentation", "unstable-mechanism"] }
 # #1707: `optimistic_publish.rs` uses NIP-29's write door as one of two
 # vehicles for a claim that is otherwise general (#1182) -- it is not a
 # NIP-29-door proof itself (that moved to `nmp-nip29/tests/` with the door),

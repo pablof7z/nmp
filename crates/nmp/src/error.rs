@@ -17,7 +17,7 @@
 /// never a panic and never a silently disconnected channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineError {
-    /// One of [`EngineConfig`](crate::EngineConfig)'s `indexer_relays`/
+    /// One of [`EngineConfig`](crate::EngineConfig)'s
     /// `app_relays`/`fallback_relays` entries did not parse as a valid relay
     /// URL.
     InvalidRelayUrl { url: String },

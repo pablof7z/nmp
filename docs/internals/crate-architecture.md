@@ -75,8 +75,31 @@ section.
 
 | crate | owns | notes | status |
 |---|---|---|---|
-| `nmp-nip65` | kind:10002 relay-list semantics + the outbox coordinator | THE one declared protocol edge below the engine (feature-gated). Deliberately not trait-abstracted: one implementor, no cycle — a seam there would be the `EventStore` shape (#1495) | correct today |
 | `nmp-nip11` | NIP-11 relay-information values + the fetch/cache/single-flight service (2,700 lines) | the SOLE `reqwest`/`httpdate` user in the engine's tree — extracting it is what lets the reducer's manifest carry no HTTP client. `RelayInformationCapabilityEvidence` deliberately stayed behind in `core` (reducer input vocabulary) and `runtime/nip11.rs` projects a snapshot into it, so the edge runs `runtime → nmp-nip11` and never the reverse | correct today |
+
+### The routing seam
+
+| crate | owns | notes | status |
+|---|---|---|---|
+| `nmp-nip65` | kind:10002 relay-list semantics: `RELAY_LIST_KIND`, marker parsing, canonical winner selection, the outbox coordinator, `BootstrapRelayList` | ordinary protocol vocabulary now, engine-free (`nostr` + `nmp-grammar`), on the same shelf as `nmp-nip18` | correct today |
+| `nmp-outbox` | the NIP-65 outbox ALGORITHM as an `AuthorRouteProvider` implementation | the unit an application names to choose its routing. Nothing in `nmp`, `nmp-engine` or `nmp-runtime` mentions this crate; a competing algorithm is a third-party crate depending on `nmp-engine`/`nmp-router`/`nmp-grammar` and changing zero lines here | correct today |
+
+`AuthorRouteProvider` (declared in `nmp-engine`, three moments: `reroot`,
+`observe_rows`, `observe_evidence`) is the seam. It is **not** an invented
+one: the owner named the requirement — "other developers might want to supply
+their own NIP-65 outbox routing… routing should be a fairly adapter-friendly
+interface" — and the third-party test is stated and passing. The pull side
+(`RoutingFacts`) stays engine-owned and concrete, because it is read
+synchronously inside the deterministic reducer and foreign code there is
+exactly what `nmp-engine`'s manifest exists to forbid.
+
+Construction-time only, and deliberately hostile to becoming more:
+`Option<Box<dyn AuthorRouteProvider>>` beside the capability vec at spawn, no
+handles, no ids, no registration, no replacement. Two providers would
+last-write-win over a whole-fact replacement with no merge rule anyone could
+state, so composition is a combinator provider the application writes, refused
+as engine policy. Swapping algorithms is spelled: drop the engine, construct
+it with the other provider.
 
 ### The engine
 
@@ -85,7 +108,7 @@ The reducer and the async edge left `crates/nmp` as **two crates**:
 | crate | owns | must never depend on | status |
 |---|---|---|---|
 | `nmp-engine` | the deterministic reducer: `EngineCore`, `handle(EngineMsg) → Vec<Effect>` / `tick()`, plus its reducer-coupled satellites (the negentropy FSM it drives turn-by-turn, the publish-queue fact vocabulary, bench hooks) | **`tokio`, `reqwest`, `nmp-nip11`,** the runtime, the facade, any capability crate. Allowed: grammar, store, resolver, router, transport (frame value types), signer, `negentropy`, `nostr` | correct today |
-| `nmp-runtime` | the async edge that interprets effects: `EngineThread`, `Handle`, channels/mailboxes, the AUTH driver, sign-event completion, signer registry, pool bridge, the opaque session payload, the NIP-65 assembly glue, NIP-11 service wiring | the facade, any capability crate (its `nmp-nip65`/`nmp-nip11` edges are the two declared protocol edges) | correct today |
+| `nmp-runtime` | the async edge that interprets effects: `EngineThread`, `Handle`, channels/mailboxes, the AUTH driver, sign-event completion, signer registry, pool bridge, the opaque session payload, NIP-11 service wiring, and driving whichever `AuthorRouteProvider` the application constructed | the facade, any capability crate, **any routing protocol** (`nmp-nip11` is its ONE declared protocol edge; author-route discovery is a contract it drives, not a crate it names) | correct today |
 
 `session.rs` went with the runtime rather than staying in the facade:
 `EngineThread::spawn` takes a `RestoredSession` and `Handle` owns the live
@@ -585,18 +608,16 @@ Mechanical, no checker required:
    (the capability crate alone; `nmp` needs no companion edit), **two**
    including `nmp-ffi` when a native projection is wanted. Target reached.
 
-**The one exception, counted honestly rather than by either measure
-above**: `nmp-runtime`'s own automatic-outbox-discovery routing glue
-(`nmp-runtime/src/nip65.rs`, feature-gated) depends on `nmp-nip65` for the
-coordinator's neutral vocabulary. That edge is invisible to measures 1–2
-because it lives in `nmp-runtime`, not `crates/nmp` -- it is real
-regardless. It is not a capability the engine merely executes: it is how
-the engine performs its own job of discovering an author's relays for
-outbox routing, so it stays. A second production implementor of
-author-route discovery is what would change that answer; nothing else
-would, and no trait should be built to pre-empt one that does not exist
-(the same reasoning that keeps `nmp-store` free of a backend-abstraction
-seam, #1495).
+**The exception is gone.** `nmp-runtime` used to own automatic-outbox-discovery
+glue (`nmp-runtime/src/nip65.rs`, feature-gated) that depended on `nmp-nip65`,
+counted honestly here because measures 1–2 could not see it. It is deleted: the
+routing seam above replaced it, `nmp-runtime` names no routing protocol, and
+the `nip65` cargo feature is gone from both `nmp-runtime` and `nmp` (taking
+the cfg-shape break class of #1687 with it). What changed the answer is what
+this section said would change it — not a second implementor discovered in the
+wild, but the owner stating that supplying one is a product requirement. That
+is the difference between a seam invented to pre-empt a hypothetical (#1495's
+`EventStore`) and a seam with a named consumer and a stated acceptance test.
 
 ### What the crate work did and did not fix
 
@@ -642,8 +663,8 @@ the value types — `PendingWrite` owning its own transitions rather than
   wrong and is being reversed (#1707, owner ruling 2026-08-15). Steps 0–4
   (media, `Row`/`ReplaceableMaterializer`, NIP-02, the eight bare re-export
   doors, NIP-29) and the NIP-65 split are done; measures 1–2 above read
-  zero. NIP-65's routing glue is the one exception, ruled separately and
-  kept for the reason above.
+  zero. NIP-65's routing glue was the one exception and is now closed too:
+  it is `nmp-outbox`, an `AuthorRouteProvider` an application constructs.
 - `Row`/`RowSignature` and the `ReplaceableMaterializer` contract belong in
   `nmp-grammar` (#1707 steps 1–2); the contract's own imports prove it needs
   nothing from the engine.
@@ -651,10 +672,16 @@ the value types — `PendingWrite` owning its own transitions rather than
   `Engine::new_with_capabilities(config, Vec<ReplaceableMaterializerSpec>)`,
   duplicate and unknown program/format refused before custody (#1624). No
   runtime registration, no registry object, no capability super-trait.
+- **Routing installation is the same shape**, and for the same reason:
+  `Engine::new_with_capabilities_and_routing(config, capabilities,
+  Option<Box<dyn AuthorRouteProvider>>)`. One provider, chosen at
+  construction, fixed for the engine's life. No registration, no replacement
+  generations, no unregister — #1624 deleted exactly that machinery for
+  capabilities and the routing API must give it nothing to grip.
 - The load-bearing boundaries: `nmp-store`'s single write transaction;
   `nmp-signer`'s zeroize-only manifest; `nmp-grammar`'s dependency-light hub
   position; the manifest-is-the-proof crates; `nmp-cli`'s zero NMP deps;
-  the one-way `nmp(-runtime) → nmp-nip65` protocol edge.
+  and the fact that no crate below the facade names a routing protocol.
 - No backend abstraction over the store without a real second backend
   (#1495), and no invented seams: a trait with one production implementor
   and no cycle to break is dead surface.

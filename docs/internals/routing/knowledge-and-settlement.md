@@ -70,7 +70,7 @@ facts-before-claims transaction was poisoned by a failed EVENT or coverage
 commit. A terminal from an old revision or undeclared source cannot settle
 the current question.
 
-## Optional NIP-65 assembly
+## The NIP-65 provider
 
 `nmp-nip65` is engine-free. It owns:
 
@@ -81,10 +81,11 @@ the current question.
 - all-sources settlement and `Present`/`Absent` coordinator updates;
 - first-publication bootstrap composition.
 
-The non-default `nmp/nip65` feature binds those pure values to ordinary
-`LiveQuery`, observation evidence, and `WriteIntent` values. Its runtime
-assembly privately converts coordinator updates into the one atomic core
-writer. No protocol vocabulary leaks into the router or generic reducer.
+`nmp-outbox` binds those pure values to ordinary `LiveQuery` and observation
+evidence by implementing `AuthorRouteProvider`; the loop converts what it
+returns into the one atomic core writer. An application installs it at
+construction, or installs a different algorithm, or none. No protocol
+vocabulary leaks into the router or generic reducer either way.
 
 With zero exact sources, no query opens and no new absence can be minted;
 current facts remain unchanged.

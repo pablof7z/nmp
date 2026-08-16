@@ -1818,6 +1818,7 @@ dependencies = [
  "nmp-local-signer",
  "nmp-nip11",
  "nmp-nip29",
+ "nmp-outbox",
  "nmp-resolver",
  "nmp-resolver-testkit",
  "nmp-router",
@@ -1856,6 +1857,7 @@ dependencies = [
  "nmp-grammar",
  "nmp-local-signer",
  "nmp-nip29",
+ "nmp-outbox",
  "nmp-resolver",
  "nmp-router",
  "nmp-router-testkit",
@@ -1922,6 +1924,7 @@ dependencies = [
  "nmp-nip25",
  "nmp-nip29",
  "nmp-nipc7",
+ "nmp-outbox",
 ]
 
 [[package]]
@@ -1981,6 +1984,7 @@ dependencies = [
  "nmp-nip25",
  "nmp-nip29",
  "nmp-nipc7",
+ "nmp-outbox",
  "nmp-store",
  "nmp-test-support",
  "nostr 0.44.4",
@@ -2084,6 +2088,7 @@ dependencies = [
  "nmp",
  "nmp-engine",
  "nmp-grammar",
+ "nmp-outbox",
  "nmp-router",
  "nmp-router-testkit",
  "nmp-runtime",
@@ -2138,6 +2143,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nmp-outbox"
+version = "0.1.0"
+dependencies = [
+ "nmp-engine",
+ "nmp-grammar",
+ "nmp-nip65",
+ "nmp-router",
+ "nostr 0.44.4",
+]
+
+[[package]]
 name = "nmp-parity"
 version = "0.1.0"
 dependencies = [
@@ -2148,6 +2164,7 @@ dependencies = [
  "nmp-nip02",
  "nmp-nip22",
  "nmp-nip29",
+ "nmp-outbox",
  "nmp-store",
  "nmp-test-support",
  "nostr 0.44.4",
@@ -2210,7 +2227,7 @@ dependencies = [
  "nmp-grammar",
  "nmp-local-signer",
  "nmp-nip11",
- "nmp-nip65",
+ "nmp-outbox",
  "nmp-resolver",
  "nmp-resolver-testkit",
  "nmp-router",

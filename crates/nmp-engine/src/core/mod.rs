@@ -34,6 +34,8 @@
 #[cfg(test)]
 mod admission_tests;
 mod attribution;
+mod author_route_provider;
+pub use author_route_provider::{AuthorRouteProvider, AuthorRouteUpdate, ProviderReroot};
 #[cfg(test)]
 mod auth_core_headless;
 mod auth_transport;
@@ -847,9 +849,9 @@ pub enum AuthEffect {
 /// for the reason that crate exists at all: acquisition is HTTP, and a
 /// reducer that named the acquiring crate's types would drag `reqwest` into
 /// its own manifest. `runtime` projects a `RelayInformationSnapshot` into
-/// this value the same way `runtime/nip65.rs` projects `CoordinatorUpdate`
-/// into `AuthorRouteUpdate`. Nothing below this line knows an HTTP client
-/// exists.
+/// this value the same way it projects an author-route provider's answer
+/// into an [`AuthorRouteUpdate`]. Nothing below this line knows an HTTP
+/// client exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayInformationCapabilityEvidence {
     pub supported_nips: Option<Vec<u16>>,
