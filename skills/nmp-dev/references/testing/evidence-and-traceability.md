@@ -46,13 +46,40 @@ A falsifier is a small deliberate break that the linked evidence must catch. Eve
 # nmp:falsifier=Treat one relay's EOSE as global completion; this scenario fails.
 ```
 
-For new or changed evidence:
+Falsifying is part of writing the test, not a separate ceremony. It costs
+about one extra test run:
 
-1. Remove, bypass, or reverse the protection named by `nmp:falsifier`.
-2. Confirm the linked evidence fails because of that break.
-3. Restore the protection and confirm the evidence passes.
+1. Assert the precondition holds — confirm the scenario actually reaches the
+   state the falsifier is supposed to break, before the break becomes
+   observable.
+2. Remove, bypass, or reverse the protection named by `nmp:falsifier`.
+3. Confirm the linked evidence fails, and fails for the reason claimed — not
+   for some other reason.
+4. Restore the protection and confirm the evidence passes.
 
-If the evidence still passes, it does not prove this promise.
+If the evidence still passes, or fails for a different reason, it does not
+prove this promise. In one recent session three new falsifiers were green
+while broken, each for a different reason: an assertion that only observed
+post-convergence state, an assertion placed after an internal drain had
+already consumed the observable, and a missing precondition that made "the
+guard held" indistinguishable from "the scenario never arose." Each looked
+like passing proof until the break was actually introduced.
+
+## Exact relationships, not aggregate counts
+
+Cardinality-preserving corruption is invisible to a census: an aggregate
+count can stay correct while the specific pairing underneath it is wrong.
+
+- `CoreOwnershipCensus` counted how many demands were live but never their
+  owner counts, so it could not distinguish 2 owners from 4. Every
+  `assert_eq!(census, default())` teardown proof in the suite was blind to a
+  wrong-but-nonzero count.
+- `plan_edges == child_count` passed with a child indexed under the wrong
+  plan — the count matched while the relationship it stood in for did not.
+
+Derive every mirrored relation from the one canonical relation and compare it
+exactly — which owner, which plan, which parent — not just how many. A count
+match is not a relationship match.
 
 ## Prove external effects independently
 

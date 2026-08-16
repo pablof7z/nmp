@@ -314,32 +314,34 @@ impl WireOwnership {
         key: DemandKey,
     ) -> HandleAtomRemoval {
         let departing_claims = coverage_claim_keys(atom);
-        let (removed, handle_emptied) = self
+        let atoms = self
             .atoms_by_handle
             .get_mut(&handle)
-            .map(|atoms| {
-                let removed = atoms.remove(atom);
-                (removed, atoms.is_empty())
-            })
-            .unwrap_or_default();
+            .expect("a handle named by the atom reverse index owns an atom set");
+        let removed = atoms.remove(atom);
+        let handle_emptied = atoms.is_empty();
         if !removed {
             return HandleAtomRemoval::default();
         }
 
-        let demand_released = self
-            .demand_refs_by_handle
-            .get_mut(&handle)
-            .is_some_and(|refs| release_ref(refs, key));
+        let demand_released = release_ref(
+            self.demand_refs_by_handle
+                .get_mut(&handle)
+                .expect("a handle owning atoms owns per-demand refcounts"),
+            key,
+        );
         if demand_released {
             discard_edge(&mut self.handles_by_demand, &key, handle);
         }
         #[cfg(any(test, feature = "bench-instrumentation"))]
         let claims_examined = departing_claims.len();
         for claim_key in departing_claims {
-            let released = self
-                .coverage_refs_by_handle
-                .get_mut(&handle)
-                .is_some_and(|refs| release_ref(refs, claim_key));
+            let released = release_ref(
+                self.coverage_refs_by_handle
+                    .get_mut(&handle)
+                    .expect("a handle owning atoms owns per-claim refcounts"),
+                claim_key,
+            );
             if released {
                 discard_edge(&mut self.handles_by_coverage, &claim_key, handle);
             }
@@ -392,6 +394,15 @@ impl WireOwnership {
 
     pub(super) fn is_attached(&self, id: HandleId) -> bool {
         self.atoms_by_handle.contains_key(&id)
+    }
+
+    /// Whether some handle is already indexed as owning this exact atom.
+    ///
+    /// The precondition for retaining an owner. Retaining can refresh evidence,
+    /// and that refresh reads the reverse indexes -- so an atom retained before
+    /// its handle is indexed is one whose own arrival cannot see it.
+    pub(super) fn is_indexed(&self, atom: &ContextualAtom) -> bool {
+        self.handles_by_atom.contains_key(atom)
     }
 
     pub(super) fn handles_for_coverage(&self, key: &CoverageKey) -> Option<&BTreeSet<HandleId>> {
@@ -492,6 +503,133 @@ impl WireOwnership {
     }
 }
 
+/// Exact structural consistency, rebuilt from the one canonical relation.
+///
+/// `atoms_by_handle` is the truth: everything else in this owner is derivable
+/// from it. So the check derives all of it and demands exact equality, rather
+/// than comparing sizes.
+///
+/// The distinction is the whole point. A census that agrees on counts still
+/// passes when a handle is indexed under the wrong atom, an atom under the
+/// wrong demand, or a routing fact under the wrong key — corruption that
+/// preserves cardinality. `wire_owner_refs` was added because the census could
+/// not see a doubled owner count; this exists because it cannot see a
+/// *misplaced* one either.
+///
+/// Two relations are deliberately NOT derived, because they are answers this
+/// owner stores rather than computes:
+///
+/// - `pending_atoms` is a router verdict. Only its domain is checked (every
+///   pending key is a live demand).
+/// - `pending_resolver_closes` names demands that became ownerless, so its
+///   keys must be disjoint from the live ones.
+#[cfg(any(test, feature = "bench-instrumentation"))]
+impl WireOwnership {
+    pub(super) fn assert_consistent(&self, at: &str) {
+        let mut expected_demand_refs: HashMap<HandleId, BTreeMap<DemandKey, usize>> =
+            HashMap::new();
+        let mut expected_coverage_refs: HashMap<HandleId, BTreeMap<CoverageKey, usize>> =
+            HashMap::new();
+        let mut expected_by_atom: BTreeMap<ContextualAtom, BTreeSet<HandleId>> = BTreeMap::new();
+        let mut expected_by_demand: BTreeMap<DemandKey, BTreeSet<HandleId>> = BTreeMap::new();
+        let mut expected_by_coverage: BTreeMap<CoverageKey, BTreeSet<HandleId>> = BTreeMap::new();
+        let mut expected_owner_counts: BTreeMap<DemandKey, usize> = BTreeMap::new();
+        let mut expected_evidence: BTreeMap<DemandKey, BTreeMap<RoutingEvidence, usize>> =
+            BTreeMap::new();
+
+        for (id, atoms) in &self.atoms_by_handle {
+            let demand_refs = expected_demand_refs.entry(*id).or_default();
+            let coverage_refs = expected_coverage_refs.entry(*id).or_default();
+            for atom in atoms {
+                let key = DemandKey::for_atom(atom);
+                *demand_refs.entry(key).or_insert(0) += 1;
+                *expected_owner_counts.entry(key).or_insert(0) += 1;
+                let evidence = expected_evidence.entry(key).or_default();
+                for fact in &atom.routing_evidence {
+                    *evidence.entry(fact.clone()).or_insert(0) += 1;
+                }
+                expected_by_atom
+                    .entry(atom.clone())
+                    .or_default()
+                    .insert(*id);
+                expected_by_demand.entry(key).or_default().insert(*id);
+                for claim_key in coverage_claim_keys(atom) {
+                    *coverage_refs.entry(claim_key).or_insert(0) += 1;
+                    expected_by_coverage
+                        .entry(claim_key)
+                        .or_default()
+                        .insert(*id);
+                }
+            }
+        }
+
+        assert_eq!(
+            self.demand_refs_by_handle, expected_demand_refs,
+            "{at}: per-handle demand refcounts do not match the atoms the handles own"
+        );
+        assert_eq!(
+            self.coverage_refs_by_handle, expected_coverage_refs,
+            "{at}: per-handle coverage refcounts do not match the atoms the handles own"
+        );
+        assert_eq!(
+            self.handles_by_atom, expected_by_atom,
+            "{at}: the atom reverse index names the wrong handles"
+        );
+        assert_eq!(
+            self.handles_by_demand, expected_by_demand,
+            "{at}: the demand reverse index names the wrong handles"
+        );
+        assert_eq!(
+            self.handles_by_coverage, expected_by_coverage,
+            "{at}: the coverage reverse index names the wrong handles"
+        );
+
+        // Owner counts are reachable exactly one way in production -- one
+        // retain per atom per handle -- so they must equal the per-handle
+        // totals key by key, not merely sum to the same number.
+        let actual_owner_counts: BTreeMap<_, _> = self
+            .owner_counts
+            .iter()
+            .map(|(key, (_, count))| (*key, *count))
+            .collect();
+        assert_eq!(
+            actual_owner_counts, expected_owner_counts,
+            "{at}: wire owner counts do not match the handles owning each demand"
+        );
+        assert_eq!(
+            self.routing_evidence_owner_counts, expected_evidence,
+            "{at}: routing-evidence owner counts do not match the atoms contributing them"
+        );
+
+        // Each live demand presents the exact union of its owners' evidence.
+        for (key, (atom, _)) in &self.owner_counts {
+            let union: BTreeSet<_> = expected_evidence
+                .get(key)
+                .into_iter()
+                .flat_map(BTreeMap::keys)
+                .cloned()
+                .collect();
+            assert_eq!(
+                atom.routing_evidence, union,
+                "{at}: a demand's effective atom does not carry its owners' evidence union"
+            );
+        }
+
+        for key in self.pending_atoms.keys() {
+            assert!(
+                self.owner_counts.contains_key(key),
+                "{at}: a demand is pending admission with no live owner"
+            );
+        }
+        for key in self.pending_resolver_closes.keys() {
+            assert!(
+                !self.owner_counts.contains_key(key),
+                "{at}: a demand is awaiting a deferred close while still owned"
+            );
+        }
+    }
+}
+
 /// The reads the admission proofs need, as questions rather than maps.
 ///
 /// Four test files used to hand-write six of this owner's maps to build a
@@ -545,18 +683,33 @@ impl WireOwnership {
     pub(super) fn pending_len(&self) -> usize {
         self.pending_atoms.len()
     }
+
+    /// How many resolver closes are deferred, waiting to see whether a
+    /// replacement owner claims their demand in the same turn.
+    pub(super) fn deferred_close_count(&self) -> usize {
+        self.pending_resolver_closes.len()
+    }
 }
 
 /// Drop one handle from a reverse index, removing the key when it empties.
-fn discard_edge<K: Ord + Clone>(
+///
+/// Both the key and the edge must be there. This used to be an `if let` that
+/// shrugged at a missing key and never checked whether the handle was actually
+/// removed, which is the precise shape of "the mirror is already broken and
+/// nothing says so".
+fn discard_edge<K: Ord + Clone + std::fmt::Debug>(
     index: &mut BTreeMap<K, BTreeSet<HandleId>>,
     key: &K,
     handle: HandleId,
 ) {
-    if let Some(handles) = index.get_mut(key) {
-        handles.remove(&handle);
-        if handles.is_empty() {
-            index.remove(key);
-        }
+    let handles = index
+        .get_mut(key)
+        .unwrap_or_else(|| panic!("a handle's own index entry is missing for {key:?}"));
+    assert!(
+        handles.remove(&handle),
+        "reverse index for {key:?} did not name the handle releasing it"
+    );
+    if handles.is_empty() {
+        index.remove(key);
     }
 }

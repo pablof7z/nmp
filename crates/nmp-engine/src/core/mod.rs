@@ -2576,6 +2576,22 @@ impl EngineCore {
         self.wire_demand()
     }
 
+    /// Assert every extracted owner's mirrors are exactly right, by identity
+    /// rather than by count.
+    ///
+    /// The census next to this counts things. That is the correct instrument
+    /// for leaks and for boundedness, and the wrong one for structure: a
+    /// handle indexed under the wrong atom, a child under the wrong plan, or a
+    /// live target under the wrong demand all preserve every number it
+    /// reports. Tests that care about structure call this; tests that care
+    /// about totals call the census; nothing should use one for the other.
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub fn assert_owner_consistency(&self, at: &str) {
+        self.wire.assert_consistent(at);
+        self.request_targets.assert_consistent(at);
+        self.nip77.assert_consistent(at);
+    }
+
     #[cfg(any(test, feature = "bench-instrumentation"))]
     #[doc(hidden)]
     pub fn bench_ownership_census(&self) -> CoreOwnershipCensus {

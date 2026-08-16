@@ -75,7 +75,19 @@ impl<V: PlanChild> Default for PlanIndexed<V> {
 }
 
 impl<V: PlanChild> PlanIndexed<V> {
+    /// Index one new child under the plan that owns it.
+    ///
+    /// A duplicate child id is refused rather than replaced. Every id here is
+    /// freshly minted from a role incarnation, so re-inserting one is not a
+    /// supported transition — and the permissive spelling was actively unsafe:
+    /// it added the new reverse edge, overwrote the forward value, and left
+    /// the OLD plan still naming the child. One child in two reverse sets,
+    /// silently.
     pub(super) fn insert(&mut self, sub_id: SubId, value: V) {
+        assert!(
+            !self.by_child.contains_key(&sub_id),
+            "a NIP-77 child id was reused while still live"
+        );
         self.by_plan
             .entry(value.plan_sub_id().clone())
             .or_default()
@@ -84,14 +96,24 @@ impl<V: PlanChild> PlanIndexed<V> {
     }
 
     /// Remove one child and prune its plan's set.
+    ///
+    /// Absent is a valid answer for the CHILD -- callers legitimately probe
+    /// for one that has already gone. It is not a valid answer for its plan's
+    /// set: once the forward map says the child existed, the reverse edge is
+    /// required to exist too, and used to be allowed to be missing.
     pub(super) fn take(&mut self, sub_id: &SubId) -> Option<V> {
         let value = self.by_child.remove(sub_id)?;
         let plan = value.plan_sub_id().clone();
-        if let Some(children) = self.by_plan.get_mut(&plan) {
-            children.remove(sub_id);
-            if children.is_empty() {
-                self.by_plan.remove(&plan);
-            }
+        let children = self
+            .by_plan
+            .get_mut(&plan)
+            .expect("a live child's plan owns a reverse-index set");
+        assert!(
+            children.remove(sub_id),
+            "a live child's plan did not name it in the reverse index"
+        );
+        if children.is_empty() {
+            self.by_plan.remove(&plan);
         }
         Some(value)
     }
@@ -102,9 +124,15 @@ impl<V: PlanChild> PlanIndexed<V> {
         let children = self.by_plan.remove(plan).unwrap_or_default();
         children
             .into_iter()
-            .filter_map(|child| {
-                let value = self.by_child.remove(&child)?;
-                Some((child, value))
+            .map(|child| {
+                // `filter_map` here used to make a reverse edge naming an
+                // absent child disappear quietly. That is the mirror being
+                // broken, and it should say so where it broke.
+                let value = self
+                    .by_child
+                    .remove(&child)
+                    .expect("a plan's reverse index names only live children");
+                (child, value)
             })
             .collect()
     }
@@ -169,6 +197,43 @@ impl<V: PlanChild> PlanIndexed<V> {
     }
 }
 
+/// Exact structural consistency for one mirrored index.
+///
+/// Both directions, by identity rather than by count. `plan_edges == len` is
+/// necessary and nowhere near sufficient: one child indexed under the wrong
+/// plan preserves both numbers exactly.
+#[cfg(any(test, feature = "bench-instrumentation"))]
+impl<V: PlanChild> PlanIndexed<V> {
+    pub(super) fn assert_consistent(&self, what: &str, at: &str) {
+        for (child, value) in &self.by_child {
+            let plan = value.plan_sub_id();
+            let children = self.by_plan.get(plan).unwrap_or_else(|| {
+                panic!("{at}: {what} child {child:?} has no reverse set for its own plan")
+            });
+            assert!(
+                children.contains(child),
+                "{at}: {what} child {child:?} is not named by the plan it reports"
+            );
+        }
+        for (plan, children) in &self.by_plan {
+            assert!(
+                !children.is_empty(),
+                "{at}: {what} kept an empty reverse set for plan {plan:?}"
+            );
+            for child in children {
+                let value = self.by_child.get(child).unwrap_or_else(|| {
+                    panic!("{at}: {what} plan {plan:?} names child {child:?}, which is not live")
+                });
+                assert_eq!(
+                    value.plan_sub_id(),
+                    plan,
+                    "{at}: {what} child {child:?} is indexed under a plan it does not report"
+                );
+            }
+        }
+    }
+}
+
 /// The census contribution, so the root counts this owner's state without
 /// naming its maps.
 #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -218,7 +283,14 @@ impl Nip77Sessions {
     /// Mint the next role incarnation. The only way this counter moves.
     pub(super) fn mint_incarnation(&mut self) -> u64 {
         let incarnation = self.next_incarnation;
-        self.next_incarnation = self.next_incarnation.wrapping_add(1);
+        // Checked, not wrapping. Exhausting a u64 at one mint per repair phase
+        // is not reachable by this process -- which is an argument for the
+        // width, not for silently re-minting a string a straggler EOSE could
+        // still be addressed to if it ever were.
+        self.next_incarnation = self
+            .next_incarnation
+            .checked_add(1)
+            .expect("NIP-77 role incarnations are exhausted; ids must never be reused");
         incarnation
     }
 
@@ -279,23 +351,37 @@ impl Nip77Sessions {
         role_sub_ids.extend(self.handoffs.children_of(plan_sub_id));
         role_sub_ids.extend(self.sessions.children_of(plan_sub_id));
         for child in self.backfills.children_of(plan_sub_id) {
-            match self.backfills.get(&child) {
+            // Exhaustive over the typed value. The `None => {}` arm this
+            // replaced turned a broken mirror into a silently smaller fan-out,
+            // which is the failure mode where a plan's metadata update simply
+            // misses one of its own roles.
+            let request = self
+                .backfills
+                .get(&child)
+                .expect("a plan's backfill index names only live children");
+            match request {
                 // The ids-only fetch is not coverage proof and deliberately
                 // owns no plan claims. The retained NEG snapshot is extended
                 // separately by `extend_plan_execution_metadata`.
-                Some(TemporaryReq::MissingIds { .. }) => {}
-                Some(TemporaryReq::Backlog { .. }) => {
+                TemporaryReq::MissingIds { .. } => {}
+                TemporaryReq::Backlog { .. } => {
                     role_sub_ids.insert(child);
                 }
-                Some(TemporaryReq::BacklogActivatesLive { live_sub_id, .. }) => {
+                TemporaryReq::BacklogActivatesLive { live_sub_id, .. } => {
                     let live_sub_id = live_sub_id.clone();
                     role_sub_ids.insert(child);
                     role_sub_ids.insert(live_sub_id);
                 }
-                None => {}
             }
         }
         role_sub_ids
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) fn assert_consistent(&self, at: &str) {
+        self.handoffs.assert_consistent("handoff", at);
+        self.sessions.assert_consistent("reconciliation", at);
+        self.backfills.assert_consistent("backfill", at);
     }
 
     #[cfg(any(test, feature = "bench-instrumentation"))]

@@ -1,5 +1,5 @@
 import XCTest
-@testable import NMP
+import NMP
 
 final class NMPSimulatorQualificationTests: XCTestCase {
     /// A real iOS Simulator process must resolve a public relay hostname with

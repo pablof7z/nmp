@@ -12,6 +12,21 @@ Do not copy the same rule into several places. Current BDD syntax, status, and
 runner rules live in
 [`docs/bdd/000-bdd-approach.md`](../../../../docs/bdd/000-bdd-approach.md).
 
+## Three layers
+
+Tests prove behavior at three layers. The layers are complementary — a
+public-API system scenario does not replace the owner or headless-engine test
+underneath it:
+
+- **Owner tests** prove exact local invariants inside the crate that owns the
+  state.
+- **Headless engine scenarios** prove cross-owner behavior with no sockets and
+  no wall-clock timing.
+- **Public-API system scenarios** prove restart and complete query/write flows
+  through the supported `nmp::Engine` API.
+
+See [`test-placement.md`](test-placement.md) for what each layer must cover.
+
 ## User corrections
 
 When a user correction changes the meaning of a behavior:
