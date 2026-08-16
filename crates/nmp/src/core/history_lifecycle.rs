@@ -163,7 +163,7 @@ impl HistorySessions {
     /// I4, as a question: the window is gone AND no handle still points at
     /// it. Both halves, because checking only one is what the seven
     /// hand-written sites made easy to get wrong.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(test)]
     pub(super) fn is_retired(&self, id: HistorySessionId) -> bool {
         !self.sessions.contains_key(&id) && self.by_handle.values().all(|owner| *owner != id)
     }
