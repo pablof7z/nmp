@@ -1818,7 +1818,6 @@ dependencies = [
  "nmp-local-signer",
  "nmp-nip11",
  "nmp-nip29",
- "nmp-nip65",
  "nmp-resolver",
  "nmp-resolver-testkit",
  "nmp-router",
