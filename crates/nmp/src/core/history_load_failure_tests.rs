@@ -572,7 +572,7 @@ struct HistorySnapshot {
 }
 
 fn snapshot(core: &EngineCore, id: HistorySessionId) -> HistorySnapshot {
-    let state = &core.histories[&id];
+    let state = &core.history.expect_live(id);
     assert!(state.pending_load.is_none());
     HistorySnapshot {
         target_rows: state.target_rows,
@@ -583,7 +583,7 @@ fn snapshot(core: &EngineCore, id: HistorySessionId) -> HistorySnapshot {
         projection_complete: state.projection_complete,
         load: state.load,
         handle_ids: state.handle_ids.clone(),
-        history_by_handle: core.history_by_handle.clone(),
+        history_by_handle: core.history.handle_index_snapshot(),
     }
 }
 
@@ -645,7 +645,8 @@ fn literal_history_query() -> HistoryQuery {
 /// The oldest retained row's second: the boundary an advance would fetch
 /// behind. Derived from state now that windows carry no continuation token.
 fn boundary_second(core: &EngineCore, id: HistorySessionId) -> u64 {
-    core.histories[&id]
+    core.history
+        .expect_live(id)
         .last_rows
         .values()
         .map(|row| row.created_at().as_secs())
@@ -777,8 +778,8 @@ fn tie_second_read_failure_dispatches_diagnostics_and_exact_rollback() {
 fn older_window_read_failure_dispatches_diagnostics_and_exact_rollback() {
     let (_directory, mut core, id) = derived_fixture();
     let boundary_secs = boundary_second(&core, id);
-    core.histories
-        .get_mut(&id)
+    core.history
+        .get_mut(id)
         .unwrap()
         .acquired_tie_seconds
         .insert(boundary_secs);
