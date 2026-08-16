@@ -85,7 +85,11 @@ impl Engine {
                 limit: config.max_auth_capabilities,
             });
         }
-        Self::new_with_initial_session(config, restored, super::default_capabilities())
+        // #1707: no capability is auto-registered any more (see
+        // `Engine::new`'s own doc) -- a restored session still starts with an
+        // empty compiled capability set unless the caller uses
+        // `new_with_session_and_capabilities` instead.
+        Self::new_with_initial_session(config, restored, Vec::new())
             .map_err(map_session_start_error)
     }
 

@@ -10,6 +10,10 @@ name = "nmp-nip29-consumer"
 path = "src/main.rs"
 
 # This is an application-boundary proof: needing any Rust dependency besides
-# the supported facade is itself a failure of the experiment.
+# the supported facade -- for the GENERIC engine surface -- is itself a
+# failure of the experiment. `nmp-nip29` is a second, EXPLICIT dependency
+# for the same reason `nmp-consumer-check` names it that way (#1707: `nmp`
+# must not know what a NIP-29 group means), not a failure of this proof.
 [dependencies]
-nmp = { workspace = true, features = ["nip29"] }
+nmp.workspace = true
+nmp-nip29.workspace = true

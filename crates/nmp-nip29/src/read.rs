@@ -24,7 +24,7 @@
 
 use nmp_grammar::{Demand, LiveQuery, LiveQueryError};
 
-use crate::nip29::GroupContextError;
+use crate::GroupContextError;
 
 /// Why a NIP-29 read produced no live query.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +67,7 @@ impl std::error::Error for GroupReadError {}
 /// Fold one complete branch per host into ONE live query.
 ///
 /// `branches` is always nonempty: it is built by mapping over a
-/// [`RelayScope`](crate::nip29::RelayScope)'s hosts, and a scope cannot be
+/// [`RelayScope`](crate::RelayScope)'s hosts, and a scope cannot be
 /// empty.
 pub(crate) fn one_live_query(branches: Vec<Demand>) -> Result<LiveQuery, GroupReadError> {
     let mut branches = branches;

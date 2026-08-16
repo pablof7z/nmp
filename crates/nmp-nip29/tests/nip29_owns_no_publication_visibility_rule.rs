@@ -1,5 +1,8 @@
-//! #1182 falsifier 5: no file under `crates/nmp-nip29/` or
-//! `crates/nmp/src/nip29/` special-cases publication visibility.
+//! #1182 falsifier 5: no file under `crates/nmp-nip29/src/` special-cases
+//! publication visibility. Moved here from `crates/nmp/tests/` by #1707
+//! alongside the code it scans -- NIP-29's app-facing door left
+//! `crates/nmp/src/nip29/` entirely, so `crates/nmp-nip29/src/` is now the
+//! whole of NIP-29's source, not one of two directories to scan.
 //!
 //! Whether a locally accepted write appears in a matching live query, and what
 //! provenance it reports while no relay has carried it, is ordinary engine
@@ -169,14 +172,11 @@ fn rust_files(dir: &Path) -> Vec<PathBuf> {
 fn nip29_dirs() -> Vec<PathBuf> {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("crates/nmp has a parent")
+        .expect("crates/nmp-nip29 has a parent")
         .parent()
         .expect("crates has a parent (workspace root)")
         .to_path_buf();
-    let dirs = vec![
-        workspace.join("crates/nmp-nip29/src"),
-        workspace.join("crates/nmp/src/nip29"),
-    ];
+    let dirs = vec![workspace.join("crates/nmp-nip29/src")];
     for dir in &dirs {
         assert!(
             dir.is_dir(),

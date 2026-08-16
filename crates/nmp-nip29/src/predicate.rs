@@ -72,8 +72,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::{GroupRecord, GROUP_ADMINS_KIND, GROUP_MEMBERS_KIND};
 use nmp_grammar::{Binding, Filter, IndexedTagName, SetAlgebra, SetOp};
-use nmp_nip29::{GroupRecord, GROUP_ADMINS_KIND, GROUP_MEMBERS_KIND};
 use nostr::RelayUrl;
 
 /// Which groups an observation covers.
@@ -195,7 +195,7 @@ impl std::error::Error for GroupPredicateError {}
 /// who is listed, an id set by its own members. This one names nothing, so
 /// what comes back is whatever the relay chooses to answer with. The bound is
 /// the observation's own per-host `limit`
-/// ([`RelayScope::observe`](super::RelayScope::observe)'s fourth argument),
+/// ([`RelayScope::observe`](crate::RelayScope::observe)'s fourth argument),
 /// which is the ordinary NIP-01 `Filter::limit` every other read uses --
 /// there is no `all`-specific knob, because unboundedness is not
 /// `all`-specific either.
@@ -338,7 +338,7 @@ impl GroupIds {
     fn lower_at(&self, host: &RelayUrl) -> Binding {
         match &self.source {
             IdSource::AtHost(selection) => {
-                nmp_nip29::groups_whose_record_matches_at(host, selection.clone())
+                crate::groups_whose_record_matches_at(host, selection.clone())
             }
             // A caller's binding names values under its own authority: there
             // is nothing here to pin and nothing here NMP may repin.

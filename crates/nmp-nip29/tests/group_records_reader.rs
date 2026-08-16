@@ -28,10 +28,11 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use nmp::nip29::{
-    self, member_list_includes, GroupAvailability, GroupObservation, GroupRecord, GroupSnapshot,
-};
 use nmp::{Binding, Engine, EngineConfig};
+use nmp_nip29::{
+    self as nip29, member_list_includes, GroupAvailability, GroupObservation, GroupRecord,
+    GroupSnapshot,
+};
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{Keys, Kind, Tag, Timestamp, UnsignedEvent};
 

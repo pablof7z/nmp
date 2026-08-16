@@ -1,4 +1,4 @@
-//! `nmp::nip29` -- the app-facing NIP-29 door (#1033).
+//! [`RelayScope`] and [`on`] -- the top of the NIP-29 door (#1033).
 //!
 //! Two values, one narrowing:
 //!
@@ -12,20 +12,15 @@
 //! private context is the only source of all four. That is the whole reason
 //! the scope exists as a value rather than as a parameter list.
 //!
-//! # Why the door lives here and not in `nmp-nip29`
+//! # Why this crate owns all of it now
 //!
-//! `nmp-nip29` is engine-free by construction -- `nostr` + `nmp-grammar`, no
-//! core, no mechanism. It owns NIP-29's
-//! schema, its tag/predicate semantics, its editors and its signed-event
-//! validation, and it returns only validated semantic values. It never
-//! imports, constructs, stores or returns a [`WriteIntent`](crate::WriteIntent).
-//!
-//! The final door needs both halves at once: the retained relay scope AND the
-//! opaque write intent the one publish door takes. A lower crate cannot read
-//! this module's private retained context without a public accessor, a
-//! callback injection, or a reverse dependency -- all three of which are
-//! worse than moving the door up. So the door is here, the vocabulary is
-//! below, and the dependency still runs `nmp -> nmp-nip29` only.
+//! Moved back here from `nmp` by #1707. This crate is engine-free by
+//! construction for its schema/tag/predicate half, but the final door needs
+//! both halves at once: the retained relay scope AND the opaque write intent
+//! the one publish door takes -- so `Group`/`Groups`/`GroupListWrites`/the
+//! records observation all live in this crate too, reaching `nmp`'s own
+//! engine surface as an ordinary `nmp-nip29 -> nmp` dependency. `nmp` must
+//! not know what a NIP-29 group or a kind:10009 saved-groups list means.
 //!
 //! # Per-relay authority is the whole difficulty
 //!
@@ -43,58 +38,14 @@
 //! NIP-29-owned nesting level -- never inherited, and never blanket-rewritten
 //! onto a binding the caller supplied.
 
-mod group;
-mod group_list_writes;
-mod groups;
-mod predicate;
-mod read;
-mod records;
-
 use std::collections::BTreeSet;
 
 use nmp_grammar::Demand;
 use nostr::RelayUrl;
 
-use crate::engine::Engine;
+use nmp::Engine;
 
-pub use group::{Group, GroupPublishError};
-pub use group_list_writes::{
-    add_group_to_list, add_relay_in_use, group_list_capability, group_list_writes,
-    remove_group_from_list, remove_relay_in_use, GroupListActionError, GroupListWrites,
-};
-pub use groups::Groups;
-pub use nmp_nip29::GroupContextError;
-pub use nmp_nip29::{
-    current_account_group_list_demand, parse_simple_groups_list_from_raw_tags_tolerant,
-    parse_simple_groups_list_tolerant, SimpleGroupEntry, SimpleGroupsList,
-};
-pub use nmp_nip29::{GroupUser, GroupUsersError};
-pub use predicate::{
-    admin_list_includes, all, any_of, groups_whose_record_matches, member_list_includes, GroupIds,
-    GroupPredicate, GroupPredicateError,
-};
-pub use read::GroupReadError;
-pub use records::{
-    GroupAvailability, GroupObservation, GroupObserveError, GroupSnapshot, GroupWaitError,
-    HostRecords,
-};
-
-// What one relay-signed record SAYS is `nmp-nip29`'s, beside the schema it
-// parses. The facade re-exports the values so an app never imports two crates
-// to read one snapshot.
-pub use nmp_nip29::{GroupMetadata, GroupRecord, ListedRecord, ListedSubject};
-
-// The NIP-29-owned composers, re-exported as themselves. An app that wants
-// the raw builder for a named operation gets it; the group's own methods are
-// the ordinary path.
-pub use nmp_nip29::{
-    add_users, create_group, create_invite, delete_event, delete_group, edit_metadata,
-    join_request, leave_request, remove_users, GroupMetadataEdit, JoinAccess, ReadAccess,
-};
-// The kinds NIP-29 itself defines for describing a group. Named because
-// NIP-29 names them -- unlike a group's CONTENT kinds, which are the app's to
-// choose and which this crate deliberately refuses to catalogue (#838).
-pub use nmp_nip29::{GROUP_ADMINS_KIND, GROUP_MEMBERS_KIND, GROUP_METADATA_KIND};
+use crate::{Group, GroupObservation, GroupObserveError, GroupPredicate, GroupRecord, Groups};
 
 /// Why a relay scope could not be formed.
 ///
@@ -165,9 +116,9 @@ impl RelayScope {
     /// id privately; there is no accessor for either, so a layer that is
     /// handed a `Group` cannot reconstruct the authority and route something
     /// elsewhere under it. The one thing that does yield both is the write
-    /// door itself ([`Group::intent`]), which mints them into an ordinary
-    /// [`WriteIntent`](crate::WriteIntent) -- see [`Group`]'s own doc for why
-    /// that trade is the right one.
+    /// door itself ([`Group::publish`]), which mints them into an ordinary
+    /// [`WriteIntent`](nmp_grammar::WriteIntent) -- see [`Group`]'s own doc
+    /// for why that trade is the right one.
     #[must_use]
     pub fn group(&self, group_id: impl Into<String>) -> Group {
         Group::new(self.hosts.clone(), group_id.into())
@@ -193,7 +144,7 @@ impl RelayScope {
     pub fn groups(
         &self,
         group_ids: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Result<Groups, GroupContextError> {
+    ) -> Result<Groups, crate::GroupContextError> {
         Groups::new(
             self.hosts.clone(),
             group_ids.into_iter().map(Into::into).collect(),
@@ -205,12 +156,13 @@ impl RelayScope {
     /// One complete branch per host: at host `H` the read selects exactly the
     /// kinds `records` names, pinned to `H`, keyed on `d` by the predicate
     /// lowered AT `H` -- or keyed on nothing at all, when the predicate is
-    /// [`all`]. Evidence observed at one relay therefore never constrains a
-    /// listing at another.
+    /// [`all`](crate::all). Evidence observed at one relay therefore never
+    /// constrains a listing at another.
     ///
-    /// Each delivery is a complete [`GroupSnapshot`] per matching group --
-    /// metadata, admins, members, availability, and the per-host breakdown
-    /// beside them. The app never sees a row delta and never walks a `p` row.
+    /// Each delivery is a complete [`GroupSnapshot`](crate::GroupSnapshot) per
+    /// matching group -- metadata, admins, members, availability, and the
+    /// per-host breakdown beside them. The app never sees a row delta and
+    /// never walks a `p` row.
     ///
     /// ```text
     /// let watching = nip29::on(hosts)?.observe(
@@ -256,7 +208,7 @@ impl RelayScope {
             return Err(GroupObserveError::NoRecordSelected);
         }
         let predicate = predicate.into();
-        records::observe(
+        crate::record_observation::observe(
             engine,
             self.hosts.clone(),
             BTreeSet::new(),
@@ -277,7 +229,7 @@ impl RelayScope {
     ) -> Vec<Demand> {
         self.hosts
             .iter()
-            .map(|host| nmp_nip29::group_records_at(host, records, predicate.lower_at(host), limit))
+            .map(|host| crate::group_records_at(host, records, predicate.lower_at(host), limit))
             .collect()
     }
 
@@ -302,6 +254,7 @@ pub fn group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{member_list_includes, GroupObserveError};
     use nmp_grammar::{
         AccessContext, Binding, CacheMode, Derived, IdentityField, IndexedTagName, SourceAuthority,
     };
@@ -484,7 +437,7 @@ mod tests {
     #[test]
     fn a_multi_host_listing_is_one_live_query_with_one_branch_per_host() {
         let scope = on([host(1), host(2)]).expect("two hosts");
-        let query = read::one_live_query(scope.records_branches(
+        let query = crate::read::one_live_query(scope.records_branches(
             &member_list_includes(Binding::Reactive(IdentityField::ActivePubkey)).into(),
             &BTreeSet::from([GroupRecord::Metadata]),
             None,
@@ -502,8 +455,11 @@ mod tests {
     #[test]
     fn an_unconstrained_directory_asks_every_host_with_no_group_id_row() {
         let scope = on([host(1), host(2)]).expect("two hosts");
-        let branches =
-            scope.records_branches(&all(), &BTreeSet::from([GroupRecord::Metadata]), Some(250));
+        let branches = scope.records_branches(
+            &crate::all(),
+            &BTreeSet::from([GroupRecord::Metadata]),
+            Some(250),
+        );
         let d = IndexedTagName::new('d').expect("d is a single ASCII letter");
 
         assert_eq!(branches.len(), 2, "one complete branch per host");
@@ -532,8 +488,8 @@ mod tests {
     #[test]
     fn a_per_host_bound_is_never_reported_as_a_bound_on_the_union() {
         let scope = on([host(1), host(2)]).expect("two hosts");
-        let query = read::one_live_query(scope.records_branches(
-            &all(),
+        let query = crate::read::one_live_query(scope.records_branches(
+            &crate::all(),
             &BTreeSet::from([GroupRecord::Metadata]),
             Some(250),
         ))
@@ -577,7 +533,7 @@ mod tests {
     /// indistinguishable-from-real-emptiness failure #1245 was about.
     #[test]
     fn an_empty_record_selection_is_refused_rather_than_observed() {
-        let engine = crate::Engine::new(crate::EngineConfig::default()).expect("an engine");
+        let engine = nmp::Engine::new(nmp::EngineConfig::default()).expect("an engine");
         let scope = on([host(1)]).expect("one host");
         assert_eq!(
             scope

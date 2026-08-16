@@ -22,10 +22,11 @@
 //! parser result to ride on.
 //!
 //! Write-side replacement encoding is deliberately NOT here: this file stays
-//! a pure, engine-free reader. The app-facing typed add/remove operations live
-//! at `nmp::nip29`, where they compile private versioned operation bytes into
-//! the ordinary durable `WriteIntent` and receipt lifecycle. They never
-//! promote this observational value into a reusable authority noun.
+//! a pure, engine-free reader. The app-facing typed add/remove operations
+//! live in `crate::group_list_writes`, which compiles private versioned
+//! operation bytes into the ordinary durable `WriteIntent` and receipt
+//! lifecycle. They never promote this observational value into a reusable
+//! authority noun.
 
 use nostr::{Event, RelayUrl};
 

@@ -33,18 +33,18 @@ unstable-mechanism = [
 # there too.
 nip65 = ["dep:nmp-nip65", "nmp-runtime/nip65"]
 
-# #824: NIP-29 is selected like every other app-facing family. The facade
-# module remains the owner of the engine-bound Group door; making the pure
-# vocabulary dependency optional physically removes both when unselected.
-nip29 = ["dep:nmp-nip29"]
-
-# #1707 deleted the `nip22`/`nip25`/`nip18`/`nipc7`/`content`/`asset`/
+# #1707 deleted the `nip29`/`nip22`/`nip25`/`nip18`/`nipc7`/`content`/`asset`/
 # `blossom`/`nip68` features and their `dep:nmp-*` optional dependencies
-# below: each was a pure re-export door with no engine coupling at all, so
-# `nmp` re-exporting it was never required -- a direct-Rust app names the
-# mechanism crate directly, same as `nmp-ffi`/Swift/Kotlin already do and
-# same as `nmp-media` already works (step 0). `nmp` must not contain a
-# single line of any capability's meaning, re-export door or not.
+# below. `nip22`/`nip25`/`nip18`/`nipc7`/`content`/`asset`/`blossom`/`nip68`
+# were pure re-export doors with no engine coupling at all. `nip29` was not a
+# bare re-export door -- its Group/Groups/group-list-write door genuinely
+# needed `nmp`'s engine surface -- but that need runs the OTHER way: the
+# capability crate composes the engine it runs against, not the reverse, so
+# `nmp-nip29` now depends on `nmp` instead of the facade re-exporting
+# `nmp-nip29`. A direct-Rust app names the mechanism crate directly, same as
+# `nmp-ffi`/Swift/Kotlin already do and same as `nmp-media`/`nmp-nip02`
+# already work. `nmp` must not contain a single line of any capability's
+# meaning, re-export door or not.
 
 # #827: both instrumentation features came in with the folded engine modules
 # (`core`, `runtime`, `outbox`, `negentropy`). They stay non-default.
@@ -80,12 +80,6 @@ required-features = ["nip65"]
 nostr.workspace = true
 nmp-grammar.workspace = true
 nmp-nip65 = { workspace = true, optional = true }
-# #977: the NIP-29 `Group` door. The dependency runs THIS WAY ROUND and
-# only this way round -- `Group` is pure composition over `nostr` +
-# `nmp-grammar`, and `crate::nip29`'s extension trait is what binds it to
-# the one publish door. `crates/nmp-nip29/Cargo.toml` must never gain the
-# reverse edge.
-nmp-nip29 = { workspace = true, optional = true }
 nmp-signer.workspace = true
 nmp-local-signer.workspace = true
 # The deterministic reducer (#1707). It left this crate so its own manifest
@@ -144,18 +138,22 @@ libc = { version = "0.2", optional = true }
 # configured. That discovery is the optional NIP-65 coordinator, so this
 # crate's own test targets enable it. Test-only: the default feature set a
 # consumer links is unchanged.
-# `nip29_group_list_headless.rs` proves the kind:10009 demand against a real
-# engine through the same `nmp::nip29` path an app uses.
 # `unstable-mechanism`: every headless/`_headless.rs` and `core_headless/`
 # integration test seeds its `EngineCore`/`EngineThread` through the gated
 # fixture constructors (#1665, #1667) -- this crate's own test targets are
 # their only in-workspace callers.
-nmp = { path = ".", features = ["nip29", "nip65", "test-instrumentation", "unstable-mechanism"] }
+nmp = { path = ".", features = ["nip65", "test-instrumentation", "unstable-mechanism"] }
 # The headless reducer corpus (`tests/core_headless/`) and the runtime
 # integration tests drive `EngineCore`/`EngineThread` directly. They reached
 # them through the deleted `mechanism` basement; they name the packages now.
 nmp-engine = { workspace = true, features = ["test-instrumentation", "unstable-mechanism"] }
 nmp-runtime = { workspace = true, features = ["test-instrumentation", "unstable-mechanism", "nip65"] }
+# #1707: `optimistic_publish.rs` uses NIP-29's write door as one of two
+# vehicles for a claim that is otherwise general (#1182) -- it is not a
+# NIP-29-door proof itself (that moved to `nmp-nip29/tests/` with the door),
+# so it stays here and reaches the capability the ordinary way, through this
+# crate's own dev-dependencies.
+nmp-nip29.workspace = true
 nmp-test-support.workspace = true
 nmp-resolver-testkit.workspace = true
 nmp-router-testkit.workspace = true

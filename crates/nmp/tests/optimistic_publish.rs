@@ -38,11 +38,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
-use nmp::nip29;
 use nmp::{
     AccessContext, CacheMode, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery,
     RelayState, Row, RowDelta, SourceAuthority, WriteFact, WriteIntent, WritePayload, WriteRouting,
 };
+use nmp_nip29 as nip29;
 use nmp_runtime::FifoReceiver;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{EventId, Keys, Kind, RelayUrl, Tag, Timestamp, UnsignedEvent};

@@ -1,5 +1,5 @@
 //! #1033 Lane E: what a multi-relay group publication and a multi-relay
-//! group listing actually do on the wire, against `nmp::nip29`'s new
+//! group listing actually do on the wire, against `nmp-nip29`'s new
 //! [`RelayScope`]/[`Group`] shape.
 //!
 //! The single-host discovery door and `Group`'s single-host constructor are
@@ -25,7 +25,7 @@
 //!      `a_group_records_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group`.
 //!
 //! (3) deliberately does not re-check the mutation-level graph shape --
-//! `crates/nmp/src/nip29/mod.rs`'s own
+//! `crates/nmp-nip29/src/scope.rs`'s own
 //! `scope_stamps_exact_hosts_on_every_nested_nip29_demand` already pins that
 //! every nested `Demand` is stamped with the exact host. What THAT test
 //! cannot show is that getting it wrong would actually corrupt an answer:
@@ -48,14 +48,14 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use nmp::nip29::{
-    self, member_list_includes, Group, GroupContextError, GroupObservation, GroupPublishError,
-    GroupRecord, GroupSnapshot,
-};
 use nmp::{
     Binding, Engine, EngineConfig, EventBuilder, NotSentReason, RelayState, SignerError, SignerOp,
     SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability, SigningState,
     WriteFact, WriteOutcome,
+};
+use nmp_nip29::{
+    self as nip29, member_list_includes, Group, GroupContextError, GroupObservation,
+    GroupPublishError, GroupRecord, GroupSnapshot,
 };
 use nmp_runtime::FifoReceiver;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};

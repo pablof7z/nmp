@@ -37,10 +37,10 @@ use std::time::{Duration, Instant};
 
 use nostr::{Event, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
-use nmp::nip29::{self, Group, GroupContextError, GroupPublishError};
 use nmp::Engine;
 use nmp::ReceiptStream;
 use nmp_grammar::Filter;
+use nmp_nip29::{self as nip29, Group, GroupContextError, GroupPublishError};
 
 use super::budgets::EVENTUALLY;
 use super::observe::{FeedState, ReceiptState};

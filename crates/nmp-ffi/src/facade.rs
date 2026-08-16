@@ -182,7 +182,7 @@ pub struct NmpEngine {
     #[cfg(feature = "nip02")]
     follow_writes: nmp_nip02::FollowWrites,
     #[cfg(feature = "nip29")]
-    pub(crate) group_list_writes: nmp::nip29::GroupListWrites,
+    pub(crate) group_list_writes: nmp_nip29::GroupListWrites,
     #[cfg(feature = "nip65")]
     pub(crate) automatic_routing: AutomaticRoutingAssembly,
 }
@@ -283,7 +283,7 @@ impl NmpEngine {
             #[cfg(feature = "nip02")]
             nmp_nip02::follow_capability(),
             #[cfg(feature = "nip29")]
-            nmp::nip29::group_list_capability(),
+            nmp_nip29::group_list_capability(),
         ];
         let engine = Arc::new(match session_payload {
             Some(payload) => nmp::Engine::new_with_session_and_capabilities(
@@ -297,7 +297,7 @@ impl NmpEngine {
         #[cfg(feature = "nip02")]
         let follow_writes = nmp_nip02::follow_writes();
         #[cfg(feature = "nip29")]
-        let group_list_writes = nmp::nip29::group_list_writes();
+        let group_list_writes = nmp_nip29::group_list_writes();
         Ok(Arc::new(Self {
             engine,
             #[cfg(feature = "nip02")]

@@ -5,8 +5,9 @@ use super::*;
 // Headless, zero-socket falsifiers for the read half of #1123
 // (`features/groups/reads-through-the-one-door.feature`). Every `Demand`
 // here is minted by the SAME pure `nmp_nip29::group_demand_at`/
-// `group_records_at` constructors the `nmp::nip29` facade calls -- nothing
-// here is a parallel or simplified re-implementation of the door.
+// `group_records_at` constructors `nmp-nip29`'s own door calls (#1707 moved
+// that door out of `nmp`) -- nothing here is a parallel or simplified
+// re-implementation of the door.
 //
 // Provenance in this engine is not something a test has to dig for: which
 // relay served a row is a field on the row itself (`Row::sources`/
@@ -65,7 +66,7 @@ fn rows_of(effects: &[Effect]) -> Vec<RowDelta> {
 
 /// PROTOCOL-READSTHROUGHTHEONEDOOR-005 (witness half): two DIFFERENT group
 /// ids on the SAME host, proven at the wire rather than only in the minted
-/// `Demand` shape (`nmp::nip29::mod`'s
+/// `Demand` shape (`nmp-nip29`'s own
 /// `two_group_ids_on_one_host_differ_only_in_their_h_branch` already proves
 /// the shape). One host serves BOTH groups' own kind:9 content; a listing
 /// scoped to "photographers" must surface only the "photographers" event
