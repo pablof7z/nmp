@@ -107,7 +107,7 @@ The reducer and the async edge left `crates/nmp` as **two crates**:
 
 | crate | owns | must never depend on | status |
 |---|---|---|---|
-| `nmp-engine` | the deterministic reducer: `EngineCore`, `handle(EngineMsg) → Vec<Effect>` / `tick()`, plus its reducer-coupled satellites (the negentropy FSM it drives turn-by-turn, the publish-queue fact vocabulary, bench hooks) | **`tokio`, `reqwest`, `nmp-nip11`,** the runtime, the facade, any capability crate. Allowed: grammar, store, resolver, router, transport (frame value types), signer, `negentropy`, `nostr` | correct today |
+| `nmp-engine` | the deterministic reducer: `EngineCore`, `handle(EngineMsg) → Vec<Effect>` / `tick()`, plus its reducer-coupled satellites (the negentropy FSM it drives turn-by-turn, the publish-queue fact vocabulary, bench hooks) | **`tokio`, `reqwest`, `nmp-nip11`,** the runtime, the facade, any capability crate. Allowed: grammar, store, resolver, router, transport (nine value and observation types — see the fence), signer, `negentropy`, `nostr` | correct today |
 | `nmp-runtime` | the async edge that interprets effects: `EngineThread`, `Handle`, channels/mailboxes, the AUTH driver, sign-event completion, signer registry, pool bridge, the opaque session payload, NIP-11 service wiring, and driving whichever `AuthorRouteProvider` the application constructed | the facade, any capability crate, **any routing protocol** (`nmp-nip11` is its ONE declared protocol edge; author-route discovery is a contract it drives, not a crate it names) | correct today |
 
 `session.rs` went with the runtime rather than staying in the facade:
@@ -151,21 +151,43 @@ Why two and not one (measured at `64f14255`):
   subsystems it is supposed to be sequencing.
 - Sequencing: the cut lands after #1707 (capabilities out) and after #1606's
   first owner extractions, so the frozen door is the owner-shaped one, not
-  the pre-decomposition one. See open question 1 for what could still
-  reverse the two-crate answer.
+  the pre-decomposition one. What could have reversed the two-crate answer,
+  and did not, is recorded in the "Decided" section.
 
-**The fence, and how it was checked (#1720).** A manifest claim is only worth
-making if someone verified it, and verifying it needs both directions —
-a clean dependency list proves nothing if the source reaches an async runtime
-some other way, and clean source proves nothing about what the next edit may
-add:
+**The fence, and how it was checked (#1720).** State what the fence actually
+proves, because it is narrower than "the reducer cannot do I/O". The manifest
+proves **no *direct* dependency**; it does not prove no *reachable* I/O,
+because `nmp-engine` depends on the whole `nmp-transport` crate, whose own
+manifest names `mio`, `rustls` and `tungstenite`. A reducer file that called
+a blocking `Pool` method would be inside the fence and outside the intent.
+That is exactly why the check runs in **both directions, and why neither half
+is optional**:
 
-- *Manifest:* `crates/nmp-engine/Cargo.toml` names no `tokio`, no
-  `crossbeam-channel`, no `futures-channel`, no `reqwest`. Adding one is a
-  reviewable line in a file whose whole purpose is that list.
-- *Source:* grepping `crates/nmp-engine/src` for
+- *Manifest — proves no direct edge.* `crates/nmp-engine/Cargo.toml` names no
+  `tokio`, no `crossbeam-channel`, no `futures-channel`, no `reqwest`. Adding
+  one is a reviewable line in a file whose whole purpose is that list. This
+  is the half that survives the next edit: it constrains what can be added.
+- *Source — proves no reachable use today.* Grepping
+  `crates/nmp-engine/src` for
   `tokio|crossbeam|futures_channel|std::thread|std::sync::mpsc|std::net|reqwest`
-  returns only the two doc comments that assert the property. Zero real uses.
+  returns exactly two hits, both doc comments asserting the property
+  (`lib.rs:11`, `core/mod.rs:850`). Zero real uses. This is the half that
+  covers what the manifest cannot see — reaching I/O through a dependency
+  that is already legitimately present.
+
+A clean dependency list proves nothing if the source reaches an async runtime
+through an allowed crate, and clean source proves nothing about what the next
+edit may add. Neither statement alone is the fence.
+
+The `nmp-transport` edge is also wider than "frame value types" suggests, and
+worth naming exactly: the reducer imports **nine** symbols — `RelayFrame`,
+`RelayHandle`, `RelayHealth`, `DisconnectReason`, `HandoffResult`,
+`AttemptCorrelation`, `CommittedObservationCandidate`,
+`CommittedObservationHit`, `CommittedObservationPublication`
+(`core/mod.rs:122-126`, `core/auth_core_headless.rs:7`). Several are richer
+domain vocabulary than "frame". None is async and none performs I/O, so the
+property holds — but the phrase was underselling what the edge pulls in, and
+an under-described edge is how the next one gets waved through.
 
 `crossbeam-channel` also left `crates/nmp`'s manifest. `tokio` stays there for
 exactly two facade uses — `Engine::adapter_runtime()`, which hands a protocol
@@ -231,29 +253,58 @@ plus `cargo clippy --workspace --all-targets -- -D warnings` **without**
 `--all-features` as well as with it — dead-code warnings are shape-dependent
 in exactly the same way, and #1724's own first fix produced one.
 
-**The reducer stays one crate.** This is a defended "one thing, merely
-large", not a default: a field-level scan of `EngineCore` shows **15 fields
-touched by both the write-plane files and the read-plane files** (beyond the
-shared `store`/`clock`/`resolver`/`attribution` context: the session
-registry, live request evidence, author-outbox route needs, negotiation
-sessions, branch handles), and three named invariants span the planes —
-write teardown must emit an observation unsubscribe (the coordinate-coverage
-leak guard), store recovery clears write-plane state and rebuilds the
-resolver in one sequence, and the exact-generation session conjunction gates
-both planes' sends. A write/read crate seam would put shared mutable state
-on the wrong side of any line drawn. The reducer's internal decomposition is
-#1606's module-owner work, and #1606's conclusion stands: seventeen module
-owners, zero crates — none of the clusters has an independent dependency,
-consumer, or lifecycle, so crate-ing one would only convert `pub(super)`
-into permanent public API.
+**The reducer remains one crate today — and "today" is part of the claim,
+not a hedge.** Two separate things get run together here, and keeping them
+apart is the whole point of this section.
 
-The evidence for that is the census below, specifically its tail: `store` is
-touched from six files, `clock` from seven, and neither reaches 50%
-concentration; `router` 48%, `resolver` 35%, `attempts` 40%,
-`connected_relays` 42%. Those are not fields awaiting an owner. They are the
-context every plane runs in, and **no line drawn anywhere puts them on one
-side** — which is the same fact as "the reducer is one thing", measured
-rather than asserted.
+*What is measured.* The read-plane/write-plane seam is wrong, and wrong
+structurally rather than by degree: a field-level scan of `EngineCore` shows
+**15 fields touched by both the write-plane files and the read-plane files**
+(beyond the shared `store`/`clock`/`resolver`/`attribution` context: the
+session registry, live request evidence, author-outbox route needs,
+negotiation sessions, branch handles), and three named invariants span the
+planes — write teardown must emit an observation unsubscribe (the
+coordinate-coverage leak guard), store recovery clears write-plane state and
+rebuilds the resolver in one sequence, and the exact-generation session
+conjunction gates both planes' sends. A write/read crate seam would put
+shared mutable state on the wrong side of any line drawn. Four owner-shaped
+candidates were then measured one at a time and each failed for its own
+reason — `SessionRegistry`, `AttemptCorrelations`, `CoordinateCoverage`, and
+`nmp-nip77`, all below.
+
+*What is NOT measured, and must not be inferred from it.* That no package
+seam exists. **Four rejected proposals bound the proposals, not the space.**
+"These four seams are bad, therefore the reducer is permanently one package"
+is a step this document used to take and no longer does; the two owner
+extractions that succeeded at zero visibility cost (`RequestAttempts` #1693,
+`HistorySessions` #1695) are the standing counter-example, because they
+demonstrate the reducer's internals *are* separable — the fact a permanent
+ruling talks past rather than answers.
+
+So the standing position is exactly this, and no more:
+
+- The reducer remains one crate **today**.
+- The current read/write split and the examined owner extractions **do not
+  earn package boundaries**. Crate-ing any of them would convert
+  `pub(super)` into permanent public API and buy no dependency.
+- **#1606 continues through private concrete owners.** That is the work, and
+  it is not waiting on any packaging question.
+- **A future crate requires new evidence**: a stable independent lifecycle,
+  an independent consumer, an independently consumed artifact, or a
+  dependency that must not exist. Absent one of those the answer stays one
+  crate — and going looking for one is legitimate work, not relitigation.
+
+The census below is what the first bullet rests on, specifically its tail:
+`store` is touched from six files, `clock` from seven, and neither reaches
+50% concentration; `router` 48%, `resolver` 35%, `attempts` 40%,
+`connected_relays` 42%. Those are not fields awaiting an owner; they are the
+context every plane runs in, and no line drawn *between the planes* puts
+them on one side. Read that as evidence against the plane seam, which is
+what it measures — not as evidence against every seam, which it does not.
+And read it knowing the instrument's limit: it counts per *file*, and a file
+holds both `impl SomeOwner` and `impl EngineCore`, so it charges root
+orchestration to whatever owner shares the file. "They all need the same four
+things" below is where that is measured properly and comes out differently.
 
 ### The field census — picking the next owner by lookup, not judgement
 
@@ -311,11 +362,41 @@ before it existed:
   cluster. Concentration finds candidates; foreign *callers* and foreign
   *writers* reject them.
 
-**Smaller boundaries are not the same as more crates.** Rust module privacy
-gives the identical compiler enforcement — `E0616` instead of an unresolved
-import — without freezing a churning internal surface as public API. So the
-two questions take different evidence, and conflating them is what produced
-three bad nominations during #1606:
+**Smaller boundaries are not the same as more crates, and they do not enforce
+the same thing.** A module and a manifest buy two different guarantees, and
+this document used to say they were "identical compiler enforcement —
+`E0616` instead of an unresolved import". That is false, and it is the
+sentence that made "a module is as good as a crate" sound proven:
+
+- **State encapsulation — what a module buys.** `E0616` fires when code
+  outside an item's defining module touches a field not visible to that
+  scope. It governs *intra-crate item visibility*. This is real and it is
+  what #1606 is collecting: `RequestAttempts`' maps are private, so `write.rs`
+  cannot corrupt a reverse index, and the invariant becomes enforceable
+  rather than documented.
+- **Dependency isolation — what only a manifest buys.** `E0433` fires when a
+  path names a crate the manifest does not declare. **Cargo dependencies are
+  crate-global: any module may `use` any dependency the package declares, and
+  no amount of module privacy narrows that.**
+
+The demonstration is in this crate, not hypothetical. `hex` is declared once
+in `crates/nmp-engine/Cargo.toml` and used by two modules that share nothing:
+`negentropy/mod.rs` frames NEG-OPEN/NEG-MSG payloads with it, and
+`core/write.rs:4956`/`:4988` encodes and decodes durable `explicit-hex:`
+routing snapshots with it. The manifest comment names both concerns — and
+**that comment is the only thing scoping the dependency.** Module privacy has
+no opinion on it: `write.rs` did not have to ask anyone, and if a third
+module reaches for `hex` tomorrow the comment simply goes stale with nothing
+red. Contrast the package answer: were the NIP-77 FSM its own crate declaring
+`hex`, `write.rs` reaching for it would be `E0433` and would have to add its
+own reviewable manifest line. `libc` shows the same shape from the other end
+— declared for exactly one file's bench counters (`ingest_attribution.rs`),
+and reachable from all 57 files in the crate whenever the feature is on.
+
+So a module owner cannot forbid a dependency, and a crate line cannot make a
+field private that was already reachable within its module. The two questions
+take different evidence, and conflating them is what produced three bad
+nominations during #1606:
 
 - *Does it deserve an owner module?* Count foreign versus own accesses to the
   fields. A cluster the rest of the reducer reaches into more than it reaches
@@ -326,11 +407,20 @@ three bad nominations during #1606:
 Measured against the second test, the three strongest candidates all failed,
 each in a different way, and the failures are the useful part:
 
-- `SessionRegistry` — 12 foreign functions and ~15 public methods before the
-  first line is written, 9 AUTH types in the signatures, `connected_relays`
-  at 8 foreign versus 6 own accesses. The transport/auth re-cut that would
-  fix the shape is ruled out by the exact-generation session conjunction (I3)
-  spanning both planes.
+- `SessionRegistry` — the rejection stands, but **the reason this document
+  used to give was wrong in both directions** (corrected in the cluster table
+  below). It was not a headcount: of ~13 foreign functions, 11 are
+  `EngineMsg` dispatcher entries in `mod.rs::handle()`, which every owner
+  needs and which `RequestAttempts` and `HistorySessions` have too — the
+  genuinely foreign, non-dispatch count is **2**, and "9 AUTH types"
+  reproduces at **6**. `connected_relays` at 8 foreign versus 6 own is exact,
+  and all 8 are reads. The real obstacle is structural and was understated:
+  `auth_transport.rs:1435-1437` mutates resolver and store in one call
+  (`self.resolver.ingest_observed_detailed(&mut self.store, ..)`) inside a
+  function that also reads `slot_to_relay`, and the file emits 29 `Effect::`s
+  directly rather than returning outcomes. The transport/auth re-cut that
+  would fix the shape is in turn ruled out by the exact-generation session
+  conjunction (I3) spanning both planes.
 - `AttemptCorrelations` — 2 fields, 6 accesses, all in one file, and still
   no: `AttemptCorrelationTarget` names `ReceiptId` (core-owned),
   `RelaySessionKey` (`nmp-grammar`) and `PublishQueueLaneKey` (`nmp-store`).
@@ -349,6 +439,216 @@ and `negentropy` is on the reducer's allowed list anyway. The contrast with
 reducer saw only a value `core` defines itself, which is what let the crate
 line remove `reqwest` from the reducer's future manifest. Ask which side owns
 the state before asking whether the cluster is self-contained.
+
+### "They all need the same four things" — the claim, checked
+
+The argument that carried the most weight above is that every cluster needs
+`store`, `clock`, `router` and `resolver`, so a boundary around one prevents
+no dependency and buys nothing. As stated it does not hold, for two reasons
+that have to be separated before any evidence means anything.
+
+- **It counts unlike things alike.** A type appearing in a signature, a
+  read-only fact, a direct mutation, and root orchestration that runs *after*
+  an owner returns an outcome are four different relationships. Only some are
+  coupling at all.
+- **It mostly measures the premise.** Every cluster reaches those four
+  through `EngineCore` because every cluster currently *lives on*
+  `EngineCore`. That is the thing under investigation, not evidence about it.
+
+It was also unfalsifiable as written. This document used to say "#1606's
+conclusion stands: seventeen module owners, zero crates". No enumeration of
+seventeen anything existed — not here, not in #1606 (whose body states the
+enumeration as future work: owner candidates "must be discovered from a fresh
+field-to-transition map"), not in any issue. The number was asserted in #1709
+and then repeated as established fact. Same class of defect as the fail-open
+gates two sections down: a specific-sounding claim with nothing behind it to
+check. The enumeration below is the repair, and it is reproducible — the
+grouping is the census's own rule (fields that move together, by top file).
+
+#### The instrument was the problem
+
+The census counts `self.field` per **file**. A file holds two different
+things: `impl SomeOwner` and `impl EngineCore`. `history_lifecycle.rs` is the
+clean demonstration — `impl HistorySessions` is lines 79–231, `impl
+EngineCore` is 233–1747, and **every one** of that file's 21
+`self.store`/`self.resolver`/`self.clock` accesses is in the second block.
+Counted per file, `HistorySessions` looks like it needs the store and the
+resolver. Counted per `impl`, it needs neither. The apparent coupling was
+root orchestration, attributed to the owner by the measuring instrument.
+
+Re-run at `impl` granularity across every production file in `nmp-engine`:
+
+| | `self.store`/`clock`/`router`/`resolver` | `Effect::` |
+|---|---|---|
+| every `impl EngineCore` block | **203** | 138 |
+| every other `impl` block | **0** | 11 |
+
+Zero. Not "few". The eleven `Effect::` mentions outside `EngineCore` are six
+in a test fixture and five in value types that construct or match one — none
+is an owner emitting. **Every access to the shared four in this crate is made
+by the root.** That is what the extracted owners promise in prose and what
+nothing had checked.
+
+Two honest caveats, because this number is easy to over-read. Only four real
+state owners exist today, so "zero in owner impls" is partly a statement
+about how little has been extracted. And a coarser function-level measure —
+"does a function that mutates this cluster's fields also touch the shared
+four?" — over-reports by construction: applied to the *already extracted*
+`HistorySessions` it still returns 2 of 7, because it counts the root
+functions that drive the owner. Treat that measure as an upper bound, which
+is how the table below uses it.
+
+#### The categories
+
+| category | what it means |
+|---|---|
+| **appears** | the type merely appears in state or a signature — weak coupling |
+| **fact** | read-only fact input; passable as an argument |
+| **mutates** | direct mutation of store/router/resolver — strong coupling |
+| **atomic** | mutation requiring one atomic transaction — potentially decisive |
+| **root** | root orchestration *after* the owner returns an outcome — **not owner coupling** |
+| **cross** | cross-owner private-state access — boundary failure |
+| **package** | independent consumer or build shape — package evidence |
+
+The question asked of each cluster is the sharp one: **after separating
+owner-local state transitions from root orchestration, what does the owner
+itself require?** Not: what does some `EngineCore` call path that touches
+this cluster eventually use.
+
+#### The calibration points — four owners that already exist
+
+| owner | store | clock | router | resolver | evidence |
+|---|---|---|---|---|---|
+| `RequestAttempts` (#1693) | — | **fact** | — | — | `schedule_retry(.., now: Timestamp)`; `request_attempt.rs:251` — "`now` is an argument rather than a read of `EngineCore::clock`: the owner holds no clock, exactly as it holds no store" |
+| `HistorySessions` (#1695) | — | — | — | — | takes no `Timestamp` at all; `history_lifecycle.rs:22` — "no `store`, no `resolver`, no `router`, no `Effect`" |
+| `AttributionState` | — | — | — | — | resolver-clean empirically; its contract text omits "resolver" where the other two name all four, which is a comment to fix, not a difference in behaviour |
+| `RoutingFactStore` | — | — | — | — | pure fact store behind `RoutingFacts` |
+
+**If the blanket claim were true, none of these could exist in its current
+shape.** That is the whole force of the calibration: it is not an argument
+that the claim is unlikely, it is four counter-examples already compiled.
+
+#### The seventeen clusters not yet behind an owner
+
+| # | cluster | store | clock | router | resolver | what actually decides it |
+|---|---|---|---|---|---|---|
+| 1 | **PendingWrites** (`pending`, `intent_receipts`, `event_to_receipts`) | **atomic** | fact | — | root | The in-memory map is a *mirror of a durable transaction*. `write.rs:4427-4502` removes the entry, calls `store.cancel_write`, and **re-inserts on store failure**; `write.rs:5012-5050` does the same around `compensate_write`. 10 of 24 mutating functions call the store. This is I1, and it is real coupling. |
+| 2 | **LaneProjection** | **atomic** | fact | — | root | The lanes *are* store rows; the projection mirrors them. `lane_projection.rs:95` `operation(&mut self.store)`, `:122` `bootstrap_publish_queue_lanes`, `:377` `record_route_revision`. Clock is a deadline (`:218 due: self.clock`, `:232`) — fact-shaped. |
+| 3 | **SessionRegistry** | **atomic** | fact | fact | **atomic** | `auth_transport.rs:1435-1437` — `self.resolver.ingest_observed_detailed(&mut self.store, observed_events)` mutates resolver and store in one call, inside a function that also reads `slot_to_relay`. 29 `Effect::` emissions in the file: it emits directly rather than returning an outcome. |
+| 4 | **RequestEvidence** / request targets | root | fact | — | root | 16 mutating functions; **one** reads `clock`, **zero** call store, router or resolver. The cleanest cluster measured. |
+| 5 | **CoordinateCoverage** | — | — | — | — | 0 of 4 mutating functions touch any of the four. Its rejection was never about the shared four: `release_coordinate_coverage` calls `self.on_unsubscribe(..)` — **cross**, I6 as a call graph. |
+| 6 | **AuthorOutboxRouteNeeds** | — | — | — | — | 0 of 5 mutating functions touch any of the four — but it emits `Effect::AuthorRouteNeedsChanged` from its own method instead of returning an outcome. **Axis 2**, not axis 1. |
+| 7 | **AttemptCorrelations** | root | fact | — | root | Rejected on **appears**, not coupling: `AttemptCorrelationTarget` names `ReceiptId`, `RelaySessionKey` and `PublishQueueLaneKey` — a ~50-line crate whose public type drags three vocabularies. |
+| 8 | **LiveWireOwnership** (9 fields) | root | root | **fact** | root | 4 of 8 mutating functions read `self.router.plan()`; none calls store or resolver. One genuinely foreign reader (`observation.rs`, a membership predicate). |
+| 9 | **NegentropySessions** (NIP-77, 10 fields) | root | fact | fact | root | 22 mutating functions, 2 touch router/clock. Its crate rejection was a **dependency** argument, not a coupling one: `negentropy` is already on the reducer's allowed list, so `nmp-nip77` gains a hop rather than removing an edge. |
+| 10 | **ObservationBranches** (`observations`, `handles`) | root | — | — | **root** | 3 of 7 mutating functions call the resolver — all of them root subscribe/unsubscribe *around* the map update, the `HistorySessions` shape exactly. |
+| 11 | **RequestClaimTransfers** | root | fact | fact | root | Clock is a deadline; router reads are plan facts. |
+| 12 | **RetryScheduler** (`retry_scheduler_blocked`) | root | **fact** | — | root | 8 of 12 mutating functions read `clock`, all to compute a deadline — the exact shape `RequestAttempts` already converted to an argument. This is I8. |
+| 13 | **QuarantinedAuthReceipts** | root | fact | — | root | First read as **atomic**; re-reading it, the shape is get → orchestrate → remove, which is what the extracted owners already do. Recorded as the corrected classification. |
+| 14 | **StalledWriteCensus** | root | fact | — | root | A cached projection; the store calls are the root recomputing it. |
+| 15 | **StoreHealth** (`store_degraded`, `store_failure_epoch`, `store_recovery_requested`) | **fact** *about* the store | — | — | root | Flags describing the store, not mutations of it. The recovery *sequence* (I7) is root orchestration spanning both planes. |
+| 16 | **TransportHealth** | — | fact | fact | — | Barely a cluster: `relay_open_failures` is inserted inside the dispatcher arm in `mod.rs`, so it is already partly root-owned, and consumers read it by reference as pure fact. |
+| 17 | **PlannedReadSessions** | — | — | **fact** | — | One mutating function, one `router.plan()` read. |
+
+#### Two axes, and the argument kept confusing them
+
+Before the verdict, one distinction the original claim collapsed and that
+changes what the evidence means.
+
+- **Axis 1 — shared dependence on `store`/`clock`/`router`/`resolver`.** This
+  is what "they all need the same four things" was about, and it is what the
+  table measures.
+- **Axis 2 — cross-owner private-state access.** One cluster reaching
+  directly into another's maps (`self.pending`, `self.intent_receipts`,
+  `self.wire_owner_counts`) rather than taking the data as an argument; a
+  cluster's mutators defined in one file and called from another with no
+  struct or trait between them; `AuthorOutboxRouteNeeds` emitting
+  `Effect::AuthorRouteNeedsChanged` from its own method instead of returning
+  an outcome. This is widespread.
+
+**Axis 2 was being read as evidence for axis 1, and it is not evidence at
+all.** That clusters reach into each other does not show they belong
+together; it shows the ownership was never modelled. It is a boundary
+failure, and it argues **for** #1606's owner work, not against future
+boundaries. The four extracted owners do none of it — which is the point of
+extracting them.
+
+#### What survives
+
+**The blanket claim does not survive.** Fourteen of the seventeen clusters
+need only read-only facts and root orchestration; two of them (5, 6) touch
+none of the four in any mutating function at all. The two rejections this
+document leaned on hardest were not about the shared four in the first place
+— `CoordinateCoverage` failed on a **cross**-owner teardown call and
+`AttemptCorrelations` on the vocabularies its public type drags. "They all
+need the same four things" described neither, and described the other twelve
+wrongly.
+
+Taken one dependency at a time, the four are not one thing and never were:
+
+- **`store` — real, and only on the write plane.** Write-plane clusters
+  branch on a store result *within the same function* that mutates their own
+  state, not as root orchestration after a return.
+- **`clock` — a dependency of nothing.** Category **fact** in every cluster
+  on both planes: always a passable `Timestamp` used to compute a deadline,
+  never a mid-transition consult. `RequestAttempts` already converted its use
+  to an argument and lost nothing.
+- **`router` — a dependency of nothing.** No write-plane cluster calls it at
+  all. Read-plane use is `plan()`/`admit()`/`admission_incomplete()` fact
+  reads in `query.rs`; `router.compile()` has no production call site in the
+  reducer.
+- **`resolver` — real for two clusters**, not seventeen.
+
+**A much stronger and much narrower claim does survive.** Where the coupling
+is real it is real for a nameable reason, and it is always the same reason:
+**the cluster's job *is* the shared resource.**
+
+- `PendingWrites` and `LaneProjection` are in-memory mirrors of a durable
+  transaction. `nmp-store`'s single redb transaction spanning event and
+  publish-queue tables is the strongest do-not-split in the workspace, and
+  these two clusters are that transaction's reducer-side half. The
+  remove-call-reinsert rollback at `write.rs:4427-4502` is not incidental
+  coupling; it is the mirror being kept honest.
+- `SessionRegistry` genuinely interleaves — one call mutating resolver and
+  store while session fields are in scope.
+
+And one genuine multi-cluster atomic transaction exists:
+`recover_store_after_failure` (`write.rs:275-327`) reopens the store,
+rebuilds the resolver, and clears five other clusters' raw fields in one
+function. That is I7, and it is the sharpest single argument against carving
+the reducer up. **It was challenged during this audit as possibly
+unreachable from production — and it is not:** `nmp-runtime/src/lib.rs:2258`
+calls it from the engine loop under `StoreRecoveryDriver`. A grep scoped to
+`nmp-engine` alone misses the caller, which is exactly how a load-bearing
+claim goes unchecked. It is recorded here verified rather than assumed.
+
+One judgment call is left open rather than decided: `AttemptCorrelations`'
+minting logic is clean and owner-shaped, but its insert and remove sites sit
+inside store-touching, effect-emitting host functions. "The cluster is
+entangled" and "the cluster's callers are entangled" are different diagnoses
+with different fixes, and this is the second. It does not change the ruling.
+
+So the honest sentence about `SessionRegistry` is not the method count this
+document used to give. (For the record those numbers were also wrong: of ~13
+foreign functions, **11 are `EngineMsg` dispatcher entries** in
+`mod.rs::handle()`, which every owner needs and which
+`RequestAttempts`/`HistorySessions` would need too; the genuinely foreign
+non-dispatch count is **2**, and the "9 AUTH types" figure reproduces at
+**6**. `connected_relays` at 8 foreign versus 6 own is confirmed exactly, and
+all 8 are reads.) The honest sentence is: **`SessionRegistry` cannot be
+extracted in the shape the other owners use until the frame-ingestion logic
+that mutates store and resolver is separated from the pure session
+bookkeeping** — a structural obstacle, not a headcount.
+
+**What this changes, and what it does not.** It does not justify one new
+extraction, and none is proposed here; see open question 3. What it changes is
+what may be *inferred*: "no cluster earns a boundary because they all need the
+same four things" was doing work it had not earned, and with it gone, the
+reason no crate is justified today is the plain one — **no cluster has yet
+been shown to have an independent lifecycle, an independent consumer, an
+independently consumed artifact, or a dependency that must not exist.** That
+is a statement about evidence not yet produced, which is falsifiable, rather
+than a claim about a space known to be empty, which was not.
 
 ### What crosses a boundary
 
@@ -378,10 +678,13 @@ in each of them; the fourth by measuring #1720's real cost.
 
 A crate line earns itself when the boundary needs *manifest*-level proof: a
 dependency that must not exist. That is exactly why reducer-versus-runtime is
-a real crate line (zero `tokio`, zero threads, zero channels under `core/` —
-the cut makes the reducer's purity a build error) and why `nmp-nip11` is one
-(it is the only package in the engine's tree naming `reqwest`). Neither
-property is available to any cluster inside the reducer.
+a real crate line (no direct `tokio`, no threads, no channels under `core/` —
+the cut makes a whole class of impurity a build error) and why `nmp-nip11` is
+one (it is the only package in the engine's tree naming `reqwest`). **No
+cluster inside the reducer has yet been shown to have either property** —
+which is a statement about what has been looked for, not a proof that none
+does. Producing that proof for some cluster is exactly the new evidence open
+question 3 asks for.
 
 ### A guard whose failure mode is fail-open is probably untested
 
@@ -628,28 +931,10 @@ has read the wrong number.
 
 What actually happened is that ~66,000 lines moved to packages where their
 dependencies could be constrained. `nmp-engine` is still ~27,000 production
-lines built around one struct that eleven files write to, and no further
-crate line addresses that — four candidates were measured and rejected
-precisely because a crate boundary is the wrong instrument for it.
-
-What shrinks the reducer is finishing the owner program (#1606: module owners
-with private fields, so the compiler finds every violating access, including
-in tests, at zero visibility cost) and pushing state-machine transitions onto
-the value types — `PendingWrite` owning its own transitions rather than
-`write.rs` performing them on it. Neither is a packaging change.
-
-### What the crate work did and did not fix
-
-**The crate cut fixed coupling and provability. It did not fix size, and size
-was never going to be fixed by moving files between crates.** Anyone reading
-measure (3)'s drop from 73,598 to 7,254 and concluding the hard part is done
-has read the wrong number.
-
-What actually happened is that ~66,000 lines moved to packages where their
-dependencies could be constrained. `nmp-engine` is still ~27,000 production
-lines built around one struct that eleven files write to, and no further
-crate line addresses that — four candidates were measured and rejected
-precisely because a crate boundary is the wrong instrument for it.
+lines built around one struct that eleven files write to, and no crate line
+yet *proposed* addresses that — four candidates were measured and each
+rejected. That bounds the proposals, not the space, and it is not a reason to
+wait: shrinking the reducer was never going to be a packaging change anyway.
 
 What shrinks the reducer is finishing the owner program (#1606: module owners
 with private fields, so the compiler finds every violating access, including
@@ -685,12 +970,15 @@ the value types — `PendingWrite` owning its own transitions rather than
 - No backend abstraction over the store without a real second backend
   (#1495), and no invented seams: a trait with one production implementor
   and no cycle to break is dead surface.
-- **The reducer/runtime cut is two crates, and it is done (#1720).** Open
-  question 1 asked what would reverse it — a door still churning fast enough
-  that the boundary forces cross-crate rework catching no drift. It did not:
-  the cut cost 96 compiler-chosen widenings once, and the fence is verified
-  in both the manifest and the source. Reopening needs new facts about
-  churn, not a fresh opinion about size.
+- **The reducer/runtime cut is two crates, and it is done (#1720).** A
+  former open question asked what would reverse it — a door still churning
+  fast enough that the boundary forces cross-crate rework catching no drift.
+  It did not: the cut cost 96 compiler-chosen widenings once, and the fence
+  is verified in both the manifest and the source. Reopening needs new facts
+  about churn, not a fresh opinion about size.
+  **This settles one boundary, not every boundary.** The evidence here is
+  about the line between `nmp-engine` and `nmp-runtime`; it says nothing
+  about lines *inside* `nmp-engine`, which are open question 3.
 - **`RelayInformationCapabilityEvidence` is reducer-side** with the
   snapshot→evidence projection in `nmp-runtime` (#1716). Former open
   question 2; feasible as believed, with one correction the attempt found —
@@ -715,6 +1003,21 @@ Marked open on purpose; do not infer answers.
    decision. When a second NIP-51 family arrives (bookmarks), decide
    whether an `nmp-nip51` crate owns the list schemas — do not decide it
    by precedent-matching either way.
+3. **Whether any package boundary inside `nmp-engine` ever earns itself.**
+   Open, and deliberately moved back here from "Decided" (#1739). Today's
+   answer is no, on today's evidence: the plane seam is refuted by shared
+   mutable state, and four owner-shaped candidates were each measured and
+   rejected. But that is a statement about four proposals, and the cluster
+   table above shows the "they all need the same four things" argument does
+   not hold in the blanket form it was asserted in. **The reopening
+   condition is a specific fact, not a fresh opinion about size**: an
+   independent lifecycle that outlives or precedes the reducer's, a consumer
+   that wants the cluster without the reducer, an independently consumed
+   artifact, or a dependency the cluster must be forbidden — the last being
+   the only one a manifest can enforce and the only one `nmp-nip11` and the
+   engine/runtime cut actually had. Until one of those is produced, the
+   answer is one crate and #1606's private owners are the whole programme.
+   Do not read this question as an invitation; read it as the honest state.
 
 ## Related epics
 
@@ -725,6 +1028,9 @@ Marked open on purpose; do not infer answers.
   document applies).
 - #1627 — records the boundary criteria and rejects metric-driven
   decomposition; this document is bound by it.
+- #1739 — the correction that produced the cluster table, the two-guarantees
+  wording, and open question 3: this document had ruled out a future reducer
+  crate on evidence that only rejected four specific seams.
 - #1721 — revisit the 20 public struct fields the engine/runtime cut froze.
   Not a defect; a public field is forever in a way a method is not, and five
   structs destructured across a package boundary is a shape worth a second
