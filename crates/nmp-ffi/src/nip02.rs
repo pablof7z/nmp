@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use crate::convert::FfiError;
-use nmp::nip02::{
+use nmp_nip02::{
     AsyncFollowObservation, FollowActionFailure, FollowAvailability, FollowRelationship,
     FollowSnapshot,
 };
@@ -42,7 +42,7 @@ pub struct FfiFollowSnapshot {
 
 /// Why a typed follow/unfollow action was refused before ordinary receipt
 /// custody. `InvalidTarget` is the one refusal this boundary adds to
-/// [`nmp::nip02::FollowActionFailure`]: `target` crosses FFI as a
+/// [`nmp_nip02::FollowActionFailure`]: `target` crosses FFI as a
 /// caller-typed hex string, which the Rust-native API never has to parse.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum FfiFollowActionError {

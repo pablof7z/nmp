@@ -1,24 +1,24 @@
 //! The NIP-02 following observation and typed follow/unfollow action.
 //!
-//! Lives beside [`super::writes`] for the same reason: both need the engine
-//! itself (`Arc<Engine>`, `WriteIntent`/receipt custody), which
-//! `nmp-nip02`'s pure reactive-query vocabulary cannot depend on without
-//! reversing the package graph (#1143).
+//! Moved back here from `nmp` by #1707, beside [`crate::writes`] for the
+//! same reason: both need `nmp`'s own engine surface (`Arc<Engine>`,
+//! `WriteIntent`/receipt custody), which is exactly the ordinary
+//! capability-crate-depends-on-`nmp` shape #1707 restores.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use nmp_nip02::current_account_demand;
+use crate::demand::current_account_demand;
 use nostr::PublicKey;
 
-use crate::{
+use nmp::{
     AcquisitionEvidence, Engine, EventId, LiveQuery, ObservationCancel, ReceiptStream, Row,
     RowDelta, ShortfallFact, SourceStatus,
 };
 
-use super::writes::{follows, FollowChange, FollowWrites};
+use crate::writes::{follows, FollowChange, FollowWrites};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FollowRelationship {
@@ -52,8 +52,8 @@ pub struct FollowSnapshot {
 
 /// Why a typed follow/unfollow action was refused before ordinary receipt
 /// custody. `EngineClosed` and `PublishRefused` name exactly what
-/// [`crate::Engine::publish`] itself can return for this call
-/// ([`crate::EngineError`] has no other reachable variant here); there is no
+/// [`nmp::Engine::publish`] itself can return for this call
+/// ([`nmp::EngineError`] has no other reachable variant here); there is no
 /// separate follow-only fiction standing in for a receipt that failed to
 /// materialize for no named reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -304,7 +304,7 @@ impl Drop for FollowObservation {
 pub fn observe_following(
     engine: Arc<Engine>,
     target: PublicKey,
-) -> Result<FollowObservation, crate::EngineError> {
+) -> Result<FollowObservation, nmp::EngineError> {
     let runtime = engine.adapter_runtime()?;
     let subscription = engine.observe_async(LiveQuery::single(current_account_demand()), None)?;
     let cancel = subscription.cancel_handle();
@@ -333,7 +333,7 @@ pub fn observe_following(
 /// projection is a complete self-contained snapshot, so a lost/redelivered
 /// frame under per-call cancellation is benign.
 pub struct AsyncFollowObservation {
-    subscription: crate::AsyncSubscription,
+    subscription: nmp::AsyncSubscription,
     engine: Arc<Engine>,
     target: PublicKey,
     accumulator: Mutex<Accumulator>,
@@ -341,8 +341,8 @@ pub struct AsyncFollowObservation {
 
 impl AsyncFollowObservation {
     /// Await the next relationship snapshot, or `None` once the underlying
-    /// demand is withdrawn. [`crate::ConcurrentNext`] on an overlapping call.
-    pub async fn next(&self) -> Result<Option<FollowSnapshot>, crate::ConcurrentNext> {
+    /// demand is withdrawn. [`nmp::ConcurrentNext`] on an overlapping call.
+    pub async fn next(&self) -> Result<Option<FollowSnapshot>, nmp::ConcurrentNext> {
         match self.subscription.next().await? {
             Some(frame) => {
                 let mut accumulator = self.accumulator.lock().unwrap();
@@ -379,7 +379,7 @@ impl AsyncFollowObservation {
 pub fn observe_following_async(
     engine: Arc<Engine>,
     target: PublicKey,
-) -> Result<AsyncFollowObservation, crate::EngineError> {
+) -> Result<AsyncFollowObservation, nmp::EngineError> {
     let subscription = engine.observe_async(LiveQuery::single(current_account_demand()), None)?;
     Ok(AsyncFollowObservation {
         subscription,
@@ -411,7 +411,7 @@ pub fn set_following(
     };
     let intent = writes.intent(author, target, change);
     engine.publish(intent).map_err(|error| match error {
-        crate::EngineError::EngineClosed => FollowActionFailure::EngineClosed,
+        nmp::EngineError::EngineClosed => FollowActionFailure::EngineClosed,
         other => FollowActionFailure::PublishRefused {
             reason: other.to_string(),
         },
@@ -421,17 +421,17 @@ pub fn set_following(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AccessContext, EngineConfig, RelayUrl, SigningState, SourceEvidence, WriteFact};
+    use nmp::{AccessContext, EngineConfig, RelayUrl, SigningState, SourceEvidence, WriteFact};
     use nostr::Keys;
 
     #[test]
     fn signed_out_action_fails_typed_without_a_write() {
         let engine = Engine::new_with_capabilities(
             EngineConfig::default(),
-            vec![crate::nip02::follow_capability()],
+            vec![crate::follow_capability()],
         )
         .unwrap();
-        let writes = crate::nip02::follow_writes();
+        let writes = crate::follow_writes();
         let failure = set_following(
             &engine,
             &writes,
@@ -448,14 +448,14 @@ mod tests {
     fn logged_in_without_sources_accepts_the_capability_default() {
         let engine = Engine::new_with_capabilities(
             EngineConfig::default(),
-            vec![crate::nip02::follow_capability()],
+            vec![crate::follow_capability()],
         )
         .unwrap();
         let author = Keys::generate();
         engine
             .add_private_key_account(&author.secret_key().to_secret_bytes(), true)
             .unwrap();
-        let writes = crate::nip02::follow_writes();
+        let writes = crate::follow_writes();
         let receipt = set_following(
             &engine,
             &writes,
@@ -475,14 +475,14 @@ mod tests {
     fn account_switch_after_action_cannot_retarget_the_frozen_author() {
         let engine = Engine::new_with_capabilities(
             EngineConfig::default(),
-            vec![crate::nip02::follow_capability()],
+            vec![crate::follow_capability()],
         )
         .unwrap();
         let author = Keys::generate().public_key();
         let later_account = Keys::generate().public_key();
         engine.add_public_key_account(author, true).unwrap();
         engine.add_public_key_account(later_account, false).unwrap();
-        let writes = crate::nip02::follow_writes();
+        let writes = crate::follow_writes();
 
         let receipt = set_following(
             &engine,
