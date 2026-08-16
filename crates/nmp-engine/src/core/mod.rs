@@ -1182,7 +1182,11 @@ pub struct CoreOwnershipCensus {
     pub router_diagnostic_dropped_merge_rules: usize,
 }
 
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(any(
+    test,
+    feature = "bench-instrumentation",
+    feature = "test-instrumentation"
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreObservationOwnershipCensus {
     pub handles: usize,
@@ -2679,7 +2683,7 @@ impl EngineCore {
                 .filter_map(ScopeAcquisition::opening_evidence)
                 .map(|evidence| evidence.sources.len())
                 .sum::<usize>()
-                + history.freshness_source_edges,
+                + self.history.freshness_source_edges(),
             request_target_handles: self.request_targets_by_handle.len(),
             request_target_demand_keys: self.request_targets_by_demand.len(),
             request_target_edges: self
@@ -2882,7 +2886,11 @@ impl EngineCore {
         }
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(any(
+        test,
+        feature = "bench-instrumentation",
+        feature = "test-instrumentation"
+    ))]
     pub fn observation_ownership_census(&self) -> CoreObservationOwnershipCensus {
         let history = self.history.counts();
         CoreObservationOwnershipCensus {

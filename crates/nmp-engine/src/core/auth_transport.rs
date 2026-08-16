@@ -1288,7 +1288,11 @@ impl EngineCore {
     // ---- inbound relay frame: EVENT/EOSE parsed here (D/E own OK/CLOSED/
     // NOTICE/AUTH/COUNT/NEG-*) --------------------------------------------
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(any(
+        test,
+        feature = "bench-instrumentation",
+        feature = "test-instrumentation"
+    ))]
     pub fn ingest_relay_events(
         &mut self,
         events: Vec<(SignedEvent, RelayObserved)>,
