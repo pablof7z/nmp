@@ -148,6 +148,13 @@ impl CompletedAttribution {
 /// All coverage-attribution bookkeeping `EngineCore` owns. Keyed by `SubId`
 /// (which already embeds the relay — `SubId(RelayUrl, SkeletonHash, AccessContext)`), so a
 /// FIFO lookup is also implicitly relay-scoped.
+///
+/// It holds state and the invariants over that state, and nothing else: no
+/// `store`, no `router`, no `resolver`, no `Effect`. Anything that has to
+/// emit is orchestration and stays on `EngineCore`. `RequestAttempts` and
+/// `HistorySessions` restate this same contract; it is written here because
+/// `request_attempt.rs` cites "the `AttributionState` contract, verbatim"
+/// and until now there was no verbatim text to cite (#1739).
 #[derive(Debug, Default)]
 pub(crate) struct AttributionState {
     next_send_id: u64,
