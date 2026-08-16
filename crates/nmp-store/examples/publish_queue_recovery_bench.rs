@@ -290,8 +290,6 @@ fn populate(path: &Path, intents: usize, relays_per_intent: usize) -> BenchResul
             .accept_write(AcceptWrite {
                 payload: AcceptWritePayload::Event {
                     frozen: Box::new(frozen_event(&signed)),
-                    replaceable_base: None,
-                    monotonic_stamp: false,
                     routing: "fixed-representative-fixture".into(),
                     sig_state: IntentSigState::Pending,
                 },

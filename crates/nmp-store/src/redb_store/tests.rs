@@ -463,8 +463,6 @@ fn accepted_signed(
         .accept_write(AcceptWrite {
             payload: crate::AcceptWritePayload::Event {
                 frozen: Box::new(frozen),
-                replaceable_base: None,
-                monotonic_stamp: false,
                 routing: "range-proof".into(),
                 sig_state: IntentSigState::Pending,
             },
@@ -506,8 +504,6 @@ fn accepted_pending(
         .accept_write(AcceptWrite {
             payload: crate::AcceptWritePayload::Event {
                 frozen: Box::new(frozen),
-                replaceable_base: None,
-                monotonic_stamp: false,
                 routing: "compensation-proof".into(),
                 sig_state: IntentSigState::Pending,
             },
@@ -1964,8 +1960,6 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
         .accept_write(AcceptWrite {
             payload: crate::AcceptWritePayload::Event {
                 frozen: Box::new(frozen),
-                replaceable_base: None,
-                monotonic_stamp: false,
                 routing: "integrity".into(),
                 sig_state: IntentSigState::Pending,
             },

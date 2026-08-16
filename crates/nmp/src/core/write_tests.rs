@@ -7,7 +7,7 @@ mod receipt_allocator_tests {
     use super::*;
 
     use nmp_router_testkit::FixtureRoutingFacts;
-    use nmp_store::{PersistenceFault, RedbStore, RefuseReason};
+    use nmp_store::{PersistenceFault, RedbStore};
     use nostr::{EventBuilder, Keys, Kind};
 
     /// The same frozen note, `p`-tagging the given recipients — the shape
@@ -119,91 +119,6 @@ mod receipt_allocator_tests {
             Some(nmp_store::PersistenceFault::Io),
             "the same typed branch must still arm reconstruction for I/O"
         );
-    }
-
-    #[test]
-    fn stale_replaceable_edit_is_refused_into_custody_keeping_both_event_ids() {
-        use nmp_store::RelayObserved;
-        use nostr::EventBuilder;
-
-        let keys = Keys::generate();
-        let relay = RelayUrl::parse("wss://source.example").unwrap();
-        let base = EventBuilder::new(Kind::ContactList, "base")
-            .custom_created_at(Timestamp::from(10u64))
-            .sign_with_keys(&keys)
-            .unwrap();
-        let concurrent = EventBuilder::new(Kind::ContactList, "concurrent")
-            .custom_created_at(Timestamp::from(20u64))
-            .sign_with_keys(&keys)
-            .unwrap();
-        let mut store = RedbStore::temporary().expect("temporary Redb store");
-        store
-            .insert(
-                base.clone(),
-                RelayObserved::new(relay.clone(), Timestamp::from(10u64)),
-            )
-            .unwrap();
-        store
-            .insert(
-                concurrent.clone(),
-                RelayObserved::new(relay, Timestamp::from(20u64)),
-            )
-            .unwrap();
-
-        let mut core = EngineCore::new(store, 10);
-        core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
-        let effects = core.handle(EngineMsg::Publish(WriteIntent {
-            payload: WritePayload::ReplaceableEdit {
-                builder: nmp_grammar::EventBuilder {
-                    kind: Kind::ContactList,
-                    tags: (vec![]).into_iter().collect(),
-                    content: ("my edit").into(),
-                    created_at: Some(Timestamp::from(30u64)),
-                },
-                expected_base: Some(base.id),
-            },
-            routing: WriteRouting::Auto,
-            identity: Identity::Active,
-            correlation: None,
-        }));
-
-        // CUSTODY, not a refused call: the store was working and said no,
-        // so the write becomes a permanently-failed queue entry the app can
-        // read back. Both event ids survive verbatim -- that pair is what
-        // lets an app fetch `actual`, reapply the change and resubmit
-        // without ever troubling the user.
-        let receipt = effects
-            .iter()
-            .find_map(|effect| match effect {
-                Effect::WriteAccepted(id, _) => Some(*id),
-                _ => None,
-            })
-            .expect("a store-refused write is still taken into custody");
-        let expected = WriteFact::Outcome(WriteOutcome::Refused(
-            RefuseReason::ReplaceableBaseChanged {
-                expected: Some(base.id),
-                actual: Some(concurrent.id),
-            },
-        ));
-        assert!(
-            effects.iter().any(|effect| matches!(
-                effect,
-                Effect::EmitReceipt(id, status) if *id == receipt && *status == expected
-            )),
-            "the refusal must name BOTH event ids: {effects:?}"
-        );
-        assert!(
-            !effects
-                .iter()
-                .any(|effect| matches!(effect, Effect::PublishFailed(_))),
-            "a stale base is never a refused call: {effects:?}"
-        );
-        assert!(core.pending.is_empty());
-        assert!(core
-            .store
-            .recover_publish_queue()
-            .expect("recover delivery")
-            .is_empty());
     }
 
     #[test]

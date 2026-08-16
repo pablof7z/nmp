@@ -43,8 +43,6 @@ fn accept(frozen: Event, keys: &Keys, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
         payload: AcceptWritePayload::Event {
             frozen: Box::new(frozen),
-            replaceable_base: None,
-            monotonic_stamp: false,
             routing: "lane-contract".into(),
             sig_state: IntentSigState::Pending,
         },

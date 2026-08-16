@@ -354,30 +354,6 @@ impl VerifiedSignature {
     }
 }
 
-/// Re-freeze `frozen` at `created_at`, re-deriving its NIP-01 id over the
-/// stamped body. Used by the acceptance transaction to apply
-/// [`AcceptWrite::monotonic_stamp`] against the row it is CAS-ing; the
-/// signature stays [`sentinel_signature`] because the body is still
-/// pre-signature at this point (which is precisely why moving the stamp
-/// here is possible at all).
-pub(crate) fn restamped(frozen: &Event, created_at: Timestamp) -> Event {
-    Event::new(
-        EventId::new(
-            &frozen.pubkey,
-            &created_at,
-            &frozen.kind,
-            &frozen.tags,
-            &frozen.content,
-        ),
-        frozen.pubkey,
-        created_at,
-        frozen.kind,
-        frozen.tags.clone(),
-        frozen.content.clone(),
-        frozen.sig,
-    )
-}
-
 /// A stored event plus its provenance. What `query` returns — every caller
 /// gets provenance for free, never a bare `Event` (ledger #5's falsifier:
 /// no `query` path returns an event without its provenance populated).
@@ -503,18 +479,6 @@ pub enum RefuseReason {
     /// the same author (retraction-and-negative-deltas.md §2, §7:
     /// tombstone retention is PERMANENT — never GC-claimed).
     Tombstoned,
-    /// A whole-value replacement was composed from `expected`, but the
-    /// canonical winner at that exact replaceable/addressable coordinate
-    /// was `actual` when the store's atomic acceptance transaction ran.
-    /// Nothing was stored or journaled and no ids were allocated.
-    ReplaceableBaseChanged {
-        expected: Option<EventId>,
-        actual: Option<EventId>,
-    },
-    /// A caller attached a replaceable-base precondition to an event kind
-    /// that has no replaceable/addressable coordinate. Fail closed instead
-    /// of silently accepting an unchecked write.
-    ReplaceableBaseOnRegularEvent,
 }
 
 /// Why a [`RedbStore::remove`] call is removing a row. Exists so
@@ -597,8 +561,6 @@ pub struct AcceptWrite {
 pub enum AcceptWritePayload {
     Event {
         frozen: Box<Event>,
-        replaceable_base: Option<Option<EventId>>,
-        monotonic_stamp: bool,
         routing: String,
         sig_state: IntentSigState,
     },
@@ -765,18 +727,8 @@ impl AcceptOutcome {
 
     /// The canonical row this acceptance is about, when it produced one.
     ///
-    /// Its `event` is the body the store actually froze — which is not
-    /// always the body the caller handed in: an [`AcceptWrite`] with
-    /// `monotonic_stamp` set may have had its `created_at` moved forward
-    /// inside the transaction, re-deriving the id. A caller that needs the
-    /// frozen body (to hand it to a signer, to name it on a receipt) must
-    /// read it from here rather than from what it sent.
-    ///
     /// `None` for `Stale` — which lost its address race and owns no row —
-    /// and for `Refused`, which journaled nothing. Neither is reachable for
-    /// a `monotonic_stamp` write whose precondition passed: the stamp is
-    /// strictly greater than the winner it was compared against, so the
-    /// candidate cannot then lose to that same winner.
+    /// and for `Refused`, which journaled nothing.
     pub fn accepted_row(&self) -> Option<&StoredEvent> {
         match self {
             AcceptOutcome::Inserted { row, .. }
@@ -1015,10 +967,7 @@ pub enum ReceiptState {
     /// signer request or a relay write, only this one retained receipt.
     ///
     /// The write is still in CUSTODY: the app reads the reason back through
-    /// reattachment or enumeration, and a
-    /// [`RefuseReason::ReplaceableBaseChanged`] carries both event ids so
-    /// the app can fetch what is actually there, reapply the user's change
-    /// and resubmit without ever troubling them.
+    /// reattachment or enumeration.
     Refused(RefuseReason),
 }
 

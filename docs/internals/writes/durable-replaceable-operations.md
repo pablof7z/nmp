@@ -12,7 +12,6 @@ owns:
   - the body-complete custody boundary for configured capability materializers
 related:
   - docs/design/durable-write-signing-and-retry.md
-  - docs/internals/writes/payload-and-replaceable-edits.md
   - docs/internals/writes/publish-queue.md
   - docs/internals/routing/auto-and-explicit.md
   - docs/internals/routing/outbox.md
@@ -1929,7 +1928,7 @@ Today the payload is one of:
 
 ```text
 Event(builder)
-ReplaceableEdit { builder, expected_base }
+ReplaceableOperation(operation)
 Signed(event)
 ```
 

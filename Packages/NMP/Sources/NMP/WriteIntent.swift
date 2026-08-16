@@ -374,21 +374,11 @@ public enum NotSentReason: Sendable, Hashable {
 public enum RefuseReason: Sendable, Hashable {
     case alreadyExpired
     case tombstoned
-    case replaceableBaseOnRegularEvent
-    /// A whole-value replacement lost its compare-and-swap.
-    ///
-    /// BOTH ids are kept, and that is what makes the failure recoverable
-    /// without the user: fetch `actual`, reapply the change and resubmit
-    /// silently. Reduced to a string you could only tell them to redo it.
-    case replaceableBaseChanged(expected: String?, actual: String?)
 
     init(_ ffi: FfiRefuseReason) {
         switch ffi {
         case .alreadyExpired: self = .alreadyExpired
         case .tombstoned: self = .tombstoned
-        case .replaceableBaseOnRegularEvent: self = .replaceableBaseOnRegularEvent
-        case .replaceableBaseChanged(let expected, let actual):
-            self = .replaceableBaseChanged(expected: expected, actual: actual)
         }
     }
 }

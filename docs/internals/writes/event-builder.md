@@ -13,7 +13,6 @@ owns:
   - the death of the deterministic-bytes requirement
 related:
   - docs/internals/writes/identity.md
-  - docs/internals/writes/payload-and-replaceable-edits.md
   - docs/internals/routing/auto-and-explicit.md
   - docs/internals/routing/resolution-lifecycle.md
   - docs/internals/routing/knowledge-and-settlement.md
@@ -143,8 +142,7 @@ truth for the identity to disagree with. #47's "the engine never restamps a
 draft" becomes "there is nothing to restamp" — which is strictly stronger than
 the check it replaces, because a class of writes that previously *failed
 correctly* now cannot be constructed at all. (The check itself survives on the
-one payload that still states an author; see
-`writes/identity.md` §4 and `writes/payload-and-replaceable-edits.md`.)
+one payload that still states an author; see `writes/identity.md` §4.)
 
 The same structural argument covers `created_at`: absent-then-stamped is fine;
 present-then-changed stays impossible because the engine fills the field only
@@ -284,8 +282,7 @@ Two consequences:
   anything, including `created_at` — §2), or the pre-signed path has (`id`,
   `sig`). Reproducible composition was the residue, and it is now nothing. So
   "the cost of folding" `Unsigned` into the builder is, in Pablo's words,
-  non-existent, and `WritePayload` drops to three variants — see
-  `writes/payload-and-replaceable-edits.md`.
+  non-existent.
 
 ## 7. What to watch when building this — DESIGNED
 
@@ -294,10 +291,7 @@ Two consequences:
   composing intents must not gain an engine dependency). Schema-only composers
   return `EventBuilder`; composers that own write policy return `WriteIntent`.
 - **Stamping is acceptance-time, not compose-time**, and it is the same
-  acceptance transaction that resolves identity (`writes/identity.md`) and
-  checks replaceable preconditions
-  (`writes/payload-and-replaceable-edits.md` — where acceptance-time stamping
-  is what makes replaceable edits *better*, not merely equivalent).
+  acceptance transaction that resolves identity (`writes/identity.md`).
 - **Do not add validation to the builder.** Ruling: it "should be able to
   provide ANYTHING." Guardrails belong in composers and diagnostics, not as
   refusals in the one universal type. The failure mode is well-intentioned

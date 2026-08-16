@@ -200,8 +200,6 @@ fn attempt_durable_write(store: &mut RedbStore, created_at: u64) -> Result<(), P
         .accept_write(AcceptWrite {
             payload: crate::AcceptWritePayload::Event {
                 frozen: Box::new(frozen),
-                replaceable_base: None,
-                monotonic_stamp: false,
                 routing: "durability-proof".into(),
                 sig_state: IntentSigState::Pending,
             },
@@ -223,8 +221,6 @@ fn attempt_correlated_write(
     store.accept_write(AcceptWrite {
         payload: crate::AcceptWritePayload::Event {
             frozen: Box::new(frozen),
-            replaceable_base: None,
-            monotonic_stamp: false,
             routing: "durability-proof".into(),
             sig_state: IntentSigState::Pending,
         },
@@ -326,8 +322,6 @@ fn reopen_replaces_only_the_database_generation_and_preserves_durable_identity()
         .accept_write(AcceptWrite {
             payload: crate::AcceptWritePayload::Event {
                 frozen: Box::new(frozen.clone()),
-                replaceable_base: None,
-                monotonic_stamp: false,
                 routing: "reopen-proof".into(),
                 sig_state: IntentSigState::Pending,
             },

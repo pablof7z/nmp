@@ -713,42 +713,10 @@ fn decode_coordinate(
     Ok(coordinate)
 }
 
-fn encode_optional_event_id(encoder: &mut Encoder, value: Option<EventId>) {
-    match value {
-        None => encoder.u8(0),
-        Some(id) => {
-            encoder.u8(1);
-            encoder.fixed(id.as_bytes());
-        }
-    }
-}
-
-fn decode_optional_event_id(
-    decoder: &mut Decoder<'_>,
-) -> Result<Option<EventId>, PublishQueueCodecError> {
-    match decoder.u8()? {
-        0 => Ok(None),
-        1 => Ok(Some(decoder.event_id()?)),
-        other => Err(PublishQueueCodecError::InvalidTag(
-            "optional event id",
-            other,
-        )),
-    }
-}
-
 fn encode_refuse_reason(encoder: &mut Encoder, reason: RefuseReason) {
     match reason {
         RefuseReason::AlreadyExpired => encoder.u8(0),
         RefuseReason::Tombstoned => encoder.u8(1),
-        RefuseReason::ReplaceableBaseOnRegularEvent => encoder.u8(2),
-        // The two ids are the whole point of retaining this reason: they let
-        // an app fetch what is actually at the coordinate, reapply the
-        // user's change and resubmit without troubling them.
-        RefuseReason::ReplaceableBaseChanged { expected, actual } => {
-            encoder.u8(3);
-            encode_optional_event_id(encoder, expected);
-            encode_optional_event_id(encoder, actual);
-        }
     }
 }
 
@@ -756,12 +724,6 @@ fn decode_refuse_reason(decoder: &mut Decoder<'_>) -> Result<RefuseReason, Publi
     match decoder.u8()? {
         0 => Ok(RefuseReason::AlreadyExpired),
         1 => Ok(RefuseReason::Tombstoned),
-        2 => Ok(RefuseReason::ReplaceableBaseOnRegularEvent),
-        3 => {
-            let expected = decode_optional_event_id(decoder)?;
-            let actual = decode_optional_event_id(decoder)?;
-            Ok(RefuseReason::ReplaceableBaseChanged { expected, actual })
-        }
         other => Err(PublishQueueCodecError::InvalidTag("refuse reason", other)),
     }
 }

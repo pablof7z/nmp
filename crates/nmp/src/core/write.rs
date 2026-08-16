@@ -3620,26 +3620,8 @@ impl EngineCore {
             payload => payload,
         };
 
-        let replaceable_base = match &payload {
-            WritePayload::ReplaceableEdit { expected_base, .. } => Some(*expected_base),
-            WritePayload::Event(_) | WritePayload::Signed(_) => None,
-            WritePayload::ReplaceableOperation(_) => unreachable!("handled above"),
-        };
-        // The store owns this write's timestamp exactly when the app left
-        // it unsaid on an edit that names a base: it is the only component
-        // that can read the winner and the precondition in one breath. A
-        // caller-stated `created_at` is never moved, on any payload —
-        // including one that regresses below the winner and loses the
-        // replacement race, which stays observable rather than forbidden.
-        let monotonic_stamp = matches!(
-            &payload,
-            WritePayload::ReplaceableEdit { builder, .. } if builder.created_at.is_none()
-        );
-
         let payload_kind = match &payload {
-            WritePayload::Event(builder) | WritePayload::ReplaceableEdit { builder, .. } => {
-                builder.kind
-            }
+            WritePayload::Event(builder) => builder.kind,
             WritePayload::Signed(event) => event.kind,
             WritePayload::ReplaceableOperation(_) => unreachable!("handled above"),
         };
@@ -3654,7 +3636,7 @@ impl EngineCore {
             // there is no second source of truth for it to disagree with,
             // and the mismatch class #47 fails closed on is unrepresentable
             // here rather than merely refused.
-            WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => match identity {
+            WritePayload::Event(_) => match identity {
                 // Explicit per-write consent to publish as `pk`. The current
                 // account is irrelevant (even logged out): acceptance pins
                 // `pk` and downstream signing targets it forever.
@@ -3706,16 +3688,12 @@ impl EngineCore {
             let accept = AcceptWrite {
                 payload: AcceptWritePayload::Event {
                     frozen: Box::new(frozen.clone()),
-                    replaceable_base,
-                    monotonic_stamp,
                     routing: Self::routing_snapshot(&routing),
                     // Treat an unsigned acceptance as reattachable signer work.
                     // If a signer is already present the immediate request below
                     // promotes it; if not, restart safely re-requests it.
                     sig_state: match payload {
-                        WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => {
-                            IntentSigState::AwaitingSigner
-                        }
+                        WritePayload::Event(_) => IntentSigState::AwaitingSigner,
                         WritePayload::Signed(_) => IntentSigState::Pending,
                         WritePayload::ReplaceableOperation(_) => unreachable!("handled above"),
                     },
@@ -3750,19 +3728,15 @@ impl EngineCore {
                 // CUSTODY. The store was working and said no, which is an
                 // answer the app is entitled to read back — so the refusal
                 // becomes a one-row, permanently-failed queue entry rather
-                // than an error on the call. `ReplaceableBaseChanged` keeps
-                // both event ids, which is what lets an app fetch what is
-                // actually there, reapply the user's change and resubmit
-                // without ever troubling them.
+                // than an error on the call.
                 return PublishPreparation::Complete(
                     match self.store.accept_refused(frozen.id, signing_pubkey, reason) {
                         Ok(receipt_id) => {
                             let id = ReceiptId(receipt_id);
                             vec![
-                                // The refusal never reached the CAS that could
-                                // have restamped anything, so the body this froze
-                                // is the body custody holds — and it is exactly
-                                // what `accept_refused` retained above.
+                                // The body this froze is the body custody
+                                // holds — exactly what `accept_refused`
+                                // retained above.
                                 Effect::WriteAccepted(id, frozen.id),
                                 Effect::EmitReceipt(
                                     id,
@@ -3891,7 +3865,7 @@ impl EngineCore {
         }
 
         match payload {
-            WritePayload::Event(_) | WritePayload::ReplaceableEdit { .. } => {
+            WritePayload::Event(_) => {
                 if already_signed {
                     self.on_signed(
                         id,
@@ -4844,17 +4818,13 @@ impl EngineCore {
     /// which is the only moment both after the app finished describing the
     /// event and before anything downstream depends on the bytes. A STATED
     /// `created_at` is kept verbatim; present-then-changed is impossible.
-    ///
-    /// A replaceable edit's stamp can still move forward from here, but only
-    /// inside the store's acceptance transaction and only against the row
-    /// that transaction is CAS-ing (`AcceptWrite::monotonic_stamp`).
     pub(super) fn freeze_payload(
         payload: &WritePayload,
         author: PublicKey,
         clock: Timestamp,
     ) -> SignedEvent {
         match payload {
-            WritePayload::Event(builder) | WritePayload::ReplaceableEdit { builder, .. } => {
+            WritePayload::Event(builder) => {
                 let created_at = builder.created_at.unwrap_or(clock);
                 // Tags reach the wire in the order the app wrote them:
                 // nothing here reorders, normalises, or filters them.

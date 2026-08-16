@@ -7,21 +7,15 @@
 //! in favor of bounded pages plus direct event-id lookup.
 //!
 //! What these falsify is not the ergonomics but the VALUE: the id `publish`
-//! returns must be the post-restamp one in every case, must be what the queue
+//! returns must be the exact one frozen at acceptance, must be what the queue
 //! reports for the same receipt, and must be what the signature eventually
-//! lands on. A door that returned a pre-restamp guess for a replaceable edit
-//! would be worse than no door.
+//! lands on.
 
 use std::time::Duration;
 
 use nmp::{Engine, EngineConfig, SigningState, WriteFact};
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
-use nmp_store::{RedbStore, RelayObserved};
-use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Tags, Timestamp};
-
-/// Far enough ahead that no wall clock in this test can reach it, so the
-/// store's monotonic stamp is provably the thing that decided the id.
-const WINNER_STAMP: u64 = 4_000_000_000;
+use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl};
 
 fn unreachable_relay() -> RelayUrl {
     RelayUrl::parse("wss://frozen-id-at-acceptance.invalid").unwrap()
@@ -79,83 +73,6 @@ fn acceptance_answers_the_same_event_id_the_queue_reports() {
     assert_eq!(
         entry.event_id, receipt.event_id,
         "acceptance and the queue must not be two authorities on one id"
-    );
-    engine.shutdown();
-}
-
-/// The case a pre-restamp answer would get wrong, and the reason this cannot
-/// be a doc caveat: a replaceable edit that leaves `created_at` unsaid has its
-/// stamp moved forward INSIDE the acceptance transaction, against the row that
-/// transaction is CAS-ing, which re-derives the id. `publish` must report the
-/// value that survived that, not the one the reducer froze on the way in.
-#[test]
-fn a_restamped_replaceable_edit_reports_its_post_restamp_id() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("restamped.redb");
-    let keys = Keys::generate();
-
-    // A local winner already sitting at this author's replaceable coordinate,
-    // stamped beyond any clock this test can observe.
-    let winner = EventBuilder::new(Kind::ContactList, "winner")
-        .custom_created_at(Timestamp::from(WINNER_STAMP))
-        .sign_with_keys(&keys)
-        .expect("sign the winner");
-    {
-        let mut store = RedbStore::open(&path).expect("open store");
-        store
-            .insert(
-                winner.clone(),
-                RelayObserved::new(unreachable_relay(), Timestamp::from(WINNER_STAMP)),
-            )
-            .expect("seed the winner");
-    }
-
-    let engine = engine_over(&path, &keys);
-    let content = "edited without stating a created_at";
-    let receipt = engine
-        .publish(WriteIntent {
-            payload: WritePayload::ReplaceableEdit {
-                builder: nmp_grammar::EventBuilder::new(Kind::ContactList).content(content),
-                expected_base: Some(winner.id),
-            },
-            routing: WriteRouting::Explicit(vec![unreachable_relay()]),
-            identity: Identity::Active,
-            correlation: None,
-        })
-        .expect("the edit wins its compare-and-swap");
-
-    let restamped = EventId::new(
-        &keys.public_key(),
-        &Timestamp::from(WINNER_STAMP + 1),
-        &Kind::ContactList,
-        &Tags::new(),
-        content,
-    );
-    assert_eq!(
-        receipt.event_id, restamped,
-        "acceptance must report the id the store's monotonic stamp produced"
-    );
-    let at_wall_clock = EventId::new(
-        &keys.public_key(),
-        &Timestamp::now(),
-        &Kind::ContactList,
-        &Tags::new(),
-        content,
-    );
-    assert_ne!(
-        receipt.event_id, at_wall_clock,
-        "the fixture must actually exercise a restamp, or it proves nothing"
-    );
-    assert_eq!(
-        engine
-            .publish_queue(None, u8::MAX)
-            .expect("the queue reads back")
-            .into_iter()
-            .find(|entry| entry.receipt_id == receipt.id)
-            .expect("the edit is retained")
-            .event_id,
-        receipt.event_id,
-        "one write, one identity, whichever door reports it"
     );
     engine.shutdown();
 }

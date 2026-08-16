@@ -268,8 +268,6 @@ pub fn accept_write_of(signed: nostr::Event, accepted_at: u64) -> AcceptWrite {
     AcceptWrite {
         payload: AcceptWritePayload::Event {
             frozen: Box::new(frozen),
-            replaceable_base: None,
-            monotonic_stamp: false,
             routing: "auto".to_string(),
             sig_state: IntentSigState::Pending,
         },
