@@ -5,10 +5,10 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use nmp::mechanism::runtime::FifoReceiver;
 use nmp::{
     Engine, EngineConfig, Identity, RelayState, WriteFact, WriteIntent, WritePayload, WriteRouting,
 };
+use nmp_runtime::FifoReceiver;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{Keys, Kind};
 

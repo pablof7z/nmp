@@ -8,7 +8,7 @@
 //! is an obligation nobody is holding a receipt for, which is exactly the
 //! thing every other observable in this world reaches through a receipt.
 
-use nmp::mechanism::core::{DiagnosticsSnapshot, StalledWrite};
+use nmp_engine::core::{DiagnosticsSnapshot, StalledWrite};
 use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_router::RelayUrl;
 
@@ -57,8 +57,8 @@ impl NmpWorld {
             seen.iter().any(|status| {
                 matches!(
                     status,
-                    nmp::mechanism::publish_queue::WriteFact::Signing(
-                        nmp::mechanism::publish_queue::SigningState::Signed { .. }
+                    nmp_engine::publish_queue::WriteFact::Signing(
+                        nmp_engine::publish_queue::SigningState::Signed { .. }
                     )
                 )
             })
@@ -141,7 +141,7 @@ impl NmpWorld {
     }
 
     /// The exact census behind them.
-    pub fn stalled_write_totals(&self) -> nmp::mechanism::core::StalledWriteTotals {
+    pub fn stalled_write_totals(&self) -> nmp_engine::core::StalledWriteTotals {
         self.last_diagnostics
             .as_ref()
             .map(|snapshot| snapshot.stalled_write_totals)
@@ -181,9 +181,7 @@ impl NmpWorld {
     /// A bounded settle over the receipt stream, used by the "nothing
     /// changed" assertions: it costs the full negative budget by
     /// construction.
-    pub fn receipt_statuses_after_settling(
-        &mut self,
-    ) -> Vec<nmp::mechanism::publish_queue::WriteFact> {
+    pub fn receipt_statuses_after_settling(&mut self) -> Vec<nmp_engine::publish_queue::WriteFact> {
         let _ = self.receipt_never(|_| false);
         self.receipt_statuses()
     }

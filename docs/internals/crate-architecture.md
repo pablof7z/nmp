@@ -80,13 +80,16 @@ section.
 
 ### The engine
 
-Today `core/` (42,043 lines) + `runtime/` (13,956) + satellites live inside
-`crates/nmp`. Target: they leave `nmp` entirely, as **two crates**:
+The reducer and the async edge left `crates/nmp` as **two crates**:
 
 | crate | owns | must never depend on | status |
 |---|---|---|---|
-| `nmp-engine` | the deterministic reducer: `EngineCore`, `handle(EngineMsg) → Vec<Effect>` / `tick()`, plus its reducer-coupled satellites (the negentropy FSM it drives turn-by-turn, the publish-queue fact vocabulary, bench hooks) | **`tokio`, `reqwest`, `nmp-nip11`,** the runtime, the facade, any capability crate. Allowed: grammar, store, resolver, router, transport (frame value types), signer, `negentropy`, `nostr` | target |
-| `nmp-runtime` | the async edge that interprets effects: `EngineThread`, `Handle`, channels/mailboxes, the AUTH driver, sign-event completion, signer registry, pool bridge, the NIP-65 assembly glue, NIP-11 service wiring | the facade, any capability crate (its `nmp-nip65`/`nmp-nip11` edges are the two declared protocol edges) | target |
+| `nmp-engine` | the deterministic reducer: `EngineCore`, `handle(EngineMsg) → Vec<Effect>` / `tick()`, plus its reducer-coupled satellites (the negentropy FSM it drives turn-by-turn, the publish-queue fact vocabulary, bench hooks) | **`tokio`, `reqwest`, `nmp-nip11`,** the runtime, the facade, any capability crate. Allowed: grammar, store, resolver, router, transport (frame value types), signer, `negentropy`, `nostr` | correct today |
+| `nmp-runtime` | the async edge that interprets effects: `EngineThread`, `Handle`, channels/mailboxes, the AUTH driver, sign-event completion, signer registry, pool bridge, the opaque session payload, the NIP-65 assembly glue, NIP-11 service wiring | the facade, any capability crate (its `nmp-nip65`/`nmp-nip11` edges are the two declared protocol edges) | correct today |
+
+`session.rs` went with the runtime rather than staying in the facade:
+`EngineThread::spawn` takes a `RestoredSession` and `Handle` owns the live
+session state, so the facade only encodes, decodes, and hands one over.
 
 Why two and not one (measured at `64f14255`):
 
@@ -106,6 +109,20 @@ Why two and not one (measured at `64f14255`):
   first owner extractions, so the frozen door is the owner-shaped one, not
   the pre-decomposition one. See open question 1 for what could still
   reverse the two-crate answer.
+
+What the cut actually cost, measured rather than estimated: **96 declarations
+went from `pub(crate)` to `pub`** — 62 in `nmp-engine` (29 functions, 11
+types, 18 struct fields, 4 re-exports), 21 in `nmp-runtime` (14 functions, 3
+types, 2 fields, 2 other), and 13 bench-only counters in
+`ingest_attribution`. Roughly twice the pre-cut estimate of ~35, and the
+excess is concentrated in three places worth naming: the bench counters
+(13, all behind `bench-instrumentation`), `session.rs`'s encode/decode pair
+and its account mutators (11, unforeseen because `session.rs` moving was not
+in the estimate), and struct **fields** rather than methods (20, on five
+structs the runtime destructures — `CoreObservationOwnershipCensus`,
+`RelayWorkerRequirements`, `RowsSeed`, `RuntimeConfig`,
+`PreparedReplaceableMaterialization`). Field types and destructuring sites
+are a boundary cost that a "count the methods" estimate does not see.
 
 **The reducer stays one crate.** This is a defended "one thing, merely
 large", not a default: a field-level scan of `EngineCore` shows **15 fields
@@ -165,11 +182,12 @@ available to any cluster inside the reducer.
 |---|---|---|---|
 | `nmp` | `Engine` (lifecycle gate, construction incl. the capability vec), `EngineConfig`, `EngineError`, `Subscription`/`Frame`/`Window`, the diagnostics snapshot family, session/auth-policy surface, and the re-export list that IS the public API | **any capability crate, any protocol crate.** Deps: `nmp-runtime`, `nmp-grammar`, `nostr` | target (today it violates rule 2; #1707 is the fix) |
 
-When the target is reached, `crates/nmp` is roughly 4,000 production lines,
-its `[features]` table loses every per-family entry, and the
-`#[doc(hidden)] pub mod mechanism` door is deleted — harnesses name
-`nmp-engine`/`nmp-runtime` directly instead of reaching through the product
-crate's basement.
+The `#[doc(hidden)] pub mod mechanism` door is **deleted**: `nmp-bdd` and
+`nmp/tests` name `nmp-engine`/`nmp-runtime` directly instead of reaching
+through the product crate's basement. `nmp`'s public API is now exactly its
+visible re-export list. What remains before the row above reads "correct
+today" is #1707's own work — the per-family `[features]` entries and the
+capability modules.
 
 ### Capabilities — above the facade, one crate per family
 
@@ -216,9 +234,9 @@ Mechanical, no checker required:
    #1707's falsifier and the primary number: it is rule 2 stated as an `ls`.
 2. **Protocol crates named in `crates/nmp/Cargo.toml`** — today **11**
    optional dependencies. Target **0**.
-3. **Lines in `crates/nmp`** — today **73,032**. Target ≈ **7,500**
-   (~4,000 production + facade tests). Crude, gameable by moving code, so
-   secondary to (1).
+3. **Lines in `crates/nmp`** — today **46,898**, down from 73,032 when the
+   engine left. Target ≈ **7,500** (~4,000 production + facade tests). Crude,
+   gameable by moving code, so secondary to (1).
 4. **Crates changed by adding a capability** — today three (`nmp`,
    `nmp-ffi`, the capability crate). Target **one** for direct-Rust apps
    (+`nmp-ffi` only when a native projection is wanted).

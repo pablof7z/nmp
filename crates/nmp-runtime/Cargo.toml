@@ -1,0 +1,72 @@
+[package]
+name = "nmp-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+
+bench-instrumentation = [
+    "dep:libc",
+    "nmp-engine/bench-instrumentation",
+    "nmp-store/bench-instrumentation",
+    "nmp-resolver/bench-instrumentation",
+    "nmp-transport/bench-instrumentation",
+]
+test-instrumentation = [
+    "nmp-engine/test-instrumentation",
+    "nmp-store/test-instrumentation",
+    "nmp-nip11/test-instrumentation",
+]
+unstable-mechanism = ["dep:nmp-router-testkit", "nmp-engine/unstable-mechanism"]
+
+# The automatic NIP-65 coordinator assembly. One of exactly TWO protocol edges
+# this crate is allowed (`nmp-nip11` is the other), and it is optional: a
+# core-only build contains no NIP-65 dependency or symbols.
+nip65 = ["dep:nmp-nip65"]
+
+# This is the crate that is ALLOWED to own threads and a runtime -- that is
+# what it is for. The split is what makes the reducer's manifest meaningful:
+# `tokio`, `crossbeam-channel` and the transport pool live here, and
+# `nmp-engine`, which this crate drives, names none of them.
+[dependencies]
+nostr.workspace = true
+nmp-grammar.workspace = true
+nmp-engine.workspace = true
+nmp-store.workspace = true
+nmp-router.workspace = true
+nmp-resolver.workspace = true
+nmp-transport.workspace = true
+nmp-signer.workspace = true
+nmp-local-signer.workspace = true
+nmp-nip11.workspace = true
+nmp-nip65 = { workspace = true, optional = true }
+nmp-router-testkit = { workspace = true, optional = true }
+crossbeam-channel = "0.5"
+# #704: the engine owns ONE multi-thread tokio runtime (2 workers) that hosts
+# every adapter task (NIP-11 fetches, signer/AUTH completion awaits, optional
+# provider sessions, follow-action acquisition). `rt-multi-thread` is a
+# production feature, not a dev-only one; `Handle::adapter_runtime()` hands
+# protocol adapters that same runtime handle.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sync"] }
+libc = { version = "0.2", optional = true }
+# The opaque session payload's secret bytes are wiped on drop.
+zeroize = "1"
+
+[dev-dependencies]
+nmp-runtime = { path = ".", features = [
+    "nip65",
+    "test-instrumentation",
+    "unstable-mechanism",
+] }
+nmp-store = { workspace = true, features = ["test-instrumentation"] }
+nmp-router-testkit.workspace = true
+nmp-resolver-testkit.workspace = true
+nmp-test-support.workspace = true
+tempfile = "3"
+# The AUTH driver's in-crate test drives a raw websocket peer directly.
+tungstenite = "0.29"
+# The session payload test asserts on the exact hex encoding it stores.
+hex = "0.4"

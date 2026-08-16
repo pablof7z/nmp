@@ -14,7 +14,7 @@
 //! app rolls the per-source facts into its own progress policy; this module
 //! is this harness being that app.
 
-use nmp::mechanism::core::{AcquisitionEvidence, ShortfallFact, SourceEvidence};
+use nmp_engine::core::{AcquisitionEvidence, ShortfallFact, SourceEvidence};
 
 /// Every source fact across every canonical branch of one observation.
 ///
@@ -98,7 +98,7 @@ pub(crate) fn unproven_report(evidence: &[AcquisitionEvidence]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nmp::mechanism::core::SourceStatus;
+    use nmp_engine::core::SourceStatus;
     use nostr::{RelayUrl, Timestamp};
 
     use super::*;

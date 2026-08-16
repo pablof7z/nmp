@@ -41,6 +41,12 @@ nmp-signer.workspace = true
 # diagnostics channels its `Then` steps assert on. `nip65` drives the
 # feature-on coordinator scenarios through ordinary pinned queries.
 nmp = { workspace = true, features = ["unstable-mechanism", "nip29", "nip65"] }
+# #1707: this harness drives a REAL `EngineCore` and a REAL `EngineThread`
+# directly, which it always did -- it used to do it through `nmp`'s
+# `#[doc(hidden)] pub mod mechanism` basement. That basement is deleted; the
+# two packages are named here instead, which is both honest and narrower.
+nmp-engine = { workspace = true, features = ["unstable-mechanism"] }
+nmp-runtime = { workspace = true, features = ["unstable-mechanism", "nip65"] }
 nmp-test-support.workspace = true
 
 cucumber = "0.21"

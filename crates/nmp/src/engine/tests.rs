@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
 use super::*;
-use crate::core::{Effect, EngineCore, EngineMsg};
-use crate::publish_queue::{NotSentReason, SigningState, WriteFact, WriteOutcome};
 use crate::{Row, RowDelta, RowSignature};
+use nmp_engine::core::{Effect, EngineCore, EngineMsg};
+use nmp_engine::publish_queue::{NotSentReason, SigningState, WriteFact, WriteOutcome};
 use nmp_store::RelayObserved;
 use nostr::{Keys, Tag};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2340,9 +2340,9 @@ fn an_explicit_identity_publishes_as_a_secondary_without_moving_the_current_acco
                 panic!("override publish must not terminate pre-routing: {outcome:?}")
             }
             Ok(_) => {}
-            Err(crate::runtime::FifoRecvTimeoutError::Timeout) => {}
-            Err(crate::runtime::FifoRecvTimeoutError::Closed) => break,
-            Err(crate::runtime::FifoRecvTimeoutError::Lagged) => {
+            Err(nmp_runtime::FifoRecvTimeoutError::Timeout) => {}
+            Err(nmp_runtime::FifoRecvTimeoutError::Closed) => break,
+            Err(nmp_runtime::FifoRecvTimeoutError::Lagged) => {
                 panic!("short identity-override receipt unexpectedly lagged")
             }
         }
@@ -2996,7 +2996,7 @@ fn history_advance_and_blocking_recv_have_safe_split_ownership() {
                     .ok()
                     .and_then(|frame| frame.window.as_ref())
                     .map(|window| window.load),
-                Some(crate::core::WindowLoad::Returned { .. })
+                Some(nmp_engine::core::WindowLoad::Returned { .. })
             );
             if returned || frame.is_err() {
                 batch_tx.send(frame).unwrap();
@@ -3015,7 +3015,7 @@ fn history_advance_and_blocking_recv_have_safe_split_ownership() {
     let contents = frame.window.expect("windowed frames carry window contents");
     assert_eq!(
         contents.load,
-        crate::core::WindowLoad::Returned { added: 1 }
+        nmp_engine::core::WindowLoad::Returned { added: 1 }
     );
     assert_eq!(contents.rows.len(), 2);
     drain.join().unwrap();

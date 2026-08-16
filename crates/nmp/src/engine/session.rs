@@ -21,17 +21,17 @@ fn map_session_start_error(error: EngineError) -> crate::SessionRestoreError {
 }
 
 fn session_mutation_from_add_signer(
-    error: crate::runtime::AddSignerError,
+    error: nmp_runtime::AddSignerError,
 ) -> crate::SessionMutationError {
     match error {
-        crate::runtime::AddSignerError::RegistryFull { limit } => {
+        nmp_runtime::AddSignerError::RegistryFull { limit } => {
             crate::SessionMutationError::CapabilityRegistryFull { limit }
         }
-        crate::runtime::AddSignerError::CapabilityInstanceExhausted => {
+        nmp_runtime::AddSignerError::CapabilityInstanceExhausted => {
             crate::SessionMutationError::CapabilityInstanceExhausted
         }
-        crate::runtime::AddSignerError::EngineShuttingDown
-        | crate::runtime::AddSignerError::MissingPublicKey => {
+        nmp_runtime::AddSignerError::EngineShuttingDown
+        | nmp_runtime::AddSignerError::MissingPublicKey => {
             crate::SessionMutationError::EngineClosed
         }
     }
@@ -78,7 +78,7 @@ impl Engine {
         config: EngineConfig,
         payload: crate::SessionPayload,
     ) -> Result<Self, crate::SessionRestoreError> {
-        let restored = crate::session::decode(&payload)?;
+        let restored = nmp_runtime::session::decode(&payload)?;
         let provider_count = restored.provider_count();
         if provider_count > config.max_auth_capabilities {
             return Err(crate::SessionRestoreError::CapabilityRegistryFull {
@@ -96,7 +96,7 @@ impl Engine {
         payload: crate::SessionPayload,
         capabilities: Vec<crate::ReplaceableMaterializerSpec>,
     ) -> Result<Self, crate::SessionRestoreError> {
-        let restored = crate::session::decode(&payload)?;
+        let restored = nmp_runtime::session::decode(&payload)?;
         let provider_count = restored.provider_count();
         if provider_count > config.max_auth_capabilities {
             return Err(crate::SessionRestoreError::CapabilityRegistryFull {
@@ -129,7 +129,7 @@ impl Engine {
                     .map(|descriptor| (public_key, descriptor))
             })
             .collect();
-        Ok(crate::session::encode(&export.snapshot, descriptors))
+        Ok(nmp_runtime::session::encode(&export.snapshot, descriptors))
     }
 
     pub fn add_private_key_account(

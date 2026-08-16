@@ -19,7 +19,7 @@
 
 use cucumber::then;
 
-use nmp::mechanism::publish_queue::{RelayState, SigningState, WriteFact, WriteOutcome};
+use nmp_engine::publish_queue::{RelayState, SigningState, WriteFact, WriteOutcome};
 use nostr::JsonUtil;
 
 use crate::world::{format_stated_time, NmpWorld};

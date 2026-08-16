@@ -63,7 +63,7 @@ impl Engine {
             .unwrap_or_else(|poison| poison.into_inner());
         guard
             .as_ref()
-            .map(|inner| crate::runtime::relay_information_retention_census(&inner.handle))
+            .map(|inner| nmp_runtime::relay_information_retention_census(&inner.handle))
             .expect("test census requires an open engine")
     }
 }

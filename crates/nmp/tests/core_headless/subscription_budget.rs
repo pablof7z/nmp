@@ -40,8 +40,8 @@ fn limited_pinned_query(kind: u16) -> LiveQuery {
 fn advertising(
     max_subscriptions: Option<u64>,
     max_subid_length: Option<u64>,
-) -> nmp::mechanism::core::RelayInformationCapabilityEvidence {
-    nmp::mechanism::core::RelayInformationCapabilityEvidence {
+) -> nmp_engine::core::RelayInformationCapabilityEvidence {
+    nmp_engine::core::RelayInformationCapabilityEvidence {
         supported_nips: Some(vec![11]),
         max_subscriptions,
         max_subid_length,
@@ -105,7 +105,7 @@ fn core_watching(count: u16) -> (EngineCore, LiveWire) {
     (core, wire)
 }
 
-fn relay_row(core: &EngineCore) -> nmp::mechanism::core::RelayDiagnosticsSnapshot {
+fn relay_row(core: &EngineCore) -> nmp_engine::core::RelayDiagnosticsSnapshot {
     core.diagnostics_snapshot()
         .relays
         .into_iter()

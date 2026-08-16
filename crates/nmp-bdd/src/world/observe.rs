@@ -18,11 +18,11 @@ use std::time::{Duration, Instant};
 
 use nostr::EventId;
 
-use nmp::mechanism::core::{
+use nmp_engine::core::{
     AcquisitionEvidence, DiagnosticsSnapshot, PublishError, Row, RowDelta, ShortfallFact,
 };
-use nmp::mechanism::publish_queue::{SigningState, WriteFact, WriteOutcome};
-use nmp::mechanism::runtime::{fifo_channel, DiagnosticsHandle, QueryHandle, RowsReceiver};
+use nmp_engine::publish_queue::{SigningState, WriteFact, WriteOutcome};
+use nmp_runtime::{fifo_channel, DiagnosticsHandle, QueryHandle, RowsReceiver};
 
 use super::acquisition::branch_shortfall;
 use super::budgets::{EVENTUALLY, NEVER};
@@ -185,7 +185,7 @@ pub(super) fn is_outcome_fact(fact: &WriteFact) -> bool {
 /// only ever names "the receipt", singular -- one implicit publish in
 /// flight per scenario).
 pub(super) struct ReceiptState {
-    pub(super) rx: nmp::mechanism::runtime::FifoReceiver<WriteFact>,
+    pub(super) rx: nmp_runtime::FifoReceiver<WriteFact>,
     pub(super) seen: Vec<WriteFact>,
     /// `Some` when `publish()` itself refused. Custody is what `Ok` means, so
     /// a refusal is not a fact ON a stream -- there is no stream, no receipt
@@ -197,7 +197,7 @@ pub(super) struct ReceiptState {
 
 impl ReceiptState {
     /// A fresh accumulator over one publish's fact stream.
-    pub(super) fn new(rx: nmp::mechanism::runtime::FifoReceiver<WriteFact>) -> Self {
+    pub(super) fn new(rx: nmp_runtime::FifoReceiver<WriteFact>) -> Self {
         Self {
             rx,
             seen: Vec::new(),
@@ -304,7 +304,7 @@ pub(super) struct DiagFeed {
 impl DiagFeed {
     pub(super) fn new(
         handle: DiagnosticsHandle,
-        rx: nmp::mechanism::runtime::LatestReceiver<DiagnosticsSnapshot>,
+        rx: nmp_runtime::LatestReceiver<DiagnosticsSnapshot>,
     ) -> Self {
         let shared = Arc::new((Mutex::new(None), Condvar::new()));
         let shared2 = Arc::clone(&shared);
@@ -496,7 +496,7 @@ impl NmpWorld {
     /// The id the publish door answered with, which is what every later fact
     /// correlates to and the only handle a restarted app has. `None` when the
     /// door refused: nothing was taken, so nothing was identified.
-    pub fn last_receipt_id(&self) -> Option<nmp::mechanism::core::ReceiptId> {
+    pub fn last_receipt_id(&self) -> Option<nmp_engine::core::ReceiptId> {
         self.last_receipt_id
     }
 

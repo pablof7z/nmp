@@ -4,7 +4,7 @@
 //! an app names and binds the one bootstrap publish to the facade.
 //!
 //! The runtime glue that drives the coordinator is deliberately NOT here. It
-//! lives in `crate::runtime::nip65`, beside the loop that calls it, so the
+//! lives in `nmp_runtime::nip65`, beside the loop that calls it, so the
 //! engine never depends upward on a facade module. See that module's header.
 
 use crate::{Engine, EngineError, ReceiptStream};

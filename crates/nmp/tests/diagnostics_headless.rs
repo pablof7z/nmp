@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp::mechanism::core::{Effect, EngineCore, EngineMsg};
+use nmp_engine::core::{Effect, EngineCore, EngineMsg};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, RelaySessionKey};
 use nmp_resolver_testkit::{kind1, kind3};

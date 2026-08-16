@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp::mechanism::core::{
+use nmp_engine::core::{
     Effect, EngineCore, EngineMsg, HistoryBatch, HistoryQuery, HistorySessionId, RowDelta,
     WindowLoad,
 };

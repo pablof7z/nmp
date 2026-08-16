@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use nmp::mechanism::publish_queue::{WriteFact, WriteOutcome};
+use nmp_engine::publish_queue::{WriteFact, WriteOutcome};
 use nmp_store::RedbStore;
 
 use super::{NmpWorld, ME};

@@ -12,10 +12,10 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::core::{HistoryQuery, RowDelta};
-use nmp::mechanism::runtime::{EngineThread, HistoryReceiver, RowsMsg, RowsReceiver};
+use nmp_engine::core::{HistoryQuery, RowDelta};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{AccessContext, Binding, Demand, Filter, SourceAuthority};
+use nmp_runtime::{EngineThread, HistoryReceiver, RowsMsg, RowsReceiver};
 use nmp_store::RedbStore;
 use nmp_transport::PoolConfig;
 use nostr::{EventBuilder, EventId, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -668,7 +668,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         AccessContext::Public,
     )?;
     #[cfg(feature = "bench-instrumentation")]
-    nmp::mechanism::ingest_attribution::reset();
+    nmp_engine::ingest_attribution::reset();
     #[cfg(feature = "bench-instrumentation")]
     nmp_transport::configure_diagnostic_duplicate_ceiling(
         config.diagnostic_duplicate_ceiling_capacity,
@@ -1127,7 +1127,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
 #[cfg(feature = "bench-instrumentation")]
 fn ingest_attribution_json() -> serde_json::Value {
     let transport = nmp_transport::ingest_attribution::snapshot();
-    let engine = nmp::mechanism::ingest_attribution::snapshot();
+    let engine = nmp_engine::ingest_attribution::snapshot();
     let resolver = nmp_resolver::ingest_attribution::snapshot();
     let store = nmp_store::ingest_attribution::snapshot();
     serde_json::json!({

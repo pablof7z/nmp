@@ -13,7 +13,7 @@
 
 use cucumber::then;
 
-use nmp::mechanism::publish_queue::WriteFact;
+use nmp_engine::publish_queue::WriteFact;
 
 use crate::world::NmpWorld;
 

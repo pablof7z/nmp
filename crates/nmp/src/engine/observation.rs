@@ -2,8 +2,8 @@ use nmp_grammar::LiveQuery;
 
 use super::Engine;
 use crate::error::EngineError;
-use crate::runtime::{Handle, HistoryHandle, HistoryReceiver, QueryHandle, RowsReceiver};
 use crate::subscription::{AsyncSubscription, Subscription, Window};
+use nmp_runtime::{Handle, HistoryHandle, HistoryReceiver, QueryHandle, RowsReceiver};
 
 impl Engine {
     /// Noun 1: open a live query (#485). `window: None` ⇒ the unbounded delta
@@ -91,7 +91,8 @@ impl Engine {
                 if query.aggregate_result_limit().is_some() {
                     return Err(EngineError::WindowAggregateResultLimit);
                 }
-                let history_query = crate::core::HistoryQuery::new(query, initial.get(), max.get());
+                let history_query =
+                    nmp_engine::core::HistoryQuery::new(query, initial.get(), max.get());
                 self.with_handle(|handle| {
                     handle
                         .subscribe_history(history_query)

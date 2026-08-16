@@ -36,11 +36,11 @@
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
-use nmp::mechanism::runtime::FifoReceiver;
 use nmp::{
     Engine, EngineConfig, Identity, NotSentReason, WriteFact, WriteIntent, WriteOutcome,
     WritePayload, WriteRouting,
 };
+use nmp_runtime::FifoReceiver;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
 use nostr::{Keys, Kind, RelayUrl, Timestamp};
 

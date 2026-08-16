@@ -3,7 +3,7 @@
 //! selection and the router cap `nmp-ffi` used to duplicate by hand.
 //!
 //! No `Signed`-payload verify lives here: that guarantee moved to
-//! `crate::core::EngineCore::on_publish`'s acceptance boundary (Unit
+//! `nmp_engine::core::EngineCore::on_publish`'s acceptance boundary (Unit
 //! A0, #56) precisely so it holds for every entry point -- this facade,
 //! `nmp-ffi`, and any `from_parts`/raw-`EngineThread` caller alike -- not
 //! only the one that happens to verify locally. See [`crate::error`]'s doc.
@@ -34,18 +34,18 @@ pub use relay_information::RelayInformationRequestError;
 use std::sync::Mutex;
 
 #[cfg(test)]
-use crate::core::ReceiptId;
-#[cfg(test)]
-use crate::runtime::ReceiptReattachment;
-#[cfg(any(test, feature = "test-instrumentation"))]
-use crate::runtime::{AddSignerError, SignerRegistration};
-use crate::runtime::{EngineThread, Handle, RuntimeConfig, SignEventError, SignEventOperation};
-#[cfg(test)]
 use crate::subscription::{Subscription, Window};
+#[cfg(test)]
+use nmp_engine::core::ReceiptId;
 #[cfg(test)]
 use nmp_grammar::LiveQuery;
 #[cfg(test)]
 use nmp_grammar::WriteIntent;
+#[cfg(test)]
+use nmp_runtime::ReceiptReattachment;
+#[cfg(any(test, feature = "test-instrumentation"))]
+use nmp_runtime::{AddSignerError, SignerRegistration};
+use nmp_runtime::{EngineThread, Handle, RuntimeConfig, SignEventError, SignEventOperation};
 use nmp_store::{RedbStore, RedbStoreOpenError, RedbStoreResetError};
 use nmp_transport::PoolConfig;
 #[cfg(test)]
@@ -100,7 +100,7 @@ pub struct Engine {
 /// replacement.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AuthPolicyRegistration {
-    inner: crate::runtime::AuthPolicyRegistration,
+    inner: nmp_runtime::AuthPolicyRegistration,
 }
 
 impl AuthPolicyRegistration {
@@ -190,14 +190,14 @@ impl Engine {
     ) -> Result<Self, EngineError> {
         Self::new_with_initial_session(
             config,
-            crate::session::RestoredSession::empty(),
+            nmp_runtime::session::RestoredSession::empty(),
             capabilities,
         )
     }
 
     fn new_with_initial_session(
         config: EngineConfig,
-        initial_session: crate::session::RestoredSession,
+        initial_session: nmp_runtime::session::RestoredSession,
         capabilities: Vec<crate::ReplaceableMaterializerSpec>,
     ) -> Result<Self, EngineError> {
         let (app_relays, fallback_relays) = build_routing_fact_relays(&config)?;
@@ -374,8 +374,8 @@ impl Engine {
         pool_config: PoolConfig,
     ) -> Result<Self, EngineError> {
         let runtime_config = RuntimeConfig {
-            max_auth_capabilities: crate::runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
-            max_publish_attempts: crate::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
+            max_auth_capabilities: nmp_runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
+            max_publish_attempts: nmp_engine::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
             nip65_sources,
             ..RuntimeConfig::default()
         };
@@ -386,7 +386,7 @@ impl Engine {
                 cap,
                 pool_config,
                 runtime_config,
-                crate::session::RestoredSession::empty(),
+                nmp_runtime::session::RestoredSession::empty(),
                 Vec::new(),
             )
             .map_err(EngineError::from_start_error)?;
@@ -438,7 +438,7 @@ impl Engine {
     /// reads `Timestamp::now()` at exactly the sites it always did.
     #[cfg(feature = "unstable-mechanism")]
     #[doc(hidden)]
-    pub fn clock(&self) -> Result<crate::mechanism::runtime::EngineClock, EngineError> {
+    pub fn clock(&self) -> Result<nmp_runtime::EngineClock, EngineError> {
         let guard = self
             .inner
             .lock()
@@ -568,7 +568,7 @@ impl Engine {
         &self,
         request: SignEventRequest,
         completion: impl FnOnce(Result<nostr::Event, SignEventError>) + Send + 'static,
-    ) -> Result<crate::runtime::SignEventCancel, SignEventError> {
+    ) -> Result<nmp_runtime::SignEventCancel, SignEventError> {
         let (handle, pubkey) = {
             let guard = self
                 .inner

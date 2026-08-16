@@ -4,7 +4,7 @@
 //! This set is deliberately SMALL: construction-time failures, identity
 //! parsing, and the closed-lifecycle state. The one thing it explicitly
 //! does NOT contain is a "bad signed event" variant -- that guarantee lives
-//! at `crate::core::EngineCore::on_publish`'s acceptance boundary now
+//! at `nmp_engine::core::EngineCore::on_publish`'s acceptance boundary now
 //! (Unit A0, #56, per the Fable checkpoint's Q2 ruling), so a tampered
 //! `WritePayload::Signed` surfaces on the [`WriteFact`](crate::WriteFact)
 //! receipt stream `publish` returns, not as a sync `Err` here. Duplicating a
@@ -219,12 +219,12 @@ impl EngineError {
     /// Map an engine-thread failure raised during engine CONSTRUCTION
     /// (`Engine::new`) to its engine-start error. A genuine OS thread refusal
     /// or an unrepresentable relay budget both mean no engine was built (#704).
-    pub(crate) fn from_start_error(error: crate::runtime::EngineThreadError) -> Self {
+    pub(crate) fn from_start_error(error: nmp_runtime::EngineThreadError) -> Self {
         match error {
-            crate::runtime::EngineThreadError::ThreadUnavailable { component, reason } => {
+            nmp_runtime::EngineThreadError::ThreadUnavailable { component, reason } => {
                 Self::EngineStartFailed { component, reason }
             }
-            crate::runtime::EngineThreadError::RelayBudgetOverflow { relay_limit } => {
+            nmp_runtime::EngineThreadError::RelayBudgetOverflow { relay_limit } => {
                 Self::EngineStartFailed {
                     component: "relay worker budget".to_string(),
                     reason: format!(
@@ -232,19 +232,19 @@ impl EngineError {
                     ),
                 }
             }
-            crate::runtime::EngineThreadError::ObservationUnavailable { reason } => {
+            nmp_runtime::EngineThreadError::ObservationUnavailable { reason } => {
                 Self::EngineStartFailed {
                     component: "initial observation projection".to_string(),
                     reason,
                 }
             }
-            crate::runtime::EngineThreadError::MissingReplaceableCapability { program, format } => {
+            nmp_runtime::EngineThreadError::MissingReplaceableCapability { program, format } => {
                 Self::MissingReplaceableCapability { program, format }
             }
             // The runtime's finite shutdown drain (#8 U4) refuses new work
             // with a typed engine-level error; at this facade it is the same
             // closed-engine fact `EngineClosed` already names.
-            crate::runtime::EngineThreadError::EngineShuttingDown => Self::EngineClosed,
+            nmp_runtime::EngineThreadError::EngineShuttingDown => Self::EngineClosed,
         }
     }
 
@@ -254,48 +254,48 @@ impl EngineError {
     /// `ThreadUnavailable` and `RelayBudgetOverflow` are construction-only
     /// defensive arms, while `EngineShuttingDown` remains the closed-engine
     /// fact.
-    pub(crate) fn from_observe_error(error: crate::runtime::EngineThreadError) -> Self {
+    pub(crate) fn from_observe_error(error: nmp_runtime::EngineThreadError) -> Self {
         match error {
-            crate::runtime::EngineThreadError::ObservationUnavailable { reason } => {
+            nmp_runtime::EngineThreadError::ObservationUnavailable { reason } => {
                 Self::ObservationUnavailable { reason }
             }
-            crate::runtime::EngineThreadError::ThreadUnavailable { component, reason } => {
+            nmp_runtime::EngineThreadError::ThreadUnavailable { component, reason } => {
                 Self::ObservationUnavailable {
                     reason: format!("{component}: {reason}"),
                 }
             }
-            crate::runtime::EngineThreadError::RelayBudgetOverflow { relay_limit } => {
+            nmp_runtime::EngineThreadError::RelayBudgetOverflow { relay_limit } => {
                 Self::ObservationUnavailable {
                     reason: format!(
                         "configured max_relays {relay_limit} cannot represent its finite retirement envelope"
                     ),
                 }
             }
-            crate::runtime::EngineThreadError::MissingReplaceableCapability { program, format } => {
+            nmp_runtime::EngineThreadError::MissingReplaceableCapability { program, format } => {
                 Self::MissingReplaceableCapability { program, format }
             }
-            crate::runtime::EngineThreadError::EngineShuttingDown => Self::EngineClosed,
+            nmp_runtime::EngineThreadError::EngineShuttingDown => Self::EngineClosed,
         }
     }
 
-    pub(crate) fn from_publish_error(err: crate::core::PublishError) -> Self {
+    pub(crate) fn from_publish_error(err: nmp_engine::core::PublishError) -> Self {
         match err {
-            crate::core::PublishError::EngineShuttingDown => Self::EngineClosed,
+            nmp_engine::core::PublishError::EngineShuttingDown => Self::EngineClosed,
             other => Self::PublishRefused {
                 reason: other.to_string(),
             },
         }
     }
 
-    pub(crate) fn from_add_auth_policy_error(error: crate::runtime::AddAuthPolicyError) -> Self {
+    pub(crate) fn from_add_auth_policy_error(error: nmp_runtime::AddAuthPolicyError) -> Self {
         match error {
-            crate::runtime::AddAuthPolicyError::CapabilityInstanceExhausted => {
+            nmp_runtime::AddAuthPolicyError::CapabilityInstanceExhausted => {
                 Self::AuthCapabilityInstanceExhausted
             }
-            crate::runtime::AddAuthPolicyError::RegistryFull { limit } => {
+            nmp_runtime::AddAuthPolicyError::RegistryFull { limit } => {
                 Self::AuthCapabilityRegistryFull { limit }
             }
-            crate::runtime::AddAuthPolicyError::EngineShuttingDown => Self::EngineClosed,
+            nmp_runtime::AddAuthPolicyError::EngineShuttingDown => Self::EngineClosed,
         }
     }
 }
@@ -311,27 +311,27 @@ mod tests {
         // repair.
         for (error, expected) in [
             (
-                crate::core::PublishError::NoCurrentAccount,
+                nmp_engine::core::PublishError::NoCurrentAccount,
                 "publishing with the current-account identity requires a current account",
             ),
             (
-                crate::core::PublishError::SignatureInvalid {
+                nmp_engine::core::PublishError::SignatureInvalid {
                     reason: "bad sig".to_string(),
                 },
                 "the supplied signature does not verify: bad sig",
             ),
             (
-                crate::core::PublishError::ReservedKind { kind: 22242 },
+                nmp_engine::core::PublishError::ReservedKind { kind: 22242 },
                 "kind:22242 is reserved for reducer-owned relay authentication",
             ),
             (
-                crate::core::PublishError::PersistenceFailed {
+                nmp_engine::core::PublishError::PersistenceFailed {
                     reason: "disk".to_string(),
                 },
                 "the write could not be recorded: disk",
             ),
             (
-                crate::core::PublishError::AlreadyExpired,
+                nmp_engine::core::PublishError::AlreadyExpired,
                 "the event was already expired at acceptance",
             ),
         ] {
@@ -347,7 +347,7 @@ mod tests {
         // Shutdown stays its own lifecycle fact rather than folding into the
         // refusal class.
         assert_eq!(
-            EngineError::from_publish_error(crate::core::PublishError::EngineShuttingDown),
+            EngineError::from_publish_error(nmp_engine::core::PublishError::EngineShuttingDown),
             EngineError::EngineClosed
         );
     }

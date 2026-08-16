@@ -55,78 +55,32 @@ mod error;
 mod observation;
 mod subscription;
 
-// #827: the M3 engine, folded in from the former `nmp-engine` crate. These are
-// the SAME modules, at the same names, moved verbatim -- the crate boundary
-// they used to sit behind added nothing but a second public API.
+// The engine is no longer inside this crate. It is two:
 //
-// - [`mod@core`] -- `EngineCore`: the synchronous reducer and durable-state
-//   owner. It performs concrete Redb I/O but owns no threads, sockets, or
-//   imposed runtime. Its main message-driven interface is
-//   `handle(EngineMsg) -> Vec<Effect>` / `tick(Timestamp) -> Vec<Effect>`;
-//   that boundary keeps the engine headlessly testable (plan §2 position 1).
-// - [`mod@runtime`] -- the async edge: `EngineThread` (one dedicated OS
-//   thread, blocking `mpsc` recv loop, D8) + `Handle` (the cheap
-//   `Clone + Send` value the app holds).
-// - [`mod@delivery`] -- the write-intent/receipt plane (durability class, typed
-//   routing, the receipt stream).
-// - [`mod@negentropy`] -- the prober FSM + `ProbedRelay` capability token +
-//   `Reconciler` (a MODULE, not a crate -- plan §1: reducer-coupled).
+// - `nmp-engine` — the deterministic reducer. `handle(EngineMsg) ->
+//   Vec<Effect>` / `tick(Timestamp) -> Vec<Effect>`, concrete redb I/O, no
+//   threads and no sockets.
+// - `nmp-runtime` — the async edge that interprets those effects.
+//   `EngineThread` (one dedicated OS thread, blocking `mpsc` recv loop, D8)
+//   plus the cheap `Clone + Send` `Handle` an app holds, the channels and
+//   mailboxes, the AUTH driver, the pool bridge.
 //
-// NIP-11 acquisition is deliberately NOT in this list: it is `nmp-nip11`, a
-// crate. HTTP is the reason -- a module here would put `reqwest` in the same
-// manifest as the reducer, and `EngineCore` must link no HTTP client. The
-// values it produces are re-exported below; the reducer sees only
-// `core::RelayInformationCapabilityEvidence`, which `runtime` projects.
+// The cut is a manifest, and that is the whole reason it is a crate line and
+// not a module one. `nmp-engine`'s `Cargo.toml` names no `tokio`, no
+// `crossbeam-channel`, no `futures-channel`, no `reqwest`; `nmp-runtime`'s
+// names the first two, because interpreting effects is exactly what it is
+// for. The reducer's determinism is the foundation of every headless
+// falsifier in the workspace, and it used to be protected by a comment in
+// this file. It is a build error now.
 //
-// They are PRIVATE, exactly like every other module of this facade, which is
-// what keeps ~242 mechanism items out of the public API: the
-// public API stays the selective `pub use crate::core::…` /
-// `crate::runtime::…` list below, byte-for-byte the list that used to read
-// `nmp_engine::core::…`. Making them `pub` (even `#[doc(hidden)]`) would
-// instead dump the whole mechanism into the facade.
-mod core;
-#[cfg(feature = "bench-instrumentation")]
-mod ingest_attribution;
-mod negentropy;
-mod publish_queue;
-mod runtime;
-mod session;
-
-/// The doc-hidden mechanism door, for IN-WORKSPACE harnesses only.
-///
-/// The reducer and the runtime used to be reachable as `nmp_engine::core` /
-/// `nmp_engine::runtime` because they lived in another crate. Three kinds of
-/// caller genuinely drive them directly and always did: this crate's own
-/// headless reducer tests and runtime integration tests (`tests/`), its
-/// benchmark examples, and the in-workspace harnesses (`nmp-bdd`, and the
-/// remote-signer provider's restart falsifiers) that spawn a real
-/// `EngineThread`. Folding the crate in must not silently delete those
-/// falsifiers, so the same access survives here -- through ONE explicitly
-/// named door rather than by making five modules public.
-///
-/// `#[doc(hidden)]`, so rustdoc omits it and everything beneath it: nothing
-/// here is an app contract. An application uses the re-exported public API
-/// below; if something in here is genuinely needed by an app, the answer is
-/// to project it through that API, not to reach in.
-#[doc(hidden)]
-pub mod mechanism {
-    pub mod core {
-        pub use crate::core::*;
-    }
-    #[cfg(feature = "bench-instrumentation")]
-    pub mod ingest_attribution {
-        pub use crate::ingest_attribution::*;
-    }
-    pub mod negentropy {
-        pub use crate::negentropy::*;
-    }
-    pub mod publish_queue {
-        pub use crate::publish_queue::*;
-    }
-    pub mod runtime {
-        pub use crate::runtime::*;
-    }
-}
+// The `#[doc(hidden)] pub mod mechanism` basement is DELETED with them. It
+// existed to let in-workspace harnesses reach `core`/`runtime` while those
+// were private modules here, and it did that by publicly re-exporting the
+// whole mechanism through a door rustdoc merely hides. `nmp-bdd` and
+// `nmp/tests` name `nmp-engine`/`nmp-runtime` directly now, which is both
+// honest and narrower: what they reach is those packages' own APIs, not a
+// glob of this one's internals. `nmp`'s public API is now exactly the
+// re-export list below — visible, and the whole of it.
 
 // #851: the NIP-22 comment vocabulary and its write operation, owned here so
 // direct Rust and `nmp-ffi` cannot end up with two owners of the same values.
@@ -216,11 +170,11 @@ pub use nmp_grammar::{
     RegisteredReplaceableMaterializer, ReplaceableMaterializer, ReplaceableMaterializerOperation,
     ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec,
 };
-pub use observation::ObservationEvidence;
-pub use session::{
+pub use nmp_runtime::session::{
     SessionAccount, SessionMutationError, SessionPayload, SessionProvider, SessionRestoreError,
     SessionSnapshot, SigningAvailability,
 };
+pub use observation::ObservationEvidence;
 
 /// Monotonic count of real OS threads NMP spawned through its instrumented
 /// paths (#680 falsifier instrumentation). This includes joined engine-owned
@@ -255,7 +209,7 @@ pub fn nmp_threads_live() -> u64 {
 // (nmp-ffi and any direct-Rust app await them) but are doc-hidden so they do
 // not double the facade with generic auto-trait expansions.
 #[doc(hidden)]
-pub use crate::runtime::ConcurrentNext;
+pub use nmp_runtime::ConcurrentNext;
 // #1239's rule, applied to NIP-11: an app reaches a protocol family through
 // this facade, never as a second Cargo line beside it. The values are
 // `nmp-nip11`'s; naming that crate is the engine's business, not the app's.
@@ -298,13 +252,13 @@ pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 // not a protocol-module privilege -- an app offering "publish this event to
 // relay: [user input]" and a crate routing to a group host say the same
 // thing the same way.
-pub use crate::core::ReceiptId;
-pub use crate::publish_queue::{
+pub use nmp_engine::core::ReceiptId;
+pub use nmp_engine::publish_queue::{
     AuthDenialSource, NotSentReason, PublishQueueEntry, PublishQueueReadError, ReceiptResult,
     ReceiptResultError, RefuseReason, RelayState, RelayWaiting, RemoveQueueEntryError, RetryCause,
     SigningState, WriteFact, WriteOutcome, DEFAULT_MAX_PUBLISH_ATTEMPTS,
 };
-pub use crate::runtime::{
+pub use nmp_runtime::{
     ReceiptReattachment, ReceiptStream, SignEventCancel, SignEventError, SignEventOperation,
 };
 // The receipt/status receiver is delivery mechanism — it was previously an
@@ -314,7 +268,7 @@ pub use crate::runtime::{
 // documented public API keeps its previous shape: `publish` returns a
 // receipt stream you drain, not a new documented type family.
 #[doc(hidden)]
-pub use crate::runtime::{
+pub use nmp_runtime::{
     AsyncFifoReceiver, FifoNextError, FifoReceiver, FifoRecvError, FifoRecvTimeoutError,
     FifoTryRecvError, ReceiptReplayCursor, FACT_CHANNEL_CAPACITY,
 };
@@ -322,7 +276,7 @@ pub use crate::runtime::{
 // `nip02::observe`'s follow observation worker) to feed a receipt/status
 // stream — not app public API, so doc-hidden.
 #[doc(hidden)]
-pub use crate::runtime::{fifo_channel, FifoSender};
+pub use nmp_runtime::{fifo_channel, FifoSender};
 // `EventBuilder` collides with `nostr::EventBuilder`, but only INSIDE this
 // crate: the re-export below never carried nostr's, and never will, so an
 // app sees exactly one `EventBuilder` and never writes a disambiguating
@@ -382,7 +336,7 @@ pub use nmp_grammar::{
 // `FilterCoverageEntry.coverage` (an `Option<CoverageInterval>`) is the
 // engine-global, per-(relay, filter) diagnostics watermark -- unscoped by
 // design, and never reused as a query-level verdict either.
-pub use crate::core::{
+pub use nmp_engine::core::{
     AcquisitionEvidence, AuthDiagnosticsPhase, AuthPhase, Row, RowDelta, RowSignature,
     ShortfallFact, SourceEvidence, SourceStatus, WindowLoad,
 };

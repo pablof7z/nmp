@@ -201,7 +201,7 @@ fn poll_until(
 }
 
 fn drain_until_all_acked(
-    receipts: &nmp::mechanism::runtime::FifoReceiver<WriteFact>,
+    receipts: &nmp_runtime::FifoReceiver<WriteFact>,
     expected: &BTreeSet<RelayUrl>,
 ) -> Vec<WriteFact> {
     let deadline = Instant::now() + SETTLE;

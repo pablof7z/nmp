@@ -380,7 +380,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             .unwrap();
         core.handle(EngineMsg::AuthCapabilityBound {
             token: policy_token.clone(),
-            capability: nmp::mechanism::core::AuthCapability::Policy,
+            capability: nmp_engine::core::AuthCapability::Policy,
             instance: AuthCapabilityInstance(1),
         });
         let signature = core.handle(EngineMsg::AuthPolicyCompleted(
@@ -399,7 +399,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
             .unwrap();
         core.handle(EngineMsg::AuthCapabilityBound {
             token: sign_token.clone(),
-            capability: nmp::mechanism::core::AuthCapability::Signer,
+            capability: nmp_engine::core::AuthCapability::Signer,
             instance: AuthCapabilityInstance(2),
         });
         let signed = unsigned.sign_with_keys(&author).unwrap();
@@ -914,14 +914,10 @@ fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
     let mut cursor = None;
     let mut replayed = Vec::new();
     loop {
-        let page = core.reattach_receipt_page(
-            receipt,
-            cursor,
-            nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY,
-        );
+        let page = core.reattach_receipt_page(receipt, cursor, nmp_runtime::FACT_CHANNEL_CAPACITY);
         assert!(page.outcome.is_attached());
         assert!(
-            page.facts.len() <= nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY,
+            page.facts.len() <= nmp_runtime::FACT_CHANNEL_CAPACITY,
             "each durable replay page obeys the same finite delivery bound"
         );
         replayed.extend(page.facts);
@@ -931,7 +927,7 @@ fn paused_receipt_across_repeated_durable_retries_is_bounded_and_loud() {
         }
     }
     assert!(
-        replayed.len() > nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY,
+        replayed.len() > nmp_runtime::FACT_CHANNEL_CAPACITY,
         "the cursor traverses more history than one in-memory page can retain"
     );
     assert!(replayed.iter().any(|status| matches!(
@@ -1002,17 +998,14 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
 
     let mut cursor = None;
     let mut replayed = Vec::new();
-    let first_page = core.reattach_receipt_page(
-        receipt,
-        cursor,
-        nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY,
-    );
+    let first_page =
+        core.reattach_receipt_page(receipt, cursor, nmp_runtime::FACT_CHANNEL_CAPACITY);
     assert!(first_page.outcome.is_attached());
     cursor = first_page.next_cursor;
     replayed.extend(first_page.facts);
     assert_eq!(
         replayed.len(),
-        nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY,
+        nmp_runtime::FACT_CHANNEL_CAPACITY,
         "the first page must cross into the later relay's durable history"
     );
 
@@ -1028,7 +1021,7 @@ fn live_receipt_mutation_between_pages_is_exactly_once() {
         let page = core.reattach_receipt_page(
             receipt,
             Some(page_cursor),
-            nmp::mechanism::runtime::FACT_CHANNEL_CAPACITY,
+            nmp_runtime::FACT_CHANNEL_CAPACITY,
         );
         assert!(page.outcome.is_attached());
         replayed.extend(page.facts);
