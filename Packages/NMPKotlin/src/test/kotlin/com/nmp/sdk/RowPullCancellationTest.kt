@@ -17,6 +17,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collect
 import uniffi.nmp_ffi.FfiAcquisitionEvidence
+import uniffi.nmp_ffi.FfiBlobDescriptor
 import uniffi.nmp_ffi.FfiAuthPolicyCallback
 import uniffi.nmp_ffi.FfiAuthPolicyRegistration
 import uniffi.nmp_ffi.FfiCancelWriteOutcome
@@ -317,6 +318,13 @@ class RowPullCancellationTest {
             `relay`: String,
             `policy`: FfiRelayInformationCachePolicy,
         ): FfiRelayInformation = unusedByThisFalsifier()
+
+        override suspend fun `uploadBlossom`(
+            `serverUrl`: String,
+            `blob`: ByteArray,
+            `contentType`: String,
+            `description`: String,
+        ): FfiBlobDescriptor = unusedByThisFalsifier()
 
         override fun `removeAccount`(`account`: FfiSessionAccount): Boolean =
             unusedByThisFalsifier()

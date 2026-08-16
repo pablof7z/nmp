@@ -378,7 +378,7 @@ class EvidenceMappingTest {
         val refused =
             WriteFact.from(
                 FfiWriteFact.Outcome(
-                    FfiWriteOutcome.Refused(FfiRefuseReason.Tombstoned),
+                    FfiWriteOutcome.Refused(FfiRefuseReason.TOMBSTONED),
                 ),
             )
         assertEquals(
