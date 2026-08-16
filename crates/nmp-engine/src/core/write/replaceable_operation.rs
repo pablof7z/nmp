@@ -857,10 +857,32 @@ impl EngineCore {
             let Some(member_receipt) = member_receipt else {
                 continue;
             };
-            if let Some(previous) = self.pending.get_mut(&member_receipt) {
-                if let Some(receipts) = self.event_to_receipts.get_mut(&previous.frozen.id) {
-                    receipts.remove(&member_receipt);
-                }
+            if self.pending.contains_key(&member_receipt) {
+                // Releases every relay this member's old generation had
+                // persisted lanes on from `receipts_by_lane_relay` before the
+                // field reset below, through the one diff both this rewrite
+                // and `replace_lane_projection` share (#1562). Done first, as
+                // its own `&mut self` call, because it cannot run while
+                // `previous` below holds `self.pending`'s only mutable
+                // borrow.
+                self.reset_lane_projection_for_successor(member_receipt);
+                // Release the retired generation's bytes through the one
+                // door, which prunes the entry once nothing owns them. This
+                // site used to remove the receipt by hand and leave the
+                // emptied set behind (#1562). Read the old id and release it
+                // before taking `previous`, since the door borrows all of
+                // `self`.
+                let old_event_id = self
+                    .pending
+                    .get(&member_receipt)
+                    .expect("just confirmed present")
+                    .frozen
+                    .id;
+                self.unindex_receipt_from_event(old_event_id, member_receipt);
+                let previous = self
+                    .pending
+                    .get_mut(&member_receipt)
+                    .expect("just confirmed present");
                 previous.frozen = frozen.clone();
                 previous.target = parked_target.clone();
                 previous.already_signed = false;
@@ -871,7 +893,7 @@ impl EngineCore {
                 previous.unstarted_relays.clear();
                 previous.route_blocked_relays.clear();
                 previous.attempt_ordinals.clear();
-                previous.lane_projection = LaneWorkerProjection::default();
+                // `lane_projection` was already reset above.
                 previous.durable_routes.clear();
                 previous.route_complete = false;
                 previous.destinations_reported = false;
@@ -905,10 +927,7 @@ impl EngineCore {
                 );
                 self.intent_receipts.insert(member, member_receipt);
             }
-            self.event_to_receipts
-                .entry(frozen.id)
-                .or_default()
-                .insert(member_receipt);
+            self.index_receipt_under_event(frozen.id, member_receipt);
         }
         if let Some(owner) = current
             .generation
