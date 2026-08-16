@@ -191,6 +191,33 @@ Passed in ~1s. Deliberately sabotaged (pointed the filter at a wrong-but-valid
 red with the exact expected timeout message rather than passing regardless of
 relay behaviour, then was restored and re-confirmed green.
 
+**C7 is proven live**, the write path's first real end-to-end exercise:
+`apps/Canary/Tests/CanaryRelayLabTests/C7NormalPublishTests.swift` opens a read
+query before publishing, then `engine.publish(WriteIntent(...))`s a real
+signed event under a real local-key account through `.explicit(relays:)` to
+the same strfry process. Two independent consuming tasks (one over the
+already-open read query, one over `receipt.status`) run concurrently, sharing
+only the one cross-cutting fact that matters: whether the row was visible
+before this relay's confirmation reached the receipt stream. It was, every
+run. The row's `sources` then grow to include the relay once its echo
+arrives — the SAME canonical row gaining provenance, never a second row — and
+the row query and the receipt stream independently agree on the exact event
+id. Terminal outcome reached `.settled`. Passed in under 1.5s.
+
+Falsified three ways, each restored afterward: routing the write to a dead
+address (`ws://127.0.0.1:1`) timed out with the expected message, since the
+echo can never arrive if the write never reaches the relay; inverting the
+acceptance-visibility assertion failed with the real captured value
+(`Optional(true)` vs. the deliberately wrong `Optional(false)`) rather than
+passing regardless; inverting the echo/dedup assertion failed showing the
+real `sources` array containing the relay URL. All three prove the scenario's
+assertions are live and would catch a real regression in any of these three
+independent ways, not just the one that happened to get exercised.
+
+No API finding this time — `WriteIntent`, `Receipt`/`ReceiptStatus`, and the
+local-acceptance-then-echo behavior all worked exactly as documented, with no
+app-side polling or retry required anywhere in the scenario.
+
 Two facts about the starting position, established by survey:
 
 - **The app has never called `publish`.** Six scenarios (C5, C7, C8, C9, C10,
