@@ -5,6 +5,214 @@
 
 use super::*;
 
+/// Every open history window, and the handle-to-window index that must
+/// mirror it exactly.
+///
+/// Fields are PRIVATE and this is a sibling module of `query` and `write`,
+/// so I4 -- `by_handle[h] == id` iff `h` is one of session `id`'s handles --
+/// is maintained here or not at all (#1606 step 2).
+///
+/// Before this owner existed the invariant was hand-maintained at SEVEN
+/// sites: two that link (open, advance) and five that unlink (two open
+/// failure paths, unsubscribe, superseded tie-seconds, load rollback). Three
+/// of the unlink sites open-coded the same three-collection dance across
+/// `by_handle`, `HistoryState::handles` and `HistoryState::handle_ids`.
+///
+/// It holds state and its invariant, and nothing else: no `store`, no
+/// `resolver`, no `router`, no `Effect`. Resolver withdrawal and wire
+/// teardown are orchestration and stay at the call sites -- which is also
+/// what keeps a real difference between those sites visible rather than
+/// collapsed; see `retire`.
+#[derive(Default)]
+pub(super) struct HistorySessions {
+    sessions: HashMap<HistorySessionId, HistoryState>,
+    by_handle: HashMap<HandleId, HistorySessionId>,
+    next_id: u64,
+}
+
+/// The census contribution, so the root counts this owner's state without
+/// naming its maps. `pub(super)`, and deliberately not nested into the flat
+/// `pub CoreOwnershipCensus`.
+#[cfg(any(test, feature = "bench-instrumentation"))]
+pub(super) struct HistorySessionCounts {
+    pub(super) sessions: usize,
+    pub(super) handles: usize,
+    /// Opening-evidence source edges every frozen branch acquisition still
+    /// retains, for the census's retained-freshness total.
+    pub(super) freshness_source_edges: usize,
+}
+
+/// The two shapes the unlink callers already hold: a set from the rollback
+/// path and a vec from the superseded path. A trait rather than forcing one
+/// of them to convert, because the conversion is what an open-coded unlink
+/// avoids and re-introducing it would be a step backwards.
+pub(super) trait HandleSet {
+    fn ids(&self) -> Vec<HandleId>;
+    fn holds(&self, handle: &HandleId) -> bool;
+}
+
+impl HandleSet for BTreeSet<HandleId> {
+    fn ids(&self) -> Vec<HandleId> {
+        self.iter().copied().collect()
+    }
+    fn holds(&self, handle: &HandleId) -> bool {
+        self.contains(handle)
+    }
+}
+
+impl HandleSet for Vec<HandleId> {
+    fn ids(&self) -> Vec<HandleId> {
+        self.clone()
+    }
+    fn holds(&self, handle: &HandleId) -> bool {
+        self.contains(handle)
+    }
+}
+
+impl HistorySessions {
+    pub(super) fn new() -> Self {
+        Self {
+            next_id: 1,
+            ..Self::default()
+        }
+    }
+
+    /// Install one window and link every handle it opened with.
+    pub(super) fn open(
+        &mut self,
+        state: HistoryState,
+        handle_ids: impl IntoIterator<Item = HandleId>,
+    ) -> HistorySessionId {
+        let id = HistorySessionId(self.next_id);
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        for handle_id in handle_ids {
+            self.by_handle.insert(handle_id, id);
+        }
+        self.sessions.insert(id, state);
+        id
+    }
+
+    /// Remove one window and unlink every handle it still holds.
+    ///
+    /// Returns the window so the caller can decide what its handles need:
+    /// the two `open_history_observation` failure paths withdraw them from
+    /// the resolver only, because they run BEFORE the first
+    /// `attach_wire_handle` and there is no wire demand to tear down;
+    /// `on_unsubscribe_history` must also detach wire handles and withdraw
+    /// demand. That difference is a rule, not an oversight, and it stays at
+    /// the call sites where it is visible.
+    pub(super) fn retire(&mut self, id: HistorySessionId) -> Option<HistoryState> {
+        let state = self.sessions.remove(&id)?;
+        for handle_id in &state.handle_ids {
+            self.by_handle.remove(handle_id);
+        }
+        Some(state)
+    }
+
+    /// Index handles an advance just pushed onto the window.
+    ///
+    /// The window half of that push happens under a `get_mut` borrow, so
+    /// this closes the index half the moment the borrow ends. Both halves of
+    /// I4 are still inside this module.
+    pub(super) fn link_advance_handles(&mut self, id: HistorySessionId, handle_ids: &[HandleId]) {
+        for handle_id in handle_ids {
+            self.by_handle.insert(*handle_id, id);
+        }
+    }
+
+    /// Unlink handles a window no longer holds, from all three collections
+    /// at once. The superseded-tie-second and load-rollback paths each
+    /// open-coded this; now neither can forget a half.
+    pub(super) fn unlink_handles<S>(&mut self, id: HistorySessionId, handle_ids: &S)
+    where
+        S: HandleSet + ?Sized,
+    {
+        for handle_id in handle_ids.ids() {
+            self.by_handle.remove(&handle_id);
+        }
+        let Some(state) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        state
+            .handles
+            .retain(|handle| !handle_ids.holds(&handle.id()));
+        state.handle_ids.retain(|handle| !handle_ids.holds(handle));
+    }
+
+    pub(super) fn get(&self, id: HistorySessionId) -> Option<&HistoryState> {
+        self.sessions.get(&id)
+    }
+
+    pub(super) fn get_mut(&mut self, id: HistorySessionId) -> Option<&mut HistoryState> {
+        self.sessions.get_mut(&id)
+    }
+
+    /// The window, for the paths that already established it is live. Panics
+    /// exactly where the `self.histories[&id]` index it replaces did.
+    pub(super) fn expect_live(&self, id: HistorySessionId) -> &HistoryState {
+        self.sessions
+            .get(&id)
+            .expect("history session remains live")
+    }
+
+    /// The window a resolver handle belongs to.
+    pub(super) fn session_for_handle(&self, handle: HandleId) -> Option<HistorySessionId> {
+        self.by_handle.get(&handle).copied()
+    }
+
+    /// I4, as a question: the window is gone AND no handle still points at
+    /// it. Both halves, because checking only one is what the seven
+    /// hand-written sites made easy to get wrong.
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) fn is_retired(&self, id: HistorySessionId) -> bool {
+        !self.sessions.contains_key(&id) && self.by_handle.values().all(|owner| *owner != id)
+    }
+
+    pub(super) fn ids(&self) -> Vec<HistorySessionId> {
+        self.sessions.keys().copied().collect()
+    }
+
+    /// Every history handle with the acquisition decision its branch froze,
+    /// for the root's wire-ownership rebuild. A read-only iterator: the
+    /// rebuild counts, it does not reshape a window.
+    pub(super) fn wire_attachments(
+        &self,
+    ) -> impl Iterator<Item = (HandleId, &HandleAcquisition)> + '_ {
+        self.sessions.values().flat_map(|state| {
+            state.handle_ids.iter().filter_map(move |handle_id| {
+                let branch = state.branch_of.get(handle_id).copied().unwrap_or_default();
+                state
+                    .acquisitions_by_branch
+                    .get(branch)
+                    .map(|acquisition| (*handle_id, acquisition))
+            })
+        })
+    }
+
+    /// A copy of the handle index, for falsifiers that assert a failed
+    /// transition left I4 exactly as it found it. A copy, not the map.
+    #[cfg(test)]
+    pub(super) fn handle_index_snapshot(&self) -> HashMap<HandleId, HistorySessionId> {
+        self.by_handle.clone()
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) fn counts(&self) -> HistorySessionCounts {
+        HistorySessionCounts {
+            sessions: self.sessions.len(),
+            handles: self.by_handle.len(),
+            freshness_source_edges: self
+                .sessions
+                .values()
+                .flat_map(|state| &state.acquisitions_by_branch)
+                .flat_map(|acquisition| &acquisition.scopes)
+                .filter_map(ScopeAcquisition::opening_evidence)
+                .map(|evidence| evidence.sources.len())
+                .sum(),
+        }
+    }
+}
+
 impl EngineCore {
     pub(crate) fn open_history_observation(
         &mut self,
@@ -56,17 +264,14 @@ impl EngineCore {
                 }
             }
         }
-        let id = HistorySessionId(self.next_history_id);
-        self.next_history_id = self.next_history_id.wrapping_add(1).max(1);
         let live_handle_ids: Vec<HandleId> = handles.iter().map(|handle| handle.id()).collect();
         let mut branch_of = BTreeMap::new();
         for (index, handle) in handles.iter().enumerate() {
-            self.history_by_handle.insert(handle.id(), id);
             branch_of.insert(handle.id(), index);
         }
-        let handle_ids = live_handle_ids.iter().copied().collect();
-        self.histories.insert(
-            id,
+        let handle_ids: BTreeSet<HandleId> = live_handle_ids.iter().copied().collect();
+        let linked = handle_ids.clone();
+        let id = self.history.open(
             HistoryState {
                 target_rows: query.page_size(),
                 query,
@@ -84,6 +289,7 @@ impl EngineCore {
                 load: WindowLoad::Idle,
                 pending_load: None,
             },
+            linked,
         );
 
         // As with ordinary observations, canonical materialization is the
@@ -95,13 +301,15 @@ impl EngineCore {
             Ok(current) => current,
             Err(error) => {
                 let reason = format!("canonical history projection failed: {error}");
+                // Resolver-only, deliberately: this runs BEFORE the first
+                // `attach_wire_handle` below, so there is no wire demand to
+                // withdraw. `on_unsubscribe_history` does both.
                 let withdrawn = self
-                    .histories
-                    .remove(&id)
+                    .history
+                    .retire(id)
                     .map(|state| state.live_handle_ids)
                     .unwrap_or_default();
                 for handle_id in withdrawn {
-                    self.history_by_handle.remove(&handle_id);
                     let delta = self.resolver.unsubscribe(handle_id);
                     self.consume_resolver_delta(delta);
                 }
@@ -120,13 +328,15 @@ impl EngineCore {
             Ok(evidence) => evidence,
             Err(error) => {
                 let reason = format!("history evidence projection failed: {error}");
+                // Resolver-only, deliberately: this runs BEFORE the first
+                // `attach_wire_handle` below, so there is no wire demand to
+                // withdraw. `on_unsubscribe_history` does both.
                 let withdrawn = self
-                    .histories
-                    .remove(&id)
+                    .history
+                    .retire(id)
                     .map(|state| state.live_handle_ids)
                     .unwrap_or_default();
                 for handle_id in withdrawn {
-                    self.history_by_handle.remove(&handle_id);
                     let delta = self.resolver.unsubscribe(handle_id);
                     self.consume_resolver_delta(delta);
                 }
@@ -136,7 +346,7 @@ impl EngineCore {
             }
         };
         let attachments: Vec<_> = {
-            let state = &self.histories[&id];
+            let state = self.history.expect_live(id);
             state
                 .live_handle_ids
                 .iter()
@@ -176,13 +386,14 @@ impl EngineCore {
     }
 
     pub(super) fn on_unsubscribe_history(&mut self, id: HistorySessionId) -> Vec<Effect> {
-        let Some(state) = self.histories.remove(&id) else {
+        let Some(state) = self.history.retire(id) else {
             return Vec::new();
         };
         let mut effects = Vec::new();
         let mut closing = Vec::new();
+        // Unlike the open-failure unwinds, this window has been through
+        // `attach_wire_handle`, so its wire demand must come down too.
         for handle in state.handles {
-            self.history_by_handle.remove(&handle.id());
             closing.extend(self.detach_wire_handle(handle.id()));
             let resolver_delta = self.resolver.unsubscribe(handle.id());
             self.consume_resolver_delta(resolver_delta);
@@ -199,7 +410,7 @@ impl EngineCore {
     /// `NoBoundary` error — an in-flight advance simply raises the target, and
     /// being at the bound is a frame fact, not an error.
     pub(super) fn on_request_rows(&mut self, id: HistorySessionId, at_least: usize) -> Vec<Effect> {
-        let Some(state) = self.histories.get(&id) else {
+        let Some(state) = self.history.get(id) else {
             // The session was withdrawn concurrently. The facade keeps a
             // window's session alive for its whole lifetime, so this is only
             // reachable as a benign teardown race — report Ok, do nothing.
@@ -216,8 +427,8 @@ impl EngineCore {
         // continuation converges the window to it.
         if state.pending_load.is_some() {
             if new_target != old_target {
-                self.histories
-                    .get_mut(&id)
+                self.history
+                    .get_mut(id)
                     .expect("history remains live")
                     .target_rows = new_target;
             }
@@ -247,7 +458,7 @@ impl EngineCore {
     /// This is the cursor an advance fetches strictly older than. `None` when
     /// the window holds no rows yet.
     pub(super) fn window_boundary(&self, id: HistorySessionId) -> Option<nmp_store::EventCursor> {
-        let state = self.histories.get(&id)?;
+        let state = self.history.get(id)?;
         state
             .last_rows
             .iter()
@@ -290,8 +501,8 @@ impl EngineCore {
             needed,
         ) = {
             let state = self
-                .histories
-                .get(&id)
+                .history
+                .get(id)
                 .expect("advance requires a live session");
             let prior_target = state.target_rows;
             let old_len = state.last_rows.len();
@@ -317,7 +528,7 @@ impl EngineCore {
         // Raise the target now: `history_rows_and_evidence_for` /
         // `advance_history_projection` both read `target_rows`.
         {
-            let state = self.histories.get_mut(&id).expect("history remains live");
+            let state = self.history.get_mut(id).expect("history remains live");
             state.target_rows = state.target_rows.max(new_target);
         }
 
@@ -334,7 +545,7 @@ impl EngineCore {
         }
 
         {
-            let state = self.histories.get_mut(&id).expect("history remains live");
+            let state = self.history.get_mut(id).expect("history remains live");
             state.pending_load = Some(PendingHistoryLoad {
                 prior_target_rows: prior_target,
                 prior_load,
@@ -394,9 +605,10 @@ impl EngineCore {
         }
 
         {
+            let mut linked = Vec::with_capacity(opened.len());
             let state = self
-                .histories
-                .get_mut(&id)
+                .history
+                .get_mut(id)
                 .expect("history remains live during synchronous advance");
             if needs_tie {
                 state.acquired_tie_seconds.insert(boundary_second);
@@ -407,18 +619,20 @@ impl EngineCore {
                 state.handles.push(handle);
                 state.acquisitions.insert(handle_id, kind);
                 state.branch_of.insert(handle_id, branch);
-                self.history_by_handle.insert(handle_id, id);
                 state
                     .pending_load
                     .as_mut()
                     .expect("load was staged before opening resolver handles")
                     .opened_handle_ids
                     .push(handle_id);
+                linked.push(handle_id);
             }
+            // The other half of I4, once the window borrow ends.
+            self.history.link_advance_handles(id, &linked);
         }
 
         let attachments: Vec<_> = {
-            let state = &self.histories[&id];
+            let state = self.history.expect_live(id);
             state
                 .pending_load
                 .as_ref()
@@ -457,8 +671,8 @@ impl EngineCore {
                     })
                     .collect();
                 let pending = self
-                    .histories
-                    .get_mut(&id)
+                    .history
+                    .get_mut(id)
                     .expect("history remains live during staged advance")
                     .pending_load
                     .as_mut()
@@ -468,7 +682,7 @@ impl EngineCore {
                 added
             }
             Err(error) => {
-                if let Some(state) = self.histories.get_mut(&id) {
+                if let Some(state) = self.history.get_mut(id) {
                     state.projection_complete = false;
                 }
                 self.degrade_store(error, &mut effects);
@@ -496,7 +710,7 @@ impl EngineCore {
         max: usize,
     ) -> Vec<Effect> {
         let (prior_target, prior_load, prior_evidence, prior_projection_complete) = {
-            let state = self.histories.get(&id).expect("history remains live");
+            let state = self.history.get(id).expect("history remains live");
             (
                 state.target_rows,
                 state.load,
@@ -505,7 +719,7 @@ impl EngineCore {
             )
         };
         let batch = self.history_batch(id, Vec::new(), WindowLoad::AtBound { max });
-        let state = self.histories.get_mut(&id).expect("history remains live");
+        let state = self.history.get_mut(id).expect("history remains live");
         state.pending_load = Some(PendingHistoryLoad {
             prior_target_rows: prior_target,
             prior_load,
@@ -521,8 +735,8 @@ impl EngineCore {
 
     pub(super) fn on_commit_history_load(&mut self, id: HistorySessionId) -> Vec<Effect> {
         if !self
-            .histories
-            .get(&id)
+            .history
+            .get(id)
             .is_some_and(|state| state.pending_load.is_some())
         {
             return Vec::new();
@@ -550,8 +764,8 @@ impl EngineCore {
         // re-diffs the demand and emits the wire CLOSEs for the dropped handles.
         let superseded: Vec<HandleId> = {
             let state = self
-                .histories
-                .get(&id)
+                .history
+                .get(id)
                 .expect("committed history remained live");
             let current: BTreeSet<HandleId> = state
                 .pending_load
@@ -566,8 +780,8 @@ impl EngineCore {
                 .window_boundary(id)
                 .map(|cursor| cursor.created_at.as_secs());
             let state = self
-                .histories
-                .get(&id)
+                .history
+                .get(id)
                 .expect("committed history remained live");
             state
                 .acquisitions
@@ -585,18 +799,17 @@ impl EngineCore {
         let mut withdrawn = Vec::new();
         if !superseded.is_empty() {
             for handle_id in &superseded {
-                self.history_by_handle.remove(handle_id);
                 withdrawn.extend(self.detach_wire_handle(*handle_id));
                 let resolver_delta = self.resolver.unsubscribe(*handle_id);
                 self.consume_resolver_delta(resolver_delta);
             }
+            // One door for all three collections; neither this path nor the
+            // rollback below can forget a half any more.
+            self.history.unlink_handles(id, &superseded);
             let state = self
-                .histories
-                .get_mut(&id)
+                .history
+                .get_mut(id)
                 .expect("committed history remained live");
-            state
-                .handles
-                .retain(|handle| !superseded.contains(&handle.id()));
             for handle_id in &superseded {
                 state.handle_ids.remove(handle_id);
                 state.acquisitions.remove(handle_id);
@@ -609,8 +822,8 @@ impl EngineCore {
 
         let (made_progress, target, len, has_boundary) = {
             let state = self
-                .histories
-                .get_mut(&id)
+                .history
+                .get_mut(id)
                 .expect("committed history remained live");
             let pending = state
                 .pending_load
@@ -643,8 +856,8 @@ impl EngineCore {
 
     pub(super) fn on_rollback_history_load(&mut self, id: HistorySessionId) -> Vec<Effect> {
         let Some(pending) = self
-            .histories
-            .get_mut(&id)
+            .history
+            .get_mut(id)
             .and_then(|state| state.pending_load.take())
         else {
             return Vec::new();
@@ -654,19 +867,15 @@ impl EngineCore {
         let opened: BTreeSet<_> = pending.opened_handle_ids.iter().copied().collect();
         let mut withdrawn = Vec::new();
         for handle_id in &opened {
-            self.history_by_handle.remove(handle_id);
             withdrawn.extend(self.detach_wire_handle(*handle_id));
             let resolver_delta = self.resolver.unsubscribe(*handle_id);
             self.consume_resolver_delta(resolver_delta);
         }
+        self.history.unlink_handles(id, &opened);
         let state = self
-            .histories
-            .get_mut(&id)
+            .history
+            .get_mut(id)
             .expect("rollback target remained live while staged handles closed");
-        state
-            .handles
-            .retain(|handle| !opened.contains(&handle.id()));
-        state.handle_ids.retain(|handle| !opened.contains(handle));
         state
             .acquisitions
             .retain(|handle, _| !opened.contains(handle));
@@ -697,7 +906,7 @@ impl EngineCore {
     /// is already represented by the initial session; shadow planning never
     /// needs to mutate the widen-only discovery subscription.
     pub(super) fn history_shadow_plans(&self, id: HistorySessionId) -> Vec<RelayPlan> {
-        let Some(state) = self.histories.get(&id) else {
+        let Some(state) = self.history.get(id) else {
             return Vec::new();
         };
         let handles_by_branch = self.history_handles_by_branch(id);
@@ -725,7 +934,7 @@ impl EngineCore {
     /// branch: branch `i`'s live-top acquisition plus whatever tie-second and
     /// older-range acquisitions are currently open for that same branch.
     fn history_handles_by_branch(&self, id: HistorySessionId) -> Vec<Vec<HandleId>> {
-        let Some(state) = self.histories.get(&id) else {
+        let Some(state) = self.history.get(id) else {
             return Vec::new();
         };
         let mut grouped = vec![Vec::new(); state.live_handle_ids.len()];
@@ -738,7 +947,7 @@ impl EngineCore {
     }
 
     pub(super) fn refresh_all_histories(&mut self, effects: &mut Vec<Effect>) {
-        let ids: Vec<_> = self.histories.keys().copied().collect();
+        let ids: Vec<_> = self.history.ids();
         for id in ids {
             self.refresh_history(id, WindowLoad::Idle, effects);
         }
@@ -752,7 +961,7 @@ impl EngineCore {
     /// #1646: the production door for every AUTH transition, mirroring
     /// [`Self::refresh_all_observation_evidence`] for history sessions.
     pub(super) fn refresh_all_history_evidence(&mut self, effects: &mut Vec<Effect>) {
-        let ids: Vec<_> = self.histories.keys().copied().collect();
+        let ids: Vec<_> = self.history.ids();
         for id in ids {
             self.refresh_history_evidence(id, effects);
         }
@@ -765,8 +974,8 @@ impl EngineCore {
         load: WindowLoad,
     ) -> HistoryBatch {
         let state = self
-            .histories
-            .get_mut(&id)
+            .history
+            .get_mut(id)
             .expect("history batch requires a live session");
         state.load = load;
         let rows = state
@@ -791,7 +1000,7 @@ impl EngineCore {
         let (current, evidence) = match self.history_rows_and_evidence_for(id) {
             Ok(value) => value,
             Err(error) => {
-                if let Some(state) = self.histories.get_mut(&id) {
+                if let Some(state) = self.history.get_mut(id) {
                     state.projection_complete = false;
                 }
                 self.degrade_store(error, effects);
@@ -812,7 +1021,7 @@ impl EngineCore {
         evidence: Vec<AcquisitionEvidence>,
         load: WindowLoad,
     ) -> Option<HistoryBatch> {
-        let state = self.histories.get_mut(&id)?;
+        let state = self.history.get_mut(id)?;
         let current_rows = current.clone();
         let current_order = current_rows
             .iter()
@@ -858,7 +1067,7 @@ impl EngineCore {
         id: HistorySessionId,
         effects: &mut Vec<Effect>,
     ) {
-        let Some(state) = self.histories.get(&id) else {
+        let Some(state) = self.history.get(id) else {
             return;
         };
         if !state.projection_complete {
@@ -876,7 +1085,7 @@ impl EngineCore {
                 return;
             }
         };
-        let Some(state) = self.histories.get_mut(&id) else {
+        let Some(state) = self.history.get_mut(id) else {
             return;
         };
         if state.last_evidence.as_ref() == Some(&evidence) && state.load == WindowLoad::Idle {
@@ -895,7 +1104,7 @@ impl EngineCore {
         &self,
         id: HistorySessionId,
     ) -> Result<Vec<AcquisitionEvidence>, PersistenceError> {
-        let Some(state) = self.histories.get(&id) else {
+        let Some(state) = self.history.get(id) else {
             return Ok(Vec::new());
         };
         let by_branch = self.history_handles_by_branch(id);
@@ -923,8 +1132,8 @@ impl EngineCore {
         id: HistorySessionId,
     ) -> Result<BTreeMap<EventId, Row>, PersistenceError> {
         let state = self
-            .histories
-            .get(&id)
+            .history
+            .get(id)
             .expect("history projection requires a live session");
         let mut by_id: BTreeMap<EventId, Row> = BTreeMap::new();
         for (branch, live) in state.live_handle_ids.iter().enumerate() {
@@ -1032,8 +1241,8 @@ impl EngineCore {
         plans: &[RelayPlan],
     ) -> Result<(HistoryBatch, usize), PersistenceError> {
         let state = self
-            .histories
-            .get(&id)
+            .history
+            .get(id)
             .expect("history advance requires a live session");
         let needed = state.target_rows.saturating_sub(state.last_rows.len());
         let mut candidates = BTreeMap::<EventId, Row>::new();
@@ -1100,14 +1309,14 @@ impl EngineCore {
             // reads above it (#763).
             evidence.push(self.acquisition_evidence_for_scopes_with_plan(
                 self.history_branch_demand_scopes(&handles),
-                &self.histories[&id].acquisitions_by_branch[branch],
+                &self.history.expect_live(id).acquisitions_by_branch[branch],
                 plans.get(branch).unwrap_or(&RelayPlan::default()),
             )?);
         }
 
         let state = self
-            .histories
-            .get_mut(&id)
+            .history
+            .get_mut(id)
             .expect("history remains live during synchronous projection");
         let mut deltas = Vec::with_capacity(ordered.len());
         for row in ordered {
@@ -1138,7 +1347,7 @@ impl EngineCore {
     ) -> bool {
         #[cfg(feature = "bench-instrumentation")]
         let phase_started = std::time::Instant::now();
-        let Some(state) = self.histories.get(&id) else {
+        let Some(state) = self.history.get(id) else {
             return true;
         };
         // The incremental algebra below is proven for a single-branch
@@ -1226,8 +1435,8 @@ impl EngineCore {
                         )
                     }),
                     Err(error) => {
-                        self.histories
-                            .get_mut(&id)
+                        self.history
+                            .get_mut(id)
                             .expect("history remained live after affected-row read failure")
                             .projection_complete = false;
                         self.degrade_store(error, effects);
@@ -1258,8 +1467,8 @@ impl EngineCore {
 
         {
             let state = self
-                .histories
-                .get_mut(&id)
+                .history
+                .get_mut(id)
                 .expect("history remained live during committed mutation");
             let remember =
                 |event_id: EventId,
@@ -1384,8 +1593,8 @@ impl EngineCore {
                 Ok(rows) => rows,
                 Err(error) => {
                     let state = self
-                        .histories
-                        .get_mut(&id)
+                        .history
+                        .get_mut(id)
                         .expect("history remained live after failed backfill");
                     for (event_id, prior) in before {
                         if let Some(current) = state.last_rows.remove(&event_id) {
@@ -1412,8 +1621,8 @@ impl EngineCore {
                     .saturating_add(rows.len() as u64),
             );
             let state = self
-                .histories
-                .get_mut(&id)
+                .history
+                .get_mut(id)
                 .expect("history remained live during exact backfill");
             for stored in rows {
                 let event_id = stored.event.id;
@@ -1440,8 +1649,8 @@ impl EngineCore {
 
         {
             let state = self
-                .histories
-                .get_mut(&id)
+                .history
+                .get_mut(id)
                 .expect("history remained live during canonical truncation");
             let remember =
                 |event_id: EventId,
@@ -1472,8 +1681,8 @@ impl EngineCore {
         let phase_started = std::time::Instant::now();
 
         let state = self
-            .histories
-            .get(&id)
+            .history
+            .get(id)
             .expect("history remained live after committed rebalance");
         let mut deltas = Vec::new();
         for (event_id, prior) in &before {

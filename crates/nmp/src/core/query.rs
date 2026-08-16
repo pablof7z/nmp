@@ -1151,7 +1151,7 @@ impl EngineCore {
         for handle in candidates {
             if let Some(state) = self.handles.get(&handle) {
                 observations.insert(state.observation);
-            } else if let Some(history) = self.history_by_handle.get(&handle) {
+            } else if let Some(history) = self.history.session_for_handle(handle).as_ref() {
                 histories.insert(*history);
             }
         }
@@ -1472,13 +1472,11 @@ impl EngineCore {
         for (id, state) in &self.handles {
             contributions.push((*id, self.wire_atoms_for_handle(*id, &state.acquisition)));
         }
-        for state in self.histories.values() {
-            for id in &state.handle_ids {
-                let branch = state.branch_of.get(id).copied().unwrap_or_default();
-                if let Some(acquisition) = state.acquisitions_by_branch.get(branch) {
-                    contributions.push((*id, self.wire_atoms_for_handle(*id, acquisition)));
-                }
-            }
+        for (handle_id, acquisition) in self.history.wire_attachments() {
+            contributions.push((
+                handle_id,
+                self.wire_atoms_for_handle(handle_id, acquisition),
+            ));
         }
         self.wire_atoms_by_handle.clear();
         self.wire_demand_refs_by_handle.clear();
@@ -3026,7 +3024,7 @@ impl EngineCore {
         let affected: Vec<_> = affected_handles.into_iter().collect();
         let affected_histories: BTreeSet<_> = affected
             .iter()
-            .filter_map(|handle| self.history_by_handle.get(handle).copied())
+            .filter_map(|handle| self.history.session_for_handle(*handle))
             .collect();
         #[cfg(feature = "bench-instrumentation")]
         crate::ingest_attribution::committed_projection_prelude(phase_started.elapsed());
