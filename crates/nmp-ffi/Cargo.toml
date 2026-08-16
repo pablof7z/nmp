@@ -33,9 +33,14 @@ asset = ["nmp/asset"]
 blossom = ["nmp/blossom", "asset"]
 content = ["nmp/content"]
 # #971: the one-shot engine-authorized Blossom upload. Needs `blossom` for
-# the client/authorization vocabulary and `nmp/media` for the exact-bytes
-# prepare/upload seam this call composes internally.
-media = ["nmp/media", "blossom"]
+# the client/authorization vocabulary and `dep:nmp-media` for the exact-bytes
+# prepare/upload seam this call composes internally. `nmp-media` is a
+# deliberate exception to the "always through `nmp`" rule below (#1707):
+# `nmp` does not re-export it and must not -- the facade contains no
+# capability's implementation, reachable or not. This is a direct edge to
+# the capability crate itself, the same shape every native app already uses
+# to reach `nmp-media` directly.
+media = ["dep:nmp-media", "blossom"]
 
 # `cargo run -p nmp-ffi --bin uniffi-bindgen generate --library <staticlib> \
 #   --language swift --out-dir gen/` (M4 plan §3 step 3, library mode -- reads
@@ -65,6 +70,11 @@ nostr.workspace = true
 # offers each one, a direct edge here would be a second owner of the same
 # values -- exactly what #851 closed for `nmp-nip22`.
 nmp = { workspace = true }
+# #1707: the one deliberate exception to the paragraph above. `nmp` does not
+# and must not re-export the media composition seam, so this is a direct
+# edge to the capability crate, not a second owner of values `nmp` also
+# offers.
+nmp-media = { workspace = true, optional = true }
 uniffi = { workspace = true, features = ["cli"] }
 zeroize = "1"
 k256 = { version = "0.13.4", default-features = false }

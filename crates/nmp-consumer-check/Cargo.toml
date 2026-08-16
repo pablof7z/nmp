@@ -25,16 +25,16 @@ publish.workspace = true
 # dependency graph and the reason this list could not name it. Now it is a
 # feature like every other retrofitted family below.
 #
-# `media` closed #1563: `nmp-media` (and `nmp-nip68`, which it composes) had
-# no facade feature at all, so ~1,600 lines of media composition were
-# unreachable from any app in any language. `media` implies `nip68` and
-# `blossom` (which implies `asset`), so no separate line is needed for those.
+# `media` is deliberately ABSENT: #1707 reversed #1563's absorption of
+# `nmp-media` into the facade. `nmp` must not contain any capability's
+# implementation, so a picture-composing app depends on `nmp-media` directly
+# -- this crate's whole point is proving what IS reachable from `nmp` alone,
+# and media composition no longer is, on purpose.
 [dependencies]
 nmp = { workspace = true, features = [
     "asset",
     "blossom",
     "content",
-    "media",
     "nip02",
     "nip18",
     "nip22",

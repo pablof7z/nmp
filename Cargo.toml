@@ -48,10 +48,12 @@ members = [
     "crates/nmp-blossom",
     # NIP-68 picture-first (kind:20) schema owner (#558, epic #216 T15-B-NIP68-IMETA).
     "crates/nmp-nip68",
-    # #1563: the staged media composition seam (prepare -> upload -> compose,
-    # #559, epic #216 T15-C-MEDIA-COMPOSITION) absorbed into `nmp::media` --
-    # it owned no schema of its own, only sequencing the crates above, so it
-    # is no longer a separate package.
+    # The staged media composition seam (prepare -> upload -> compose, #559,
+    # epic #216 T15-C-MEDIA-COMPOSITION): sequences nmp-asset/nmp-blossom/
+    # nmp-nip68 without owning any schema of its own. #1563 absorbed this
+    # into `nmp::media`; #1707 reverses that -- `nmp` must not contain any
+    # capability's implementation, reachable or not.
+    "crates/nmp-media",
     "crates/nmp-content",
     "crates/nmp-test-support",
     # Typed NIP-22 comments over NIP-73 external content ids (#572),
@@ -106,6 +108,7 @@ default-members = [
     "crates/nmp-asset",
     "crates/nmp-blossom",
     "crates/nmp-nip68",
+    "crates/nmp-media",
     "crates/nmp-content",
     "crates/nmp-nip22",
     "crates/nmp-nip73",
@@ -149,6 +152,7 @@ nmp-nipc7 = { path = "crates/nmp-nipc7" }
 nmp-asset = { path = "crates/nmp-asset" }
 nmp-blossom = { path = "crates/nmp-blossom" }
 nmp-nip68 = { path = "crates/nmp-nip68" }
+nmp-media = { path = "crates/nmp-media" }
 nmp-content = { path = "crates/nmp-content" }
 nmp-test-support = { path = "crates/nmp-test-support" }
 nmp-nip22 = { path = "crates/nmp-nip22" }

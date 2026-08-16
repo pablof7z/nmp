@@ -74,16 +74,11 @@ content = ["dep:nmp-content"]
 asset = ["dep:nmp-asset"]
 blossom = ["dep:nmp-blossom", "asset"]
 
-# NIP-68 picture-first (kind:20) schema (#558). Separate from `media` because
-# read-only decoding of a kind:20 seen on a relay needs no Blossom/asset
-# machinery at all.
+# NIP-68 picture-first (kind:20) schema (#558). Read-only decoding of a
+# kind:20 seen on a relay needs no Blossom/asset machinery at all; composing
+# and uploading a new picture is `nmp-media`'s own seam (#1707), not this
+# facade's.
 nip68 = ["dep:nmp-nip68"]
-
-# #1563: the media composition seam, absorbed from the standalone
-# `nmp-media` crate. Composes `nip68` + `blossom` (which already implies
-# `asset`); an app that never composes a picture upload does not link any of
-# the three.
-media = ["nip68", "blossom"]
 
 # #827: both instrumentation features came in with the folded engine modules
 # (`core`, `runtime`, `outbox`, `negentropy`). They stay non-default.
@@ -121,9 +116,9 @@ nmp-nipc7 = { workspace = true, optional = true }
 nmp-content = { workspace = true, optional = true }
 nmp-asset = { workspace = true, optional = true }
 nmp-blossom = { workspace = true, optional = true }
-# #1563: NIP-68 schema plus the `media` composition seam absorbed from the
-# deleted `nmp-media` crate. `nmp-nip68` itself stays independent -- #1562
-# confirmed it does not fold into a consolidated protocol package.
+# NIP-68 (kind:20) read-only decoding. #1562 confirmed it does not fold into
+# a consolidated protocol package. The media composition seam that consumes
+# it lives in `nmp-media`, not here (#1707).
 nmp-nip68 = { workspace = true, optional = true }
 # #977: the NIP-29 `Group` door. The dependency runs THIS WAY ROUND and
 # only this way round -- `Group` is pure composition over `nostr` +
@@ -191,9 +186,7 @@ libc = { version = "0.2", optional = true }
 # `nip02`: `body_complete_semantic_acceptance.rs` (#1143, moved up from
 # `nmp-nip02` alongside the follow door itself) proves the door end-to-end
 # against a real engine.
-# `media`: `media_composition.rs` (#1563, moved up from `nmp-media`) proves
-# the prepare -> upload -> compose seam against a real async loopback mock.
-nmp = { path = ".", features = ["media", "nip02", "nip29", "nip65", "test-instrumentation", "unstable-mechanism"] }
+nmp = { path = ".", features = ["nip02", "nip29", "nip65", "test-instrumentation", "unstable-mechanism"] }
 nmp-test-support.workspace = true
 nmp-resolver-testkit.workspace = true
 nmp-router-testkit.workspace = true

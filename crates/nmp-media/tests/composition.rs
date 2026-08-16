@@ -14,7 +14,7 @@ use nmp_blossom::{
 };
 use nmp_nip68::{ContentWarning, ImageDim, PictureBuildError, PictureImageError};
 
-use nmp::media::{
+use nmp_media::{
     compose_picture, prepare, ComposedImage, MediaComposeError, MediaUploadError, PicturePost,
     PrepareError, PreparedUpload, UploadedAsset,
 };
