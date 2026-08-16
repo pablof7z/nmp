@@ -448,6 +448,148 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     assert_eq!(attempts[0].outcome, PublishQueueAttemptOutcome::Started);
 }
 
+/// I1: `pending` must stay exactly mirrored by `intent_receipts` and
+/// `event_to_receipts`. `remember_pending_indexes` (#1725) is the insertion
+/// half of that mirror, called both at ordinary acceptance and -- this
+/// test's own case -- at every `recover_on_boot` intent. Two co-owner
+/// obligations accept the exact same bytes before a restart (the same
+/// mechanism `duplicate_coowners_keep_independent_routes_and_terminal_receipts`
+/// proves in-process); after the restart, `event_to_receipts` has ONLY the
+/// boot-recovery insertion to rebuild it from -- `on_signed`'s own insertion
+/// never runs again, because its guard (`pending.event_id.is_some()`) skips
+/// an obligation that recovery already loaded as signed. A shared event's
+/// ack must still fan out to both co-owners, not just whichever one owns the
+/// lane the ack physically arrived on.
+///
+/// nmp:falsifier=An ack for an event two co-owners share reaches both
+/// receipts after a restart, exactly as it does in-process.
+#[test]
+fn a_shared_events_ack_reaches_every_co_owner_after_a_restart() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://co-owner-restart.example").unwrap();
+    let other = RelayUrl::parse("wss://co-owners-other-lane.example").unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("co-owner-restart.redb");
+    let template = draft(1, "same bytes, two obligations, survives a restart");
+
+    let (id_a, id_b, event_id) = {
+        let store = RedbStore::open(&path).expect("open fresh Redb store");
+        let mut core = EngineCore::new(store, 10);
+        activate(&mut core, &author);
+        connect_signer(&mut core, 0, &relay, author.public_key());
+        authenticate_signer(&mut core, 0, &relay, &author);
+
+        let first = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Event(template.clone()),
+            routing: WriteRouting::Explicit(vec![relay.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        let (id_a, generation_a, to_sign) = find_sign_request(&first);
+        let second = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Event(template.clone()),
+            routing: WriteRouting::Explicit(vec![other.clone()]),
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        let (id_b, _, _) = find_sign_request(&second);
+        assert_ne!(
+            id_a, id_b,
+            "fixture sanity: two distinct obligations accept the same bytes"
+        );
+
+        let signed = to_sign.sign_with_keys(&author).expect("sign fixture event");
+        let routed = core.handle(EngineMsg::SignerCompleted(
+            id_a,
+            generation_a,
+            Ok(signed.clone()),
+        ));
+        // Fixture sanity, pre-restart: the store's co-owner promotion must
+        // have actually advanced BOTH obligations from this one signer
+        // completion, or nothing below is testing what this test claims to.
+        assert!(
+            routed.iter().any(|effect| matches!(
+                effect,
+                Effect::EmitReceipt(id, WriteFact::Signing(SigningState::Signed { event_id }))
+                    if *id == id_a && *event_id == signed.id
+            )),
+            "fixture sanity: co-owner A must be signed before the restart, got {routed:?}"
+        );
+        assert!(
+            routed.iter().any(|effect| matches!(
+                effect,
+                Effect::EmitReceipt(id, WriteFact::Signing(SigningState::Signed { event_id }))
+                    if *id == id_b && *event_id == signed.id
+            )),
+            "fixture sanity: co-owner B must be signed by the SAME completion before the \
+             restart, got {routed:?}"
+        );
+        mark_written(&mut core, &routed, &relay);
+        (id_a, id_b, signed.id)
+    };
+
+    // The restart: a fresh process reopens the same durable store. Neither
+    // obligation is re-signed here -- `on_signed` never runs again for
+    // either one, so `event_to_receipts` has only `recover_on_boot`'s
+    // insertion to rebuild it from.
+    let store = RedbStore::open(&path).expect("reopen Redb store after restart");
+    let mut recovered = EngineCore::new(store, 10);
+    recovered.recover_on_boot();
+    connect_signer(&mut recovered, 0, &relay, author.public_key());
+    // The restart re-dispatches: neither the wire correlation nor the
+    // in-flight lane state is durable, only the fact that the attempt
+    // exists. The reconnect + AUTH readiness re-arms exactly one fresh
+    // attempt for this relay, which must be marked written before an ack
+    // for it can correlate.
+    let authd = authenticate_signer(&mut recovered, 0, &relay, &author);
+    mark_written(&mut recovered, &authd, &relay);
+
+    // Fixture sanity, post-restart and BEFORE the ack: both co-owners must
+    // have survived recovery as live, signed obligations on the shared
+    // event. Asserting this first is what makes a red assertion below
+    // evidence of I1's fan-out specifically -- a generation that never
+    // reformed and a fan-out that silently degraded to one receipt would
+    // otherwise both fail the same way.
+    assert!(
+        recovered.reattach_receipt(id_a).is_attached(),
+        "co-owner A must survive the restart"
+    );
+    assert!(
+        recovered.reattach_receipt(id_b).is_attached(),
+        "co-owner B must survive the restart"
+    );
+
+    let acked = recovered.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        signer_session(&relay, author.public_key()),
+        RelayFrame::from(RelayMessage::ok(event_id, true, "")),
+    ));
+    assert!(
+        acked.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(
+                id,
+                WriteFact::Relay { event_id: e, relay: r, state: RelayState::Published }
+            ) if *id == id_a && *e == event_id && r == &relay
+        )),
+        "I1: co-owner A's ack must fan out after a restart, got {acked:?}"
+    );
+    assert!(
+        acked.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(
+                id,
+                WriteFact::Relay { event_id: e, relay: r, state: RelayState::Published }
+            ) if *id == id_b && *e == event_id && r == &relay
+        )),
+        "I1: co-owner B's ack must fan out after a restart even though B's own routing \
+         never named this relay -- exactly as it does without a restart -- got {acked:?}"
+    );
+}
+
 #[test]
 fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
     let author = Keys::generate();
