@@ -150,6 +150,43 @@ point, so none was widened by hand or opportunistically.
 The third of those is the one that generalises, and it is the rule below's
 fourth item arriving from the manifest side. See "what crosses a boundary".
 
+### Check the build shapes that differ, not one invocation
+
+`cargo check --workspace --all-features` is the shape most likely to pass and
+the least likely to tell you anything, because feature unification quietly
+supplies what a plainer build will not. It has now hidden two master breaks in
+two days: a `nip65`-gated `RelayUrl` import (#1687), and — from the engine cut
+itself (#1724) — three items gated `#[cfg(any(test, feature =
+"bench-instrumentation"))]` that a sibling crate's own `#[cfg(test)]` code
+calls.
+
+The second is a class the split created and worth understanding rather than
+memorising. Inside one crate, `cfg(test)` covered caller and callee together.
+Across a crate boundary it does not: when `nmp-runtime` compiles its lib-test
+target, `nmp-engine` is an ordinary dependency built **without** `cfg(test)`,
+so a `#[cfg(test)]`-only item on the engine side simply is not there. Anything
+one crate's tests need from another must be behind a real *feature* — here
+`test-instrumentation`, which the self-dev-dependency pattern turns on.
+
+The answer is not more care. It is running the shapes that actually differ,
+which for these three crates is:
+
+```
+for p in nmp nmp-engine nmp-runtime; do
+  cargo check -p $p --no-default-features
+  cargo check -p $p
+  cargo check -p $p --all-features
+  cargo check -p $p --all-targets --no-default-features
+  cargo check -p $p --all-targets
+  cargo check -p $p --all-targets --all-features
+done
+cargo check --workspace{,' --all-targets'}{,' --all-features'}
+```
+
+plus `cargo clippy --workspace --all-targets -- -D warnings` **without**
+`--all-features` as well as with it — dead-code warnings are shape-dependent
+in exactly the same way, and #1724's own first fix produced one.
+
 **The reducer stays one crate.** This is a defended "one thing, merely
 large", not a default: a field-level scan of `EngineCore` shows **15 fields
 touched by both the write-plane files and the read-plane files** (beyond the
@@ -274,6 +311,28 @@ Do NOT merge the small capability crates into a bundle (#1562 is declined
 under this architecture): the crate a capability lives in is the unit an
 application names, and a bundle recreates the accumulation problem one
 level down.
+
+**The facade's re-export inventory is a reliable single point of truth for
+what is reachable, and the architecture depends on it.** Five reversals have
+now run the same census before moving anything — `nmp-media`,
+`Row`/materializer, NIP-02, the eight pure re-export doors, NIP-29 — and the
+property held every time: **every external consumer reaches these types
+through `nmp`'s crate-root re-export, never by naming a lower crate directly
+for something `nmp` re-exports.** Every downstream fix across all five was a
+pure substitution.
+
+That is what makes capability eviction mechanical instead of a hunt across
+the workspace: read the re-export list, and you have read the reachable set.
+If the property ever stops holding, these moves stop being cheap — so treat a
+consumer that reaches around the facade for a re-exported type as a defect in
+that consumer, not a style choice.
+
+The one exception is `nmp-ffi`, which also names capability crates directly.
+It is not a hole: it does that only for things `nmp` deliberately never
+re-exports, because compiled materializers have to be linked into the
+staticlib. That is the target shape working. **Do not "fix" it** by routing
+`nmp-ffi` through the facade — that would put capability crates back in
+`nmp`'s dependency list, which is rule 2 inverted.
 
 ### Platform artifacts and harnesses — all correct today
 
