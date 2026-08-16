@@ -40,9 +40,9 @@ fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
         let immutable_request = core.router.plan().reqs.values().next().unwrap()[0].clone();
 
         core.retain_wire_atom_owner(&survivor_atom);
-        assert!(core.pending_wire_atoms.is_empty());
+        assert_eq!(core.wire.pending_len(), 0);
         assert_eq!(
-            core.wire_owner_counts[&key].0.routing_evidence,
+            core.wire.effective_atom(&key).unwrap().routing_evidence,
             BTreeSet::from([first, survivor.clone()])
         );
         assert_eq!(
@@ -51,9 +51,9 @@ fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
         );
 
         assert!(core.release_wire_atom_owner(&first_atom).is_none());
-        assert!(core.pending_wire_atoms.is_empty());
+        assert_eq!(core.wire.pending_len(), 0);
         assert_eq!(
-            core.wire_owner_counts[&key].0.routing_evidence,
+            core.wire.effective_atom(&key).unwrap().routing_evidence,
             BTreeSet::from([survivor.clone()])
         );
         assert_eq!(
@@ -118,11 +118,11 @@ fn second_outbox_hint_opens_only_the_missing_relay_for_both_owner_close_orders()
         );
         let first_session = RelaySessionKey::public(first_evidence.relay.clone());
         let incumbent = core.router.plan().reqs[&first_session][0].clone();
-        assert!(core.pending_wire_atoms.is_empty());
+        assert_eq!(core.wire.pending_len(), 0);
 
         core.router_compiles.set(0);
         core.retain_wire_atom_owner(&first);
-        assert!(core.pending_wire_atoms.is_empty());
+        assert_eq!(core.wire.pending_len(), 0);
         assert!(flush(&mut core).is_empty());
         assert_eq!(
             core.router_compiles.get(),
@@ -132,7 +132,7 @@ fn second_outbox_hint_opens_only_the_missing_relay_for_both_owner_close_orders()
         assert!(core.release_wire_atom_owner(&first).is_none());
 
         core.retain_wire_atom_owner(&second);
-        assert_eq!(core.pending_wire_atoms.len(), 1);
+        assert_eq!(core.wire.pending_len(), 1);
         let healed = flush(&mut core);
         assert_eq!(
             wire_ops(&healed)

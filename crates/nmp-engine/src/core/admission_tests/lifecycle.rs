@@ -271,7 +271,7 @@ fn closing_an_incumbent_rearms_an_already_pending_limited_atom_without_a_rebuild
         Freshness::Live,
     )));
     assert!(wire_ops(&flush(&mut core)).is_empty());
-    assert_eq!(core.pending_wire_atoms.len(), 1);
+    assert_eq!(core.wire.pending_len(), 1);
 
     core.pending_atoms_rebuilt.set(0);
     core.evidence_candidates_examined.set(0);
@@ -291,7 +291,7 @@ fn closing_an_incumbent_rearms_an_already_pending_limited_atom_without_a_rebuild
     assert_eq!(core.pending_atoms_rebuilt.get(), 0);
     assert_eq!(core.evidence_candidates_examined.get(), 0);
     assert_eq!(core.diagnostic_snapshots_built.get(), 0);
-    assert_eq!(core.pending_wire_atoms.len(), 1);
+    assert_eq!(core.wire.pending_len(), 1);
     assert_eq!(
         wire_ops(&flush(&mut core))
             .into_iter()
@@ -299,7 +299,7 @@ fn closing_an_incumbent_rearms_an_already_pending_limited_atom_without_a_rebuild
             .count(),
         1
     );
-    assert!(core.pending_wire_atoms.is_empty());
+    assert_eq!(core.wire.pending_len(), 0);
 }
 
 #[test]
@@ -314,7 +314,7 @@ fn ten_thousand_distinct_pending_cancellations_never_rebuild_surviving_demand() 
             Freshness::Live,
         )))));
     }
-    assert_eq!(core.pending_wire_atoms.len(), 10_000);
+    assert_eq!(core.wire.pending_len(), 10_000);
 
     core.projection_store_queries.set(0);
     core.router_compiles.set(0);
@@ -346,7 +346,7 @@ fn ten_thousand_distinct_pending_cancellations_never_rebuild_surviving_demand() 
     assert_eq!(core.pending_atoms_rebuilt.get(), 0);
     assert_eq!(core.evidence_candidates_examined.get(), 0);
     assert_eq!(core.diagnostic_snapshots_built.get(), 0);
-    assert!(core.pending_wire_atoms.is_empty());
+    assert_eq!(core.wire.pending_len(), 0);
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()

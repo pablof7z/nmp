@@ -137,8 +137,7 @@ fn a_later_admission_cohort_never_visits_ten_thousand_incumbents() {
     );
     for atom in incumbent_atoms {
         core.attribution.observe_atom(&atom);
-        core.wire_owner_counts
-            .insert(nmp_router::DemandKey::for_atom(&atom), (atom, 1));
+        core.wire.retain(&atom);
     }
     core.planned_read_sessions.insert(session.clone());
     core.planned_read_session_counts_by_relay
