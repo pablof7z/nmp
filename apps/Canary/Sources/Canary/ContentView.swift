@@ -11,6 +11,9 @@ struct ContentView: View {
             FeedView(model: model)
                 .tabItem { Label("Feed", systemImage: "list.bullet.rectangle") }
 
+            ComposeView(model: model)
+                .tabItem { Label("Compose", systemImage: "square.and.pencil") }
+
             NavigationStack { KindsEditorView(model: model) }
                 .tabItem { Label("Kinds", systemImage: "slider.horizontal.3") }
 
