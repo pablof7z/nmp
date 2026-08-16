@@ -129,7 +129,6 @@ use crate::publish_queue::{
     RelayState, RelayWaiting, RemoveQueueEntryError, RetryCause, SigningState, WriteFact,
     WriteOutcome,
 };
-use crate::relay_information_service::RelayInformationCapabilityEvidence;
 
 type AttributedRelayObservation = (
     SignedEvent,
@@ -838,6 +837,44 @@ pub enum AuthEffect {
         token: AuthOpToken,
         event: Box<SignedEvent>,
     },
+}
+
+/// The provenance-bearing subset of a NIP-11 document used by engine
+/// capability decisions and diagnostics. It deliberately excludes runtime
+/// connection/AUTH state.
+///
+/// This is reducer INPUT VOCABULARY and it lives here, not in `nmp-nip11`,
+/// for the reason that crate exists at all: acquisition is HTTP, and a
+/// reducer that named the acquiring crate's types would drag `reqwest` into
+/// its own manifest. `runtime` projects a `RelayInformationSnapshot` into
+/// this value the same way `runtime/nip65.rs` projects `CoordinatorUpdate`
+/// into `AuthorRouteUpdate`. Nothing below this line knows an HTTP client
+/// exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayInformationCapabilityEvidence {
+    pub supported_nips: Option<Vec<u16>>,
+    /// `limitation.max_subscriptions` — concurrent subscriptions this relay
+    /// will hold open on one connection. `None` is "advertised nothing",
+    /// which the router reads as UNBUDGETED rather than as any number
+    /// (`nmp_router::budget`). Enforced planning input, not presentation.
+    pub max_subscriptions: Option<u64>,
+    /// `limitation.max_subid_length` — the longest subscription id this
+    /// relay accepts. DIAGNOSED only: NMP's wire ids are fixed 64-character
+    /// strings, and a relay advertising less rejects every REQ we send. It
+    /// must never feed id derivation, because this document refreshes and a
+    /// mutable derivation input is identity instability.
+    pub max_subid_length: Option<u64>,
+    pub document_revision: String,
+    /// Absolute Unix-seconds deadline. Diagnostics derives freshness from
+    /// the engine clock instead of retaining a read-time label forever.
+    pub fresh_until: u64,
+    /// Already rendered. The reducer's only use of the last acquisition
+    /// failure is the diagnostics string it copies into
+    /// `RelayDiagnostics::nip11_last_error`; it never matched a variant.
+    /// Carrying `nmp_nip11::RelayInformationError` here instead would be the
+    /// one type dependency that puts an HTTP client back in the reducer's
+    /// manifest, to buy a `Display` call `runtime` can make itself.
+    pub last_error: Option<String>,
 }
 
 /// The read/write/frame vocabulary the reducer consumes (plan §3.4).
@@ -3049,7 +3086,7 @@ impl EngineCore {
                 } else {
                     "stale"
                 });
-                relay.nip11_last_error = information.last_error.as_ref().map(ToString::to_string);
+                relay.nip11_last_error = information.last_error.clone();
             }
             relay.nip77_advertisement = match relay
                 .nip11_supported_nips

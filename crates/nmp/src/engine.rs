@@ -73,9 +73,9 @@ pub(crate) fn default_capabilities() -> Vec<crate::ReplaceableMaterializerSpec> 
     ]
 }
 use crate::error::EngineError;
-#[cfg(test)]
-use crate::relay_information::{RelayInformationCachePolicy, RelayInformationError};
 use crate::subscription::{AsyncDiagnosticsSubscription, DiagnosticsSubscription};
+#[cfg(test)]
+use nmp_nip11::{RelayInformationCachePolicy, RelayInformationError};
 
 /// The open state: the `Handle` verbs are driven through, plus the
 /// `EngineThread` `shutdown` eventually joins. Not `Clone` (`EngineThread`

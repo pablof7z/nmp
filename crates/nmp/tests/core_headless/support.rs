@@ -421,15 +421,15 @@ fn finish_authentication(
 
 fn nip11_evidence(
     supported_nips: Option<Vec<u16>>,
-) -> nmp::mechanism::relay_information_service::RelayInformationCapabilityEvidence {
+) -> nmp::mechanism::core::RelayInformationCapabilityEvidence {
     nip11_evidence_until(supported_nips, u64::MAX)
 }
 
 fn nip11_evidence_until(
     supported_nips: Option<Vec<u16>>,
     fresh_until: u64,
-) -> nmp::mechanism::relay_information_service::RelayInformationCapabilityEvidence {
-    nmp::mechanism::relay_information_service::RelayInformationCapabilityEvidence {
+) -> nmp::mechanism::core::RelayInformationCapabilityEvidence {
+    nmp::mechanism::core::RelayInformationCapabilityEvidence {
         supported_nips,
         max_subscriptions: None,
         max_subid_length: None,

@@ -14,6 +14,11 @@ members = [
     "crates/nmp-resolver-testkit",
     "crates/nmp-router-testkit",
     "crates/nmp-transport",
+    # NIP-11 relay information documents and their one-shot HTTP acquisition
+    # service. The ONLY package in the engine's tree that names `reqwest`/
+    # `httpdate`, which is the boundary this crate exists to prove: the
+    # reducer consumes a projected value and links no HTTP client.
+    "crates/nmp-nip11",
     # Dependency-free signer/crypto values, traits, errors, and completion.
     "crates/nmp-signer",
     # Explicit in-process local-key provider used by `nmp::Engine::add_account`.
@@ -96,6 +101,7 @@ default-members = [
     "crates/nmp-resolver",
     "crates/nmp-router",
     "crates/nmp-transport",
+    "crates/nmp-nip11",
     "crates/nmp-signer",
     "crates/nmp-local-signer",
     "crates/nmp",
@@ -140,6 +146,7 @@ nmp-router = { path = "crates/nmp-router" }
 nmp-resolver-testkit = { path = "crates/nmp-resolver-testkit" }
 nmp-router-testkit = { path = "crates/nmp-router-testkit" }
 nmp-transport = { path = "crates/nmp-transport" }
+nmp-nip11 = { path = "crates/nmp-nip11" }
 nmp-signer = { path = "crates/nmp-signer" }
 nmp-local-signer = { path = "crates/nmp-local-signer" }
 nmp = { path = "crates/nmp" }

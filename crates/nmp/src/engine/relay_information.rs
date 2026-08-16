@@ -2,9 +2,7 @@ use nostr::RelayUrl;
 
 use super::Engine;
 use crate::error::EngineError;
-use crate::relay_information::{
-    RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot,
-};
+use nmp_nip11::{RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot};
 
 /// Failure of an explicit NIP-11 one-shot: lifecycle/URL validation stays
 /// distinct from network/document acquisition.
@@ -58,7 +56,7 @@ impl Engine {
     #[cfg(test)]
     pub(super) fn relay_information_retention_census(
         &self,
-    ) -> crate::relay_information_service::RelayInformationRetentionCensus {
+    ) -> nmp_nip11::RelayInformationRetentionCensus {
         let guard = self
             .inner
             .lock()

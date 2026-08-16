@@ -226,7 +226,7 @@ impl NmpEngine {
         // polling it, which uniffi's Swift/Kotlin async bridge does not
         // provide for an exported `async fn`. #704 replaced the old
         // per-fetch throwaway runtime this exact problem used to need
-        // (`relay_information_service.rs`'s deleted `http_runtime()`) with
+        // (the NIP-11 service's deleted `http_runtime()`) with
         // spawning the I/O-bound work as a real task on the engine's own
         // shared multi-thread runtime and awaiting the `JoinHandle` --
         // which works correctly whether or not THIS function's own caller

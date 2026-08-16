@@ -59,6 +59,10 @@ mod diagnostics_delivery;
 mod engine_thread;
 mod fifo_channel;
 mod history_mailbox;
+// The NIP-11 snapshot -> reducer-evidence projection, for the same reason
+// `nip65` below is here: the glue belongs beside the loop, so the only edge
+// runs downward into the protocol crate.
+mod nip11;
 // The NIP-65 route-source glue. Private and `pub(crate)` throughout: a `pub`
 // item here would be re-exported by `mechanism::runtime`'s glob.
 #[cfg(feature = "nip65")]
@@ -134,14 +138,14 @@ use crate::publish_queue::{
     CancelWriteError, CancelWriteOutcome, PublishQueueEntry, PublishQueueReadError,
     RemoveQueueEntryError, SigningState, WriteFact, WriteOutcome,
 };
-use crate::relay_information::{
-    RelayInformationCachePolicy, RelayInformationError, RelayInformationSnapshot,
-};
-use crate::relay_information_service::RelayInformationService;
 use crate::session::{
     RestoredSession, SessionAccount, SessionProvider, SessionSnapshot, SigningAvailability,
 };
 use nmp_grammar::WriteIntent;
+use nmp_nip11::{
+    RelayInformationCachePolicy, RelayInformationError, RelayInformationService,
+    RelayInformationSnapshot,
+};
 
 use diagnostics_channel::{latest_channel, LatestSender};
 pub use diagnostics_channel::{AsyncLatestReceiver, ConcurrentNext, LatestReceiver};
@@ -2688,9 +2692,7 @@ fn engine_loop(
                 if !nip11_decisions.borrow_mut().complete(&url, generation) {
                     continue;
                 }
-                let information = (*result)
-                    .ok()
-                    .map(|snapshot| snapshot.capability_evidence());
+                let information = (*result).ok().as_ref().map(nip11::capability_evidence);
                 let effects = core.handle(EngineMsg::RelayInformationResolved(url, information));
                 dispatch_core_effects(
                     &mut core,
@@ -4743,7 +4745,7 @@ impl std::error::Error for AddSignerError {}
 #[doc(hidden)]
 pub fn relay_information_retention_census(
     handle: &Handle,
-) -> crate::relay_information_service::RelayInformationRetentionCensus {
+) -> nmp_nip11::RelayInformationRetentionCensus {
     handle.relay_information.retention_census()
 }
 
@@ -4845,7 +4847,7 @@ impl Handle {
         policy: RelayInformationCachePolicy,
     ) -> Result<RelayInformationSnapshot, RelayInformationError> {
         let snapshot = self.relay_information.get(relay.clone(), policy)?;
-        let information = snapshot.capability_evidence();
+        let information = nip11::capability_evidence(&snapshot);
         let _ = self
             .inbox
             .send(Cmd::Engine(EngineMsg::RelayInformationResolved(
@@ -4866,7 +4868,7 @@ impl Handle {
             .relay_information
             .get_async(relay.clone(), policy)
             .await?;
-        let information = snapshot.capability_evidence();
+        let information = nip11::capability_evidence(&snapshot);
         let _ = self
             .inbox
             .send(Cmd::Engine(EngineMsg::RelayInformationResolved(

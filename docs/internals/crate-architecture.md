@@ -76,7 +76,7 @@ section.
 | crate | owns | notes | status |
 |---|---|---|---|
 | `nmp-nip65` | kind:10002 relay-list semantics + the outbox coordinator | THE one declared protocol edge below the engine (feature-gated). Deliberately not trait-abstracted: one implementor, no cycle — a seam there would be the `EventStore` shape (#1495) | correct today |
-| `nmp-nip11` | NIP-11 relay-information values + the fetch/cache/single-flight service (today `crates/nmp/src/relay_information{,_service}.rs`, 2,686 lines) | self-contained: its only `crate::` import is its own value module; it is the SOLE `reqwest` user in all of `crates/nmp/src`. Extracting it is what lets the reducer's manifest carry no HTTP client | target |
+| `nmp-nip11` | NIP-11 relay-information values + the fetch/cache/single-flight service (2,700 lines) | the SOLE `reqwest`/`httpdate` user in the engine's tree — extracting it is what lets the reducer's manifest carry no HTTP client. `RelayInformationCapabilityEvidence` deliberately stayed behind in `core` (reducer input vocabulary) and `runtime/nip11.rs` projects a snapshot into it, so the edge runs `runtime → nmp-nip11` and never the reverse | correct today |
 
 ### The engine
 
@@ -122,6 +122,42 @@ on the wrong side of any line drawn. The reducer's internal decomposition is
 owners, zero crates — none of the clusters has an independent dependency,
 consumer, or lifecycle, so crate-ing one would only convert `pub(super)`
 into permanent public API.
+
+**Smaller boundaries are not the same as more crates.** Rust module privacy
+gives the identical compiler enforcement — `E0616` instead of an unresolved
+import — without freezing a churning internal surface as public API. So the
+two questions take different evidence, and conflating them is what produced
+three bad nominations during #1606:
+
+- *Does it deserve an owner module?* Count foreign versus own accesses to the
+  fields. A cluster the rest of the reducer reaches into more than it reaches
+  into itself is not a cluster.
+- *Does it deserve a crate?* Follow the type dependencies and the teardown
+  reach. Zero foreign readers is necessary and nowhere near sufficient.
+
+Measured against the second test, the three strongest candidates all failed,
+each in a different way, and the failures are the useful part:
+
+- `SessionRegistry` — 12 foreign functions and ~15 public methods before the
+  first line is written, 9 AUTH types in the signatures, `connected_relays`
+  at 8 foreign versus 6 own accesses. The transport/auth re-cut that would
+  fix the shape is ruled out by the exact-generation session conjunction (I3)
+  spanning both planes.
+- `AttemptCorrelations` — 2 fields, 6 accesses, all in one file, and still
+  no: `AttemptCorrelationTarget` names `ReceiptId` (core-owned),
+  `RelaySessionKey` (`nmp-grammar`) and `PublishQueueLaneKey` (`nmp-store`).
+  A ~50-line crate whose public type drags three vocabularies is a
+  dependency edge bought for nothing.
+- `CoordinateCoverage` — `release_coordinate_coverage` calls
+  `self.on_unsubscribe(..)`. Teardown reaches into the query plane, which is
+  I6 stated as a call graph.
+
+A crate line earns itself when the boundary needs *manifest*-level proof: a
+dependency that must not exist. That is exactly why reducer-versus-runtime is
+a real crate line (zero `tokio`, zero threads, zero channels under `core/` —
+the cut makes determinism a build error) and why `nmp-nip11` is one (it is
+the only package in the engine's tree naming `reqwest`). Neither property is
+available to any cluster inside the reducer.
 
 ### The facade
 
