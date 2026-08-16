@@ -397,6 +397,8 @@ fn relay_request_targets(effects: &[Effect]) -> BTreeSet<(ObservationId, String,
         .collect()
 }
 
+#[path = "admission_tests/attach_ordering.rs"]
+mod attach_ordering;
 #[path = "admission_tests/claim_detach.rs"]
 mod claim_detach;
 #[path = "admission_tests/claim_transfer_retry.rs"]

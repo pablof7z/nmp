@@ -6,26 +6,24 @@
 //! forward entry and a reverse edge ever agreed — the census reports the two
 //! counts, and no test compared them.
 //!
-//! `plan_edges == len` is the whole invariant: every child is named by exactly
-//! one plan's set, so the total number of edges is the number of children.
+//! The invariant is an identity, not a count: every child appears in exactly
+//! the reverse set its own `plan_sub_id()` names, and every reverse edge names
+//! a live child that reports that plan. `plan_edges == len` was the first
+//! spelling here and it is necessary and nowhere near sufficient -- one child
+//! indexed under the wrong plan preserves both numbers exactly.
 
 use super::*;
 
-/// Assert every NIP-77 index mirrors its forward map exactly.
+/// Assert every owner's mirrors are exactly right.
+///
+/// This used to compare `plan_edges` against the child count, which is
+/// necessary and nowhere near sufficient: one child indexed under the wrong
+/// plan preserves both numbers exactly. `assert_owner_consistency` checks both
+/// directions by identity — every child appears in exactly the reverse set its
+/// own `plan_sub_id()` names, and every reverse edge names a live child that
+/// reports that plan.
 fn assert_mirrors(core: &EngineCore, at: &str) {
-    let census = core.bench_ownership_census();
-    assert_eq!(
-        census.pending_neg_plan_edges, census.pending_neg_handoffs,
-        "{at}: handoff reverse index does not mirror its forward map"
-    );
-    assert_eq!(
-        census.neg_session_plan_edges, census.neg_sessions,
-        "{at}: reconciliation reverse index does not mirror its forward map"
-    );
-    assert_eq!(
-        census.pending_backfill_plan_edges, census.pending_backfills,
-        "{at}: backfill reverse index does not mirror its forward map"
-    );
+    core.assert_owner_consistency(at);
 }
 
 /// One plan's children arrive and leave through the ordinary lifecycle. The

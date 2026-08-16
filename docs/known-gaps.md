@@ -616,7 +616,119 @@ about current code:
 
 - **`nmp-media` provides the STANDALONE staged composition seam (prepare → upload → compose) with separated failure domains, but not the durable upload, the FFI projection, or BUD-03 server-list placement (#559, epic #216 T15-C-MEDIA-COMPOSITION).** The opt-in crate wires the app-facing pipeline `Sha256Hash → signed authorization → VerifiedUpload → kind:20 draft` into three witness-typed stages so a skipped/failed stage is unrepresentable: `prepare` (holds the exact bytes it hashed and authorized — uploading those held bytes makes an authorized-hash/uploaded-bytes mismatch structurally impossible), the async standalone `PreparedUpload::upload` (a used-once obligation yielding a verified `UploadedAsset`), and `compose_picture` (the final unsigned kind:20 whose public `kind`/`tags`/`content`/`created_at` fields copy into the public-field `EventBuilder`; selecting its `pubkey` explicitly on the ordinary `WriteIntent` preserves the author through the EXISTING publish path). It defines no event schema of its own — composition is not schema ownership (`routing-and-ownership.md` §3.2.1) — and it never publishes (relay/publish is downstream). The three failure domains are three SEPARATE types (`PrepareError`, `MediaUploadError`, `MediaComposeError`) so an upload failure can never be pattern-matched or `?`-merged as a compose failure; `MediaUploadError::Blossom` preserves the whole separated Blossom `UploadError` taxonomy intact. Deliberately NOT in this unit: the upload half is NOT crash-durable (the engine-integrated durable-upload obligation — persisted intent / reattachable receipt / HTTP-publish Effect / blob persistence — is the ADDITIVE #562, whose witness types are identical to these); the FFI/Swift/Kotlin projection of the seam is a SEPARATE later unit (batched with the nip68 projection, compile-gated); and BUD-03 kind:10063 server-list placement is still deferred.
 
+## Reducer invariants without falsifiers
+
+- **I3 and I8 have no reducer-level falsifier.** Both are fail-open guards on
+  abnormal paths: I3 is the exact-generation session conjunction
+  (`docs/internals/crate-architecture.md:572`, `:858`), I8 the per-turn
+  `retry_scheduler_blocked` reset (`docs/internals/crate-architecture.md:695`,
+  `:863`; field at `crates/nmp-engine/src/core/mod.rs:2200`, reset sites
+  including `mod.rs:3060`/`:3237` and `write.rs:299`/`:2418`). Breaking either
+  leaves the corpus green — `crate-architecture.md:858`/`:863` record both as
+  "green — not caught," and `:874`/`:891` note that a mutated reducer becomes
+  strictly more permissive (I3 drops a conjunct, I8 drops a reset) with no
+  test noticing. Blocked on the hostile/degraded-input fixture tracked in
+  issue #1736.
+
+- **The `attach_wire_handle` ordering change is unobservable.** Indexing a
+  handle before retaining its atoms was changed during the `WireOwnership`
+  extraction (`crates/nmp-engine/src/core/query.rs:1224`-`1256`). Running the
+  entire workspace with the ordering reversed gives 2033 passed, 0 failed — no
+  reachable input distinguishes the two orders, because the evidence refresh
+  it protects only fires when a covered-atom reattach transfers request
+  metadata, and nothing produces transferred claims today. The ordering is
+  currently enforced by a `debug_assert!` precondition at `query.rs:1247`
+  inside `attach_wire_handle`, not by a behavioural test — the surrounding
+  comment (`query.rs:1231`-`1246`) states this explicitly. Record it as an
+  unproven invariant.
+
+- **`abandon_sub` call-site asymmetry.** `crates/nmp-engine/src/core/query.rs`
+  defines `abandon_sub` at line 1604 and calls it from many sites within the
+  same file (currently lines 1777, 1789, 1827, 1843, 1855, 1862, 1884, 1903,
+  1944, 1972, 2041, 2352, 2668); `crates/nmp-engine/src/core/auth_transport.rs`
+  calls it from six more sites (currently lines 1084, 1787, 1799, 1833, 1841,
+  1845). The specific line numbers originally used to describe this gap
+  (`query.rs` definition "around line 2254," a covered call site at
+  `auth_transport.rs:1057`, and uncovered call sites at `query.rs:158` and
+  `:780`) no longer match this tree — the file has moved since that note was
+  written, and none of those exact lines currently contain an `abandon_sub`
+  reference. The underlying question is unresolved and needs re-establishing
+  against the current line numbers above: whether every call site's precondition
+  is independently guaranteed by its caller, or whether some call `abandon_sub`
+  on state a caller hasn't verified, has never been checked either way.
+
 ## Process / tooling
+
+- **Unexplained workspace-test abort.** A `cargo test --workspace` run
+  aborted after 198 tests once, on 2026-08-16. Every subsequent full run has
+  been clean (2031-2033 passed, 0 failed). Not reproduced. A later clean run
+  does not explain an earlier abort. Investigated 2026-08-16; the mechanism is
+  narrowed but not pinned, so this stays open.
+
+  What the symptom rules out: **a flaky assertion cannot produce it.** No
+  `Cargo.toml` in the workspace sets `panic=abort`, and nothing passes
+  `--fail-fast`, so libtest catches a panicking assertion on the test's own
+  thread, prints it under that test's name, and continues to the next one. A
+  run that stops mid-stream with nothing named is categorically a different
+  event from a test failing.
+
+  What it points at instead is resource exhaustion, in one of two phases, and
+  the evidence splits across them:
+
+  - *Build phase, disk.* Demonstrated on this machine the same day: the
+    worktree's own `target/` had reached 100GB (60G `debug/deps`, 35G
+    `debug/incremental`) across roughly fifteen rebuild cycles, `df` showed
+    1.0Gi free at 100% capacity, and `cargo test --workspace` died with
+    `failed to write ... No space left on device (os error 28)` plus
+    `could not compile nostr-sdk` / `nmp-nip11` and linker failures in
+    `nmp-bdd`. Freeing 39GB restored a clean run. This is real and it is a
+    standing hazard, but it is **phase-mismatched** against the record: it
+    produces named compiler errors, whereas "198 tests had run" means the
+    binaries were built and already printing per-test lines.
+  - *Run phase, process death.* OOM `SIGKILL`, stack overflow, or a
+    double-panic abort is the closer mechanistic match for "the stream just
+    stops". There is no direct evidence for it — macOS `log show` was not
+    usable in the investigating shell, so jetsam/OOM records could not be
+    checked either way. Near-100% disk plausibly correlates with memory
+    pressure from parallel `rustc`/test processes, but that is inference, not
+    evidence.
+
+  Nothing was found in `nmp-engine`'s own test suite that could cause a silent
+  abort: `RedbStore::temporary()` uses `tempfile::tempdir()` (unique per call,
+  RAII-removed — see `redb_store/tests.rs:52`), there are zero `thread::spawn`
+  and zero `process::exit` in the crate, and the scale tests open one store
+  each rather than thousands of handles.
+
+  **The experiment that would settle it**, which must run somewhere other than
+  a shared, contended worktree to be interpretable: on a machine with real
+  headroom and a fresh `target/`, pre-build every workspace test binary, then
+  drive free disk to near-zero and run `cargo test --workspace --no-fail-fast`.
+  An ENOSPC/compiler-shaped death confirms disk end-to-end including run-phase
+  recompiles; a death with no message, or a bare `signal:` line, points at
+  OOM instead; no reproduction at all means the original event was
+  environmental rather than inherent to this suite.
+
+- **A panic in a runtime-owned background thread is silently swallowed.**
+  `crates/nmp-runtime/src/engine_thread.rs:499,509,579,582,596` and
+  `crates/nmp-transport/src/pool/worker.rs` all discard their join results
+  (`let _ = handle.join()`). Because nothing sets `panic=abort`, a thread that
+  panics neither kills the process nor surfaces anywhere — so a test can pass
+  while the runtime thread underneath it died. This is a masked-failure risk
+  in exactly the fail-open class the reducer's own guards are audited for, and
+  it is unaudited: it was found while investigating the abort above, and is
+  not the cause of it.
+
+- **One test asserts against the wall clock.**
+  `crates/nmp-engine/tests/core_headless/live_queries.rs:185` asserts
+  `start.elapsed() < Duration::from_secs(30)`. On a loaded or contended
+  machine that is a genuine flake, independent of everything above. It fails
+  by name rather than silently, so it does not explain the abort, but the
+  standing rule is to control clocks rather than race them.
+
+- **`process::exit` call sites are unaudited.** Present in
+  `crates/nmp-store/src/redb_store/{store,tests,postings_store,publish_queue_ops}.rs`
+  and `crates/nmp-cli/src/main.rs`. Not reviewed for reachability from a test
+  process. Flagged, not cleared.
 
 - **Cross-SDK parity has no mechanical check (#1637).** The invariant — an app
   on one platform must not silently lose an operation the other two have — is

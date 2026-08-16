@@ -7,8 +7,15 @@
 //! already agree at every instant. Nothing checked that they did.
 //!
 //! These assert it directly: reach a state incrementally, rebuild, and demand
-//! the ownership census be bit-identical. A rebuild that forgets a map, or an
-//! incremental path that stops maintaining one, is red here.
+//! the result be identical — both as an exact structure and as a census.
+//!
+//! The two checks answer different questions and neither replaces the other.
+//! `assert_owner_consistency` proves each owner's mirrors are internally exact
+//! after the rebuild, catching an association that moved to the wrong key. The
+//! census comparison proves the rebuild reached the same *quantities* as the
+//! incremental path, catching a demand that disappeared entirely. A rebuild
+//! that forgets a map fails the second; a rebuild that misfiles one fails the
+//! first.
 
 use super::*;
 
@@ -41,8 +48,10 @@ fn rebuilding_wire_ownership_reproduces_the_incremental_state_exactly() {
     core.handle(EngineMsg::Subscribe(bounded_query(&other, "bounded")));
     flush(&mut core);
 
+    core.assert_owner_consistency("incremental");
     let incremental = core.bench_ownership_census();
     core.rebuild_wire_ownership();
+    core.assert_owner_consistency("rebuilt");
     assert_eq!(
         core.bench_ownership_census(),
         incremental,
@@ -76,8 +85,10 @@ fn rebuilding_after_partial_teardown_still_reproduces_the_incremental_state() {
     core.handle(EngineMsg::Unsubscribe(first));
     flush(&mut core);
 
+    core.assert_owner_consistency("incremental after withdrawal");
     let incremental = core.bench_ownership_census();
     core.rebuild_wire_ownership();
+    core.assert_owner_consistency("rebuilt after withdrawal");
     assert_eq!(
         core.bench_ownership_census(),
         incremental,
@@ -105,7 +116,9 @@ fn rebuilding_wire_ownership_twice_changes_nothing() {
     flush(&mut core);
 
     core.rebuild_wire_ownership();
+    core.assert_owner_consistency("after one rebuild");
     let once = core.bench_ownership_census();
     core.rebuild_wire_ownership();
+    core.assert_owner_consistency("after two rebuilds");
     assert_eq!(core.bench_ownership_census(), once);
 }

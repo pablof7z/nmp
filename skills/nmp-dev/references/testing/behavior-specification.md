@@ -15,6 +15,20 @@ Add or change a scenario when it records:
 Do not put local parser, codec, private-state, or exhaustive cases in feature
 files unless an app-visible distinction would otherwise be lost.
 
+## Scope
+
+BDD is for durable user-visible contracts and multi-step lifecycle
+guarantees — not every internal map transition. If a rewrite could replace
+the internal mechanism without an app noticing, it does not need a scenario;
+prove it as an owner test or headless engine scenario instead (see
+[`test-placement.md`](test-placement.md)).
+
+Required tests behind a `built` scenario use protocol-real events and
+deterministic infrastructure: scripted relays, signers, and clocks. Never
+live internet relays or uncontrolled data — an opt-in live check is a
+separate, supplemental locator (see
+[Evidence and traceability](evidence-and-traceability.md)).
+
 ## Show exactly what changed
 
 Describe the two situations that were incorrectly treated as the same. Explain

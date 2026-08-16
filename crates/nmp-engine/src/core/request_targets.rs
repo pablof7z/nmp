@@ -97,23 +97,26 @@ pub(super) struct RequestTargets {
 impl RequestTargets {
     // -- declarations -------------------------------------------------------
 
-    /// Replace one handle's declared target set.
+    /// Replace one handle's declared target set, retiring whatever it had
+    /// active and re-deriving the active layer from the new declaration.
     ///
-    /// `active_scopes` is `None` when the handle owns no live wire
-    /// participation: its declaration is stored but nothing is activated, and
-    /// nothing was active to release. Passing `Some` re-derives the active
-    /// layer from the new declaration in one step, which is what keeps a
-    /// deactivate/replace/activate sequence from being three separate things
-    /// a caller has to remember to do in order.
+    /// `active_scopes` says which of the handle's scopes contribute wire, or
+    /// `None` when it is not wire-attached at all. Note what it does NOT do:
+    /// select whether to deactivate. The retirement is unconditional, because
+    /// "`None` means nothing was active" was a precondition the caller had to
+    /// know and this owner could not enforce — pass `None` for a handle that
+    /// *was* active and its old reverse-index entries outlived the declaration
+    /// they came from.
+    ///
+    /// A caller should never have to know this owner's current internal state
+    /// to use a replacement operation safely.
     pub(super) fn replace_for_handle(
         &mut self,
         id: HandleId,
         declared: BTreeMap<ActiveRequestTarget, usize>,
         active_scopes: Option<&BTreeSet<usize>>,
     ) {
-        if active_scopes.is_some() {
-            self.deactivate_handle(id);
-        }
+        self.deactivate_handle(id);
         self.by_handle.remove(&id);
         if !declared.is_empty() {
             self.by_handle.insert(id, declared);
@@ -130,8 +133,14 @@ impl RequestTargets {
 
     // -- activation ---------------------------------------------------------
 
-    /// Make live every declared target of `id` whose scope contributes wire.
+    /// Make live every declared target of `id` whose scope contributes wire,
+    /// replacing any activation it already had.
+    ///
+    /// Activating twice used to add the counts into `by_demand` twice while
+    /// overwriting the per-handle entry once, so the two indexes diverged by
+    /// exactly the duplicate. Retiring first makes a second call idempotent.
     pub(super) fn activate_handle(&mut self, id: HandleId, active_scopes: &BTreeSet<usize>) {
+        self.deactivate_handle(id);
         let Some(declared) = self.by_handle.get(&id) else {
             return;
         };
@@ -275,6 +284,68 @@ impl RequestTargets {
     }
 }
 
+/// Exact structural consistency between the declared and live layers.
+///
+/// `by_demand` is derivable: it is the flattening of every handle's active
+/// entry. Nothing else in this owner is, because which scopes contribute wire
+/// is a freshness answer supplied from outside — so the check verifies that
+/// every live target traces back to a declaration, and that the reverse index
+/// is exactly the merge, rather than merely the same size as it.
+#[cfg(any(test, feature = "bench-instrumentation"))]
+impl RequestTargets {
+    pub(super) fn assert_consistent(&self, at: &str) {
+        let mut expected_by_demand: BTreeMap<DemandKey, BTreeMap<RequestTarget, usize>> =
+            BTreeMap::new();
+        for (id, by_demand) in &self.active_by_handle_demand {
+            assert!(
+                !by_demand.is_empty(),
+                "{at}: handle {id:?} kept an empty activation entry"
+            );
+            let declared = self.by_handle.get(id).unwrap_or_else(|| {
+                panic!("{at}: handle {id:?} has live targets but no declaration")
+            });
+            for (demand, targets) in by_demand {
+                assert!(
+                    !targets.is_empty(),
+                    "{at}: handle {id:?} kept an empty activation for demand {demand:?}"
+                );
+                for (target, count) in targets {
+                    assert_eq!(
+                        &target.handle, id,
+                        "{at}: an activation entry names a target owned by another handle"
+                    );
+                    // Every live target must trace back to a declaration with
+                    // the same path, revision and demand. Scope is erased by
+                    // the reverse target, so several declared scopes may fold
+                    // into one live target; the count carries that fold.
+                    let declared_count: usize = declared
+                        .iter()
+                        .filter(|(declared_target, _)| {
+                            declared_target.demand == *demand
+                                && declared_target.path == target.path
+                                && declared_target.revision == target.revision
+                        })
+                        .map(|(_, declared_count)| *declared_count)
+                        .sum();
+                    assert!(
+                        declared_count >= *count,
+                        "{at}: a live target claims more refs than its handle declared"
+                    );
+                    *expected_by_demand
+                        .entry(*demand)
+                        .or_default()
+                        .entry(target.clone())
+                        .or_insert(0) += count;
+                }
+            }
+        }
+        assert_eq!(
+            self.by_demand, expected_by_demand,
+            "{at}: the demand reverse index is not the exact merge of every handle's activation"
+        );
+    }
+}
+
 /// The reads the execution-target proofs need, as questions rather than maps.
 #[cfg(test)]
 impl RequestTargets {
@@ -282,13 +353,23 @@ impl RequestTargets {
         self.by_handle.get(&id).cloned().unwrap_or_default()
     }
 
+    /// Add one declared target to a handle, through the same replacement door
+    /// production uses.
+    ///
+    /// Deliberately not a raw write into `by_handle`: the previous spelling
+    /// let a fixture install a declaration without retiring the activation
+    /// derived from the old one, which is the class of unreachable-state
+    /// fixture the wire owner's tests had to be rewritten to stop building.
     pub(super) fn declare_for_handle(
         &mut self,
         id: HandleId,
         target: ActiveRequestTarget,
         count: usize,
+        active_scopes: Option<&BTreeSet<usize>>,
     ) {
-        self.by_handle.entry(id).or_default().insert(target, count);
+        let mut declared = self.declared_for_handle(id);
+        declared.insert(target, count);
+        self.replace_for_handle(id, declared, active_scopes);
     }
 
     /// Every live target across every demand.

@@ -32,8 +32,13 @@ Do not ask "what dependency does this split remove?" before establishing
 whether the candidate owns a coherent responsibility. A package may be
 justified even when both sides use the same lower-level mechanisms.
 
-Enforcement is still structural, and this repository has zero CI by decision,
-so nothing below depends on a checker. Manifest exclusion is one mechanism: a
+Enforcement here is structural, and deliberately does not depend on a checker.
+That is a property of the mechanisms below, not a statement about CI: CI
+returns once local commands are deterministic and known flakes are fixed or
+honestly excluded with an owning issue, and when it does, each gate must
+protect one named failure mode and fail when the mechanism it protects is
+reverted. None of the boundaries below become weaker or stronger for it.
+Manifest exclusion is one mechanism: a
 crate that does not declare a dependency cannot use it. Many important
 boundaries are enforced by other structural means — private fields, opaque
 types, ownership, state machines, typed messages, constructors, transaction

@@ -9,12 +9,27 @@ Use only relevant sections.
 - [ ] Status and metadata match reality. Unfinished work links one open issue.
 - [ ] Requested behavior runs normally without an unrequested runtime flag.
 
+## Layers
+
+- [ ] The change is proven at every layer it touches: owner invariant,
+      headless engine scenario, and public-API system scenario, as
+      applicable. No layer stands in for another.
+- [ ] Owner tests cover both directions of every mirrored index, replacement,
+      teardown, and rejection of states production cannot reach.
+- [ ] Headless engine scenarios use no sockets and no wall-clock timing.
+- [ ] Public-API scenarios go through `nmp::Engine` with a real consumer, a
+      temporary Redb, and deterministic relay/signer/clock fakes — never live
+      internet relays or uncontrolled data.
+
 ## Evidence
 
 - [ ] Each executable check sits with the smallest stable component responsible
       for the behavior.
 - [ ] Reintroducing the named bug or removing its protection makes the linked
-      evidence fail.
+      evidence fail — and fail for the claimed reason, confirmed by asserting
+      the precondition before the break becomes observable.
+- [ ] Mirrored relations are compared exactly (which owner, which plan, which
+      parent), not just by count. A count match is not a relationship match.
 - [ ] Rules across many inputs or operation orders use property or model tests.
 - [ ] Public-API and native-platform tests are kept only when they prove an
       additional result.
@@ -26,6 +41,9 @@ Use only relevant sections.
 ## Fixtures
 
 - [ ] Setup provides the inputs instead of inserting the expected result.
+- [ ] Fixtures are built only through production doors — the same
+      constructors, writes, and API calls a real caller uses — never by
+      hand-writing an owner's internal maps.
 - [ ] Public claims use public API output or an independent witness, not private
       state.
 - [ ] The test controls its build, identities, environment, clock, ports, and
