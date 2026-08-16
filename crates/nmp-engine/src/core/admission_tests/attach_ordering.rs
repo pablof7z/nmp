@@ -178,3 +178,69 @@ fn an_arriving_handle_is_fully_indexed_before_its_atoms_are_retained() {
         CoreOwnershipCensus::default()
     );
 }
+
+/// Indexing one handle twice must replace its index, not accumulate it.
+///
+/// This is the reachable hazard: `index_handle` used to insert fresh
+/// per-handle maps while leaving the three reverse indexes still naming the
+/// handle under its OLD atoms. Nothing more exotic than attaching twice
+/// produced permanently stale edges, and no assertion in the corpus could see
+/// them because every check ran against a handle that had only been indexed
+/// once.
+#[test]
+fn indexing_one_handle_twice_replaces_its_index_rather_than_accumulating() {
+    let relay = RelayUrl::parse("wss://double-index.example").unwrap();
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
+    let observation = observation_id(&core.handle(EngineMsg::Subscribe(query(
+        &relay,
+        "double-indexed",
+        Freshness::Live,
+    ))));
+    flush(&mut core);
+    let handle = core.observations[&observation].branches[0];
+
+    let original = core
+        .wire
+        .atoms_for_handle(handle)
+        .into_iter()
+        .next()
+        .expect("the live observation owns one atom");
+    let original_demand = nmp_router::DemandKey::for_atom(&original);
+    let original_claim = coverage_key(&original);
+
+    // Re-index the same handle under a DIFFERENT atom. This exercises
+    // `index_handle` alone -- owner counting is the caller's separate `retain`
+    // loop and is deliberately not maintained here -- so the assertions below
+    // are scoped to exactly what indexing is responsible for: the three
+    // reverse indexes and the three per-handle maps.
+    let replacement = bounded_atom(&relay, "replacement-shape");
+    core.wire
+        .index_handle(handle, BTreeSet::from([replacement.clone()]));
+
+    assert_eq!(
+        core.wire.atoms_for_handle(handle),
+        BTreeSet::from([replacement.clone()]),
+        "the handle should own exactly its new atom"
+    );
+    assert!(
+        core.wire.take_handles_for_atom(&original).is_none(),
+        "the handle's OLD atom still names it in the atom reverse index"
+    );
+    assert!(
+        core.wire.handles_for_demand(&original_demand).is_none(),
+        "the handle's OLD demand still names it in the demand reverse index"
+    );
+    assert!(
+        core.wire.handles_for_coverage(&original_claim).is_none(),
+        "the handle's OLD claim still names it in the coverage reverse index"
+    );
+
+    // Teardown must not trip over a stale edge either. Before the fix this
+    // panicked in `discard_edge`, because `unindex_handle` walks the handle's
+    // CURRENT refcounts while the reverse indexes still held the old ones.
+    core.wire.unindex_handle(handle);
+    assert!(
+        core.wire.atoms_for_handle(handle).is_empty(),
+        "the handle still owns atoms after being unindexed"
+    );
+}
