@@ -2953,14 +2953,14 @@ impl CoreState {
             .or_else(|| self.transport_degraded.clone());
         let mut auth_sessions = BTreeMap::new();
         for (handle, session) in self.slot_to_relay.values() {
-            if session.access == None || !self.connected_relays.contains(session) {
+            if session.authenticated_as == None || !self.connected_relays.contains(session) {
                 continue;
             }
             auth_sessions.insert(
                 session.clone(),
                 AuthDiagnosticsSnapshot {
                     relay: session.relay.clone(),
-                    access: session.access,
+                    authenticated_as: session.authenticated_as,
                     transport_slot: handle.slot,
                     transport_generation: handle.generation,
                     epoch_sequence: None,
@@ -2996,7 +2996,7 @@ impl CoreState {
                 session.clone(),
                 AuthDiagnosticsSnapshot {
                     relay: session.relay.clone(),
-                    access: session.access,
+                    authenticated_as: session.authenticated_as,
                     transport_slot: state.epoch.handle.slot,
                     transport_generation: state.epoch.handle.generation,
                     epoch_sequence: Some(state.epoch.sequence),
@@ -3017,11 +3017,11 @@ impl CoreState {
         snapshot.stalled_write_totals = self.stalled_writes.totals();
         for relay in &mut snapshot.relays {
             // NIP-11 advertisement and the NIP-77 behavioral probe are both
-            // PUBLIC-session evidence (#8): the one-shot HTTP document and
-            // the probe run outside/over the unauthenticated session, so a
-            // protected session's row must never inherit them — its
-            // capability facts stay honestly "unknown".
-            if relay.access != None {
+            // earned on the connection bound to no identity (#8): the
+            // one-shot HTTP document and the probe run outside/over that
+            // socket, so an identity-bound session's row must never inherit
+            // them — its capability facts stay honestly "unknown".
+            if relay.authenticated_as.is_some() {
                 continue;
             }
             if let Some(information) = self.nip11_information.get(&relay.relay) {

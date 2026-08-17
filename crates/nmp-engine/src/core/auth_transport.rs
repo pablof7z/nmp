@@ -193,7 +193,7 @@ impl CoreState {
         session: RelaySessionKey,
         challenge: String,
     ) -> Vec<Effect> {
-        let Some(expected_pubkey) = session.access else {
+        let Some(expected_pubkey) = session.authenticated_as else {
             return Vec::new();
         };
         self.auth_probe_sessions.remove(&session);
@@ -278,7 +278,7 @@ impl CoreState {
         handle: TransportRelayHandle,
         session: RelaySessionKey,
     ) -> Vec<Effect> {
-        if session.access == None {
+        if session.authenticated_as == None {
             return Vec::new();
         }
         self.auth_probe_sessions.remove(&session);
@@ -321,7 +321,7 @@ impl CoreState {
         reason: String,
         effects: &mut Vec<Effect>,
     ) {
-        let Some(pubkey) = session.access else {
+        let Some(pubkey) = session.authenticated_as else {
             return;
         };
         let lanes = match self.recover_all_lanes() {
@@ -413,7 +413,7 @@ impl CoreState {
         let mut effects = Vec::new();
         let denial = match outcome {
             AuthPolicyOutcome::Allow => {
-                let Some(expected_pubkey) = state.epoch.session.access else {
+                let Some(expected_pubkey) = state.epoch.session.authenticated_as else {
                     return Vec::new();
                 };
                 let clock = self.clock.as_secs();
@@ -701,7 +701,7 @@ impl CoreState {
                     AuthCapability::Policy => state.policy_instance == Some(instance),
                     AuthCapability::Signer => state.signer_instance == Some(instance),
                 };
-                (session.access == Some(pubkey) && owns_instance)
+                (session.authenticated_as == Some(pubkey) && owns_instance)
                     .then(|| session.clone())
             })
             .collect();
@@ -753,7 +753,7 @@ impl CoreState {
         // that socket. Public sessions own no AUTH epoch; invalidating one
         // here would erase an initial REQ already accepted by this exact
         // still-dialing handle, then manufacture a duplicate replay (#1075).
-        if session.access != None {
+        if session.authenticated_as != None {
             self.invalidate_auth_epoch(&session, false, &mut effects);
         }
         self.slot_to_relay
@@ -773,7 +773,7 @@ impl CoreState {
         // then dropped" fact).
         self.connected_relays.insert(session.clone());
         self.ever_connected_relays.insert(session.clone());
-        if !same_physical_session && session.access != None {
+        if !same_physical_session && session.authenticated_as != None {
             if self.auth_required_sessions.contains(&session) {
                 self.auth_probe_sessions.remove(&session);
             } else {
@@ -798,7 +798,7 @@ impl CoreState {
         // AUTH (#8) — sending them earlier would leak the protected demand
         // onto an unauthenticated socket and record attribution snapshots no
         // honest EOSE can ever discharge.
-        if session.access == None {
+        if session.authenticated_as == None {
             if let Some(reqs) = planned_read_reqs.as_ref() {
                 // A new websocket generation has no live subscriptions even
                 // if the previous generation's accepted-wire owner map still
@@ -1066,7 +1066,7 @@ impl CoreState {
             // when the Public session itself dropped -- a protected
             // session's disconnect must not kill a reconciliation still
             // healthy on the URL's live Public socket.
-            if session.access == None {
+            if session.authenticated_as == None {
                 self.nip77.drop_live_for_relay(&session.relay);
                 // Any reconciliation open against this relay dies with the
                 // connection -- there is nothing left to `NEG-CLOSE` (the
@@ -1924,7 +1924,7 @@ impl CoreState {
                 // session, so a NEG frame arriving on a protected session
                 // could only be a foreign/confused reply — it must not
                 // resolve the Public probe or step a Public reconciliation.
-                if session.access != None {
+                if session.authenticated_as != None {
                     return effects;
                 }
                 let wire_id = subscription_id.as_str();
@@ -1953,7 +1953,7 @@ impl CoreState {
                 // Same PUBLIC-session-only gate as `NegMsg` above (#8): a
                 // protected session's NEG-ERR must not classify the URL as
                 // Unsupported or tear a Public reconciliation down to REQ.
-                if session.access != None {
+                if session.authenticated_as != None {
                     return effects;
                 }
                 let wire_id = subscription_id.as_str();

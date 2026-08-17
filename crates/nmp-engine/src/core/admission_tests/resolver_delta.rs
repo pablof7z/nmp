@@ -286,7 +286,7 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
         relay,
         &request_atom.filter,
         &request_atom.routing,
-        request_atom.access,
+        request_atom.authenticate_as,
     );
     core.white_box("attribution.retain_live_request_claims", |s| {
         s.attribution

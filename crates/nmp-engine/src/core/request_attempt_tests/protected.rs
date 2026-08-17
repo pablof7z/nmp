@@ -16,10 +16,10 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
     let atom = ContextualAtom {
         filter: filter.clone(),
         routing: ReadRouting::Explicit(vec![relay]),
-        access: session.access,
+        authenticated_as: session.authenticated_as,
         routing_evidence: BTreeSet::new(),
     };
-    let sub_id = SubId::for_wire(session.relay.clone(), &filter, &atom.routing, atom.access);
+    let sub_id = SubId::for_wire(session.relay.clone(), &filter, &atom.routing, atom.authenticate_as);
     let claims = BTreeSet::from([nmp_store::coverage_key(&atom)]);
     let owners = BTreeSet::from([nmp_router::DemandKey::for_atom(&atom)]);
     let first_handle = TransportRelayHandle {

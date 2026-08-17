@@ -46,7 +46,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
         relay.clone(),
         &incumbent.filter,
         &incumbent.routing,
-        incumbent.access,
+        incumbent.authenticated_as,
     );
     core.white_box("attribution.retain_live_request_claims", |s| {
         s.attribution
@@ -184,7 +184,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
         relay.clone(),
         &incumbent.filter,
         &incumbent.routing,
-        incumbent.access,
+        incumbent.authenticated_as,
     );
     core.white_box("attribution.retain_live_request_claims", |s| {
         s.attribution

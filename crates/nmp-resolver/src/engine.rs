@@ -211,7 +211,7 @@ impl From<&Demand> for AcquisitionKey {
         Self {
             selection: d.selection.clone(),
             routing: d.routing.clone(),
-            access: d.access,
+            authenticate_as: d.authenticate_as,
         }
     }
 }
@@ -419,7 +419,7 @@ pub struct Engine {
     handle_to_root: HashMap<HandleId, NodeId>,
     next_handle: u64,
     /// The demand truth (M1 plan §3.2, re-keyed on [`ContextualAtom`] per
-    /// #106): every atom -- selection + source + access -- any live
+    /// #106): every atom -- selection + source + authenticate_as -- any live
     /// FilterNode currently contributes, refcounted. Open fires on 0->1,
     /// close on 1->0. Two atoms with identical `ConcreteFilter` but
     /// different context refcount INDEPENDENTLY (Fable D: coalescing is
@@ -601,7 +601,7 @@ impl Engine {
         if let Some(&root) = self.descriptor_to_root.get(&key) {
             // Identical cache-free acquisition identity already has a
             // graph: graph-level dedup (M1 plan §3.2/§4; #106 widens the
-            // key to selection+source+access, still cache-free per atlas's
+            // key to selection+source+authenticate_as, still cache-free per atlas's
             // forward-note -- two Demands differing only in `cache` share
             // this same graph/atoms/wire/coverage). Handles are counted by
             // the GRAPH refcount and nothing else: the atom table counts
@@ -625,13 +625,13 @@ impl Engine {
             };
         }
 
-        let (source, access) = branch.atom_context();
+        let (source, authenticate_as) = branch.atom_context();
         let graph_checkpoint = self.graph.allocation_checkpoint();
         let root = match self.build_filter_node(
             store,
             &branch.selection,
             source,
-            access,
+            authenticate_as,
             ParentLink::Root,
             0,
         ) {
@@ -1526,7 +1526,7 @@ impl Engine {
     /// full atom into `DemandDelta` (#106, Fable's ratified shape --
     /// `DemandOp::Open/Close(ContextualAtom)`, not a bare `ConcreteFilter`):
     /// the delta reflects exactly what the refcount table keys on. Two
-    /// atoms with the same `filter` but different `source`/`access`
+    /// atoms with the same `filter` but different `source`/`authenticate_as`
     /// refcount in SEPARATE buckets, so BOTH can surface an `Open` here --
     /// downstream (the router's per-relay context partitioning + wire-
     /// domain `ConcreteFilter::hash`/`SubId::for_wire`) is what keeps their
@@ -1556,7 +1556,7 @@ impl Engine {
 
     // ---- graph construction (M1 plan §3.1) ------------------------------
 
-    /// `source`/`access` are the OWNING `Demand`'s context (#106), threaded
+    /// `source`/`authenticate_as` are the OWNING `Demand`'s context (#106), threaded
     /// in from the caller rather than re-derived here -- this FilterNode may
     /// be the root of a top-level `LiveQuery`'s `Demand` or the `inner` of a
     /// `Binding::Derived`'s OWN (independent) `Demand`; either way, by the
@@ -1595,7 +1595,7 @@ impl Engine {
             bound,
             cached_atoms: BTreeSet::new(),
             routing,
-            access,
+            authenticate_as,
         };
         self.graph.insert(id, Node::Filter(data), parent, depth);
         let atoms = self.graph.compute_atoms(id);
@@ -1636,7 +1636,7 @@ impl Engine {
             Binding::Derived(d) => {
                 let id = self.graph.alloc_id();
                 // `d.inner` is its OWN `Demand` (#106): its `source`/
-                // `access` come from ITSELF, never from the enclosing
+                // `authenticate_as` come from ITSELF, never from the enclosing
                 // FilterNode's context -- a Demand's context is never
                 // inherited across a `Binding::Derived` boundary.
                 let (inner_source, inner_access) = d.inner.atom_context();

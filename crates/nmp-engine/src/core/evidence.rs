@@ -81,7 +81,8 @@ pub struct AcquisitionEvidence {
 pub struct SourceEvidence {
     pub relay: RelayUrl,
     /// Frozen access identity of the physical session producing this fact.
-    pub access: /// Durable per-(shape, relay) watermark evidence, min'd over the
+    pub authenticated_as: Option<nostr::PublicKey>,
+    /// Durable per-(shape, relay) watermark evidence, min'd over the
     /// subtree atoms THIS source covers in THIS query, IFF every one of
     /// them has a coverage row whose `from` is at or before the query's own
     /// window floor. `None` = unproven (at least one covered atom has no
@@ -366,7 +367,7 @@ pub(crate) fn acquisition_evidence(
                 let status = if acquisition == EvidenceAcquisition::CoverageSatisfied {
                     SourceStatus::CoverageSatisfied
                 } else if connected.contains(&session) {
-                    if session.access == None {
+                    if session.authenticated_as == None {
                         request_placement_status(all_placed, any_awaiting)
                     } else {
                         match auth_status.get(&session).copied().unwrap_or(
@@ -397,7 +398,7 @@ pub(crate) fn acquisition_evidence(
                 };
                 SourceEvidence {
                     relay: session.relay,
-                    access: session.access,
+                    authenticated_as: session.authenticated_as,
                     reconciled_through: if all_proven { through } else { None },
                     status,
                 }
@@ -460,12 +461,13 @@ fn merge_source_status(left: SourceStatus, right: SourceStatus) -> SourceStatus 
 pub(crate) fn merge_acquisition_evidence(
     parts: impl IntoIterator<Item = AcquisitionEvidence>,
 ) -> AcquisitionEvidence {
-    let mut sources: BTreeMap<(RelayUrl), SourceEvidence> = BTreeMap::new();
+    let mut sources: BTreeMap<(RelayUrl, Option<nostr::PublicKey>), SourceEvidence> =
+        BTreeMap::new();
     let mut shortfall = Vec::new();
 
     for part in parts {
         for source in part.sources {
-            let key = (source.relay.clone(), source.access);
+            let key = (source.relay.clone(), source.authenticated_as);
             match sources.entry(key) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(source);
@@ -521,7 +523,7 @@ mod tests {
         let key = coverage_key(&atom);
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
         let req = WireReq {
-            sub_id: SubId::for_wire(relay.clone(), &atom.filter, &atom.routing, atom.access),
+            sub_id: SubId::for_wire(relay.clone(), &atom.filter, &atom.routing, atom.authenticate_as),
             filter: atom.filter.clone(),
             routing: atom.routing.clone(),
             provenance: BTreeSet::new(),
@@ -611,7 +613,7 @@ mod tests {
                         relay.clone(),
                         &atom.filter,
                         &atom.routing,
-                        atom.access,
+                        atom.authenticate_as,
                     ),
                     filter: atom.filter.clone(),
                     routing: atom.routing.clone(),
@@ -649,15 +651,15 @@ mod tests {
     #[test]
     fn protected_source_reports_each_exact_auth_phase_and_terminal_truth() {
         let mut atom = atom();
-        atom.access = Some(Keys::generate().public_key());
+        atom.authenticate_as = Some(Keys::generate().public_key());
         let relay = RelayUrl::parse("wss://protected-evidence.example").unwrap();
-        let session = RelaySessionKey::new(relay.clone(), atom.access);
+        let session = RelaySessionKey::new(relay.clone(), atom.authenticate_as);
         let key = coverage_key(&atom);
         let plan = RelayPlan {
             reqs: BTreeMap::from([(
                 session.clone(),
                 vec![WireReq {
-                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.routing, atom.access),
+                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.routing, atom.authenticate_as),
                     filter: atom.filter.clone(),
                     routing: atom.routing.clone(),
                     provenance: BTreeSet::new(),
@@ -737,7 +739,7 @@ mod tests {
             reqs: BTreeMap::from([(
                 session,
                 vec![WireReq {
-                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.routing, atom.access),
+                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.routing, atom.authenticate_as),
                     filter: atom.filter.clone(),
                     routing: atom.routing.clone(),
                     provenance: BTreeSet::new(),

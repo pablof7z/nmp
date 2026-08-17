@@ -897,7 +897,7 @@ impl CoreState {
                     planned
                         .keys()
                         .filter(|session| {
-                            session.access != None
+                            session.authenticated_as != None
                                 && !self.auth_ready_sessions.contains_key(*session)
                         })
                         .cloned()
@@ -919,7 +919,7 @@ impl CoreState {
                             .planned_read_session_counts_by_relay
                             .entry(session.relay.clone())
                             .or_insert(0) += 1;
-                        if session.access != None
+                        if session.authenticated_as != None
                             && !self.auth_ready_sessions.contains_key(&session)
                         {
                             effects.push(Effect::EnsureReadRelay(session));
@@ -995,7 +995,7 @@ impl CoreState {
             // `finish_auth_ok`, replays the full planned set on readiness,
             // so nothing is lost), and no CLOSE is needed pre-auth — nothing
             // was ever sent on that socket for this plan to withdraw.
-            if session.access != None
+            if session.authenticated_as != None
                 && !self.auth_ready_sessions.contains_key(session)
             {
                 continue;
@@ -1029,7 +1029,7 @@ impl CoreState {
                         // about an authenticated session's view.
                         let broad = filter.limit.is_none();
                         match (
-                            broad && session.access == None,
+                            broad && session.authenticated_as == None,
                             self.prober.probed(&session.relay),
                         ) {
                             (true, Some(probed)) => {

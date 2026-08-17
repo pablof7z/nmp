@@ -345,7 +345,7 @@ impl CoreState {
         // public question and never for a protected one — the same
         // access-context rule the rest of this module keeps free by carrying
         // it in the session key.
-        if session.access != None {
+        if session.authenticated_as != None {
             return None;
         }
         let mut found = None;
@@ -404,7 +404,7 @@ impl CoreState {
         let demand = Demand::new(
             coordinate_filter(coordinate),
             ReadRouting::Explicit(vec![session.relay.clone()]),
-            session.access,
+            session.authenticated_as,
         )
         .expect("one relay-pinned coordinate demand is never empty");
         let demand = Demand {

@@ -53,19 +53,26 @@ pub enum ReadRouting {
     Explicit(Vec<nostr::RelayUrl>),
 }
 
-/// The complete identity of one physical relay session: a URL plus who that
-/// connection has actually authenticated as.
+/// The complete identity of one physical relay session: a URL plus the
+/// identity that session is bound to.
 ///
-/// `authenticated_as` is DISCOVERED, never declared. A connection opens with
-/// `None`; if the relay challenges it and the installed policy answers, it
-/// becomes `Some(key)`. NIP-42 visibility is connection-scoped, so a URL
-/// without the identity the socket actually holds is never a sufficient key
-/// for planning, transport, attribution, replay, or coverage.
+/// `None` is the ordinary connection, bound to nobody. It is NOT a category
+/// an app selects and it does not mean "will never authenticate": if the
+/// relay challenges it, NMP answers as the engine's current account. A read
+/// therefore never names an identity — it plans against the URL, and the
+/// connection authenticates if and when the relay asks.
 ///
-/// One websocket carries at most one authenticated identity, which is why
-/// this — and not the URL alone — is the session key: two accounts publishing
-/// to the same relay concurrently are genuinely two sockets
-/// (`nmp-engine`'s `same_url_keeps_distinct_signing_identities_in_worker_demand`).
+/// `Some(key)` is a connection DEDICATED to one identity, which only a write
+/// lane requires: a write already knows the key it is publishing as, so it
+/// does not have to guess. One websocket carries at most one NIP-42 identity,
+/// which is why this — and not the URL alone — is the session key: two
+/// accounts publishing to the same relay concurrently are genuinely two
+/// sockets (`nmp-engine`'s
+/// `same_url_keeps_distinct_signing_identities_in_worker_demand`).
+///
+/// NIP-42 visibility is connection-scoped, so a URL without the identity its
+/// socket is bound to is never a sufficient key for planning, transport,
+/// attribution, replay, or coverage.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RelaySessionKey {
     pub relay: nostr::RelayUrl,
@@ -84,8 +91,8 @@ impl RelaySessionKey {
         }
     }
 
-    /// A connection that has not authenticated. This is the ordinary state of
-    /// a freshly opened socket, not a category an app selects.
+    /// The ordinary connection, bound to no identity. This is what every
+    /// read plans against; it is not a category an app selects.
     #[must_use]
     pub const fn unauthenticated(relay: nostr::RelayUrl) -> Self {
         Self::new(relay, None)

@@ -25,7 +25,7 @@ mod relay_session_key_tests {
         let atom = ContextualAtom {
             filter: filter.clone(),
             routing: ReadRouting::Auto,
-            access: access_a,
+            authenticated_as: access_a,
             routing_evidence: BTreeSet::new(),
         };
         let key = coverage_key(&atom);
@@ -154,7 +154,7 @@ mod relay_session_key_tests {
         let atom_b = ContextualAtom {
             filter: filter_b.clone(),
             routing: ReadRouting::Auto,
-            access: protected_session.access,
+            authenticated_as: protected_session.authenticated_as,
             routing_evidence: BTreeSet::new(),
         };
         let key_a = coverage_key(&atom_a);
@@ -169,7 +169,7 @@ mod relay_session_key_tests {
             relay,
             &filter_b,
             &ReadRouting::Auto,
-            protected_session.access,
+            protected_session.authenticated_as,
         );
         let wire_a = wire_sub_id_string(&sub_a);
         let wire_b = wire_sub_id_string(&sub_b);
@@ -381,7 +381,7 @@ mod relay_session_key_tests {
             ContextualAtom {
                 filter,
                 routing: ReadRouting::Explicit(vec![relay.clone()]),
-                access: protected.access,
+                authenticated_as: protected.authenticated_as,
                 routing_evidence: BTreeSet::new(),
             },
         ]);
@@ -438,12 +438,12 @@ mod relay_session_key_tests {
         let public_diagnostics = probing
             .relays
             .iter()
-            .find(|entry| entry.access == None)
+            .find(|entry| entry.authenticated_as == None)
             .unwrap();
         let protected_diagnostics = probing
             .relays
             .iter()
-            .find(|entry| entry.access == protected.access)
+            .find(|entry| entry.authenticated_as == protected.authenticated_as)
             .unwrap();
         assert_eq!(public_diagnostics.nip77_behavior, "probing");
         assert_eq!(protected_diagnostics.nip77_behavior, "unknown");
@@ -462,7 +462,7 @@ mod relay_session_key_tests {
             resolved
                 .relays
                 .iter()
-                .find(|entry| entry.access == None)
+                .find(|entry| entry.authenticated_as == None)
                 .unwrap()
                 .nip77_behavior,
             "behaviorally_proven"
@@ -471,7 +471,7 @@ mod relay_session_key_tests {
             resolved
                 .relays
                 .iter()
-                .find(|entry| entry.access == protected.access)
+                .find(|entry| entry.authenticated_as == protected.authenticated_as)
                 .unwrap()
                 .nip77_behavior,
             "unknown"

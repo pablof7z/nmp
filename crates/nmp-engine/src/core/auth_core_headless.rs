@@ -33,7 +33,7 @@ impl Fixture {
         let atom = ContextualAtom {
             filter,
             routing: ReadRouting::Explicit(vec![relay.clone()]),
-            access: session.access,
+            authenticated_as: session.authenticated_as,
             routing_evidence: BTreeSet::new(),
         };
         let directory = FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [relay]);

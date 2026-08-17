@@ -16,7 +16,7 @@ fn local_owner_detach_prunes_the_current_attribution_generation_before_eose() {
         relay,
         &incumbent.filter,
         &incumbent.routing,
-        incumbent.access,
+        incumbent.authenticated_as,
     );
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     core.set_active_demand(&BTreeSet::from([incumbent.clone(), added.clone()]));
@@ -122,7 +122,7 @@ fn aliased_current_claim_stays_until_its_last_owner_and_can_reattach_before_eose
         relay,
         &incumbent.filter,
         &incumbent.routing,
-        incumbent.access,
+        incumbent.authenticated_as,
     );
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     core.set_active_demand(&BTreeSet::from([

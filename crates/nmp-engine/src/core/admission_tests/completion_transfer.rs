@@ -183,7 +183,7 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
             relay,
             &incumbent.filter,
             &incumbent.routing,
-            incumbent.access,
+            incumbent.authenticated_as,
         );
         core.white_box("attribution.retain_live_request_claims", |s| {
             s.attribution
@@ -272,7 +272,7 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
         relay.clone(),
         &incumbent.filter,
         &incumbent.routing,
-        incumbent.access,
+        incumbent.authenticated_as,
     );
     let added_for_generation = |generation: u16| ContextualAtom {
         filter: ConcreteFilter {

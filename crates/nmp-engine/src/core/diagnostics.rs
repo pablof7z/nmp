@@ -384,7 +384,7 @@ pub(crate) fn build(
 
         relays.push(RelayDiagnosticsSnapshot {
             relay: session.relay.clone(),
-            access: session.access,
+            authenticated_as: session.authenticated_as,
             wire_sub_count: rd.wire_sub_count,
             subscription_budget: rd.subscription_budget,
             subscriptions_refused: rd.subscriptions_refused,

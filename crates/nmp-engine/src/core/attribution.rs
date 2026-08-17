@@ -678,7 +678,7 @@ mod tests {
     }
 
     fn sub_id_for(atom: &ContextualAtom) -> SubId {
-        SubId::for_wire(relay(), &atom.filter, &atom.routing, atom.access)
+        SubId::for_wire(relay(), &atom.filter, &atom.routing, atom.authenticate_as)
     }
 
     /// The census counts `live_shape_owner_counts.len()` and its value sum.
