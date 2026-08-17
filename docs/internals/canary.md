@@ -350,6 +350,117 @@ Two facts about the starting position, established by survey:
 - **Session identity did not survive restart**, which silently blocked C2, C9
   and C12: there was no identity for a resumed write to remain frozen to.
 
+**C17 is proven as an oracle, and two of its three phases pass. The third
+fails, and the failure is a real finding (#1846), not a scenario defect.**
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C17RepeatedLifecycleChurnTests.swift`
+is the first measurement of NMP's resource behaviour over time at any
+layer — nothing anywhere previously watched memory, sockets, threads or
+subscription count across repeated open/close cycles (#1844).
+
+**Where the measurement lives, and why.** Footprint, open file descriptors
+and live thread count are properties of a PROCESS; there is no per-object
+equivalent. #1796 is this repository's standing proof that a process-wide
+measurement inside a shared test binary is not an oracle — it cannot tell
+"the subject misbehaved" from "something else in this process was busy",
+and a leak oracle is exposed in both directions, since ambient allocation
+manufactures growth NMP did not cause and ambient release hides growth it
+did. So the churn runs in `canary-c17-churner`, a sibling executable whose
+entire job is the churn: no XCTest runner, no other scenario, no relay
+controller, no relay-lab dependency. The parent test starts the relay,
+seeds one event over a real EVENT frame, and reads samples off stdout —
+C9's parent/child split, for a different reason.
+
+Four numbers per cycle: `phys_footprint` (what macOS charges the process),
+`mstats().bytes_used` (byte-granular heap; Rust's default macOS allocator
+IS the system malloc, so engine allocations land here), an exact file
+descriptor count, and the live thread count — plus the one resource count
+the public API exposes, per-relay `wireSubCount` from
+`observeDiagnostics()`.
+
+**PASSING — `repeat`, 300 open/close cycles of one identical filter
+against one engine.** Everything returns to steady state: fds flat at 8,
+threads flat at 18, `wireSubCount` back to 0 after every teardown,
+heap +6 B/cycle with a decile series that is flat to within 5 KB across
+300 cycles. Cross-length control: final heap 74,456,848 B at 300 cycles
+and 74,456,400 B at 1200 — **−0.5 bytes per additional cycle**, i.e. no
+per-cycle growth at all.
+
+**PASSING — `engine`, 60 whole-engine construct/read/`shutdown()` cycles
+over the same store path.** This is also C17's connect/disconnect churn:
+each engine dials the relay fresh and each shutdown drops it, so a leaked
+socket or engine thread per lifecycle would land in the fd and thread
+series without a second control channel. Post-shutdown heap sits at
+177 KB, flat, against the ~74 MB a live engine holds — so `shutdown()`
+releases essentially the entire engine, and fds drain from 6 to 3.
+
+**FAILING — `distinct`, 300 cycles with a different wire filter each
+time.** Heap grows +402 B/cycle with decile means rising monotonically in
+all ten deciles. Cross-length: 74,577,904 B at 300 cycles, 74,840,160 B at
+1200 (+291 B per additional filter), 76,354,832 B at 4000 (+541 B per
+additional filter) — linear, no plateau, and `phys_footprint` over that
+4000-cycle run rose 9.49 MB → 13.78 MB. **NMP retains a few hundred bytes
+per distinct filter ever observed for the lifetime of the engine, and
+closing the observation does not release it.** Filed as #1846 and left
+red on purpose: the threshold was not raised to make it green. Every other
+resource is clean in this phase too — fds and threads flat, `wireSubCount`
+back to 0 after all 4000 teardowns.
+
+What C17 cannot determine: whether that retention is an unbounded
+in-memory map or the store's page cache holding legitimately durable
+per-filter coverage rows. The public API exposes no way to tell — that is
+itself the API finding below.
+
+**The thresholds are measured, not chosen.** The first draft asserted
+16 B/cycle on the heap, malloc's smallest allocation quantum. Against a
+~74 MB live-engine baseline that is below the instrument's noise floor,
+and it failed the `repeat` phase, which the cross-length control proves
+has zero per-cycle growth. The resolution was then measured — `repeat`
+reported +22 B/cycle at 300 cycles and +41 at 1200 purely from noise — and
+the committed bound set at 128 B/cycle, roughly three times the largest
+drift observed on a series known to be flat. Stated plainly in the file:
+C17 cannot resolve a heap leak smaller than about 128 B/cycle in the
+single-engine phases. `phys_footprint` is bounded on total drift (2 MB)
+rather than a rate, because it swings ±900 KB in both directions on runs
+with no growth and dividing a fixed swing by the run length makes the same
+behaviour read as −33,810 B/cycle at 60 cycles and −3,166 at 300.
+
+**Falsified two ways, each restored afterward.** Retaining every `NMPQuery`
+instead of releasing it (a leaked subscription) failed red on three
+assertions with the real numbers: heap +22,592 B/cycle against a clean
++22, footprint +22,518 B/cycle, and `wireSubCount` after close stuck at 1
+with `DRAINED:` reporting 1 instead of 0. Leaking one file descriptor per
+cycle (`open("/dev/null")`, never closed) failed red at exactly
+**+1.00 fd/cycle**, first sample 9, last sample 68 over 60 cycles, while
+every other series stayed flat — the two falsifiers hit different
+assertions, so neither is carrying the other.
+
+A third falsification arrived unplanned and is the more useful one. The
+first draft ended each cycle at the query's first delivered batch, which
+looked reasonable and was wrong: the first batch carries `rows=0` and
+arrives from the local store immediately, long before the subscription
+reaches the relay (measured: three consecutive `rows=0` batches precede
+the `rows=1` one). Every cycle was tearing the observation down before it
+was ever established. The scenario reported this as `0/300 cycles saw a
+live wire subscription while open` and refused to treat the post-teardown
+zeros as evidence — the liveness assertion exists precisely so a count
+that is always zero cannot pass as a released resource. Cycles now end on
+the engine's own report that the subscription is established.
+
+**API findings.** Two, both small and both real.
+
+`observeDiagnostics()` is push-only: there is no synchronous "what is your
+current snapshot". An app that wants a point-in-time resource reading must
+hold the stream open and cache the last value, which is what the churner
+does and what the shipped `NMPDiagnosticsSnapshotObserver` sugar does. Not
+a defect, but it means "read the engine's current resource state" is not a
+call an app can make.
+
+More consequentially, `DiagnosticsSnapshot` reports per-relay subscription
+counts, wire filters and coverage state, but nothing about retained
+per-filter bookkeeping or memory — so an app hitting #1846 has no
+public surface that would tell it what is growing, and neither did this
+scenario.
+
 **C15's relay lab is qualified; C15 itself is NOT proven.** The distinction is
 the whole point of the paragraph below, and an earlier revision of this section
 got it wrong by calling C15 "proven live".

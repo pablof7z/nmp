@@ -65,6 +65,18 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   churn fixes all live. Verify the running result on the Canary before
   declaring the M5 jank gone. Many of these fixes also carry "device room-open
   verification pending" — the same on-device pass closes them.
+- **Engine-lifetime memory grows linearly in DISTINCT filters observed, and
+  closing the observation never releases it (#1846).** Canary C17 measured
+  +291 B per additional distinct filter between 300 and 1200 cycles and
+  +541 B between 1200 and 4000 — linear, no plateau, with `phys_footprint`
+  rising 9.49 MB → 13.78 MB across 4000 closed observations. The identical
+  loop with the SAME filter is flat (−0.5 B per additional cycle), so this
+  is keyed on the filter being new, not on open/close overhead. Released in
+  full by `shutdown()`. Whether it is an unbounded in-memory map or the
+  store's page cache holding durable per-filter coverage rows cannot be
+  determined through the public API — `DiagnosticsSnapshot` exposes no
+  retained-bookkeeping or memory fact at all. C17's `distinct` phase is red
+  until this is answered.
 - **Suspend/resume transparency (#4): the on-device pass is pending.** Transport
   hardening (`SuspendGapDetector`/`apply_resume_gap`, wall-clock gap detection)
   and the clock audit of every suspension-spanning wait are done; what remains

@@ -35,6 +35,20 @@ let package = Package(
                 .product(name: "NMP", package: "NMP")
             ]
         ),
+        // C17's measured half. Memory footprint, open file descriptors and
+        // live thread count are properties of a PROCESS, and issue #1796 is
+        // the standing proof that a process-wide measurement inside a shared
+        // test binary cannot tell the thing under test from everything else
+        // running beside it. This executable is a process whose only job is
+        // the churn, so its numbers are attributable. Like
+        // `canary-c9-publisher` it needs NMP only -- the relay's lifecycle
+        // and seeding stay the parent test's job.
+        .executableTarget(
+            name: "canary-c17-churner",
+            dependencies: [
+                .product(name: "NMP", package: "NMP")
+            ]
+        ),
         .testTarget(
             name: "CanaryScenariosTests",
             dependencies: [
