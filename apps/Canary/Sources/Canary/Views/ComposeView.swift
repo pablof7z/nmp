@@ -269,10 +269,11 @@ struct ComposeView: View {
                 LabeledContent("Relay said", value: detail)
                     .textSelection(.enabled)
             }
-        case .waiting, .sent, .gaveUp:
+        case .waiting, .attempting, .sent, .gaveUp:
             // `.gaveUp` carries nothing: the ceiling was reached, and whatever
             // each failed attempt's relay message was is not retained on the
-            // terminal state either.
+            // terminal state either. `.attempting` and `.sent` are states the
+            // relay has not answered from yet, so there is nothing it said.
             EmptyView()
         }
     }
@@ -379,6 +380,9 @@ struct ComposeView: View {
     private func describe(_ state: RelayState) -> String {
         switch state {
         case .waiting(let waiting): return "waiting: \(describe(waiting))"
+        // Deliberately not "sent": the ordinal is spent and the bytes are with
+        // transport, but nothing about the wire is proved yet.
+        case .attempting(let attempt, _): return "attempting (attempt \(attempt))"
         case .sent(let attempt, _): return "sent (attempt \(attempt))"
         case .published: return "published"
         case .rejected: return "rejected"
@@ -391,6 +395,9 @@ struct ComposeView: View {
         switch waiting {
         case .notConnected: return "not connected"
         case .needsAuth: return "needs auth"
+        // Queued behind the relay's one attempt slot. Nothing is wrong, which
+        // is exactly why this is not "not connected".
+        case .eligible: return "eligible"
         case .backingOff(let attempt, _, let cause, _):
             return "backing off (attempt \(attempt), \(cause))"
         // Local disk, not a relay -- never quoted as something a relay said.

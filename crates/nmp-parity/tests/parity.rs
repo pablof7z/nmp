@@ -345,6 +345,40 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
             WriteFact::Relay {
                 event_id: relay_event_id,
                 relay: relay.clone(),
+                state: RelayState::Waiting(RelayWaiting::Eligible {
+                    since: Timestamp::from(118),
+                }),
+            },
+            FfiWriteFact::Relay {
+                event_id: relay_event_id.to_hex(),
+                relay: relay.to_string(),
+                state: FfiRelayState::Waiting {
+                    waiting: FfiRelayWaiting::Eligible { since: 118 },
+                },
+            },
+        ),
+        (
+            WriteFact::Relay {
+                event_id: relay_event_id,
+                relay: relay.clone(),
+                state: RelayState::Attempting {
+                    attempt: 4,
+                    started_at: Timestamp::from(121),
+                },
+            },
+            FfiWriteFact::Relay {
+                event_id: relay_event_id.to_hex(),
+                relay: relay.to_string(),
+                state: FfiRelayState::Attempting {
+                    attempt: 4,
+                    started_at: 121,
+                },
+            },
+        ),
+        (
+            WriteFact::Relay {
+                event_id: relay_event_id,
+                relay: relay.clone(),
                 state: RelayState::GaveUp,
             },
             FfiWriteFact::Relay {
@@ -497,8 +531,15 @@ enum NormStatus {
     Destinations(Vec<String>, bool, Vec<String>),
     WaitingNotConnected(String),
     WaitingNeedsAuth(String),
+    /// Scheduled and unblocked. Carried apart from `WaitingNotConnected`
+    /// because a boundary that folded the two would tell an app the relay is
+    /// unreachable while the write is merely queued.
+    WaitingEligible(String, u64),
     BackingOff(String, u64, u64, String, Option<String>),
     PersistenceStalled(String, String),
+    /// An attempt is running with nothing about the wire proved. Carried
+    /// apart from `Sent`, whose whole content is the proof.
+    Attempting(String, u64, u64),
     Sent(String),
     Published(String),
     Rejected(String, String),
@@ -1007,6 +1048,9 @@ fn normalize_direct_status(status: WriteFact, relay: &str) -> NormStatus {
                     NormStatus::WaitingNotConnected(url)
                 }
                 RelayState::Waiting(RelayWaiting::NeedsAuth) => NormStatus::WaitingNeedsAuth(url),
+                RelayState::Waiting(RelayWaiting::Eligible { since }) => {
+                    NormStatus::WaitingEligible(url, since.as_secs())
+                }
                 RelayState::Waiting(RelayWaiting::BackingOff {
                     attempt,
                     eligible_at,
@@ -1022,6 +1066,10 @@ fn normalize_direct_status(status: WriteFact, relay: &str) -> NormStatus {
                 RelayState::Waiting(RelayWaiting::PersistenceStalled { detail }) => {
                     NormStatus::PersistenceStalled(url, detail)
                 }
+                RelayState::Attempting {
+                    attempt,
+                    started_at,
+                } => NormStatus::Attempting(url, attempt, started_at.as_secs()),
                 RelayState::Sent { .. } => NormStatus::Sent(url),
                 RelayState::Published => NormStatus::Published(url),
                 RelayState::Rejected { reason } => NormStatus::Rejected(url, reason),
@@ -1088,6 +1136,9 @@ fn normalize_ffi_status(status: FfiWriteFact, relay: &str) -> NormStatus {
                     waiting: FfiRelayWaiting::NeedsAuth,
                 } => NormStatus::WaitingNeedsAuth(url),
                 FfiRelayState::Waiting {
+                    waiting: FfiRelayWaiting::Eligible { since },
+                } => NormStatus::WaitingEligible(url, since),
+                FfiRelayState::Waiting {
                     waiting:
                         FfiRelayWaiting::BackingOff {
                             attempt,
@@ -1105,6 +1156,10 @@ fn normalize_ffi_status(status: FfiWriteFact, relay: &str) -> NormStatus {
                 FfiRelayState::Waiting {
                     waiting: FfiRelayWaiting::PersistenceStalled { detail },
                 } => NormStatus::PersistenceStalled(url, detail),
+                FfiRelayState::Attempting {
+                    attempt,
+                    started_at,
+                } => NormStatus::Attempting(url, attempt, started_at),
                 FfiRelayState::Sent { .. } => NormStatus::Sent(url),
                 FfiRelayState::Published => NormStatus::Published(url),
                 FfiRelayState::Rejected { reason } => NormStatus::Rejected(url, reason),
@@ -2193,8 +2248,10 @@ fn direct_relay_state_name(state: &RelayState) -> &'static str {
     match state {
         RelayState::Waiting(RelayWaiting::NotConnected) => "awaiting_relay",
         RelayState::Waiting(RelayWaiting::NeedsAuth) => "awaiting_auth",
+        RelayState::Waiting(RelayWaiting::Eligible { .. }) => "eligible",
         RelayState::Waiting(RelayWaiting::BackingOff { .. }) => "backing_off",
         RelayState::Waiting(RelayWaiting::PersistenceStalled { .. }) => "persistence_stalled",
+        RelayState::Attempting { .. } => "attempting",
         RelayState::Sent { .. } => "sent",
         RelayState::Published => "published",
         RelayState::Rejected { .. } => "rejected",
@@ -2247,11 +2304,15 @@ fn ffi_relay_state_name(state: &FfiRelayState) -> &'static str {
             waiting: FfiRelayWaiting::NeedsAuth,
         } => "awaiting_auth",
         FfiRelayState::Waiting {
+            waiting: FfiRelayWaiting::Eligible { .. },
+        } => "eligible",
+        FfiRelayState::Waiting {
             waiting: FfiRelayWaiting::BackingOff { .. },
         } => "backing_off",
         FfiRelayState::Waiting {
             waiting: FfiRelayWaiting::PersistenceStalled { .. },
         } => "persistence_stalled",
+        FfiRelayState::Attempting { .. } => "attempting",
         FfiRelayState::Sent { .. } => "sent",
         FfiRelayState::Published => "published",
         FfiRelayState::Rejected { .. } => "rejected",

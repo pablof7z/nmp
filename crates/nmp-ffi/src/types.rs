@@ -1168,6 +1168,14 @@ pub enum FfiRelayState {
     Waiting {
         waiting: FfiRelayWaiting,
     },
+    /// An attempt is running and its ordinal is spent, but nothing about the
+    /// wire is proved: transport has not answered the handoff yet, or cannot
+    /// say whether the bytes reached the socket. Deliberately NOT folded into
+    /// `Sent`, whose whole content is the proof.
+    Attempting {
+        attempt: u64,
+        started_at: u64,
+    },
     /// Transport proved socket write + flush. Not an ack, and not terminal.
     Sent {
         attempt: u64,
@@ -1201,6 +1209,13 @@ pub enum FfiRelayWaiting {
     /// spend the give-up ceiling.
     NotConnected,
     NeedsAuth,
+    /// Nothing is blocking this lane: it is routed, scheduled, and its turn
+    /// to send has not come. No attempt is running, so no ordinal is spent.
+    /// Deliberately NOT `NotConnected` — a queued write is not an unreachable
+    /// relay, and only one of those is worth troubling a person with.
+    Eligible {
+        since: u64,
+    },
     /// The last attempt failed in a way that permits another one, and
     /// `cause`/`detail` say WHY — "we will try again" and "we will try again
     /// because the relay rate-limited us" are different messages and only the

@@ -1370,9 +1370,12 @@ impl CoreState {
                 AccessContext::Nip42(pending.signing_pubkey),
             );
             // Connectivity is process-local, so re-parking the lane records
-            // NOTHING durable (#889): `Eligible` and `WaitingConnection`
-            // already project to the identical
-            // `RelayState::Waiting(NotConnected)` at the enumeration door, and
+            // NOTHING durable (#889): an `Eligible` lane WITHOUT this session
+            // and a `WaitingConnection` lane already project to the identical
+            // `RelayState::Waiting(NotConnected)` at the enumeration door —
+            // which is exactly the case this branch is in, because the
+            // projection asks `connected_relays` the same question asked
+            // immediately below and gets the same answer. And
             // the reverse transition is the one `wake_relay_lanes` performs
             // when a session arrives. Committing it here cost one
             // fsync-durable transaction per eligible lane every time a
@@ -3996,7 +3999,10 @@ impl CoreState {
                         .unwrap_or_default(),
                     route_complete: owner_pending.is_some_and(|pending| pending.route_complete),
                     relay_states: owner_pending
-                        .map(|pending| self.relay_states_for(pending))
+                        .map(|pending| {
+                            self.relay_states_for(pending.intent_id, pending.signing_pubkey)
+                        })
+                        .transpose()?
                         .unwrap_or_default(),
                     outcome: None,
                     persistence_fault: owner_pending
@@ -4082,18 +4088,30 @@ impl CoreState {
                     Some(WriteOutcome::NotSent(NotSentReason::SignerRefused))
                 }
             };
-            let relay_states = pending
-                .map(|pending| self.relay_states_for(pending))
-                .unwrap_or_default();
+            // Destinations and lane states come from the DURABLE rows, keyed
+            // by the receipt's own intent id, because settlement deletes the
+            // pending row while leaving every route revision and lane behind.
+            // Reading them through `pending` made a write report zero relays
+            // at the exact moment it finished — an app showing "published to
+            // 3 of 5" went blank on becoming 5 of 5.
+            //
+            // A receipt-only refusal (`intent_id: None`) never gained an
+            // intent row, so it never routed and never owned a lane; empty is
+            // the true answer there and not a missing one.
+            let (relays, relay_states) = match receipt.intent_id {
+                Some(intent_id) => (
+                    self.durable_relays_for(intent_id)?,
+                    self.relay_states_for(intent_id, receipt.expected_pubkey)?,
+                ),
+                None => (BTreeSet::new(), Vec::new()),
+            };
             entries.push(PublishQueueEntry {
                 receipt_id: id,
                 event_id,
                 pubkey: receipt.expected_pubkey,
                 accepted_at: receipt.accepted_at.unwrap_or_else(|| Timestamp::from(0u64)),
                 signing,
-                relays: pending
-                    .map(|pending| pending.durable_routes.clone())
-                    .unwrap_or_default(),
+                relays,
                 route_complete: pending.is_none_or(|pending| pending.route_complete),
                 relay_states,
                 outcome,
@@ -4103,9 +4121,34 @@ impl CoreState {
         Ok(entries)
     }
 
-    fn relay_states_for(&self, pending: &PendingWrite) -> Vec<(RelayUrl, RelayState)> {
-        let Ok(lanes) = self.store.recover_publish_queue_lanes(pending.intent_id) else {
-            return Vec::new();
+    /// Project one intent's durable lane rows into the per-relay picture an
+    /// app reads.
+    ///
+    /// Keyed by `intent_id` and never by the in-memory `PendingWrite`, because
+    /// settlement DELETES that row while the lane, route-revision and
+    /// attempt-detail rows survive it (only `remove_publish_queue_entry`
+    /// reclaims those). Reading through the pending row is what made a
+    /// finished write report zero relays at the exact moment it succeeded.
+    fn relay_states_for(
+        &self,
+        intent_id: IntentId,
+        signing_pubkey: PublicKey,
+    ) -> Result<Vec<(RelayUrl, RelayState)>, PersistenceError> {
+        let lanes = self.store.recover_publish_queue_lanes(intent_id)?;
+        // Attempt evidence is only consulted for a lane that is actually in
+        // flight, so a settled or backing-off intent pays no extra read.
+        let details = if lanes
+            .iter()
+            .any(|lane| matches!(lane.state, PublishQueueLaneState::InFlight { .. }))
+        {
+            self.store.recover_attempt_details(intent_id)?
+        } else {
+            Vec::new()
+        };
+        let attempt_detail = |relay: &RelayUrl, ordinal: u64| {
+            details
+                .iter()
+                .find(|detail| detail.relay == *relay && detail.ordinal == ordinal)
         };
         lanes
             .into_iter()
@@ -4131,9 +4174,83 @@ impl CoreState {
                         }),
                         None => RelayState::Waiting(RelayWaiting::NeedsAuth),
                     },
-                    PublishQueueLaneState::Eligible { .. }
-                    | PublishQueueLaneState::InFlight { .. } => {
-                        RelayState::Waiting(RelayWaiting::NotConnected)
+                    // `Eligible` covers two live situations, because
+                    // `schedule_ready` deliberately does NOT commit a durable
+                    // transition when it finds an eligible lane whose session
+                    // is gone — that would cost one fsync per eligible lane on
+                    // every pass of a disconnected engine, which at boot is
+                    // the whole queue.
+                    //
+                    // Connectivity is process-local anyway, so it is what
+                    // separates them here, read from the same
+                    // `connected_relays` the scheduler itself gates on. A lane
+                    // with a live session is genuinely just queued; one
+                    // without is genuinely not connected. Reporting BOTH as
+                    // not connected invented a fault for the first, and
+                    // reporting both as merely queued would hide a real one
+                    // for the second.
+                    PublishQueueLaneState::Eligible { since } => {
+                        let session = RelaySessionKey::new(
+                            lane.key.relay.clone(),
+                            AccessContext::Nip42(signing_pubkey),
+                        );
+                        if self.connected_relays.contains(&session) {
+                            RelayState::Waiting(RelayWaiting::Eligible { since })
+                        } else {
+                            RelayState::Waiting(RelayWaiting::NotConnected)
+                        }
+                    }
+                    // An attempt is running. Which of the two honest answers
+                    // it gets turns on transport's handoff evidence, which
+                    // `start_lane_attempt` and `record_lane_handoff` each
+                    // commit in the SAME transaction as the lane state — so
+                    // the evidence a given phase needs is always present, and
+                    // its absence is a durable inconsistency rather than a
+                    // state to guess at.
+                    PublishQueueLaneState::InFlight { ordinal, ref phase } => {
+                        let detail = attempt_detail(&lane.key.relay, ordinal).ok_or_else(|| {
+                            PersistenceError::invariant("in-flight lane has no attempt detail row")
+                        })?;
+                        match phase {
+                            PublishQueueInFlightPhase::AwaitingHandoff => {
+                                let started_at = detail.started_at.ok_or_else(|| {
+                                    PersistenceError::invariant("started attempt has no start time")
+                                })?;
+                                RelayState::Attempting {
+                                    attempt: ordinal,
+                                    started_at,
+                                }
+                            }
+                            // A lane reaches AwaitingAck on `Written` AND on
+                            // `Ambiguous` (see `on_write_handoff`), and only
+                            // the first is proof. `Sent` claims socket write
+                            // + flush, so an ambiguous handoff must not
+                            // borrow it.
+                            PublishQueueInFlightPhase::AwaitingAck { .. } => {
+                                let handoff = detail.handoff.as_ref().ok_or_else(|| {
+                                    PersistenceError::invariant(
+                                        "acked-awaiting lane has no handoff evidence",
+                                    )
+                                })?;
+                                match handoff.result {
+                                    HandoffEvidence::Written => RelayState::Sent {
+                                        attempt: ordinal,
+                                        written_at: handoff.at,
+                                    },
+                                    HandoffEvidence::Ambiguous | HandoffEvidence::NotHandedOff => {
+                                        let started_at = detail.started_at.ok_or_else(|| {
+                                            PersistenceError::invariant(
+                                                "started attempt has no start time",
+                                            )
+                                        })?;
+                                        RelayState::Attempting {
+                                            attempt: ordinal,
+                                            started_at,
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     PublishQueueLaneState::Terminal { ref outcome, .. } => match outcome {
                         PublishQueueTerminalOutcome::Acked => RelayState::Published,
@@ -4142,7 +4259,7 @@ impl CoreState {
                         },
                         PublishQueueTerminalOutcome::GaveUp => RelayState::GaveUp,
                         PublishQueueTerminalOutcome::AuthDenied(denial) => RelayState::AuthFailed {
-                            pubkey: pending.signing_pubkey,
+                            pubkey: signing_pubkey,
                             source: match denial.source {
                                 StoredAuthDenialSource::Policy => AuthDenialSource::Policy,
                                 StoredAuthDenialSource::Signer => AuthDenialSource::Signer,
@@ -4152,9 +4269,28 @@ impl CoreState {
                         },
                     },
                 };
-                (lane.key.relay, state)
+                Ok((lane.key.relay, state))
             })
             .collect()
+    }
+
+    /// Every relay this intent durably resolved to, read from the committed
+    /// route revisions rather than the in-memory `durable_routes` mirror.
+    ///
+    /// This is the same union crash recovery rebuilds
+    /// `PendingWrite::durable_routes` from, so an open write's answer is
+    /// unchanged — and a settled write, whose pending row no longer exists,
+    /// finally gets one instead of reporting no destinations at all.
+    fn durable_relays_for(
+        &self,
+        intent_id: IntentId,
+    ) -> Result<BTreeSet<RelayUrl>, PersistenceError> {
+        Ok(self
+            .store
+            .recover_route_revisions(intent_id)?
+            .iter()
+            .flat_map(|revision| revision.relays.iter().cloned())
+            .collect())
     }
 
     /// Forget one queue entry (#1039).

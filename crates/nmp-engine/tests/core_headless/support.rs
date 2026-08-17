@@ -18,7 +18,8 @@ use nmp_engine::core::{
     SourceEvidence, SourceStatus,
 };
 use nmp_engine::publish_queue::{
-    NotSentReason, RelayState, RelayWaiting, RetryCause, SigningState, WriteFact, WriteOutcome,
+    NotSentReason, PublishQueueEntry, RelayState, RelayWaiting, RetryCause, SigningState,
+    WriteFact, WriteOutcome,
 };
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{
