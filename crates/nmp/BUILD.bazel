@@ -407,6 +407,7 @@ rust_test(
     compile_data = ["Cargo.toml"],
     rustc_env = {"CARGO_MANIFEST_DIR": "./crates/nmp"},
     data = ["//:first_party_sources", "//:workspace_data"],
+    tags = ["exclusive"],
     visibility = ["//visibility:public"],
 )
 

@@ -411,6 +411,28 @@ HOST_TOOL_LINES = [
 ]
 
 
+# Tests that drive real relays over loopback with timing assertions, and that
+# therefore need the machine largely to themselves.
+#
+# `cargo test` gave them that implicitly: it runs one test BINARY at a time,
+# so a relay-driving suite never competed with another suite. Bazel runs test
+# targets concurrently, which is faster and is the reason the suite finishes
+# sooner -- but it means these tests suddenly share the machine with a dozen
+# others. Observed failures under that contention, none of which reproduce
+# under sequential runs: accepted_requests_are_immutable_and_reconnect_
+# replays_each_once, withdrawing_last_demand_flushes_close_before_worker_
+# retirement, neg_liveness_deadline_does_not_busy_spin.
+#
+# `exclusive` is not a quarantine and not a retry: the test still runs on every
+# `bazel test //...` and still has to pass. It declares a resource requirement
+# the test always had and that Cargo satisfied by accident. The alternative --
+# leaving them to fail a fraction of the time -- means the default run is never
+# trustworthy, which is worse than the seconds this costs.
+EXCLUSIVE_TESTS = {
+    ("nmp", "runtime_integration"),
+}
+
+
 def cargo_env_refs(src_paths, mdir):
     """(bin_exe_names, needs_cargo, uses_git) from scanning the given sources."""
     names = set()
@@ -741,6 +763,8 @@ def gen_for(pkg, prod_feats, prod_opt, test_feats, test_opt_all, bin_label_by_na
         emit_env_data(L, integ_env, integ_labels)
         if integ_host:
             L.extend(HOST_TOOL_LINES)
+        elif (name, tname) in EXCLUSIVE_TESTS:
+            L.append('    tags = ["exclusive"],')
         L.append(PUBLIC)
         L.append(")")
         L.append("")
