@@ -9,6 +9,7 @@ owns:
   - preview's deliberate side effect on the discovery set
   - the routing park, its reason, and the stalled_writes diagnostics section
   - why NOTHING auto-abandons — visibility replaces a give-up policy
+  - **`GaveUp` is terminal, not resumable (owner ruling, 2026-08-17)**
 related:
   - docs/internals/routing/auto-and-explicit.md
   - docs/internals/routing/resolution-lifecycle.md
@@ -133,7 +134,16 @@ delivery states:
   (`delivery/mod.rs:176`)
 - `RetryEligible { relay, attempt, eligible_at }` — a failed attempt with
   the persisted ordinal and when the lane may retry (`delivery/mod.rs:151`)
-- `GaveUp(RelayUrl)` — this lane exhausted its policy (`delivery/mod.rs:177`)
+- `GaveUp(RelayUrl)` — this lane exhausted its policy (`delivery/mod.rs:177`).
+  **Terminal, not resumable — owner ruling, 2026-08-17: "give up is obviously
+  final."** The lane is done; nothing later reopens it, and the promise holds
+  across a restart because the state is durable. The recommendation put to the
+  owner was the opposite — resumable, on the grounds that NMP could not keep a
+  terminal promise across a restart — and it was wrong on its own facts as
+  well as overruled. Terminal is also the simpler thing to tell an app: a
+  state that may silently resume is not an outcome. What remains open under
+  #1031 is how a lane REACHES this state (attempt count versus wall-clock
+  deadline), which is a separate question and does not soften this one.
 - `OutcomeUnknown(RelayUrl)` — an at-most-once attempt crossed a
   process-loss boundary after its Started fact committed; terminal
   ambiguity, never retry permission (`delivery/mod.rs:191`)
@@ -216,6 +226,16 @@ open-ended facts about the world, and a durable queue that quietly drops
 obligations on a guess is worse than one that holds them visibly. The app or
 the user decides, with `stalled_writes` and `detail` as the evidence;
 explicit cancellation remains the one abandonment door.
+
+**Unresolved against this: #1031 proposes a delivery-attempt ceiling, which
+is a give-up policy for the lane.** The owner ruled on 2026-08-17 that when
+NMP does give up, that is final — "give up is obviously final" (§3) — which
+settles what `GaveUp` MEANS but not whether this section's no-ceiling
+position survives. The two are stated here side by side deliberately rather
+than reconciled by guess: this section is a 2026-07-29 design position about
+routing parks, #1031 is about a lane that has a relay and cannot reach it,
+and nobody has ruled on whether that distinction holds. Do not cite either
+one as having settled the other.
 
 ---
 

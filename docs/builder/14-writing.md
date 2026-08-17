@@ -1,36 +1,67 @@
-# Drafts, acceptance, pending rows, and receipts
+# Writing: acceptance, pending rows, and receipts
 
 A write is an intent with an observable receipt, not a call that returns one
 success boolean.
 
-## Start from an immutable draft
+## Publish an event
 
 ```swift
-let draft = NMPDraft(
-    kind: appKind,
-    tags: appTags,
-    content: encodedContent
-)
-```
-
-The draft is unsigned. The engine or an enabled protocol module may validate
-closed typed context, but no stage mutates an already signed event.
-
-Publishing declares policy:
-
-```swift
-let receipt = try engine.publish(.init(
-    draft: draft,
-    durability: .durable,
-    signer: nil,
-    context: nil
+let receipt = try await engine.publish(WriteIntent(
+    payload: .event(kind: appKind, tags: appTags, content: encodedContent),
+    routing: .auto
 ))
 ```
 
-- `signer: nil` selects the signer registered for current pubkey.
-- an identity override applies to this intent only;
-- typed protocol context may contribute route/access facts; and
-- the app does not expand ordinary routing into relay arrays.
+The payload is unsigned until NMP signs it. The engine or an enabled protocol
+module may validate closed typed context, but no stage mutates an already
+signed event — `.signed(...)` publishes bytes that already carry a signature,
+verbatim.
+
+- `identity` defaults to the current account and applies to this intent only.
+- typed protocol context may contribute route/access facts.
+- the app does not expand ordinary routing into relay arrays; it either names
+  relays or says nothing (`17-relays.md`).
+
+There is no `NMPDraft`, no `durability` selector, no `signer` field and no
+`context` field. Those spellings are deleted, not renamed.
+
+## Where this surface is going — owner ruling, 2026-08-17
+
+The shape above is what ships. The owner ruled on 2026-08-17 that it collapses
+further, and the ruling is recorded here so the next person to touch this
+surface does not re-derive it. He wrote the target twice, first as an example:
+
+> yeah, WriteIntent should be able to take the relay list to publish to like
+> `nmp.publish(eventBuilderOutput, ['relay1', 'relay2'])` -- right?
+
+and then as the signature:
+
+> `publish(event, relays?, signer?)` ?
+
+So a publish takes **the event**, **optionally the relays**, and **optionally
+who signs it**. Nothing else. Three consequences he stated directly:
+
+- **Naming no relays is how an app asks NMP to route it.** *"do we really need
+  to be explicit about this? can't it just be the lack of `relays: ["relay1",
+  "relay2"]` be enough to determine this is to be automatically routed?"* An
+  absent relay list is the whole of that signal; a separate routing word is
+  not carrying information the relay list does not already carry.
+- **The wrappers around those values go.** Told that if an absent relay list
+  means "route it", then the read-routing and write-routing types and half of
+  `Demand` become unnecessary, he answered *"yes, good! they should! they seem
+  very stupid"*. On the surrounding ceremony — *"is all this boilerplate
+  needed? can't it just literally be a simple array of relays and that's
+  it?"*, and of `WritePayload`, *"what is this WritePayload thing? sounds
+  pretty boilerplaty to me; does it have any purpose?"*
+- **Who signs is an optional argument, not something a capability decides.**
+  Same day, same subject: `nmp.follow(bob, as: alice)` or `nmp.follow(bob)`.
+  See `docs/internals/writes/identity.md` §7.
+
+This is a ruling on direction. It is not a specification, and nothing here
+says what the collapsed types are called or how the pieces that currently
+carry access context and payload variants land afterwards. Do not implement
+from this paragraph; implement from a design that answers those, and check it
+against these words.
 
 ## Durable acceptance is a transaction
 

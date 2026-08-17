@@ -6,6 +6,17 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
 
 ## Capability & signing
 
+- **Three capability crates resolve the author themselves, which the owner
+  ruled against on 2026-08-17.** `nmp-nip02`'s `set_following`,
+  `nmp-bookmarks`' write doors and `nmp-nip29`'s group-list doors each carry
+  their own copy of "read the session, take `current_pubkey`, refuse when
+  signed out, stamp `Identity::Explicit`" — the universal resolution the write
+  plane already owns, re-implemented per crate. `nmp-nip29`'s `Group` doors
+  break the same rule from the other side by requiring `author: PublicKey` on
+  every operation. The ruled shape is an optional account defaulted to the
+  current one, resolved by the write plane; see
+  `docs/internals/writes/identity.md` §7.
+
 - **No FFI-crossing door for an app-implemented signing capability.** A Secure
   Enclave or hardware-backed key reachable only from Swift/Kotlin has no way in.
   Whatever closes it must keep NMP the owner of when/what to sign, with the app's
@@ -31,6 +42,16 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   diagnostics.** NIP-55 execution and Android AAR integration also remain open.
 
 ## Routing & limits
+
+- **There is no indexer write lane, and the owner ruled there must be one.**
+  The 2026-08-17 routing ruling (`docs/internals/routing/outbox.md`) is that
+  indexers always receive kind:0, kind:3 and kind:1xxxx events. Nothing
+  publishes to an indexer today: the built-in `Auto` write resolver
+  deliberately does not choose indexers, and indexers appear in the shipped
+  lane vocabulary only as a read-side discovery input. The other two lanes in
+  that ruling — the author's outbox and the operator's app relays — are built
+  on both the read and write sides. This one is a ruling with no
+  implementation, and no design for one.
 
 - **Boundedness is only partial.** Swift newest-frame buffering, indexed
   queries, router caps, and the expandable observation window are bounded, but
@@ -99,6 +120,19 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   `behaviorally_proven` and `nip77Handoff` never leaving `none`;
   reconciliation engages on the NEXT request (a reconnect replay), where the
   same divergence costs 10 events instead of 70.
+- **Negentropy has no app-facing door, and the owner ruled it should have
+  one.** Asked on 2026-08-17 whether apps should be able to use negentropy
+  explicitly, he answered *"meaning if apps should be able to use negentropy
+  explicitly? yes, they should"*. Today NIP-77 surfaces to an app only as
+  three diagnostics string fields and one terminal request variant; nothing
+  is app-constructible. This is a ruling on direction, not a design — and
+  whatever the door turns out to be has to survive the two facts recorded
+  directly above and below it: a cold start never reconciles, and nothing
+  distinguishes reconciled from refetched per query. Exposing today's
+  behaviour as-is would hand an app a door that silently does a full refetch
+  on first use. Related: #1806 owns extracting NIP-77 out of the core, which
+  is a different question from whether an app can drive it.
+
 - **NIP-77 reconciliation is invisible per query (#1888).** Negentropy
   coverage is attributed through the same `attribute_eose` path as an ordinary
   EOSE, so `SourceEvidence.reconciledThrough` and `SourceStatus` are identical
@@ -202,6 +236,22 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
 
 ## Store & persistence
 
+- **The engine ships no retention policy, and the owner ruled that it should
+  (#1787, #1843).** On 2026-08-17: *"whatever, just ship a default policy;
+  this is not a high priority."* Today canonical events are retained
+  unconditionally — `RedbStore::gc` exists but no crate outside `nmp-store`
+  ever calls it, and neither `GcRetentionSet` nor `GcReport` appears in `nmp`
+  or `nmp-ffi`, so the documented remedy names a host that has no way to act.
+  Terminal receipts meanwhile are evicted on a fixed, undocumented, unreachable
+  24h/100k/256MiB policy from six call sites including the write path itself
+  (#1843), on `SystemTime::now()`, so a device clock jump wipes terminal
+  history. The store simultaneously refuses to evict what an app might want
+  gone and silently evicts what an app might need kept. The ruling settles who
+  owns the decision; the policy's shape, and the 24-hour wall clock that
+  #1843 calls the part with no defence, are unbuilt. Tombstones are excluded
+  by the 2026-07-11 permanence ruling. Disk size is explicitly not the reason
+  to do this work — see `docs/builder/11-coverage.md`.
+
 - **Backend candidates are not semantically qualified (#698/#699).** The
   reference event/publishing trace checks redb against independent expected
   outcomes and attaches a stable recovery digest to every process-death
@@ -268,10 +318,15 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   product preparation (`.nmp.toml`, `nmp init/prepare/verify`, cached
   Apple/Kotlin/Android products) is first-class; runtime qualification remains
   platform work.
-- **Broad multi-platform UI remains open (#75, #561).** Still unbuilt: broad
-  Compose UI parity and a Compose Gallery, broader registry/template breadth,
-  NIP-25 live reaction resources/write intents (#155), and broader
-  product/photo/highlight/media component families.
+- **Broad multi-platform UI remains open (#75, #561), and Kotlin UI parity is
+  wanted but deliberately unscheduled.** Asked on 2026-08-17 whether Kotlin
+  reaching Swift `NMPUI`'s parity is a goal — Swift ships 15 files, Kotlin one
+  — the owner answered *"out of scope for now, yes, but not now"*: it is
+  intended, and it is not queued. Recorded here so it stops reading as an open
+  question anyone needs to re-ask. Still unbuilt: broad Compose UI parity and
+  a Compose Gallery, broader registry/template breadth, NIP-25 live reaction
+  resources/write intents (#155), and broader product/photo/highlight/media
+  component families.
 
 ## Reducer invariants without falsifiers
 

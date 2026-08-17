@@ -70,7 +70,8 @@ smuggling a feed, follows list, profile convention, or favored kind into core.
 The three descriptor dimensions matter:
 
 - `selection` decides which canonical rows match;
-- `source` authorizes NIP-65 author-outbox discovery; and
+- read routing is unset here, which is the app saying nothing and NMP
+  routing it; and
 - `access` says the request is public rather than AUTH-scoped.
 
 ## 4. Observe native snapshots

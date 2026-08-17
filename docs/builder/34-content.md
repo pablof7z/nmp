@@ -65,8 +65,7 @@ Core decoding returns one of five exact public values:
   relay hints.
 
 There is no generic `referenceDemandPlan`, no canonical/helper vocabulary, and
-no automatic kind:0, source-authority, freshness, cache, or relay-admission
-choice. Malformed and secret locators fail closed. Public authored hints remain
+no automatic kind:0, routing, freshness, cache, or relay-admission choice. Malformed and secret locators fail closed. Public authored hints remain
 exact data until an optional acquisition owner explicitly validates or
 promotes them.
 
@@ -103,8 +102,11 @@ func profileDemand(for target: NostrReferenceTarget) throws -> NMPDemand {
 
 That conversion belongs to the profile component/protocol owner or the app,
 not to decoding. A generic event loader can choose exact id/coordinate
-selection and public, author-outbox, pinned, cache-only, consent-gated, or no
-acquisition. If it promotes authored relay hints, it also owns their URL
+selection, can name relays or say nothing about them, and can choose its cache
+mode. There is no menu of acquisition authorities to pick from — "public",
+"author-outbox" and "pinned" were invented categories and are deleted, not
+renamed (`docs/internals/conventions/naming-no-invented-categories.md` §3). If
+it promotes authored relay hints, it also owns their URL
 validation, safety filtering, bounds, and scoped evidence.
 
 The shipped UI Gallery deliberately ignores authored hints in its example

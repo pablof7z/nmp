@@ -47,7 +47,9 @@ Demand = Selection + ReadRouting + AccessContext
 
 - **Selection** is a Nostr filter whose set-valued fields may contain closed
   reactive bindings.
-- **Source authority** says which typed routing facts may acquire the rows.
+- **Read routing** says one of two things and nothing else: the app named
+  relays, or the app said nothing and NMP routes it. It is not a menu of
+  routing kinds to select from.
 - **Access context** captures facts that can change a source's answer, such as
   an AUTH identity or a protocol visibility grant.
 

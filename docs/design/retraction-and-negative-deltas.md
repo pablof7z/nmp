@@ -448,6 +448,14 @@ Revisit only if a real long-lived replica proves the growth matters (at which po
 GC-bounded variant with a documented resurrection window is the fallback, not the
 default). Build accordingly: tombstones are a permanent durable table, not GC-claimed.
 
+**Still standing after the 2026-08-17 retention ruling.** The owner ruled that
+the engine ships a default retention policy (`docs/builder/11-coverage.md`).
+That default is scoped to exclude tombstones; this decision is not superseded
+by it, and a policy that collected them would reopen exactly the resurrection
+window described above. The same ruling also recorded that disk and database
+size are not a priority, which is the argument in this paragraph — ~40 bytes
+per deletion — applied to the whole store rather than to tombstones alone.
+
 Everything else in this design is derivable from settled principles (one door,
 replace-not-rebuild, D8, two nouns, ledger #5/#7) and carries no new app-facing
 surface: the app's entire experience of this family is `RowDelta::Removed` — a variant

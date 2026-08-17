@@ -92,10 +92,19 @@ mod subscription;
 // line of capability convenience (`engine.publish(request.into_write_intent())`)
 // wearing an engine-bound signature -- not routing mechanism, so it went
 // the same way the other eight did: deleted, not relocated. `nmp` must not
-// contain a single line of any capability's meaning, re-export door or
-// not; a direct-Rust app now names the mechanism crate directly, the same
-// way `nmp-ffi`/Swift/Kotlin already do and the same way `nmp-media`
+// contain a single line of any EVENT-KIND CAPABILITY's meaning, re-export
+// door or not; a direct-Rust app now names the mechanism crate directly, the
+// same way `nmp-ffi`/Swift/Kotlin already do and the same way `nmp-media`
 // already works.
+//
+// Read that word exactly: an event-kind capability is one that owns the
+// meaning of some kinds, and the facade names none of them. A protocol
+// MECHANISM -- NIP-11 relay information, NIP-42 AUTH, NIP-77 negentropy --
+// is wire/session machinery every app rides whether or not it knows the
+// number, has no per-app extension surface, and MAY be named here. Owner
+// ruling 2026-08-17, closing #1791, which found this comment and the NIP-11
+// re-export below stating exact negations of each other eighty lines apart.
+// `docs/internals/crate-architecture.md` rule 2 carries the full statement.
 //
 // NIP-65's automatic-outbox-discovery ROUTING GLUE used to be the one
 // deliberate exception left in this reversal: a feature-gated
@@ -171,9 +180,14 @@ pub fn nmp_threads_live() -> u64 {
 // not double the facade with generic auto-trait expansions.
 #[doc(hidden)]
 pub use nmp_runtime::ConcurrentNext;
-// #1239's rule, applied to NIP-11: an app reaches a protocol family through
-// this facade, never as a second Cargo line beside it. The values are
-// `nmp-nip11`'s; naming that crate is the engine's business, not the app's.
+// NIP-11 is a protocol MECHANISM, not an event-kind capability (see the
+// ruling above), so this re-export is what rule 2 permits rather than an
+// exception to it: an app reaches relay information through this facade,
+// never as a second Cargo line beside it. The values are `nmp-nip11`'s;
+// naming that crate is the engine's business, not the app's. This says
+// nothing about the dependency direction -- `nmp-nip11` being a non-optional
+// dependency of both `nmp` and `nmp-runtime` is still the workspace's one
+// inverted edge, and #1806 owns removing it.
 pub use nmp_nip11::{
     RelayInformationCachePolicy, RelayInformationDocument, RelayInformationError,
     RelayInformationFreshness, RelayInformationLimitations, RelayInformationSnapshot,
@@ -186,10 +200,13 @@ pub use subscription::{
 };
 
 // The grammar an app builds a `LiveQuery`'s `Demand` out of. `Demand`'s
-// `selection` is the `Filter`; `source`/`access`/`cache` are the #106 axes.
-// Every branch names its own authority through `Demand::public`,
-// `Demand::author_outboxes`, `Demand::pinned` or `Demand::new` -- nothing
-// infers one from the selection's shape (#847).
+// `selection` is the `Filter`; routing/access/cache are the other axes.
+// A branch says one of exactly two things about relays -- the app named
+// them, or the app said nothing and NMP routes it -- and nothing infers
+// that from the selection's shape (#847). `Demand::public`,
+// `Demand::author_outboxes` and `Demand::pinned` are DELETED, along with
+// the invented category they named; see
+// `docs/internals/conventions/naming-no-invented-categories.md` section 3.
 pub use nmp_grammar::{
     AccessContext, Binding, CacheMode, Demand, DemandError, Derived, Filter, Freshness,
     IdentityField, IndexedTagName, LiveQuery, LiveQueryError, ReadRouting, Selector, SetAlgebra,
