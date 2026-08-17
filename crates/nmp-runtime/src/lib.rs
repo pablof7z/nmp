@@ -168,8 +168,8 @@ use diagnostics_delivery::{
 #[cfg(test)]
 use engine_thread::RUNTIME_LIFECYCLE_TEST_LOCK;
 pub use fifo_channel::{
-    fifo_channel, AsyncFifoReceiver, FifoNextError, FifoReceiver, FifoRecvError,
-    FifoRecvTimeoutError, FifoSender, FifoTryRecvError, FACT_CHANNEL_CAPACITY,
+    fifo_channel, superseding_fifo_channel, AsyncFifoReceiver, FifoNextError, FifoReceiver,
+    FifoRecvError, FifoRecvTimeoutError, FifoSender, FifoTryRecvError, FACT_CHANNEL_CAPACITY,
 };
 use identity_sessions::{decode_signed_event, RuntimeSessionState, SignerRegistry};
 use nip11_decision::Nip11DecisionState;
