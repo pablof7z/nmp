@@ -3277,9 +3277,11 @@ fn a_death_batch_that_overflows_the_counter_rewrites_the_run() {
     // "packed postings: dead-key block fan-in exceeds the hard bound" and
     // failed the write.
     for (batch, id) in ids.iter().take(256).enumerate() {
-        store.remove(*id, RetractReason::Deleted).unwrap_or_else(|error| {
-            panic!("death batch {batch} must not fail the write transaction: {error}")
-        });
+        store
+            .remove(*id, RetractReason::Deleted)
+            .unwrap_or_else(|error| {
+                panic!("death batch {batch} must not fail the write transaction: {error}")
+            });
     }
 
     // The rewrite really did happen rather than the deaths silently no-oping:
@@ -3291,8 +3293,102 @@ fn a_death_batch_that_overflows_the_counter_rewrites_the_run() {
         "no removed event may survive the run rewrite"
     );
     assert_eq!(
-        store.query(&Filter::new().ids(alive.clone())).unwrap().len(),
+        store
+            .query(&Filter::new().ids(alive.clone()))
+            .unwrap()
+            .len(),
         alive.len(),
         "the rewrite must preserve every event that was not dead"
+    );
+}
+
+/// **No filter is ever stored in the database** (#1849). A coverage row is
+/// `key` + `from` + `through` and nothing else: the durable value carries no
+/// author, no id, no tag and no kind from the filter it was proven against.
+///
+/// Before this, every row retained the full window-erased shape, so the store
+/// was a permanent record of every distinct query a user had ever issued --
+/// which authors they read, which tags they followed -- with no expiry and no
+/// delete door. It existed only so `gc` could ask "would this row have matched
+/// the event I am evicting"; `gc` now shrinks on interval overlap alone.
+///
+/// The test looks at the raw bytes of BOTH halves of the row, not at a decoded
+/// struct: a field reinstated on `CoverageRowRecord` would still decode fine
+/// into whatever the reader asked for, and only the bytes can say what is
+/// actually on disk.
+#[test]
+fn a_persisted_coverage_row_carries_no_filter_derived_bytes() {
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+
+    let author = nostr::Keys::generate().public_key().to_hex();
+    let id = nostr::Keys::generate().public_key().to_hex();
+    let tag_value = "distinctive-tag-value-for-1849".to_string();
+    let kind = 30_042u16;
+
+    let filter = ConcreteFilter {
+        kinds: Some(BTreeSet::from([kind])),
+        authors: Some(BTreeSet::from([author.clone()])),
+        ids: Some(BTreeSet::from([id.clone()])),
+        tags: BTreeMap::from([(
+            nmp_grammar::IndexedTagName::new('d').expect("'d' is an indexed tag name"),
+            BTreeSet::from([tag_value.clone()]),
+        )]),
+        since: Some(1_700_000_042),
+        until: None,
+        limit: None,
+    };
+    let atom = ContextualAtom {
+        filter,
+        source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+        access: nmp_grammar::AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let relay = RelayUrl::parse("wss://r1.example").expect("relay url");
+
+    store
+        .record_coverage(&[(
+            atom,
+            relay,
+            CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
+        )])
+        .expect("record coverage");
+
+    let rows: Vec<(String, String)> = {
+        let read_txn = store
+            .database()
+            .expect("database handle")
+            .begin_read()
+            .expect("read txn");
+        let coverage = read_txn.open_table(COVERAGE).expect("open coverage");
+        coverage
+            .iter()
+            .expect("iterate coverage")
+            .map(|entry| {
+                let (key, value) = entry.expect("coverage row");
+                (key.value().to_string(), value.value().to_string())
+            })
+            .collect()
+    };
+
+    assert_eq!(rows.len(), 1, "one (atom, relay) claim is one row");
+    let (row_key, row_value) = &rows[0];
+
+    for (what, needle) in [
+        ("the author pubkey", author.as_str()),
+        ("the event id", id.as_str()),
+        ("the tag value", tag_value.as_str()),
+        ("the kind", "30042"),
+        ("the `since` bound", "1700000042"),
+    ] {
+        assert!(
+            !row_key.contains(needle) && !row_value.contains(needle),
+            "{what} is filter-derived and must appear nowhere on disk; \
+             found it in coverage row {row_key:?} => {row_value:?}"
+        );
+    }
+
+    assert_eq!(
+        row_value, r#"{"from":0,"through":100}"#,
+        "a coverage row's value is the proven interval and nothing else"
     );
 }

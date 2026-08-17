@@ -161,7 +161,7 @@ pub(super) const POSTINGS_READY: &str = "postings_query_ready";
 /// accepted writes, lanes, attempts, receipts, and route facts — because they
 /// share one `redb::Database` transaction boundary and are therefore one
 /// epoch, not seven independently-versioned ones.
-pub(super) const SCHEMA_VERSION: u64 = 24;
+pub(super) const SCHEMA_VERSION: u64 = 25;
 /// Bound redb's process-private page cache for mobile/desktop clients.
 ///
 /// redb 4.1 defaults this cache to 1 GiB. A million-event sequential ingest

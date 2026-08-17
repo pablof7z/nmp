@@ -5,8 +5,9 @@
 //! and the `CoverageKey` -> retained window-erased shape registry
 //! `record_coverage` needs (the store only ever sees whatever
 //! `ConcreteFilter` it is handed; `CoreState` is the one place that knows
-//! which shape a given key came from — see `nmp-store`'s own `ShapeRecord`
-//! doc comment for the identical reasoning at the store layer).
+//! which shape a given key came from). This registry is in-memory and
+//! request-scoped — no filter is ever stored in the database (#1849): a
+//! durable coverage row is key + `from` + `through`, nothing more.
 //!
 //! This is a plain data structure with no I/O and no access to the store or
 //! router — `CoreState` (`core/mod.rs`) is the one place both exist

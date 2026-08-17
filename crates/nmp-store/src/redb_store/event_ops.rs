@@ -14,11 +14,10 @@ use super::store::RedbCrashPoint;
 use super::store::RedbStore;
 use super::{
     address_key_for, binary_event, compute_coverage_key, merge_interval, shrink_after_eviction,
-    window_erase, BTreeMap, BTreeSet, ConcreteFilter, ContextualAtom, CoverageInterval,
-    CoverageKey, Event, EventCursor, EventId, Filter, GcReport, GcRetentionSet, GcVictimIndex,
-    HashMap, IndexedMatch, InsertOutcome, LocalOrigin, PersistenceError, PreparedFilter,
-    RelayObserved, RelayUrl, RetractReason, ShapeRecord, SigState, StoredEvent, StoredEventView,
-    Timestamp,
+    BTreeMap, BTreeSet, ContextualAtom, CoverageInterval, CoverageKey, Event, EventCursor, EventId,
+    Filter, GcReport, GcRetentionSet, GcVictimIndex, HashMap, IndexedMatch, InsertOutcome,
+    LocalOrigin, PersistenceError, PreparedFilter, RelayObserved, RelayUrl, RetractReason,
+    SigState, StoredEvent, StoredEventView, Timestamp,
 };
 use nostr::secp256k1::schnorr::Signature;
 use redb::{Database, ReadableDatabase, ReadableTable};
@@ -30,13 +29,19 @@ use serde::{Deserialize, Serialize};
 ))]
 use std::sync::atomic::Ordering;
 
-/// The `coverage` table's JSON value: the window-erased shape the row was
-/// recorded against (needed so `gc` can test event-shape matches — see
-/// `ShapeRecord`'s doc comment) plus the proven interval, stored as raw
-/// `u64` seconds (round-tripped through `Timestamp::from`/`as_secs`).
+/// The `coverage` table's JSON value: the proven interval and nothing else,
+/// stored as raw `u64` seconds (round-tripped through
+/// `Timestamp::from`/`as_secs`).
+///
+/// **No filter is ever stored in the database** (#1849). A row used to
+/// carry the window-erased shape it was recorded against — authors, ids,
+/// tags and kinds, in full — so `gc` could ask "would this row have matched
+/// the event I am evicting". That made the store a durable record of every
+/// distinct query a user had ever issued, with no expiry and no delete
+/// door, to buy precision `gc` does not need: see [`GcVictimIndex`] for why
+/// shrinking on interval overlap alone is the sound rule.
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct CoverageRowRecord {
-    pub(super) shape: ShapeRecord,
     pub(super) from: u64,
     pub(super) through: u64,
 }
@@ -589,7 +594,6 @@ pub(super) fn record_coverage(
         let mut coverage = write_txn.open_table(COVERAGE).map_err(persist_err)?;
         for (atom, relay, proven) in claims {
             let key = compute_coverage_key(atom);
-            let shape = window_erase(&atom.filter);
             let row_key = RedbStore::coverage_row_key(key, relay);
             let existing = coverage
                 .get(row_key.as_str())
@@ -599,7 +603,6 @@ pub(super) fn record_coverage(
 
             let merged = merge_interval(existing, *proven);
             let record = CoverageRowRecord {
-                shape: ShapeRecord::from(&shape),
                 from: merged.from.as_secs(),
                 through: merged.through.as_secs(),
             };
@@ -780,9 +783,8 @@ pub(super) fn gc(
         }
 
         // Pass 2 (issue #507): a SINGLE pass over coverage rows,
-        // using `GcVictimIndex` (shared verbatim with
-        // `RedbStore::gc` — see its doc comment for the proof) to
-        // find each row's maximum matching victim timestamp directly,
+        // using `GcVictimIndex` (see its doc comment for the proof) to
+        // find each row's maximum in-range victim timestamp directly,
         // instead of re-walking the full victim list per row. Same
         // write transaction as the event removals above — the
         // shrink/delete and the event delete commit atomically
@@ -792,19 +794,24 @@ pub(super) fn gc(
         // before (this was already `RedbStore`'s counting; only
         // `RedbStore`'s per-(victim, row) counting needed
         // unifying).
+        //
+        // A row is shrunk on INTERVAL OVERLAP alone: it is never asked
+        // whether it would have matched the evicted event, because no
+        // filter is stored in the database (#1849). This over-
+        // invalidates, and over-invalidation costs a refetch — the
+        // opposite error would be a correctness bug.
         let victim_index = GcVictimIndex::new(&victims);
         let mut row_updates: Vec<(String, Option<CoverageRowRecord>)> = Vec::new();
         for entry in coverage.iter().map_err(persist_err)? {
             let (row_key, value) = entry.map_err(persist_err)?;
 
             let mut record: CoverageRowRecord = decode_coverage_row(value.value())?;
-            let shape: ConcreteFilter = (&record.shape).into();
             let interval = CoverageInterval::new(
                 Timestamp::from(record.from),
                 Timestamp::from(record.through),
             );
 
-            if let Some(m) = victim_index.max_matching_within(&shape, interval) {
+            if let Some(m) = victim_index.max_within(interval) {
                 match shrink_after_eviction(interval, m) {
                     Some(next) => {
                         record.from = next.from.as_secs();
