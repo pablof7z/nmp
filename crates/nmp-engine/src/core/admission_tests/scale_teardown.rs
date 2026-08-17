@@ -131,6 +131,15 @@ fn a_large_open_and_close_burst_never_reprojects_sibling_rows() {
 fn ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work() {
     let relay = RelayUrl::parse("wss://admission-shared-10k.example").unwrap();
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
+    // This test drives `handle()` directly, once per item, specifically to
+    // prove the production entrypoint's teardown is owner-plus-one work, not
+    // O(n) -- an amortized-COST proof, not a mirror-structure one. See
+    // `EngineCore::suppress_turn_level_consistency_for_named_exception`'s
+    // doc: scanning full mirror structure at each of the ~20,000 direct
+    // calls below turns this O(n) claim into O(n^2) test-suite cost with no
+    // added coverage, and only this test and its `lifecycle` sibling may
+    // suppress it.
+    core.suppress_turn_level_consistency_for_named_exception();
     let mut observations = Vec::with_capacity(10_000);
     for _ in 0..10_000 {
         observations.push(observation_id(
@@ -202,6 +211,9 @@ fn ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work() {
     assert_eq!(final_work.diagnostic_rebuilds, 1);
     assert_eq!(core.projection_store_queries.get(), 0);
     assert_eq!(core.router_compiles.get(), 0);
+    // One full structural check on the final state, in place of the ~20,000
+    // the turn-level call would otherwise have run.
+    core.assert_owner_consistency("after ten-thousand shared-owner withdrawals");
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -231,6 +243,13 @@ fn withdrawing_the_final_routeless_observation_emits_its_diagnostic_retraction()
 fn later_exact_owner_routing_evidence_retracts_the_uncovered_diagnostic_on_admission() {
     let author = Keys::generate().public_key();
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
+    // `retain_wire_atom_owner`/`release_wire_atom_owner` exercise the
+    // owner-count algebra directly, with no handle ever indexed for these
+    // atoms -- a state real production cannot reach (`attach_wire_handle`
+    // always indexes the handle first). See
+    // `EngineCore::suppress_turn_level_consistency_for_named_exception`'s
+    // doc.
+    core.suppress_turn_level_consistency_for_named_exception();
     let routeless = routeless_outbox_atom(author);
     assert!(!core.retain_wire_atom_owner(&routeless));
     let first = flush(&mut core);

@@ -116,6 +116,13 @@ fn distinct_physical_closes_defer_diagnostic_coverage_projection() {
 #[test]
 fn a_later_admission_cohort_never_visits_ten_thousand_incumbents() {
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
+    // `core.wire.retain(&atom)` below exercises owner-count bookkeeping
+    // directly, with no handle ever indexed for these 10,000 atoms -- a
+    // state real production cannot reach (`attach_wire_handle` always
+    // indexes the handle first). See
+    // `EngineCore::suppress_turn_level_consistency_for_named_exception`'s
+    // doc.
+    core.suppress_turn_level_consistency_for_named_exception();
     let relay = RelayUrl::parse("wss://incremental-admission.example").unwrap();
     let session = RelaySessionKey::public(relay.clone());
     let incumbent_atoms: BTreeSet<_> = (0..10_000)

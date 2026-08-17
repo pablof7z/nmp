@@ -85,15 +85,35 @@ impl HistorySessions {
     }
 
     /// Install one window and link every handle it opened with.
+    ///
+    /// A duplicate handle is refused rather than relinked: every handle here
+    /// is either freshly opened by this call's own caller or, for
+    /// `link_advance_handles`, freshly opened by an advance, so an existing
+    /// `by_handle` entry means some earlier session was never properly
+    /// retired -- relinking it here would silently hand that session's
+    /// handle to a second window while the first still believed it owned it
+    /// (compare `owner_index.rs`'s `insert`, which refuses the identical
+    /// case for the same reason).
     pub(super) fn open(
         &mut self,
         state: HistoryState,
         handle_ids: impl IntoIterator<Item = HandleId>,
     ) -> HistorySessionId {
         let id = HistorySessionId(self.next_id);
-        self.next_id = self.next_id.wrapping_add(1).max(1);
+        // Checked, not wrapping. Exhausting a u64 at one mint per history
+        // session is not reachable by this process -- which is an argument
+        // for the width, not for silently re-minting an id a still-live
+        // `by_handle` entry could still be addressed to (same rule as
+        // `Nip77Sessions::mint_incarnation`; see its doc comment).
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("history session ids are exhausted; ids must never be reused");
         for handle_id in handle_ids {
-            self.by_handle.insert(handle_id, id);
+            assert!(
+                self.by_handle.insert(handle_id, id).is_none(),
+                "HistorySessions: handle {handle_id:?} was already linked to a session when session {id:?} opened"
+            );
         }
         self.sessions.insert(id, state);
         id
@@ -111,7 +131,15 @@ impl HistorySessions {
     pub(super) fn retire(&mut self, id: HistorySessionId) -> Option<HistoryState> {
         let state = self.sessions.remove(&id)?;
         for handle_id in &state.handle_ids {
-            self.by_handle.remove(handle_id);
+            let owner = self.by_handle.remove(handle_id).unwrap_or_else(|| {
+                panic!(
+                    "HistorySessions: retiring session {id:?} found no by_handle entry for its own handle {handle_id:?}"
+                )
+            });
+            assert_eq!(
+                owner, id,
+                "HistorySessions: retiring session {id:?} found handle {handle_id:?} indexed under a different session"
+            );
         }
         Some(state)
     }
@@ -123,7 +151,10 @@ impl HistorySessions {
     /// I4 are still inside this module.
     pub(super) fn link_advance_handles(&mut self, id: HistorySessionId, handle_ids: &[HandleId]) {
         for handle_id in handle_ids {
-            self.by_handle.insert(*handle_id, id);
+            assert!(
+                self.by_handle.insert(*handle_id, id).is_none(),
+                "HistorySessions: handle {handle_id:?} was already linked to a session when session {id:?}'s advance opened it"
+            );
         }
     }
 
@@ -135,11 +166,25 @@ impl HistorySessions {
         S: HandleSet + ?Sized,
     {
         for handle_id in handle_ids.ids() {
-            self.by_handle.remove(&handle_id);
+            let owner = self.by_handle.remove(&handle_id).unwrap_or_else(|| {
+                panic!(
+                    "HistorySessions: unlinking session {id:?} found no by_handle entry for handle {handle_id:?}"
+                )
+            });
+            assert_eq!(
+                owner, id,
+                "HistorySessions: unlinking session {id:?} found handle {handle_id:?} indexed under a different session"
+            );
         }
-        let Some(state) = self.sessions.get_mut(&id) else {
-            return;
-        };
+        // Every caller holds `id` live across this call (the commit and
+        // rollback paths both `expect` it immediately before and after), so
+        // a missing session here is the mirror disagreeing with itself, not
+        // a benign teardown race -- tolerating it used to mean the reverse
+        // edges above were already dropped while the window's own
+        // `handles`/`handle_ids` silently kept the stale entries.
+        let state = self.sessions.get_mut(&id).unwrap_or_else(|| {
+            panic!("HistorySessions: unlink_handles targeted session {id:?}, which is not live")
+        });
         state
             .handles
             .retain(|handle| !handle_ids.holds(&handle.id()));
@@ -165,6 +210,42 @@ impl HistorySessions {
     /// The window a resolver handle belongs to.
     pub(super) fn session_for_handle(&self, handle: HandleId) -> Option<HistorySessionId> {
         self.by_handle.get(&handle).copied()
+    }
+
+    /// Exact structural consistency for I4, by identity rather than by
+    /// count: every handle a session reports in `handle_ids` must resolve
+    /// back through `by_handle` to that SAME session, and every `by_handle`
+    /// entry must point at a session that still reports the handle it names.
+    /// `counts()` -- checked elsewhere -- verifies totals; it cannot see one
+    /// handle indexed under the wrong session, because that swap preserves
+    /// every count it reports (same reasoning as `OwnerIndexed::
+    /// assert_consistent` and `RequestAttempts::assert_consistent`).
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) fn assert_consistent(&self, at: &str) {
+        for (id, state) in &self.sessions {
+            for handle_id in &state.handle_ids {
+                let owner = self.by_handle.get(handle_id).unwrap_or_else(|| {
+                    panic!(
+                        "{at}: history session {id:?} reports handle {handle_id:?}, which has no by_handle entry"
+                    )
+                });
+                assert_eq!(
+                    owner, id,
+                    "{at}: history session {id:?} reports handle {handle_id:?}, which by_handle indexes under a different session"
+                );
+            }
+        }
+        for (handle_id, id) in &self.by_handle {
+            let state = self.sessions.get(id).unwrap_or_else(|| {
+                panic!(
+                    "{at}: by_handle names session {id:?} for handle {handle_id:?}, which is not live"
+                )
+            });
+            assert!(
+                state.handle_ids.contains(handle_id),
+                "{at}: by_handle names handle {handle_id:?} under session {id:?}, which does not report it"
+            );
+        }
     }
 
     /// I4, as a question: the window is gone AND no handle still points at
@@ -1743,5 +1824,200 @@ impl EngineCore {
         );
         effects.push(Effect::EmitHistory(id, batch));
         true
+    }
+}
+
+/// `HistorySessions::assert_consistent`'s falsifier, and its removal-site
+/// falsifiers (#1562). All three reach `sessions`/`by_handle` directly,
+/// something only a test inside this module can do -- exactly the reasoning
+/// `owner_index.rs`'s own falsifier module doc gives for the same technique.
+#[cfg(test)]
+mod tests {
+    use nmp_grammar::Filter;
+    use nmp_store::RedbStore;
+
+    use super::*;
+
+    /// Two live, independent history sessions over an empty store, each with
+    /// exactly one open handle.
+    fn open_two_sessions() -> (EngineCore, HistorySessionId, HistorySessionId) {
+        let store = RedbStore::temporary().expect("temporary Redb store");
+        let mut core = EngineCore::new(store, 20);
+        let query_for = |kind: u16| {
+            HistoryQuery::new(
+                LiveQuery::from_filter(Filter {
+                    kinds: Some(BTreeSet::from([kind])),
+                    ..Filter::default()
+                }),
+                3,
+                6,
+            )
+        };
+        let session_id = |effects: Vec<Effect>| {
+            effects
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::EmitHistory(id, _) => Some(id),
+                    _ => None,
+                })
+                .expect("history session opens")
+        };
+        let first = session_id(core.handle(EngineMsg::SubscribeHistory(query_for(1))));
+        let second = session_id(core.handle(EngineMsg::SubscribeHistory(query_for(2))));
+        (core, first, second)
+    }
+
+    /// `assert_consistent`'s falsifier: swap which session each of two
+    /// sessions' handles is indexed under in `by_handle`, WITHOUT adding or
+    /// removing a session or a handle. A census that only counts sessions
+    /// and handles cannot see this -- that is the whole point of checking
+    /// identity instead (same reasoning as `OwnerIndexed::assert_consistent`
+    /// and `RequestAttempts::assert_consistent`).
+    #[test]
+    #[should_panic(expected = "by_handle indexes under a different session")]
+    fn assert_consistent_catches_a_cardinality_preserving_owner_swap() {
+        let (mut core, first, second) = open_two_sessions();
+
+        // Precondition: the mirror is intact, and each session owns exactly
+        // one handle, before corrupting it.
+        core.history.assert_consistent("precondition");
+        let first_handle = *core
+            .history
+            .expect_live(first)
+            .handle_ids
+            .iter()
+            .next()
+            .expect("the first session opened at least one handle");
+        let second_handle = *core
+            .history
+            .expect_live(second)
+            .handle_ids
+            .iter()
+            .next()
+            .expect("the second session opened at least one handle");
+        assert_ne!(first_handle, second_handle);
+
+        // Swap ownership in `by_handle` only. Total handle-key count (2) is
+        // unchanged -- only identity moved.
+        core.history.by_handle.insert(first_handle, second);
+        core.history.by_handle.insert(second_handle, first);
+        assert_eq!(
+            core.history.by_handle.len(),
+            2,
+            "handle-key count must be unchanged"
+        );
+
+        core.history.assert_consistent("after swap");
+    }
+
+    /// `retire`'s falsifier: corrupt `by_handle` so it no longer names the
+    /// session being retired for one of its own handles, bypassing every
+    /// real removal path. `retire` must refuse to tolerate that silently.
+    #[test]
+    #[should_panic(expected = "found no by_handle entry for its own handle")]
+    fn retire_panics_when_by_handle_mirror_already_disagrees() {
+        let (mut core, first, _second) = open_two_sessions();
+        let first_handle = *core
+            .history
+            .expect_live(first)
+            .handle_ids
+            .iter()
+            .next()
+            .expect("the first session opened at least one handle");
+
+        // Corrupt only `by_handle`, bypassing every real removal path.
+        // `sessions[first].handle_ids` still names it.
+        core.history.by_handle.remove(&first_handle);
+
+        let _ = core.history.retire(first);
+    }
+
+    /// `unlink_handles`'s falsifier: corrupt `by_handle` so the handle being
+    /// unlinked is indexed under a DIFFERENT session, without changing any
+    /// count. `unlink_handles` must refuse rather than silently remove a
+    /// reverse edge it does not own.
+    #[test]
+    #[should_panic(expected = "indexed under a different session")]
+    fn unlink_handles_panics_when_by_handle_names_a_different_owner() {
+        let (mut core, first, second) = open_two_sessions();
+        let first_handle = *core
+            .history
+            .expect_live(first)
+            .handle_ids
+            .iter()
+            .next()
+            .expect("the first session opened at least one handle");
+
+        // Re-point the reverse edge at the OTHER session, without touching
+        // any count.
+        core.history.by_handle.insert(first_handle, second);
+
+        let handles: BTreeSet<HandleId> = BTreeSet::from([first_handle]);
+        core.history.unlink_handles(first, &handles);
+    }
+
+    /// `open`'s falsifier: a handle already linked to a live session must
+    /// refuse a second session claiming it, rather than silently relinking
+    /// it and leaving the first session's `handle_ids` stale.
+    #[test]
+    #[should_panic(expected = "was already linked to a session")]
+    fn open_refuses_a_handle_already_linked_to_another_session() {
+        let (mut core, first, _second) = open_two_sessions();
+        let first_handle = *core
+            .history
+            .expect_live(first)
+            .handle_ids
+            .iter()
+            .next()
+            .expect("the first session opened at least one handle");
+
+        // A minimal second window, deliberately reusing a handle id already
+        // live under `first`.
+        let query = HistoryQuery::new(
+            LiveQuery::from_filter(Filter {
+                kinds: Some(BTreeSet::from([3u16])),
+                ..Filter::default()
+            }),
+            3,
+            6,
+        );
+        let state = HistoryState {
+            target_rows: query.page_size(),
+            query,
+            acquisitions_by_branch: Vec::new(),
+            handles: Vec::new(),
+            handle_ids: BTreeSet::new(),
+            live_handle_ids: Vec::new(),
+            branch_of: BTreeMap::new(),
+            acquisitions: BTreeMap::new(),
+            acquired_tie_seconds: BTreeSet::new(),
+            last_rows: BTreeMap::new(),
+            order: BTreeSet::new(),
+            last_evidence: None,
+            projection_complete: false,
+            load: WindowLoad::Idle,
+            pending_load: None,
+        };
+        core.history.open(state, [first_handle]);
+    }
+
+    /// `link_advance_handles`'s falsifier: an advance opening a handle id
+    /// already live under ANOTHER session must refuse, rather than silently
+    /// relinking it and leaving the other session's `handle_ids` stale --
+    /// same reasoning as `open`'s falsifier above, at the sibling link site.
+    #[test]
+    #[should_panic(expected = "was already linked to a session")]
+    fn link_advance_handles_refuses_a_handle_already_linked_to_another_session() {
+        let (mut core, first, second) = open_two_sessions();
+        let first_handle = *core
+            .history
+            .expect_live(first)
+            .handle_ids
+            .iter()
+            .next()
+            .expect("the first session opened at least one handle");
+
+        // `second`'s advance opens a handle id that is already `first`'s.
+        core.history.link_advance_handles(second, &[first_handle]);
     }
 }
