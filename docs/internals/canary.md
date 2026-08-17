@@ -134,7 +134,13 @@ heal, seed, ephemeral port, isolated temp directory, bounded-poll readiness
 rather than sleeps, a one-shot real-TCP reachability probe (`isReachable`,
 what "the relay is genuinely unreachable" has to mean), and an optional
 shared `dataDir` so a second relay process can write into a stopped relay's
-durable store on its own port — C13's outage window. It knows nothing about NMP; it is a generic real-relay
+durable store on its own port — C13's and C14's outage window — and
+`probeRead`, one plain NMP-free `REQ` on one fresh connection that reports what
+the relay did about it (challenge, refusal text, events served), optionally
+completing a NIP-42 handshake as a caller-supplied key first. That last one
+exists so a scenario can prove a relay's demand INDEPENDENTLY of NMP: "NMP got
+the row, therefore the relay demanded AUTH" is circular, and a relay that
+challenged nobody would satisfy it. It knows nothing about NMP; it is a generic real-relay
 lifecycle library, reusable outside this app entirely. It is consumed by two
 thin CLI targets a developer runs directly (`swift run relay-lab-lifecycle
 <strfry-binary>`, `relay-lab-nip42`) to bring the lab up and drive it by
@@ -580,22 +586,177 @@ the session is restored, because a literal-author filter needs no account.
 The identity half and the feed half are independent claims and are separately
 falsifiable, which is why both are asserted.
 
-**C15's relay lab is qualified; C15 itself is NOT proven.** The distinction is
-the whole point of the paragraph below, and an earlier revision of this section
-got it wrong by calling C15 "proven live".
+**C14 is proven live** (#1888), and the thing it proves is not "the events
+arrived" — that is equally true of a refetch — but that NMP **transferred the
+difference instead of the whole set**.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C14Nip77ReconciliationTests.swift`
+holds ONE feed open across a real strfry outage during which the relay's LMDB
+store gains ten events the local Redb store does not have. The two stores are
+named plainly: NMP's own durable store is one, the relay's is the other. There
+is no app-visible "reconcile these peers" call anywhere in the public API, so
+the scenario is written the way an app actually meets NIP-77 — it doesn't.
 
-What the run below establishes is that **strfry can be driven through a
-complete NIP-42 round trip on demand** — a prerequisite for the scenario, and a
-real result, since the first two attempts to obtain one failed. What it does
-not touch is NMP: the handshake is driven by the *controller*, not by
-`NMPEngine`. So none of the following is yet proven — NMP notices the challenge,
-NMP consults the configured AUTH policy, NMP signs a kind:22242 event bound to
-that exact challenge and relay, or NMP recovers after a denial or a reconnect.
+The divergence is deterministic by construction, not a race won: the ten
+outage-window events are written by a SECOND strfry process on its own
+ephemeral port over the SAME LMDB directory (C13's `RelayHandle(dataDir:)`)
+while the port the app is dialing provably refuses a real TCP connection, and
+the scenario checks that the app is holding exactly the sixty overlap events at
+that moment.
 
-C15 becomes proven when the NMP path closes the round trip. Until then it
-belongs under "not executed", not under the passing scenarios.
+**The oracle is `RelayDiagnostics.eventsByKind`** — "events actually RECEIVED
+from a relay, counted by kind" — sampled before the outage and again after
+convergence. Measured, with `relay.negentropy.enabled = true`: 60 → 70, a
+delta of **10** for a 10-event difference, with `nip77Handoff` walking
+`none → awaiting_live_eose → backfilling → live` and `nip77Behavior` reaching
+`behaviorally_proven`. The identical flow against the identical relay with
+`relay.negentropy.enabled = false` also converges on all 70 rows — over a
+delta of **70**, 60 → 130, with `nip77Advertisement` at
+`advertised_unsupported`, `nip77Behavior` never leaving `unknown`, and
+`nip77Handoff` never leaving `none`. Both runs are committed; neither half is
+asserted alone, because "converged" without the count proves nothing about
+NIP-77 and the count without the negentropy-off control is not evidence that
+the count is caused by NIP-77.
 
-The route to the qualification corrected an earlier mistake worth keeping.
+**A real finding, found by writing the scenario, and the reason it has the
+shape it has.** The first draft primed the store, shut the engine down, seeded
+the divergence and restarted — the obvious shape. It converged **while
+receiving all 70 events**, with NMP simultaneously reporting
+`nip77Behavior = behaviorally_proven` and `nip77Handoff = none`. The NIP-77
+capability probe is asynchronous: a fresh engine places its query's REQ as soon
+as the socket is up, and `begin_neg_handoff` is only reachable when
+`prober.probed(&relay)` already holds a verdict at the moment a request is
+placed. The verdict lands afterwards, and nothing re-plans the in-flight
+request. **A cold start therefore never reconciles — it always refetches, and
+learns the relay supports NIP-77 just too late to use it.** Reconciliation is
+reachable on a LATER request: a reconnect replay, or a new filter. So the
+committed scenario establishes the probe verdict first and asserts it as a
+precondition, which is exactly what makes the measurement afterwards a
+measurement of reconciliation being used rather than of it still being
+discovered.
+
+Falsified three ways, each restored and re-confirmed green. Seeding the
+divergence BEFORE the outage instead of during it left convergence trivially
+true and was caught only by the divergence precondition ("the app already held
+10 outage-window events before the outage ended") — C13's fourth falsifier,
+same shape, same lesson. Inverting the efficiency assertion failed on the real
+captured `10` against a deliberately wrong `60`. Pointing the negentropy
+scenario at the negentropy-disabled relay failed on all four NIP-77 assertions
+at once with real values: `advertised_unsupported`, `unknown`, handoff
+`["none"]`, and 70 events transferred.
+
+**C14's API finding.** Reconciliation is invisible to the app that benefits
+from it. There is no `sync()`/`reconcile()` call, no demand option, and — more
+consequentially — no PER-QUERY fact distinguishing "this coverage came from a
+completed negentropy round" from "this came from a plain REQ": NIP-77 coverage
+is attributed through the exact same `attribute_eose` path as EOSE, so
+`SourceEvidence.reconciledThrough` and `SourceStatus` are identical either way.
+The only public distinguisher is the per-RELAY, engine-global
+`RelayDiagnostics.nip77Advertisement`/`nip77Behavior`/`nip77Handoff` triple,
+and `nip77Handoff` is a transient — a snapshot read after reconciliation
+finished says `live` and nothing about how it got there, so an app must hold
+`observeDiagnostics()` open and accumulate. This scenario does exactly that,
+and would have measured nothing without it.
+
+**C15's relay lab is qualified; C15 itself is NOT proven** — and it is now
+proven not to work, which is a stronger and more useful result than "not
+executed". The distinction between lab and subject is the whole point of the
+paragraphs below, and an earlier revision of this section got it wrong by
+calling C15 "proven live".
+
+**C15 is committed and RED, on purpose** (#1887), with the failure diagnosed:
+**NMP's NIP-42 deadlocks against any relay that challenges in response to a
+request, which is to say against strfry (#1889).**
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C15NIP42AuthTests.swift`
+uses strfry's real native read trigger, `relay.auth.restrictedReadKinds`, and
+leaves `restrictReadToInvolvedPubkey` on, so the seeded events are `p`-tagged
+to NMP's own account and the relay serves them ONLY to a connection
+authenticated as exactly that key. "The row arrived" would therefore have meant
+"NMP authenticated as its own account", not merely "some AUTH happened".
+
+**Every precondition passes, and each is proven by an NMP-free client**
+(`RelayHandle.probeRead`, new in `RelayLabKit`): an unauthenticated plain
+client issuing the identical filter receives a real `["AUTH", <challenge>]`
+frame plus `CLOSED ... auth-required: requested filter requires
+authentication` and zero events; a client that authenticates as a DIFFERENT key
+completes the handshake (`successfully authenticated`) and is still served zero
+events; a client that authenticates as an involved pubkey is served the row. So
+the relay demands AUTH, the challenge is real, the identity scoping is live,
+and the data is retrievable.
+
+**Then NMP does nothing.** It opens the `.nip42` session, reports it under
+exactly the requested access identity, reaches
+`awaitingAuth(phase: .awaitingChallenge)` and stays there indefinitely. It
+transmits nothing at all — not the AUTH proof, not even the REQ. The installed
+`NMPAuthPolicy` is never consulted. `AuthDiagnostics` shows
+`policyBound=false`, `signerBound=false`, `challengeDescriptor=nil`,
+`transportGeneration` incrementing across reconnects and nothing else moving.
+
+**The scenario pins the cause through the public API alone**, with a control
+phase: the SAME relay and SAME filter observed under `.public` instead of
+`.nip42`. One field different, two outcomes —
+
+```
+CONTROL (.public):  status=error                           history=["connecting", "error"]
+SUBJECT (.nip42):   status=awaitingAuth(awaitingChallenge)  history=["connecting", "awaitingAuth(awaitingChallenge)"]
+```
+
+The `.public` session's REQ reaches the relay and is answered (with the
+auth-required refusal, hence `error`). The protected session is the one that
+never transmits. Recorded, not asserted — a diagnosis printed alongside a
+failure, never promoted to a contract, the same treatment C13 gave
+`wireSubCount`.
+
+The mechanism, confirmed in the engine: NMP drops a protected session's ops
+from the wire delta until that session has completed AUTH
+(`crates/nmp-engine/src/core/query.rs`), replays planned REQs at connect only
+for a `Public` session (`core/auth_transport.rs`), and constructs an
+`AuthSessionState` in exactly one place — on an INBOUND `["AUTH", challenge]`
+frame. strfry only emits that frame in response to a request it wants to gate;
+`canary.md` already records both of its genuine triggers as challenge-driven.
+So NMP waits for a challenge the relay will only send once NMP sends the
+request NMP is withholding until it is challenged. Neither side is wrong
+alone; together they never exchange a byte.
+
+**Why no existing test caught this.** Every green NIP-42 test uses a relay
+shape that challenges unsolicited, or fabricates the challenge outright:
+`auth_core_headless.rs` injects a synthetic `RelayMessage::Auth` directly into
+the reducer; `nmp-parity`'s scenarios use `ScriptedRelay`'s
+`auth_required_writes`, whose own doc says it does not challenge on connect and
+does not gate reads, so no protected-READ demand is exercised anywhere; and
+`crates/nmp/tests/integration_capstone.rs` had to hand-build a relay that
+sends AUTH "immediately after the WebSocket handshake, before the client has a
+chance to send a REQ or EVENT". That bespoke relay exists precisely because the
+standard fixture does not challenge unsolicited — which means the only relay
+shape the current engine can complete a NIP-42 round trip against is one built
+for it. This is the exact gap the Canary exists to find, found the first time
+an ordinary application drove the surface against a real third-party relay.
+
+**Left red rather than reshaped**, on the principle C17's #1846 phase
+established: the scenario is not weakened until something passes. It is written
+as the scenario that will be green when #1889 closes — the round trip, the
+denial surfacing as `authDenied`, recovery on a fresh session, and re-AUTH
+after a reconnect are all already asserted and all already have their
+preconditions — so closing the gap is what turns it green.
+
+Falsified twice, each restored and the red state re-confirmed. Because the
+scenario's *result* is a failure, what has to be falsifiable is its
+*preconditions*: pointing `restrictedReadKinds` at a kind the scenario does not
+use made the unauthenticated probe receive no challenge and be served the row
+outright, failing three preconditions with the real captured frames (and,
+usefully, turning the `.public` control green at `finishedStoredEvents`, which
+confirms the auth gate is the only thing holding it at `error`). Turning
+`restrictReadToInvolvedPubkey` off made the wrong-identity probe be served the
+row, failing exactly the one identity-scoping precondition and nothing else.
+
+**The lab qualification that came first**, and still stands: **strfry can be
+driven through a complete NIP-42 round trip on demand** — a prerequisite for
+the scenario, and a real result, since the first two attempts to obtain one
+failed. What it does not touch is NMP, since the handshake is driven by the
+*controller*. C15's own scenario above is what drives `NMPEngine`, and the
+`RestrictedReadProbe` it uses for its preconditions is the read-side successor
+to this write-side qualification.
+
+The route to that qualification corrected an earlier mistake worth keeping.
 
 The first probe gated writes with a strfry `writePolicy` plugin that rejects
 unless the connection is authenticated. That denial is real — but
