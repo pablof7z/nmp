@@ -1,17 +1,24 @@
 //! The falsifier `AuthorRouteNeeds`'s wholesale rebuild never had, mirroring
-//! `wire_rebuild_agreement.rs` next door.
+//! `wire_rebuild_agreement.rs` next door -- but proving a different property,
+//! because this owner does not have `WireOwnership`'s property.
 //!
 //! `rebuild_author_outbox_route_needs` (the wholesale path, triggered by
 //! every `recompile`) and `retain_author_outbox_wire_owner` /
 //! `release_author_outbox_wire_owner` (the incremental path, triggered by
-//! every wire attach/detach) both maintain the same owner. They must already
-//! agree at every instant a rebuild can run -- `recompile` is not a repair
-//! pass, nothing marks the incremental state suspect first. Nothing checked
-//! that they did.
-//!
-//! This exercises the one case `wire_rebuild_agreement.rs` cannot: an author
-//! whose route turns positive *between* rebuilds, which the incremental path
-//! never notices (see `AuthorRouteNeeds`'s module doc) but a rebuild must.
+//! every wire attach/detach) both maintain the same owner, but they do not
+//! see the same inputs. Both react to attach/detach, and for that input
+//! alone they must already agree at every instant -- proved by
+//! [`rebuilding_author_route_needs_reproduces_the_incremental_state_exactly`]
+//! and [`rebuilding_author_route_needs_twice_changes_nothing`] below. But
+//! `AuthorRouteNeeds` also depends on routing facts, which only the rebuild
+//! re-reads (see `AuthorRouteNeeds`'s module doc): the incremental path
+//! never reconsiders an author's route status while their wire ownership
+//! stays live, so it is *expected*, by design, to fall stale exactly there.
+//! `recompile` IS a repair pass for that one input -- proved by
+//! [`a_route_learned_between_rebuilds_is_reflected_by_the_next_rebuild_only`]
+//! below, which drives an author to gain a positive route while their wire
+//! ownership never lapses, and checks both halves: that the incremental-only
+//! state is genuinely wrong first, and that the rebuild repairs it after.
 
 use super::*;
 
