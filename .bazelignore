@@ -4,3 +4,12 @@
 target
 **/target
 crates/nmp-ui
+
+# Agent worktrees live under `.claude/worktrees/<name>/`, INSIDE the primary
+# checkout. Each is a full checkout carrying its own `bazel-*` convenience
+# symlinks, and those point into that worktree's execroot -- which contains
+# every external repo it fetched. Without this, `bazel test //...` run from
+# the primary checkout walks into a sibling worktree's execroot and fails
+# loading a package out of someone else's `@rules_shell`. Same bug class as
+# `target` above: a nested build output must never become a Bazel package.
+.claude
