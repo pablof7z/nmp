@@ -128,6 +128,26 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   surface, so the only way to ask "same thread" is to build the demand from
   each and compare. Recorded by Canary C11, which asserts the demand equality
   and prints both values rather than freezing either shape.
+
+- **The FIRST `requestRows` on a window is dropped (#1886).** Canary C6
+  measured a window opened at `initial: 10` staying at 10 rows for a bounded
+  45s after `requestRows(atLeast: 20)`, with the relay up and holding 150
+  matching events, and the advance delivering `WindowLoad.returned(added: 0)`.
+  It never self-heals, and re-issuing the SAME target is a documented no-op,
+  so an app has no way to ask again from where it is — in a real feed this is
+  the first scroll-to-bottom doing nothing. Deterministic 5/5 across
+  `(initial, firstTarget)` of (10,11), (10,20), (10,50), (1,2) and
+  (10,10)→(10,11), with 0ms/1s/3s settle beats, so it is neither a race nor a
+  function of step size. Every LATER advance reaches its target exactly. Root
+  cause is in the issue: `stage_history_advance` attaches wire handles without
+  arming admission, and the runtime drops the stage turn's effects on the
+  success path, so the advance's REQ never reaches the wire; the second
+  advance only works because its commit supersedes the first advance's handle
+  and `withdraw_wire_demand` arms admission as a side effect. C6's first-advance
+  phase is red until this is fixed. A second, related fact recorded there:
+  `WindowLoad.returned(added:)` is not a usable progress signal — across runs
+  the same advance reported `added: 20` and `added: 0`, with the rows arriving
+  in a later `.idle` batch.
 - **Suspend/resume transparency (#4): the on-device pass is pending.** Transport
   hardening (`SuspendGapDetector`/`apply_resume_gap`, wall-clock gap detection)
   and the clock audit of every suspension-spanning wait are done; what remains
