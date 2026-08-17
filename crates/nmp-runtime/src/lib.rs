@@ -471,6 +471,12 @@ mod pool_bridge_tests;
 #[cfg(test)]
 mod route_provider_tests;
 
+/// #1803: drives `dispatch_effect`'s `Effect::RelayAuth` arm directly, the
+/// exact call site that used to `debug_assert!` an AUTH-bind's effects were
+/// empty and drop them.
+#[cfg(test)]
+mod dispatch_relay_auth_tests;
+
 #[cfg(test)]
 // The closed-surface falsifier scans this module's code lines for the token
 // `relays:`. Assigning the cap after `Default` keeps a pool fixture from
@@ -1463,6 +1469,13 @@ struct DispatchRuntime<'a> {
 struct RouteProviderSlot {
     provider: Box<dyn AuthorRouteProvider>,
     bound: Option<ObservationId>,
+    /// Set once the provider panics inside any of the three synchronous
+    /// calls the loop makes into it (see `guarded_provider_call`). Unwind
+    /// safety says nothing about the provider's state after a caught panic,
+    /// so a poisoned provider is never called again for the life of the
+    /// engine -- refused the same way a provider that answers with silence
+    /// already is. See #1802.
+    poisoned: bool,
 }
 
 impl RouteProviderSlot {
@@ -1470,6 +1483,33 @@ impl RouteProviderSlot {
         Self {
             provider,
             bound: None,
+            poisoned: false,
+        }
+    }
+}
+
+/// Runs one synchronous call into the foreign `AuthorRouteProvider`,
+/// catching a panic instead of letting it unwind through the reducer
+/// thread. `AuthorRouteProvider` is app-supplied code invoked under a
+/// `RefCell` borrow with no timeout and no capability token (#1802) --
+/// a caught panic is the one failure mode a synchronous foreign call can
+/// hit that isn't already a typed return value, so this converts it into
+/// one: the provider is poisoned and every caller sees `None`, which is
+/// indistinguishable from "no provider" to the rest of the loop.
+fn guarded_provider_call<T>(
+    slot: &mut RouteProviderSlot,
+    call: impl FnOnce(&mut dyn AuthorRouteProvider) -> T,
+) -> Option<T> {
+    if slot.poisoned {
+        return None;
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        call(slot.provider.as_mut())
+    })) {
+        Ok(value) => Some(value),
+        Err(_) => {
+            slot.poisoned = true;
+            None
         }
     }
 }
@@ -3475,7 +3515,12 @@ fn provider_reroot(
     slot: &mut RouteProviderSlot,
     needs: BTreeSet<PublicKey>,
 ) -> Vec<Effect> {
-    let (reroot, updates) = slot.provider.reroot(needs);
+    // A panicking provider is refused exactly like one that re-roots onto
+    // silence: `Closed` drops the current observation and opens nothing
+    // (see `ProviderReroot`), and `guarded_provider_call` has already
+    // poisoned the slot so it is never called again. See #1802.
+    let (reroot, updates) = guarded_provider_call(slot, |provider| provider.reroot(needs))
+        .unwrap_or((ProviderReroot::Closed, Vec::new()));
     let mut effects = Vec::new();
     if !matches!(reroot, ProviderReroot::Unchanged) {
         // Both remaining outcomes close the current observation. Only
@@ -3746,9 +3791,24 @@ fn dispatch_effect(
                     capability,
                     instance,
                 });
-                debug_assert!(
-                    effects.is_empty(),
-                    "binding an AUTH capability is a synchronous state-only transition"
+                // `on_auth_capability_bound` itself always returns an empty
+                // vec, but `EngineCore::handle`'s epilogue can append to
+                // *any* arm's result afterward -- in particular
+                // `prune_unowned_relay_state`, which is live exactly when
+                // `auth_required_sessions` is non-empty, the state this
+                // message fires in. So "this call produces no effects" is
+                // not a property this call site can assume; dispatch
+                // whatever comes back, the same way every other
+                // `core.handle` call site in this file does. See #1803.
+                dispatch_core_effects(
+                    core,
+                    effects,
+                    pool,
+                    row_channels,
+                    history_channels,
+                    diag_channels,
+                    registry,
+                    runtime,
                 );
             };
             auth::dispatch(
@@ -3774,7 +3834,9 @@ fn dispatch_effect(
                 let mut slot = runtime.route_provider.borrow_mut();
                 slot.as_mut()
                     .filter(|slot| slot.bound == Some(id))
-                    .map(|slot| slot.provider.observe_rows(&rows))
+                    .and_then(|slot| {
+                        guarded_provider_call(slot, |provider| provider.observe_rows(&rows))
+                    })
             };
             if let Some(updates) = provider_updates {
                 let followups = apply_author_routes(core, updates);
@@ -3799,7 +3861,9 @@ fn dispatch_effect(
                 let mut slot = runtime.route_provider.borrow_mut();
                 slot.as_mut()
                     .filter(|slot| slot.bound == Some(id))
-                    .map(|slot| slot.provider.observe_evidence(&evidence))
+                    .and_then(|slot| {
+                        guarded_provider_call(slot, |provider| provider.observe_evidence(&evidence))
+                    })
             };
             if let Some(updates) = provider_updates {
                 let followups = apply_author_routes(core, updates);

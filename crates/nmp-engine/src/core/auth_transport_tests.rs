@@ -188,3 +188,63 @@ fn auth_sequence_reopens_the_store_zero_times_regardless_of_observation_count() 
         "same rule for history sessions: AUTH transitions carry no canonical-row work"
     );
 }
+
+/// #1803: `EngineCore::handle`'s epilogue (`prune_unowned_relay_state`) can
+/// append effects after ANY arm returns, including
+/// `on_auth_capability_bound`'s -- which returns an empty `Vec` on every one
+/// of its own paths. A caller that reads only the arm and concludes "this
+/// message never produces effects" is wrong about `handle` as a whole.
+///
+/// This reproduces the exact precondition the epilogue's third branch
+/// checks: a stale `relay_open_failures` entry for a session
+/// `auth_required_sessions` also names, that nothing currently requires.
+/// Real engine state gets into this shape over several turns (a relay
+/// worker failed to open, then every read/write demand on it was withdrawn
+/// on a later turn); this test sets it up directly because WHICH turn made
+/// it stale is not the point -- what matters is that `AuthCapabilityBound`
+/// is the next message the reducer processes while it is stale, so its
+/// call is where the cleanup effect surfaces.
+#[test]
+fn auth_capability_bound_can_surface_an_epilogue_effect_the_arm_itself_never_returns() {
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
+    let relay = protected_relay();
+    let signer = Keys::generate().public_key();
+    let session = signer_session(&relay, signer);
+
+    // Nothing subscribes to or writes through `session`, so
+    // `relay_worker_requirements().all` will not contain it -- exactly the
+    // "nothing currently requires this session" half of the precondition.
+    core.relay_open_failures
+        .insert(session.clone(), "injected: relay worker failed to open".into());
+    core.auth_required_sessions.insert(session.clone());
+
+    // The token need not resolve to a real in-flight AUTH operation: even
+    // when `on_auth_capability_bound` takes its own `_ => return Vec::new()`
+    // path, `handle`'s epilogue still runs unconditionally afterward.
+    let bogus_token = AuthOpToken {
+        epoch: AuthEpoch {
+            handle: TransportRelayHandle {
+                slot: 0,
+                generation: 1,
+            },
+            session,
+            sequence: 0,
+        },
+        sequence: 0,
+    };
+    let effects = core.handle(EngineMsg::AuthCapabilityBound {
+        token: bogus_token,
+        capability: AuthCapability::Policy,
+        instance: AuthCapabilityInstance(1),
+    });
+
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))),
+        "handle()'s epilogue prunes the stale relay_open_failures entry and must surface a \
+         diagnostics effect on THIS call's return -- the premise the dropped `debug_assert!` at \
+         this call site once encoded (\"binding an AUTH capability is a synchronous state-only \
+         transition\") is false: {effects:?}"
+    );
+}

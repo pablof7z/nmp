@@ -3548,6 +3548,31 @@ impl EngineCore {
     pub fn publish_queue_lane_recovery_reads(&self) -> u64 {
         self.store.publish_queue_lane_recovery_reads()
     }
+
+    /// Seeds a stale `relay_open_failures`/`auth_required_sessions` entry
+    /// for `session` -- the same shape `EngineMsg::RelayOpenFailed` leaves
+    /// once `session` stops being required (#1803 falsifier support).
+    ///
+    /// `handle`'s epilogue (`prune_unowned_relay_state`) runs after EVERY
+    /// message, so whichever call first observes a session drop out of
+    /// `relay_worker_requirements()` is the one credited with the cleanup
+    /// effect -- an ordinary sequence of `handle()` calls can never leave
+    /// this state stale FOR a specific later message to discover, because
+    /// the call that causes the drop always sees it first, in its own
+    /// return. This door seeds the staleness directly, before the first
+    /// `handle()` call this session has ever seen, so a caller in another
+    /// crate can drive the exact turn under test deterministically instead
+    /// of needing a live relay connection and AUTH handshake whose own
+    /// turn would otherwise claim the credit.
+    #[doc(hidden)]
+    pub fn seed_stale_relay_open_failure_for_test(
+        &mut self,
+        session: RelaySessionKey,
+        reason: String,
+    ) {
+        self.relay_open_failures.insert(session.clone(), reason);
+        self.auth_required_sessions.insert(session);
+    }
 }
 
 #[cfg(feature = "bench-instrumentation")]
