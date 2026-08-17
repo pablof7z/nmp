@@ -327,7 +327,7 @@ mod relay_session_key_tests {
         let relay = relay();
         let a = Keys::generate().public_key();
         let b = Keys::generate().public_key();
-        let public = RelaySessionKey::unauthenticated(relay.clone());
+        let unauthenticated = RelaySessionKey::unauthenticated(relay.clone());
         let session_a = RelaySessionKey::new(relay.clone(), Some(a));
         let session_b = RelaySessionKey::new(relay, Some(b));
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
@@ -345,7 +345,7 @@ mod relay_session_key_tests {
                 generation: 1,
             },
         ];
-        core.handle(EngineMsg::RelayConnected(handles[0], public.clone()));
+        core.handle(EngineMsg::RelayConnected(handles[0], unauthenticated.clone()));
         core.handle(EngineMsg::RelayConnected(handles[1], session_a.clone()));
         core.handle(EngineMsg::RelayConnected(handles[2], session_b.clone()));
 
@@ -355,7 +355,7 @@ mod relay_session_key_tests {
             DisconnectReason::Closed,
         ));
 
-        assert!(core.connected_relays.contains(&public));
+        assert!(core.connected_relays.contains(&unauthenticated));
         assert!(!core.connected_relays.contains(&session_a));
         assert!(core.connected_relays.contains(&session_b));
     }
@@ -363,7 +363,7 @@ mod relay_session_key_tests {
     #[test]
     fn protected_neg_frames_cannot_resolve_the_public_probe_or_inherit_its_diagnostics() {
         let relay = relay();
-        let public = RelaySessionKey::unauthenticated(relay.clone());
+        let unauthenticated = RelaySessionKey::unauthenticated(relay.clone());
         let protected = RelaySessionKey::new(
             relay.clone(),
             Some(Keys::generate().public_key()),
@@ -390,7 +390,7 @@ mod relay_session_key_tests {
         core.white_box("router.compile", |s| {
             s.router.compile(&atoms, &s.routing_facts, s.cap)
         });
-        let public_handle = TransportRelayHandle {
+        let unauthenticated_handle = TransportRelayHandle {
             slot: 5,
             generation: 1,
         };
@@ -398,7 +398,7 @@ mod relay_session_key_tests {
             slot: 6,
             generation: 1,
         };
-        core.handle(EngineMsg::RelayConnected(public_handle, public.clone()));
+        core.handle(EngineMsg::RelayConnected(unauthenticated_handle, unauthenticated.clone()));
         core.handle(EngineMsg::RelayConnected(
             protected_handle,
             protected.clone(),
@@ -453,7 +453,7 @@ mod relay_session_key_tests {
             subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(wire_id)),
             message: std::borrow::Cow::Owned("6100".to_string()),
         });
-        core.handle(EngineMsg::RelayFrame(public_handle, public, public_neg_msg));
+        core.handle(EngineMsg::RelayFrame(unauthenticated_handle, unauthenticated, public_neg_msg));
         assert_eq!(
             core.prober.state(&relay),
             crate::negentropy::ProbeState::Supported

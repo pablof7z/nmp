@@ -522,22 +522,22 @@ mod relay_worker_reconciliation_tests {
     #[test]
     fn protected_write_session_preempts_same_relay_public_slot_at_cap_one() {
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
-        let public = RelaySessionKey::unauthenticated(relay.clone());
+        let unauthenticated = RelaySessionKey::unauthenticated(relay.clone());
         let protected =
             RelaySessionKey::new(relay, Some(Keys::generate().public_key()));
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
         let pool = Pool::new(config, test_verifier(), pool_tx).expect("test pool construction");
-        let public_handle = pool
-            .ensure_session(&public)
+        let unauthenticated_handle = pool
+            .ensure_session(&unauthenticated)
             .expect("Public read owns the cap-sized pool");
         let (self_inbox, inbox_rx) = mpsc::channel();
 
         let protected_handle = ensure_write_effect_session(&protected, &pool, &self_inbox)
             .expect("write displaces Public");
 
-        assert_eq!(pool.live_session_handle(&public), None);
+        assert_eq!(pool.live_session_handle(&unauthenticated), None);
         assert_eq!(pool.live_session_handle(&protected), Some(protected_handle));
         assert!(matches!(
             inbox_rx.recv_timeout(Duration::from_secs(1)),
@@ -545,7 +545,7 @@ mod relay_worker_reconciliation_tests {
                 handle,
                 session,
                 nmp_transport::DisconnectReason::Closed,
-            ))) if handle == public_handle && session == public
+            ))) if handle == unauthenticated_handle && session == unauthenticated
         ));
 
         pool.shutdown();
@@ -554,7 +554,7 @@ mod relay_worker_reconciliation_tests {
     #[test]
     fn protected_read_session_cannot_claim_write_preemption_authority() {
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
-        let public = RelaySessionKey::unauthenticated(relay.clone());
+        let unauthenticated = RelaySessionKey::unauthenticated(relay.clone());
         let signer = Keys::generate().public_key();
         let protected_read = RelaySessionKey::new(relay.clone(), Some(signer));
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 1);
@@ -571,14 +571,14 @@ mod relay_worker_reconciliation_tests {
         let mut config = PoolConfig::default();
         config.max_relays = 1;
         let pool = Pool::new(config, test_verifier(), pool_tx).expect("test pool construction");
-        let public_handle = pool
-            .ensure_session(&public)
+        let unauthenticated_handle = pool
+            .ensure_session(&unauthenticated)
             .expect("Public read owns the cap-sized pool");
         assert!(matches!(
             pool.ensure_session(&protected_read),
             Err(nmp_transport::RelayOpenError::AtCapacity { max_relays: 1 })
         ));
-        assert_eq!(pool.live_session_handle(&public), Some(public_handle));
+        assert_eq!(pool.live_session_handle(&unauthenticated), Some(unauthenticated_handle));
         assert_eq!(pool.live_session_handle(&protected_read), None);
 
         pool.shutdown();
@@ -3377,11 +3377,11 @@ fn ensure_write_effect_session(
         Err(nmp_transport::RelayOpenError::AtCapacity { .. })
             if session.authenticate_as.is_some() =>
         {
-            let public = RelaySessionKey::unauthenticated(session.relay.clone());
-            let Some(public_handle) = pool.live_session_handle(&public) else {
+            let unauthenticated = RelaySessionKey::unauthenticated(session.relay.clone());
+            let Some(unauthenticated_handle) = pool.live_session_handle(&unauthenticated) else {
                 return pool.ensure_session(session);
             };
-            if let Some(event) = pool.close(public_handle) {
+            if let Some(event) = pool.close(unauthenticated_handle) {
                 if let Some(message) = translate_pool_event(event) {
                     let _ = self_inbox.send(Cmd::Engine(message));
                 }

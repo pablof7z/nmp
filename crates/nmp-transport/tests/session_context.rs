@@ -25,17 +25,17 @@ fn physical_session_cap_counts_contexts_not_urls() {
     )
     .unwrap();
     let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
-    let public = RelaySessionKey::unauthenticated(relay.clone());
+    let unauthenticated = RelaySessionKey::unauthenticated(relay.clone());
     let a = RelaySessionKey::new(
         relay.clone(),
         Some(Keys::generate().public_key()),
     );
     let b = RelaySessionKey::new(relay, Some(Keys::generate().public_key()));
 
-    let public_handle = pool.ensure_session(&public).unwrap();
-    assert_eq!(pool.ensure_session(&public).unwrap(), public_handle);
+    let unauthenticated_handle = pool.ensure_session(&unauthenticated).unwrap();
+    assert_eq!(pool.ensure_session(&unauthenticated).unwrap(), unauthenticated_handle);
     let a_handle = pool.ensure_session(&a).unwrap();
-    assert_ne!(a_handle, public_handle);
+    assert_ne!(a_handle, unauthenticated_handle);
     assert_eq!(
         pool.ensure_session(&b),
         Err(RelayOpenError::AtCapacity { max_relays: 2 })

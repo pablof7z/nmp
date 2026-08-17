@@ -775,7 +775,7 @@ fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
 /// Neither context may inherit or overwrite the other, including on identity
 /// reroot.
 #[test]
-fn derived_inner_and_outer_demands_keep_independent_source_and_access_contexts() {
+fn derived_inner_and_outer_demands_keep_independent_source_and_identities() {
     let mut h = Harness::new();
     let a = Keys::generate();
     let b = Keys::generate();

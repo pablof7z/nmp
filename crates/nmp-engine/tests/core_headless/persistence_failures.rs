@@ -295,7 +295,7 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
 /// URL. Two identical pinned selections therefore keep independent coverage
 /// authority when one runs on Public and the other on `Nip42(author)`.
 #[test]
-fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
+fn failed_event_commit_isolated_by_session_identity_on_the_same_relay() {
     let public_author = Keys::generate();
     let protected_author = Keys::generate();
     let relay = RelayUrl::parse("wss://access-isolation.example.com").unwrap();

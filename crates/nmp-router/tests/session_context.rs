@@ -6,7 +6,7 @@ use nmp_router_testkit::{test_relay, FixtureRoutingFacts};
 use nostr::Keys;
 
 #[test]
-fn authorless_public_a_b_are_three_exact_session_plans() {
+fn authorless_unauthenticated_a_b_are_three_exact_session_plans() {
     let relay = test_relay(0);
     let source = ReadRouting::Explicit(vec![relay.clone()]);
     let filter = ConcreteFilter {

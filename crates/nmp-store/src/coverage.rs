@@ -408,9 +408,9 @@ mod tests {
     /// cannot satisfy the identical selection acquired through an
     /// authenticated NIP-42 session (or vice versa).
     #[test]
-    fn coverage_key_differs_for_different_access_context() {
+    fn coverage_key_differs_for_different_session_identity() {
         let filter = cf(&[1], &["aa"], None, None);
-        let public = ContextualAtom {
+        let unauthenticated = ContextualAtom {
             filter: filter.clone(),
             routing: nmp_grammar::ReadRouting::Auto,
             authenticate_as: None,
@@ -422,7 +422,7 @@ mod tests {
             authenticate_as: Some(nostr::Keys::generate().public_key()),
             routing_evidence: BTreeSet::new(),
         };
-        assert_ne!(coverage_key(&public), coverage_key(&authenticated));
+        assert_ne!(coverage_key(&unauthenticated), coverage_key(&authenticated));
     }
 
     #[test]
