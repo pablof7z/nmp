@@ -110,10 +110,13 @@ NIP-42 can change one relay's answer, so AUTH is part of a demand's access
 context. A protocol/operator policy selects an identity reference as a closed
 value; an app callback does not decide per frame.
 
-Diagnostics retains challenge, connection generation, identity/policy
-reference, response result, and error without exposing secrets. Ordinary query
-snapshots receive compact facts such as AUTH required, awaiting capability,
-authenticated, or rejected.
+Diagnostics is SHAPED to retain challenge, connection generation,
+identity/policy reference, response result and error without exposing secrets.
+It is populated on the write path. On a protected READ against a relay that
+challenges only in response to a request, it is not (#1889): that session gets
+a hardcoded `AwaitingChallenge` row with no challenge, no policy reference and
+no result, and `authenticated`/`rejected` are unreachable on that path alone.
+Read `docs/known-gaps.md` before building on these fields.
 
 AUTH never silently changes current pubkey, retargets another write, partitions
 the shared cache, or grants protocol-host authority to an arbitrary relay.
