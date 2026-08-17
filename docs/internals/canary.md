@@ -131,8 +131,11 @@ Policed by review only:
 Three SwiftPM packages, not the Xcode project. `apps/Canary/RelayLabKit` is
 the relay-lab controller itself — start, stop, kill, restart, partition,
 heal, seed, ephemeral port, isolated temp directory, bounded-poll readiness
-rather than sleeps, a one-shot real-TCP reachability probe (`isReachable`,
-what "the relay is genuinely unreachable" has to mean), and an optional
+rather than sleeps, two real-TCP probes — `isReachable`, a boolean for
+"wait until this port stops answering", and `probe`, which reports the
+actual errno (`.refused`/`.timedOut`/`.failed(errno:)`) and elapsed time,
+because `isReachable` cannot tell a refused port from a black-holed one and
+costs its full timeout for both (C8's finding, below) — plus an optional
 shared `dataDir` so a second relay process can write into a stopped relay's
 durable store on its own port — C13's outage window. It knows nothing about NMP; it is a generic real-relay
 lifecycle library, reusable outside this app entirely. It is consumed by two
@@ -369,9 +372,10 @@ Two facts about the starting position, established by survey:
   (`WriteIntent`, `Receipt` and `reattachReceipt` are complete and well
   specified) but because no screen uses them.
 - **Session identity did not survive restart**, which silently blocked C2, C9
-  and C12: there was no identity for a resumed write to remain frozen to. Both
-  C9 and C2 are now proven through `NMPSessionPayload`, so the blocker is
-  closed for those two; C12 remains unwritten.
+  and C12: there was no identity for a resumed write to remain frozen to. C9
+  and C2 are proven through `NMPSessionPayload`. C12 turned out not to need a
+  restart at all — the account switch it is about happens inside one live
+  engine — and is proven above.
 
 **C17 is proven as an oracle, and two of its three phases pass. The third
 fails, and the failure is a real finding (#1846), not a scenario defect.**
@@ -685,6 +689,160 @@ lab engine does not have, so the app assigns `intent.routing =
 .explicit(relays:)` on the returned value — a plain public field on the
 ordinary write noun, exactly what C7 does. This is the same read/write routing
 asymmetry already recorded below, seen from the capability side.
+
+**C8 is proven live** (#1880), and it is the first publish in this suite
+into a relay that is *down* rather than *hung*.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C8PublishWhileRelaysFailTests.swift`
+publishes one real signed event to three real strfry destinations, two live
+and one whose process was started and then `SIGKILL`ed, in ~1.5s. The
+distinction from C9 case 3 is the whole point: that scenario's unreachable
+relay is `SIGSTOP`ed, so its listening socket stays open and the app's
+packets are accepted and never answered — a hung relay, which fails by
+timeout. C8's fails by `ECONNREFUSED` on the first syscall, and nothing here
+had ever published into that.
+
+Both healthy relays reach `.published` while the dead one is still
+`waiting(notConnected)`, and each of the three claims is asserted
+separately: the `destinations` fact names all three with `complete == true`;
+the receipt reports a fact of its own for the dead relay rather than falling
+silent about it; the durable `publishQueue` entry lists all three relays
+with a per-relay state for each; both live relays serve the event back over
+their OWN wire (relay-side truth, independent of anything NMP claims); and
+the single canonical row's provenance grows to exactly the two relays that
+echoed it, never the third.
+
+**The precondition needed a new instrument, and finding that out is a
+RelayLabKit finding.** The first draft asserted the dead relay was
+unreachable *and fast about it* through `RelayHandle.isReachable`, and failed
+on its first run with the relay genuinely dead: `isReachable(timeout: 2)`
+returned `false` after **2.0057 seconds** — the entire budget.
+`Network.framework` classifies a refused connection as
+`NWConnection.State.waiting(.posix(ECONNREFUSED))` and keeps retrying it, so
+a probe watching for `.failed` can only ever end on its own timeout, and a
+refused port is indistinguishable from a black-holed one through that door.
+`isReachable` remains correct for "wait until this stops answering", which is
+all C2 and C13 ask of it. C8 needed the errno, so `RelayLabKit` gained
+`RelayHandle.probe` — a non-blocking `connect(2)`/`poll(2)`/`SO_ERROR` probe
+reporting `.accepted`/`.refused`/`.failed(errno:)`/`.timedOut` with elapsed
+time. Measured against the same dead port: **`refused` in 0.0001s**.
+
+**Falsified two ways, each restored and re-confirmed green.** Not killing the
+third relay at all left every behavioural assertion green and failed on the
+refusal precondition (`accepted` vs `refused`), on the down relay's real
+history `["waiting(notConnected)", "waiting(needsAuth)", "sent(attempt=1)",
+"published"]`, and on the end-of-scenario re-probe. Routing the write to only
+the two healthy relays — the app quietly dropping the failed destination —
+failed on three independent assertions with real values: `destinations` named
+two rather than three, the receipt reported `(never reported)` for the third
+across 11 facts, and the queue entry listed `[]`.
+
+**What C8 deliberately does not assert.** The write never reaches
+`WriteOutcome.settled`, and that is correct rather than a defect: settlement
+needs every destination terminal, the only terminal a permanently-unreachable
+relay could reach is `.gaveUp`, and offline time deliberately consumes no
+attempt ordinal — so a relay that is simply down never spends the ceiling.
+`outcome=nil` is printed on every run.
+
+**C10 is proven live** (#1880-adjacent; see the issue list), the write-side
+half of the local-first claim C2 proved for reads.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C10OfflineWriteThenConvergenceTests.swift`
+publishes one note with **nothing reachable at all**, then restarts the relay
+on the same port and requires the write to go out and settle by itself. It
+does, in a measured **7.7-9.9s** after the relay returns (~7-12s per run), on
+the SAME `Receipt` the single `publish` call returned: no re-publish, no
+`reattachReceipt`, no second engine, no reopened query, no app-side retry
+anywhere in the file.
+
+Proven along the way: the row is visible through the app's own live query
+while offline with `sources` empty; the local key signs with no network; the
+relay serves the event back over its own wire afterwards with the right
+pubkey and content; the row's provenance grows to include the relay with the
+row count still 1; and the relay holds **exactly one** event by this author.
+
+**Two preconditions, and the falsification proves they are the only thing
+standing between this scenario and vacuity.** Leaving the relay UP for the
+write and taking it away only afterwards left *every single convergence
+assertion green* — `converged=true in 0.3s`, the relay serves it back,
+provenance grew, one row, one id — and was caught ONLY by the two
+preconditions: the port probed `accepted` at write time, and a second strfry
+process over the SAME LMDB directory on its own ephemeral port
+(`RelayHandle(dataDir:)`, C13's mechanism used to prove ABSENCE) found the
+event already in the relay's durable store while its port was dead. That is
+C13's fourth falsifier in write form, and it is now mechanically ruled out.
+The second falsifier — never restarting the relay — failed red with the real
+stuck values: `waiting(notConnected)` for the full 120s, `outcome=nil`.
+
+**What C10's duplicate check can and cannot prove.** The relay is asked for
+every event this author wrote and must hold exactly one, which rules out the
+failure that actually loses data: a write re-signed on the retry path is a
+DIFFERENT event id, since an id is the hash of its contents. It does NOT rule
+out NMP sending the identical EVENT frame twice — the relay deduplicates by
+id and the receipt looks the same. Same limit C9 recorded for its no-resend
+assertion; closing it needs relay-side inbound frame counts or a public
+delivery-attempt fact, and neither exists.
+
+**C12 is proven live, and it was the last scenario this document listed as
+blocked.** The blocker was recorded as "session identity did not survive
+restart… there was no identity for a resumed write to remain frozen to". It
+turns out C12 needs no restart at all: the switch it cares about happens
+inside one live engine, which is exactly what an app does when a user taps a
+different account.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C12IdentityFreezeTests.swift`
+covers the two moments a write can be frozen at, which fail differently:
+
+1. **Unsigned and parked** (~5.8s). Alice signs in with a PUBLIC KEY ONLY —
+   an ordinary app state, a user whose signer is not attached yet — and
+   publishes. The write parks at `awaitingSigner(alice)`. Bob is then added
+   WITH a private key and made current, and the scenario waits, deliberately,
+   giving a re-resolving engine every chance to sign alice's parked write
+   with bob's available key. It does not: the signing stage names alice and
+   only alice across the write's whole life. Alice's private key is then
+   added with `makeCurrent: false`, and her write signs, publishes and
+   settles **while bob is the current account**. Measured signing history:
+   `["awaitingSigner(alice)", "inFlight(alice)", "signed(...)"]`. This is the
+   case where re-resolution would be invisible — the wrong event would be
+   perfectly valid and perfectly signed.
+2. **Signed and undelivered** (~8-10s). Alice signs, her only relay is a
+   refused port, bob becomes current, the relay returns, and the delivered
+   event still carries alice's key.
+
+Both cases end at the RELAY, over its own wire: alice must hold exactly the
+one event and **bob must hold nothing at all**. A re-signed write shows up
+there as an event by the wrong author, and no amount of correct internal
+bookkeeping hides it. `PublishQueueEntry.pubkey` reads alice before and after
+the switch in both cases.
+
+**The mid-flight precondition is asserted, and falsification shows why.**
+Giving alice her signer FIRST — so the write signs, publishes and settles
+under her, and only then switching to bob — left every identity assertion
+green (alice has 1 event, bob has 0, stored pubkey is alice's) and was caught
+only by `PublishQueueEntry.outcome` reading `settled` at the instant of the
+switch. Not switching at all in case 2 failed on the switch precondition with
+the real key. Inverting case 1's relay-side identity claim (assert the event
+belongs to bob) failed showing the real values in both directions.
+
+**Three findings from C8/C10/C12, all small, all real.**
+
+`RelayWaiting.needsAuth` appears against a strfry with no NIP-42
+configuration that never sends an `AUTH` frame. Every write in C8 and C10
+walks `notConnected → needsAuth → sent → published`. Nothing is broken — the
+write lane needs its own identity-scoped session established before it can
+send — but the sentence an app builds out of that case is "this relay wants
+you to authenticate", which is not what happened. Recorded, not asserted.
+
+`publishQueue(forEventID:)` returns **zero entries once a write settles**
+(measured during C8's falsification, where all three relays succeeded). The
+queue is outstanding obligations, exactly as its doc says, not a history of
+writes — so an app that wants to know where a FINISHED write went must have
+been holding its receipt. Worth stating because "read your own publish queue
+back" reads like a durable record of writes, and it is a record of unfinished
+ones.
+
+`RelayHandle.isReachable` cannot distinguish a refused port from a
+black-holed one and costs its full timeout for both (the `NWConnection`
+finding above). That is a Canary-lab defect rather than an NMP one, and it is
+fixed by `RelayHandle.probe` rather than by changing `isReachable`, whose
+boolean is still the right tool for the waits C2 and C13 use it for.
 
 **C15's relay lab is qualified; C15 itself is NOT proven.** The distinction is
 the whole point of the paragraph below, and an earlier revision of this section
