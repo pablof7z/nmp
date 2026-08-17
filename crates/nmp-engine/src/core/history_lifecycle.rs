@@ -1828,7 +1828,7 @@ impl EngineCore {
 }
 
 /// `HistorySessions::assert_consistent`'s falsifier, and its removal-site
-/// falsifiers (#1562). All three reach `sessions`/`by_handle` directly,
+/// falsifiers (#1606). All three reach `sessions`/`by_handle` directly,
 /// something only a test inside this module can do -- exactly the reasoning
 /// `owner_index.rs`'s own falsifier module doc gives for the same technique.
 #[cfg(test)]

@@ -19,7 +19,7 @@
 //! Both directions are one implementation, so the two maps cannot disagree
 //! about who owns whom.
 //!
-//! `RequestReplacements` (#1562) needed the identical shape with a
+//! `RequestReplacements` (#1606) needed the identical shape with a
 //! `RelaySessionKey` owner instead of a plan `SubId`, so the mechanism moved
 //! to `owner_index.rs`, generic over the owner key. This file keeps its own
 //! vocabulary — "plan", not "owner" — in the type alias and the trait impls

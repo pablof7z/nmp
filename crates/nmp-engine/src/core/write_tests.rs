@@ -1493,7 +1493,7 @@ mod semantic_successor_tests {
         }));
     }
 
-    /// #1562: a replaceable-operation successor that rewrites an existing
+    /// #1606: a replaceable-operation successor that rewrites an existing
     /// member's `pending` row in place must not leave that member's OLD
     /// generation naming it in `receipts_by_lane_relay`.
     ///
@@ -1581,7 +1581,7 @@ mod semantic_successor_tests {
                     .event,
             );
         }
-        // #1562, the second index: publishing bob's contribution rewrote
+        // #1606, the second index: publishing bob's contribution rewrote
         // alice's already-pending row onto the new generation through
         // `write/replaceable_operation.rs`'s member-rewrite branch. That
         // branch retires the member's old frozen bytes, and it used to drop

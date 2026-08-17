@@ -1944,7 +1944,7 @@ pub struct EngineCore {
     attempts: RequestAttempts,
     /// Every accepted-open-before-close transition still waiting on its
     /// successor's admission, keyed by successor and mirrored by owning
-    /// session (#774, #1562). Private maps in `request_replacements.rs`,
+    /// session (#774, #1606). Private maps in `request_replacements.rs`,
     /// reusing the mirrored-index mechanism `nip77_sessions.rs` introduced.
     request_replacements: RequestReplacements,
     active_request_evidence: HashMap<u64, ActiveRequestEvidence>,
@@ -2219,7 +2219,7 @@ pub struct EngineCore {
     /// Suppresses the per-`handle()` turn-level mirror check
     /// (`assert_owner_consistency`, called unconditionally under
     /// `#[cfg(test)]` at the end of [`Self::handle`]) for exactly the named
-    /// tests below (#1562). Two distinct, both narrow, reasons:
+    /// tests below (#1606). Two distinct, both narrow, reasons:
     ///
     /// 1. **Amortized-COST falsifiers** that drive `handle()` directly once
     ///    per item to prove no O(n) revisit hides behind the production
@@ -3382,7 +3382,7 @@ impl EngineCore {
         // this crate drives at least one `handle()` call, so this single
         // site turns the whole corpus into a mirror falsifier for every
         // extracted owner at once, instead of depending on each test author
-        // remembering to call `assert_owner_consistency` themselves (#1562).
+        // remembering to call `assert_owner_consistency` themselves (#1606).
         // `#[cfg(test)]`, not the wider `bench-instrumentation` gate the
         // owners' own `assert_consistent` methods use: this runs on every
         // `handle()` call in every test, so it must never ship in a
