@@ -36,7 +36,27 @@
 //! 200 lines away absorbed the same violation with `saturating_sub`, for no
 //! stated reason. Two spellings of one invariant is one spelling too many;
 //! a wire owner count that goes negative is a bug in this file, and silence
-//! would only move the crash somewhere less informative.
+//! would only move the crash somewhere less informative. [`WireOwnership::retain`]'s
+//! two increments are `checked_add(..).expect(..)` for the same reason
+//! (#1774): a `usize` wraps silently on overflow in a release build, and an
+//! asymmetric rule -- checked one way, plain the other -- is itself the kind
+//! of unmotivated inconsistency this file exists to not have.
+//!
+//! ## Why `retain`'s frozen atom body is safe to freeze
+//!
+//! [`WireOwnership::retain`] keeps the FIRST retainer's atom body and only
+//! ever overwrites its `routing_evidence` afterward (below); [`assert_consistent`]
+//! only ever checks that field and the count, never the rest of the stored
+//! atom. That is sound only because `DemandKey` -- `(coverage_key(atom),
+//! since, until, limit)` -- is injective over everything else a `ContextualAtom`
+//! carries: `coverage_key` hashes `{window_erase(filter), source, access,
+//! evidence: ∅}`, and `window_erase` blanks exactly `since`/`until`/`limit`.
+//! So two atoms sharing a `DemandKey` differ from each other only in
+//! `routing_evidence`, and freezing the rest of the body is a consequence of
+//! that fact in two other crates (`nmp-router`, `nmp-store`), not one this
+//! file enforces itself. A future change that erases one more field from
+//! `coverage_key` would keep `assert_consistent` passing while silently
+//! handing the router a stale atom body.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -190,7 +210,9 @@ impl WireOwnership {
         for fact in &atom.routing_evidence {
             let count = evidence.entry(fact.clone()).or_insert(0);
             evidence_grew |= *count == 0;
-            *count += 1;
+            *count = count
+                .checked_add(1)
+                .expect("routing-evidence owner count cannot overflow");
         }
         let effective_evidence = evidence.keys().cloned().collect();
 
@@ -198,7 +220,10 @@ impl WireOwnership {
             .owner_counts
             .entry(key)
             .or_insert_with(|| (atom.clone(), 0));
-        entry.1 += 1;
+        entry.1 = entry
+            .1
+            .checked_add(1)
+            .expect("wire owner count cannot overflow");
         entry.0.routing_evidence = effective_evidence;
         AtomRetained {
             key,
@@ -271,14 +296,28 @@ impl WireOwnership {
     /// caller's separate [`Self::retain`] loop, because each retained atom
     /// produces a router and attribution consequence this owner cannot
     /// perform.
+    ///
+    /// Refuses a handle that is already indexed, rather than self-healing.
+    /// An earlier version called [`Self::unindex_handle`] here and DROPPED
+    /// the returned atom set -- exactly what the caller is contractually
+    /// required to [`Self::release`] (the two `admission_tests/resolver_delta.rs`
+    /// fixtures that used to call the now-deleted test-only `reindex_handle`
+    /// spell out the correct sequence: unindex, release whatever left the
+    /// set, index, retain whatever the set gained). The old self-heal
+    /// silently traded index corruption for an `owner_counts` leak: every
+    /// one of the old atoms stayed retained forever while its index edges
+    /// vanished. Double-indexing is not a supported transition -- every
+    /// `attach_wire_handle` call site passes a freshly minted `HandleId`
+    /// (#1774) -- so this is the same refusal `owner_index.rs::insert` makes
+    /// of a reused child id, for the same reason: a defensive branch that
+    /// swaps one silent corruption for another is worse than a panic, and
+    /// self-healing here would hide the caller bug that produced the
+    /// double-index in the first place.
     pub(super) fn index_handle(&mut self, id: HandleId, atoms: BTreeSet<ContextualAtom>) {
-        // Replace, do not overwrite. Indexing a handle twice used to insert
-        // fresh per-handle maps while leaving the three reverse indexes
-        // naming it under its OLD atoms forever -- silent corruption
-        // reachable by nothing more exotic than calling attach twice.
-        if self.atoms_by_handle.contains_key(&id) {
-            self.unindex_handle(id);
-        }
+        assert!(
+            !self.atoms_by_handle.contains_key(&id),
+            "WireOwnership: handle {id:?} is already indexed"
+        );
         let mut demand_refs: BTreeMap<DemandKey, usize> = BTreeMap::new();
         let mut coverage_refs: BTreeMap<CoverageKey, usize> = BTreeMap::new();
         for atom in &atoms {
@@ -673,13 +712,6 @@ impl WireOwnership {
         self.atoms_by_handle.get(&id).cloned().unwrap_or_default()
     }
 
-    /// Replace one handle's complete atom set, dropping its previous index
-    /// edges first. Owner counts are the caller's [`Self::retain`] loop.
-    pub(super) fn reindex_handle(&mut self, id: HandleId, atoms: BTreeSet<ContextualAtom>) {
-        self.unindex_handle(id);
-        self.index_handle(id, atoms);
-    }
-
     pub(super) fn demand_refs(&self, id: HandleId, key: &DemandKey) -> usize {
         self.demand_refs_by_handle
             .get(&id)
@@ -739,5 +771,106 @@ fn discard_edge<K: Ord + Clone + std::fmt::Debug>(
     );
     if handles.is_empty() {
         index.remove(key);
+    }
+}
+
+/// Falsifiers for #1774: `index_handle`'s double-index refusal (moved here
+/// from `admission_tests/attach_ordering.rs`, which asserted the self-heal
+/// this replaces), and `retain`'s two `checked_add` overflows.
+#[cfg(test)]
+mod tests {
+    use nmp_grammar::{ConcreteFilter, Demand, Filter, LiveQuery};
+    use nmp_store::RedbStore;
+    use nostr::{RelayUrl, Timestamp};
+
+    use super::*;
+    use super::super::{AccessContext, EngineCore, EngineMsg, Effect, Freshness, SourceAuthority};
+
+    /// A minimal atom with no routing evidence, needing no production
+    /// wiring -- for the two overflow falsifiers below, which corrupt an
+    /// owner count directly rather than driving it there one retain at a
+    /// time (unreachable in one process lifetime, same reasoning as the
+    /// id-minting `checked_add`s elsewhere in this crate).
+    fn atom() -> ContextualAtom {
+        ContextualAtom {
+            filter: ConcreteFilter::default(),
+            source: SourceAuthority::Pinned(BTreeSet::from([
+                RelayUrl::parse("wss://wire-ownership-overflow.example").unwrap(),
+            ])),
+            access: AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
+        }
+    }
+
+    /// One live observation, opened and admitted through the real
+    /// `Subscribe`/`FlushWireAdmission` doors, with its one attached
+    /// `HandleId` -- the shape [`WireOwnership::index_handle`] is always
+    /// called with in production.
+    fn subscribed_handle() -> (EngineCore, HandleId) {
+        let relay = RelayUrl::parse("wss://wire-ownership-double-index.example").unwrap();
+        let mut demand = Demand::from_filter(Filter::default());
+        demand.source = SourceAuthority::Pinned(BTreeSet::from([relay]));
+        demand.freshness = Freshness::Live;
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
+        let opened = core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));
+        core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
+        let id = opened
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::EmitRows(id, _, _) => Some(*id),
+                _ => None,
+            })
+            .expect("an observation open returns its immediate cache seed");
+        let handle = core.observations[&id].branches[0];
+        (core, handle)
+    }
+
+    /// `index_handle`'s falsifier: a handle already indexed must refuse a
+    /// second `index_handle` call, rather than self-healing by dropping its
+    /// old index edges and leaving their `owner_counts` incremented forever.
+    #[test]
+    #[should_panic(expected = "is already indexed")]
+    fn index_handle_refuses_a_handle_already_indexed() {
+        let (mut core, handle) = subscribed_handle();
+
+        // Precondition: the handle really is indexed before the break can
+        // become observable.
+        assert!(core.wire.is_attached(handle));
+
+        core.wire.index_handle(handle, BTreeSet::new());
+    }
+
+    /// `retain`'s owner-count falsifier: corrupt `owner_counts` to
+    /// `usize::MAX` directly -- reaching past `retain`'s own door is the only
+    /// way to reach this state at all, so this proves the guard fires, not
+    /// that production can ever exhaust it.
+    #[test]
+    #[should_panic(expected = "wire owner count cannot overflow")]
+    fn retain_panics_on_owner_count_overflow() {
+        let mut wire = WireOwnership::default();
+        let atom = atom();
+        let key = DemandKey::for_atom(&atom);
+        wire.owner_counts.insert(key, (atom.clone(), usize::MAX));
+
+        wire.retain(&atom);
+    }
+
+    /// `retain`'s routing-evidence-count falsifier, same technique.
+    #[test]
+    #[should_panic(expected = "routing-evidence owner count cannot overflow")]
+    fn retain_panics_on_routing_evidence_count_overflow() {
+        let mut wire = WireOwnership::default();
+        let mut atom = atom();
+        let fact = RoutingEvidence {
+            relay: RelayUrl::parse("wss://wire-ownership-overflow-evidence.example").unwrap(),
+            origin: nmp_grammar::RoutingEvidenceKind::Hint,
+        };
+        atom.routing_evidence.insert(fact.clone());
+        wire.routing_evidence_owner_counts
+            .entry(DemandKey::for_atom(&atom))
+            .or_default()
+            .insert(fact, usize::MAX);
+
+        wire.retain(&atom);
     }
 }
