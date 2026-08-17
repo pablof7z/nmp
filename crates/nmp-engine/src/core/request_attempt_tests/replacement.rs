@@ -136,9 +136,7 @@ fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candida
         handle,
     });
 
-    core.prober
-        .states
-        .insert(relay.clone(), crate::negentropy::ProbeState::Supported);
+    core.prober.force_supported_for_test(relay.clone());
     let probed = core.prober.probed(&relay).unwrap();
     let mut handoff_effects = Vec::new();
     core.begin_neg_handoff(

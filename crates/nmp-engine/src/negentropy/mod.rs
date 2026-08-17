@@ -121,7 +121,21 @@ pub struct ProbeRequest {
 /// from `core::attribution`'s bookkeeping for real REQ/negentropy
 /// sessions, so the two can never be confused for one another).
 pub struct Prober {
-    pub states: HashMap<RelayUrl, ProbeState>,
+    /// PRIVATE, and that is what makes this module's opening claim true.
+    ///
+    /// [`ProbedRelay`]'s field being private is only half a fence: [`probed`]
+    /// mints the token from `self.state(relay) == Supported`, so a writable
+    /// `states` is a second constructor for it. `states.insert(url,
+    /// Supported)` needs no probe, no relay, and no `NEG-MSG` — it fabricates
+    /// a capability from a verdict nothing ever gave.
+    ///
+    /// Nine test files did exactly that, and two of them then called
+    /// `probed(..).unwrap()` on the result. Tests now drive the real
+    /// transitions, or use [`Self::force_supported_for_test`], which is one
+    /// named door rather than a field anything in the crate can write.
+    ///
+    /// [`probed`]: Self::probed
+    states: HashMap<RelayUrl, ProbeState>,
     pending: HashMap<(RelayUrl, String), SubId>,
 }
 
@@ -152,6 +166,22 @@ impl Prober {
     /// for the other, "just learned it" construction site).
     pub fn probed(&self, relay: &RelayUrl) -> Option<ProbedRelay> {
         (self.state(relay) == ProbeState::Supported).then(|| ProbedRelay(relay.clone()))
+    }
+
+    /// Record `relay` as `Supported` without a probe exchange. **Test-only**,
+    /// and deliberately one named door rather than a writable field.
+    ///
+    /// A fixture that needs a NIP-77-capable relay to reach the behaviour it
+    /// is actually testing should not have to run the whole probe handshake,
+    /// and before this existed nine test files reached into `states` to say
+    /// so. That is fine as an intent and was not fine as a mechanism: the
+    /// same write is what would fabricate a [`ProbedRelay`] in production.
+    ///
+    /// Prefer driving [`Self::begin_probe`] then [`Self::on_neg_msg`] where
+    /// the test is about the probe itself — that proves the transition too.
+    #[cfg(test)]
+    pub(crate) fn force_supported_for_test(&mut self, relay: RelayUrl) {
+        self.states.insert(relay, ProbeState::Supported);
     }
 
     /// Begin probing `relay` if its state is `Unknown` (idempotent — a

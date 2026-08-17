@@ -59,9 +59,7 @@ impl Fixture {
             incumbent_claims,
             incumbent_demands,
         );
-        core.prober
-            .states
-            .insert(relay.clone(), crate::negentropy::ProbeState::Supported);
+        core.prober.force_supported_for_test(relay.clone());
         Self {
             core,
             relay,
@@ -317,9 +315,7 @@ fn exact_public_disconnect_retires_the_active_nip77_child_and_every_reverse_owne
 fn assert_consistent_catches_a_cardinality_preserving_swap_between_plans() {
     let relay = RelayUrl::parse("wss://nip77-plan-swap.example").unwrap();
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-    core.prober
-        .states
-        .insert(relay.clone(), crate::negentropy::ProbeState::Supported);
+    core.prober.force_supported_for_test(relay.clone());
 
     let install_plan = |core: &mut EngineCore, kind: u16| -> SubId {
         let atom = ContextualAtom {

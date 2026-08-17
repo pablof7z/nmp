@@ -97,8 +97,7 @@ impl Fixture {
             });
         self.core
             .prober
-            .states
-            .insert(self.relay.clone(), crate::negentropy::ProbeState::Supported);
+            .force_supported_for_test(self.relay.clone());
         let probed = self.core.prober.probed(&self.relay).unwrap();
         let mut effects = Vec::new();
         self.core.begin_neg_handoff(
@@ -165,10 +164,7 @@ fn predecessor_candidate_eose_during_replacement_keeps_its_plan_metadata() {
             attempt_id: first_attempt,
             handle: fixture.handle,
         });
-    fixture.core.prober.states.insert(
-        fixture.relay.clone(),
-        crate::negentropy::ProbeState::Supported,
-    );
+    fixture.core.prober.force_supported_for_test(fixture.relay.clone());
     let probed = fixture.core.prober.probed(&fixture.relay).unwrap();
     let mut candidate_effects = Vec::new();
     fixture.core.begin_neg_handoff(

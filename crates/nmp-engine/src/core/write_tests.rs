@@ -605,10 +605,7 @@ mod semantic_successor_tests {
         });
         // The destination speaks NIP-77, so the coordinate read this gate
         // opens compiles to a live-first barrier rather than an ordinary REQ.
-        core.prober.states.insert(
-            destination.clone(),
-            crate::negentropy::ProbeState::Supported,
-        );
+        core.prober.force_supported_for_test(destination.clone());
 
         let operation = nmp_grammar::ReplaceableOperation::from_registered_default_parts(
             [11; 16],

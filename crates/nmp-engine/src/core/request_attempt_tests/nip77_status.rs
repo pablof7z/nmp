@@ -22,9 +22,7 @@ impl Nip77StatusFixture {
             generation: 1,
         };
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-        core.prober
-            .states
-            .insert(relay.clone(), crate::negentropy::ProbeState::Supported);
+        core.prober.force_supported_for_test(relay.clone());
         core.handle(EngineMsg::RelayConnected(handle, session.clone()));
         let opened = core.handle(EngineMsg::Subscribe(live_query(&relay)));
         let observation = observation_id(&opened);
