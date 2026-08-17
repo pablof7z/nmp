@@ -42,9 +42,6 @@ members = [
     # First-class application tooling: `.nmp.toml` capability selection and
     # prepared Apple/Android products (#1392).
     "crates/nmp-cli",
-    # #1201: a real-relay application falsifier for the supported NIP-29
-    # facade. It deliberately names `nmp` as its only Rust dependency.
-    "tools/nip29-consumer",
     "crates/nmp-ffi",
     "crates/nmp-bdd",
     "crates/nmp-parity",
@@ -91,13 +88,6 @@ members = [
     # proof of goal, exercising the reversed architecture end to end. See
     # this crate's own doc comment for the measured claim.
     "crates/nmp-bookmarks",
-    # #818 Fjall journal-write-error falsifier. ONLY the harness is a member,
-    # so `cargo test --workspace` runs the regression instead of letting it rot
-    # behind a bespoke lane. It depends on no Fjall crate: the three pinned
-    # release probes under `tools/fjall-journal-fault/v3_1_*` stay detached
-    # workspaces that the harness builds and runs as child processes, so no
-    # Fjall version ever enters NMP's production or default graph.
-    "tools/fjall-journal-fault/harness",
 ]
 
 # #1564: `members` above is every package this repository ships evidence
