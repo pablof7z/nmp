@@ -424,6 +424,16 @@ pub struct Engine {
     /// close on 1->0. Two atoms with identical `ConcreteFilter` but
     /// different context refcount INDEPENDENTLY (Fable D: coalescing is
     /// equal-context-only).
+    ///
+    /// The count is **one per live FilterNode contributing the atom**, never
+    /// per handle (#1848). Handles are counted exactly once, by
+    /// [`GraphEntry::refcount`]; an atom is on the wire because some
+    /// FilterNode's `cached_atoms` holds it, and a FilterNode is live
+    /// because its graph has at least one handle. Mixing the two quantities
+    /// into this one counter is what made the paths asymmetric: subscribe
+    /// added a claim per handle, but `recompute_node`'s atom-set diff can
+    /// only ever remove ONE -- there is no handle to attribute a departing
+    /// atom to, because it departed from a *node*.
     atoms: BTreeMap<DescriptorHash, (ContextualAtom, u32)>,
     /// Every `Reactive` BindingNode id currently in the graph, across all
     /// live subscriptions — the re-root seed set (M1 plan §3.6).
@@ -593,19 +603,16 @@ impl Engine {
             // graph: graph-level dedup (M1 plan §3.2/§4; #106 widens the
             // key to selection+source+access, still cache-free per atlas's
             // forward-note -- two Demands differing only in `cache` share
-            // this same graph/atoms/wire/coverage). Bump the graph refcount
-            // and this handle's own claim on every atom the (shared) graph
-            // currently owns; none of these can cross 0->1 (they're already
-            // open), so this always yields an empty delta.
+            // this same graph/atoms/wire/coverage). Handles are counted by
+            // the GRAPH refcount and nothing else: the atom table counts
+            // FilterNode contributions (see `ref_atom`), and this graph's
+            // contributions are already in it. So a joining handle touches
+            // no atom and yields an empty delta.
             self.graph_entries
                 .get_mut(&root)
                 .expect("registry entry must exist")
                 .refcount += 1;
             self.handle_to_root.insert(handle_id, root);
-            let mut acc = DeltaAcc::default();
-            for atom in self.graph.atoms_in_structural_order(root) {
-                self.ref_atom(&atom, &mut acc);
-            }
             let handle = QueryHandle {
                 id: handle_id,
                 cache,
@@ -614,7 +621,7 @@ impl Engine {
             };
             return SubscribeOutcome::Opened {
                 handle,
-                delta: merge_deltas(drop_delta, acc.into_delta()),
+                delta: drop_delta,
             };
         }
 
@@ -693,17 +700,16 @@ impl Engine {
             entry.refcount
         };
 
-        let mut acc = DeltaAcc::default();
         if refcount_after > 0 {
-            // Other handles still hold this (shared) graph open: only this
-            // handle's own claim on each atom is withdrawn.
-            for atom in self.graph.atoms_in_structural_order(root) {
-                self.unref_atom(&atom, &mut acc);
-            }
-            return acc.into_delta();
+            // Other handles still hold this (shared) graph open. The graph's
+            // FilterNodes are all still live and still contributing every
+            // atom they contributed a moment ago, so the atom table -- which
+            // counts FilterNode contributions, not handles -- is unchanged.
+            return DemandDelta::empty();
         }
 
         // Refcount hit zero: full teardown.
+        let mut acc = DeltaAcc::default();
         let descriptor = self.graph_entries.remove(&root).unwrap().descriptor;
         self.descriptor_to_root.remove(&descriptor);
         for atom in self.graph.atoms_in_structural_order(root) {
@@ -1500,6 +1506,21 @@ impl Engine {
     }
 
     // ---- atom refcounting (M1 plan §3.2/§4) -----------------------------
+    //
+    // The counted unit is a FilterNode's membership of the atom (#1848).
+    // Exactly three sites move the count, and each moves it by one per
+    // (FilterNode, atom) membership gained or lost:
+    //
+    //   - `subscribe` building a NEW graph refs every atom in
+    //     `atoms_in_structural_order`, which is precisely the concatenation
+    //     of every FilterNode's `cached_atoms` in that graph;
+    //   - `unsubscribe_inner` tearing the LAST handle's graph down unrefs
+    //     the same walk, removing those same memberships;
+    //   - `recompute_node` diffs one FilterNode's `cached_atoms` and
+    //     refs/unrefs exactly the memberships that appeared/disappeared.
+    //
+    // Handle count never enters, in either direction. A second handle on an
+    // existing graph adds no FilterNode, so it adds no membership.
 
     /// Refcounts a [`ContextualAtom`] (identity domain) and pushes the SAME
     /// full atom into `DemandDelta` (#106, Fable's ratified shape --
