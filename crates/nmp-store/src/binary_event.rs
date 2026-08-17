@@ -902,9 +902,13 @@ impl<'a> StoredEventView<'a> {
         read_u16(self.bytes, KIND_OFFSET).expect("validated fixed header")
     }
 
-    pub(crate) fn content(&self) -> &'a str {
+    /// `from_trusted` only checks that the content byte range lies inside
+    /// the row; it never decodes those bytes. A corrupt-but-length-consistent
+    /// row can carry non-UTF-8 content here, so this door reports that as a
+    /// typed error instead of trusting the byte range's validity.
+    pub(crate) fn content(&self) -> Result<&'a str, DecodeError> {
         std::str::from_utf8(&self.bytes[self.content_start..self.content_start + self.content_len])
-            .expect("canonical event content is valid utf8")
+            .map_err(|_| DecodeError::InvalidUtf8)
     }
 
     pub(crate) fn tags(&self) -> TagsIter<'a> {
@@ -922,18 +926,25 @@ impl<'a> StoredEventView<'a> {
     #[cfg(test)]
     pub(crate) fn matches_filter(&self, filter: &Filter) -> bool {
         self.matches_prepared_filter_after_index(&PreparedFilter::new(filter), IndexedMatch::None)
+            .expect("test fixture events decode cleanly")
     }
 
+    /// `from_trusted` validates only the fixed header and the direct
+    /// content/tag-section byte ranges; it never walks the per-tag directory
+    /// or decodes atom descriptors. A corrupt-but-length-consistent row can
+    /// therefore carry a tag-end that does not correspond to a real atom
+    /// boundary, so every step here that walks tags or content is fallible
+    /// and this returns `Result` rather than trusting the row.
     pub(crate) fn matches_prepared_filter_after_index(
         &self,
         prepared: &PreparedFilter<'_>,
         indexed: IndexedMatch,
-    ) -> bool {
+    ) -> Result<bool, DecodeError> {
         let filter = prepared.filter;
         if filter.ids.as_ref().is_some_and(|ids| {
             !ids.is_empty() && !ids.iter().any(|id| id.as_bytes() == self.id_bytes())
         }) {
-            return false;
+            return Ok(false);
         }
         if !matches!(indexed, IndexedMatch::Author)
             && filter.authors.as_ref().is_some_and(|authors| {
@@ -943,14 +954,14 @@ impl<'a> StoredEventView<'a> {
                         .any(|author| author.as_bytes() == self.pubkey_bytes())
             })
         {
-            return false;
+            return Ok(false);
         }
         if !matches!(indexed, IndexedMatch::Kind)
             && filter.kinds.as_ref().is_some_and(|kinds| {
                 !kinds.is_empty() && !kinds.iter().any(|kind| kind.as_u16() == self.kind_u16())
             })
         {
-            return false;
+            return Ok(false);
         }
         let created_at = self.created_at_secs();
         if filter
@@ -960,44 +971,53 @@ impl<'a> StoredEventView<'a> {
                 .until
                 .is_some_and(|until| created_at > until.as_secs())
         {
-            return false;
+            return Ok(false);
         }
         for (name, wanted) in &prepared.generic_tags {
             if matches!(indexed, IndexedMatch::Tag(indexed_name) if indexed_name == *name) {
                 continue;
             }
-            if !self.tags().any(|tag| {
+            let mut any_match = false;
+            for tag in self.tags() {
                 let mut elements = tag.elements();
-                let Some(tag_name) = elements.next() else {
-                    return false;
+                let Some(tag_name) = elements.next().transpose()? else {
+                    continue;
                 };
-                let Some(value) = elements.next() else {
-                    return false;
+                let Some(value) = elements.next().transpose()? else {
+                    continue;
                 };
-                tag_name.is_single_ascii(name.as_char() as u8) && wanted.matches(value)
-            }) {
-                return false;
+                if tag_name.is_single_ascii(name.as_char() as u8) && wanted.matches(value) {
+                    any_match = true;
+                    break;
+                }
+            }
+            if !any_match {
+                return Ok(false);
             }
         }
         if let Some(query) = &filter.search {
             let query = query.as_bytes();
-            if !query.is_empty()
-                && !self
-                    .content()
+            if !query.is_empty() {
+                let content = self.content()?;
+                if !content
                     .as_bytes()
                     .windows(query.len())
                     .any(|window| window.eq_ignore_ascii_case(query))
-            {
-                return false;
+                {
+                    return Ok(false);
+                }
             }
         }
-        true
+        Ok(true)
     }
 
     pub(crate) fn materialize_event(&self) -> Result<Event, DecodeError> {
         let mut tags = Vec::with_capacity(self.tag_count as usize);
         for tag in self.tags() {
-            let elements: Vec<String> = tag.elements().map(AtomRef::to_owned_text).collect();
+            let elements: Vec<String> = tag
+                .elements()
+                .map(|element| element.map(AtomRef::to_owned_text))
+                .collect::<Result<Vec<_>, DecodeError>>()?;
             tags.push(Tag::parse(elements).map_err(|_| DecodeError::InvalidTag)?);
         }
         Ok(Event::new(
@@ -1006,7 +1026,7 @@ impl<'a> StoredEventView<'a> {
             Timestamp::from(self.created_at_secs()),
             Kind::from(self.kind_u16()),
             Tags::from_list(tags),
-            self.content(),
+            self.content()?,
             Signature::from_slice(self.signature_bytes())
                 .map_err(|_| DecodeError::InvalidSignature)?,
         ))
@@ -1079,20 +1099,38 @@ pub(crate) struct TagElementsIter<'a> {
 }
 
 impl<'a> Iterator for TagElementsIter<'a> {
-    type Item = AtomRef<'a>;
+    type Item = Result<AtomRef<'a>, DecodeError>;
 
+    /// `atom_end` comes from a tag-end that `from_trusted` never validates
+    /// against the real atom directory, so both the directory read and the
+    /// arena decode below are treated as untrusted input: an out-of-range
+    /// offset becomes a typed `Err` instead of an out-of-bounds panic, and a
+    /// malformed descriptor's `Err` is returned rather than `.expect`ed
+    /// away. Either error halts this tag's iteration so a bogus `atom_end`
+    /// cannot keep walking unrelated bytes as if they were atoms.
     fn next(&mut self) -> Option<Self::Item> {
         if self.atom_index == self.atom_end {
             return None;
         }
-        let offset = self.atom_refs_start + self.atom_index as usize * 4;
-        let descriptor: &[u8; 4] = self.bytes[offset..offset + 4]
-            .try_into()
-            .expect("validated atom directory");
-        let arena = &self.bytes[self.arena_start..self.arena_start + self.arena_len];
-        let (atom, _cell) = decode_atom(descriptor, arena).expect("validated atom descriptor");
+        let descriptor = (self.atom_index as usize)
+            .checked_mul(4)
+            .and_then(|delta| self.atom_refs_start.checked_add(delta))
+            .and_then(|offset| offset.checked_add(4).map(|end| (offset, end)))
+            .and_then(|(offset, end)| self.bytes.get(offset..end));
+        let Some(descriptor) = descriptor else {
+            self.atom_index = self.atom_end;
+            return Some(Err(DecodeError::Truncated));
+        };
+        let descriptor: &[u8; 4] = descriptor.try_into().expect("length checked");
         self.atom_index += 1;
-        Some(atom)
+        let arena = &self.bytes[self.arena_start..self.arena_start + self.arena_len];
+        match decode_atom(descriptor, arena) {
+            Ok((atom, _cell)) => Some(Ok(atom)),
+            Err(error) => {
+                self.atom_index = self.atom_end;
+                Some(Err(error))
+            }
+        }
     }
 }
 
@@ -1180,7 +1218,13 @@ mod tests {
             .unwrap();
         let encoded = encode_event(&event).unwrap();
         let view = StoredEventView::parse(&encoded).unwrap();
-        let atoms: Vec<_> = view.tags().next().unwrap().elements().collect();
+        let atoms: Vec<_> = view
+            .tags()
+            .next()
+            .unwrap()
+            .elements()
+            .collect::<Result<Vec<_>, DecodeError>>()
+            .unwrap();
 
         assert_eq!(atoms[0], AtomRef::Text("x"));
         assert_eq!(atoms[1], AtomRef::Text(""));

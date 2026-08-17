@@ -234,7 +234,14 @@ pub(super) fn query(
                     "decode canonical event view {event_key}: {error:?}"
                 ))
             })?;
-            if !view.matches_prepared_filter_after_index(&prepared_filter, IndexedMatch::None) {
+            let matches = view
+                .matches_prepared_filter_after_index(&prepared_filter, IndexedMatch::None)
+                .map_err(|error| {
+                    PersistenceError::invariant(format!(
+                        "match canonical event against filter {event_key}: {error:?}"
+                    ))
+                })?;
+            if !matches {
                 continue;
             }
             let local_value = events
