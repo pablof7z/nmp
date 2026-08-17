@@ -1545,9 +1545,7 @@ mod coverage_evidence_refresh_tests {
     fn nip77_barrier_lifecycle_is_lazy_without_a_diagnostics_observer() {
         let relay = RelayUrl::parse("wss://evidence-only-nip77-barrier.example").unwrap();
         let (mut core, transport, session) = connected_core(&relay);
-        core.prober
-            .states
-            .insert(relay.clone(), crate::negentropy::ProbeState::Supported);
+        core.prober.force_supported_for_test(relay.clone());
         core.handle(EngineMsg::Subscribe(pinned_query(&relay)));
         core.diagnostic_snapshots_built.set(0);
 

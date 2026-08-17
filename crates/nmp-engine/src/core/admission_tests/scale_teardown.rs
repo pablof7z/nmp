@@ -7,9 +7,7 @@ fn probed_nip77_plan_closes_touch_only_their_exact_children() {
     const PLANS: u16 = 64;
     let relay = RelayUrl::parse("wss://nip77-exact-close.example").unwrap();
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-    core.prober
-        .states
-        .insert(relay.clone(), crate::negentropy::ProbeState::Supported);
+    core.prober.force_supported_for_test(relay.clone());
     let mut observations = Vec::with_capacity(PLANS as usize);
     for index in 0..PLANS {
         observations.push(observation_id(&core.handle(EngineMsg::Subscribe(

@@ -2634,8 +2634,18 @@ impl EngineCore {
     /// reports. Tests that care about structure call this; tests that care
     /// about totals call the census; nothing should use one for the other.
     ///
-    /// Covers seven owners: `wire`, `request_targets`, `nip77`,
-    /// `request_replacements`, `attempts`, `stalled_writes`, `history`.
+    /// Covers every extracted owner. The list is the body below, not a
+    /// sentence here: an enumeration in prose is a hand-maintained mirror of
+    /// a function's call sites, and this one had already drifted twice — it
+    /// said "six" when seven were covered (#1759), was corrected to "seven",
+    /// and was stale again two commits later when `author_outbox_route_needs`
+    /// was added. A campaign against hand-maintained mirrors should not
+    /// carry one in its own doc comment.
+    ///
+    /// Not covered, and known: `Prober` (`states`/`pending` have a real
+    /// cross-map invariant) and `auth_ready_sessions` mirroring
+    /// `auth_sessions[s].phase == Ready`. Both are live mirrors outside this
+    /// check.
     #[cfg(any(test, feature = "bench-instrumentation"))]
     pub fn assert_owner_consistency(&self, at: &str) {
         self.wire.assert_consistent(at);

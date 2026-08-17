@@ -33,9 +33,7 @@ fn nip77_plan_indexes_mirror_their_forward_maps_through_open_and_close() {
     const PLANS: u16 = 8;
     let relay = RelayUrl::parse("wss://plan-index-mirror.example").unwrap();
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-    core.prober
-        .states
-        .insert(relay.clone(), crate::negentropy::ProbeState::Supported);
+    core.prober.force_supported_for_test(relay.clone());
     assert_mirrors(&core, "empty");
 
     let mut observations = Vec::with_capacity(PLANS as usize);
@@ -69,9 +67,7 @@ fn losing_a_relay_generation_leaves_no_orphaned_plan_edges() {
     let relay = RelayUrl::parse("wss://plan-index-mirror-disconnect.example").unwrap();
     let session = RelaySessionKey::public(relay.clone());
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-    core.prober
-        .states
-        .insert(relay.clone(), crate::negentropy::ProbeState::Supported);
+    core.prober.force_supported_for_test(relay.clone());
     let handle = TransportRelayHandle {
         slot: 17,
         generation: 1,
