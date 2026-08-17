@@ -11,6 +11,18 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   Whatever closes it must keep NMP the owner of when/what to sign, with the app's
   adapter merely interfacing to the hardware; the deleted app-supplied signer
   mailbox (#1290) inverted that ownership and was removed rather than kept.
+- **NIP-42 deadlocks against any relay that challenges in response to a
+  request (#1889).** An app declaring `NMPAccessContext.nip42` against strfry
+  never exchanges a byte with it: NMP withholds a protected session's REQs
+  until AUTH completes and only starts AUTH on an INBOUND `["AUTH", challenge]`
+  frame, while strfry only challenges in response to a request it wants to
+  gate. The query sits at `awaitingAuth(phase: .awaitingChallenge)` forever,
+  the installed `NMPAuthPolicy` is never consulted, and `AuthDiagnostics`
+  reports a placeholder row indistinguishable from a session that has merely
+  just connected. Every green NIP-42 test either injects a synthetic challenge
+  into the reducer or uses a relay hand-built to challenge unsolicited on
+  connect, which is why nothing caught it. Canary C15 is the committed
+  reproduction and is red until this closes.
 - **AUTH-policy callback inversion still open (#783).**
 - **Session storage is app-owned: NMP ships no plaintext checkpoint and no
   automatic Keychain/Keystore session store.** Transactional app-owned session
@@ -77,6 +89,25 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   determined through the public API — `DiagnosticsSnapshot` exposes no
   retained-bookkeeping or memory fact at all. C17's `distinct` phase is red
   until this is answered.
+- **A cold start never reconciles over NIP-77; it always refetches (#1888).**
+  `begin_neg_handoff` is only reachable when the relay already carries a
+  behaviorally-minted probe verdict at the moment a request is placed, and the
+  probe is asynchronous — a fresh engine sends its query's REQ as soon as the
+  socket is up and learns the relay supports NIP-77 just too late to use it.
+  Nothing re-plans the in-flight request. Canary C14 measured a first-run
+  cold start refetching all 70 events with `nip77Behavior` reporting
+  `behaviorally_proven` and `nip77Handoff` never leaving `none`;
+  reconciliation engages on the NEXT request (a reconnect replay), where the
+  same divergence costs 10 events instead of 70.
+- **NIP-77 reconciliation is invisible per query (#1888).** Negentropy
+  coverage is attributed through the same `attribute_eose` path as an ordinary
+  EOSE, so `SourceEvidence.reconciledThrough` and `SourceStatus` are identical
+  whether a result was reconciled or refetched. The only public distinguisher
+  is the engine-global, per-relay
+  `RelayDiagnostics.nip77Advertisement`/`nip77Behavior`/`nip77Handoff` triple,
+  and `nip77Handoff` is a transient an app must accumulate from
+  `observeDiagnostics()` to see at all.
+
 - **Two of NIP-22's three root shapes cannot be read back through the
   capability's own demand (#1876).** `commentThreadDemand(root:)` binds the
   root identifier to the `#I` tag whatever the root is, but the composer writes
