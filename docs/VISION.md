@@ -42,8 +42,10 @@ Demand := Selection + ReadRouting + AccessContext
 
 - **Selection** says which stored events match. It is a Nostr `Filter` whose
   field values may be reactive bindings.
-- **Source authority** says which relay facts and routing policy are allowed to
-  acquire the selection.
+- **Read routing** says one of two things: the app named relays, or the app
+  said nothing and NMP routes it. It names no kind of routing, because the
+  lanes NMP uses are additive rather than a choice
+  (`docs/internals/routing/outbox.md`).
 - **Access context** carries protocol context that can affect what a relay is
   asked for or allowed to return, such as AUTH state. It is not a local
   account-privacy boundary.

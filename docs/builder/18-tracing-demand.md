@@ -41,21 +41,30 @@ add/withdraw only affected demand.
 This stage decides what rows match. It does not grant authority to contact a
 relay merely because an `authors` field happens to exist.
 
-## 2. Apply source and access authority
+## 2. Apply routing and access
 
-The descriptor explicitly says where acquisition may come from:
+The descriptor says one of exactly two things about where acquisition may come
+from: the app named relays, or the app said nothing. It never names a lane.
 
-- `Auto` authorizes NIP-65 discovery/coverage for selected authors;
-- an opaque protocol-host authority authorizes its validated relay/object;
-- a private-protocol context authorizes verified recipient inbox facts; and
-- operator bootstrap policy authorizes discovery lanes.
+When the app said nothing, every lane that applies contributes, and they add
+up rather than compete — the selection's authors contribute their NIP-65
+outbound relays, the operator's app relays always contribute, a protocol's own
+host or a recipient's inbox contributes where the protocol supplies one, and
+relay hints and prior provenance contribute. When the app named relays, those
+relays are asked and nothing is added. The full ruling is in
+`docs/internals/routing/outbox.md`.
+
+There is no menu of authorities here to pick from, and no name for any of
+these lanes on the app surface —
+`docs/internals/conventions/naming-no-invented-categories.md` §3 records why.
 
 Access context says which AUTH identity or visibility grant applies. Equal
 selections under different access contexts retain separate evidence unless the
 compiler can prove sharing safe.
 
-Filter shape is never authority. An authorless selection is not automatically
-"pinned," and a selection with authors is not automatically an outbox request.
+Filter shape decides nothing about routing. An authorless selection does not
+become an exact-relay request, and a selection with authors does not become a
+different kind of request.
 
 ## 3. Solve candidates under limits
 

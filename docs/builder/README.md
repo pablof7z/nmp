@@ -65,7 +65,7 @@ library, or like an application framework in disguise?
 
 ### Route and operate
 
-- [Source authority and protocol routing context](17-relays.md)
+- [Read routing and protocol routing context](17-relays.md)
 - [Tracing compiled demand](18-tracing-demand.md)
 - [Offline acquisition and reconnect](19-offline-sync.md)
 - [Signer, AUTH, and crypto capabilities](20-capabilities.md)

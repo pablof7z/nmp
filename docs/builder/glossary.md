@@ -47,8 +47,11 @@
 - **Selector:** `Authors | Ids | Tag(EventTagName) | AddressCoord`, the closed
   projection vocabulary used by `Derived`. Tag projection accepts arbitrary
   event tag names; it is not limited to indexed filter keys.
-- **Source authority:** a typed value saying which routing facts may acquire a
-  selection. It is not a raw relay override.
+- **Read routing:** whether the app named relays or said nothing. Nothing
+  else, and no name for any lane NMP then uses — see
+  `docs/internals/conventions/naming-no-invented-categories.md` §3 for why
+  "source authority", "public" and "author outboxes" were all deleted rather
+  than renamed.
 - **Access context:** typed identity/visibility context that may change a
   source's answer.
 - **Query snapshot:** current canonical local rows plus cache, acquisition, and
