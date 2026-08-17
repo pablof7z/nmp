@@ -70,6 +70,18 @@ write intent. Swift and Kotlin use the matching top-level `commentIntent`
 function, then pass that value to generic `publish`. No `CommentIntent`
 wrapper, take-once lifecycle, or NIP-22 `publishComposed` overload exists.
 
+That is about `Engine`'s own surface, and it is unchanged. A module still
+ships **both** a primitive that constructs the event and a publishing
+convenience over it — the convenience is a protocol-owned free function that
+takes the engine, and it is a thin wrapper over the primitive, adding the
+publish call and nothing else. The ruling and the four cases that make the
+primitive mandatory are in
+`docs/design/protocol-modules-and-composition.md` §6.1.
+
+Neither form decides who signs. An account is an optional argument the caller
+may supply and the write plane resolves —
+`docs/internals/writes/identity.md` §7.
+
 ## Distinguish public protocol context from private authority
 
 A public protocol may make one host relay part of an object's identity. An

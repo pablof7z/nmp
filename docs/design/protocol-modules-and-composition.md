@@ -128,6 +128,57 @@ one generic `publish` → receipt lifecycle. A separate wrapper noun or
 protocol-specific publication overload would create a second owner of the
 same write.
 
+## 6.1 Both forms, and one is a wrapper over the other — OWNER RULING, 2026-08-17
+
+A capability offers **both** the primitive that constructs the event and a
+publishing convenience over it. The ruling came in two halves on the same day,
+and the second half corrected an over-strong reading of the first.
+
+The first half — the publishing form must exist, for every capability, not
+just the ones that happen to have it:
+
+> it's an implementation difference that should be fucking ironed out!
+> nip25::react and all the other shit should be able to take the engine and do
+> the publishing for the full experience
+
+That was briefly taken to mean the primitive should be deleted so there is
+only one lane. The second half rejects that, and names the reason:
+
+> "Reacting inside a NIP-29 group breaks." => THAT'S TRUE -> WE NEED THESE
+> EVENTS TO ALSO PROVIDE A NON-BATTERIES-INCLUDED-WE-WILL-PUBLISH-FOR-YOU. The
+> publish function should be just a nice wrapper on the primitive that only
+> constructs the event and returns it.
+
+So the shape is:
+
+- **the primitive** constructs the event and returns it, taking no engine;
+- **the publishing form** is a thin wrapper over that same primitive — it adds
+  the publish call and nothing else.
+
+"And nothing else" is the load-bearing half. If the wrapper composes the event
+a second way, or applies policy the primitive does not, the two forms drift
+and the capability has two definitions of its own event.
+
+Deleting the primitive was wrong because four shipping things go through it
+and cannot be expressed without it:
+
+1. **Composition inside a NIP-29 group.** `react()` produces an event; the
+   group door contextualizes it with the `h` tag and the group's own route.
+   With no primitive nothing reaches that door — no reacting, chatting,
+   reposting or replying inside a group.
+2. **Blossom kind:24242 authorizations** (`crates/nmp-blossom/src/auth.rs`)
+   are signed and base64'd into an HTTP `Authorization` header. They never go
+   to a relay at all: primitive only, no wrapper.
+3. **Republishing someone else's already-signed event** to a personal archive
+   relay — the owner's own worked example, and the reason
+   `WritePayload::Signed` exists (`docs/internals/routing/auto-and-explicit.md`
+   §4).
+4. **`nmp-nip68::build_picture`**, which returns an unsigned event for the
+   caller's own signer.
+
+Neither form resolves the author. Both inherit the one mechanism that does —
+`docs/internals/writes/identity.md` §7.
+
 #838 removed NIP-29's former `FfiComposedWriteIntent` / `GroupSendIntent` and
 `publishComposed` path and replaced it with the pure `GroupPublication`
 value. #977/#1011 later deleted `GroupPublication`, `contextualize_group_event`,
