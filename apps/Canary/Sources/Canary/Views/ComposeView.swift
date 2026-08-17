@@ -10,21 +10,64 @@
 // retry, or chase a relay itself. If truthfully rendering what happened to a
 // write ever seemed to require that, that would be an NMP API finding, not
 // something to route around here.
+//
+// It answers three questions about a publish, in the order a person asks
+// them: WHAT did I publish (the event id), WHERE was it meant to go (the
+// intended relay set, and whether routing has finished choosing it), and WHAT
+// HAPPENED at each of those relays -- including, verbatim, what the relay
+// itself said.
+//
+// Two of those are answered only partly, and both gaps are rendered rather
+// than hidden. The event id is not returned by `publish`; it appears when a
+// fact first quotes it. And the relay's message on a SUCCESSFUL publish does
+// not exist in NMP at all -- see `relayMessageRow`. Showing a gap is this
+// screen's job as much as showing a success is; an app that silently rendered
+// only the failure messages would leave the impression that the API carries
+// both.
 
 import SwiftUI
 import NMP
+
+/// The relays one write is INTENDED for, exactly as `WriteFact.destinations`
+/// delivered them. `complete` is kept alongside the set because the set alone
+/// cannot be read: while it is `false` the set can still GROW, so it is not a
+/// denominator yet and nothing here may be rendered as "n of m".
+struct WriteDestinations {
+    var relays: [String]
+    var complete: Bool
+    var awaitingAuthorRoutes: [String]
+}
 
 /// The app's own record of what one accepted write has reported so far.
 /// `Receipt.status` is authoritative; this only retains facts already
 /// delivered by that stream so the view has something to render between
 /// deliveries -- never a value this app invented.
 struct OutstandingWrite: Identifiable {
+    /// The store-issued RECEIPT id (`Receipt.id`) -- not the event id.
     let id: UInt64
     let preview: String
+    /// The frozen event id, `nil` until the stream reveals it. `Receipt`
+    /// carries only the receipt id, so this app learns the event id from the
+    /// facts that quote it -- see `apply(_:toWriteID:)`.
+    var eventID: String?
     var signing: SigningState?
-    var destinations: (relays: [String], complete: Bool, awaitingAuthorRoutes: [String])?
+    var destinations: WriteDestinations?
     var relayStates: [String: RelayState] = [:]
     var outcome: WriteOutcome?
+
+    /// Every relay this write is known to involve: the intended set, plus any
+    /// relay that has already reported. They are usually the same set, but a
+    /// relay fact can arrive before the `destinations` fact that names it, and
+    /// neither may be dropped from the picture.
+    var knownRelays: [String] {
+        Set((destinations?.relays ?? []) + relayStates.keys).sorted()
+    }
+
+    /// Only meaningful once `destinations.complete` is true -- before that
+    /// there is no denominator for this to be a fraction of.
+    var publishedCount: Int {
+        relayStates.values.filter { $0 == .published }.count
+    }
 }
 
 struct ComposeView: View {
@@ -98,26 +141,33 @@ struct ComposeView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(write.preview).font(.body)
 
+            // The event id, which is what a person actually needs to go and
+            // look this note up anywhere else. `Receipt` hands back only the
+            // receipt id, so until a fact quotes the event id there is nothing
+            // truthful to print here -- say that rather than print a blank.
+            //
+            // In full, and selectable: an id abbreviated to fit is an id
+            // nobody can paste into a relay query, which is the entire reason
+            // to show one.
+            if let eventID = write.eventID {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Event id").foregroundStyle(.secondary)
+                    Text(eventID)
+                        .font(.caption2.monospaced())
+                        .textSelection(.enabled)
+                }
+            } else {
+                LabeledContent("Event id", value: "not reported yet")
+                    .foregroundStyle(.secondary)
+            }
+
             if let signing = write.signing {
                 LabeledContent("Signing", value: describe(signing))
             }
-            if let destinations = write.destinations {
-                LabeledContent(
-                    "Destinations",
-                    value: "\(destinations.relays.count) relay(s), complete: \(destinations.complete)"
-                )
-                if !destinations.awaitingAuthorRoutes.isEmpty {
-                    LabeledContent(
-                        "Awaiting routes for",
-                        value: "\(destinations.awaitingAuthorRoutes.count) author(s)"
-                    )
-                }
-            }
-            ForEach(write.relayStates.keys.sorted(), id: \.self) { relay in
-                if let state = write.relayStates[relay] {
-                    LabeledContent(relay, value: describe(state))
-                }
-            }
+
+            destinationsRows(write)
+            relayRows(write)
+
             if let outcome = write.outcome {
                 LabeledContent("Outcome", value: describe(outcome))
                     .font(.footnote.bold())
@@ -125,6 +175,106 @@ struct ComposeView: View {
         }
         .font(.caption)
         .padding(.vertical, 2)
+    }
+
+    /// Where routing decided this write goes -- and, just as load-bearing,
+    /// whether it has finished deciding. An incomplete set may still GROW, so
+    /// it is never rendered as a total and never gets a "n of m" beside it.
+    @ViewBuilder
+    private func destinationsRows(_ write: OutstandingWrite) -> some View {
+        if let destinations = write.destinations {
+            if destinations.complete {
+                LabeledContent(
+                    "Routing",
+                    value: "decided: \(destinations.relays.count) relay(s)"
+                )
+                // Only now is there a denominator: the destination set is
+                // closed, so this fraction is a fact rather than a guess.
+                LabeledContent(
+                    "Published",
+                    value: "\(write.publishedCount) of \(destinations.relays.count)"
+                )
+            } else if destinations.relays.isEmpty {
+                LabeledContent("Routing", value: "still deciding -- no relay named yet")
+                    .foregroundStyle(.orange)
+            } else {
+                LabeledContent(
+                    "Routing",
+                    value: "still deciding -- \(destinations.relays.count) so far, may grow"
+                )
+                .foregroundStyle(.orange)
+            }
+
+            // The keys resolution is still waiting on ARE the repair list, so
+            // they are shown as keys, not counted into a number nobody can act
+            // on.
+            ForEach(destinations.awaitingAuthorRoutes, id: \.self) { pubkey in
+                LabeledContent("Awaiting routes for", value: shortHex(pubkey))
+                    .foregroundStyle(.orange)
+            }
+        } else {
+            LabeledContent("Routing", value: "no destinations fact yet")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// One block per relay: what happened there, and what the relay itself
+    /// said about it.
+    @ViewBuilder
+    private func relayRows(_ write: OutstandingWrite) -> some View {
+        ForEach(write.knownRelays, id: \.self) { relay in
+            VStack(alignment: .leading, spacing: 2) {
+                if let state = write.relayStates[relay] {
+                    LabeledContent(relay, value: describe(state))
+                    relayMessageRow(state)
+                } else {
+                    LabeledContent(relay, value: "intended, nothing reported yet")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    /// What the relay said, VERBATIM, wherever NMP carries it.
+    ///
+    /// It carries the message for every answer except the one an app most
+    /// wants to show. `RelayState.published` is a case with no payload:
+    /// `handle_write_ack` classifies `["OK", id, true, message]` as an ack and
+    /// drops `message` on the floor, so there is no empty string to render and
+    /// no "" to mistake for one -- the text simply does not exist anywhere in
+    /// NMP. The same happens to a relay's `duplicate: ...` explanation, which
+    /// is classified as an ack too.
+    ///
+    /// This app therefore says so out loud instead of quietly rendering only
+    /// the failure cases. Proving what an app CANNOT get through the public
+    /// API is as much this screen's job as proving what it can.
+    @ViewBuilder
+    private func relayMessageRow(_ state: RelayState) -> some View {
+        switch state {
+        case .published:
+            LabeledContent("Relay said", value: "unavailable -- NMP discards the OK message")
+                .foregroundStyle(.orange)
+                .italic()
+        case .rejected(let reason):
+            LabeledContent("Relay said", value: reason)
+                .textSelection(.enabled)
+        case .authFailed(_, let source, let reason):
+            // Only the `.relay` source is the relay talking; the other two are
+            // this device's own refusal and must never be shown as a relay
+            // rejecting the user.
+            LabeledContent(source == .relay ? "Relay said" : "Refused locally", value: reason)
+                .textSelection(.enabled)
+        case .waiting(.backingOff(_, _, _, let detail)):
+            if let detail {
+                LabeledContent("Relay said", value: detail)
+                    .textSelection(.enabled)
+            }
+        case .waiting, .sent, .gaveUp:
+            // `.gaveUp` carries nothing: the ceiling was reached, and whatever
+            // each failed attempt's relay message was is not retained on the
+            // terminal state either.
+            EmptyView()
+        }
     }
 
     private func publish() {
@@ -181,15 +331,29 @@ struct ComposeView: View {
         }
     }
 
+    /// Folds one delivered fact into this app's record. The event id is
+    /// harvested from the two facts that quote it -- `.signing(.signed)` and
+    /// `.relay` -- because `publish` does not return it: `Receipt` exposes
+    /// `id`, the store-issued RECEIPT id used for reattach and cancel, and
+    /// nothing else. So the id of the thing actually published only becomes
+    /// showable once a fact mentions it.
     private func apply(_ fact: WriteFact, toWriteID id: UInt64) {
         guard let idx = writes.firstIndex(where: { $0.id == id }) else { return }
         switch fact {
         case .signing(let state):
             writes[idx].signing = state
-        case .relay(_, let relay, let state):
+            if case .signed(let eventID) = state {
+                writes[idx].eventID = eventID
+            }
+        case .relay(let eventID, let relay, let state):
+            writes[idx].eventID = eventID
             writes[idx].relayStates[relay] = state
         case .destinations(let relays, let complete, let awaitingAuthorRoutes):
-            writes[idx].destinations = (relays, complete, awaitingAuthorRoutes)
+            writes[idx].destinations = WriteDestinations(
+                relays: relays,
+                complete: complete,
+                awaitingAuthorRoutes: awaitingAuthorRoutes
+            )
         case .outcome(let outcome):
             writes[idx].outcome = outcome
         }
@@ -208,13 +372,17 @@ struct ComposeView: View {
         }
     }
 
+    /// The STATE only. Anything the relay itself said is rendered separately
+    /// and verbatim by `relayMessageRow`, so it is deliberately not folded
+    /// into this sentence -- a quoted relay message must appear exactly once,
+    /// unedited, and be selectable.
     private func describe(_ state: RelayState) -> String {
         switch state {
         case .waiting(let waiting): return "waiting: \(describe(waiting))"
         case .sent(let attempt, _): return "sent (attempt \(attempt))"
         case .published: return "published"
-        case .rejected(let reason): return "rejected: \(reason)"
-        case .authFailed(_, let source, let reason): return "auth failed (\(source)): \(reason)"
+        case .rejected: return "rejected"
+        case .authFailed(_, let source, _): return "auth failed (\(source))"
         case .gaveUp: return "gave up"
         }
     }
@@ -223,8 +391,9 @@ struct ComposeView: View {
         switch waiting {
         case .notConnected: return "not connected"
         case .needsAuth: return "needs auth"
-        case .backingOff(let attempt, _, let cause, let detail):
-            return "backing off (attempt \(attempt), \(cause)\(detail.map { ": \($0)" } ?? ""))"
+        case .backingOff(let attempt, _, let cause, _):
+            return "backing off (attempt \(attempt), \(cause))"
+        // Local disk, not a relay -- never quoted as something a relay said.
         case .persistenceStalled(let detail): return "persistence stalled: \(detail)"
         }
     }
