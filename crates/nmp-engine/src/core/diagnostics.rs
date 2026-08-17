@@ -2,9 +2,9 @@
 //! `nmp_router::Diagnostics` (per-relay wire-sub count, exact filters, lane
 //! counts, reverse coverage) with the two facts `nmp-router` cannot see on
 //! its own: events actually RECEIVED per (relay, kind) (this crate's own
-//! counter, bumped by `EngineCore::on_relay_frame`'s `RelayMessage::Event`
+//! counter, bumped by `CoreState::on_relay_frame`'s `RelayMessage::Event`
 //! arm) and per-(filter, relay) coverage (read from the store via
-//! `EngineCore::get_coverage`). Read-only, off the data path: nothing here
+//! `CoreState::get_coverage`). Read-only, off the data path: nothing here
 //! ever influences routing/delivery — it is strictly an observer of the
 //! other planes (M5 plan §1, VISION §5's "acceptance test made visible").
 //!
@@ -84,7 +84,7 @@ pub struct RelayDiagnosticsSnapshot {
     pub filters: Vec<String>,
     /// Events actually received FROM this relay, counted by kind — the one
     /// datum `nmp-router`'s own `Diagnostics` cannot see (it never observes
-    /// inbound frames); bumped in `EngineCore::on_relay_frame`'s
+    /// inbound frames); bumped in `CoreState::on_relay_frame`'s
     /// `RelayMessage::Event` arm.
     pub events_by_kind: Vec<(u16, u64)>,
     /// Per-filter coverage, same order/count as `filters`.
@@ -325,7 +325,7 @@ pub struct DiagnosticsSnapshot {
 /// Combine `diag` (subs/filters/lanes/authors_served — `nmp-router`-owned)
 /// with `events_by_session_kind` (this crate's own counter) and per-(relay,
 /// filter) coverage (`get_coverage`, read from the store) into one
-/// [`DiagnosticsSnapshot`]. Called by `EngineCore::diagnostics_snapshot`.
+/// [`DiagnosticsSnapshot`]. Called by `CoreState::diagnostics_snapshot`.
 ///
 /// Total by construction, because `degrade_store` builds a snapshot in order
 /// to report a failure — so a failing coverage read cannot abort this. It
@@ -416,13 +416,13 @@ pub(crate) fn build(
         )
         .unwrap_or(u64::MAX),
         // A coverage read that failed WHILE building this snapshot is set
-        // here; `EngineCore::diagnostics_snapshot` then lets the reducer's
+        // here; `CoreState::diagnostics_snapshot` then lets the reducer's
         // own latched #122 error win if it holds one. Either way the field
         // is non-`None` whenever a `coverage` entry above is empty because
         // the store could not be read.
         store_degraded: coverage_unreadable,
         transport_degraded: None,
-        // Filled in by `EngineCore::diagnostics_snapshot` from the reducer's
+        // Filled in by `CoreState::diagnostics_snapshot` from the reducer's
         // own pending-obligation set: `build` sees only router/store read
         // facts and has no notion of the write plane.
         stalled_writes: Vec::new(),

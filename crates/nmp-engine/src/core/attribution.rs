@@ -4,12 +4,12 @@
 //! send-time snapshots, the wire subscription-id -> `SubId` reverse lookup,
 //! and the `CoverageKey` -> retained window-erased shape registry
 //! `record_coverage` needs (the store only ever sees whatever
-//! `ConcreteFilter` it is handed; `EngineCore` is the one place that knows
+//! `ConcreteFilter` it is handed; `CoreState` is the one place that knows
 //! which shape a given key came from — see `nmp-store`'s own `ShapeRecord`
 //! doc comment for the identical reasoning at the store layer).
 //!
 //! This is a plain data structure with no I/O and no access to the store or
-//! router — `EngineCore` (`core/mod.rs`) is the one place both exist
+//! router — `CoreState` (`core/mod.rs`) is the one place both exist
 //! together, and it is the one that actually calls
 //! `RedbStore::record_coverage` with the shape this module hands back.
 
@@ -145,13 +145,13 @@ impl CompletedAttribution {
     }
 }
 
-/// All coverage-attribution bookkeeping `EngineCore` owns. Keyed by `SubId`
+/// All coverage-attribution bookkeeping `CoreState` owns. Keyed by `SubId`
 /// (which already embeds the relay — `SubId(RelayUrl, SkeletonHash, AccessContext)`), so a
 /// FIFO lookup is also implicitly relay-scoped.
 ///
 /// It holds state and the invariants over that state, and nothing else: no
 /// `store`, no `router`, no `resolver`, no `Effect`. Anything that has to
-/// emit is orchestration and stays on `EngineCore`. `RequestAttempts` and
+/// emit is orchestration and stays on `CoreState`. `RequestAttempts` and
 /// `HistorySessions` restate this same contract; it is written here because
 /// `request_attempt.rs` cites "the `AttributionState` contract, verbatim"
 /// and until now there was no verbatim text to cite (#1739).
@@ -162,7 +162,7 @@ pub(crate) struct AttributionState {
     /// `(session, wire-format subscription_id string) -> SubId`, populated at
     /// send time. `nmp-transport::Pool` is an unimplemented Step 0 shell in
     /// M3 step B, so there is no pre-existing wire convention to conform
-    /// to; `EngineCore` invents and owns this string entirely (see
+    /// to; `CoreState` invents and owns this string entirely (see
     /// `wire_sub_id_string` below) and is the only reader of it, via this
     /// map — never by re-parsing the string back into a hash. Keyed by the
     /// full [`RelaySessionKey`] (never a bare URL): NIP-42 visibility is
@@ -175,10 +175,10 @@ pub(crate) struct AttributionState {
     /// takes a `&ContextualAtom`, since `CoverageKey` itself is a
     /// context-inclusive hash, so retaining only the selection shape would
     /// no longer be enough to reconstruct the right key at EOSE time).
-    /// `EngineCore` only ever has a `CoverageKey` at attribution time (from
+    /// `CoreState` only ever has a `CoverageKey` at attribution time (from
     /// `WireReq::coverage_claims`), so it must retain the FULL atom separately to
     /// be able to call that door at all. Pruned each recompile by
-    /// [`Self::prune_shapes`] (mirroring `EngineCore`'s own
+    /// [`Self::prune_shapes`] (mirroring `CoreState`'s own
     /// `nip11_information` pruning in `core/mod.rs::recompile`) against the
     /// union of the current `active_demand()` and every `CoverageKey` still
     /// `coverage_claims` by an outstanding `inflight` snapshot — see that method's
@@ -205,7 +205,7 @@ impl AttributionState {
 
     /// Learn the ContextualAtom behind every atom in `demand` (called once
     /// per recompile, from the resolver's full current `active_demand()` —
-    /// cheap, and the only way `EngineCore` ever sees the atoms' shapes at
+    /// cheap, and the only way `CoreState` ever sees the atoms' shapes at
     /// all). `demand` carries each atom's full `ContextualAtom` identity
     /// (#106) so the retained value is keyed AND populated the SAME way
     /// `record_send`/`attribute_eose`'s `CoverageKey`s already are.
@@ -243,7 +243,7 @@ impl AttributionState {
     /// Prune `shape_by_key` down to keys still reachable from SOMEWHERE
     /// (finding E3, epic #507): called once per recompile, right after
     /// [`Self::observe_demand`] (same `demand` argument), mirroring
-    /// `EngineCore`'s own `nip11_information.retain(..)` immediately below
+    /// `CoreState`'s own `nip11_information.retain(..)` immediately below
     /// it in `core/mod.rs::recompile` -- without this, `shape_by_key` grows
     /// once per distinct atom shape ever demanded for the life of the
     /// process, which for a long-running client visiting many distinct

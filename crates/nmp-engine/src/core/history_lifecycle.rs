@@ -311,7 +311,7 @@ impl HistorySessions {
     }
 }
 
-impl EngineCore {
+impl CoreState {
     /// The refused-open unwind, shared by `open_history_observation`'s two
     /// fallible projections (canonical rows, opening evidence). A window is
     /// installed whole or not at all, so both retire the just-created session
@@ -345,7 +345,7 @@ impl EngineCore {
         ObservationOpen::Refused { reason, effects }
     }
 
-    pub fn open_history_observation(
+    pub(in crate::core) fn open_history_observation(
         &mut self,
         query: HistoryQuery,
         now: Timestamp,
@@ -474,7 +474,7 @@ impl EngineCore {
         ObservationOpen::Opened { id, seed, effects }
     }
 
-    pub(super) fn on_subscribe_history(&mut self, query: HistoryQuery) -> Vec<Effect> {
+    pub(in crate::core) fn on_subscribe_history(&mut self, query: HistoryQuery) -> Vec<Effect> {
         match self.open_history_observation(query, self.clock) {
             ObservationOpen::Opened {
                 id,
@@ -488,7 +488,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn on_unsubscribe_history(&mut self, id: HistorySessionId) -> Vec<Effect> {
+    pub(in crate::core) fn on_unsubscribe_history(&mut self, id: HistorySessionId) -> Vec<Effect> {
         let Some(state) = self.history.retire(id) else {
             return Vec::new();
         };
@@ -512,7 +512,11 @@ impl EngineCore {
     /// no generation to go stale, and no `LoadInProgress`/`AtBound`/
     /// `NoBoundary` error — an in-flight advance simply raises the target, and
     /// being at the bound is a frame fact, not an error.
-    pub(super) fn on_request_rows(&mut self, id: HistorySessionId, at_least: usize) -> Vec<Effect> {
+    pub(in crate::core) fn on_request_rows(
+        &mut self,
+        id: HistorySessionId,
+        at_least: usize,
+    ) -> Vec<Effect> {
         let Some(state) = self.history.get(id) else {
             // The session was withdrawn concurrently. The facade keeps a
             // window's session alive for its whole lifetime, so this is only
@@ -560,7 +564,10 @@ impl EngineCore {
     /// NIP-01 newest-first order (`created_at ASC`, then `event_id DESC`).
     /// This is the cursor an advance fetches strictly older than. `None` when
     /// the window holds no rows yet.
-    pub(super) fn window_boundary(&self, id: HistorySessionId) -> Option<nmp_store::EventCursor> {
+    pub(in crate::core) fn window_boundary(
+        &self,
+        id: HistorySessionId,
+    ) -> Option<nmp_store::EventCursor> {
         let state = self.history.get(id)?;
         state
             .last_rows
@@ -585,7 +592,7 @@ impl EngineCore {
     /// The advance chunk is the actual shortfall (`target - held`), not a
     /// fixed page size, so a single `request_rows(at_least)` asks the wire for
     /// exactly the rows it still needs.
-    pub(super) fn stage_history_advance(
+    pub(in crate::core) fn stage_history_advance(
         &mut self,
         id: HistorySessionId,
         new_target: usize,
@@ -807,7 +814,7 @@ impl EngineCore {
     /// still gets one delivered fact. It rides the same staged commit path as
     /// a real advance (no opened handles and no target change) so it conflates
     /// identically and rolls back cleanly if the runtime never accepts it.
-    pub(super) fn stage_history_atbound(
+    pub(in crate::core) fn stage_history_atbound(
         &mut self,
         id: HistorySessionId,
         max: usize,
@@ -836,7 +843,7 @@ impl EngineCore {
         vec![Effect::HistoryLoadResult(id, Ok(()))]
     }
 
-    pub(super) fn on_commit_history_load(&mut self, id: HistorySessionId) -> Vec<Effect> {
+    pub(in crate::core) fn on_commit_history_load(&mut self, id: HistorySessionId) -> Vec<Effect> {
         if !self
             .history
             .get(id)
@@ -957,7 +964,10 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn on_rollback_history_load(&mut self, id: HistorySessionId) -> Vec<Effect> {
+    pub(in crate::core) fn on_rollback_history_load(
+        &mut self,
+        id: HistorySessionId,
+    ) -> Vec<Effect> {
         let Some(pending) = self
             .history
             .get_mut(id)
@@ -1008,7 +1018,7 @@ impl EngineCore {
     /// window of an already-live descriptor, so every discovery dependency
     /// is already represented by the initial session; shadow planning never
     /// needs to mutate the widen-only discovery subscription.
-    pub(super) fn history_shadow_plans(&self, id: HistorySessionId) -> Vec<RelayPlan> {
+    pub(in crate::core) fn history_shadow_plans(&self, id: HistorySessionId) -> Vec<RelayPlan> {
         let Some(state) = self.history.get(id) else {
             return Vec::new();
         };
@@ -1049,7 +1059,7 @@ impl EngineCore {
         grouped
     }
 
-    pub(super) fn refresh_all_histories(&mut self, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn refresh_all_histories(&mut self, effects: &mut Vec<Effect>) {
         let ids: Vec<_> = self.history.ids();
         for id in ids {
             self.refresh_history(id, WindowLoad::Idle, effects);
@@ -1063,14 +1073,14 @@ impl EngineCore {
     ///
     /// #1646: the production door for every AUTH transition, mirroring
     /// [`Self::refresh_all_observation_evidence`] for history sessions.
-    pub(super) fn refresh_all_history_evidence(&mut self, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn refresh_all_history_evidence(&mut self, effects: &mut Vec<Effect>) {
         let ids: Vec<_> = self.history.ids();
         for id in ids {
             self.refresh_history_evidence(id, effects);
         }
     }
 
-    pub(super) fn history_batch(
+    pub(in crate::core) fn history_batch(
         &mut self,
         id: HistorySessionId,
         deltas: Vec<RowDelta>,
@@ -1094,7 +1104,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn refresh_history(
+    pub(in crate::core) fn refresh_history(
         &mut self,
         id: HistorySessionId,
         load: WindowLoad,
@@ -1165,7 +1175,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn refresh_history_evidence(
+    pub(in crate::core) fn refresh_history_evidence(
         &mut self,
         id: HistorySessionId,
         effects: &mut Vec<Effect>,
@@ -1221,7 +1231,7 @@ impl EngineCore {
         Ok(evidence)
     }
 
-    pub(super) fn history_rows_and_evidence_for(
+    pub(in crate::core) fn history_rows_and_evidence_for(
         &self,
         id: HistorySessionId,
     ) -> Result<(BTreeMap<EventId, Row>, Vec<AcquisitionEvidence>), PersistenceError> {
@@ -1230,7 +1240,7 @@ impl EngineCore {
         Ok((rows, evidence))
     }
 
-    pub(super) fn history_rows_for(
+    pub(in crate::core) fn history_rows_for(
         &self,
         id: HistorySessionId,
     ) -> Result<BTreeMap<EventId, Row>, PersistenceError> {
@@ -1336,7 +1346,7 @@ impl EngineCore {
         combined
     }
 
-    pub(super) fn advance_history_projection(
+    pub(in crate::core) fn advance_history_projection(
         &mut self,
         id: HistorySessionId,
         before: nmp_store::EventCursor,
@@ -1442,7 +1452,7 @@ impl EngineCore {
     /// rows plus the exact newly exposed lower segment are visited: the
     /// canonical order index identifies eviction/backfill boundaries without
     /// sorting or replaying the retained window.
-    pub(super) fn try_apply_committed_history_row_changes(
+    pub(in crate::core) fn try_apply_committed_history_row_changes(
         &mut self,
         id: HistorySessionId,
         changes: &CommittedRowChanges,
@@ -1840,9 +1850,9 @@ mod tests {
 
     /// Two live, independent history sessions over an empty store, each with
     /// exactly one open handle.
-    fn open_two_sessions() -> (EngineCore, HistorySessionId, HistorySessionId) {
+    fn open_two_sessions() -> (CoreState, HistorySessionId, HistorySessionId) {
         let store = RedbStore::temporary().expect("temporary Redb store");
-        let mut core = EngineCore::new(store, 20);
+        let mut core = CoreState::new(store, 20);
         let query_for = |kind: u16| {
             HistoryQuery::new(
                 LiveQuery::from_filter(Filter {

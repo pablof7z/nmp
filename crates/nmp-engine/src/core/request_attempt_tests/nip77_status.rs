@@ -22,7 +22,9 @@ impl Nip77StatusFixture {
             generation: 1,
         };
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-        core.prober.force_supported_for_test(relay.clone());
+        core.white_box("prober.force_supported_for_test", |s| {
+            s.prober.force_supported_for_test(relay.clone())
+        });
         core.handle(EngineMsg::RelayConnected(handle, session.clone()));
         let opened = core.handle(EngineMsg::Subscribe(live_query(&relay)));
         let observation = observation_id(&opened);
@@ -41,13 +43,15 @@ impl Nip77StatusFixture {
         assert_status(&accepted, SourceStatus::Requesting);
         assert_no_error(&accepted);
 
-        let candidate_eose = core.on_relay_frame(
-            handle,
-            session.clone(),
-            RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
-                nostr::SubscriptionId::new(wire_sub_id_string(&candidate_sub_id)),
-            ))),
-        );
+        let candidate_eose = core.white_box("on_relay_frame", |s| {
+            s.on_relay_frame(
+                handle,
+                session.clone(),
+                RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+                    nostr::SubscriptionId::new(wire_sub_id_string(&candidate_sub_id)),
+                ))),
+            )
+        });
         let (neg_attempt, neg_sub_id, initial_hex) = candidate_eose
             .iter()
             .find_map(|effect| match effect {
@@ -81,16 +85,18 @@ impl Nip77StatusFixture {
     }
 
     fn respond(&mut self, response_hex: String) -> Vec<Effect> {
-        self.core.on_relay_frame(
-            self.handle,
-            self.session.clone(),
-            RelayFrame::from_message(RelayMessage::NegMsg {
-                subscription_id: Cow::Owned(nostr::SubscriptionId::new(wire_sub_id_string(
-                    &self.neg_sub_id,
-                ))),
-                message: Cow::Owned(response_hex),
-            }),
-        )
+        self.core.white_box("on_relay_frame", |s| {
+            s.on_relay_frame(
+                self.handle,
+                self.session.clone(),
+                RelayFrame::from_message(RelayMessage::NegMsg {
+                    subscription_id: Cow::Owned(nostr::SubscriptionId::new(wire_sub_id_string(
+                        &self.neg_sub_id,
+                    ))),
+                    message: Cow::Owned(response_hex),
+                }),
+            )
+        })
     }
 
     fn close(mut self) {

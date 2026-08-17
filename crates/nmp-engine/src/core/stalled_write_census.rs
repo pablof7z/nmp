@@ -13,7 +13,7 @@ use super::{
 /// Everything the stalled-stage decision reads, named rather than reached
 /// for.
 ///
-/// The decision used to be an `&EngineCore` method, which made it look like
+/// The decision used to be an `&CoreState` method, which made it look like
 /// it could consult anything the reducer owns. It consults exactly two
 /// things, and one of them is not on the write plane at all: `connected` is
 /// transport-session state. Stating it here is what makes the cross-plane
@@ -125,7 +125,7 @@ pub(super) fn stalled_write_stage(
 /// It holds state and its invariant, and nothing else: no `store`, no
 /// `clock`, no `router`, no `resolver`, no `Effect`. Deciding WHICH receipts
 /// a turn touched, and pushing `Effect::DiagnosticsChanged` when this owner
-/// reports a change, are orchestration and stay on `EngineCore`.
+/// reports a change, are orchestration and stay on `CoreState`.
 pub(super) struct StalledWriteCensus {
     /// Receipt -> stage, sorted by receipt. Sorted because the incremental
     /// path binary-searches it; the DISPLAY order is a different order and

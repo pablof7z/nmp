@@ -99,7 +99,7 @@ impl AttributionState {
 
     /// Resolve a wire subscription-id string back to the `SubId`
     /// `record_send` registered it under, if any (the same map
-    /// `attribute_eose` itself reads at EOSE time). Exposed so `EngineCore`
+    /// `attribute_eose` itself reads at EOSE time). Exposed so `CoreState`
     /// can route an inbound `NEG-MSG`/`NEG-ERR` (which only ever carries the
     /// wire string, never a `SubId`) back to the right in-flight negentropy
     /// session -- the identical lookup `attribute_eose` performs internally
@@ -118,7 +118,7 @@ impl AttributionState {
     /// outstanding snapshot and wire-id mapping for `session`. A replayed sub
     /// on the new generation calls [`Self::record_send`] again and gets a
     /// fresh snapshot; the pool translator (transport, C) guarantees a
-    /// stale-generation frame never reaches `EngineCore` at all, so this is
+    /// stale-generation frame never reaches `CoreState` at all, so this is
     /// the only clearing path attribution needs. Scoped to the EXACT session:
     /// dropping the URL's other access contexts' snapshots here would erase
     /// coverage FIFOs for physical connections that never dropped.

@@ -245,7 +245,9 @@ fn each_refused_open_arm_consumes_a_pending_drop_into_one_same_call_wire_close()
                 ObservationOpen::Opened { id, .. } => id,
                 ObservationOpen::Refused { reason, .. } => panic!("fixture open refused: {reason}"),
             };
-        let opened = core.flush_wire_admission(Timestamp::from(0u64));
+        let opened = core.white_box("flush_wire_admission", |s| {
+            s.flush_wire_admission(Timestamp::from(0u64))
+        });
         let sub_id = opened
             .iter()
             .filter_map(|effect| match effect {
@@ -263,8 +265,10 @@ fn each_refused_open_arm_consumes_a_pending_drop_into_one_same_call_wire_close()
         // so its close is pending inside the resolver, while core's exact wire
         // index still records the request the next outcome must withdraw.
         let branch = core.observations[&observation].branches[0];
-        core.observations.remove(&observation);
-        drop(core.handles.remove(&branch));
+        core.white_box("observations.remove", |s| {
+            s.observations.remove(&observation)
+        });
+        drop(core.white_box("handles.remove", |s| s.handles.remove(&branch)));
 
         let failing = if graph_refusal {
             nmp_grammar::Demand::from_filter(Filter {
@@ -310,8 +314,13 @@ fn each_refused_open_arm_consumes_a_pending_drop_into_one_same_call_wire_close()
             .collect();
         assert_eq!(closes, vec![&sub_id], "{refusal} refusal");
         assert!(core.router.plan().reqs.is_empty());
-        assert!(core.resolver.poll_pending_drops().is_empty());
-        assert!(core.flush_wire_admission(Timestamp::from(0u64)).is_empty());
+        assert!(core.white_box("resolver.poll_pending_drops", |s| s
+            .resolver
+            .poll_pending_drops()
+            .is_empty()));
+        assert!(core.white_box("flush_wire_admission", |s| s
+            .flush_wire_admission(Timestamp::from(0u64))
+            .is_empty()));
     }
 }
 
@@ -740,13 +749,15 @@ fn derived_fixture() -> (tempfile::TempDir, EngineCore, HistorySessionId) {
 fn latch_redb_generation_without_core_diagnostics(core: &mut EngineCore) {
     let keys = Keys::generate();
     let accepted = event(&keys, 1, 1_500);
-    let error = match core.resolver.accept_local(
-        &mut core.store,
-        nmp_resolver_testkit::accept_write_of(accepted, 1_501),
-    ) {
-        Ok(_) => panic!("construction-armed acceptance I/O must close the Redb generation"),
-        Err(error) => error,
-    };
+    let error = core.white_box("resolver.accept_local", |s| {
+        match s.resolver.accept_local(
+            &mut s.store,
+            nmp_resolver_testkit::accept_write_of(accepted, 1_501),
+        ) {
+            Ok(_) => panic!("construction-armed acceptance I/O must close the Redb generation"),
+            Err(error) => error,
+        }
+    });
     assert_eq!(error.fault(), PersistenceFault::Io);
     assert_eq!(error.message(), "injected acceptance failed before commit");
     assert!(
@@ -778,11 +789,13 @@ fn tie_second_read_failure_dispatches_diagnostics_and_exact_rollback() {
 fn older_window_read_failure_dispatches_diagnostics_and_exact_rollback() {
     let (_directory, mut core, id) = derived_fixture();
     let boundary_secs = boundary_second(&core, id);
-    core.history
-        .get_mut(id)
-        .unwrap()
-        .acquired_tie_seconds
-        .insert(boundary_secs);
+    core.white_box("history.get_mut", |s| {
+        s.history
+            .get_mut(id)
+            .unwrap()
+            .acquired_tie_seconds
+            .insert(boundary_secs)
+    });
     let before = snapshot(&core, id);
     latch_redb_generation_without_core_diagnostics(&mut core);
 

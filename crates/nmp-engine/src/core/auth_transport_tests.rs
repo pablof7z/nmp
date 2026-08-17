@@ -214,9 +214,15 @@ fn auth_capability_bound_can_surface_an_epilogue_effect_the_arm_itself_never_ret
     // Nothing subscribes to or writes through `session`, so
     // `relay_worker_requirements().all` will not contain it -- exactly the
     // "nothing currently requires this session" half of the precondition.
-    core.relay_open_failures
-        .insert(session.clone(), "injected: relay worker failed to open".into());
-    core.auth_required_sessions.insert(session.clone());
+    core.white_box("relay_open_failures.insert", |s| {
+        s.relay_open_failures.insert(
+            session.clone(),
+            "injected: relay worker failed to open".into(),
+        )
+    });
+    core.white_box("auth_required_sessions.insert", |s| {
+        s.auth_required_sessions.insert(session.clone())
+    });
 
     // The token need not resolve to a real in-flight AUTH operation: even
     // when `on_auth_capability_bound` takes its own `_ => return Vec::new()`

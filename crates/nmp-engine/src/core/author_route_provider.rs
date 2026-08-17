@@ -7,7 +7,7 @@
 //! side: an application-supplied algorithm, driven by the runtime loop (the
 //! async edge, where foreign code belongs), feeding the reducer through its
 //! one neutral writer,
-//! [`EngineCore::replace_author_routes`](super::EngineCore::replace_author_routes).
+//! [`CoreState::replace_author_routes`](super::CoreState::replace_author_routes).
 //!
 //! The three moments below are the whole contract. Nothing here carries a
 //! handle, an id, or a lifecycle: a provider is fixed for the engine's life,
@@ -49,7 +49,7 @@ pub enum ProviderReroot {
 }
 
 /// One neutral author-route replacement the loop applies through
-/// [`EngineCore::replace_author_routes`](super::EngineCore::replace_author_routes).
+/// [`CoreState::replace_author_routes`](super::CoreState::replace_author_routes).
 ///
 /// The replacement is TOTAL per author: both directions at once. A provider
 /// cannot express "merge this relay in", so the fact store never holds a

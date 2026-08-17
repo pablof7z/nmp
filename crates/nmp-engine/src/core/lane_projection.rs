@@ -7,7 +7,7 @@
 
 use super::*;
 
-impl EngineCore {
+impl CoreState {
     /// Move `receipts_by_lane_relay` from one persisted-relay set to another
     /// for one receipt: drop it from every relay it no longer persists to,
     /// add it to every relay it newly does.
@@ -85,7 +85,7 @@ impl EngineCore {
     /// never told this index, so every relay the old generation had
     /// persisted lanes on kept naming the receipt in
     /// `receipts_by_lane_relay` until the next full boot recovery (#1606).
-    pub(super) fn reset_lane_projection_for_successor(&mut self, id: ReceiptId) {
+    pub(in crate::core) fn reset_lane_projection_for_successor(&mut self, id: ReceiptId) {
         let previous = self
             .pending
             .get(&id)
@@ -168,7 +168,7 @@ impl EngineCore {
     /// durable route set. `None` means it could not be read at all — the
     /// caller has nothing to hold conservatively, so the whole projection
     /// reports unavailable until a retry commits.
-    pub(super) fn bootstrap_projected_lanes(
+    pub(in crate::core) fn bootstrap_projected_lanes(
         &mut self,
         intent_id: IntentId,
         candidate_relays: Option<&BTreeSet<RelayUrl>>,
@@ -221,7 +221,7 @@ impl EngineCore {
     /// E2 lane state against retained E1 attempt history. The predecessor
     /// attempts are valid historical evidence, while the current event id is
     /// the fence that decides which physical lanes may run now.
-    pub(super) fn recover_semantic_generation_lanes(
+    pub(in crate::core) fn recover_semantic_generation_lanes(
         &mut self,
         intent_id: IntentId,
         event_id: EventId,
@@ -253,7 +253,7 @@ impl EngineCore {
     /// this exists: `uncertain` can be cleared solely by a committed lane
     /// fact for that exact relay, and for an intent with no lane rows no
     /// other path in the reducer can ever produce one.
-    pub(super) fn schedule_lane_bootstrap_retry(
+    pub(in crate::core) fn schedule_lane_bootstrap_retry(
         &mut self,
         intent_id: IntentId,
         candidates: Option<&BTreeSet<RelayUrl>>,
@@ -286,7 +286,7 @@ impl EngineCore {
         entry.due = self.clock + bootstrap_retry_delay_secs(entry.failures);
     }
 
-    pub(super) fn commit_lane_waiting(
+    pub(in crate::core) fn commit_lane_waiting(
         &mut self,
         key: &PublishQueueLaneKey,
         revision: u64,
@@ -300,7 +300,7 @@ impl EngineCore {
         .map(|(_, lane)| lane)
     }
 
-    pub(super) fn commit_lane_eligible(
+    pub(in crate::core) fn commit_lane_eligible(
         &mut self,
         key: &PublishQueueLaneKey,
         revision: u64,
@@ -315,7 +315,7 @@ impl EngineCore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn commit_lane_transient(
+    pub(in crate::core) fn commit_lane_transient(
         &mut self,
         key: &PublishQueueLaneKey,
         revision: u64,
@@ -333,7 +333,7 @@ impl EngineCore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn commit_lane_suspension(
+    pub(in crate::core) fn commit_lane_suspension(
         &mut self,
         key: &PublishQueueLaneKey,
         revision: u64,
@@ -351,7 +351,7 @@ impl EngineCore {
         .map(|(_, lane)| lane)
     }
 
-    pub(super) fn commit_lane_attempt_start(
+    pub(in crate::core) fn commit_lane_attempt_start(
         &mut self,
         key: &PublishQueueLaneKey,
         revision: u64,
@@ -363,7 +363,7 @@ impl EngineCore {
         })
     }
 
-    pub(super) fn commit_lane_handoff(
+    pub(in crate::core) fn commit_lane_handoff(
         &mut self,
         key: &PublishQueueLaneKey,
         revision: u64,
@@ -379,7 +379,7 @@ impl EngineCore {
         .map(|(_, lane)| lane)
     }
 
-    pub(super) fn commit_lane_attempt_finish(
+    pub(in crate::core) fn commit_lane_attempt_finish(
         &mut self,
         key: &PublishQueueLaneKey,
         revision: u64,
@@ -395,7 +395,7 @@ impl EngineCore {
         .map(|(_, lane)| lane)
     }
 
-    pub(super) fn commit_lane_auth_denied(
+    pub(in crate::core) fn commit_lane_auth_denied(
         &mut self,
         key: &PublishQueueLaneKey,
         revision: u64,
@@ -423,7 +423,7 @@ impl EngineCore {
     /// something new — at which point lane minting moves onto this path. The
     /// door plus the enumeration falsifier is what makes that future change
     /// fail mechanically instead of silently projecting nothing.
-    pub(super) fn commit_route_revision(
+    pub(in crate::core) fn commit_route_revision(
         &mut self,
         intent_id: IntentId,
         relays: BTreeSet<RelayUrl>,
@@ -438,7 +438,7 @@ impl EngineCore {
     /// changes nothing: the caller keeps the pending write, and with it every
     /// relay the projection still owns, rather than retiring a worker on an
     /// unproven close.
-    pub(super) fn commit_terminal_close(
+    pub(in crate::core) fn commit_terminal_close(
         &mut self,
         intent_id: IntentId,
     ) -> Result<CloseIntentOutcome, PersistenceError> {
@@ -456,7 +456,7 @@ mod tests {
     /// Accept and sign one durable private write, which routes and bootstraps
     /// its lanes.
     fn publish_to(
-        core: &mut EngineCore,
+        core: &mut CoreState,
         author: &Keys,
         relays: &[RelayUrl],
         created_at: u64,
@@ -491,7 +491,7 @@ mod tests {
     }
 
     fn publish_waiting(
-        core: &mut EngineCore,
+        core: &mut CoreState,
         author: &Keys,
         relay: &RelayUrl,
         created_at: u64,
@@ -512,7 +512,7 @@ mod tests {
     /// Independent semantic oracle: reconstruct the old exact answer from
     /// canonical store rows plus the reducer's non-lane transient owners.
     /// This deliberately does not inspect `LaneWorkerProjection`.
-    fn durable_worker_oracle(core: &EngineCore) -> BTreeSet<RelaySessionKey> {
+    fn durable_worker_oracle(core: &CoreState) -> BTreeSet<RelaySessionKey> {
         let mut expected: BTreeSet<_> = core
             .attempt_correlations
             .values()
@@ -541,7 +541,7 @@ mod tests {
         expected
     }
 
-    fn assert_projection_matches_store(core: &EngineCore) {
+    fn assert_projection_matches_store(core: &CoreState) {
         let actual = core
             .relay_worker_requirements()
             .expect("projection remains available")
@@ -555,7 +555,7 @@ mod tests {
         let relay = RelayUrl::parse("wss://projection-lifecycle.example.com").unwrap();
         let session =
             RelaySessionKey::new(relay.clone(), AccessContext::Nip42(author.public_key()));
-        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
+        let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 10);
 
         let (receipt, signed) = publish_waiting(&mut core, &author, &relay, 1);
         assert_projection_matches_store(&core);
@@ -599,7 +599,7 @@ mod tests {
         let author_a = Keys::generate();
         let author_b = Keys::generate();
         let relay = RelayUrl::parse("wss://projection-identity.example.com").unwrap();
-        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
+        let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 10);
 
         publish_waiting(&mut core, &author_a, &relay, 10);
         publish_waiting(&mut core, &author_b, &relay, 11);
@@ -629,14 +629,14 @@ mod tests {
         ]);
 
         {
-            let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
+            let mut core = CoreState::new(RedbStore::open(&path).unwrap(), 10);
             publish_waiting(&mut core, &author_a, &relay, 20);
             publish_waiting(&mut core, &author_b, &relay, 21);
             assert_projection_matches_store(&core);
             assert_eq!(core.relay_worker_requirements().unwrap().writes, expected);
         }
 
-        let mut recovered = EngineCore::new(RedbStore::open(&path).unwrap(), 10);
+        let mut recovered = CoreState::new(RedbStore::open(&path).unwrap(), 10);
         let effects = recovered.recover_on_boot();
         assert_projection_matches_store(&recovered);
         assert_eq!(
@@ -654,7 +654,7 @@ mod tests {
     fn durability_unknown_marks_the_lane_uncertain_and_retains_its_worker() {
         let author = Keys::generate();
         let relay = RelayUrl::parse("wss://projection-unknown.example.com").unwrap();
-        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
+        let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 10);
         let (receipt, _) = publish_waiting(&mut core, &author, &relay, 30);
         let key = PublishQueueLaneKey {
             intent_id: core.pending[&receipt].intent_id,
@@ -688,7 +688,7 @@ mod tests {
     fn durability_absent_leaves_the_exact_projection_unchanged() {
         let author = Keys::generate();
         let relay = RelayUrl::parse("wss://projection-absent.example.com").unwrap();
-        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
+        let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 10);
         let (receipt, _) = publish_waiting(&mut core, &author, &relay, 31);
         let key = PublishQueueLaneKey {
             intent_id: core.pending[&receipt].intent_id,
@@ -908,7 +908,7 @@ mod tests {
     ///
     /// It measures BOTH bodies against the SAME populated `RedbStore` in the
     /// same process, so the comparison is not across builds or revisions:
-    /// [`EngineCore::write_relay_workers`] (the projection) versus
+    /// [`CoreState::write_relay_workers`] (the projection) versus
     /// [`durable_worker_oracle`] (the old body, kept verbatim as this
     /// module's semantic oracle). `#[ignore]`d because it builds a real
     /// on-disk store with hundreds of intents and reports a wall-clock
@@ -932,7 +932,7 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("measure-worker-demand.redb");
-        let mut core = EngineCore::new(RedbStore::open(&path).unwrap(), INTENTS + 1);
+        let mut core = CoreState::new(RedbStore::open(&path).unwrap(), INTENTS + 1);
 
         for i in 0..INTENTS {
             let author = Keys::generate();

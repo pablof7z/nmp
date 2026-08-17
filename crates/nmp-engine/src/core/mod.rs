@@ -1,8 +1,15 @@
 //! The synchronous reducer and durable-state owner (plan §2 position 1,
-//! §3.4). `EngineCore` owns the concrete `RedbStore`, the M1 resolver
+//! §3.4). `CoreState` holds the concrete `RedbStore`, the M1 resolver
 //! `Engine`, the M2 `Router`, the write-delivery state, and the
-//! coverage-attribution bookkeeping (`attribution.rs`, `evidence.rs`). Its
-//! main message-driven surface is:
+//! coverage-attribution bookkeeping (`attribution.rs`, `evidence.rs`).
+//!
+//! **Everything outside `core` talks to [`EngineCore`] (`cell.rs`), never to
+//! `CoreState`.** `EngineCore` is a shell holding one private `CoreState`;
+//! every mutating door on it proves owner consistency afterwards, which is
+//! what makes the proof a property of the reducer rather than of one
+//! entrypoint. `CoreState`'s own doors are all `pub(in crate::core)`, so
+//! outside this module the type has no callable member at all. The
+//! message-driven surface is:
 //!
 //! ```ignore
 //! impl EngineCore {
@@ -16,7 +23,7 @@
 //! means the driver has genuinely nothing to wake up for and never that the
 //! store could not be read (#763).
 //!
-//! `EngineCore` performs synchronous durable I/O through its `RedbStore`, but
+//! `CoreState` performs synchronous durable I/O through its `RedbStore`, but
 //! spawns no threads, touches no socket, and imposes no runtime. This is the
 //! seam that preserves M1/M2's headless property: the whole engine's logic is
 //! testable by feeding `EngineMsg`s and asserting `Effect`s against a concrete
@@ -42,6 +49,8 @@ mod auth_core_headless;
 mod auth_transport;
 #[cfg(test)]
 mod auth_transport_tests;
+mod cell;
+pub use cell::EngineCore;
 mod coordinate_coverage;
 mod diagnostics;
 mod evidence;
@@ -441,6 +450,7 @@ fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
 }
 
 use attribution::{AttributionSendId, AttributionState, CompletedAttribution, EventFailureTarget};
+use author_route_needs::AuthorRouteNeeds;
 pub use diagnostics::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
     RelayDiagnosticsSnapshot, StalledWrite, StalledWriteStage, StalledWriteTotals,
@@ -459,7 +469,6 @@ pub use query::Nip77Frame;
 pub use request_attempt::{LocalSendRefusal, RequestAttemptId, RequestHandoffOutcome};
 use request_attempt::{RequestAttemptPurpose, RequestAttemptState, RequestAttempts, RequestSend};
 pub use request_effects::{AttemptedReplay, AttemptedWireDelta};
-use author_route_needs::AuthorRouteNeeds;
 use request_replacements::RequestReplacements;
 use request_targets::{ActiveRequestTarget, RequestTargets};
 use stalled_write_census::{StalledWriteCensus, StalledWriteInputs};
@@ -790,7 +799,7 @@ pub enum AuthSendOutcome {
 /// Transport never runs engine code: it emits this value on the ordinary pool
 /// event path and the reducer applies it on its own owner thread. The exact
 /// `(handle, session)` the frame was submitted against travels WITH the
-/// terminal, so `EngineCore::on_auth_send_completed` re-derives the awaiting
+/// terminal, so `CoreState::on_auth_send_completed` re-derives the awaiting
 /// [`AuthOpToken`] from state it already owns instead of keeping a side table
 /// of in-flight completions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -984,7 +993,7 @@ pub enum EngineMsg {
     CancelWrite(ReceiptId),
     /// The one, ever, typed result of a durable `EVENT` handoff (issue
     /// #93), translated from `PoolEvent::EventHandoff`. See
-    /// `EngineCore::on_event_handoff`'s doc for what this does and does
+    /// `CoreState::on_event_handoff`'s doc for what this does and does
     /// NOT do in this unit.
     EventHandoff(AttemptCorrelation, HandoffResult),
     Tick(Timestamp),
@@ -1377,7 +1386,7 @@ pub struct RelayWorkerRequirements {
     pub writes: BTreeSet<RelaySessionKey>,
 }
 
-/// Per-handle bookkeeping `EngineCore` must retain across `handle()` calls:
+/// Per-handle bookkeeping `CoreState` must retain across `handle()` calls:
 /// the `QueryHandle` itself (dropping it would withdraw the subscription —
 /// see `nmp_resolver::QueryHandle`'s `Drop` impl) and the last-emitted
 /// row/evidence state (so `EmitRows` fires only when
@@ -1773,7 +1782,7 @@ struct PendingWrite {
     route_needs: BTreeSet<PublicKey>,
 }
 
-/// A live, EngineCore-owned negentropy reconciliation in progress for
+/// A live, CoreState-owned negentropy reconciliation in progress for
 /// `sub_id` (plan §6 E). `filter` is already window-erased (since/until/
 /// limit cleared) -- ruling §2: "NEG runs unfloored/unlimited"; recording an
 /// attribution snapshot straight off this field is therefore always the
@@ -1895,8 +1904,23 @@ struct PendingRequestClaimTransfer {
     failures: u32,
 }
 
-/// The synchronous reducer and durable-state owner (§2 position 1). No threads.
-pub struct EngineCore {
+/// The whole live reducer state, and the transitions over it (§2 position 1).
+/// No threads.
+///
+/// **Crate-private, and reachable only through [`EngineCore`]**, which is the
+/// one checked door into it: every externally initiated transition runs
+/// through `EngineCore::checked`, which proves the mirrored indexes still
+/// agree afterwards. Nothing outside `core` can name this type, obtain a
+/// reference to one, or call a door on it.
+///
+/// This is temporary scaffolding that SHRINKS. Every owner extracted from
+/// here (`RequestTargets`, `WireOwnership`, `HistorySessions`,
+/// `RequestAttempts`, `AuthorRouteNeeds`, `Nip77Sessions` so far) removes
+/// fields and decisions from it. It is not the semantic owner of engine
+/// state and must not become one -- that is the god object this
+/// decomposition exists to dissolve.
+#[doc(hidden)]
+pub struct CoreState {
     store: RedbStore,
     resolver: ResolverEngine,
     replaceable_materializers: HashMap<([u8; 16], [u8; 16]), ReplaceableMaterializerRegistration>,
@@ -1980,7 +2004,7 @@ pub struct EngineCore {
     retired_coverage_observations: BTreeSet<ObservationId>,
     pending_request_claim_transfers:
         BTreeMap<(RelaySessionKey, SubId), PendingRequestClaimTransfer>,
-    /// EngineCore's memory of the exact connection generation and SESSION
+    /// CoreState's memory of the exact connection generation and SESSION
     /// that currently occupy each pool slot. Disconnects are asynchronous;
     /// the generation prevents a delayed old disconnect from erasing a slot
     /// that has already reopened, and the session key prevents a frame
@@ -2338,8 +2362,8 @@ struct AttemptCorrelationTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AttemptCorrelationExhausted;
 
-impl EngineCore {
-    pub fn install_replaceable_materializer(
+impl CoreState {
+    pub(in crate::core) fn install_replaceable_materializer(
         &mut self,
         registration: ReplaceableMaterializerRegistration,
     ) {
@@ -2347,7 +2371,7 @@ impl EngineCore {
             .insert((registration.program, registration.format), registration);
     }
 
-    pub fn install_replaceable_materializers(
+    pub(in crate::core) fn install_replaceable_materializers(
         &mut self,
         capabilities: Vec<nmp_grammar::ReplaceableMaterializerSpec>,
     ) {
@@ -2356,7 +2380,7 @@ impl EngineCore {
         }
     }
 
-    pub fn new(store: RedbStore, cap: usize) -> Self {
+    pub(in crate::core) fn new(store: RedbStore, cap: usize) -> Self {
         Self::new_with_routing_facts(store, RoutingFactStore::default(), cap)
     }
 
@@ -2366,7 +2390,7 @@ impl EngineCore {
     /// the private mutable fact store and uses [`Self::new`].
     #[cfg(feature = "unstable-mechanism")]
     #[doc(hidden)]
-    pub fn new_with_fixture_routing_facts(
+    pub(in crate::core) fn new_with_fixture_routing_facts(
         store: RedbStore,
         facts: nmp_router_testkit::FixtureRoutingFacts,
         cap: usize,
@@ -2374,7 +2398,7 @@ impl EngineCore {
         Self::new_with_routing_facts(store, RoutingFactStore::from_fixture(facts), cap)
     }
 
-    pub fn new_with_routing_facts(
+    pub(in crate::core) fn new_with_routing_facts(
         store: RedbStore,
         routing_facts: RoutingFactStore,
         cap: usize,
@@ -2509,7 +2533,7 @@ impl EngineCore {
     /// The sole neutral author-route mutation door. Replacement and the
     /// resulting Auto-write wake happen in one reducer turn.
     #[allow(dead_code)]
-    pub fn replace_author_routes(
+    pub(in crate::core) fn replace_author_routes(
         &mut self,
         author: PublicKey,
         replacement: AuthorRouteReplacement,
@@ -2527,7 +2551,7 @@ impl EngineCore {
     /// finite default: a ceiling of zero would give up before ever trying,
     /// which is a verdict without a single observation behind it.
     #[must_use]
-    pub fn with_max_publish_attempts(mut self, max_publish_attempts: u64) -> Self {
+    pub(in crate::core) fn with_max_publish_attempts(mut self, max_publish_attempts: u64) -> Self {
         self.max_publish_attempts = if max_publish_attempts == 0 {
             crate::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS
         } else {
@@ -2548,7 +2572,7 @@ impl EngineCore {
     /// This projection is computed from in-memory state alone: durable lane
     /// reads happen only at bootstrap/recovery and mutation boundaries, never
     /// while reconciling ordinary worker ownership. ("Pure" would be the wrong
-    /// word for anything in `EngineCore`, which owns the store and commits
+    /// word for anything in `CoreState`, which owns the store and commits
     /// through it -- see `docs/internals/architecture-boundaries.md`.)
     /// Whether the reducer can prove its lane-worker projection is a
     /// conservative superset of durable nonterminal lanes.
@@ -2567,7 +2591,7 @@ impl EngineCore {
                 .all(LaneBootstrapRetry::covers_retention)
     }
 
-    pub fn relay_worker_requirements(&self) -> Option<RelayWorkerRequirements> {
+    pub(in crate::core) fn relay_worker_requirements(&self) -> Option<RelayWorkerRequirements> {
         if !self.lane_worker_projection_available() {
             return None;
         }
@@ -2620,7 +2644,7 @@ impl EngineCore {
     /// entries into one. Widened rather than patched with an assertion,
     /// per the repo's no-compat-alias convention -- this mirrors
     /// `nmp_resolver::Engine::active_demand()` exactly.
-    pub fn active_demand(&self) -> BTreeSet<ContextualAtom> {
+    pub(in crate::core) fn active_demand(&self) -> BTreeSet<ContextualAtom> {
         self.wire_demand()
     }
 
@@ -2647,7 +2671,7 @@ impl EngineCore {
     /// `auth_sessions[s].phase == Ready`. Both are live mirrors outside this
     /// check.
     #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub fn assert_owner_consistency(&self, at: &str) {
+    pub(in crate::core) fn assert_owner_consistency(&self, at: &str) {
         self.wire.assert_consistent(at);
         self.author_outbox_route_needs.assert_consistent(at);
         self.request_targets.assert_consistent(at);
@@ -2666,7 +2690,7 @@ impl EngineCore {
 
     #[cfg(any(test, feature = "bench-instrumentation"))]
     #[doc(hidden)]
-    pub fn bench_ownership_census(&self) -> CoreOwnershipCensus {
+    pub(in crate::core) fn bench_ownership_census(&self) -> CoreOwnershipCensus {
         let (
             attribution_inflight_subs,
             attribution_wire_keys,
@@ -2844,7 +2868,7 @@ impl EngineCore {
         feature = "bench-instrumentation",
         feature = "test-instrumentation"
     ))]
-    pub fn observation_ownership_census(&self) -> CoreObservationOwnershipCensus {
+    pub(in crate::core) fn observation_ownership_census(&self) -> CoreObservationOwnershipCensus {
         let history = self.history.counts();
         CoreObservationOwnershipCensus {
             handles: self.handles.len(),
@@ -2876,7 +2900,7 @@ impl EngineCore {
     /// `SourceAuthority::Pinned` breaks that assumption; the reconstruction
     /// would then compute the WRONG `CoverageKey` and silently report
     /// "not covered" for coverage that IS actually proven.
-    pub fn get_coverage(
+    pub(in crate::core) fn get_coverage(
         &self,
         atom: &ContextualAtom,
         relay: &RelayUrl,
@@ -2938,7 +2962,7 @@ impl EngineCore {
     /// `Self::get_coverage`. Pure and read-only — never influences
     /// routing/delivery; every number here is real state this reducer
     /// already tracks for other reasons, never fabricated/estimated.
-    pub fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
+    pub(in crate::core) fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.diagnostic_snapshots_built
             .set(self.diagnostic_snapshots_built.get().saturating_add(1));
@@ -3105,7 +3129,7 @@ impl EngineCore {
     /// never a poll-loop timer thread). Every sweep stays real and unit-
     /// tested here against a synthetic clock regardless of who calls this
     /// -- the runtime driver is a caller, not part of the mechanism.
-    pub fn tick(&mut self, now: Timestamp) -> Vec<Effect> {
+    pub(in crate::core) fn tick(&mut self, now: Timestamp) -> Vec<Effect> {
         #[cfg(any(test, feature = "test-instrumentation"))]
         {
             self.maintenance_turns = self.maintenance_turns.saturating_add(1);
@@ -3186,7 +3210,7 @@ impl EngineCore {
     }
 
     #[cfg(any(test, feature = "test-instrumentation"))]
-    pub fn maintenance_turn_count(&self) -> u64 {
+    pub(in crate::core) fn maintenance_turn_count(&self) -> u64 {
         self.maintenance_turns
     }
 
@@ -3194,7 +3218,7 @@ impl EngineCore {
     /// Runtime does this once at command boundaries; due expiry, retry, and
     /// liveness work remain exclusively owned by [`Self::tick`] and
     /// [`Self::next_deadline`].
-    pub fn advance_clock(&mut self, now: Timestamp) {
+    pub(in crate::core) fn advance_clock(&mut self, now: Timestamp) {
         self.clock = now;
     }
 
@@ -3202,7 +3226,7 @@ impl EngineCore {
     /// route-source observation with this rather than re-reading a clock the
     /// reducer has not seen yet -- the same value [`Self::on_subscribe`] uses
     /// for an app subscription.
-    pub fn clock(&self) -> Timestamp {
+    pub(in crate::core) fn clock(&self) -> Timestamp {
         self.clock
     }
 
@@ -3229,7 +3253,7 @@ impl EngineCore {
     /// `.ok().flatten()` is how a durable, due obligation could stop being
     /// scheduled with nothing recording why. `runtime::engine_loop` degrades
     /// the store on `Err`, which is the #122 fact an app already reads.
-    pub fn next_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+    pub(in crate::core) fn next_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
         let expiry = self.store.next_expiration()?;
         let neg_liveness = self
             .nip77
@@ -3273,7 +3297,7 @@ impl EngineCore {
         .min())
     }
 
-    pub fn handle(&mut self, msg: EngineMsg) -> Vec<Effect> {
+    pub(in crate::core) fn handle(&mut self, msg: EngineMsg) -> Vec<Effect> {
         // A prior persistence failure suppresses a due delivery deadline only
         // until real work arrives. Re-expose it after this message so the
         // runtime immediately drives a fresh Tick instead of either spinning
@@ -3387,29 +3411,17 @@ impl EngineCore {
         if self.prune_unowned_relay_state() {
             effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
         }
-        // The check is a property of a TURN, not of whichever owner happens
-        // to ship its own falsifier: every one of the ~500 existing tests in
-        // this crate drives at least one `handle()` call, so this single
-        // site turns the whole corpus into a mirror falsifier for every
-        // extracted owner at once, instead of depending on each test author
-        // remembering to call `assert_owner_consistency` themselves (#1606).
-        // `#[cfg(test)]`, not the wider `bench-instrumentation` gate the
-        // owners' own `assert_consistent` methods use: this runs on every
-        // `handle()` call in every test, so it must never ship in a
-        // production or benchmark build.
-        //
-        // The named-exception suppression is the one escape hatch, and it is
-        // exactly that narrow: see
-        // `turn_level_consistency_suppressed_for_named_exception`'s doc.
-        #[cfg(test)]
-        if !self.turn_level_consistency_suppressed_for_named_exception {
-            self.assert_owner_consistency("end of handle()");
-        }
+        // No owner-consistency check here. It used to live at this one site,
+        // which meant `handle()` was checked and the other ~37 externally
+        // reachable `&mut self` doors were not -- `cancel_write` was checked
+        // through `EngineMsg::CancelWrite` and unchecked when the runtime
+        // called it directly. The check now runs in `EngineCore::checked`
+        // (`cell.rs`), so it covers every door instead of this one.
         effects
     }
 
     /// Opt out of the per-`handle()` turn-level mirror check for the rest of
-    /// this `EngineCore`'s life. Exactly seven call sites may call this --
+    /// this `CoreState`'s life. Exactly seven call sites may call this --
     /// see `turn_level_consistency_suppressed_for_named_exception`'s doc for
     /// which, and for the two distinct reasons (amortized-cost proof,
     /// handle-less algebra fixture) that justify each. Any other test
@@ -3417,7 +3429,7 @@ impl EngineCore {
     /// rather than a real cost problem or a deliberately handle-less
     /// fixture -- prefer fixing the fixture instead.
     #[cfg(test)]
-    pub(super) fn suppress_turn_level_consistency_for_named_exception(&mut self) {
+    pub(in crate::core) fn suppress_turn_level_consistency_for_named_exception(&mut self) {
         self.turn_level_consistency_suppressed_for_named_exception = true;
     }
 
@@ -3485,10 +3497,10 @@ impl EngineCore {
     /// This is the one stored copy. The reducer must hold it because it
     /// resolves `Identity::Active` and re-roots reactive bindings from pure
     /// `&mut self` code that cannot reach the runtime's account registry, and
-    /// because `EngineCore` is exercised headlessly with no runtime in
+    /// because `CoreState` is exercised headlessly with no runtime in
     /// existence at all. `RuntimeSessionState` therefore keeps no second
     /// copy: it owns the account set and asks here for the selection.
-    pub fn active_pubkey(&self) -> Option<PublicKey> {
+    pub(in crate::core) fn active_pubkey(&self) -> Option<PublicKey> {
         self.active_pubkey
     }
 
@@ -3523,11 +3535,11 @@ impl EngineCore {
 }
 
 #[cfg(any(test, feature = "test-instrumentation"))]
-impl EngineCore {
+impl CoreState {
     /// Execute the runtime's existing requested Redb reconstruction sequence
     /// without exposing its two internal lifecycle doors independently.
     #[doc(hidden)]
-    pub fn recover_requested_redb_store_for_test(
+    pub(in crate::core) fn recover_requested_redb_store_for_test(
         &mut self,
     ) -> Result<Option<(PersistenceFault, Vec<Effect>)>, PersistenceError> {
         let Some(fault) = self.take_store_recovery_request() else {
@@ -3540,12 +3552,12 @@ impl EngineCore {
     /// Test-only access to the concrete store-door count used by the relay
     /// worker scheduling falsifiers.
     #[doc(hidden)]
-    pub fn reset_publish_queue_lane_recovery_reads(&self) {
+    pub(in crate::core) fn reset_publish_queue_lane_recovery_reads(&self) {
         self.store.reset_publish_queue_lane_recovery_reads();
     }
 
     #[doc(hidden)]
-    pub fn publish_queue_lane_recovery_reads(&self) -> u64 {
+    pub(in crate::core) fn publish_queue_lane_recovery_reads(&self) -> u64 {
         self.store.publish_queue_lane_recovery_reads()
     }
 
@@ -3565,7 +3577,7 @@ impl EngineCore {
     /// of needing a live relay connection and AUTH handshake whose own
     /// turn would otherwise claim the credit.
     #[doc(hidden)]
-    pub fn seed_stale_relay_open_failure_for_test(
+    pub(in crate::core) fn seed_stale_relay_open_failure_for_test(
         &mut self,
         session: RelaySessionKey,
         reason: String,
@@ -3576,11 +3588,11 @@ impl EngineCore {
 }
 
 #[cfg(feature = "bench-instrumentation")]
-impl EngineCore {
+impl CoreState {
     /// Reset reducer lifecycle counters independently from Redb's row-work
     /// counters so a benchmark can attribute admission and projection work.
     #[doc(hidden)]
-    pub fn bench_reset_lifecycle_work(&self) {
+    pub(in crate::core) fn bench_reset_lifecycle_work(&self) {
         self.projection_store_queries.set(0);
         self.router_compiles.set(0);
         self.history_store_queries.set(0);
@@ -3592,7 +3604,7 @@ impl EngineCore {
     /// `(ordinary projection reads, router compiles, history projection
     /// reads)` since the last lifecycle reset.
     #[doc(hidden)]
-    pub fn bench_lifecycle_work(&self) -> (u64, u64, u64) {
+    pub(in crate::core) fn bench_lifecycle_work(&self) -> (u64, u64, u64) {
         (
             self.projection_store_queries.get(),
             self.router_compiles.get(),
@@ -3603,7 +3615,7 @@ impl EngineCore {
     /// `(whole pending-owner rebuild visits, submitted cohort atoms
     /// reconciled, whole attribution-demand rebuild visits)` since reset.
     #[doc(hidden)]
-    pub fn bench_admission_local_work(&self) -> (u64, u64, u64) {
+    pub(in crate::core) fn bench_admission_local_work(&self) -> (u64, u64, u64) {
         (
             self.pending_atoms_rebuilt.get(),
             self.pending_cohort_atoms_reconciled.get(),
@@ -3612,7 +3624,7 @@ impl EngineCore {
     }
 
     #[doc(hidden)]
-    pub fn bench_reset_admission_work(&mut self) {
+    pub(in crate::core) fn bench_reset_admission_work(&mut self) {
         self.pending_atoms_rebuilt.set(0);
         self.pending_cohort_atoms_reconciled.set(0);
         self.attribution_atoms_rebuilt.set(0);
@@ -3630,7 +3642,7 @@ impl EngineCore {
     }
 
     #[doc(hidden)]
-    pub fn bench_admission_work(&self) -> CoreAdmissionWork {
+    pub(in crate::core) fn bench_admission_work(&self) -> CoreAdmissionWork {
         let router = self.router.admission_work();
         CoreAdmissionWork {
             pending_atoms_rebuilt: self.pending_atoms_rebuilt.get(),
@@ -3660,7 +3672,7 @@ impl EngineCore {
     }
 
     #[doc(hidden)]
-    pub fn bench_reset_freshness_work(&self) {
+    pub(in crate::core) fn bench_reset_freshness_work(&self) {
         self.freshness_candidate_atoms.set(0);
         self.freshness_incumbent_demand_edges_visited.set(0);
         self.freshness_plan_request_entries_visited.set(0);
@@ -3668,7 +3680,7 @@ impl EngineCore {
     }
 
     #[doc(hidden)]
-    pub fn bench_freshness_work(&self) -> CoreFreshnessWork {
+    pub(in crate::core) fn bench_freshness_work(&self) -> CoreFreshnessWork {
         CoreFreshnessWork {
             candidate_atoms: self.freshness_candidate_atoms.get(),
             incumbent_demand_edges_visited: self.freshness_incumbent_demand_edges_visited.get(),
@@ -3680,7 +3692,7 @@ impl EngineCore {
     /// Reset exact delta-withdrawal counters independently of projection and
     /// storage work.
     #[doc(hidden)]
-    pub fn bench_reset_withdrawal_work(&mut self) {
+    pub(in crate::core) fn bench_reset_withdrawal_work(&mut self) {
         self.withdrawal_handle_detaches.set(0);
         self.resolver_delta_ops_consumed.set(0);
         self.resolver_owner_keys_touched.set(0);
@@ -3696,7 +3708,7 @@ impl EngineCore {
     }
 
     #[doc(hidden)]
-    pub fn bench_withdrawal_work(&self) -> CoreWithdrawalWork {
+    pub(in crate::core) fn bench_withdrawal_work(&self) -> CoreWithdrawalWork {
         let router = self.router.withdrawal_work();
         CoreWithdrawalWork {
             handles_detached: self.withdrawal_handle_detaches.get(),
@@ -3721,24 +3733,24 @@ impl EngineCore {
     /// Benchmark-only access to the store work counters used by the
     /// million-row scale proofs. Not an application/store API.
     #[doc(hidden)]
-    pub fn bench_reset_query_work(&self) {
+    pub(in crate::core) fn bench_reset_query_work(&self) {
         self.store.reset_query_work();
     }
 
     #[doc(hidden)]
-    pub fn bench_query_work(&self) -> (u64, u64, u64) {
+    pub(in crate::core) fn bench_query_work(&self) -> (u64, u64, u64) {
         self.store.query_work()
     }
 
     /// Coverage-table point reads are counted separately from event
     /// projection rows because diagnostics and freshness evidence use them.
     #[doc(hidden)]
-    pub fn bench_reset_coverage_reads(&self) {
+    pub(in crate::core) fn bench_reset_coverage_reads(&self) {
         self.store.reset_coverage_reads();
     }
 
     #[doc(hidden)]
-    pub fn bench_coverage_reads(&self) -> u64 {
+    pub(in crate::core) fn bench_coverage_reads(&self) -> u64 {
         self.store.coverage_reads()
     }
 
@@ -3746,7 +3758,7 @@ impl EngineCore {
     /// transport frame; the benchmark already owns verified signed events
     /// and explicit relay observations.
     #[doc(hidden)]
-    pub fn bench_ingest_observed(
+    pub(in crate::core) fn bench_ingest_observed(
         &mut self,
         events: Vec<(SignedEvent, RelayObserved)>,
     ) -> Vec<Effect> {
@@ -3759,7 +3771,7 @@ impl EngineCore {
     /// door, then force the old affected-handle full refresh. Restricted to
     /// ordinary benchmark events whose demand/directory shape cannot change.
     #[doc(hidden)]
-    pub fn bench_ingest_observed_with_forced_refresh(
+    pub(in crate::core) fn bench_ingest_observed_with_forced_refresh(
         &mut self,
         events: Vec<(SignedEvent, RelayObserved)>,
     ) -> Vec<Effect> {
@@ -3797,7 +3809,7 @@ impl EngineCore {
     /// policy added by #228. Receipt/signing/routing orchestration is outside
     /// the measured mutation seam and deliberately omitted.
     #[doc(hidden)]
-    pub fn bench_accept_local(&mut self, accept: AcceptWrite) -> Vec<Effect> {
+    pub(in crate::core) fn bench_accept_local(&mut self, accept: AcceptWrite) -> Vec<Effect> {
         let accepted = self
             .resolver
             .accept_local(&mut self.store, accept)
@@ -3815,7 +3827,10 @@ impl EngineCore {
     /// reactive-demand fallback behavior, but force stable-shape handles
     /// through the former full-refresh projection.
     #[doc(hidden)]
-    pub fn bench_accept_local_with_forced_refresh(&mut self, accept: AcceptWrite) -> Vec<Effect> {
+    pub(in crate::core) fn bench_accept_local_with_forced_refresh(
+        &mut self,
+        accept: AcceptWrite,
+    ) -> Vec<Effect> {
         let accepted = self
             .resolver
             .accept_local(&mut self.store, accept)
@@ -3839,14 +3854,17 @@ impl EngineCore {
     /// Expire due rows through the production store/retraction/projection
     /// path. The fixture supplies exactly one due row per measured call.
     #[doc(hidden)]
-    pub fn bench_expire_due(&mut self, now: Timestamp) -> Vec<Effect> {
+    pub(in crate::core) fn bench_expire_due(&mut self, now: Timestamp) -> Vec<Effect> {
         self.bench_expire_due_with_mode(now, false)
     }
 
     /// Exact pre-#228 expiry comparison: same governed store mutation and
     /// resolver reaction, followed by the former recompile/full refresh.
     #[doc(hidden)]
-    pub fn bench_expire_due_with_forced_refresh(&mut self, now: Timestamp) -> Vec<Effect> {
+    pub(in crate::core) fn bench_expire_due_with_forced_refresh(
+        &mut self,
+        now: Timestamp,
+    ) -> Vec<Effect> {
         self.bench_expire_due_with_mode(now, true)
     }
 

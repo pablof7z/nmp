@@ -67,7 +67,7 @@ fn rebuilding_wire_ownership_reproduces_the_incremental_state_exactly() {
 
     core.assert_owner_consistency("incremental");
     let incremental = core.bench_ownership_census();
-    core.rebuild_wire_ownership();
+    core.white_box("rebuild_wire_ownership", |s| s.rebuild_wire_ownership());
     core.assert_owner_consistency("rebuilt");
     assert_eq!(
         core.bench_ownership_census(),
@@ -104,7 +104,7 @@ fn rebuilding_after_partial_teardown_still_reproduces_the_incremental_state() {
 
     core.assert_owner_consistency("incremental after withdrawal");
     let incremental = core.bench_ownership_census();
-    core.rebuild_wire_ownership();
+    core.white_box("rebuild_wire_ownership", |s| s.rebuild_wire_ownership());
     core.assert_owner_consistency("rebuilt after withdrawal");
     assert_eq!(
         core.bench_ownership_census(),
@@ -132,10 +132,10 @@ fn rebuilding_wire_ownership_twice_changes_nothing() {
     )));
     flush(&mut core);
 
-    core.rebuild_wire_ownership();
+    core.white_box("rebuild_wire_ownership", |s| s.rebuild_wire_ownership());
     core.assert_owner_consistency("after one rebuild");
     let once = core.bench_ownership_census();
-    core.rebuild_wire_ownership();
+    core.white_box("rebuild_wire_ownership", |s| s.rebuild_wire_ownership());
     core.assert_owner_consistency("after two rebuilds");
     assert_eq!(core.bench_ownership_census(), once);
 }

@@ -124,18 +124,23 @@ mod receipt_allocator_tests {
     #[test]
     fn last_attempt_correlation_is_issued_once_then_exhaustion_is_stable_and_typed() {
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
-        core.set_next_attempt_correlation_for_test(Some(u64::MAX));
+        core.white_box("set_next_attempt_correlation_for_test", |s| {
+            s.set_next_attempt_correlation_for_test(Some(u64::MAX))
+        });
 
         assert_eq!(
-            core.alloc_attempt_correlation(),
+            core.white_box("alloc_attempt_correlation", |s| s
+                .alloc_attempt_correlation()),
             Ok(AttemptCorrelation(u64::MAX))
         );
         assert_eq!(
-            core.alloc_attempt_correlation(),
+            core.white_box("alloc_attempt_correlation", |s| s
+                .alloc_attempt_correlation()),
             Err(AttemptCorrelationExhausted)
         );
         assert_eq!(
-            core.alloc_attempt_correlation(),
+            core.white_box("alloc_attempt_correlation", |s| s
+                .alloc_attempt_correlation()),
             Err(AttemptCorrelationExhausted),
             "exhaustion remains stable: no wrap, reuse, or fabricated id"
         );
@@ -174,7 +179,9 @@ mod receipt_allocator_tests {
             })
             .expect("accepted unsigned intent requests signing");
         let intent = core.pending[&receipt].intent_id;
-        core.set_next_attempt_correlation_for_test(None);
+        core.white_box("set_next_attempt_correlation_for_test", |s| {
+            s.set_next_attempt_correlation_for_test(None)
+        });
 
         let effects = core.handle(EngineMsg::SignerCompleted(
             receipt,
@@ -190,7 +197,8 @@ mod receipt_allocator_tests {
         assert!(core.pending[&receipt].attempt_ordinals.is_empty());
         assert!(core.store.recover_attempts(intent).unwrap().is_empty());
         assert_eq!(
-            core.alloc_attempt_correlation(),
+            core.white_box("alloc_attempt_correlation", |s| s
+                .alloc_attempt_correlation()),
             Err(AttemptCorrelationExhausted),
             "the failed call must not revive or wrap the namespace"
         );
@@ -401,16 +409,16 @@ mod receipt_allocator_tests {
         let a = RelayUrl::parse("wss://chosen-a.example").unwrap();
         let b = RelayUrl::parse("wss://chosen-b.example").unwrap();
 
-        let auto = EngineCore::routing_snapshot(&WriteRouting::Auto);
+        let auto = CoreState::routing_snapshot(&WriteRouting::Auto);
         assert_eq!(auto, "auto", "Auto stores a label, never a relay set");
         assert!(matches!(
-            EngineCore::parse_routing_snapshot(&auto),
+            CoreState::parse_routing_snapshot(&auto),
             Some(WriteRouting::Auto)
         ));
 
         let route = WriteRouting::Explicit(vec![b.clone(), a.clone()]);
-        let snapshot = EngineCore::routing_snapshot(&route);
-        let restored = EngineCore::parse_routing_snapshot(&snapshot)
+        let snapshot = CoreState::routing_snapshot(&route);
+        let restored = CoreState::parse_routing_snapshot(&snapshot)
             .expect("a valid explicit snapshot must remain readable");
         let WriteRouting::Explicit(relays) = restored else {
             panic!("snapshot restored the wrong routing variant")
@@ -475,7 +483,9 @@ mod receipt_allocator_tests {
         );
 
         let mut immediate_resync = Vec::new();
-        recovered.resync_route_needs(&mut immediate_resync);
+        recovered.white_box("resync_route_needs", |s| {
+            s.resync_route_needs(&mut immediate_resync)
+        });
         assert!(
             immediate_resync
                 .iter()
@@ -605,7 +615,9 @@ mod semantic_successor_tests {
         });
         // The destination speaks NIP-77, so the coordinate read this gate
         // opens compiles to a live-first barrier rather than an ordinary REQ.
-        core.prober.force_supported_for_test(destination.clone());
+        core.white_box("prober.force_supported_for_test", |s| {
+            s.prober.force_supported_for_test(destination.clone())
+        });
 
         let operation = nmp_grammar::ReplaceableOperation::from_registered_default_parts(
             [11; 16],
@@ -908,8 +920,10 @@ mod semantic_successor_tests {
         // store commit failure would, then finish its stored-events phase.
         // It delivered nothing and proves nothing -- Finished, no interval.
         let wire_id = wire_sub_id_string(&coordinate_sub_id);
-        core.attribution
-            .poison_event_commit_failure(&read_session, &wire_id);
+        core.white_box("attribution.poison_event_commit_failure", |s| {
+            s.attribution
+                .poison_event_commit_failure(&read_session, &wire_id)
+        });
         seen.extend(core.handle(EngineMsg::RelayFrame(
             read_handle,
             read_session.clone(),
@@ -1134,8 +1148,9 @@ mod semantic_successor_tests {
             core.handle(EngineMsg::RelayConnected(read_handle, read_session.clone()));
             core.handle(EngineMsg::RelayConnected(handle, session.clone()));
             let parked = core.handle(EngineMsg::AuthProbeReleased(handle, session.clone()));
-            let released =
-                core.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
+            let released = core.white_box("answer_coordinate_coverage_for_test", |s| {
+                s.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked)
+            });
             let correlation = released
                 .iter()
                 .find_map(|effect| match effect {
@@ -1172,11 +1187,11 @@ mod semantic_successor_tests {
         let stale_unsigned = current.clone();
         let stale_signed = stale_unsigned.sign_with_keys(&author).unwrap();
         let stale_receipt = receipts[0];
-        {
-            let pending = core.pending.get_mut(&stale_receipt).unwrap();
+        core.white_box("pending.get_mut", |s| {
+            let pending = s.pending.get_mut(&stale_receipt).unwrap();
             pending.sign_request_in_flight = true;
             pending.sign_generation = stale_generation;
-        }
+        });
         let current_echo = current.clone().sign_with_keys(&author).unwrap();
         let mut echo_effects = Vec::new();
         core.ingest_relay_events(
@@ -1203,7 +1218,9 @@ mod semantic_successor_tests {
             first_local_id,
             "a relay echo of E1 is signature evidence, not a newer semantic base"
         );
-        core.replaceable_materializers.clear();
+        core.white_box("replaceable_materializers.clear", |s| {
+            s.replaceable_materializers.clear()
+        });
         let unavailable = source(&author, 3, "unavailable", &[carol]);
         let mut unavailable_effects = Vec::new();
         core.ingest_relay_events(
@@ -1747,8 +1764,9 @@ mod semantic_successor_tests {
             core.handle(EngineMsg::RelayConnected(read_handle, read_session.clone()));
             core.handle(EngineMsg::RelayConnected(*handle, session.clone()));
             let parked = core.handle(EngineMsg::AuthProbeReleased(*handle, session.clone()));
-            let released =
-                core.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
+            let released = core.white_box("answer_coordinate_coverage_for_test", |s| {
+                s.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked)
+            });
             let correlation = released
                 .iter()
                 .find_map(|effect| match effect {
@@ -1837,7 +1855,7 @@ mod semantic_successor_tests {
         // Keep E2's own ACK deadline strictly after both retired E1
         // deadlines. The later ticks below are therefore stale E1 inputs,
         // not legitimate current-generation timeouts.
-        core.clock = Timestamp::from(10_000u64);
+        core.white_box("clock", |s| s.clock = Timestamp::from(10_000u64));
         let e2_started = core.handle(EngineMsg::SignerCompleted(
             receipt,
             e2_generation,
@@ -1858,7 +1876,9 @@ mod semantic_successor_tests {
                 )
             })
             .collect::<Vec<_>>();
-        let e2_answered = core.answer_coordinate_coverage_for_test(&read_sessions, &e2_started);
+        let e2_answered = core.white_box("answer_coordinate_coverage_for_test", |s| {
+            s.answer_coordinate_coverage_for_test(&read_sessions, &e2_started)
+        });
         let mut combined = e2_started;
         combined.extend(e2_answered);
         let e2_started = combined;
@@ -2022,9 +2042,11 @@ mod persistence_stall_replay_tests {
             })
             .expect("publish takes custody and answers with the receipt id");
         // The same relay failed to commit BOTH durable facts.
-        let pending = core.pending.get_mut(&id).expect("the write is pending");
-        pending.unstarted_relays.insert(relay.clone());
-        pending.route_blocked_relays.insert(relay.clone());
+        core.white_box("pending.get_mut", |s| {
+            let pending = s.pending.get_mut(&id).expect("the write is pending");
+            pending.unstarted_relays.insert(relay.clone());
+            pending.route_blocked_relays.insert(relay.clone());
+        });
 
         // Page one fact at a time, which is what makes a collapsed dedup key
         // observable: the second stall is skipped as "already delivered".
@@ -2096,17 +2118,19 @@ mod persistence_stall_replay_tests {
         let event_id = core.pending[&id].frozen.id;
 
         let mut effects = Vec::new();
-        core.emit_write_fact(
-            id,
-            WriteFact::Relay {
-                event_id,
-                relay: relay.clone(),
-                state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
-                    detail: ATTEMPT_STALL_DETAIL.to_string(),
-                }),
-            },
-            &mut effects,
-        );
+        core.white_box("emit_write_fact", |s| {
+            s.emit_write_fact(
+                id,
+                WriteFact::Relay {
+                    event_id,
+                    relay: relay.clone(),
+                    state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
+                        detail: ATTEMPT_STALL_DETAIL.to_string(),
+                    }),
+                },
+                &mut effects,
+            )
+        });
         assert_eq!(
             core.pending
                 .get(&id)
@@ -2117,15 +2141,17 @@ mod persistence_stall_replay_tests {
         );
 
         // A later success at the same relay.
-        core.emit_write_fact(
-            id,
-            WriteFact::Relay {
-                event_id,
-                relay,
-                state: RelayState::Published,
-            },
-            &mut effects,
-        );
+        core.white_box("emit_write_fact", |s| {
+            s.emit_write_fact(
+                id,
+                WriteFact::Relay {
+                    event_id,
+                    relay,
+                    state: RelayState::Published,
+                },
+                &mut effects,
+            )
+        });
         assert_eq!(
             core.pending
                 .get(&id)
@@ -2135,5 +2161,56 @@ mod persistence_stall_replay_tests {
             "a later ack overwrote the persistence fault; an operator loses the only signal \
              that the local disk is failing"
         );
+    }
+}
+
+/// The invariant `core::cell` exists to hold, exercised on the door that
+/// makes the hole visible.
+///
+/// `cancel_write` is reachable BOTH through `EngineMsg::CancelWrite`
+/// (`core/mod.rs`) and by a direct call -- `nmp-runtime/src/lib.rs` does
+/// exactly that. Before the checked shell, the owner-consistency proof ran
+/// at one site, the end of `handle()`, so the same code was checked or not
+/// depending on who called it. Now every `&mut self` door on `EngineCore`
+/// runs it, and this test drives the direct one.
+///
+/// It asserts almost nothing of its own on purpose. Its job is that a mirror
+/// desync introduced anywhere inside `cancel_write`, or anywhere the checked
+/// owners reach, panics HERE naming `cancel_write` -- on a route that
+/// previously proved nothing at all.
+#[cfg(test)]
+mod checked_shell_tests {
+    use super::*;
+
+    use nmp_store::RedbStore;
+    use nostr::{Keys, Kind};
+
+    #[test]
+    fn the_direct_cancel_write_door_proves_owner_consistency() {
+        let keys = Keys::generate();
+        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
+        core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::TextNote,
+                tags: (vec![]).into_iter().collect(),
+                content: ("checked shell").into(),
+                created_at: Some(Timestamp::from(7u64)),
+            }),
+            routing: WriteRouting::Auto,
+            identity: Identity::Active,
+            correlation: None,
+        }));
+        let receipt = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::WriteAccepted(id, _) => Some(*id),
+                _ => None,
+            })
+            .expect("publish takes custody and answers with a receipt id");
+
+        // THE POINT: not `core.handle(EngineMsg::CancelWrite(receipt))`.
+        let (outcome, _) = core.cancel_write(receipt);
+        assert_eq!(outcome, Ok(CancelWriteOutcome::Cancelled));
     }
 }

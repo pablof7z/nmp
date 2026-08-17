@@ -35,7 +35,9 @@ fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
         let survivor_atom = with_evidence(survivor.clone());
         let key = nmp_router::DemandKey::for_atom(&first_atom);
 
-        core.retain_wire_atom_owner(&first_atom);
+        core.white_box("retain_wire_atom_owner", |s| {
+            s.retain_wire_atom_owner(&first_atom)
+        });
         let opened = flush(&mut core);
         assert_eq!(
             wire_ops(&opened)
@@ -46,7 +48,9 @@ fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
         );
         let immutable_request = core.router.plan().reqs.values().next().unwrap()[0].clone();
 
-        core.retain_wire_atom_owner(&survivor_atom);
+        core.white_box("retain_wire_atom_owner", |s| {
+            s.retain_wire_atom_owner(&survivor_atom)
+        });
         assert_eq!(core.wire.pending_len(), 0);
         assert_eq!(
             core.wire.effective_atom(&key).unwrap().routing_evidence,
@@ -57,7 +61,9 @@ fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
             immutable_request
         );
 
-        assert!(core.release_wire_atom_owner(&first_atom).is_none());
+        assert!(core.white_box("release_wire_atom_owner", |s| s
+            .release_wire_atom_owner(&first_atom)
+            .is_none()));
         assert_eq!(core.wire.pending_len(), 0);
         assert_eq!(
             core.wire.effective_atom(&key).unwrap().routing_evidence,
@@ -72,11 +78,14 @@ fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
             BTreeSet::from([survivor])
         );
 
-        let final_atom = core
-            .release_wire_atom_owner(&survivor_atom)
-            .expect("the final exact owner retires the shared selection");
+        let final_atom = core.white_box("release_wire_atom_owner", |s| {
+            s.release_wire_atom_owner(&survivor_atom)
+                .expect("the final exact owner retires the shared selection")
+        });
         let mut closed = Vec::new();
-        core.withdraw_wire_demand(vec![final_atom], &mut closed);
+        core.white_box("withdraw_wire_demand", |s| {
+            s.withdraw_wire_demand(vec![final_atom], &mut closed)
+        });
         assert_eq!(
             wire_ops(&closed)
                 .into_iter()
@@ -114,7 +123,9 @@ fn second_outbox_hint_opens_only_the_missing_relay_for_both_owner_close_orders()
         let mut second = routeless_outbox_atom(author);
         second.routing_evidence.insert(second_evidence.clone());
 
-        core.retain_wire_atom_owner(&first);
+        core.white_box("retain_wire_atom_owner", |s| {
+            s.retain_wire_atom_owner(&first)
+        });
         let initially_admitted = flush(&mut core);
         assert_eq!(
             wire_ops(&initially_admitted)
@@ -132,7 +143,9 @@ fn second_outbox_hint_opens_only_the_missing_relay_for_both_owner_close_orders()
         assert_eq!(core.wire.pending_len(), 0);
 
         core.router_compiles.set(0);
-        core.retain_wire_atom_owner(&first);
+        core.white_box("retain_wire_atom_owner", |s| {
+            s.retain_wire_atom_owner(&first)
+        });
         assert_eq!(core.wire.pending_len(), 0);
         assert!(flush(&mut core).is_empty());
         assert_eq!(
@@ -140,9 +153,13 @@ fn second_outbox_hint_opens_only_the_missing_relay_for_both_owner_close_orders()
             0,
             "duplicate evidence is no cohort"
         );
-        assert!(core.release_wire_atom_owner(&first).is_none());
+        assert!(core.white_box("release_wire_atom_owner", |s| s
+            .release_wire_atom_owner(&first)
+            .is_none()));
 
-        core.retain_wire_atom_owner(&second);
+        core.white_box("retain_wire_atom_owner", |s| {
+            s.retain_wire_atom_owner(&second)
+        });
         assert_eq!(core.wire.pending_len(), 1);
         let healed = flush(&mut core);
         assert_eq!(
@@ -167,12 +184,17 @@ fn second_outbox_hint_opens_only_the_missing_relay_for_both_owner_close_orders()
         } else {
             (&second, &first)
         };
-        assert!(core.release_wire_atom_owner(departing).is_none());
-        let final_atom = core
-            .release_wire_atom_owner(survivor)
-            .expect("the final exact owner retires both immutable relay edges");
+        assert!(core.white_box("release_wire_atom_owner", |s| s
+            .release_wire_atom_owner(departing)
+            .is_none()));
+        let final_atom = core.white_box("release_wire_atom_owner", |s| {
+            s.release_wire_atom_owner(survivor)
+                .expect("the final exact owner retires both immutable relay edges")
+        });
         let mut closed = Vec::new();
-        core.withdraw_wire_demand(vec![final_atom], &mut closed);
+        core.white_box("withdraw_wire_demand", |s| {
+            s.withdraw_wire_demand(vec![final_atom], &mut closed)
+        });
         assert_eq!(
             wire_ops(&closed)
                 .into_iter()
@@ -209,15 +231,17 @@ fn preflush_hint_owner_churn_combines_pending_and_incumbent_assignment_truth() {
         a.routing_evidence.insert(evidence_a.clone());
         let mut b = routeless_outbox_atom(author);
         b.routing_evidence.insert(evidence_b.clone());
-        core.retain_wire_atom_owner(&a);
+        core.white_box("retain_wire_atom_owner", |s| s.retain_wire_atom_owner(&a));
         flush(&mut core);
         let incumbent_session = RelaySessionKey::public(evidence_a.relay.clone());
         let incumbent = core.router.plan().reqs[&incumbent_session][0].clone();
 
-        core.retain_wire_atom_owner(&b);
+        core.white_box("retain_wire_atom_owner", |s| s.retain_wire_atom_owner(&b));
         let departing = if depart_a_before_flush { &a } else { &b };
         let survivor = if depart_a_before_flush { &b } else { &a };
-        assert!(core.release_wire_atom_owner(departing).is_none());
+        assert!(core.white_box("release_wire_atom_owner", |s| s
+            .release_wire_atom_owner(departing)
+            .is_none()));
         let admitted = flush(&mut core);
         assert_eq!(core.router.plan().reqs[&incumbent_session], vec![incumbent]);
 
@@ -243,9 +267,13 @@ fn preflush_hint_owner_churn_combines_pending_and_incumbent_assignment_truth() {
             );
         }
 
-        let final_atom = core.release_wire_atom_owner(survivor).unwrap();
+        let final_atom = core.white_box("release_wire_atom_owner", |s| {
+            s.release_wire_atom_owner(survivor).unwrap()
+        });
         let mut closed = Vec::new();
-        core.withdraw_wire_demand(vec![final_atom], &mut closed);
+        core.white_box("withdraw_wire_demand", |s| {
+            s.withdraw_wire_demand(vec![final_atom], &mut closed)
+        });
         assert_eq!(
             wire_ops(&closed)
                 .into_iter()

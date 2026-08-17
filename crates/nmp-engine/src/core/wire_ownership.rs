@@ -1,7 +1,7 @@
 //! Typed ownership for live-wire demand: which handles own which atoms, and
 //! which logical demands are therefore live on the wire.
 //!
-//! Ten maps used to sit directly on `EngineCore`, maintained by *two*
+//! Ten maps used to sit directly on `CoreState`, maintained by *two*
 //! hand-written algorithms that nothing checked against each other: an
 //! incremental path (`retain_wire_atom_owner_with_effects` /
 //! `release_wire_atom_owner`) and a wholesale `rebuild_wire_ownership` that
@@ -783,8 +783,8 @@ mod tests {
     use nmp_store::RedbStore;
     use nostr::{RelayUrl, Timestamp};
 
+    use super::super::{AccessContext, CoreState, Effect, EngineMsg, Freshness, SourceAuthority};
     use super::*;
-    use super::super::{AccessContext, EngineCore, EngineMsg, Effect, Freshness, SourceAuthority};
 
     /// A minimal atom with no routing evidence, needing no production
     /// wiring -- for the two overflow falsifiers below, which corrupt an
@@ -794,9 +794,10 @@ mod tests {
     fn atom() -> ContextualAtom {
         ContextualAtom {
             filter: ConcreteFilter::default(),
-            source: SourceAuthority::Pinned(BTreeSet::from([
-                RelayUrl::parse("wss://wire-ownership-overflow.example").unwrap(),
-            ])),
+            source: SourceAuthority::Pinned(BTreeSet::from([RelayUrl::parse(
+                "wss://wire-ownership-overflow.example",
+            )
+            .unwrap()])),
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         }
@@ -806,12 +807,12 @@ mod tests {
     /// `Subscribe`/`FlushWireAdmission` doors, with its one attached
     /// `HandleId` -- the shape [`WireOwnership::index_handle`] is always
     /// called with in production.
-    fn subscribed_handle() -> (EngineCore, HandleId) {
+    fn subscribed_handle() -> (CoreState, HandleId) {
         let relay = RelayUrl::parse("wss://wire-ownership-double-index.example").unwrap();
         let mut demand = Demand::from_filter(Filter::default());
         demand.source = SourceAuthority::Pinned(BTreeSet::from([relay]));
         demand.freshness = Freshness::Live;
-        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
+        let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let opened = core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));
         core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
         let id = opened

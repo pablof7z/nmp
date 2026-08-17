@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, ops::Deref};
 use nmp_grammar::{ConcreteFilter, DescriptorHash, RelaySessionKey};
 use nmp_router::{SubId, WireDelta, WireOp, WireReq};
 
-use super::{EngineCore, RequestAttemptId};
+use super::{CoreState, RequestAttemptId};
 
 /// A router delta plus the exact attempt identity of every REQ it carries.
 #[derive(Debug)]
@@ -74,8 +74,8 @@ impl PartialEq<Vec<WireReq>> for AttemptedReplay {
     }
 }
 
-impl EngineCore {
-    pub(super) fn attempted_wire_delta(&self, delta: WireDelta) -> AttemptedWireDelta {
+impl CoreState {
+    pub(in crate::core) fn attempted_wire_delta(&self, delta: WireDelta) -> AttemptedWireDelta {
         let mut attempts = BTreeMap::new();
         for (session, ops) in &delta.ops {
             for op in ops {
@@ -94,7 +94,7 @@ impl EngineCore {
         AttemptedWireDelta::new(delta, attempts)
     }
 
-    pub(super) fn attempted_replay(
+    pub(in crate::core) fn attempted_replay(
         &self,
         session: &RelaySessionKey,
         requests: Vec<WireReq>,

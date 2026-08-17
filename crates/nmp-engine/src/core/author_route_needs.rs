@@ -2,7 +2,7 @@
 //! authors currently have live `AuthorOutboxes` wire demand, and which of
 //! those still lack a positive outbound route.
 //!
-//! Three fields used to sit directly on `EngineCore`, maintained by *two*
+//! Three fields used to sit directly on `CoreState`, maintained by *two*
 //! hand-written algorithms nothing checked against each other: an
 //! incremental path (`retain_author_outbox_wire_owner` /
 //! `release_author_outbox_wire_owner`) and a wholesale
@@ -39,9 +39,9 @@
 //!
 //! This is not an open-ended staleness window in production today: the
 //! coordinator's sole production writer of routing facts,
-//! `EngineCore::replace_author_routes`, always calls `recompile` --
+//! `CoreState::replace_author_routes`, always calls `recompile` --
 //! and therefore this owner's rebuild -- synchronously in the same turn a
-//! route changes, so nothing outside `EngineCore` ever observes the
+//! route changes, so nothing outside `CoreState` ever observes the
 //! incremental-only state. What the two-path split *does* make load-bearing
 //! is entirely inside that one turn: `recompile`'s own
 //! `flush_author_outbox_route_need_changes` is the only mechanism that can
@@ -312,7 +312,7 @@ mod tests {
     /// this owner derived the flag from replay-time `retain` calls alone and
     /// missed exactly this case -- caught by
     /// `core::query_tests::author_outbox_queries_need_a_provider_until_a_positive_route_or_withdrawal`
-    /// at the `EngineCore` level, reproduced here at the owner level.
+    /// at the `CoreState` level, reproduced here at the owner level.
     #[test]
     fn a_rebuild_notices_a_route_learned_between_rebuilds() {
         let mut owner = AuthorRouteNeeds::default();

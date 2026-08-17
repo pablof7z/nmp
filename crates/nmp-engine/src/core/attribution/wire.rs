@@ -2,10 +2,10 @@
 
 use nmp_router::SubId;
 
-/// The wire-format `subscription_id` string `EngineCore` sends a REQ under
+/// The wire-format `subscription_id` string `CoreState` sends a REQ under
 /// for `sub_id`: the hex `Display` of its `SubId.1` digest — 64 lowercase hex
 /// characters, exactly NIP-01's `subscription_id` cap, never prefixed and
-/// never truncated. This is an internal implementation detail EngineCore owns
+/// never truncated. This is an internal implementation detail CoreState owns
 /// end-to-end (recorded at send time in `sub_id_by_wire`, read back at EOSE
 /// time from the same map) — nothing else in the M3 crate graph has committed
 /// to a different convention, so no other component's contract depends on

@@ -35,7 +35,7 @@
 //! state, a relay-scoped teardown, a liveness sweep -- not the map it used
 //! to touch. The plan's own lifecycle operations
 //! ([`Nip77Sessions::cancel_repair_for_plan`],
-//! [`Nip77Sessions::retire_backfills_for_plan`]) live here too: `EngineCore`
+//! [`Nip77Sessions::retire_backfills_for_plan`]) live here too: `CoreState`
 //! sequences the cross-owner consequences
 //! (abandoning a wire id reaches into attempts, attribution, and other
 //! owners this struct does not hold) from the [`PlanRepairWithdrawal`] this
@@ -583,7 +583,7 @@ impl Nip77Sessions {
     /// count `counts()` reports are unchanged. The cardinality-preserving
     /// corruption `assert_consistent` exists to catch, exposed here only so
     /// a falsifier can drive it without reaching past this owner's own
-    /// fields (which are private even to `EngineCore`).
+    /// fields (which are private even to `CoreState`).
     #[cfg(test)]
     pub(super) fn swap_handoff_owners_for_test(&mut self, a: &SubId, b: &SubId) {
         self.handoffs.swap_owners_for_test(a, b);

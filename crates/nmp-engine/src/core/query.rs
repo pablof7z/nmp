@@ -20,7 +20,7 @@ pub(super) enum PlanDeltaMode {
 }
 
 /// Which NIP-77 frame the runtime attempted to hand to a relay worker, for
-/// [`EngineCore::on_nip77_handoff`] (issue #775).
+/// [`CoreState::on_nip77_handoff`] (issue #775).
 ///
 /// Closed and exhaustive: each variant names the exact reducer state that
 /// advanced before the frame existed, and therefore the exact state a
@@ -38,8 +38,8 @@ pub enum Nip77Frame {
     Continue,
 }
 
-impl EngineCore {
-    /// The sole EngineCore authority crossing the durable coverage-write
+impl CoreState {
+    /// The sole CoreState authority crossing the durable coverage-write
     /// boundary. Callers own completion or retry policy, but every path
     /// commits one request-scoped batch atomically through this door.
     fn record_request_coverage_batch(
@@ -79,7 +79,7 @@ impl EngineCore {
     /// mailbox and no wire request, and no branch of it was ever installed.
     /// On success the branches share one projection, one evidence vector in
     /// canonical branch order, and one cancellation.
-    pub fn open_observation(
+    pub(in crate::core) fn open_observation(
         &mut self,
         query: LiveQuery,
         now: Timestamp,
@@ -232,7 +232,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn on_subscribe(&mut self, query: LiveQuery) -> Vec<Effect> {
+    pub(in crate::core) fn on_subscribe(&mut self, query: LiveQuery) -> Vec<Effect> {
         let now = self.clock();
         match self.open_observation(query, now) {
             ObservationOpen::Opened {
@@ -253,7 +253,7 @@ impl EngineCore {
     /// refcounted by the resolver, so a branch whose acquisition identity is
     /// still claimed by an unrelated observation stays live: closing this
     /// observation withdraws only what nothing else still owns.
-    pub(super) fn on_unsubscribe(&mut self, id: ObservationId) -> Vec<Effect> {
+    pub(in crate::core) fn on_unsubscribe(&mut self, id: ObservationId) -> Vec<Effect> {
         let mut effects = Vec::new();
         let Some(state) = self.observations.remove(&id) else {
             return effects;
@@ -292,7 +292,7 @@ impl EngineCore {
     /// candidate's exact EOSE) Negentropy while the live REQ stays open.
     /// Ledger #8 remains structural: only a `ProbedRelay` token can enter
     /// [`Self::begin_neg_handoff`].
-    pub(super) fn recompile(&mut self, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn recompile(&mut self, effects: &mut Vec<Effect>) {
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.router_compiles
             .set(self.router_compiles.get().saturating_add(1));
@@ -348,7 +348,7 @@ impl EngineCore {
     /// Compile exactly the currently-uncovered logical demand as one pending
     /// cohort. Existing plan requests are coverage inputs, never merge or
     /// identity candidates, so this transition cannot rewrite them.
-    pub(super) fn flush_wire_admission(&mut self, now: Timestamp) -> Vec<Effect> {
+    pub(in crate::core) fn flush_wire_admission(&mut self, now: Timestamp) -> Vec<Effect> {
         // Admission is the exact transition that may mint a NIP-77 handoff
         // and its liveness deadline. Carry runtime wall truth into that stamp
         // without turning admission into a maintenance sweep.
@@ -395,7 +395,7 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn apply_request_metadata_updates(
+    pub(in crate::core) fn apply_request_metadata_updates(
         &mut self,
         updates: &[nmp_router::RequestMetadataUpdate],
         effects: &mut Vec<Effect>,
@@ -442,7 +442,7 @@ impl EngineCore {
         transferred_claims
     }
 
-    pub(super) fn apply_request_metadata_removals(
+    pub(in crate::core) fn apply_request_metadata_removals(
         &mut self,
         removals: &[nmp_router::RequestMetadataRemoval],
     ) {
@@ -497,7 +497,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn install_plan_execution_metadata(
+    pub(in crate::core) fn install_plan_execution_metadata(
         &mut self,
         sub_id: SubId,
         filter: ConcreteFilter,
@@ -739,7 +739,7 @@ impl EngineCore {
         committed
     }
 
-    pub(super) fn retry_due_request_claim_transfers(
+    pub(in crate::core) fn retry_due_request_claim_transfers(
         &mut self,
         now: Timestamp,
         effects: &mut Vec<Effect>,
@@ -769,7 +769,7 @@ impl EngineCore {
     }
 
     #[cfg(test)]
-    pub(super) fn reconcile_request_claim_transfers_for_wire_delta(
+    pub(in crate::core) fn reconcile_request_claim_transfers_for_wire_delta(
         &mut self,
         wire_delta: &WireDelta,
     ) {
@@ -798,7 +798,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn withdraw_wire_demand(
+    pub(in crate::core) fn withdraw_wire_demand(
         &mut self,
         closing_atoms: Vec<ContextualAtom>,
         effects: &mut Vec<Effect>,
@@ -829,7 +829,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn apply_router_plan_delta(
+    pub(in crate::core) fn apply_router_plan_delta(
         &mut self,
         replacements: &BTreeSet<nmp_router::RequestReplacement>,
         wire_delta: WireDelta,
@@ -1060,11 +1060,11 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn wire_admission_needed(&self) -> bool {
+    pub(in crate::core) fn wire_admission_needed(&self) -> bool {
         self.wire.admission_needed()
     }
 
-    pub(super) fn refresh_evidence_for_coverage_keys(
+    pub(in crate::core) fn refresh_evidence_for_coverage_keys(
         &mut self,
         keys: &BTreeSet<CoverageKey>,
         effects: &mut Vec<Effect>,
@@ -1072,7 +1072,7 @@ impl EngineCore {
         self.refresh_evidence_for_coverage_and_demand_keys(keys, &BTreeSet::new(), effects);
     }
 
-    pub(super) fn refresh_evidence_for_coverage_and_demand_keys(
+    pub(in crate::core) fn refresh_evidence_for_coverage_and_demand_keys(
         &mut self,
         coverage_keys: &BTreeSet<CoverageKey>,
         demand_keys: &BTreeSet<nmp_router::DemandKey>,
@@ -1121,12 +1121,12 @@ impl EngineCore {
     /// per-Demand opening-time freshness decision is `Live`. Suppressed
     /// Demand scopes still own their graph and cache projection, but their
     /// atoms are absent from this wire truth.
-    pub(super) fn wire_demand(&self) -> BTreeSet<ContextualAtom> {
+    pub(in crate::core) fn wire_demand(&self) -> BTreeSet<ContextualAtom> {
         self.wire.live_demand()
     }
 
     #[cfg(test)]
-    pub(super) fn retain_wire_atom_owner(&mut self, atom: &ContextualAtom) -> bool {
+    pub(in crate::core) fn retain_wire_atom_owner(&mut self, atom: &ContextualAtom) -> bool {
         self.retain_wire_atom_owner_with_effects(atom, &mut Vec::new())
     }
 
@@ -1175,7 +1175,7 @@ impl EngineCore {
 
     /// Release one exact owner's contribution. Returns the final effective
     /// atom only when the logical `DemandKey` became ownerless.
-    pub(super) fn release_wire_atom_owner(
+    pub(in crate::core) fn release_wire_atom_owner(
         &mut self,
         atom: &ContextualAtom,
     ) -> Option<ContextualAtom> {
@@ -1209,7 +1209,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn attach_wire_handle(
+    pub(in crate::core) fn attach_wire_handle(
         &mut self,
         id: HandleId,
         acquisition: &HandleAcquisition,
@@ -1244,7 +1244,7 @@ impl EngineCore {
         diagnostics_changed
     }
 
-    pub(super) fn detach_wire_handle(&mut self, id: HandleId) -> Vec<ContextualAtom> {
+    pub(in crate::core) fn detach_wire_handle(&mut self, id: HandleId) -> Vec<ContextualAtom> {
         let mut closing = Vec::new();
         self.deactivate_request_targets_for_handle(id);
         #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -1266,7 +1266,7 @@ impl EngineCore {
     /// handles the one fact only a drained pending-drop delta can reveal: a
     /// resolver handle disappeared before core ran that detach. Reverse edges
     /// remove only owners of the reported atom; no sibling census is needed.
-    pub(super) fn consume_resolver_delta(&mut self, delta: DemandDelta) {
+    pub(in crate::core) fn consume_resolver_delta(&mut self, delta: DemandDelta) {
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.resolver_delta_ops_consumed.set(
             self.resolver_delta_ops_consumed
@@ -1309,7 +1309,7 @@ impl EngineCore {
     /// Finish one resolver transaction after replacement handles, if any,
     /// have attached. An exact live replacement canceled its pending close in
     /// `attach_wire_handle`; only genuinely ownerless atoms reach the router.
-    pub(super) fn flush_consumed_resolver_closes(&mut self, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn flush_consumed_resolver_closes(&mut self, effects: &mut Vec<Effect>) {
         let closing = self.wire.take_deferred_closes();
         self.withdraw_wire_demand(closing, effects);
         self.flush_author_outbox_route_need_changes(effects);
@@ -1324,7 +1324,7 @@ impl EngineCore {
     /// wire owner is reset wholesale (so a map cannot be forgotten by a reset
     /// that does not name it), and the replay goes through the same
     /// [`WireOwnership::retain`] the incremental path uses.
-    pub(super) fn rebuild_wire_ownership(&mut self) {
+    pub(in crate::core) fn rebuild_wire_ownership(&mut self) {
         let mut contributions = Vec::new();
         for (id, state) in &self.handles {
             contributions.push((*id, self.wire_atoms_for_handle(*id, &state.acquisition)));
@@ -1386,7 +1386,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn wire_atoms_for_handle(
+    pub(in crate::core) fn wire_atoms_for_handle(
         &self,
         id: HandleId,
         acquisition: &HandleAcquisition,
@@ -1403,7 +1403,7 @@ impl EngineCore {
     /// Evaluate only one scoped cohort through the same candidate compiler
     /// and residual-capacity reducer as live admission. The preview reads
     /// exact incumbent indexes but never mutates live wire or ownership.
-    pub(super) fn shadow_plan_for(&self, demand: BTreeSet<ContextualAtom>) -> RelayPlan {
+    pub(in crate::core) fn shadow_plan_for(&self, demand: BTreeSet<ContextualAtom>) -> RelayPlan {
         let preview =
             self.router
                 .preview_admission(&demand, &self.routing_facts, self.compile_budget());
@@ -1439,7 +1439,7 @@ impl EngineCore {
     /// unsatisfied `MaxAge` becomes `Live` once and stays there; a satisfied
     /// scope retains the exact evaluation plan for evidence and is never
     /// re-evaluated.
-    pub(super) fn decide_handle_acquisition(
+    pub(in crate::core) fn decide_handle_acquisition(
         &self,
         id: HandleId,
         root_freshness: Freshness,
@@ -1481,7 +1481,7 @@ impl EngineCore {
         Ok(HandleAcquisition { scopes: decided })
     }
 
-    pub(super) fn acquisition_evidence_for_scopes(
+    pub(in crate::core) fn acquisition_evidence_for_scopes(
         &self,
         scopes: Vec<(BTreeSet<ContextualAtom>, Freshness)>,
         acquisition: &HandleAcquisition,
@@ -1489,7 +1489,7 @@ impl EngineCore {
         self.acquisition_evidence_for_scopes_with_plan(scopes, acquisition, self.router.plan())
     }
 
-    pub(super) fn acquisition_evidence_for_scopes_with_plan(
+    pub(in crate::core) fn acquisition_evidence_for_scopes_with_plan(
         &self,
         scopes: Vec<(BTreeSet<ContextualAtom>, Freshness)>,
         acquisition: &HandleAcquisition,
@@ -1571,7 +1571,7 @@ impl EngineCore {
     /// evidence. Presence of a matching event is deliberately irrelevant: a
     /// coverage row proves the question was checked, so an empty cached result
     /// can satisfy `MaxAge` too.
-    pub(super) fn plan_is_fresh_for(
+    pub(in crate::core) fn plan_is_fresh_for(
         &self,
         evidence: &AcquisitionEvidence,
         max_age_seconds: u64,
@@ -1589,7 +1589,7 @@ impl EngineCore {
 
     /// One exact request is abandoned. It may no longer earn coverage or
     /// produce a settlement fact.
-    pub(super) fn abandon_sub(&mut self, sub_id: &SubId) {
+    pub(in crate::core) fn abandon_sub(&mut self, sub_id: &SubId) {
         self.attempts.retire_for_sub(sub_id);
         self.attribution.discard_sub(sub_id);
         let session = RelaySessionKey::new(sub_id.0.clone(), sub_id.2);
@@ -1606,7 +1606,7 @@ impl EngineCore {
 
     /// A session dropped. Every attributed request on it is dead; replay
     /// creates fresh request revisions after reconnect.
-    pub(super) fn abandon_session_subs(&mut self, session: &RelaySessionKey) {
+    pub(in crate::core) fn abandon_session_subs(&mut self, session: &RelaySessionKey) {
         self.attempts.retire_for_session(session);
         self.attribution.clear_session(session);
         self.pending_request_evidence
@@ -1633,7 +1633,7 @@ impl EngineCore {
     /// Full filter equality is deliberate: a changed filter on the same
     /// NIP-01 subscription id remains a real replacement. Exact handle
     /// equality prevents an earlier socket from authorizing a fresh one.
-    pub(super) fn wire_request_is_live(
+    pub(in crate::core) fn wire_request_is_live(
         &self,
         session: &RelaySessionKey,
         sub_id: &SubId,
@@ -1645,7 +1645,7 @@ impl EngineCore {
             .is_some_and(|live| live.filter == *filter && live.handle == handle)
     }
 
-    pub(super) fn session_has_live_generation(
+    pub(in crate::core) fn session_has_live_generation(
         &self,
         session: &RelaySessionKey,
         handle: TransportRelayHandle,
@@ -1660,7 +1660,7 @@ impl EngineCore {
     /// candidate live REQ with `limit:0`, keeps the prior live REQ open, and
     /// records a typed pending state. `open_neg_session` is reachable only
     /// when the candidate's exact EOSE arrives.
-    pub(super) fn begin_neg_handoff(
+    pub(in crate::core) fn begin_neg_handoff(
         &mut self,
         probed: ProbedRelay,
         plan_sub_id: SubId,
@@ -1721,7 +1721,7 @@ impl EngineCore {
     /// subscription while deliberately leaving its currently-active live REQ
     /// alone. Used before a replacement handoff; [`Self::close_nip77_plan`]
     /// additionally withdraws the active live owner on demand removal.
-    pub(super) fn cancel_nip77_repair_for_plan(
+    pub(in crate::core) fn cancel_nip77_repair_for_plan(
         &mut self,
         plan_sub_id: &SubId,
         effects: &mut Vec<Effect>,
@@ -1794,7 +1794,7 @@ impl EngineCore {
         closes
     }
 
-    pub(super) fn close_nip77_plan(
+    pub(in crate::core) fn close_nip77_plan(
         &mut self,
         plan_sub_id: &SubId,
         effects: &mut Vec<Effect>,
@@ -1894,7 +1894,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn complete_request_replacement(
+    pub(in crate::core) fn complete_request_replacement(
         &mut self,
         successor: &SubId,
         effects: &mut Vec<Effect>,
@@ -1913,7 +1913,10 @@ impl EngineCore {
         self.retire_replacement_predecessor(replacement, effects);
     }
 
-    pub(super) fn abandon_request_replacements_for_session(&mut self, session: &RelaySessionKey) {
+    pub(in crate::core) fn abandon_request_replacements_for_session(
+        &mut self,
+        session: &RelaySessionKey,
+    ) {
         for (_successor, replacement) in self.request_replacements.take_for_session(session) {
             self.attribution
                 .release_live_request_claims(&replacement.prior_sub_id);
@@ -1926,7 +1929,7 @@ impl EngineCore {
     /// The candidate live REQ's EOSE is the handoff barrier. Promote it to
     /// the only active live owner, retire the overlapped predecessor, then
     /// and only then snapshot local holdings and open Negentropy.
-    pub(super) fn activate_live_and_open_neg(
+    pub(in crate::core) fn activate_live_and_open_neg(
         &mut self,
         handoff: PendingNegHandoff,
         effects: &mut Vec<Effect>,
@@ -1953,7 +1956,7 @@ impl EngineCore {
     /// active. NIP-01 and NIP-77 use separate subscription namespaces; the
     /// role-derived `neg_sub_id` makes that separation explicit in reducer
     /// state and permits both protocols to remain open concurrently.
-    pub(super) fn open_neg_session(
+    pub(in crate::core) fn open_neg_session(
         &mut self,
         handoff: PendingNegHandoff,
         effects: &mut Vec<Effect>,
@@ -2070,7 +2073,7 @@ impl EngineCore {
     /// [`Self::on_wire_request_handoff`], so headless reducer falsifiers drive
     /// the same edge the runtime does.
     #[doc(hidden)]
-    pub fn on_nip77_handoff(
+    pub(in crate::core) fn on_nip77_handoff(
         &mut self,
         frame: Nip77Frame,
         outcome: RequestHandoffOutcome,
@@ -2151,7 +2154,7 @@ impl EngineCore {
     /// (a frame for a sub this reducer isn't tracking is an untrusted-
     /// network fact, silently ignored -- same discipline as
     /// `handle_write_ack`'s unknown-`OK` case).
-    pub(super) fn step_neg_session(
+    pub(in crate::core) fn step_neg_session(
         &mut self,
         sub_id: SubId,
         relay: RelayUrl,
@@ -2214,7 +2217,7 @@ impl EngineCore {
     /// `TemporaryReq::MissingIds` defers credit to the backfill sub's OWN
     /// EOSE, by which point the events are already ingested (EVENT precedes
     /// EOSE, NIP-01). An empty `need_ids` credits immediately.
-    pub(super) fn finish_neg_session(
+    pub(in crate::core) fn finish_neg_session(
         &mut self,
         sub_id: SubId,
         relay: RelayUrl,
@@ -2317,7 +2320,7 @@ impl EngineCore {
     /// ordinary REQ's ambiguous EOSE, NEG-DONE is structurally correlated to
     /// its live `NegSession`. Credit may wait for a backfill EOSE, but
     /// `completed_at` remains the NEG completion time.
-    pub(super) fn credit_neg_coverage(
+    pub(in crate::core) fn credit_neg_coverage(
         &mut self,
         sub_id: &SubId,
         attribution_send: AttributionSendId,
@@ -2343,7 +2346,7 @@ impl EngineCore {
     /// Every retained shape is resolved before one atomic request-level
     /// coverage transaction starts. Only after that whole transaction commits
     /// does this return the committed keys for evidence refresh.
-    pub(super) fn persist_attributed_completion(
+    pub(in crate::core) fn persist_attributed_completion(
         &mut self,
         completed: CompletedAttribution,
         relay: &RelayUrl,
@@ -2443,7 +2446,7 @@ impl EngineCore {
 
     /// Start one unlimited one-shot backlog REQ under a role-separated id.
     /// It never aliases the live NIP-01 id or the NIP-77 session id.
-    pub(super) fn start_backlog_req(
+    pub(in crate::core) fn start_backlog_req(
         &mut self,
         plan_sub_id: SubId,
         filter: ConcreteFilter,
@@ -2512,7 +2515,7 @@ impl EngineCore {
     /// owner) open while a distinct unlimited backlog REQ supplies a safe
     /// fallback. Its EOSE promotes the already-sent candidate and retires
     /// the predecessor; no Negentropy is attempted on this path.
-    pub(super) fn handoff_fallback_to_req(
+    pub(in crate::core) fn handoff_fallback_to_req(
         &mut self,
         handoff: PendingNegHandoff,
         effects: &mut Vec<Effect>,
@@ -2541,7 +2544,7 @@ impl EngineCore {
     /// for the same unfloored/unlimited filter. The already-active live REQ
     /// remains open throughout timeout, NEG-ERR, malformed-message, and
     /// store-failure recovery.
-    pub(super) fn neg_session_fallback_to_req(
+    pub(in crate::core) fn neg_session_fallback_to_req(
         &mut self,
         sub_id: SubId,
         session: NegSession,
@@ -2575,7 +2578,7 @@ impl EngineCore {
         );
     }
 
-    pub(super) fn refresh_all_observations(&mut self, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn refresh_all_observations(&mut self, effects: &mut Vec<Effect>) {
         let ids: Vec<ObservationId> = self.observations.keys().copied().collect();
         for id in ids {
             self.refresh_observation(id, effects);
@@ -2592,7 +2595,7 @@ impl EngineCore {
     /// invalidation). Those transitions change session/coverage evidence —
     /// never canonical rows — so they never need `refresh_all_observations`'s
     /// full store reopen.
-    pub(super) fn refresh_all_observation_evidence(&mut self, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn refresh_all_observation_evidence(&mut self, effects: &mut Vec<Effect>) {
         let ids: Vec<ObservationId> = self.observations.keys().copied().collect();
         for id in ids {
             self.refresh_observation_evidence(id, effects);
@@ -2608,7 +2611,7 @@ impl EngineCore {
     /// through [`Self::apply_committed_row_changes`], which prefers the exact
     /// incremental algebra; this is the forced-full-refresh comparison lane.
     #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(super) fn refresh_observations_of_branches(
+    pub(in crate::core) fn refresh_observations_of_branches(
         &mut self,
         branches: impl IntoIterator<Item = HandleId>,
         effects: &mut Vec<Effect>,
@@ -2637,7 +2640,7 @@ impl EngineCore {
     /// no extra non-resolver evidence of its own (`retract`,
     /// `react_to_compensation`, `accept_local`): the resolver's own `delta`
     /// is the ONLY signal for the broad-vs-exact choice.
-    pub(super) fn apply_committed_mutation(
+    pub(in crate::core) fn apply_committed_mutation(
         &mut self,
         committed: CommittedMutationResult,
         effects: &mut Vec<Effect>,
@@ -2655,7 +2658,7 @@ impl EngineCore {
     /// implies a broad refresh). Both flags default to `false` through
     /// [`Self::apply_committed_mutation`], which reproduces this function's
     /// original (pre-#230) behavior exactly.
-    pub(super) fn apply_committed_mutation_with(
+    pub(in crate::core) fn apply_committed_mutation_with(
         &mut self,
         committed: CommittedMutationResult,
         force_recompile: bool,
@@ -2747,7 +2750,7 @@ impl EngineCore {
     /// simple handle should not re-query 60k or 1M prior rows to emit one
     /// exact delta. Complex/multi-root and strict-cache projections keep the
     /// existing full-refresh oracle until their incremental algebra is proven.
-    pub(super) fn apply_committed_row_changes(
+    pub(in crate::core) fn apply_committed_row_changes(
         &mut self,
         branches: impl IntoIterator<Item = HandleId>,
         changes: &CommittedRowChanges,
@@ -2769,7 +2772,7 @@ impl EngineCore {
     /// Returns `true` when the handle was fully and exactly handled without a
     /// store read (including the no-visible-change case), `false` when the
     /// caller must fall back to `refresh_observation`.
-    pub(super) fn try_apply_committed_row_changes(
+    pub(in crate::core) fn try_apply_committed_row_changes(
         &mut self,
         id: ObservationId,
         changes: &CommittedRowChanges,
@@ -3120,7 +3123,11 @@ impl EngineCore {
     /// Evidence can change with no row change at all (a watermark advancing,
     /// or a source's link status flipping) -- that case still emits, carrying
     /// an EMPTY row delta alongside the new evidence.
-    pub(super) fn refresh_observation(&mut self, id: ObservationId, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn refresh_observation(
+        &mut self,
+        id: ObservationId,
+        effects: &mut Vec<Effect>,
+    ) {
         // A read failure while snapshotting any branch (issue #122) degrades
         // to read-only: leave the observation's LAST delivered rows untouched
         // (never fabricate a phantom retraction from a failed read) and
@@ -3381,7 +3388,7 @@ impl EngineCore {
     /// source identity") -- over any other source there is no pinned relay
     /// set to intersect against, so Strict is a no-op there, identical to
     /// Agnostic.
-    pub(super) fn rows_for(
+    pub(in crate::core) fn rows_for(
         &self,
         id: HandleId,
     ) -> Result<BTreeMap<EventId, Row>, PersistenceError> {

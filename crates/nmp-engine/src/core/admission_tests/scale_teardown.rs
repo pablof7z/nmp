@@ -7,7 +7,9 @@ fn probed_nip77_plan_closes_touch_only_their_exact_children() {
     const PLANS: u16 = 64;
     let relay = RelayUrl::parse("wss://nip77-exact-close.example").unwrap();
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-    core.prober.force_supported_for_test(relay.clone());
+    core.white_box("prober.force_supported_for_test", |s| {
+        s.prober.force_supported_for_test(relay.clone())
+    });
     let mut observations = Vec::with_capacity(PLANS as usize);
     for index in 0..PLANS {
         observations.push(observation_id(&core.handle(EngineMsg::Subscribe(
@@ -27,7 +29,9 @@ fn probed_nip77_plan_closes_touch_only_their_exact_children() {
     assert_eq!(core.nip77.counts().handoff_plan_keys, PLANS as usize);
 
     core.nip77_plan_children_touched.set(0);
-    core.router.reset_withdrawal_work();
+    core.white_box("router.reset_withdrawal_work", |s| {
+        s.router.reset_withdrawal_work()
+    });
     for observation in observations {
         let effects = core.handle(EngineMsg::Unsubscribe(observation));
         assert!(!wire_ops(&effects).is_empty());
@@ -76,7 +80,9 @@ fn a_large_open_and_close_burst_never_reprojects_sibling_rows() {
     );
 
     core.projection_store_queries.set(0);
-    core.router.reset_withdrawal_work();
+    core.white_box("router.reset_withdrawal_work", |s| {
+        s.router.reset_withdrawal_work()
+    });
     let mut diagnostics = 0;
     for (index, observation) in observations.into_iter().enumerate() {
         diagnostics += core
@@ -162,7 +168,9 @@ fn ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work() {
     core.withdrawal_handle_detaches.set(0);
     core.resolver_delta_ops_consumed.set(0);
     core.pending_atoms_rebuilt.set(0);
-    core.router.reset_withdrawal_work();
+    core.white_box("router.reset_withdrawal_work", |s| {
+        s.router.reset_withdrawal_work()
+    });
     for observation in observations.iter().take(9_999) {
         let effects = core.handle(EngineMsg::Unsubscribe(*observation));
         assert!(wire_ops(&effects).is_empty());
@@ -249,7 +257,8 @@ fn later_exact_owner_routing_evidence_retracts_the_uncovered_diagnostic_on_admis
     // doc.
     core.suppress_turn_level_consistency_for_named_exception();
     let routeless = routeless_outbox_atom(author);
-    assert!(!core.retain_wire_atom_owner(&routeless));
+    assert!(!core.white_box("retain_wire_atom_owner", |s| s
+        .retain_wire_atom_owner(&routeless)));
     let first = flush(&mut core);
     assert!(wire_ops(&first).is_empty());
     assert_eq!(core.diagnostics_snapshot().uncovered_author_count, 1);
@@ -266,7 +275,8 @@ fn later_exact_owner_routing_evidence_retracts_the_uncovered_diagnostic_on_admis
             origin: nmp_grammar::RoutingEvidenceKind::Hint,
         },
     ]);
-    assert!(!core.retain_wire_atom_owner(&routed));
+    assert!(!core.white_box("retain_wire_atom_owner", |s| s
+        .retain_wire_atom_owner(&routed)));
     let admitted = flush(&mut core);
     assert_eq!(
         wire_ops(&admitted)
@@ -289,12 +299,17 @@ fn later_exact_owner_routing_evidence_retracts_the_uncovered_diagnostic_on_admis
     );
     assert_eq!(core.diagnostics_snapshot().uncovered_author_count, 0);
 
-    assert!(core.release_wire_atom_owner(&routed).is_none());
-    let final_atom = core
-        .release_wire_atom_owner(&routeless)
-        .expect("the final exact owner retires physical work");
+    assert!(core.white_box("release_wire_atom_owner", |s| s
+        .release_wire_atom_owner(&routed)
+        .is_none()));
+    let final_atom = core.white_box("release_wire_atom_owner", |s| {
+        s.release_wire_atom_owner(&routeless)
+            .expect("the final exact owner retires physical work")
+    });
     let mut closed = Vec::new();
-    core.withdraw_wire_demand(vec![final_atom], &mut closed);
+    core.white_box("withdraw_wire_demand", |s| {
+        s.withdraw_wire_demand(vec![final_atom], &mut closed)
+    });
     assert_eq!(
         wire_ops(&closed)
             .into_iter()

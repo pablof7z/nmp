@@ -99,7 +99,7 @@ impl ReplaceableMaterializationCall {
     }
 }
 
-impl EngineCore {
+impl CoreState {
     /// The single entry point for trusted capability code. Every caller has
     /// already read the durable snapshot it needs and closed that Redb
     /// transaction; the pure transformation runs here with nothing open, and
@@ -110,7 +110,7 @@ impl EngineCore {
     /// falsifier honest: a new call site cannot quietly grow its own entry
     /// that skips the assertion, which is exactly how the headless
     /// `on_publish` path went uninstrumented while the runtime path did not.
-    pub fn run_replaceable_materialization(
+    pub(in crate::core) fn run_replaceable_materialization(
         &mut self,
         call: ReplaceableMaterializationCall,
     ) -> ReplaceableMaterializationOutcome {
@@ -119,7 +119,7 @@ impl EngineCore {
         call.execute()
     }
 
-    pub(super) fn prepare_body_complete_replaceable_operation(
+    pub(in crate::core) fn prepare_body_complete_replaceable_operation(
         &mut self,
         operation: nmp_grammar::ReplaceableOperation,
         routing: WriteRouting,
@@ -465,7 +465,7 @@ impl EngineCore {
         })
     }
 
-    pub(super) fn replaceable_materialization_fence(
+    fn replaceable_materialization_fence(
         snapshot: Option<&nmp_store::RecoveredSemanticResource>,
     ) -> ReplaceableMaterializationFence {
         ReplaceableMaterializationFence {
@@ -510,7 +510,7 @@ impl EngineCore {
             .filter(|stored| !stored.provenance.seen.is_empty()))
     }
 
-    pub fn complete_body_complete_replaceable_operation(
+    pub(in crate::core) fn complete_body_complete_replaceable_operation(
         &mut self,
         continuation: ReplaceableMaterializationContinuation,
         outcome: ReplaceableMaterializationOutcome,

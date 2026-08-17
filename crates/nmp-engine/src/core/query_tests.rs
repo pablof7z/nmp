@@ -219,19 +219,23 @@ mod affected_handle_invalidation_tests {
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
 
         let initial = room_event(&keys, 7, 0, 10);
-        core.store
-            .insert(
-                initial,
-                RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
-            )
-            .unwrap();
+        core.white_box("store.insert", |s| {
+            s.store
+                .insert(
+                    initial,
+                    RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
+                )
+                .unwrap()
+        });
         let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(7)));
         let handle = subscribed_handle(&subscribe);
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
 
         let arriving = room_event(&keys, 7, 1, 12);
-        let effects = core.on_publish(exact_signed_intent(arriving.clone(), &relay));
+        let effects = core.white_box("on_publish", |s| {
+            s.on_publish(exact_signed_intent(arriving.clone(), &relay))
+        });
 
         assert_eq!(core.projection_store_queries.get(), 0);
         assert_eq!(core.router_compiles.get(), 0);
@@ -279,7 +283,9 @@ mod affected_handle_invalidation_tests {
         core.router_compiles.set(0);
 
         let contact_list = nmp_resolver_testkit::kind3(&author, &[followed.public_key()], 20);
-        let effects = core.on_publish(exact_signed_intent(contact_list, &relay));
+        let effects = core.white_box("on_publish", |s| {
+            s.on_publish(exact_signed_intent(contact_list, &relay))
+        });
 
         assert_eq!(core.router_compiles.get(), 1);
         assert_eq!(core.projection_store_queries.get(), 1);
@@ -298,22 +304,26 @@ mod affected_handle_invalidation_tests {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://local-compensation.example").unwrap();
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-        core.active_pubkey = Some(keys.public_key());
+        core.white_box("active_pubkey", |s| {
+            s.active_pubkey = Some(keys.public_key())
+        });
         let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(9)));
         let handle = subscribed_handle(&subscribe);
 
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        let accepted = core.on_publish(WriteIntent {
-            payload: WritePayload::Event(nmp_grammar::EventBuilder {
-                kind: Kind::from(9u16),
-                tags: vec![Tag::parse(["h".to_owned(), "room-9".to_owned()]).unwrap()],
-                content: "pending local row".into(),
-                created_at: Some(Timestamp::from(21u64)),
-            }),
-            routing: WriteRouting::Explicit(vec![relay]),
-            identity: Identity::Active,
-            correlation: None,
+        let accepted = core.white_box("on_publish", |s| {
+            s.on_publish(WriteIntent {
+                payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                    kind: Kind::from(9u16),
+                    tags: vec![Tag::parse(["h".to_owned(), "room-9".to_owned()]).unwrap()],
+                    content: "pending local row".into(),
+                    created_at: Some(Timestamp::from(21u64)),
+                }),
+                routing: WriteRouting::Explicit(vec![relay]),
+                identity: Identity::Active,
+                correlation: None,
+            })
         });
         let receipt = accepted
             .iter()
@@ -369,24 +379,28 @@ mod affected_handle_invalidation_tests {
             )
             .unwrap();
         let mut core = EngineCore::new(store, 21);
-        core.active_pubkey = Some(keys.public_key());
+        core.white_box("active_pubkey", |s| {
+            s.active_pubkey = Some(keys.public_key())
+        });
         let subscribe = core.handle(EngineMsg::Subscribe(room_query_for_kind(10, 9, 2)));
         let handle = subscribed_handle(&subscribe);
 
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        let accepted = core.on_publish(WriteIntent {
-            payload: WritePayload::Event(nmp_grammar::EventBuilder {
-                kind: Kind::from(9u16),
-                tags: (vec![Tag::parse(["h".to_owned(), "room-10".to_owned()]).unwrap()])
-                    .into_iter()
-                    .collect(),
-                content: ("newest pending").into(),
-                created_at: Some(Timestamp::from(30u64)),
-            }),
-            routing: WriteRouting::Explicit(vec![relay.clone()]),
-            identity: Identity::Active,
-            correlation: None,
+        let accepted = core.white_box("on_publish", |s| {
+            s.on_publish(WriteIntent {
+                payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                    kind: Kind::from(9u16),
+                    tags: (vec![Tag::parse(["h".to_owned(), "room-10".to_owned()]).unwrap()])
+                        .into_iter()
+                        .collect(),
+                    content: ("newest pending").into(),
+                    created_at: Some(Timestamp::from(30u64)),
+                }),
+                routing: WriteRouting::Explicit(vec![relay.clone()]),
+                identity: Identity::Active,
+                correlation: None,
+            })
         });
         let receipt = accepted
             .iter()
@@ -444,7 +458,9 @@ mod affected_handle_invalidation_tests {
             )
             .unwrap();
         let mut core = EngineCore::new(store, 20);
-        core.active_pubkey = Some(keys.public_key());
+        core.white_box("active_pubkey", |s| {
+            s.active_pubkey = Some(keys.public_key())
+        });
         let subscribe = core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(
             Filter::default(),
         )));
@@ -452,18 +468,20 @@ mod affected_handle_invalidation_tests {
 
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        let accepted = core.on_publish(WriteIntent {
-            payload: WritePayload::Event(nmp_grammar::EventBuilder {
-                kind: Kind::ContactList,
-                tags: (vec![Tag::public_key(Keys::generate().public_key())])
-                    .into_iter()
-                    .collect(),
-                content: ("new").into(),
-                created_at: Some(Timestamp::from(20u64)),
-            }),
-            routing: WriteRouting::Explicit(vec![relay]),
-            identity: Identity::Active,
-            correlation: None,
+        let accepted = core.white_box("on_publish", |s| {
+            s.on_publish(WriteIntent {
+                payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                    kind: Kind::ContactList,
+                    tags: (vec![Tag::public_key(Keys::generate().public_key())])
+                        .into_iter()
+                        .collect(),
+                    content: ("new").into(),
+                    created_at: Some(Timestamp::from(20u64)),
+                }),
+                routing: WriteRouting::Explicit(vec![relay]),
+                identity: Identity::Active,
+                correlation: None,
+            })
         });
         let receipt = accepted
             .iter()
@@ -518,22 +536,26 @@ mod affected_handle_invalidation_tests {
             )
             .unwrap();
         let mut core = EngineCore::new(store, 20);
-        core.active_pubkey = Some(keys.public_key());
+        core.white_box("active_pubkey", |s| {
+            s.active_pubkey = Some(keys.public_key())
+        });
         let subscribe = core.handle(EngineMsg::Subscribe(unlimited_room_query(13)));
         let handle = subscribed_handle(&subscribe);
 
         core.projection_store_queries.set(0);
         core.router_compiles.set(0);
-        let accepted = core.on_publish(WriteIntent {
-            payload: WritePayload::Event(nmp_grammar::EventBuilder {
-                kind: Kind::EventDeletion,
-                tags: (vec![Tag::event(target.id)]).into_iter().collect(),
-                content: ("").into(),
-                created_at: Some(Timestamp::from(20u64)),
-            }),
-            routing: WriteRouting::Explicit(vec![relay]),
-            identity: Identity::Active,
-            correlation: None,
+        let accepted = core.white_box("on_publish", |s| {
+            s.on_publish(WriteIntent {
+                payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                    kind: Kind::EventDeletion,
+                    tags: (vec![Tag::event(target.id)]).into_iter().collect(),
+                    content: ("").into(),
+                    created_at: Some(Timestamp::from(20u64)),
+                }),
+                routing: WriteRouting::Explicit(vec![relay]),
+                identity: Identity::Active,
+                correlation: None,
+            })
         });
         let receipt = accepted
             .iter()
@@ -608,13 +630,14 @@ mod affected_handle_invalidation_tests {
         accepted_at: u64,
         direct: bool,
     ) -> (IntentId, SignedEvent) {
-        let accepted = core
-            .resolver
-            .accept_local(
-                &mut core.store,
-                nmp_resolver_testkit::accept_write_of(event, accepted_at),
-            )
-            .unwrap();
+        let accepted = core.white_box("resolver.accept_local", |s| {
+            s.resolver
+                .accept_local(
+                    &mut s.store,
+                    nmp_resolver_testkit::accept_write_of(event, accepted_at),
+                )
+                .unwrap()
+        });
         let (intent_id, pending) = match &accepted.outcome {
             AcceptOutcome::Inserted { intent_id, row, .. }
             | AcceptOutcome::Superseded { intent_id, row, .. }
@@ -625,10 +648,14 @@ mod affected_handle_invalidation_tests {
         };
         let mut effects = Vec::new();
         if direct {
-            core.apply_committed_mutation(accepted.committed, &mut effects);
+            core.white_box("apply_committed_mutation", |s| {
+                s.apply_committed_mutation(accepted.committed, &mut effects)
+            });
         } else {
-            core.recompile(&mut effects);
-            core.refresh_all_observations(&mut effects);
+            core.white_box("recompile", |s| s.recompile(&mut effects));
+            core.white_box("refresh_all_observations", |s| {
+                s.refresh_all_observations(&mut effects)
+            });
         }
         (intent_id, pending)
     }
@@ -639,30 +666,43 @@ mod affected_handle_invalidation_tests {
         pending: SignedEvent,
         direct: bool,
     ) {
-        let outcome = core.store.compensate_write(intent_id).unwrap();
-        let committed = core
-            .resolver
-            .react_to_compensation(&core.store, pending, &outcome)
-            .unwrap();
+        let outcome = core.white_box("store.compensate_write", |s| {
+            s.store.compensate_write(intent_id).unwrap()
+        });
+        let committed = core.white_box("resolver.react_to_compensation", |s| {
+            s.resolver
+                .react_to_compensation(&s.store, pending, &outcome)
+                .unwrap()
+        });
         let mut effects = Vec::new();
         if direct {
-            core.apply_committed_mutation(committed, &mut effects);
+            core.white_box("apply_committed_mutation", |s| {
+                s.apply_committed_mutation(committed, &mut effects)
+            });
         } else {
-            core.recompile(&mut effects);
-            core.refresh_all_observations(&mut effects);
+            core.white_box("recompile", |s| s.recompile(&mut effects));
+            core.white_box("refresh_all_observations", |s| {
+                s.refresh_all_observations(&mut effects)
+            });
         }
     }
 
     fn apply_local_differential_expiry(core: &mut EngineCore, now: Timestamp, direct: bool) {
-        let expired = core.store.expire_due(now).unwrap();
+        let expired = core.white_box("store.expire_due", |s| s.store.expire_due(now).unwrap());
         let removed = expired.into_iter().map(|row| row.event).collect();
-        let committed = core.resolver.retract(&core.store, removed).unwrap();
+        let committed = core.white_box("resolver.retract", |s| {
+            s.resolver.retract(&s.store, removed).unwrap()
+        });
         let mut effects = Vec::new();
         if direct {
-            core.apply_committed_mutation(committed, &mut effects);
+            core.white_box("apply_committed_mutation", |s| {
+                s.apply_committed_mutation(committed, &mut effects)
+            });
         } else {
-            core.recompile(&mut effects);
-            core.refresh_all_observations(&mut effects);
+            core.white_box("recompile", |s| s.recompile(&mut effects));
+            core.white_box("refresh_all_observations", |s| {
+                s.refresh_all_observations(&mut effects)
+            });
         }
     }
 
@@ -800,7 +840,9 @@ mod affected_handle_invalidation_tests {
                 ));
             }
         }
-        core.store.insert_batch(seed).unwrap();
+        core.white_box("store.insert_batch", |s| {
+            s.store.insert_batch(seed).unwrap()
+        });
 
         for room in 0..HANDLE_COUNT {
             core.handle(EngineMsg::Subscribe(room_query(room)));
@@ -883,19 +925,21 @@ mod affected_handle_invalidation_tests {
         let oldest = room_event(&keys, 7, 0, 10);
         let retained = room_event(&keys, 7, 1, 20);
         let unrelated = room_event(&keys, 8, 0, 10);
-        core.store
-            .insert_batch(
-                [oldest.clone(), retained, unrelated]
-                    .into_iter()
-                    .map(|event| {
-                        (
-                            event,
-                            RelayObserved::new(relay.clone(), Timestamp::from(30u64)),
-                        )
-                    })
-                    .collect(),
-            )
-            .unwrap();
+        core.white_box("store.insert_batch", |s| {
+            s.store
+                .insert_batch(
+                    [oldest.clone(), retained, unrelated]
+                        .into_iter()
+                        .map(|event| {
+                            (
+                                event,
+                                RelayObserved::new(relay.clone(), Timestamp::from(30u64)),
+                            )
+                        })
+                        .collect(),
+                )
+                .unwrap()
+        });
 
         core.handle(EngineMsg::Subscribe(room_query_for_kind(7, 9, 2)));
         core.handle(EngineMsg::Subscribe(room_query_for_kind(8, 9, 2)));
@@ -930,19 +974,21 @@ mod affected_handle_invalidation_tests {
         let oldest = room_event(&keys, 21, 0, 10);
         let middle = room_event(&keys, 21, 1, 20);
         let newest = room_event(&keys, 21, 2, 30);
-        core.store
-            .insert_batch(
-                [oldest.clone(), middle, newest.clone()]
-                    .into_iter()
-                    .map(|event| {
-                        (
-                            event,
-                            RelayObserved::new(relay.clone(), Timestamp::from(31u64)),
-                        )
-                    })
-                    .collect(),
-            )
-            .unwrap();
+        core.white_box("store.insert_batch", |s| {
+            s.store
+                .insert_batch(
+                    [oldest.clone(), middle, newest.clone()]
+                        .into_iter()
+                        .map(|event| {
+                            (
+                                event,
+                                RelayObserved::new(relay.clone(), Timestamp::from(31u64)),
+                            )
+                        })
+                        .collect(),
+                )
+                .unwrap()
+        });
 
         core.handle(EngineMsg::Subscribe(room_query_for_kind(21, 9, 2)));
         core.projection_store_queries.set(0);
@@ -985,12 +1031,14 @@ mod affected_handle_invalidation_tests {
         let arriving = pair[0].clone();
         let seeded = pair[1].clone();
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-        core.store
-            .insert(
-                seeded.clone(),
-                RelayObserved::new(relay.clone(), Timestamp::from(51u64)),
-            )
-            .unwrap();
+        core.white_box("store.insert", |s| {
+            s.store
+                .insert(
+                    seeded.clone(),
+                    RelayObserved::new(relay.clone(), Timestamp::from(51u64)),
+                )
+                .unwrap()
+        });
 
         core.handle(EngineMsg::Subscribe(room_query_for_kind(22, 9, 1)));
         core.projection_store_queries.set(0);
@@ -1097,12 +1145,14 @@ mod affected_handle_invalidation_tests {
                 .unwrap()
         };
         let old = replaceable(3, 10);
-        core.store
-            .insert_batch(vec![(
-                old.clone(),
-                RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
-            )])
-            .unwrap();
+        core.white_box("store.insert_batch", |s| {
+            s.store
+                .insert_batch(vec![(
+                    old.clone(),
+                    RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
+                )])
+                .unwrap()
+        });
 
         for room in [3, 4, 5] {
             core.handle(EngineMsg::Subscribe(room_query_for_kind(room, 10_000, 10)));
@@ -1138,12 +1188,14 @@ mod affected_handle_invalidation_tests {
         let relay = RelayUrl::parse("wss://deletion-affected.example").unwrap();
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let target = room_event(&keys, 12, 0, 10);
-        core.store
-            .insert_batch(vec![(
-                target.clone(),
-                RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
-            )])
-            .unwrap();
+        core.white_box("store.insert_batch", |s| {
+            s.store
+                .insert_batch(vec![(
+                    target.clone(),
+                    RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
+                )])
+                .unwrap()
+        });
 
         core.handle(EngineMsg::Subscribe(room_query(12)));
         core.handle(EngineMsg::Subscribe(room_query(13)));
@@ -1226,12 +1278,14 @@ mod affected_handle_invalidation_tests {
             .custom_created_at(Timestamp::from(10u64))
             .sign_with_keys(&me)
             .unwrap();
-        core.store
-            .insert(
-                contact_list,
-                RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
-            )
-            .unwrap();
+        core.white_box("store.insert", |s| {
+            s.store
+                .insert(
+                    contact_list,
+                    RelayObserved::new(relay.clone(), Timestamp::from(11u64)),
+                )
+                .unwrap()
+        });
         core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
 
         let query = LiveQuery::from_filter(Filter {
@@ -1276,10 +1330,9 @@ mod affected_handle_invalidation_tests {
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let subscribed = core.handle(EngineMsg::Subscribe(unlimited_room_query(28)));
         let handle = subscribed_handle(&subscribed);
-        core.observations
-            .get_mut(&handle)
-            .unwrap()
-            .projection_complete = false;
+        core.white_box("observations.get_mut", |s| {
+            s.observations.get_mut(&handle).unwrap().projection_complete = false
+        });
 
         let first = room_event(&keys, 28, 0, 10);
         core.projection_store_queries.set(0);
@@ -1405,17 +1458,21 @@ mod affected_handle_invalidation_tests {
     #[test]
     fn resolver_internal_handle_is_filtered_before_any_projection_read() {
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-        let internal = match core
-            .resolver
-            .subscribe(&core.store, room_query(1).branches()[0].clone())
-        {
-            SubscribeOutcome::Opened { handle, .. } => handle,
-            SubscribeOutcome::Refused { error, .. } => panic!("resolver refused: {error}"),
-        };
+        let internal = core.white_box("resolver.subscribe", |s| {
+            match s
+                .resolver
+                .subscribe(&s.store, room_query(1).branches()[0].clone())
+            {
+                SubscribeOutcome::Opened { handle, .. } => handle,
+                SubscribeOutcome::Refused { error, .. } => panic!("resolver refused: {error}"),
+            }
+        });
         core.projection_store_queries.set(0);
 
         let mut effects = Vec::new();
-        core.refresh_observations_of_branches([internal.id()], &mut effects);
+        core.white_box("refresh_observations_of_branches", |s| {
+            s.refresh_observations_of_branches([internal.id()], &mut effects)
+        });
 
         assert_eq!(core.projection_store_queries.get(), 0);
         assert!(effects.is_empty());
@@ -1538,14 +1595,16 @@ mod coverage_evidence_refresh_tests {
     }
 
     fn advance_clock(core: &mut EngineCore, seconds: u64) {
-        core.clock = Timestamp::from(seconds);
+        core.white_box("clock", |s| s.clock = Timestamp::from(seconds));
     }
 
     #[test]
     fn nip77_barrier_lifecycle_is_lazy_without_a_diagnostics_observer() {
         let relay = RelayUrl::parse("wss://evidence-only-nip77-barrier.example").unwrap();
         let (mut core, transport, session) = connected_core(&relay);
-        core.prober.force_supported_for_test(relay.clone());
+        core.white_box("prober.force_supported_for_test", |s| {
+            s.prober.force_supported_for_test(relay.clone())
+        });
         core.handle(EngineMsg::Subscribe(pinned_query(&relay)));
         core.diagnostic_snapshots_built.set(0);
 
@@ -1609,7 +1668,7 @@ mod coverage_evidence_refresh_tests {
         );
         let target = requests[0].clone();
         for request in &requests {
-            core.abandon_sub(&request.sub_id);
+            core.white_box("abandon_sub", |s| s.abandon_sub(&request.sub_id));
         }
 
         let neg_sub_id = target.sub_id.clone();
@@ -1617,21 +1676,25 @@ mod coverage_evidence_refresh_tests {
             limit: None,
             ..target.filter.clone()
         };
-        let attribution_send = core.record_observed_request(RequestSend {
-            session: &session,
-            sub_id: &neg_sub_id,
-            filter: &neg_filter,
-            coverage_claims: target.coverage_claims.clone(),
-            owner_demands: target.owner_demands.clone(),
-            replay: false,
-            event_failure_target: EventFailureTarget::ThisSend,
+        let attribution_send = core.white_box("record_observed_request", |s| {
+            s.record_observed_request(RequestSend {
+                session: &session,
+                sub_id: &neg_sub_id,
+                filter: &neg_filter,
+                coverage_claims: target.coverage_claims.clone(),
+                owner_demands: target.owner_demands.clone(),
+                replay: false,
+                event_failure_target: EventFailureTarget::ThisSend,
+            })
         });
-        core.install_plan_execution_metadata(
-            target.sub_id.clone(),
-            neg_filter.clone(),
-            target.coverage_claims.clone(),
-            target.owner_demands.clone(),
-        );
+        core.white_box("install_plan_execution_metadata", |s| {
+            s.install_plan_execution_metadata(
+                target.sub_id.clone(),
+                neg_filter.clone(),
+                target.coverage_claims.clone(),
+                target.owner_demands.clone(),
+            )
+        });
         let request_facts = accept_request(
             &mut core,
             &session,
@@ -1652,20 +1715,22 @@ mod coverage_evidence_refresh_tests {
         advance_clock(&mut core, 102);
         let (reconciler, _) = crate::negentropy::Reconciler::open(&[]);
         let mut effects = Vec::new();
-        core.finish_neg_session(
-            neg_sub_id,
-            relay.clone(),
-            NegSession {
-                plan_sub_id: target.sub_id,
-                relay,
-                filter: neg_filter,
-                attribution_send,
-                started_at: Timestamp::from(101u64),
-                reconciler,
-            },
-            BTreeSet::new(),
-            &mut effects,
-        );
+        core.white_box("finish_neg_session", |s| {
+            s.finish_neg_session(
+                neg_sub_id,
+                relay.clone(),
+                NegSession {
+                    plan_sub_id: target.sub_id,
+                    relay,
+                    filter: neg_filter,
+                    attribution_send,
+                    started_at: Timestamp::from(101u64),
+                    reconciler,
+                },
+                BTreeSet::new(),
+                &mut effects,
+            )
+        });
 
         assert_eq!(core.evidence_candidates_examined.get(), 1);
         assert_eq!(core.diagnostic_snapshots_built.get(), 0);
@@ -1888,8 +1953,10 @@ mod coverage_evidence_refresh_tests {
             .iter()
             .all(|demand| core.wire.has_demand_handles(demand)));
 
-        core.attribution
-            .poison_event_commit_failure(&session, &wire_sub_id_string(&history.sub_id));
+        core.white_box("attribution.poison_event_commit_failure", |s| {
+            s.attribution
+                .poison_event_commit_failure(&session, &wire_sub_id_string(&history.sub_id))
+        });
         core.evidence_candidates_examined.set(0);
         core.diagnostic_snapshots_built.set(0);
         let effects = eose(
@@ -1964,20 +2031,25 @@ mod coverage_evidence_refresh_tests {
                 _ => None,
             })
             .unwrap();
-        core.observations
-            .get_mut(&live_id)
-            .unwrap()
-            .projection_complete = false;
-        core.history
-            .get_mut(history_id)
-            .unwrap()
-            .projection_complete = false;
+        core.white_box("observations.get_mut", |s| {
+            s.observations
+                .get_mut(&live_id)
+                .unwrap()
+                .projection_complete = false
+        });
+        core.white_box("history.get_mut", |s| {
+            s.history.get_mut(history_id).unwrap().projection_complete = false
+        });
         core.projection_store_queries.set(0);
         core.history_store_queries.set(0);
 
         let mut effects = Vec::new();
-        core.refresh_all_observation_evidence(&mut effects);
-        core.refresh_all_history_evidence(&mut effects);
+        core.white_box("refresh_all_observation_evidence", |s| {
+            s.refresh_all_observation_evidence(&mut effects)
+        });
+        core.white_box("refresh_all_history_evidence", |s| {
+            s.refresh_all_history_evidence(&mut effects)
+        });
 
         assert_eq!(core.projection_store_queries.get(), 1);
         assert_eq!(core.history_store_queries.get(), 1);

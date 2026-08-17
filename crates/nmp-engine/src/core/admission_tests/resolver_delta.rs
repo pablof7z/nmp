@@ -41,14 +41,14 @@ fn one_handle_partial_resolver_closes_touch_only_departing_refcounts_in_both_ord
         // an already-indexed handle (#1774), so the door sequence is spelled
         // out: unindex, then index the grown set. Nothing needs releasing --
         // `base` is still present in `atoms`, only `departing` is new.
-        let previous = core.wire.unindex_handle(handle);
+        let previous = core.white_box("wire.unindex_handle", |s| s.wire.unindex_handle(handle));
         debug_assert!(
             previous.is_subset(&atoms),
             "this fixture only grows the handle's atom set"
         );
-        core.wire.index_handle(handle, atoms);
+        core.white_box("wire.index_handle", |s| s.wire.index_handle(handle, atoms));
         for atom in &departing {
-            core.wire.retain(atom);
+            core.white_box("wire.retain", |s| s.wire.retain(atom));
         }
         assert_eq!(core.wire.demand_refs(handle, &demand), ATOMS);
         assert_eq!(core.wire.coverage_refs(handle, &claim), ATOMS);
@@ -60,8 +60,10 @@ fn one_handle_partial_resolver_closes_touch_only_departing_refcounts_in_both_ord
         core.resolver_owner_keys_touched.set(0);
         core.resolver_surviving_atoms_examined.set(0);
         for atom in departing {
-            core.consume_resolver_delta(DemandDelta {
-                ops: vec![DemandOp::Close(atom)],
+            core.white_box("consume_resolver_delta", |s| {
+                s.consume_resolver_delta(DemandDelta {
+                    ops: vec![DemandOp::Close(atom)],
+                })
             });
         }
 
@@ -103,7 +105,9 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
         let surviving_demand = DemandKey::for_atom(&surviving);
         let surviving_claim = coverage_key(&surviving);
 
-        core.deactivate_request_targets_for_handle(handle);
+        core.white_box("deactivate_request_targets_for_handle", |s| {
+            s.deactivate_request_targets_for_handle(handle)
+        });
         let departing_target = core
             .request_targets
             .declared_for_handle(handle)
@@ -111,36 +115,46 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
             .next()
             .cloned()
             .unwrap();
-        core.request_targets.declare_for_handle(
-            handle,
-            ActiveRequestTarget {
-                demand: surviving_demand,
-                scope: departing_target.scope,
-                path: "$.surviving".to_string(),
-                revision: departing_target.revision,
-            },
-            1,
-            None,
-        );
+        core.white_box("request_targets.declare_for_handle", |s| {
+            s.request_targets.declare_for_handle(
+                handle,
+                ActiveRequestTarget {
+                    demand: surviving_demand,
+                    scope: departing_target.scope,
+                    path: "$.surviving".to_string(),
+                    revision: departing_target.revision,
+                },
+                1,
+                None,
+            )
+        });
         atoms.insert(surviving.clone());
         // `index_handle` refuses re-indexing an already-indexed handle
         // (#1774); the door sequence is spelled out here too. Nothing needs
         // releasing -- `departing` is still present in `atoms`, only
         // `surviving` is new.
-        let previous = core.wire.unindex_handle(handle);
+        let previous = core.white_box("wire.unindex_handle", |s| s.wire.unindex_handle(handle));
         debug_assert!(
             previous.is_subset(&atoms),
             "this fixture only grows the handle's atom set"
         );
-        core.wire.index_handle(handle, atoms);
-        core.retain_wire_atom_owner(&surviving);
-        core.activate_request_targets_for_handle(handle);
+        core.white_box("wire.index_handle", |s| s.wire.index_handle(handle, atoms));
+        core.white_box("retain_wire_atom_owner", |s| {
+            s.retain_wire_atom_owner(&surviving)
+        });
+        core.white_box("activate_request_targets_for_handle", |s| {
+            s.activate_request_targets_for_handle(handle)
+        });
 
-        core.consume_resolver_delta(DemandDelta {
-            ops: vec![DemandOp::Close(departing)],
+        core.white_box("consume_resolver_delta", |s| {
+            s.consume_resolver_delta(DemandDelta {
+                ops: vec![DemandOp::Close(departing)],
+            })
         });
         let mut close_effects = Vec::new();
-        core.flush_consumed_resolver_closes(&mut close_effects);
+        core.white_box("flush_consumed_resolver_closes", |s| {
+            s.flush_consumed_resolver_closes(&mut close_effects)
+        });
         assert!(!core.request_targets.has_live_demand(&departing_demand));
         assert_eq!(core.request_targets.live_target_count(&surviving_demand), 1);
 
@@ -150,14 +164,16 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
             &surviving.source,
             surviving.access,
         );
-        core.record_observed_request(RequestSend {
-            session: &session,
-            sub_id: &sub_id,
-            filter: &surviving.filter,
-            coverage_claims: BTreeSet::from([surviving_claim]),
-            owner_demands: BTreeSet::from([surviving_demand]),
-            replay: false,
-            event_failure_target: EventFailureTarget::ThisSend,
+        core.white_box("record_observed_request", |s| {
+            s.record_observed_request(RequestSend {
+                session: &session,
+                sub_id: &sub_id,
+                filter: &surviving.filter,
+                coverage_claims: BTreeSet::from([surviving_claim]),
+                owner_demands: BTreeSet::from([surviving_demand]),
+                replay: false,
+                event_failure_target: EventFailureTarget::ThisSend,
+            })
         });
         let handoff = if terminal == "refused" {
             refuse_request(&mut core, &session, &sub_id, surviving.filter.hash())
@@ -189,21 +205,24 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
         assert_eq!(handoff_paths, BTreeSet::from(["$.surviving".to_string()]));
 
         if terminal == "eose" {
-            let completed = core
-                .attribution
-                .attribute_eose_detailed(
-                    &session,
-                    &wire_sub_id_string(&sub_id),
-                    Timestamp::from(101u64),
-                )
-                .unwrap();
+            let completed = core.white_box("attribution.attribute_eose_detailed", |s| {
+                s.attribution
+                    .attribute_eose_detailed(
+                        &session,
+                        &wire_sub_id_string(&sub_id),
+                        Timestamp::from(101u64),
+                    )
+                    .unwrap()
+            });
             let mut settled = Vec::new();
-            core.emit_request_settled(
-                completed.send_id(),
-                Timestamp::from(101u64),
-                RequestTerminal::Eose,
-                &mut settled,
-            );
+            core.white_box("emit_request_settled", |s| {
+                s.emit_request_settled(
+                    completed.send_id(),
+                    Timestamp::from(101u64),
+                    RequestTerminal::Eose,
+                    &mut settled,
+                )
+            });
             let settled_paths: BTreeSet<_> = settled
                 .iter()
                 .filter_map(|effect| match effect {
@@ -219,7 +238,7 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
             assert_eq!(settled_paths, BTreeSet::from(["$.surviving".to_string()]));
         }
 
-        core.abandon_sub(&sub_id);
+        core.white_box("abandon_sub", |s| s.abandon_sub(&sub_id));
         core.handle(EngineMsg::Unsubscribe(observation));
         assert_eq!(
             core.bench_ownership_census(),
@@ -246,7 +265,9 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
             routing_evidence: BTreeSet::new(),
         };
         incumbent_claims.insert(coverage_key(&atom));
-        core.attribution.observe_atom(&atom);
+        core.white_box("attribution.observe_atom", |s| {
+            s.attribution.observe_atom(&atom)
+        });
         atoms.push(atom);
     }
     let added_atom = ContextualAtom {
@@ -259,7 +280,9 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
         routing_evidence: BTreeSet::new(),
     };
     let added_claim = coverage_key(&added_atom);
-    core.attribution.observe_atom(&added_atom);
+    core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&added_atom)
+    });
     atoms.push(added_atom.clone());
 
     let request_atom = atoms[0].clone();
@@ -269,39 +292,49 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
         &request_atom.source,
         request_atom.access,
     );
-    core.attribution
-        .retain_live_request_claims(&sub_id, incumbent_claims.clone());
-    core.record_observed_request(RequestSend {
-        session: &session,
-        sub_id: &sub_id,
-        filter: &request_atom.filter,
-        coverage_claims: incumbent_claims,
-        owner_demands: BTreeSet::from([DemandKey::for_atom(&request_atom)]),
-        replay: false,
-        event_failure_target: EventFailureTarget::ThisSend,
+    core.white_box("attribution.retain_live_request_claims", |s| {
+        s.attribution
+            .retain_live_request_claims(&sub_id, incumbent_claims.clone())
+    });
+    core.white_box("record_observed_request", |s| {
+        s.record_observed_request(RequestSend {
+            session: &session,
+            sub_id: &sub_id,
+            filter: &request_atom.filter,
+            coverage_claims: incumbent_claims,
+            owner_demands: BTreeSet::from([DemandKey::for_atom(&request_atom)]),
+            replay: false,
+            event_failure_target: EventFailureTarget::ThisSend,
+        })
     });
 
     core.request_claim_entries_examined.set(0);
     core.request_owner_entries_examined.set(0);
     let mut effects = Vec::new();
-    core.apply_request_metadata_updates(
-        &[nmp_router::RequestMetadataUpdate {
-            session,
-            sub_id: sub_id.clone(),
-            filter_hash: request_atom.filter.hash(),
-            added_coverage_claims: BTreeSet::from([added_claim]),
-            added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added_atom)]),
-        }],
-        &mut effects,
-    );
+    core.white_box("apply_request_metadata_updates", |s| {
+        s.apply_request_metadata_updates(
+            &[nmp_router::RequestMetadataUpdate {
+                session,
+                sub_id: sub_id.clone(),
+                filter_hash: request_atom.filter.hash(),
+                added_coverage_claims: BTreeSet::from([added_claim]),
+                added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added_atom)]),
+            }],
+            &mut effects,
+        )
+    });
     assert!(effects.is_empty());
     assert_eq!(core.request_claim_entries_examined.get(), 1);
     assert_eq!(core.request_owner_entries_examined.get(), 1);
 
-    core.attribution.release_live_request_claims(&sub_id);
-    core.abandon_sub(&sub_id);
+    core.white_box("attribution.release_live_request_claims", |s| {
+        s.attribution.release_live_request_claims(&sub_id)
+    });
+    core.white_box("abandon_sub", |s| s.abandon_sub(&sub_id));
     for atom in atoms {
-        core.attribution.release_atom(&atom);
+        core.white_box("attribution.release_atom", |s| {
+            s.attribution.release_atom(&atom)
+        });
     }
     assert_eq!(
         core.bench_ownership_census(),

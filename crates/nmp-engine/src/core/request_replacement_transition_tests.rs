@@ -23,10 +23,16 @@ impl Fixture {
             generation: 1,
         };
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-        core.slot_to_relay
-            .insert(handle.slot, (handle, session.clone()));
-        core.connected_relays.insert(session.clone());
-        core.ever_connected_relays.insert(session.clone());
+        core.white_box("slot_to_relay.insert", |s| {
+            s.slot_to_relay
+                .insert(handle.slot, (handle, session.clone()))
+        });
+        core.white_box("connected_relays.insert", |s| {
+            s.connected_relays.insert(session.clone())
+        });
+        core.white_box("ever_connected_relays.insert", |s| {
+            s.ever_connected_relays.insert(session.clone())
+        });
         Self {
             core,
             relay,
@@ -49,20 +55,22 @@ impl Fixture {
     }
 
     fn compile(&mut self, demand: BTreeSet<ContextualAtom>) -> Vec<Effect> {
-        let outcome = self.core.router.compile(
-            &demand,
-            &self.core.routing_facts,
-            self.core.compile_budget(),
-        );
+        let outcome = self.core.white_box("router.compile", |s| {
+            s.router
+                .compile(&demand, &s.routing_facts, s.compile_budget())
+        });
         let mut effects = Vec::new();
-        self.core
-            .apply_request_metadata_updates(&outcome.request_metadata_updates, &mut effects);
-        self.core.apply_router_plan_delta(
-            &outcome.replacements,
-            outcome.wire,
-            PlanDeltaMode::Full,
-            &mut effects,
-        );
+        self.core.white_box("apply_request_metadata_updates", |s| {
+            s.apply_request_metadata_updates(&outcome.request_metadata_updates, &mut effects)
+        });
+        self.core.white_box("apply_router_plan_delta", |s| {
+            s.apply_router_plan_delta(
+                &outcome.replacements,
+                outcome.wire,
+                PlanDeltaMode::Full,
+                &mut effects,
+            )
+        });
         effects
     }
 
@@ -77,17 +85,21 @@ impl Fixture {
     }
 
     fn eose(&mut self, sub_id: &SubId) -> Vec<Effect> {
-        self.core.on_relay_frame(
-            self.handle,
-            self.session.clone(),
-            RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
-                nostr::SubscriptionId::new(wire_sub_id_string(sub_id)),
-            ))),
-        )
+        self.core.white_box("on_relay_frame", |s| {
+            s.on_relay_frame(
+                self.handle,
+                self.session.clone(),
+                RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+                    nostr::SubscriptionId::new(wire_sub_id_string(sub_id)),
+                ))),
+            )
+        })
     }
 
     fn establish_active_nip77(&mut self, atom: &ContextualAtom) -> (SubId, SubId) {
-        self.core.attribution.observe_atom(atom);
+        self.core.white_box("attribution.observe_atom", |s| {
+            s.attribution.observe_atom(atom)
+        });
         let opened = self.compile(BTreeSet::from([atom.clone()]));
         let (_, plan_sub_id, filter, attempt_id) = only_request(&opened);
         self.core
@@ -95,18 +107,20 @@ impl Fixture {
                 attempt_id,
                 handle: self.handle,
             });
-        self.core
-            .prober
-            .force_supported_for_test(self.relay.clone());
+        self.core.white_box("prober.force_supported_for_test", |s| {
+            s.prober.force_supported_for_test(self.relay.clone())
+        });
         let probed = self.core.prober.probed(&self.relay).unwrap();
         let mut effects = Vec::new();
-        self.core.begin_neg_handoff(
-            probed,
-            plan_sub_id.clone(),
-            Some(plan_sub_id.clone()),
-            filter,
-            &mut effects,
-        );
+        self.core.white_box("begin_neg_handoff", |s| {
+            s.begin_neg_handoff(
+                probed,
+                plan_sub_id.clone(),
+                Some(plan_sub_id.clone()),
+                filter,
+                &mut effects,
+            )
+        });
         let child = self.accept(&effects);
         self.eose(&child);
         assert_eq!(self.core.nip77.live_for_plan(&plan_sub_id), Some(&child));
@@ -155,7 +169,9 @@ fn predecessor_candidate_eose_during_replacement_keeps_its_plan_metadata() {
     let first = fixture.atom(20);
     let second = fixture.atom(21);
 
-    fixture.core.attribution.observe_atom(&first);
+    fixture.core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&first)
+    });
     let opened = fixture.compile(BTreeSet::from([first.clone()]));
     let (_, first_plan, first_filter, first_attempt) = only_request(&opened);
     fixture
@@ -164,16 +180,22 @@ fn predecessor_candidate_eose_during_replacement_keeps_its_plan_metadata() {
             attempt_id: first_attempt,
             handle: fixture.handle,
         });
-    fixture.core.prober.force_supported_for_test(fixture.relay.clone());
+    fixture
+        .core
+        .white_box("prober.force_supported_for_test", |s| {
+            s.prober.force_supported_for_test(fixture.relay.clone())
+        });
     let probed = fixture.core.prober.probed(&fixture.relay).unwrap();
     let mut candidate_effects = Vec::new();
-    fixture.core.begin_neg_handoff(
-        probed,
-        first_plan.clone(),
-        Some(first_plan.clone()),
-        first_filter,
-        &mut candidate_effects,
-    );
+    fixture.core.white_box("begin_neg_handoff", |s| {
+        s.begin_neg_handoff(
+            probed,
+            first_plan.clone(),
+            Some(first_plan.clone()),
+            first_filter,
+            &mut candidate_effects,
+        )
+    });
     let (_, first_candidate, _, candidate_attempt) = only_request(&candidate_effects);
     fixture
         .core
@@ -182,8 +204,12 @@ fn predecessor_candidate_eose_during_replacement_keeps_its_plan_metadata() {
             handle: fixture.handle,
         });
 
-    fixture.core.attribution.observe_atom(&second);
-    fixture.core.attribution.release_atom(&first);
+    fixture.core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&second)
+    });
+    fixture.core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&first)
+    });
     let replacement = fixture.compile(BTreeSet::from([second.clone()]));
     let (_, second_candidate, _, second_attempt) = only_request(&replacement);
     assert!(fixture.core.request_replacements.len() == 1);
@@ -205,7 +231,9 @@ fn predecessor_candidate_eose_during_replacement_keeps_its_plan_metadata() {
         });
     fixture.eose(&second_candidate);
     fixture.compile(BTreeSet::new());
-    fixture.core.attribution.release_atom(&second);
+    fixture.core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&second)
+    });
     assert_eq!(
         fixture.core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -221,8 +249,12 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
     let second_claim = coverage_key(&second);
     let (first_plan, old_child) = fixture.establish_active_nip77(&first);
 
-    fixture.core.attribution.observe_atom(&second);
-    fixture.core.attribution.release_atom(&first);
+    fixture.core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&second)
+    });
+    fixture.core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&first)
+    });
     let second_effects = fixture.compile(BTreeSet::from([second.clone()]));
     let (_, second_candidate, _, second_attempt) = only_request(&second_effects);
     fixture
@@ -239,8 +271,12 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
         Some(&old_child)
     );
 
-    fixture.core.attribution.observe_atom(&third);
-    fixture.core.attribution.release_atom(&second);
+    fixture.core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&third)
+    });
+    fixture.core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&second)
+    });
     let third_effects = fixture.compile(BTreeSet::from([third.clone()]));
     let (_, third_candidate, _, third_attempt) = only_request(&third_effects);
     let third_plan = fixture.core.router.plan().reqs[&fixture.session][0]
@@ -298,7 +334,9 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
     );
 
     fixture.compile(BTreeSet::new());
-    fixture.core.attribution.release_atom(&third);
+    fixture.core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&third)
+    });
     assert_eq!(
         fixture.core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -312,8 +350,12 @@ fn withdrawing_an_accepted_nip77_candidate_before_eose_closes_candidate_and_pred
     let second = fixture.atom(7);
     let (_, old_child) = fixture.establish_active_nip77(&first);
 
-    fixture.core.attribution.observe_atom(&second);
-    fixture.core.attribution.release_atom(&first);
+    fixture.core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&second)
+    });
+    fixture.core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&first)
+    });
     let replacement = fixture.compile(BTreeSet::from([second.clone()]));
     let (_, successor_child, _, successor_attempt) = only_request(&replacement);
     fixture
@@ -334,7 +376,9 @@ fn withdrawing_an_accepted_nip77_candidate_before_eose_closes_candidate_and_pred
             1
         );
     }
-    fixture.core.attribution.release_atom(&second);
+    fixture.core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&second)
+    });
     assert_eq!(
         fixture.core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -348,8 +392,12 @@ fn withdrawing_a_refused_nip77_successor_retires_its_predecessor_and_every_trans
     let second = fixture.atom(5);
     let (_, old_child) = fixture.establish_active_nip77(&first);
 
-    fixture.core.attribution.observe_atom(&second);
-    fixture.core.attribution.release_atom(&first);
+    fixture.core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&second)
+    });
+    fixture.core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&first)
+    });
     let replacement = fixture.compile(BTreeSet::from([second.clone()]));
     let (_, successor_child, _, successor_attempt) = only_request(&replacement);
     fixture
@@ -373,7 +421,9 @@ fn withdrawing_a_refused_nip77_successor_retires_its_predecessor_and_every_trans
             .count(),
         1
     );
-    fixture.core.attribution.release_atom(&second);
+    fixture.core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&second)
+    });
     assert_eq!(
         fixture.core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -384,14 +434,20 @@ fn withdrawing_a_refused_nip77_successor_retires_its_predecessor_and_every_trans
 fn accepted_byte_changed_replacements_retain_only_one_current_request() {
     let mut fixture = Fixture::new("bounded-accepted-replacements");
     let mut current = fixture.atom(10);
-    fixture.core.attribution.observe_atom(&current);
+    fixture.core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&current)
+    });
     let opened = fixture.compile(BTreeSet::from([current.clone()]));
     let mut current_sub = fixture.accept(&opened);
 
     for author in 11..=42 {
         let next = fixture.atom(author);
-        fixture.core.attribution.observe_atom(&next);
-        fixture.core.attribution.release_atom(&current);
+        fixture.core.white_box("attribution.observe_atom", |s| {
+            s.attribution.observe_atom(&next)
+        });
+        fixture.core.white_box("attribution.release_atom", |s| {
+            s.attribution.release_atom(&current)
+        });
         let replacement = fixture.compile(BTreeSet::from([next.clone()]));
         let (_, next_sub, _, next_attempt) = only_request(&replacement);
         assert_ne!(current_sub, next_sub);
@@ -417,7 +473,9 @@ fn accepted_byte_changed_replacements_retain_only_one_current_request() {
     }
 
     fixture.compile(BTreeSet::new());
-    fixture.core.attribution.release_atom(&current);
+    fixture.core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&current)
+    });
     assert_eq!(
         fixture.core.bench_ownership_census(),
         CoreOwnershipCensus::default()

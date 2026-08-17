@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::coordinate_coverage::RequestReturnEvidence;
 use super::request_targets::ActiveRequestTarget;
 use super::{
-    AttributionSendId, Effect, EngineCore, LocalSendRefusal, RequestAttemptId,
+    AttributionSendId, CoreState, Effect, LocalSendRefusal, RequestAttemptId,
     RequestAttemptPurpose, RequestAttemptState, RequestHandoffOutcome, RequestSend,
 };
 
@@ -273,8 +273,8 @@ fn filter_fingerprint(filters: &[ConcreteFilter]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-impl EngineCore {
-    pub(super) fn record_observed_request(
+impl CoreState {
+    pub(in crate::core) fn record_observed_request(
         &mut self,
         request: RequestSend<'_>,
     ) -> AttributionSendId {
@@ -282,7 +282,7 @@ impl EngineCore {
             .0
     }
 
-    pub(super) fn record_observed_request_with_purpose(
+    pub(in crate::core) fn record_observed_request_with_purpose(
         &mut self,
         request: RequestSend<'_>,
         purpose: RequestAttemptPurpose,
@@ -326,7 +326,7 @@ impl EngineCore {
 
     /// Attach exact logical owners to the current byte-identical request
     /// generation without replaying a historical request fact.
-    pub(super) fn extend_current_request_owner_demands(
+    pub(in crate::core) fn extend_current_request_owner_demands(
         &mut self,
         session: &RelaySessionKey,
         sub_id: &SubId,
@@ -364,7 +364,7 @@ impl EngineCore {
     /// accepted generation without changing its wire filter or subscription
     /// id. Attribution prunes the matching current claim membership in the
     /// same metadata-removal transition.
-    pub(super) fn remove_current_request_owner_demands(
+    pub(in crate::core) fn remove_current_request_owner_demands(
         &mut self,
         session: &RelaySessionKey,
         sub_id: &SubId,
@@ -428,7 +428,10 @@ impl EngineCore {
     /// Public only through the doc-hidden mechanism surface so headless
     /// reducer falsifiers can drive the same acceptance edge as the runtime.
     #[doc(hidden)]
-    pub fn on_wire_request_handoff(&mut self, outcome: RequestHandoffOutcome) -> Vec<Effect> {
+    pub(in crate::core) fn on_wire_request_handoff(
+        &mut self,
+        outcome: RequestHandoffOutcome,
+    ) -> Vec<Effect> {
         let (mut effects, evidence_demands) = self.consume_wire_request_handoff(outcome);
         self.refresh_evidence_for_coverage_and_demand_keys(
             &BTreeSet::new(),
@@ -438,7 +441,7 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn consume_wire_request_handoff(
+    pub(in crate::core) fn consume_wire_request_handoff(
         &mut self,
         outcome: RequestHandoffOutcome,
     ) -> (Vec<Effect>, BTreeSet<nmp_router::DemandKey>) {
@@ -572,7 +575,7 @@ impl EngineCore {
         Some(request)
     }
 
-    pub(super) fn emit_request_settled(
+    pub(in crate::core) fn emit_request_settled(
         &mut self,
         send: AttributionSendId,
         observed_at: Timestamp,
@@ -616,7 +619,7 @@ impl EngineCore {
     /// the case that separates them — it finishes without ever earning a
     /// watermark, and reporting neither fact is what left an app with only a
     /// wall clock to end a bounded read on.
-    pub(super) fn retire_request_evidence(
+    pub(in crate::core) fn retire_request_evidence(
         &mut self,
         send: AttributionSendId,
     ) -> BTreeSet<nmp_router::DemandKey> {
@@ -654,7 +657,7 @@ impl EngineCore {
 
     /// Every `(session, sub_id)` whose wire request has reached NIP-01's end
     /// of stored events, in the shape `evidence::acquisition_evidence` reads.
-    pub(super) fn finished_stored_events(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
+    pub(in crate::core) fn finished_stored_events(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
         self.live_wire_requests
             .iter()
             .filter(|(_, live)| matches!(live.stored_events, StoredEvents::Finished { .. }))
@@ -662,18 +665,18 @@ impl EngineCore {
             .collect()
     }
 
-    pub(super) fn placed_request_keys(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
+    pub(in crate::core) fn placed_request_keys(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
         self.live_wire_requests
             .iter()
             .map(|((session, _), live)| (session.clone(), live.evidence_sub_id.clone()))
             .collect()
     }
 
-    pub(super) fn awaiting_request_keys(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
+    pub(in crate::core) fn awaiting_request_keys(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
         self.attempts.awaiting_evidence_keys()
     }
 
-    pub(super) fn close_requests_for_session(
+    pub(in crate::core) fn close_requests_for_session(
         &mut self,
         session: &RelaySessionKey,
         handle: TransportRelayHandle,
@@ -714,7 +717,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn close_requests_for_sub(
+    pub(in crate::core) fn close_requests_for_sub(
         &mut self,
         session: &RelaySessionKey,
         handle: TransportRelayHandle,
@@ -765,7 +768,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn reconcile_observation_resolution(
+    pub(in crate::core) fn reconcile_observation_resolution(
         &mut self,
         id: HandleId,
         cause: ResolutionCause,
@@ -941,7 +944,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn remove_request_targets_for_handle(&mut self, id: HandleId) {
+    pub(in crate::core) fn remove_request_targets_for_handle(&mut self, id: HandleId) {
         self.replace_request_targets_for_handle(id, BTreeMap::new());
     }
 
@@ -962,7 +965,7 @@ impl EngineCore {
     }
 
     /// Which of one branch's Demand scopes currently contribute to the wire.
-    pub(super) fn wire_contributing_scopes(&self, id: HandleId) -> BTreeSet<usize> {
+    pub(in crate::core) fn wire_contributing_scopes(&self, id: HandleId) -> BTreeSet<usize> {
         self.handles
             .get(&id)
             .into_iter()
@@ -971,16 +974,16 @@ impl EngineCore {
             .collect()
     }
 
-    pub(super) fn activate_request_targets_for_handle(&mut self, id: HandleId) {
+    pub(in crate::core) fn activate_request_targets_for_handle(&mut self, id: HandleId) {
         let scopes = self.wire_contributing_scopes(id);
         self.request_targets.activate_handle(id, &scopes);
     }
 
-    pub(super) fn deactivate_request_targets_for_handle(&mut self, id: HandleId) {
+    pub(in crate::core) fn deactivate_request_targets_for_handle(&mut self, id: HandleId) {
         self.request_targets.deactivate_handle(id);
     }
 
-    pub(super) fn deactivate_request_targets_for_handle_demand(
+    pub(in crate::core) fn deactivate_request_targets_for_handle_demand(
         &mut self,
         id: HandleId,
         demand: nmp_router::DemandKey,
@@ -991,7 +994,7 @@ impl EngineCore {
     /// Issue one branch-scoped execution fact into its OBSERVATION's ordered
     /// trace. Facts about an engine-internal handle that belongs to no
     /// observation are dropped, exactly as their row emits already are.
-    pub(super) fn emit_observation_fact(
+    pub(in crate::core) fn emit_observation_fact(
         &mut self,
         id: HandleId,
         fact: ObservationFact,
@@ -1013,7 +1016,7 @@ impl EngineCore {
     }
 
     /// Which observation and canonical branch index a resolver handle serves.
-    pub(super) fn branch_owner(&self, id: HandleId) -> Option<BranchOwner> {
+    pub(in crate::core) fn branch_owner(&self, id: HandleId) -> Option<BranchOwner> {
         self.handles.get(&id).map(|state| BranchOwner {
             observation: state.observation,
             index: state.index,
@@ -1151,7 +1154,7 @@ mod tests {
             .with_outbound_routes(account_b.public_key(), [relay.clone()])
             .with_outbound_routes(followed_a.public_key(), [relay.clone()])
             .with_outbound_routes(followed_b.public_key(), [relay.clone()]);
-        let mut core = EngineCore::new_with_fixture_routing_facts(store, directory, 20);
+        let mut core = CoreState::new_with_fixture_routing_facts(store, directory, 20);
         core.handle(EngineMsg::SetActivePubkey(Some(account_a.public_key())));
 
         let opened = core.handle(EngineMsg::Subscribe(articles_by_follows()));
@@ -1259,7 +1262,7 @@ mod tests {
     #[test]
     fn request_target_multiplicity_replaces_and_tears_down_exactly() {
         let relay = RelayUrl::parse("wss://request-target-multiplicity.example").unwrap();
-        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
+        let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let observation =
             opened_observation(&core.handle(EngineMsg::Subscribe(pinned_kind_one(&relay))));
         let handle = core.observations[&observation].branches[0];
@@ -1318,7 +1321,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let mut core = EngineCore::new(store, 20);
+        let mut core = CoreState::new(store, 20);
         core.handle(EngineMsg::SetActivePubkey(Some(account_a.public_key())));
         let observation = opened_observation(&core.handle(EngineMsg::Subscribe(
             pinned_articles_by_follows(&relay, Freshness::Live),

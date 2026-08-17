@@ -47,7 +47,7 @@ fn rebuilding_author_route_needs_reproduces_the_incremental_state_exactly() {
     assert_eq!(before.1, 1, "the distinct author has one live wire owner");
     assert!(before.2.contains(&shared) && before.2.contains(&distinct));
 
-    core.rebuild_wire_ownership();
+    core.white_box("rebuild_wire_ownership", |s| s.rebuild_wire_ownership());
     core.assert_owner_consistency("rebuilt");
     let after = (
         core.author_outbox_route_needs.wire_owner_count(&shared),
@@ -103,10 +103,12 @@ fn a_route_learned_between_rebuilds_is_reflected_by_the_next_rebuild_only() {
     // so the incremental-only state below can be inspected on its own. The
     // author's wire-owner count never lapses to zero and back -- this is a
     // route learned mid-flight, not a departure/re-arrival.
-    core.routing_facts.writer().replace(
-        author,
-        AuthorRouteReplacement::Present(AuthorRoutes::new([relay], [])),
-    );
+    core.white_box("routing_facts.writer", |s| {
+        s.routing_facts.writer().replace(
+            author,
+            AuthorRouteReplacement::Present(AuthorRoutes::new([relay], [])),
+        )
+    });
     assert_eq!(
         core.author_outbox_route_needs.wire_owner_count(&author),
         1,
@@ -120,7 +122,7 @@ fn a_route_learned_between_rebuilds_is_reflected_by_the_next_rebuild_only() {
          incremental path re-examines route status once wire ownership is live"
     );
 
-    core.rebuild_wire_ownership();
+    core.white_box("rebuild_wire_ownership", |s| s.rebuild_wire_ownership());
     core.assert_owner_consistency("rebuilt after learning a route");
     assert_eq!(
         core.author_outbox_route_needs.wire_owner_count(&author),
@@ -143,13 +145,13 @@ fn rebuilding_author_route_needs_twice_changes_nothing() {
     core.handle(EngineMsg::Subscribe(routeless_outbox_query(author)));
     flush(&mut core);
 
-    core.rebuild_wire_ownership();
+    core.white_box("rebuild_wire_ownership", |s| s.rebuild_wire_ownership());
     core.assert_owner_consistency("after one rebuild");
     let once = (
         core.author_outbox_route_needs.wire_owner_count(&author),
         core.author_outbox_route_needs.needs_set(),
     );
-    core.rebuild_wire_ownership();
+    core.white_box("rebuild_wire_ownership", |s| s.rebuild_wire_ownership());
     core.assert_owner_consistency("after two rebuilds");
     let twice = (
         core.author_outbox_route_needs.wire_owner_count(&author),

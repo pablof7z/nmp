@@ -27,9 +27,10 @@ fn a_diagnostics_snapshot_built_over_corrupt_coverage_says_so() {
     let store = RedbStore::open(&path).expect("reopen diagnostic coverage fixture");
     let mut core = EngineCore::new(store, 20);
     let budget = core.compile_budget();
-    let admitted = core
-        .router
-        .admit(&BTreeSet::from([atom]), &core.routing_facts, budget);
+    let admitted = core.white_box("router.admit", |s| {
+        s.router
+            .admit(&BTreeSet::from([atom]), &s.routing_facts, budget)
+    });
     assert_eq!(
         admitted
             .wire
@@ -86,7 +87,9 @@ fn distinct_physical_closes_defer_diagnostic_coverage_projection() {
 
     core.evidence_candidates_examined.set(0);
     core.diagnostic_snapshots_built.set(0);
-    core.router.reset_withdrawal_work();
+    core.white_box("router.reset_withdrawal_work", |s| {
+        s.router.reset_withdrawal_work()
+    });
     let mut diagnostic_changes = 0;
     for observation in observations {
         let effects = core.handle(EngineMsg::Unsubscribe(observation));
@@ -129,9 +132,9 @@ fn a_later_admission_cohort_never_visits_ten_thousand_incumbents() {
         .map(|index| bounded_atom(&relay, &format!("incumbent-{index:05}")))
         .collect();
     let budget = core.compile_budget();
-    let initial = core
-        .router
-        .admit(&incumbent_atoms, &core.routing_facts, budget);
+    let initial = core.white_box("router.admit", |s| {
+        s.router.admit(&incumbent_atoms, &s.routing_facts, budget)
+    });
     assert_eq!(
         initial
             .wire
@@ -143,12 +146,18 @@ fn a_later_admission_cohort_never_visits_ten_thousand_incumbents() {
         10_000
     );
     for atom in incumbent_atoms {
-        core.attribution.observe_atom(&atom);
-        core.wire.retain(&atom);
+        core.white_box("attribution.observe_atom", |s| {
+            s.attribution.observe_atom(&atom)
+        });
+        core.white_box("wire.retain", |s| s.wire.retain(&atom));
     }
-    core.planned_read_sessions.insert(session.clone());
-    core.planned_read_session_counts_by_relay
-        .insert(relay.clone(), 1);
+    core.white_box("planned_read_sessions.insert", |s| {
+        s.planned_read_sessions.insert(session.clone())
+    });
+    core.white_box("planned_read_session_counts_by_relay.insert", |s| {
+        s.planned_read_session_counts_by_relay
+            .insert(relay.clone(), 1)
+    });
     let incumbents = core.router.plan().reqs[&session].clone();
 
     core.pending_atoms_rebuilt.set(0);
@@ -156,7 +165,9 @@ fn a_later_admission_cohort_never_visits_ten_thousand_incumbents() {
     core.attribution_atoms_rebuilt.set(0);
     core.evidence_candidates_examined.set(0);
     core.diagnostic_snapshots_built.set(0);
-    core.router.reset_admission_work();
+    core.white_box("router.reset_admission_work", |s| {
+        s.router.reset_admission_work()
+    });
     let later = core.handle(EngineMsg::Subscribe(bounded_query(&relay, "later-owner")));
     assert!(later
         .iter()
