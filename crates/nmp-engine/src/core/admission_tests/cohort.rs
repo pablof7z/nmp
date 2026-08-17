@@ -391,14 +391,16 @@ fn pending_execution_census_counts_every_revision_queued_under_one_wire_key() {
         observation_id(&core.handle(EngineMsg::Subscribe(query(&relay, "same", Freshness::Live))));
     flush(&mut core);
     let request = core.router.plan().reqs[&session][0].clone();
-    core.record_observed_request(RequestSend {
-        session: &session,
-        sub_id: &request.sub_id,
-        filter: &request.filter,
-        coverage_claims: request.coverage_claims.clone(),
-        owner_demands: request.owner_demands.clone(),
-        replay: true,
-        event_failure_target: EventFailureTarget::ThisSend,
+    core.white_box("record_observed_request", |s| {
+        s.record_observed_request(RequestSend {
+            session: &session,
+            sub_id: &request.sub_id,
+            filter: &request.filter,
+            coverage_claims: request.coverage_claims.clone(),
+            owner_demands: request.owner_demands.clone(),
+            replay: true,
+            event_failure_target: EventFailureTarget::ThisSend,
+        })
     });
 
     assert_eq!(core.pending_request_evidence.len(), 1);
@@ -421,7 +423,7 @@ fn pending_execution_census_counts_every_revision_queued_under_one_wire_key() {
         1
     );
 
-    core.abandon_sub(&request.sub_id);
+    core.white_box("abandon_sub", |s| s.abandon_sub(&request.sub_id));
     core.handle(EngineMsg::Unsubscribe(observation));
     assert_eq!(
         core.bench_ownership_census(),

@@ -6,7 +6,7 @@
 
 use super::*;
 
-impl EngineCore {
+impl CoreState {
     // ---- transport wiring (slot bookkeeping only — C owns the pool) -----
 
     /// `u64::MAX` is structurally reserved for [`AUTH_SEQUENCE_SENTINEL`]:
@@ -17,7 +17,7 @@ impl EngineCore {
     /// longer rests on the `Error`-phase guard alone (#8 U2's deferred
     /// latent item): even a registry or correlation path that only compares
     /// epochs is safe.
-    pub(super) fn mint_auth_sequence(next: &mut Option<u64>) -> Option<u64> {
+    pub(in crate::core) fn mint_auth_sequence(next: &mut Option<u64>) -> Option<u64> {
         let issued = (*next)?;
         if issued == AUTH_SEQUENCE_SENTINEL {
             *next = None;
@@ -27,7 +27,7 @@ impl EngineCore {
         Some(issued)
     }
 
-    pub(super) fn mint_auth_epoch(
+    pub(in crate::core) fn mint_auth_epoch(
         &mut self,
         handle: TransportRelayHandle,
         session: &RelaySessionKey,
@@ -39,14 +39,17 @@ impl EngineCore {
         })
     }
 
-    pub(super) fn mint_auth_operation(&mut self, epoch: &AuthEpoch) -> Option<AuthOpToken> {
+    pub(in crate::core) fn mint_auth_operation(
+        &mut self,
+        epoch: &AuthEpoch,
+    ) -> Option<AuthOpToken> {
         Some(AuthOpToken {
             epoch: epoch.clone(),
             sequence: Self::mint_auth_sequence(&mut self.next_auth_operation)?,
         })
     }
 
-    pub(super) fn exact_current_auth_epoch(&self, epoch: &AuthEpoch) -> bool {
+    pub(in crate::core) fn exact_current_auth_epoch(&self, epoch: &AuthEpoch) -> bool {
         self.connected_relays.contains(&epoch.session)
             && matches!(
                 self.slot_to_relay.get(&epoch.handle.slot),
@@ -58,7 +61,7 @@ impl EngineCore {
                 .is_some_and(|state| state.epoch == *epoch)
     }
 
-    pub fn is_current_transport_session(
+    pub(in crate::core) fn is_current_transport_session(
         &self,
         handle: TransportRelayHandle,
         session: &RelaySessionKey,
@@ -71,7 +74,10 @@ impl EngineCore {
             )
     }
 
-    pub(super) fn close_protected_reqs(&self, session: &RelaySessionKey) -> Option<Effect> {
+    pub(in crate::core) fn close_protected_reqs(
+        &self,
+        session: &RelaySessionKey,
+    ) -> Option<Effect> {
         let ops: Vec<_> = self
             .router
             .plan()
@@ -87,7 +93,7 @@ impl EngineCore {
         })
     }
 
-    pub(super) fn park_relay_lanes_for_auth(
+    pub(in crate::core) fn park_relay_lanes_for_auth(
         &mut self,
         session: &RelaySessionKey,
         effects: &mut Vec<Effect>,
@@ -148,7 +154,7 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn invalidate_auth_epoch(
+    pub(in crate::core) fn invalidate_auth_epoch(
         &mut self,
         session: &RelaySessionKey,
         close_wire: bool,
@@ -181,7 +187,7 @@ impl EngineCore {
         previous
     }
 
-    pub(super) fn on_auth_challenge(
+    pub(in crate::core) fn on_auth_challenge(
         &mut self,
         handle: TransportRelayHandle,
         session: RelaySessionKey,
@@ -267,7 +273,7 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn on_auth_restricted(
+    pub(in crate::core) fn on_auth_restricted(
         &mut self,
         handle: TransportRelayHandle,
         session: RelaySessionKey,
@@ -308,7 +314,7 @@ impl EngineCore {
     /// authenticated session. Subscription `CLOSED` facts never call this
     /// door: only typed policy/signer denial and an exact-correlated AUTH
     /// `OK false` do.
-    pub(super) fn deny_write_lanes_for_auth(
+    pub(in crate::core) fn deny_write_lanes_for_auth(
         &mut self,
         session: &RelaySessionKey,
         source: StoredAuthDenialSource,
@@ -376,7 +382,7 @@ impl EngineCore {
         effects.extend(self.schedule_ready(self.clock));
     }
 
-    pub(super) fn on_auth_policy_completed(
+    pub(in crate::core) fn on_auth_policy_completed(
         &mut self,
         token: AuthOpToken,
         instance: Option<AuthCapabilityInstance>,
@@ -477,7 +483,7 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn signed_auth_matches_frozen(
+    pub(in crate::core) fn signed_auth_matches_frozen(
         unsigned: &UnsignedEvent,
         signed: &SignedEvent,
     ) -> bool {
@@ -490,7 +496,7 @@ impl EngineCore {
             && signed.verify().is_ok()
     }
 
-    pub(super) fn auth_source_status(state: &AuthSessionState) -> SourceStatus {
+    pub(in crate::core) fn auth_source_status(state: &AuthSessionState) -> SourceStatus {
         match &state.phase {
             AuthSessionPhase::AwaitingPolicy { .. } => SourceStatus::AwaitingAuth {
                 phase: AuthPhase::AwaitingPolicy,
@@ -513,14 +519,14 @@ impl EngineCore {
     /// evidence vocabulary for `acquisition_evidence` (#8 U2). Sessions
     /// without an entry are the "connected but never challenged" case the
     /// evidence layer defaults to `AwaitingAuth { AwaitingChallenge }`.
-    pub(super) fn auth_status_map(&self) -> BTreeMap<RelaySessionKey, SourceStatus> {
+    pub(in crate::core) fn auth_status_map(&self) -> BTreeMap<RelaySessionKey, SourceStatus> {
         self.auth_sessions
             .iter()
             .map(|(session, state)| (session.clone(), Self::auth_source_status(state)))
             .collect()
     }
 
-    pub(super) fn on_auth_signer_completed(
+    pub(in crate::core) fn on_auth_signer_completed(
         &mut self,
         token: AuthOpToken,
         instance: Option<AuthCapabilityInstance>,
@@ -592,7 +598,7 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn on_auth_capability_bound(
+    pub(in crate::core) fn on_auth_capability_bound(
         &mut self,
         token: AuthOpToken,
         capability: AuthCapability,
@@ -630,7 +636,10 @@ impl EngineCore {
     /// reconstructed off-thread. Anything that does not match the awaited
     /// send — a superseded epoch, a replaced generation, a completion for a
     /// different phase — is dropped without effect.
-    pub(super) fn on_auth_send_completed(&mut self, completion: AuthSendCompletion) -> Vec<Effect> {
+    pub(in crate::core) fn on_auth_send_completed(
+        &mut self,
+        completion: AuthSendCompletion,
+    ) -> Vec<Effect> {
         let AuthSendCompletion {
             handle,
             session,
@@ -678,7 +687,7 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn on_auth_capability_invalidated(
+    pub(in crate::core) fn on_auth_capability_invalidated(
         &mut self,
         pubkey: PublicKey,
         capability: AuthCapability,
@@ -707,7 +716,7 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn on_relay_connected(
+    pub(in crate::core) fn on_relay_connected(
         &mut self,
         handle: TransportRelayHandle,
         session: RelaySessionKey,
@@ -758,7 +767,7 @@ impl EngineCore {
         // this session is now ready to report `AwaitingRequest` for Public
         // work (or `AwaitingAuth` for protected work). It becomes
         // `Requesting` only after the exact local handoff is accepted, and is
-        // never again `Connecting` for the lifetime of this `EngineCore`
+        // never again `Connecting` for the lifetime of this `CoreState`
         // (`ever_connected_relays` is append-only -- a later drop reads
         // `Disconnected`, not `Connecting`, per the doc's "was connected,
         // then dropped" fact).
@@ -873,7 +882,7 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn on_auth_probe_released(
+    pub(in crate::core) fn on_auth_probe_released(
         &mut self,
         handle: TransportRelayHandle,
         session: RelaySessionKey,
@@ -899,7 +908,7 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn on_relay_information_resolved(
+    pub(in crate::core) fn on_relay_information_resolved(
         &mut self,
         url: RelayUrl,
         information: Option<RelayInformationCapabilityEvidence>,
@@ -1012,7 +1021,7 @@ impl EngineCore {
     /// grants a fresh generation for because its worker slot is already
     /// empty (`ensure_open` on an empty slot is indistinguishable from
     /// `close`-then-`ensure_open`) -- it is simply never AUTOMATIC.
-    pub(super) fn on_relay_disconnected(
+    pub(in crate::core) fn on_relay_disconnected(
         &mut self,
         handle: TransportRelayHandle,
         reported_session: RelaySessionKey,
@@ -1156,7 +1165,7 @@ impl EngineCore {
     /// `Requesting`; a duplicate OK for the same epoch does nothing (a second
     /// snapshot would poison the attribution FIFO with a send that never
     /// happened).
-    pub(super) fn finish_auth_ok(
+    pub(in crate::core) fn finish_auth_ok(
         &mut self,
         session: &RelaySessionKey,
         mut state: AuthSessionState,
@@ -1219,7 +1228,7 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn on_auth_ok(
+    pub(in crate::core) fn on_auth_ok(
         &mut self,
         session: &RelaySessionKey,
         event_id: EventId,
@@ -1265,7 +1274,7 @@ impl EngineCore {
         feature = "bench-instrumentation",
         feature = "test-instrumentation"
     ))]
-    pub fn ingest_relay_events(
+    pub(in crate::core) fn ingest_relay_events(
         &mut self,
         events: Vec<(SignedEvent, RelayObserved)>,
         effects: &mut Vec<Effect>,
@@ -1305,7 +1314,7 @@ impl EngineCore {
         self.ingest_relay_observations_governed(events, effects, true);
     }
 
-    pub(super) fn ingest_ordinary_relay_observations(
+    pub(in crate::core) fn ingest_ordinary_relay_observations(
         &mut self,
         events: Vec<AttributedRelayObservation>,
         effects: &mut Vec<Effect>,
@@ -1530,7 +1539,7 @@ impl EngineCore {
         }
     }
 
-    pub fn committed_observation_conflicts_with_pending(
+    pub(in crate::core) fn committed_observation_conflicts_with_pending(
         &self,
         hit: &CommittedObservationHit,
     ) -> bool {
@@ -1542,7 +1551,7 @@ impl EngineCore {
     /// Reduce a cache batch whose session, epoch, and pending-write barriers
     /// were already revalidated on this same engine thread. The ordinary
     /// `RelayFrames` door remains defensive for every unvalidated frame.
-    pub fn on_revalidated_committed_observations(
+    pub(in crate::core) fn on_revalidated_committed_observations(
         &mut self,
         observations: Vec<(RelaySessionKey, u16)>,
     ) -> Vec<Effect> {
@@ -1564,7 +1573,7 @@ impl EngineCore {
         vec![Effect::EmitDiagnostics(self.diagnostics_snapshot())]
     }
 
-    pub(super) fn on_relay_frames(
+    pub(in crate::core) fn on_relay_frames(
         &mut self,
         frames: Vec<(TransportRelayHandle, RelaySessionKey, RelayFrame)>,
     ) -> Vec<Effect> {
@@ -1686,7 +1695,7 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn on_relay_frame(
+    pub(in crate::core) fn on_relay_frame(
         &mut self,
         handle: TransportRelayHandle,
         reported_session: RelaySessionKey,

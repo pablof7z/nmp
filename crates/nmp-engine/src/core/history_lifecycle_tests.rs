@@ -511,7 +511,9 @@ mod history_mutation_tests {
             )
             .unwrap();
         let mut core = EngineCore::new(store, 20);
-        core.active_pubkey = Some(keys.public_key());
+        core.white_box("active_pubkey", |s| {
+            s.active_pubkey = Some(keys.public_key())
+        });
         let opened = core.handle(EngineMsg::SubscribeHistory(history_query(
             47,
             BTreeSet::from([9, 10_000]),
@@ -525,16 +527,18 @@ mod history_mutation_tests {
             .unwrap();
         assert_eq!(ordered_ids(&core, id), vec![x.id, y.id, z.id]);
 
-        let accepted = core.on_publish(WriteIntent {
-            payload: WritePayload::Event(nmp_grammar::EventBuilder {
-                kind: Kind::from(10_000u16),
-                tags: (vec![room_tag(47)]).into_iter().collect(),
-                content: ("pending replacement").into(),
-                created_at: Some(Timestamp::from(1_000u64)),
-            }),
-            routing: WriteRouting::Explicit(vec![relay]),
-            identity: Identity::Active,
-            correlation: None,
+        let accepted = core.white_box("on_publish", |s| {
+            s.on_publish(WriteIntent {
+                payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                    kind: Kind::from(10_000u16),
+                    tags: (vec![room_tag(47)]).into_iter().collect(),
+                    content: ("pending replacement").into(),
+                    created_at: Some(Timestamp::from(1_000u64)),
+                }),
+                routing: WriteRouting::Explicit(vec![relay]),
+                identity: Identity::Active,
+                correlation: None,
+            })
         });
         let receipt = accepted
             .iter()
@@ -602,19 +606,23 @@ mod history_mutation_tests {
                 .pop()
                 .unwrap()
                 .event;
-            core.store
-                .remove(removed_id, nmp_store::RetractReason::Rejected)
-                .unwrap();
+            core.white_box("store.remove", |s| {
+                s.store
+                    .remove(removed_id, nmp_store::RetractReason::Rejected)
+                    .unwrap()
+            });
 
             seed = seed.rotate_left(17) ^ 0xa5a5_5a5a_0123_4567;
             let created_at = 50 + (seed % 1_500);
             let inserted = room_event(&keys, 47, 10_000 + step, created_at);
-            core.store
-                .insert(
-                    inserted.clone(),
-                    RelayObserved::new(relay.clone(), Timestamp::from(2_000 + step as u64)),
-                )
-                .unwrap();
+            core.white_box("store.insert", |s| {
+                s.store
+                    .insert(
+                        inserted.clone(),
+                        RelayObserved::new(relay.clone(), Timestamp::from(2_000 + step as u64)),
+                    )
+                    .unwrap()
+            });
             let changes = CommittedRowChanges {
                 inserted: vec![nmp_resolver::CommittedCurrentRow {
                     event: inserted,
@@ -630,7 +638,10 @@ mod history_mutation_tests {
             core.history_store_queries.set(0);
             core.history_rows_examined.set(0);
             let mut effects = Vec::new();
-            assert!(core.try_apply_committed_history_row_changes(id, &changes, &mut effects));
+            assert!(
+                core.white_box("try_apply_committed_history_row_changes", |s| s
+                    .try_apply_committed_history_row_changes(id, &changes, &mut effects))
+            );
             assert!(core.history_store_queries.get() <= 1);
             assert!(core.history_rows_examined.get() <= 1);
 

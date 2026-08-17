@@ -46,28 +46,33 @@ fn outstanding_request_terminals_follow_current_exact_owners_after_attachment_ch
 
             let mut terminal_effects = Vec::new();
             if relay_closes_before_eose {
-                core.close_requests_for_sub(
-                    &session,
-                    transport,
-                    &request.sub_id,
-                    "fixture relay close".to_string(),
-                    &mut terminal_effects,
-                );
-            } else {
-                let completed = core
-                    .attribution
-                    .attribute_eose_detailed(
+                core.white_box("close_requests_for_sub", |s| {
+                    s.close_requests_for_sub(
                         &session,
-                        &wire_sub_id_string(&request.sub_id),
-                        Timestamp::from(101u64),
+                        transport,
+                        &request.sub_id,
+                        "fixture relay close".to_string(),
+                        &mut terminal_effects,
                     )
-                    .expect("the accepted request owns one outstanding EOSE");
-                core.emit_request_settled(
-                    completed.send_id(),
-                    Timestamp::from(101u64),
-                    RequestTerminal::Eose,
-                    &mut terminal_effects,
-                );
+                });
+            } else {
+                let completed = core.white_box("attribution.attribute_eose_detailed", |s| {
+                    s.attribution
+                        .attribute_eose_detailed(
+                            &session,
+                            &wire_sub_id_string(&request.sub_id),
+                            Timestamp::from(101u64),
+                        )
+                        .expect("the accepted request owns one outstanding EOSE")
+                });
+                core.white_box("emit_request_settled", |s| {
+                    s.emit_request_settled(
+                        completed.send_id(),
+                        Timestamp::from(101u64),
+                        RequestTerminal::Eose,
+                        &mut terminal_effects,
+                    )
+                });
             }
             let terminal_owners: BTreeSet<_> = terminal_effects
                 .iter()
@@ -138,15 +143,18 @@ fn settled_departing_shape_remains_owned_by_the_shared_immutable_request() {
         request.filter.hash(),
         handle,
     );
-    let completed = core
-        .attribution
-        .attribute_eose_detailed(
-            &session,
-            &wire_sub_id_string(&request.sub_id),
-            Timestamp::from(1_000u64),
-        )
-        .unwrap();
-    core.retire_request_evidence(completed.send_id());
+    let completed = core.white_box("attribution.attribute_eose_detailed", |s| {
+        s.attribution
+            .attribute_eose_detailed(
+                &session,
+                &wire_sub_id_string(&request.sub_id),
+                Timestamp::from(1_000u64),
+            )
+            .unwrap()
+    });
+    core.white_box("retire_request_evidence", |s| {
+        s.retire_request_evidence(completed.send_id())
+    });
     assert_eq!(core.bench_ownership_census().attribution_shape_keys, 2);
 
     assert!(wire_ops(&core.handle(EngineMsg::Unsubscribe(a))).is_empty());
@@ -212,19 +220,21 @@ fn departing_shape_remains_owned_through_atomic_eose_persistence() {
         "the outstanding send still owns the departed claim shape"
     );
 
-    let completed = core
-        .attribution
-        .attribute_eose_detailed(
-            &session,
-            &wire_sub_id_string(&request.sub_id),
-            Timestamp::from(1_000u64),
-        )
-        .unwrap();
+    let completed = core.white_box("attribution.attribute_eose_detailed", |s| {
+        s.attribution
+            .attribute_eose_detailed(
+                &session,
+                &wire_sub_id_string(&request.sub_id),
+                Timestamp::from(1_000u64),
+            )
+            .unwrap()
+    });
     let send_id = completed.send_id();
     let mut effects = Vec::new();
     assert!(
-        core.persist_attributed_completion(completed, &relay, &mut effects)
-            .is_some(),
+        core.white_box("persist_attributed_completion", |s| s
+            .persist_attributed_completion(completed, &relay, &mut effects)
+            .is_some()),
         "completion must carry both shapes through the atomic store door"
     );
     for claim in &request.coverage_claims {
@@ -233,7 +243,9 @@ fn departing_shape_remains_owned_through_atomic_eose_persistence() {
             "both coalesced claims commit even though one active owner departed"
         );
     }
-    core.retire_request_evidence(send_id);
+    core.white_box("retire_request_evidence", |s| {
+        s.retire_request_evidence(send_id)
+    });
 
     assert_eq!(
         wire_ops(&core.handle(EngineMsg::Unsubscribe(b)))
@@ -336,7 +348,9 @@ fn ten_thousand_distinct_pending_cancellations_never_rebuild_surviving_demand() 
     core.pending_atoms_rebuilt.set(0);
     core.evidence_candidates_examined.set(0);
     core.diagnostic_snapshots_built.set(0);
-    core.router.reset_withdrawal_work();
+    core.white_box("router.reset_withdrawal_work", |s| {
+        s.router.reset_withdrawal_work()
+    });
     for observation in observations {
         let effects = core.handle(EngineMsg::Unsubscribe(observation));
         assert!(wire_ops(&effects).is_empty());

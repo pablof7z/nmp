@@ -41,44 +41,54 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
     let store = RedbStore::open_with_failed_coverage_write(&path, added_claim, relay.clone())
         .expect("reopen exact coverage-write failure fixture");
     let mut core = EngineCore::new(store, 20);
-    core.attribution.observe_atom(&incumbent);
-    core.attribution.observe_atom(&added);
+    core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&incumbent)
+    });
+    core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&added)
+    });
     let sub_id = SubId::for_wire(
         relay.clone(),
         &incumbent.filter,
         &incumbent.source,
         incumbent.access,
     );
-    core.attribution
-        .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]));
-    core.live_wire_requests.insert(
-        (session.clone(), sub_id.clone()),
-        LiveWireRequest {
-            filter: incumbent.filter.clone(),
-            evidence_sub_id: sub_id.clone(),
-            handle: TransportRelayHandle {
-                slot: 77,
-                generation: 1,
+    core.white_box("attribution.retain_live_request_claims", |s| {
+        s.attribution
+            .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]))
+    });
+    core.white_box("live_wire_requests.insert", |s| {
+        s.live_wire_requests.insert(
+            (session.clone(), sub_id.clone()),
+            LiveWireRequest {
+                filter: incumbent.filter.clone(),
+                evidence_sub_id: sub_id.clone(),
+                handle: TransportRelayHandle {
+                    slot: 77,
+                    generation: 1,
+                },
+                stored_events: super::observation::StoredEvents::Finished {
+                    request_revision: 9,
+                    committed_interval: Some(generation),
+                },
+                returns: Default::default(),
             },
-            stored_events: super::observation::StoredEvents::Finished {
-                request_revision: 9,
-                committed_interval: Some(generation),
-            },
-            returns: Default::default(),
-        },
-    );
+        )
+    });
 
     let mut failed = Vec::new();
-    core.apply_request_metadata_updates(
-        &[nmp_router::RequestMetadataUpdate {
-            session: session.clone(),
-            sub_id: sub_id.clone(),
-            filter_hash: incumbent.filter.hash(),
-            added_coverage_claims: BTreeSet::from([added_claim]),
-            added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
-        }],
-        &mut failed,
-    );
+    core.white_box("apply_request_metadata_updates", |s| {
+        s.apply_request_metadata_updates(
+            &[nmp_router::RequestMetadataUpdate {
+                session: session.clone(),
+                sub_id: sub_id.clone(),
+                filter_hash: incumbent.filter.hash(),
+                added_coverage_claims: BTreeSet::from([added_claim]),
+                added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
+            }],
+            &mut failed,
+        )
+    });
     assert_eq!(core.pending_request_claim_transfers.len(), 1);
     assert_eq!(
         core.bench_ownership_census()
@@ -102,9 +112,13 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
     assert_eq!(core.request_claim_transfer_claims_attempted.get(), 1);
     assert_eq!(core.request_claim_transfer_failures.get(), 1);
     assert_eq!(core.request_claim_transfer_commits.get(), 0);
-    core.attribution.release_atom(&added);
+    core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&added)
+    });
 
-    core.retry_scheduler_blocked = true;
+    core.white_box("retry_scheduler_blocked", |s| {
+        s.retry_scheduler_blocked = true
+    });
     let due = core
         .next_deadline()
         .unwrap()
@@ -128,9 +142,15 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
     );
     assert!(core.pending_request_claim_transfers.is_empty());
 
-    core.live_wire_requests.remove(&(session, sub_id.clone()));
-    core.attribution.release_live_request_claims(&sub_id);
-    core.attribution.release_atom(&incumbent);
+    core.white_box("live_wire_requests.remove", |s| {
+        s.live_wire_requests.remove(&(session, sub_id.clone()))
+    });
+    core.white_box("attribution.release_live_request_claims", |s| {
+        s.attribution.release_live_request_claims(&sub_id)
+    });
+    core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&incumbent)
+    });
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -168,31 +188,41 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
     let store = RedbStore::open_with_failed_coverage_write(&path, added_claim, relay.clone())
         .expect("persistent exact coverage-write failure fixture");
     let mut core = EngineCore::new(store, 20);
-    core.attribution.observe_atom(&incumbent);
-    core.attribution.observe_atom(&added);
+    core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&incumbent)
+    });
+    core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&added)
+    });
     let sub_id = SubId::for_wire(
         relay.clone(),
         &incumbent.filter,
         &incumbent.source,
         incumbent.access,
     );
-    core.attribution
-        .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]));
-    core.record_observed_request(RequestSend {
-        session: &session,
-        sub_id: &sub_id,
-        filter: &incumbent.filter,
-        coverage_claims: BTreeSet::from([incumbent_claim]),
-        owner_demands: BTreeSet::from([DemandKey::for_atom(&incumbent)]),
-        replay: false,
-        event_failure_target: EventFailureTarget::ThisSend,
+    core.white_box("attribution.retain_live_request_claims", |s| {
+        s.attribution
+            .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]))
+    });
+    core.white_box("record_observed_request", |s| {
+        s.record_observed_request(RequestSend {
+            session: &session,
+            sub_id: &sub_id,
+            filter: &incumbent.filter,
+            coverage_claims: BTreeSet::from([incumbent_claim]),
+            owner_demands: BTreeSet::from([DemandKey::for_atom(&incumbent)]),
+            replay: false,
+            event_failure_target: EventFailureTarget::ThisSend,
+        })
     });
     let first_transport = TransportRelayHandle {
         slot: 80,
         generation: 1,
     };
-    core.slot_to_relay
-        .insert(first_transport.slot, (first_transport, session.clone()));
+    core.white_box("slot_to_relay.insert", |s| {
+        s.slot_to_relay
+            .insert(first_transport.slot, (first_transport, session.clone()))
+    });
     accept_request(
         &mut core,
         &session,
@@ -200,46 +230,54 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
         incumbent.filter.hash(),
         first_transport,
     );
-    core.clock = Timestamp::from(200u64);
-    core.on_relay_frame(
-        first_transport,
-        session.clone(),
-        RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
-            nostr::SubscriptionId::new(wire_sub_id_string(&sub_id)),
-        ))),
-    );
+    core.white_box("clock", |s| s.clock = Timestamp::from(200u64));
+    core.white_box("on_relay_frame", |s| {
+        s.on_relay_frame(
+            first_transport,
+            session.clone(),
+            RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+                nostr::SubscriptionId::new(wire_sub_id_string(&sub_id)),
+            ))),
+        )
+    });
 
-    core.apply_request_metadata_updates(
-        &[nmp_router::RequestMetadataUpdate {
-            session: session.clone(),
-            sub_id: sub_id.clone(),
-            filter_hash: incumbent.filter.hash(),
-            added_coverage_claims: BTreeSet::from([added_claim]),
-            added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
-        }],
-        &mut Vec::new(),
-    );
+    core.white_box("apply_request_metadata_updates", |s| {
+        s.apply_request_metadata_updates(
+            &[nmp_router::RequestMetadataUpdate {
+                session: session.clone(),
+                sub_id: sub_id.clone(),
+                filter_hash: incumbent.filter.hash(),
+                added_coverage_claims: BTreeSet::from([added_claim]),
+                added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
+            }],
+            &mut Vec::new(),
+        )
+    });
     assert_eq!(core.pending_request_claim_transfers.len(), 1);
     assert_eq!(core.request_claim_transfer_attempts.get(), 1);
 
-    core.record_observed_request(RequestSend {
-        session: &session,
-        sub_id: &sub_id,
-        filter: &incumbent.filter,
-        coverage_claims: BTreeSet::from([incumbent_claim, added_claim]),
-        owner_demands: BTreeSet::from([
-            DemandKey::for_atom(&incumbent),
-            DemandKey::for_atom(&added),
-        ]),
-        replay: true,
-        event_failure_target: EventFailureTarget::ThisSend,
+    core.white_box("record_observed_request", |s| {
+        s.record_observed_request(RequestSend {
+            session: &session,
+            sub_id: &sub_id,
+            filter: &incumbent.filter,
+            coverage_claims: BTreeSet::from([incumbent_claim, added_claim]),
+            owner_demands: BTreeSet::from([
+                DemandKey::for_atom(&incumbent),
+                DemandKey::for_atom(&added),
+            ]),
+            replay: true,
+            event_failure_target: EventFailureTarget::ThisSend,
+        })
     });
     let transport = TransportRelayHandle {
         slot: 80,
         generation: 2,
     };
-    core.slot_to_relay
-        .insert(transport.slot, (transport, session.clone()));
+    core.white_box("slot_to_relay.insert", |s| {
+        s.slot_to_relay
+            .insert(transport.slot, (transport, session.clone()))
+    });
     accept_request(
         &mut core,
         &session,
@@ -247,21 +285,25 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
         incumbent.filter.hash(),
         transport,
     );
-    core.clock = Timestamp::from(250u64);
-    let _ = core.on_relay_frame(
-        transport,
-        session.clone(),
-        RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
-            nostr::SubscriptionId::new(wire_sub_id_string(&sub_id)),
-        ))),
-    );
+    core.white_box("clock", |s| s.clock = Timestamp::from(250u64));
+    let _ = core.white_box("on_relay_frame", |s| {
+        s.on_relay_frame(
+            transport,
+            session.clone(),
+            RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+                nostr::SubscriptionId::new(wire_sub_id_string(&sub_id)),
+            ))),
+        )
+    });
 
     assert!(core.pending_request_claim_transfers.is_empty());
     assert_eq!(core.request_claim_transfer_attempts.get(), 1);
     let census = core.bench_ownership_census();
     assert_eq!(census.attribution_live_shape_keys, 2);
     assert_eq!(census.attribution_live_shape_refs, 2);
-    core.retry_scheduler_blocked = true;
+    core.white_box("retry_scheduler_blocked", |s| {
+        s.retry_scheduler_blocked = true
+    });
     assert_eq!(core.next_deadline().unwrap(), None);
     core.tick(Timestamp::from(300u64));
     assert_eq!(core.request_claim_transfer_attempts.get(), 1);
@@ -273,13 +315,23 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
         ))
     );
 
-    core.live_wire_requests
-        .remove(&(session.clone(), sub_id.clone()));
-    core.attribution.release_live_request_claims(&sub_id);
-    core.abandon_sub(&sub_id);
-    core.slot_to_relay.remove(&transport.slot);
-    core.attribution.release_atom(&incumbent);
-    core.attribution.release_atom(&added);
+    core.white_box("live_wire_requests.remove", |s| {
+        s.live_wire_requests
+            .remove(&(session.clone(), sub_id.clone()))
+    });
+    core.white_box("attribution.release_live_request_claims", |s| {
+        s.attribution.release_live_request_claims(&sub_id)
+    });
+    core.white_box("abandon_sub", |s| s.abandon_sub(&sub_id));
+    core.white_box("slot_to_relay.remove", |s| {
+        s.slot_to_relay.remove(&transport.slot)
+    });
+    core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&incumbent)
+    });
+    core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&added)
+    });
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()

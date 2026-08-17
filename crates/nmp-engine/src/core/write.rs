@@ -8,7 +8,9 @@ use super::*;
 use nmp_grammar::ThreadPosition;
 use nostr::nips::nip01::Coordinate;
 
-mod replaceable_operation;
+// `pub(super)` so `core::cell` can name the call/continuation/outcome types
+// in the checked doors it wraps. Still invisible outside `core`.
+pub(super) mod replaceable_operation;
 pub use replaceable_operation::{PreparedReplaceableMaterialization, PublishPreparation};
 use replaceable_operation::{
     ReplaceableMaterializationCall, ReplaceableMaterializationOutcome, ReplaceableSuccessorInput,
@@ -232,17 +234,21 @@ impl ReceiptReplayCursor {
     }
 }
 
-impl EngineCore {
+impl CoreState {
     /// Record an ingest/read persistence failure (issue #122) without
     /// panicking: latch the first error message (read-only degrade) and push
     /// a fresh diagnostics snapshot so an observer sees the degraded state
     /// immediately. Idempotent — a later failure keeps the first message.
     ///
     /// `pub(crate)` because `runtime::engine_loop` owns one read this reducer
-    /// cannot: it asks for [`EngineCore::next_deadline`] outside any message,
+    /// cannot: it asks for [`CoreState::next_deadline`] outside any message,
     /// so a failing deadline peek has no reducer entry point to report
     /// through and reports here directly (#763).
-    pub fn degrade_store(&mut self, err: PersistenceError, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn degrade_store(
+        &mut self,
+        err: PersistenceError,
+        effects: &mut Vec<Effect>,
+    ) {
         self.record_store_failure(&err);
         effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
     }
@@ -265,14 +271,16 @@ impl EngineCore {
     /// Transfer one typed reopen request to the runtime supervisor. Repeated
     /// failures coalesce into one active recovery generation; diagnostics
     /// retain the first error independently.
-    pub fn take_store_recovery_request(&mut self) -> Option<PersistenceFault> {
+    pub(in crate::core) fn take_store_recovery_request(&mut self) -> Option<PersistenceFault> {
         self.store_recovery_requested.take()
     }
 
     /// Replace the backend handle and rebuild every volatile projection whose
     /// truth came from it, without replacing this reducer or any public
     /// Engine-owned handle. The failed mutation is never retried here.
-    pub fn recover_store_after_failure(&mut self) -> Result<Vec<Effect>, PersistenceError> {
+    pub(in crate::core) fn recover_store_after_failure(
+        &mut self,
+    ) -> Result<Vec<Effect>, PersistenceError> {
         self.store.reopen_after_failure()?;
 
         // An I/O error may have committed even though redb returned `Err`.
@@ -323,7 +331,7 @@ impl EngineCore {
 
     /// Mint the next [`AttemptCorrelation`] (issue #93). Checked, typed
     /// exhaustion: no id is reused or fabricated.
-    pub(super) fn alloc_attempt_correlation(
+    pub(in crate::core) fn alloc_attempt_correlation(
         &mut self,
     ) -> Result<AttemptCorrelation, AttemptCorrelationExhausted> {
         let id = self
@@ -336,7 +344,7 @@ impl EngineCore {
     /// O(1) via `intent_receipts` (epic #507 finding E5) -- this door used
     /// to be a full `self.pending` linear scan, run once per due deadline in
     /// `consume_due_publish_queue_deadlines`.
-    pub(super) fn receipt_for_intent(&self, intent_id: IntentId) -> Option<ReceiptId> {
+    pub(in crate::core) fn receipt_for_intent(&self, intent_id: IntentId) -> Option<ReceiptId> {
         self.intent_receipts.get(&intent_id).copied()
     }
 
@@ -345,7 +353,7 @@ impl EngineCore {
     /// The one door into `event_to_receipts`, paired with
     /// [`Self::unindex_receipt_from_event`]. Six sites used to spell this
     /// `entry(id).or_default().insert(receipt)` by hand.
-    pub(super) fn index_receipt_under_event(&mut self, event_id: EventId, id: ReceiptId) {
+    pub(in crate::core) fn index_receipt_under_event(&mut self, event_id: EventId, id: ReceiptId) {
         self.event_to_receipts
             .entry(event_id)
             .or_default()
@@ -363,7 +371,7 @@ impl EngineCore {
     /// set under every retired generation's event id, once per rewrite, until
     /// the next boot recovery (#1606). One door, so the two spellings cannot
     /// diverge again.
-    pub(super) fn unindex_receipt_from_event(&mut self, event_id: EventId, id: ReceiptId) {
+    pub(in crate::core) fn unindex_receipt_from_event(&mut self, event_id: EventId, id: ReceiptId) {
         let Some(receipts) = self.event_to_receipts.get_mut(&event_id) else {
             return;
         };
@@ -380,7 +388,11 @@ impl EngineCore {
     /// never at `fail_and_compensate`'s transient remove-then-reinsert
     /// (`CompensateOutcome::NotFound`/`Err`), which must leave both indexes
     /// untouched because the obligation and its lanes are still live.
-    pub(super) fn forget_pending_indexes(&mut self, id: ReceiptId, pending: &PendingWrite) {
+    pub(in crate::core) fn forget_pending_indexes(
+        &mut self,
+        id: ReceiptId,
+        pending: &PendingWrite,
+    ) {
         self.intent_receipts.remove(&pending.intent_id);
         // Every event this receipt is indexed under, not just its current
         // frozen one. A semantic receipt that rode a predecessor generation
@@ -426,7 +438,7 @@ impl EngineCore {
     /// deliberately absent: neither exists yet at insertion time — a lane is
     /// indexed when its projection persists, and a bootstrap retry when one
     /// is actually armed.
-    pub(super) fn remember_pending_indexes(
+    pub(in crate::core) fn remember_pending_indexes(
         &mut self,
         id: ReceiptId,
         intent_id: Option<IntentId>,
@@ -585,7 +597,7 @@ impl EngineCore {
     }
 
     /// Close every coordinate question outstanding at one relay.
-    pub(super) fn release_coordinate_coverage_for_relay(&mut self, relay: &RelayUrl) {
+    pub(in crate::core) fn release_coordinate_coverage_for_relay(&mut self, relay: &RelayUrl) {
         let owned: Vec<_> = self
             .semantic_publish_coverage
             .keys()
@@ -620,7 +632,7 @@ impl EngineCore {
 
     /// Drop the private delivery effects of every coverage observation this
     /// reducer owns. Everything else keeps its ordinary runtime path.
-    pub(super) fn consume_coverage_observation_effects(
+    pub(in crate::core) fn consume_coverage_observation_effects(
         &mut self,
         effects: Vec<Effect>,
     ) -> Vec<Effect> {
@@ -653,7 +665,7 @@ impl EngineCore {
     /// The engine's message door consults this to decide whether the turn it
     /// just reduced could have answered someone, rather than re-running the
     /// whole publish scheduler on every message.
-    pub(super) fn has_parked_coordinate_coverage(&self) -> bool {
+    pub(in crate::core) fn has_parked_coordinate_coverage(&self) -> bool {
         !self.semantic_publish_coverage_parked.is_empty()
     }
 
@@ -670,7 +682,10 @@ impl EngineCore {
     /// obligation, and a connectivity change carries no `EmitReceipt` of its
     /// own. Every path that ends a session drives a receipt-shaped fact for
     /// each lane it interrupts, so the set is currently complete.
-    pub(super) fn refresh_stalled_write_cache_for_effects(&mut self, effects: &[Effect]) -> bool {
+    pub(in crate::core) fn refresh_stalled_write_cache_for_effects(
+        &mut self,
+        effects: &[Effect],
+    ) -> bool {
         let touched: BTreeSet<ReceiptId> = effects
             .iter()
             .filter_map(|effect| match effect {
@@ -689,7 +704,7 @@ impl EngineCore {
 
     /// Rebuild the census from scratch after `pending` was rebuilt from the
     /// store.
-    pub(super) fn rebuild_stalled_write_cache(&mut self) {
+    pub(in crate::core) fn rebuild_stalled_write_cache(&mut self) {
         self.stalled_writes.rebuild(StalledWriteInputs {
             pending: &self.pending,
             connected: &self.connected_relays,
@@ -707,7 +722,7 @@ impl EngineCore {
     /// fact on the stream and a field on the queue entry that nothing later
     /// clears. An operator must not lose the only signal that the local disk
     /// is failing because a relay acked afterwards.
-    pub(super) fn emit_write_fact(
+    pub(in crate::core) fn emit_write_fact(
         &mut self,
         id: ReceiptId,
         fact: WriteFact,
@@ -767,7 +782,7 @@ impl EngineCore {
     ///
     /// Returns `false` when the durable fact could not be committed.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn retry_or_give_up(
+    pub(in crate::core) fn retry_or_give_up(
         &mut self,
         id: Option<ReceiptId>,
         key: &PublishQueueLaneKey,
@@ -840,7 +855,7 @@ impl EngineCore {
         true
     }
 
-    pub(super) fn remove_active_lane(&mut self, id: ReceiptId, relay: &RelayUrl) {
+    pub(in crate::core) fn remove_active_lane(&mut self, id: ReceiptId, relay: &RelayUrl) {
         if let Some(pending) = self.pending.get_mut(&id) {
             pending.pending_relays.remove(relay);
             pending.attempt_ordinals.remove(relay);
@@ -854,7 +869,11 @@ impl EngineCore {
     /// simply stops, and an app cannot distinguish a finished write from a
     /// dropped subscription. That silence is the original defect this
     /// vocabulary exists to remove.
-    pub(super) fn close_if_all_lanes_terminal(&mut self, id: ReceiptId, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn close_if_all_lanes_terminal(
+        &mut self,
+        id: ReceiptId,
+        effects: &mut Vec<Effect>,
+    ) {
         if let Some(coordinate) = self
             .pending
             .get(&id)
@@ -914,7 +933,7 @@ impl EngineCore {
     /// revalidates every route/lane fact itself; the reducer only supplies the
     /// current CAS witnesses and then removes the volatile receipt owners
     /// after a committed close.
-    pub(super) fn try_close_semantic_cohort(
+    pub(in crate::core) fn try_close_semantic_cohort(
         &mut self,
         coordinate: &Coordinate,
         effects: &mut Vec<Effect>,
@@ -1005,7 +1024,7 @@ impl EngineCore {
     #[must_use = "this helper drives admission and terminals; its effects are \
                   the only record that a publish happened during them, and \
                   dropping them is how #1683's falsifier first passed vacuously"]
-    pub(super) fn answer_coordinate_coverage_for_test(
+    pub(in crate::core) fn answer_coordinate_coverage_for_test(
         &mut self,
         sessions: &[(TransportRelayHandle, RelaySessionKey)],
         opened: &[Effect],
@@ -1064,14 +1083,14 @@ impl EngineCore {
     }
 
     #[cfg(test)]
-    pub(super) fn set_next_attempt_correlation_for_test(&mut self, next: Option<u64>) {
+    pub(in crate::core) fn set_next_attempt_correlation_for_test(&mut self, next: Option<u64>) {
         self.next_attempt_correlation = next;
     }
 
     /// Consume the one, ever, typed transport handoff for an exact persisted
     /// lane ordinal. The next lane fact commits before any receipt claim or
     /// subsequent wire effect: transport never becomes a second retry owner.
-    pub(super) fn on_event_handoff(
+    pub(in crate::core) fn on_event_handoff(
         &mut self,
         correlation: AttemptCorrelation,
         result: HandoffResult,
@@ -1197,7 +1216,7 @@ impl EngineCore {
     /// falls back to the durable store rather than guessing.
     /// `wake_relay_lanes` narrows ordinary relay events through
     /// `receipts_by_lane_relay`, except in its degraded fallback.
-    pub(super) fn recover_all_lanes(
+    pub(in crate::core) fn recover_all_lanes(
         &self,
     ) -> Result<Vec<(ReceiptId, PublishQueueLane)>, PersistenceError> {
         let mut lanes = Vec::new();
@@ -1299,7 +1318,7 @@ impl EngineCore {
     /// The only path that allocates durable attempt ordinals. Eligibility is
     /// persisted first; this reducer then applies stable ordering and the
     /// ratified 32-global/1-per-relay caps before committing Started.
-    pub(super) fn schedule_ready(&mut self, now: Timestamp) -> Vec<Effect> {
+    pub(in crate::core) fn schedule_ready(&mut self, now: Timestamp) -> Vec<Effect> {
         let mut effects = Vec::new();
         let Ok(lanes) = self.recover_all_lanes() else {
             self.retry_scheduler_blocked = true;
@@ -1529,7 +1548,7 @@ impl EngineCore {
     /// this codebase (see the idle-barrier missed-wakeup fix, d755f39, and
     /// #507's own missed-wakeup finding). A missed wakeup is never an
     /// acceptable price for narrower reads.
-    pub(super) fn wake_relay_lanes(
+    pub(in crate::core) fn wake_relay_lanes(
         &mut self,
         session: &RelaySessionKey,
         auth_only: bool,
@@ -1604,7 +1623,7 @@ impl EngineCore {
     /// the write plane rides the lane's identity-scoped authenticated
     /// session, so a lane belongs to `RelaySessionKey::new(lane.key.relay,
     /// Nip42(pending.signing_pubkey))`.
-    pub(super) fn apply_relay_wake(
+    pub(in crate::core) fn apply_relay_wake(
         &mut self,
         session: &RelaySessionKey,
         auth_only: bool,
@@ -1668,7 +1687,10 @@ impl EngineCore {
         }
     }
 
-    pub(super) fn consume_due_publish_queue_deadlines(&mut self, now: Timestamp) -> Vec<Effect> {
+    pub(in crate::core) fn consume_due_publish_queue_deadlines(
+        &mut self,
+        now: Timestamp,
+    ) -> Vec<Effect> {
         let mut effects = Vec::new();
         loop {
             let due = match self
@@ -1946,7 +1968,7 @@ impl EngineCore {
         Ok(changed)
     }
 
-    pub fn recover_on_boot(&mut self) -> Vec<Effect> {
+    pub(in crate::core) fn recover_on_boot(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
         // #790: the journal is now allowed to say "unreadable" instead of
         // panicking the host mid-boot. An `Err` here is NOT "nothing is
@@ -2405,7 +2427,7 @@ impl EngineCore {
     /// It is emphatically not a scan: `lane_bootstrap_retries` is empty in
     /// steady state, so the ordinary tick pays one empty-map probe and
     /// worker demand keeps reading zero lanes (#985).
-    pub(super) fn retry_lane_bootstraps(&mut self, now: Timestamp) -> Vec<Effect> {
+    pub(in crate::core) fn retry_lane_bootstraps(&mut self, now: Timestamp) -> Vec<Effect> {
         let due: Vec<ReceiptId> = self
             .lane_bootstrap_retries
             .iter()
@@ -2462,7 +2484,7 @@ impl EngineCore {
     }
 
     /// its retained facts. Unknown ids do not create state.
-    pub(super) fn retained_receipt_fact(
+    pub(in crate::core) fn retained_receipt_fact(
         receipt: &nmp_store::PublishQueueReceipt,
     ) -> Option<WriteFact> {
         let PublishQueueReceiptPayload::Event { event_id, state } = &receipt.payload else {
@@ -2490,7 +2512,7 @@ impl EngineCore {
         }
     }
 
-    pub fn reattach_receipt(&mut self, id: ReceiptId) -> ReceiptReplayPage {
+    pub(in crate::core) fn reattach_receipt(&mut self, id: ReceiptId) -> ReceiptReplayPage {
         self.reattach_receipt_page(id, None, usize::MAX)
     }
 
@@ -2501,7 +2523,7 @@ impl EngineCore {
     /// shift another relay's continuation. Core performs no delivery or live
     /// registration; runtime joins a caught-up page to its mailbox registry
     /// while the serialized engine loop still owns the command.
-    pub fn reattach_receipt_page(
+    pub(in crate::core) fn reattach_receipt_page(
         &mut self,
         id: ReceiptId,
         cursor: Option<ReceiptReplayCursor>,
@@ -2935,7 +2957,7 @@ impl EngineCore {
     /// #961: advance one runtime registration's durable checkpoint for one mailbox-
     /// accepted live fact. The cursor moves only for a matching retained fact;
     /// transient live-only statuses deliberately leave it unchanged.
-    pub fn receipt_cursor_after_status(
+    pub(in crate::core) fn receipt_cursor_after_status(
         &mut self,
         id: ReceiptId,
         cursor: &ReceiptReplayCursor,
@@ -2951,7 +2973,7 @@ impl EngineCore {
             .and_then(|index| page.isolated_fact_cursors.get(index).cloned())
     }
 
-    pub fn receipt_is_live(&self, id: ReceiptId) -> bool {
+    pub(in crate::core) fn receipt_is_live(&self, id: ReceiptId) -> bool {
         self.pending.contains_key(&id)
             || self
                 .store
@@ -2981,14 +3003,14 @@ impl EngineCore {
     /// `Attached`) purely so the caller -- who by construction does NOT
     /// already know it, unlike a plain [`Self::reattach_receipt`] caller --
     /// can learn it.
-    pub fn reattach_by_correlation(
+    pub(in crate::core) fn reattach_by_correlation(
         &mut self,
         token: String,
     ) -> (ReceiptReplayPage, Option<ReceiptId>) {
         self.reattach_by_correlation_page(token, None, usize::MAX)
     }
 
-    pub fn reattach_by_correlation_page(
+    pub(in crate::core) fn reattach_by_correlation_page(
         &mut self,
         token: String,
         cursor: Option<ReceiptReplayCursor>,
@@ -3016,7 +3038,7 @@ impl EngineCore {
     /// the store to adopt the source and effective body in one CAS commit.
     /// Returns `true` when this active semantic resource consumed the relay
     /// event (installed or deliberately retained the prior complete value).
-    pub(super) fn install_semantic_source_successor(
+    pub(in crate::core) fn install_semantic_source_successor(
         &mut self,
         source: SignedEvent,
         observed: RelayObserved,
@@ -3434,7 +3456,7 @@ impl EngineCore {
     /// retarget it, and an `Explicit` identity with no registered
     /// capability parks durably as `AwaitingCapability` rather than failing
     /// or drifting.
-    pub(super) fn on_publish(&mut self, intent: WriteIntent) -> Vec<Effect> {
+    pub(in crate::core) fn on_publish(&mut self, intent: WriteIntent) -> Vec<Effect> {
         let mut preparation = self.prepare_publish(intent);
         loop {
             match preparation {
@@ -3513,7 +3535,7 @@ impl EngineCore {
         Err(status)
     }
 
-    pub fn prepare_publish(&mut self, intent: WriteIntent) -> PublishPreparation {
+    pub(in crate::core) fn prepare_publish(&mut self, intent: WriteIntent) -> PublishPreparation {
         let WriteIntent {
             payload,
             routing,
@@ -3843,7 +3865,7 @@ impl EngineCore {
     /// output are whole-intent terminals (`WriteFact::Failed`). Transport
     /// absence, timeout, and disconnect return the retained obligation to
     /// `AwaitingCapability` so the exact frozen identity can be reattached.
-    pub(super) fn on_signer_completed(
+    pub(in crate::core) fn on_signer_completed(
         &mut self,
         id: ReceiptId,
         generation: u64,
@@ -3875,7 +3897,11 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn on_signer_unavailable(&mut self, id: ReceiptId, generation: u64) -> Vec<Effect> {
+    pub(in crate::core) fn on_signer_unavailable(
+        &mut self,
+        id: ReceiptId,
+        generation: u64,
+    ) -> Vec<Effect> {
         let mut effects = Vec::new();
         if let Some(pending) = self.pending.get_mut(&id) {
             if !pending.sign_request_in_flight || pending.sign_generation != generation {
@@ -3890,7 +3916,7 @@ impl EngineCore {
         effects
     }
 
-    pub(super) fn on_signer_attached(&mut self, pk: PublicKey) -> Vec<Effect> {
+    pub(in crate::core) fn on_signer_attached(&mut self, pk: PublicKey) -> Vec<Effect> {
         let mut effects = Vec::new();
         let semantic_owners = self
             .event_to_receipts
@@ -3945,7 +3971,7 @@ impl EngineCore {
     /// Commit explicit cancellation only while this receipt is still an
     /// accepted unsigned obligation. The synchronous result and emitted
     /// receipt fact come from the same reducer turn.
-    pub(super) fn retained_cancel_result(
+    pub(in crate::core) fn retained_cancel_result(
         id: ReceiptId,
         receipt: &nmp_store::PublishQueueReceipt,
     ) -> Result<CancelWriteOutcome, CancelWriteError> {
@@ -4011,7 +4037,7 @@ impl EngineCore {
     /// Superseded safety receipts are automatically age/count bounded. Other
     /// terminal receipt classes remain app-removable and #46 continues to own
     /// their general retention policy.
-    pub fn publish_queue_entries(
+    pub(in crate::core) fn publish_queue_entries(
         &self,
         after: Option<ReceiptId>,
         limit: u8,
@@ -4030,7 +4056,7 @@ impl EngineCore {
     /// Look up the currently open obligations for one canonical event id
     /// (#903). The in-memory reverse index is rebuilt from durable intents at
     /// boot and updated at acceptance, so this does not scan retained history.
-    pub fn publish_queue_entries_for_event(
+    pub(in crate::core) fn publish_queue_entries_for_event(
         &self,
         event_id: EventId,
         after: Option<ReceiptId>,
@@ -4272,7 +4298,7 @@ impl EngineCore {
     /// this door only forgets what is already terminal, which is why it can
     /// ask the cheap question ("is this receipt still in `pending`?") and
     /// leave the store's own open-intent check authoritative for the rest.
-    pub fn remove_publish_queue_entry(
+    pub(in crate::core) fn remove_publish_queue_entry(
         &mut self,
         id: ReceiptId,
     ) -> Result<(), RemoveQueueEntryError> {
@@ -4294,7 +4320,7 @@ impl EngineCore {
         }
     }
 
-    pub fn cancel_write(
+    pub(in crate::core) fn cancel_write(
         &mut self,
         id: ReceiptId,
     ) -> (Result<CancelWriteOutcome, CancelWriteError>, Vec<Effect>) {
@@ -4461,7 +4487,7 @@ impl EngineCore {
     /// here because `relays` is never bound in that branch. Every borrow of
     /// `self.pending` below is scoped to its own statement so the map can
     /// be freely read/mutated/removed across steps.
-    pub(super) fn on_signed(
+    pub(in crate::core) fn on_signed(
         &mut self,
         id: ReceiptId,
         event: SignedEvent,
@@ -4750,7 +4776,7 @@ impl EngineCore {
     /// which is the only moment both after the app finished describing the
     /// event and before anything downstream depends on the bytes. A STATED
     /// `created_at` is kept verbatim; present-then-changed is impossible.
-    pub(super) fn freeze_payload(
+    pub(in crate::core) fn freeze_payload(
         payload: &WritePayload,
         author: PublicKey,
         clock: Timestamp,
@@ -4791,7 +4817,7 @@ impl EngineCore {
     /// `promote_signed` demands cannot exist without this call succeeding,
     /// so an engine that skipped this check would have nothing to hand the
     /// store door.
-    pub(super) fn validate_signed_template(
+    pub(in crate::core) fn validate_signed_template(
         frozen: &SignedEvent,
         signed: &SignedEvent,
     ) -> Result<VerifiedSignature, String> {
@@ -4813,7 +4839,7 @@ impl EngineCore {
     /// The durable spelling of a routing STRATEGY — never a resolved relay
     /// set. `Auto` journals the label alone; resolution runs fresh at every
     /// send opportunity against whatever the engine knows then.
-    pub(super) fn routing_snapshot(routing: &WriteRouting) -> String {
+    pub(in crate::core) fn routing_snapshot(routing: &WriteRouting) -> String {
         match routing {
             WriteRouting::Auto => "auto".to_string(),
             WriteRouting::Explicit(relays) => format!(
@@ -4841,7 +4867,7 @@ impl EngineCore {
     /// An `explicit-hex:` row with no relays is likewise unreadable: an empty
     /// explicit route is refused at the acceptance door, so no legitimate row
     /// can carry one.
-    pub(super) fn parse_routing_snapshot(snapshot: &str) -> Option<WriteRouting> {
+    pub(in crate::core) fn parse_routing_snapshot(snapshot: &str) -> Option<WriteRouting> {
         if snapshot == "auto" {
             return Some(WriteRouting::Auto);
         }
@@ -4866,11 +4892,11 @@ impl EngineCore {
     /// there is no queue entry to inspect, nothing to retry and nothing to
     /// remove, so the caller learns it synchronously instead of being handed
     /// a receipt that will never say anything.
-    pub(super) fn refuse_publish(&mut self, error: PublishError) -> Vec<Effect> {
+    pub(in crate::core) fn refuse_publish(&mut self, error: PublishError) -> Vec<Effect> {
         vec![Effect::PublishFailed(error)]
     }
 
-    pub(super) fn fail_and_compensate(
+    pub(in crate::core) fn fail_and_compensate(
         &mut self,
         id: ReceiptId,
         reason: String,
@@ -4968,7 +4994,7 @@ impl EngineCore {
     /// case is unreachable from acceptance (`on_publish` refuses it at the
     /// door); it is spelled out here only so the fail-closed answer is the
     /// one this arm can give.
-    pub(super) fn resolve_routes(
+    pub(in crate::core) fn resolve_routes(
         &self,
         routing: &WriteRouting,
         event: &SignedEvent,
@@ -5145,7 +5171,7 @@ impl EngineCore {
     /// author lacks a positive outbound route, including authors produced by
     /// a derived query. Pinned provider queries do not feed themselves back
     /// into this set.
-    pub(super) fn author_route_needs(&self) -> BTreeSet<PublicKey> {
+    pub(in crate::core) fn author_route_needs(&self) -> BTreeSet<PublicKey> {
         let mut needs: BTreeSet<PublicKey> = self
             .pending
             .values()
@@ -5178,14 +5204,15 @@ impl EngineCore {
         )
     }
 
-    pub(super) fn retain_author_outbox_wire_owner(&mut self, atom: &ContextualAtom) {
+    pub(in crate::core) fn retain_author_outbox_wire_owner(&mut self, atom: &ContextualAtom) {
         for author in Self::author_outbox_authors(atom) {
             let has_positive_outbox = self.author_has_positive_outbox(&author);
-            self.author_outbox_route_needs.retain(author, has_positive_outbox);
+            self.author_outbox_route_needs
+                .retain(author, has_positive_outbox);
         }
     }
 
-    pub(super) fn release_author_outbox_wire_owner(&mut self, atom: &ContextualAtom) {
+    pub(in crate::core) fn release_author_outbox_wire_owner(&mut self, atom: &ContextualAtom) {
         for author in Self::author_outbox_authors(atom) {
             self.author_outbox_route_needs.release(author);
         }
@@ -5204,13 +5231,14 @@ impl EngineCore {
     /// `retain` call touching `needs` for that reason, so replay-time flag
     /// writes alone cannot be trusted here. See `AuthorRouteNeeds`'s module
     /// doc.
-    pub(super) fn rebuild_author_outbox_route_needs(&mut self) {
+    pub(in crate::core) fn rebuild_author_outbox_route_needs(&mut self) {
         let needs_before_rebuild = self.author_outbox_route_needs.reset_for_rebuild();
         for (atom, count) in self.wire.owner_contributions() {
             for author in Self::author_outbox_authors(&atom) {
                 let has_positive_outbox = self.author_has_positive_outbox(&author);
                 for _ in 0..count {
-                    self.author_outbox_route_needs.retain(author, has_positive_outbox);
+                    self.author_outbox_route_needs
+                        .retain(author, has_positive_outbox);
                 }
             }
         }
@@ -5218,7 +5246,10 @@ impl EngineCore {
             .finish_rebuild(needs_before_rebuild);
     }
 
-    pub(super) fn flush_author_outbox_route_need_changes(&mut self, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn flush_author_outbox_route_need_changes(
+        &mut self,
+        effects: &mut Vec<Effect>,
+    ) {
         if self.author_outbox_route_needs.take_pending_change() {
             self.resync_route_needs(effects);
         }
@@ -5238,7 +5269,7 @@ impl EngineCore {
     ///
     /// Retired intents (`route_complete`) are skipped outright, so an `Auto`
     /// with nothing left to learn costs nothing forever after.
-    pub(super) fn rewrite_route(&mut self, id: ReceiptId, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn rewrite_route(&mut self, id: ReceiptId, effects: &mut Vec<Effect>) {
         let Some(pending) = self.pending.get(&id) else {
             return;
         };
@@ -5310,7 +5341,7 @@ impl EngineCore {
     /// park is re-emitted only when its REASON changes. So a tick that
     /// learns nothing is silent on the receipt stream even though the
     /// strategy really did re-execute.
-    pub(super) fn apply_route_answer(
+    pub(in crate::core) fn apply_route_answer(
         &mut self,
         id: ReceiptId,
         intent_id: IntentId,
@@ -5506,7 +5537,7 @@ impl EngineCore {
     /// private author-route replacement as the latency path. The two overlap
     /// by design; because resolution is diff-and-append, running "too often"
     /// is free.
-    pub(super) fn rewrite_open_routes(&mut self, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn rewrite_open_routes(&mut self, effects: &mut Vec<Effect>) {
         let open = self
             .pending
             .iter()
@@ -5538,7 +5569,7 @@ impl EngineCore {
     /// also consult or clear that flag here -- `take_pending_change` exists
     /// for exactly one caller to decide whether calling this function is
     /// worth it, not for this function to re-derive its own answer from.
-    pub(super) fn resync_route_needs(&mut self, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn resync_route_needs(&mut self, effects: &mut Vec<Effect>) {
         let current = self.author_route_needs();
         if current != self.last_author_route_needs {
             self.last_author_route_needs = current.clone();
@@ -5551,7 +5582,7 @@ impl EngineCore {
     /// event id, already-terminal receipt, duplicate OK, or an `Ephemeral`
     /// write that was already forgotten) is silently ignored — it is an
     /// untrusted-network fact, not a caller error.
-    pub(super) fn handle_write_ack(
+    pub(in crate::core) fn handle_write_ack(
         &mut self,
         event_id: EventId,
         status: bool,
@@ -5697,7 +5728,7 @@ impl EngineCore {
         }
         effects.extend(self.schedule_ready(self.clock));
     }
-    pub(super) fn suspend_disconnected_lanes(
+    pub(in crate::core) fn suspend_disconnected_lanes(
         &mut self,
         session: &RelaySessionKey,
         effects: &mut Vec<Effect>,

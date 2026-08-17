@@ -231,8 +231,9 @@ fn arm_generation_with_author(
         "a delta generation must not reach the relay before the relay's own \
          current value for the coordinate is known"
     );
-    let scheduled =
-        core.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked);
+    let scheduled = core.white_box("answer_coordinate_coverage_for_test", |s| {
+        s.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &parked)
+    });
     let (correlation, event_id) = scheduled
         .iter()
         .find_map(|effect| match effect {
@@ -496,8 +497,9 @@ fn a_stale_ack_for_a_superseded_generation_cannot_settle_its_successor() {
         slot: 1,
         generation: 1,
     };
-    let scheduled =
-        core.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &complete2);
+    let scheduled = core.white_box("answer_coordinate_coverage_for_test", |s| {
+        s.answer_coordinate_coverage_for_test(&[(read_handle, read_session)], &complete2)
+    });
     let (correlation2, session2, dispatched_event2) = scheduled
         .iter()
         .find_map(|effect| match effect {

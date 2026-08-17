@@ -30,28 +30,36 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
     let owner = DemandKey::for_atom(&whole);
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     for shape in [&whole, &incumbent_piece, &residual_piece] {
-        core.attribution.observe_atom(shape);
+        core.white_box("attribution.observe_atom", |s| {
+            s.attribution.observe_atom(shape)
+        });
     }
     let transport = TransportRelayHandle {
         slot: 81,
         generation: 1,
     };
-    core.slot_to_relay
-        .insert(transport.slot, (transport, session.clone()));
+    core.white_box("slot_to_relay.insert", |s| {
+        s.slot_to_relay
+            .insert(transport.slot, (transport, session.clone()))
+    });
 
     let open_piece = |core: &mut EngineCore, piece: &ContextualAtom| {
         let sub_id = SubId::for_wire(relay.clone(), &piece.filter, &piece.source, piece.access);
         let claim = coverage_key(piece);
-        core.attribution
-            .retain_live_request_claims(&sub_id, BTreeSet::from([claim]));
-        core.record_observed_request(RequestSend {
-            session: &session,
-            sub_id: &sub_id,
-            filter: &piece.filter,
-            coverage_claims: BTreeSet::from([claim]),
-            owner_demands: BTreeSet::from([owner]),
-            replay: false,
-            event_failure_target: EventFailureTarget::ThisSend,
+        core.white_box("attribution.retain_live_request_claims", |s| {
+            s.attribution
+                .retain_live_request_claims(&sub_id, BTreeSet::from([claim]))
+        });
+        core.white_box("record_observed_request", |s| {
+            s.record_observed_request(RequestSend {
+                session: &session,
+                sub_id: &sub_id,
+                filter: &piece.filter,
+                coverage_claims: BTreeSet::from([claim]),
+                owner_demands: BTreeSet::from([owner]),
+                replay: false,
+                event_failure_target: EventFailureTarget::ThisSend,
+            })
         });
         accept_request(core, &session, &sub_id, piece.filter.hash(), transport);
         sub_id
@@ -59,14 +67,16 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
     let incumbent_sub = open_piece(&mut core, &incumbent_piece);
     let residual_sub = open_piece(&mut core, &residual_piece);
 
-    core.clock = Timestamp::from(180u64);
-    core.on_relay_frame(
-        transport,
-        session.clone(),
-        RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
-            nostr::SubscriptionId::new(wire_sub_id_string(&incumbent_sub)),
-        ))),
-    );
+    core.white_box("clock", |s| s.clock = Timestamp::from(180u64));
+    core.white_box("on_relay_frame", |s| {
+        s.on_relay_frame(
+            transport,
+            session.clone(),
+            RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+                nostr::SubscriptionId::new(wire_sub_id_string(&incumbent_sub)),
+            ))),
+        )
+    });
     assert_eq!(
         core.store.get_coverage(incumbent_claim, &relay).unwrap(),
         Some(CoverageInterval::new(
@@ -76,14 +86,16 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
     );
     assert_eq!(core.store.get_coverage(whole_claim, &relay).unwrap(), None);
 
-    core.clock = Timestamp::from(200u64);
-    core.on_relay_frame(
-        transport,
-        session.clone(),
-        RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
-            nostr::SubscriptionId::new(wire_sub_id_string(&residual_sub)),
-        ))),
-    );
+    core.white_box("clock", |s| s.clock = Timestamp::from(200u64));
+    core.white_box("on_relay_frame", |s| {
+        s.on_relay_frame(
+            transport,
+            session.clone(),
+            RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+                nostr::SubscriptionId::new(wire_sub_id_string(&residual_sub)),
+            ))),
+        )
+    });
     assert_eq!(
         core.store.get_coverage(residual_claim, &relay).unwrap(),
         Some(CoverageInterval::new(
@@ -101,14 +113,22 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
     );
 
     for sub_id in [incumbent_sub, residual_sub] {
-        core.live_wire_requests
-            .remove(&(session.clone(), sub_id.clone()));
-        core.attribution.release_live_request_claims(&sub_id);
-        core.abandon_sub(&sub_id);
+        core.white_box("live_wire_requests.remove", |s| {
+            s.live_wire_requests
+                .remove(&(session.clone(), sub_id.clone()))
+        });
+        core.white_box("attribution.release_live_request_claims", |s| {
+            s.attribution.release_live_request_claims(&sub_id)
+        });
+        core.white_box("abandon_sub", |s| s.abandon_sub(&sub_id));
     }
-    core.slot_to_relay.remove(&transport.slot);
+    core.white_box("slot_to_relay.remove", |s| {
+        s.slot_to_relay.remove(&transport.slot)
+    });
     for shape in [&whole, &incumbent_piece, &residual_piece] {
-        core.attribution.release_atom(shape);
+        core.white_box("attribution.release_atom", |s| {
+            s.attribution.release_atom(shape)
+        });
     }
     assert_eq!(
         core.bench_ownership_census(),
@@ -161,45 +181,55 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
             RedbStore::open(&path).expect("reopen corrupted Redb fixture"),
             20,
         );
-        core.attribution.observe_atom(&incumbent);
-        core.attribution.observe_atom(&added);
+        core.white_box("attribution.observe_atom", |s| {
+            s.attribution.observe_atom(&incumbent)
+        });
+        core.white_box("attribution.observe_atom", |s| {
+            s.attribution.observe_atom(&added)
+        });
         let sub_id = SubId::for_wire(
             relay,
             &incumbent.filter,
             &incumbent.source,
             incumbent.access,
         );
-        core.attribution
-            .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]));
-        core.live_wire_requests.insert(
-            (session.clone(), sub_id.clone()),
-            LiveWireRequest {
-                filter: incumbent.filter.clone(),
-                evidence_sub_id: sub_id.clone(),
-                handle: TransportRelayHandle {
-                    slot: 78,
-                    generation: 1,
+        core.white_box("attribution.retain_live_request_claims", |s| {
+            s.attribution
+                .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]))
+        });
+        core.white_box("live_wire_requests.insert", |s| {
+            s.live_wire_requests.insert(
+                (session.clone(), sub_id.clone()),
+                LiveWireRequest {
+                    filter: incumbent.filter.clone(),
+                    evidence_sub_id: sub_id.clone(),
+                    handle: TransportRelayHandle {
+                        slot: 78,
+                        generation: 1,
+                    },
+                    stored_events: super::observation::StoredEvents::Finished {
+                        request_revision: 10,
+                        committed_interval: Some(CoverageInterval::new(
+                            Timestamp::from(100),
+                            Timestamp::from(200),
+                        )),
+                    },
+                    returns: Default::default(),
                 },
-                stored_events: super::observation::StoredEvents::Finished {
-                    request_revision: 10,
-                    committed_interval: Some(CoverageInterval::new(
-                        Timestamp::from(100),
-                        Timestamp::from(200),
-                    )),
-                },
-                returns: Default::default(),
-            },
-        );
-        core.apply_request_metadata_updates(
-            &[nmp_router::RequestMetadataUpdate {
-                session: session.clone(),
-                sub_id: sub_id.clone(),
-                filter_hash: incumbent.filter.hash(),
-                added_coverage_claims: BTreeSet::from([added_claim]),
-                added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
-            }],
-            &mut Vec::new(),
-        );
+            )
+        });
+        core.white_box("apply_request_metadata_updates", |s| {
+            s.apply_request_metadata_updates(
+                &[nmp_router::RequestMetadataUpdate {
+                    session: session.clone(),
+                    sub_id: sub_id.clone(),
+                    filter_hash: incumbent.filter.hash(),
+                    added_coverage_claims: BTreeSet::from([added_claim]),
+                    added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
+                }],
+                &mut Vec::new(),
+            )
+        });
         assert_eq!(core.pending_request_claim_transfers.len(), 1);
 
         let op = if replacement {
@@ -209,15 +239,25 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
         } else {
             WireOp::Close(sub_id.clone())
         };
-        core.reconcile_request_claim_transfers_for_wire_delta(&WireDelta {
-            ops: vec![(session.clone(), vec![op])],
+        core.white_box("reconcile_request_claim_transfers_for_wire_delta", |s| {
+            s.reconcile_request_claim_transfers_for_wire_delta(&WireDelta {
+                ops: vec![(session.clone(), vec![op])],
+            })
         });
         assert!(core.pending_request_claim_transfers.is_empty());
 
-        core.live_wire_requests.remove(&(session, sub_id.clone()));
-        core.attribution.release_live_request_claims(&sub_id);
-        core.attribution.release_atom(&incumbent);
-        core.attribution.release_atom(&added);
+        core.white_box("live_wire_requests.remove", |s| {
+            s.live_wire_requests.remove(&(session, sub_id.clone()))
+        });
+        core.white_box("attribution.release_live_request_claims", |s| {
+            s.attribution.release_live_request_claims(&sub_id)
+        });
+        core.white_box("attribution.release_atom", |s| {
+            s.attribution.release_atom(&incumbent)
+        });
+        core.white_box("attribution.release_atom", |s| {
+            s.attribution.release_atom(&added)
+        });
         assert_eq!(
             core.bench_ownership_census(),
             CoreOwnershipCensus::default()
@@ -263,56 +303,68 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
     let store = RedbStore::open_with_failed_coverage_write(&path, first_added_claim, relay)
         .expect("persistent exact coverage-write failure fixture");
     let mut core = EngineCore::new(store, 20);
-    core.attribution.observe_atom(&incumbent);
-    core.attribution
-        .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]));
-    core.live_wire_requests.insert(
-        (session.clone(), sub_id.clone()),
-        LiveWireRequest {
-            filter: incumbent.filter.clone(),
-            evidence_sub_id: sub_id.clone(),
-            handle: TransportRelayHandle {
-                slot: 79,
-                generation: 1,
+    core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&incumbent)
+    });
+    core.white_box("attribution.retain_live_request_claims", |s| {
+        s.attribution
+            .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]))
+    });
+    core.white_box("live_wire_requests.insert", |s| {
+        s.live_wire_requests.insert(
+            (session.clone(), sub_id.clone()),
+            LiveWireRequest {
+                filter: incumbent.filter.clone(),
+                evidence_sub_id: sub_id.clone(),
+                handle: TransportRelayHandle {
+                    slot: 79,
+                    generation: 1,
+                },
+                returns: Default::default(),
+                stored_events: super::observation::StoredEvents::Finished {
+                    request_revision: 1,
+                    committed_interval: Some(CoverageInterval::new(
+                        Timestamp::from(100),
+                        Timestamp::from(200),
+                    )),
+                },
             },
-            returns: Default::default(),
-            stored_events: super::observation::StoredEvents::Finished {
-                request_revision: 1,
-                committed_interval: Some(CoverageInterval::new(
-                    Timestamp::from(100),
-                    Timestamp::from(200),
-                )),
-            },
-        },
-    );
+        )
+    });
 
     let mut added_atoms = Vec::with_capacity(GENERATIONS as usize);
     for generation in 1..=GENERATIONS {
         let added = added_for_generation(generation);
         let claim = coverage_key(&added);
-        core.attribution.observe_atom(&added);
-        if let Some(live) = core
-            .live_wire_requests
-            .get_mut(&(session.clone(), sub_id.clone()))
-        {
-            live.stored_events = super::observation::StoredEvents::Finished {
-                request_revision: generation as u64,
-                committed_interval: Some(CoverageInterval::new(
-                    Timestamp::from(100),
-                    Timestamp::from(200 + generation as u64),
-                )),
-            };
-        }
-        core.apply_request_metadata_updates(
-            &[nmp_router::RequestMetadataUpdate {
-                session: session.clone(),
-                sub_id: sub_id.clone(),
-                filter_hash: incumbent.filter.hash(),
-                added_coverage_claims: BTreeSet::from([claim]),
-                added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
-            }],
-            &mut Vec::new(),
-        );
+        core.white_box("attribution.observe_atom", |s| {
+            s.attribution.observe_atom(&added)
+        });
+        core.white_box("live_wire_requests.get_mut", |s| {
+            if let Some(live) = s
+                .live_wire_requests
+                .get_mut(&(session.clone(), sub_id.clone()))
+            {
+                live.stored_events = super::observation::StoredEvents::Finished {
+                    request_revision: generation as u64,
+                    committed_interval: Some(CoverageInterval::new(
+                        Timestamp::from(100),
+                        Timestamp::from(200 + generation as u64),
+                    )),
+                };
+            }
+        });
+        core.white_box("apply_request_metadata_updates", |s| {
+            s.apply_request_metadata_updates(
+                &[nmp_router::RequestMetadataUpdate {
+                    session: session.clone(),
+                    sub_id: sub_id.clone(),
+                    filter_hash: incumbent.filter.hash(),
+                    added_coverage_claims: BTreeSet::from([claim]),
+                    added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
+                }],
+                &mut Vec::new(),
+            )
+        });
         added_atoms.push(added);
     }
 
@@ -329,7 +381,9 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
     assert_eq!(core.request_claim_transfer_claims_attempted.get(), 1);
     assert_eq!(core.request_claim_transfer_failures.get(), 1);
 
-    core.retry_scheduler_blocked = true;
+    core.white_box("retry_scheduler_blocked", |s| {
+        s.retry_scheduler_blocked = true
+    });
     let due = core
         .next_deadline()
         .unwrap()
@@ -344,14 +398,24 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
     assert_eq!(core.request_claim_transfer_failures.get(), 1);
     assert_eq!(core.request_claim_transfer_commits.get(), 1);
 
-    core.reconcile_request_claim_transfers_for_wire_delta(&WireDelta {
-        ops: vec![(session.clone(), vec![WireOp::Close(sub_id.clone())])],
+    core.white_box("reconcile_request_claim_transfers_for_wire_delta", |s| {
+        s.reconcile_request_claim_transfers_for_wire_delta(&WireDelta {
+            ops: vec![(session.clone(), vec![WireOp::Close(sub_id.clone())])],
+        })
     });
-    core.live_wire_requests.remove(&(session, sub_id.clone()));
-    core.attribution.release_live_request_claims(&sub_id);
-    core.attribution.release_atom(&incumbent);
+    core.white_box("live_wire_requests.remove", |s| {
+        s.live_wire_requests.remove(&(session, sub_id.clone()))
+    });
+    core.white_box("attribution.release_live_request_claims", |s| {
+        s.attribution.release_live_request_claims(&sub_id)
+    });
+    core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&incumbent)
+    });
     for added in added_atoms {
-        core.attribution.release_atom(&added);
+        core.white_box("attribution.release_atom", |s| {
+            s.attribution.release_atom(&added)
+        });
     }
     assert_eq!(
         core.bench_ownership_census(),

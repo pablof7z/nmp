@@ -50,8 +50,10 @@ fn a_replacement_owner_in_the_same_turn_cancels_a_resolver_close() {
 
     // The resolver reports the atom closed. Its demand becomes ownerless and
     // the close is deferred rather than sent.
-    core.consume_resolver_delta(DemandDelta {
-        ops: vec![DemandOp::Close(atom.clone())],
+    core.white_box("consume_resolver_delta", |s| {
+        s.consume_resolver_delta(DemandDelta {
+            ops: vec![DemandOp::Close(atom.clone())],
+        })
     });
     core.assert_owner_consistency("after resolver close");
     // Assert the precondition before the break can make anything observable:

@@ -8,7 +8,7 @@ use nmp_store::CoverageKey;
 use nostr::Timestamp;
 
 use super::{
-    bootstrap_retry_delay_secs, Effect, EngineCore, EventFailureTarget, TransportRelayHandle,
+    bootstrap_retry_delay_secs, CoreState, Effect, EventFailureTarget, TransportRelayHandle,
 };
 
 /// Reducer-minted identity of one exact local request-send attempt.
@@ -151,7 +151,7 @@ impl RequestAttemptPurpose {
 ///
 /// It holds state and the invariants over that state, and nothing else: no
 /// `store`, no `router`, no `resolver`, no `Effect`. Anything that has to
-/// emit is orchestration and stays on `EngineCore`. This is the
+/// emit is orchestration and stays on `CoreState`. This is the
 /// `AttributionState` contract, verbatim.
 #[derive(Debug, Default)]
 pub(super) struct RequestAttempts {
@@ -300,7 +300,7 @@ impl RequestAttempts {
         }
     }
 
-    /// `now` is an argument rather than a read of `EngineCore::clock`: the
+    /// `now` is an argument rather than a read of `CoreState::clock`: the
     /// owner holds no clock, exactly as it holds no store.
     pub(super) fn schedule_retry(&mut self, attempt: RequestAttemptState, now: Timestamp) {
         let Some(key) = attempt.retry_key() else {
@@ -634,7 +634,7 @@ impl RequestAttempts {
     }
 }
 
-impl EngineCore {
+impl CoreState {
     /// Which role subscriptions one plan's metadata update applies to.
     ///
     /// The NIP-77 fan-out the attempt owner deliberately cannot see. It used
@@ -645,7 +645,7 @@ impl EngineCore {
         self.nip77.role_sub_ids_for_plan(plan_sub_id)
     }
 
-    pub(super) fn extend_request_attempt_metadata(
+    pub(in crate::core) fn extend_request_attempt_metadata(
         &mut self,
         update: &nmp_router::RequestMetadataUpdate,
     ) {
@@ -653,7 +653,7 @@ impl EngineCore {
         self.attempts.extend_metadata(&role_sub_ids, update);
     }
 
-    pub(super) fn remove_request_attempt_metadata(
+    pub(in crate::core) fn remove_request_attempt_metadata(
         &mut self,
         removal: &nmp_router::RequestMetadataRemoval,
     ) {
@@ -666,7 +666,11 @@ impl EngineCore {
     /// Selection and bookkeeping are the owner's; re-sending is not — it
     /// mints a fresh attempt through attribution and emits a wire effect, so
     /// the body stays here.
-    pub(super) fn retry_due_request_attempts(&mut self, now: Timestamp, effects: &mut Vec<Effect>) {
+    pub(in crate::core) fn retry_due_request_attempts(
+        &mut self,
+        now: Timestamp,
+        effects: &mut Vec<Effect>,
+    ) {
         for key in self.attempts.due_retry_keys(now) {
             let Some(pending) = self.attempts.take_retry(&key) else {
                 continue;
@@ -722,7 +726,7 @@ impl EngineCore {
 /// `owner_index::tests::take_owner_panics_on_a_reverse_edge_the_forward_map_already_lost`:
 /// two reach past every public method to corrupt a mirror by hand (only
 /// possible from inside this module, since the maps are private to it), and
-/// two drive the real `pub(super)` surface `EngineCore` itself calls.
+/// two drive the real `pub(super)` surface `CoreState` itself calls.
 #[cfg(test)]
 mod tests {
     use nmp_grammar::{AccessContext, SourceAuthority};
@@ -850,7 +854,7 @@ mod tests {
     }
 
     /// The real behaviour, driven entirely through the same `pub(super)`
-    /// surface `EngineCore` calls: retiring one sub removes only that sub's
+    /// surface `CoreState` calls: retiring one sub removes only that sub's
     /// attempt and its parked retry, leaves the other sub's attempt live,
     /// prunes the vacated `by_sub` bucket, and leaves the shared session's
     /// `by_session` bucket correctly shrunk rather than destroyed.

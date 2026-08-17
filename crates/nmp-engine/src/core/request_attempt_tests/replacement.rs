@@ -15,11 +15,19 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
     let first_claim = coverage_key(&first);
     let second_claim = coverage_key(&second);
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-    core.slot_to_relay
-        .insert(handle.slot, (handle, session.clone()));
-    core.connected_relays.insert(session.clone());
-    core.ever_connected_relays.insert(session.clone());
-    core.attribution.observe_atom(&first);
+    core.white_box("slot_to_relay.insert", |s| {
+        s.slot_to_relay
+            .insert(handle.slot, (handle, session.clone()))
+    });
+    core.white_box("connected_relays.insert", |s| {
+        s.connected_relays.insert(session.clone())
+    });
+    core.white_box("ever_connected_relays.insert", |s| {
+        s.ever_connected_relays.insert(session.clone())
+    });
+    core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&first)
+    });
 
     let opened = apply_compile(&mut core, BTreeSet::from([first.clone()]));
     let (_, first_sub_id, first_filter, first_attempt) = only_request(&opened);
@@ -31,8 +39,12 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
         .live_wire_requests
         .contains_key(&(session.clone(), first_sub_id.clone())));
 
-    core.attribution.observe_atom(&second);
-    core.attribution.release_atom(&first);
+    core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&second)
+    });
+    core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&first)
+    });
     let replacement = apply_compile(&mut core, BTreeSet::from([second.clone()]));
     let (_, second_sub_id, second_filter, second_attempt) = only_request(&replacement);
     assert_ne!(first_sub_id, second_sub_id);
@@ -79,15 +91,17 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
         .contains_key(&(session.clone(), second_sub_id.clone())));
     assert_eq!(core.active_request_evidence.len(), 1);
 
-    core.clock = Timestamp::from(200u64);
+    core.white_box("clock", |s| s.clock = Timestamp::from(200u64));
     for sub_id in [&first_sub_id, &second_sub_id] {
-        core.on_relay_frame(
-            handle,
-            session.clone(),
-            RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
-                nostr::SubscriptionId::new(wire_sub_id_string(sub_id)),
-            ))),
-        );
+        core.white_box("on_relay_frame", |s| {
+            s.on_relay_frame(
+                handle,
+                session.clone(),
+                RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+                    nostr::SubscriptionId::new(wire_sub_id_string(sub_id)),
+                ))),
+            )
+        });
     }
     assert!(core
         .store
@@ -104,7 +118,9 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
     assert!(wire_ops(&closed)
         .iter()
         .any(|op| matches!(op, WireOp::Close(sub_id) if sub_id == &second_sub_id)));
-    core.attribution.release_atom(&second);
+    core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&second)
+    });
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -123,11 +139,19 @@ fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candida
     let first = atom(&relay, &"33".repeat(32));
     let second = atom(&relay, &"44".repeat(32));
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-    core.slot_to_relay
-        .insert(handle.slot, (handle, session.clone()));
-    core.connected_relays.insert(session.clone());
-    core.ever_connected_relays.insert(session.clone());
-    core.attribution.observe_atom(&first);
+    core.white_box("slot_to_relay.insert", |s| {
+        s.slot_to_relay
+            .insert(handle.slot, (handle, session.clone()))
+    });
+    core.white_box("connected_relays.insert", |s| {
+        s.connected_relays.insert(session.clone())
+    });
+    core.white_box("ever_connected_relays.insert", |s| {
+        s.ever_connected_relays.insert(session.clone())
+    });
+    core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&first)
+    });
 
     let opened = apply_compile(&mut core, BTreeSet::from([first.clone()]));
     let (_, first_plan_sub, first_filter, first_attempt) = only_request(&opened);
@@ -136,32 +160,42 @@ fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candida
         handle,
     });
 
-    core.prober.force_supported_for_test(relay.clone());
+    core.white_box("prober.force_supported_for_test", |s| {
+        s.prober.force_supported_for_test(relay.clone())
+    });
     let probed = core.prober.probed(&relay).unwrap();
     let mut handoff_effects = Vec::new();
-    core.begin_neg_handoff(
-        probed,
-        first_plan_sub.clone(),
-        Some(first_plan_sub.clone()),
-        first_filter,
-        &mut handoff_effects,
-    );
+    core.white_box("begin_neg_handoff", |s| {
+        s.begin_neg_handoff(
+            probed,
+            first_plan_sub.clone(),
+            Some(first_plan_sub.clone()),
+            first_filter,
+            &mut handoff_effects,
+        )
+    });
     let (_, old_child, _, old_child_attempt) = only_request(&handoff_effects);
     core.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
         attempt_id: old_child_attempt,
         handle,
     });
-    core.on_relay_frame(
-        handle,
-        session.clone(),
-        RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
-            nostr::SubscriptionId::new(wire_sub_id_string(&old_child)),
-        ))),
-    );
+    core.white_box("on_relay_frame", |s| {
+        s.on_relay_frame(
+            handle,
+            session.clone(),
+            RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+                nostr::SubscriptionId::new(wire_sub_id_string(&old_child)),
+            ))),
+        )
+    });
     assert_eq!(core.nip77.live_for_plan(&first_plan_sub), Some(&old_child));
 
-    core.attribution.observe_atom(&second);
-    core.attribution.release_atom(&first);
+    core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&second)
+    });
+    core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&first)
+    });
     let replacement = apply_compile(&mut core, BTreeSet::from([second]));
     let (_, second_plan_child, _, second_attempt) = only_request(&replacement);
     assert_ne!(old_child, second_plan_child);
@@ -181,13 +215,15 @@ fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candida
     assert_eq!(core.nip77.live_for_plan(&first_plan_sub), Some(&old_child));
     assert_eq!(core.bench_ownership_census().request_replacement_jobs, 1);
 
-    let promoted = core.on_relay_frame(
-        handle,
-        session.clone(),
-        RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
-            nostr::SubscriptionId::new(wire_sub_id_string(&second_plan_child)),
-        ))),
-    );
+    let promoted = core.white_box("on_relay_frame", |s| {
+        s.on_relay_frame(
+            handle,
+            session.clone(),
+            RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+                nostr::SubscriptionId::new(wire_sub_id_string(&second_plan_child)),
+            ))),
+        )
+    });
     assert_eq!(
         wire_ops(&promoted)
             .iter()

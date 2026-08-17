@@ -31,25 +31,35 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
         generation: 2,
     };
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-    core.attribution.observe_atom(&atom);
-    core.attribution
-        .retain_live_request_claims(&sub_id, claims.clone());
-    core.install_plan_execution_metadata(
-        sub_id.clone(),
-        filter.clone(),
-        claims.clone(),
-        owners.clone(),
-    );
-    core.slot_to_relay
-        .insert(first_handle.slot, (first_handle, session.clone()));
-    core.record_observed_request(RequestSend {
-        session: &session,
-        sub_id: &sub_id,
-        filter: &filter,
-        coverage_claims: claims,
-        owner_demands: owners,
-        replay: false,
-        event_failure_target: EventFailureTarget::ThisSend,
+    core.white_box("attribution.observe_atom", |s| {
+        s.attribution.observe_atom(&atom)
+    });
+    core.white_box("attribution.retain_live_request_claims", |s| {
+        s.attribution
+            .retain_live_request_claims(&sub_id, claims.clone())
+    });
+    core.white_box("install_plan_execution_metadata", |s| {
+        s.install_plan_execution_metadata(
+            sub_id.clone(),
+            filter.clone(),
+            claims.clone(),
+            owners.clone(),
+        )
+    });
+    core.white_box("slot_to_relay.insert", |s| {
+        s.slot_to_relay
+            .insert(first_handle.slot, (first_handle, session.clone()))
+    });
+    core.white_box("record_observed_request", |s| {
+        s.record_observed_request(RequestSend {
+            session: &session,
+            sub_id: &sub_id,
+            filter: &filter,
+            coverage_claims: claims,
+            owner_demands: owners,
+            replay: false,
+            event_failure_target: EventFailureTarget::ThisSend,
+        })
     });
     let attempt_id = core.pending_request_evidence[&(session.clone(), sub_id.clone())]
         .back()
@@ -63,17 +73,27 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
     });
     assert_eq!(core.bench_ownership_census().request_retry_jobs, 1);
 
-    core.on_relay_connected(next_handle, session.clone());
+    core.white_box("on_relay_connected", |s| {
+        s.on_relay_connected(next_handle, session.clone())
+    });
     let census = core.bench_ownership_census();
     assert_eq!(census.request_retry_jobs, 0);
     assert_eq!(census.request_retry_sub_keys, 0);
     assert_eq!(census.request_retry_session_keys, 0);
     assert_eq!(census.request_attempts, 0);
 
-    core.on_relay_disconnected(next_handle, session, DisconnectReason::Closed);
-    core.attribution.release_live_request_claims(&sub_id);
-    core.plan_execution_metadata.remove(&sub_id);
-    core.attribution.release_atom(&atom);
+    core.white_box("on_relay_disconnected", |s| {
+        s.on_relay_disconnected(next_handle, session, DisconnectReason::Closed)
+    });
+    core.white_box("attribution.release_live_request_claims", |s| {
+        s.attribution.release_live_request_claims(&sub_id)
+    });
+    core.white_box("plan_execution_metadata.remove", |s| {
+        s.plan_execution_metadata.remove(&sub_id)
+    });
+    core.white_box("attribution.release_atom", |s| {
+        s.attribution.release_atom(&atom)
+    });
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()

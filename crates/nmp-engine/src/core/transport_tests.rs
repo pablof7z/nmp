@@ -391,7 +391,9 @@ mod relay_session_key_tests {
             },
         ]);
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
-        core.router.compile(&atoms, &core.routing_facts, core.cap);
+        core.white_box("router.compile", |s| {
+            s.router.compile(&atoms, &s.routing_facts, s.cap)
+        });
         let public_handle = TransportRelayHandle {
             slot: 5,
             generation: 1,
@@ -405,7 +407,9 @@ mod relay_session_key_tests {
             protected_handle,
             protected.clone(),
         ));
-        let probe = core.prober.begin_probe(&relay).unwrap();
+        let probe = core.white_box("prober.begin_probe", |s| {
+            s.prober.begin_probe(&relay).unwrap()
+        });
         let wire_id = wire_sub_id_string(&probe.sub_id);
 
         let protected_neg_msg = RelayFrame::from(RelayMessage::NegMsg {
@@ -493,8 +497,10 @@ mod relay_session_key_tests {
             routing_evidence: BTreeSet::new(),
         };
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
-        core.router
-            .compile(&BTreeSet::from([atom]), &core.routing_facts, core.cap);
+        core.white_box("router.compile", |s| {
+            s.router
+                .compile(&BTreeSet::from([atom]), &s.routing_facts, s.cap)
+        });
         let handle = TransportRelayHandle {
             slot: 0,
             generation: 1,

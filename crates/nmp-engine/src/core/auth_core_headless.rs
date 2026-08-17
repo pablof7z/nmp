@@ -42,12 +42,13 @@ impl Fixture {
             directory,
             10,
         );
-        core.attribution.observe_demand([&atom]);
-        core.router.compile(
-            &BTreeSet::from([atom.clone()]),
-            &core.routing_facts,
-            core.cap,
-        );
+        core.white_box("attribution.observe_demand", |s| {
+            s.attribution.observe_demand([&atom])
+        });
+        core.white_box("router.compile", |s| {
+            s.router
+                .compile(&BTreeSet::from([atom.clone()]), &s.routing_facts, s.cap)
+        });
         let sub_id = core.router.plan().reqs[&session][0].sub_id.clone();
         let handle = RelayHandle {
             slot: 7,
@@ -1316,7 +1317,7 @@ fn auth_required_closed_revokes_ready_and_restricted_closed_is_denied() {
         .contains_key(&fixture.session));
     assert!(matches!(auth_phase(&fixture), AuthSessionPhase::Denied));
     assert_eq!(
-        EngineCore::auth_source_status(&fixture.core.auth_sessions[&fixture.session]),
+        CoreState::auth_source_status(&fixture.core.auth_sessions[&fixture.session]),
         SourceStatus::AuthDenied
     );
 
@@ -1367,7 +1368,9 @@ fn auth_timestamps_enforce_future_window_and_survive_backward_clock() {
 #[test]
 fn auth_counter_exhaustion_is_terminal_error_without_wrap_or_request() {
     let mut epoch = Fixture::new();
-    epoch.core.next_auth_epoch = None;
+    epoch
+        .core
+        .white_box("next_auth_epoch", |s| s.next_auth_epoch = None);
     let (effects, token) = epoch.challenge("epoch exhausted");
     assert!(token.is_none());
     assert!(!effects
@@ -1376,7 +1379,9 @@ fn auth_counter_exhaustion_is_terminal_error_without_wrap_or_request() {
     assert!(matches!(auth_phase(&epoch), AuthSessionPhase::Error));
 
     let mut operation = Fixture::new();
-    operation.core.next_auth_operation = None;
+    operation
+        .core
+        .white_box("next_auth_operation", |s| s.next_auth_operation = None);
     let (_, token) = operation.challenge("operation exhausted");
     assert!(token.is_none());
     assert!(matches!(auth_phase(&operation), AuthSessionPhase::Error));
@@ -1385,7 +1390,9 @@ fn auth_counter_exhaustion_is_terminal_error_without_wrap_or_request() {
     let (_, policy) = signer.challenge("sign operation exhausted");
     let policy = policy.unwrap();
     bind(&mut signer, &policy, AuthCapability::Policy, POLICY);
-    signer.core.next_auth_operation = None;
+    signer
+        .core
+        .white_box("next_auth_operation", |s| s.next_auth_operation = None);
     assert!(signer
         .core
         .handle(EngineMsg::AuthPolicyCompleted(
@@ -1401,7 +1408,8 @@ fn auth_counter_exhaustion_is_terminal_error_without_wrap_or_request() {
     let (sign_token, unsigned) = send.allow(policy.unwrap());
     bind(&mut send, &sign_token, AuthCapability::Signer, SIGNER);
     let signed = unsigned.sign_with_keys(&send.keys).unwrap();
-    send.core.next_auth_operation = None;
+    send.core
+        .white_box("next_auth_operation", |s| s.next_auth_operation = None);
     assert!(send
         .core
         .handle(EngineMsg::AuthSignerCompleted(
@@ -1571,7 +1579,9 @@ fn slot_replacement_releases_the_displaced_session_without_waiting_for_disconnec
 fn auth_sequence_counter_reserves_the_sentinel_and_exhaustion_fails_closed() {
     // The last REAL mintable epoch sequence is u64::MAX - 1.
     let mut fixture = Fixture::new();
-    fixture.core.next_auth_epoch = Some(u64::MAX - 1);
+    fixture.core.white_box("next_auth_epoch", |s| {
+        s.next_auth_epoch = Some(u64::MAX - 1)
+    });
     let (_, policy) = fixture.challenge("last-real-epoch");
     let token = policy.expect("u64::MAX - 1 is still a real mintable epoch");
     assert_eq!(token.epoch.sequence, u64::MAX - 1);
@@ -1580,7 +1590,9 @@ fn auth_sequence_counter_reserves_the_sentinel_and_exhaustion_fails_closed() {
     // challenge records the sentinel fallback epoch in phase Error and
     // requests nothing.
     let mut fixture = Fixture::new();
-    fixture.core.next_auth_epoch = Some(u64::MAX);
+    fixture
+        .core
+        .white_box("next_auth_epoch", |s| s.next_auth_epoch = Some(u64::MAX));
     let (effects, policy) = fixture.challenge("sentinel-reserved");
     assert!(
         policy.is_none(),

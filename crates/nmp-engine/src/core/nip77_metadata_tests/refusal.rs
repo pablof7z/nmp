@@ -78,9 +78,15 @@ fn stray_eose_cannot_advance_refused_candidate_missing_id_or_backlog_roles() {
 
     let mut missing = Fixture::new();
     let live = missing.begin_candidate();
-    let handoff = missing.core.nip77.take_handoff(&live).unwrap();
-    missing.core.abandon_sub(&live);
-    missing.core.open_neg_session(handoff, &mut Vec::new());
+    let handoff = missing.core.white_box("nip77.take_handoff", |s| {
+        s.nip77.take_handoff(&live).unwrap()
+    });
+    missing
+        .core
+        .white_box("abandon_sub", |s| s.abandon_sub(&live));
+    missing.core.white_box("open_neg_session", |s| {
+        s.open_neg_session(handoff, &mut Vec::new())
+    });
     let neg = missing
         .core
         .nip77
@@ -89,14 +95,18 @@ fn stray_eose_cannot_advance_refused_candidate_missing_id_or_backlog_roles() {
         .next()
         .cloned()
         .unwrap();
-    let session = missing.core.nip77.take_session(&neg).unwrap();
-    missing.core.finish_neg_session(
-        neg,
-        missing.relay.clone(),
-        session,
-        BTreeSet::from([EventId::from_byte_array([11; 32])]),
-        &mut Vec::new(),
-    );
+    let session = missing.core.white_box("nip77.take_session", |s| {
+        s.nip77.take_session(&neg).unwrap()
+    });
+    missing.core.white_box("finish_neg_session", |s| {
+        s.finish_neg_session(
+            neg,
+            missing.relay.clone(),
+            session,
+            BTreeSet::from([EventId::from_byte_array([11; 32])]),
+            &mut Vec::new(),
+        )
+    });
     let missing_id = missing
         .core
         .nip77
@@ -113,10 +123,12 @@ fn stray_eose_cannot_advance_refused_candidate_missing_id_or_backlog_roles() {
 
     let mut backlog = Fixture::new();
     let live = backlog.begin_candidate();
-    let handoff = backlog.core.nip77.take_handoff(&live).unwrap();
-    backlog
-        .core
-        .handoff_fallback_to_req(handoff, &mut Vec::new());
+    let handoff = backlog.core.white_box("nip77.take_handoff", |s| {
+        s.nip77.take_handoff(&live).unwrap()
+    });
+    backlog.core.white_box("handoff_fallback_to_req", |s| {
+        s.handoff_fallback_to_req(handoff, &mut Vec::new())
+    });
     let backlog_id = backlog
         .core
         .nip77
@@ -136,9 +148,15 @@ fn stray_eose_cannot_advance_refused_candidate_missing_id_or_backlog_roles() {
 fn refused_missing_id_and_backlog_roles_each_keep_one_retry_and_teardown_exactly() {
     let mut missing = Fixture::new();
     let candidate = missing.begin_candidate();
-    let handoff = missing.core.nip77.take_handoff(&candidate).unwrap();
-    missing.core.abandon_sub(&candidate);
-    missing.core.open_neg_session(handoff, &mut Vec::new());
+    let handoff = missing.core.white_box("nip77.take_handoff", |s| {
+        s.nip77.take_handoff(&candidate).unwrap()
+    });
+    missing
+        .core
+        .white_box("abandon_sub", |s| s.abandon_sub(&candidate));
+    missing.core.white_box("open_neg_session", |s| {
+        s.open_neg_session(handoff, &mut Vec::new())
+    });
     let neg = missing
         .core
         .nip77
@@ -147,14 +165,18 @@ fn refused_missing_id_and_backlog_roles_each_keep_one_retry_and_teardown_exactly
         .next()
         .cloned()
         .unwrap();
-    let session = missing.core.nip77.take_session(&neg).unwrap();
-    missing.core.finish_neg_session(
-        neg,
-        missing.relay.clone(),
-        session,
-        BTreeSet::from([EventId::from_byte_array([9; 32])]),
-        &mut Vec::new(),
-    );
+    let session = missing.core.white_box("nip77.take_session", |s| {
+        s.nip77.take_session(&neg).unwrap()
+    });
+    missing.core.white_box("finish_neg_session", |s| {
+        s.finish_neg_session(
+            neg,
+            missing.relay.clone(),
+            session,
+            BTreeSet::from([EventId::from_byte_array([9; 32])]),
+            &mut Vec::new(),
+        )
+    });
     let missing_id = missing
         .core
         .nip77
@@ -170,10 +192,12 @@ fn refused_missing_id_and_backlog_roles_each_keep_one_retry_and_teardown_exactly
 
     let mut backlog = Fixture::new();
     let candidate = backlog.begin_candidate();
-    let handoff = backlog.core.nip77.take_handoff(&candidate).unwrap();
-    backlog
-        .core
-        .handoff_fallback_to_req(handoff, &mut Vec::new());
+    let handoff = backlog.core.white_box("nip77.take_handoff", |s| {
+        s.nip77.take_handoff(&candidate).unwrap()
+    });
+    backlog.core.white_box("handoff_fallback_to_req", |s| {
+        s.handoff_fallback_to_req(handoff, &mut Vec::new())
+    });
     let backlog_id = backlog
         .core
         .nip77
@@ -192,9 +216,15 @@ fn refused_missing_id_and_backlog_roles_each_keep_one_retry_and_teardown_exactly
 fn missing_id_retry_stays_claimless_when_plan_metadata_grows() {
     let mut fixture = Fixture::new();
     let candidate = fixture.begin_candidate();
-    let handoff = fixture.core.nip77.take_handoff(&candidate).unwrap();
-    fixture.core.abandon_sub(&candidate);
-    fixture.core.open_neg_session(handoff, &mut Vec::new());
+    let handoff = fixture.core.white_box("nip77.take_handoff", |s| {
+        s.nip77.take_handoff(&candidate).unwrap()
+    });
+    fixture
+        .core
+        .white_box("abandon_sub", |s| s.abandon_sub(&candidate));
+    fixture.core.white_box("open_neg_session", |s| {
+        s.open_neg_session(handoff, &mut Vec::new())
+    });
     let neg = fixture
         .core
         .nip77
@@ -203,14 +233,18 @@ fn missing_id_retry_stays_claimless_when_plan_metadata_grows() {
         .next()
         .cloned()
         .unwrap();
-    let session = fixture.core.nip77.take_session(&neg).unwrap();
-    fixture.core.finish_neg_session(
-        neg,
-        fixture.relay.clone(),
-        session,
-        BTreeSet::from([EventId::from_byte_array([13; 32])]),
-        &mut Vec::new(),
-    );
+    let session = fixture.core.white_box("nip77.take_session", |s| {
+        s.nip77.take_session(&neg).unwrap()
+    });
+    fixture.core.white_box("finish_neg_session", |s| {
+        s.finish_neg_session(
+            neg,
+            fixture.relay.clone(),
+            session,
+            BTreeSet::from([EventId::from_byte_array([13; 32])]),
+            &mut Vec::new(),
+        )
+    });
     let missing_id = fixture
         .core
         .nip77

@@ -59,7 +59,7 @@ use nostr::nips::nip01::Coordinate;
 use nostr::{Event, EventId, Timestamp};
 
 use super::observation::StoredEvents;
-use super::{Effect, EngineCore, ObservationId};
+use super::{CoreState, Effect, ObservationId};
 
 /// The number of returned EVENT frames at or above which one request's
 /// stored-events answer is treated as possibly truncated by the relay.
@@ -170,7 +170,7 @@ pub(crate) enum CoordinateCoverage {
     Uncovered,
 }
 
-impl EngineCore {
+impl CoreState {
     /// Count one EVENT frame this relay returned, against the request that
     /// asked for it.
     ///
@@ -178,7 +178,7 @@ impl EngineCore {
     /// merely uncounted — it erases the exact count of every request still
     /// streaming on that session, because it could have belonged to any of
     /// them.
-    pub(super) fn record_returned_event_frame(
+    pub(in crate::core) fn record_returned_event_frame(
         &mut self,
         session: &RelaySessionKey,
         wire_sub_id: &str,
@@ -206,7 +206,7 @@ impl EngineCore {
     /// preparsed committed-observation hit (which carries no subscription
     /// id), an unknown wire subscription id, and a health report of frames
     /// the transport rejected before the reducer ever saw them.
-    pub(super) fn erase_returned_frame_counts(&mut self, session: &RelaySessionKey) {
+    pub(in crate::core) fn erase_returned_frame_counts(&mut self, session: &RelaySessionKey) {
         for ((request_session, _), live) in &mut self.live_wire_requests {
             if request_session == session
                 && matches!(live.stored_events, StoredEvents::Streaming { .. })
@@ -218,7 +218,7 @@ impl EngineCore {
 
     /// Remember that one request delivered one replaceable/addressable
     /// coordinate. Only the newest delivered value per coordinate is kept.
-    pub(super) fn record_coordinate_witness(
+    pub(in crate::core) fn record_coordinate_witness(
         &mut self,
         session: &RelaySessionKey,
         wire_sub_id: &str,
@@ -256,7 +256,7 @@ impl EngineCore {
     ///
     /// Access context is part of `session`, so public coverage can never
     /// answer a NIP-42 question and vice versa.
-    pub(crate) fn coordinate_coverage(
+    pub(in crate::core) fn coordinate_coverage(
         &self,
         coordinate: &Coordinate,
         session: &RelaySessionKey,
@@ -391,7 +391,7 @@ impl EngineCore {
     /// with the observation that will answer it. That observation id is the
     /// caller's to close; no owner map is kept here, so an observation this
     /// door does not hand back is one it never opened.
-    pub(crate) fn open_coordinate_observation(
+    pub(in crate::core) fn open_coordinate_observation(
         &mut self,
         coordinate: &Coordinate,
         session: &RelaySessionKey,
@@ -609,7 +609,7 @@ mod tests {
 
     /// One relay-pinned ordinary read plus the exact wire request it placed.
     struct Fixture {
-        core: EngineCore,
+        core: CoreState,
         session: RelaySessionKey,
         handle: TransportRelayHandle,
         sub_id: SubId,
@@ -681,7 +681,7 @@ mod tests {
             slot: 3,
             generation: 1,
         };
-        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 32);
+        let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 32);
         core.handle(EngineMsg::RelayConnected(handle, session.clone()));
         let demand = Demand::new(
             filter,
@@ -1072,7 +1072,7 @@ mod tests {
             CoordinateCoverage::Witnessed { .. }
         ));
 
-        let restarted = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 32);
+        let restarted = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 32);
         assert_eq!(
             restarted.coordinate_coverage(&contact_list_coordinate(&alice), &fixture.session),
             CoordinateCoverage::Uncovered

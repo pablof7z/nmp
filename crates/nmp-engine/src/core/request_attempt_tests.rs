@@ -83,17 +83,22 @@ fn atom(relay: &RelayUrl, author: &str) -> ContextualAtom {
 }
 
 fn apply_compile(core: &mut EngineCore, demand: BTreeSet<ContextualAtom>) -> Vec<Effect> {
-    let outcome = core
-        .router
-        .compile(&demand, &core.routing_facts, core.compile_budget());
+    let outcome = core.white_box("router.compile", |s| {
+        s.router
+            .compile(&demand, &s.routing_facts, s.compile_budget())
+    });
     let mut effects = Vec::new();
-    core.apply_request_metadata_updates(&outcome.request_metadata_updates, &mut effects);
-    core.apply_router_plan_delta(
-        &outcome.replacements,
-        outcome.wire,
-        PlanDeltaMode::Full,
-        &mut effects,
-    );
+    core.white_box("apply_request_metadata_updates", |s| {
+        s.apply_request_metadata_updates(&outcome.request_metadata_updates, &mut effects)
+    });
+    core.white_box("apply_router_plan_delta", |s| {
+        s.apply_router_plan_delta(
+            &outcome.replacements,
+            outcome.wire,
+            PlanDeltaMode::Full,
+            &mut effects,
+        )
+    });
     effects
 }
 
@@ -152,13 +157,15 @@ fn repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_
     assert_eq!(census.pending_execution_owners, 0);
 
     // A never-accepted generation cannot earn coverage from a stray EOSE.
-    core.on_relay_frame(
-        handle,
-        session.clone(),
-        RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
-            nostr::SubscriptionId::new(wire_sub_id_string(&sub_id)),
-        ))),
-    );
+    core.white_box("on_relay_frame", |s| {
+        s.on_relay_frame(
+            handle,
+            session.clone(),
+            RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
+                nostr::SubscriptionId::new(wire_sub_id_string(&sub_id)),
+            ))),
+        )
+    });
     assert!(core.store.get_coverage(claim, &relay).unwrap().is_none());
 
     let retry_one = core.handle(EngineMsg::Tick(due_one));
@@ -234,7 +241,9 @@ fn nip77_candidate_status_projects_its_role_id_to_the_live_plan_request() {
         generation: 1,
     };
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-    core.prober.force_supported_for_test(relay.clone());
+    core.white_box("prober.force_supported_for_test", |s| {
+        s.prober.force_supported_for_test(relay.clone())
+    });
     core.handle(EngineMsg::RelayConnected(handle, session.clone()));
     let opened = core.handle(EngineMsg::Subscribe(live_query(&relay)));
     let observation = observation_id(&opened);
@@ -272,7 +281,7 @@ fn dynamic_full_recompile_publishes_awaiting_request_before_wire_dispatch() {
     let observation = observation_id(&opened);
 
     let mut effects = Vec::new();
-    core.recompile(&mut effects);
+    core.white_box("recompile", |s| s.recompile(&mut effects));
     let awaiting_index = effects
         .iter()
         .position(|effect| {
