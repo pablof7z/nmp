@@ -11,6 +11,18 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   Whatever closes it must keep NMP the owner of when/what to sign, with the app's
   adapter merely interfacing to the hardware; the deleted app-supplied signer
   mailbox (#1290) inverted that ownership and was removed rather than kept.
+- **NIP-42 deadlocks against any relay that challenges in response to a
+  request (#1889).** An app declaring `NMPAccessContext.nip42` against strfry
+  never exchanges a byte with it: NMP withholds a protected session's REQs
+  until AUTH completes and only starts AUTH on an INBOUND `["AUTH", challenge]`
+  frame, while strfry only challenges in response to a request it wants to
+  gate. The query sits at `awaitingAuth(phase: .awaitingChallenge)` forever,
+  the installed `NMPAuthPolicy` is never consulted, and `AuthDiagnostics`
+  reports a placeholder row indistinguishable from a session that has merely
+  just connected. Every green NIP-42 test either injects a synthetic challenge
+  into the reducer or uses a relay hand-built to challenge unsolicited on
+  connect, which is why nothing caught it. Canary C15 is the committed
+  reproduction and is red until this closes.
 - **AUTH-policy callback inversion still open (#783).**
 - **Session storage is app-owned: NMP ships no plaintext checkpoint and no
   automatic Keychain/Keystore session store.** Transactional app-owned session
@@ -77,6 +89,66 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   determined through the public API — `DiagnosticsSnapshot` exposes no
   retained-bookkeeping or memory fact at all. C17's `distinct` phase is red
   until this is answered.
+- **A cold start never reconciles over NIP-77; it always refetches (#1888).**
+  `begin_neg_handoff` is only reachable when the relay already carries a
+  behaviorally-minted probe verdict at the moment a request is placed, and the
+  probe is asynchronous — a fresh engine sends its query's REQ as soon as the
+  socket is up and learns the relay supports NIP-77 just too late to use it.
+  Nothing re-plans the in-flight request. Canary C14 measured a first-run
+  cold start refetching all 70 events with `nip77Behavior` reporting
+  `behaviorally_proven` and `nip77Handoff` never leaving `none`;
+  reconciliation engages on the NEXT request (a reconnect replay), where the
+  same divergence costs 10 events instead of 70.
+- **NIP-77 reconciliation is invisible per query (#1888).** Negentropy
+  coverage is attributed through the same `attribute_eose` path as an ordinary
+  EOSE, so `SourceEvidence.reconciledThrough` and `SourceStatus` are identical
+  whether a result was reconciled or refetched. The only public distinguisher
+  is the engine-global, per-relay
+  `RelayDiagnostics.nip77Advertisement`/`nip77Behavior`/`nip77Handoff` triple,
+  and `nip77Handoff` is a transient an app must accumulate from
+  `observeDiagnostics()` to see at all.
+
+- **Two of NIP-22's three root shapes cannot be read back through the
+  capability's own demand (#1876).** `commentThreadDemand(root:)` binds the
+  root identifier to the `#I` tag whatever the root is, but the composer writes
+  `E` for an event root and `A` for an address root. So commenting on a note —
+  the app-shaped case — composes and publishes correctly and can then never be
+  observed through NIP-22's own read door; the app must hand-build
+  `NMPFilter(kinds: [1111], tags: ["E": ...])`, i.e. own NIP-22's tag
+  vocabulary itself. Measured end to end against a real strfry process by
+  Canary C11, whose second test is red until this is fixed. Every existing test
+  of the demand, at every layer, uses an external NIP-73 root, which is why the
+  two shapes built ahead of the behaviour were never exercised.
+- **A NIP-73 web root does not survive its own round trip (#1878).** Composed
+  as `Nip73.url`, it decodes back as `Nip73.general(value:kind: "web")`. Both
+  name one page and produce one demand, but they are different cases of a
+  `Hashable` enum, so `decoded.root == theRootIComposed` is false and an app
+  keying comments by their root splits one thread in two. No public
+  `iValue`/`kValue` accessor or canonicalising constructor exists on any SDK
+  surface, so the only way to ask "same thread" is to build the demand from
+  each and compare. Recorded by Canary C11, which asserts the demand equality
+  and prints both values rather than freezing either shape.
+
+- **The FIRST `requestRows` on a window is dropped (#1886).** Canary C6
+  measured a window opened at `initial: 10` staying at 10 rows for a bounded
+  45s after `requestRows(atLeast: 20)`, with the relay up and holding 150
+  matching events, and the advance delivering `WindowLoad.returned(added: 0)`.
+  It never self-heals, and re-issuing the SAME target is a documented no-op,
+  so an app has no way to ask again from where it is — in a real feed this is
+  the first scroll-to-bottom doing nothing. Deterministic 5/5 across
+  `(initial, firstTarget)` of (10,11), (10,20), (10,50), (1,2) and
+  (10,10)→(10,11), with 0ms/1s/3s settle beats, so it is neither a race nor a
+  function of step size. Every LATER advance reaches its target exactly. Root
+  cause is in the issue: `stage_history_advance` attaches wire handles without
+  arming admission, and the runtime drops the stage turn's effects on the
+  success path, so the advance's REQ never reaches the wire; the second
+  advance only works because its commit supersedes the first advance's handle
+  and `withdraw_wire_demand` arms admission as a side effect. C6's first-advance
+  phase is red until this is fixed. A second, related fact recorded there:
+  `WindowLoad.returned(added:)` is not a usable progress signal — across runs
+  the same advance reported `added: 20` and `added: 0`, with the rows arriving
+  in a later `.idle` batch.
+
 - **A derived binding is proven to GROW; nothing proves it retracts.** Canary
   C4 (#1871) drives `NMPBinding.derived` end to end against a real relay: a
   feed over "my kind:3 contact list projected through its `p` tags" starts
@@ -92,6 +164,35 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   10+ minutes (verified dead socket), foreground, confirm the feed catches up
   and diagnostics show re-established wire subs plus repaired coverage, with zero
   app code. Not reproducible in a simulator or headless test.
+- **A relay's message on a SUCCESSFUL publish is discarded, and no app can
+  reach it.** The frame's text survives as far as
+  `handle_write_ack(event_id, status, message, ..)`
+  (`crates/nmp-engine/src/core/write.rs:5455`, fed the whole `RelayMessage::Ok`
+  at `crates/nmp-engine/src/core/auth_transport.rs:1866`), and is then thrown
+  away by classification: `classify_relay_ack`
+  (`crates/nmp-engine/src/core/mod.rs:435`) returns the UNIT variant
+  `RelayAckClass::Acked` for every `ok=true`, and also for `ok=false` with a
+  `duplicate:` prefix — whose explanation is lost the same way. The `Acked` arm
+  (`write.rs:5507`) commits the unit `PublishQueueAttemptOutcome::Acked`
+  (`crates/nmp-store/src/lib.rs:1347`) and emits the unit
+  `RelayState::Published` (`crates/nmp-engine/src/publish_queue/mod.rs:194`),
+  so the text is in no store row, no `WriteFact`, and nothing across the FFI.
+  Every OTHER answer keeps the relay's words — `Rejected { reason }`,
+  `AuthFailed { reason }`, `RelayWaiting::BackingOff { detail }` — so success
+  is the one outcome an app cannot quote. Carrying it means a payload on all
+  four of those types, in that order; anything less stops at the store
+  boundary. Canary's `ComposeView` renders the absence in words rather than
+  substituting an empty string for a message that was never kept.
+- **`Receipt` does not carry the event id.** `publish` returns a `Receipt`
+  whose only identifier is `id`, the store-issued RECEIPT id
+  (`Packages/NMP/Sources/NMP/Receipt.swift:55`, from
+  `crates/nmp-ffi/src/facade/receipt_stream.rs:208`), even though acceptance
+  has already frozen the event and `PublishQueueEntry.eventID` calls that id
+  "the write's identity from acceptance onward". An app that wants to show
+  what it just published must instead wait for a fact that happens to quote
+  the id (`WriteFact.relay`, or `SigningState.signed`), or re-find its own
+  entry in a `publishQueue` page. Canary's `ComposeView` harvests it from the
+  facts and shows "not reported yet" until one arrives.
 - **Direct-Rust unwindowed observation evidence is built; windowed and native
   SDK parity remain open (#718).** `Frame.execution` carries
   resolver/reducer/runtime-owned observation-scoped facts, but windowed

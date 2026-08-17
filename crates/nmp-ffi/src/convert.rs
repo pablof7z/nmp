@@ -1942,6 +1942,9 @@ pub fn relay_state_to_ffi(state: &GRelayState) -> FfiRelayState {
             waiting: match waiting {
                 GRelayWaiting::NotConnected => FfiRelayWaiting::NotConnected,
                 GRelayWaiting::NeedsAuth => FfiRelayWaiting::NeedsAuth,
+                GRelayWaiting::Eligible { since } => FfiRelayWaiting::Eligible {
+                    since: since.as_secs(),
+                },
                 GRelayWaiting::BackingOff {
                     attempt,
                     eligible_at,
@@ -1959,6 +1962,13 @@ pub fn relay_state_to_ffi(state: &GRelayState) -> FfiRelayState {
                     }
                 }
             },
+        },
+        GRelayState::Attempting {
+            attempt,
+            started_at,
+        } => FfiRelayState::Attempting {
+            attempt: *attempt,
+            started_at: started_at.as_secs(),
         },
         GRelayState::Sent {
             attempt,

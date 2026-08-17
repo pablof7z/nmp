@@ -131,10 +131,19 @@ Policed by review only:
 Three SwiftPM packages, not the Xcode project. `apps/Canary/RelayLabKit` is
 the relay-lab controller itself — start, stop, kill, restart, partition,
 heal, seed, ephemeral port, isolated temp directory, bounded-poll readiness
-rather than sleeps, a one-shot real-TCP reachability probe (`isReachable`,
-what "the relay is genuinely unreachable" has to mean), and an optional
+rather than sleeps, two real-TCP probes — `isReachable`, a boolean for
+"wait until this port stops answering", and `probe`, which reports the
+actual errno (`.refused`/`.timedOut`/`.failed(errno:)`) and elapsed time,
+because `isReachable` cannot tell a refused port from a black-holed one and
+costs its full timeout for both (C8's finding, below) — plus an optional
 shared `dataDir` so a second relay process can write into a stopped relay's
-durable store on its own port — C13's outage window. It knows nothing about NMP; it is a generic real-relay
+durable store on its own port — C13's and C14's outage window — and
+`probeRead`, one plain NMP-free `REQ` on one fresh connection that reports what
+the relay did about it (challenge, refusal text, events served), optionally
+completing a NIP-42 handshake as a caller-supplied key first. That last one
+exists so a scenario can prove a relay's demand INDEPENDENTLY of NMP: "NMP got
+the row, therefore the relay demanded AUTH" is circular, and a relay that
+challenged nobody would satisfy it. It knows nothing about NMP; it is a generic real-relay
 lifecycle library, reusable outside this app entirely. It is consumed by two
 thin CLI targets a developer runs directly (`swift run relay-lab-lifecycle
 <strfry-binary>`, `relay-lab-nip42`) to bring the lab up and drive it by
@@ -216,9 +225,22 @@ C1 cold start and live feed; C2 cache then offline restart; C3 multi-relay
 dedup and provenance; C4 reactive derived query; C5 replaceable, deletion and
 stale redelivery; C6 deep windowing; C7 normal publish; C8 publish while
 relays fail; C9 crash/restart during publication; C10 offline write then
-convergence; C11 semantic capability; C12 identity freeze; C13 relay
-disconnect/reconnect; C14 NIP-77 reconciliation; C15 NIP-42 AUTH; C16 slow
-consumer and backpressure; C17 repeated lifecycle churn; C18 clean shutdown.
+convergence; C11 capability end to end (NIP-22 comments); C12 identity
+freeze; C13 relay disconnect/reconnect; C14 NIP-77 reconciliation; C15
+NIP-42 AUTH; C16 slow consumer and backpressure; C17 repeated lifecycle
+churn; C18 clean shutdown.
+
+**C11 was renamed** (#1875). It was listed as "semantic capability" — a phrase
+that appeared exactly once in this entire repository, in the line above,
+introduced by the commit that created the Canary. No definition anywhere, no
+matching public API, no `semantic` surface in `crates/nmp/src/`, and no
+protocol category by that name: a named category that does not exist, which
+standing convention 3 forbids
+(`docs/internals/conventions/naming-no-invented-categories.md`). The name now
+comes from the public surface — "capability" is
+`docs/internals/crate-architecture.md` rule 2's own word and `nmp-ffi`'s own
+feature keys, "NIP-22 comments" is the protocol's name and the name of
+`Packages/NMP/Sources/NMP/NIP22.swift`.
 
 **C1 is proven live** against a real strfry child process:
 `apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C1ColdStartLiveFeedTests.swift` seeds
@@ -356,9 +378,10 @@ Two facts about the starting position, established by survey:
   (`WriteIntent`, `Receipt` and `reattachReceipt` are complete and well
   specified) but because no screen uses them.
 - **Session identity did not survive restart**, which silently blocked C2, C9
-  and C12: there was no identity for a resumed write to remain frozen to. Both
-  C9 and C2 are now proven through `NMPSessionPayload`, so the blocker is
-  closed for those two; C12 remains unwritten.
+  and C12: there was no identity for a resumed write to remain frozen to. C9
+  and C2 are proven through `NMPSessionPayload`. C12 turned out not to need a
+  restart at all — the account switch it is about happens inside one live
+  engine — and is proven above.
 
 **C17 is proven as an oracle, and two of its three phases pass. The third
 fails, and the failure is a real finding (#1846), not a scenario defect.**
@@ -580,6 +603,15 @@ the session is restored, because a literal-author filter needs no account.
 The identity half and the feed half are independent claims and are separately
 falsifiable, which is why both are asserted.
 
+**C11 is proven live for the root shape that works, and its second half is a
+real finding left red on purpose** (#1875).
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C11CommentCapabilityEndToEndTests.swift`
+is the first exercise anywhere of a capability driven end to end against a
+real relay. Every other test of a capability — `NIP22Tests.swift`,
+`NIP22Test.kt`, the Rust crate tests — runs in-process with no relay, so
+composition and decoding were covered and "the composed write reaches a relay
+and comes back through an ordinary query" was not covered at all.
+
 **C16 is proven live** (#1869), and it is the first measurement anywhere of
 what NMP does when events arrive faster than the app reads them.
 `apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C16SlowConsumerBackpressureTests.swift`
@@ -759,22 +791,584 @@ routing asymmetry already recorded below, not a C4 defect. Second, C4 proves
 the binding **grows**; whether it retracts rows when a derived set *shrinks*
 (an unfollow) is untested and unclaimed here.
 
-**C15's relay lab is qualified; C15 itself is NOT proven.** The distinction is
-the whole point of the paragraph below, and an earlier revision of this section
-got it wrong by calling C15 "proven live".
+**C3 is proven live**, and it is this suite's first exercise of the same
+event arriving from SEVERAL relays.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C3MultiRelayDedupProvenanceTests.swift`
+runs three separate strfry processes with three independent LMDB stores, all
+three in the engine's relay set. One event is seeded into relay A only; then
+the IDENTICAL bytes -- same id, same signature, a real duplicate on the wire
+rather than a re-signed lookalike -- are written into relay B, and later into
+relay C, each over a real `EVENT` frame answered by a real `OK`. Throughout,
+the app holds ONE canonical row whose `sources` grows
+`[A]` -> `[A, B]` -> `[A, B, C]`. Passes in ~1.4s, stable over five runs.
 
-What the run below establishes is that **strfry can be driven through a
-complete NIP-42 round trip on demand** — a prerequisite for the scenario, and a
-real result, since the first two attempts to obtain one failed. What it does
-not touch is NMP: the handshake is driven by the *controller*, not by
-`NMPEngine`. So none of the following is yet proven — NMP notices the challenge,
-NMP consults the configured AUTH policy, NMP signs a kind:22242 event bound to
-that exact challenge and relay, or NMP recovers after a denial or a reconnect.
+**Three different failures are in scope, and the row count catches only one
+of them.** Two rows is caught by the count and the id set. LOST PROVENANCE is
+caught by requiring the exact three-relay set. A REPLACED row -- the row
+removed and re-added rather than updated in place -- survives both, so C3
+seeds a companion event alongside the shared one purely to give the delivered
+array a second entry and therefore an INDEX that a remove-and-re-add would
+disturb: an unbounded observation folds exact rebased deltas in arrival order,
+so an in-place `sourcesGrew` leaves the position untouched while a
+reinsertion moves the row to the end. The index is pinned before the first
+growth and required to hold across both. Measured at index 1 on every run.
+A fourth check exists because `sources` would otherwise be free to mean
+nothing: the companion event never leaves relay A, and its provenance must
+stay `[A]` -- an engine that unioned every relay it ever talked to into every
+row would pass everything else.
 
-C15 becomes proven when the NMP path closes the round trip. Until then it
-belongs under "not executed", not under the passing scenarios.
+**The precondition is the whole point.** "One row naming three relays" is
+trivially true of an app handed the event by all three at cold start, with no
+moment when the row had fewer sources than it finished with. So B and C start
+EMPTY while being genuinely subscribed, and the scenario asserts before
+seeding them: the row is delivered naming EXACTLY relay A; all three relays
+report a wire subscription off `observeDiagnostics()`; and an ordinary client
+REQ against B and C for that id comes back empty -- a fact about the fixture,
+established over the relay's own wire protocol, never a reading of NMP state.
 
-The route to the qualification corrected an earlier mistake worth keeping.
+Falsified twice, each restored and re-confirmed green. **Seeding all three
+relays up front is the one that matters**: `grewToB` and `grewToC` both stay
+true, the final row is one row naming three relays, and every behaviour
+assertion is green -- ONLY the three preconditions fail (`onlyRelayA=false`,
+`relayBHasIt=true`, `relayCHasIt=true`). That is precisely the vacuous dedup
+proof this scenario would otherwise have been, and it is the C13-fourth-
+falsifier lesson repeating. Seeding relay C with a re-signed lookalike instead
+(same author and content, `created_at + 1`, therefore a DIFFERENT id -- what a
+lost-dedup engine effectively produces) failed on six assertions with the real
+values: 3 rows against 2 distinct events, `maxRows=3`, the shared row's
+`sources` stuck at two relays, and the pinned index moved from 1 to 0.
+
+No API finding for C3 -- `Row.sources`, the `sourcesGrew` in-place update and
+the per-relay diagnostics all behaved exactly as documented.
+
+**C5 is proven live**, including the part most likely to have been broken.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C5ReplaceableDeletionStaleRedeliveryTests.swift`
+drives three real relay processes and two concurrent observations, and proves
+in ~4.7s: alice's kind:0 profile is superseded by a newer version and the old
+one disappears (one row, v2's id, v2's content -- not two rows, not v1's text
+under v2's id); a kind:5 carrying `["e", target]` removes exactly its target
+and leaves the untargeted note alone; and a relay redelivering either the
+superseded version or the deleted event AFTERWARDS resurrects neither.
+
+**A correct engine's answer to a stale redelivery is to do nothing at all** --
+no row change, no delivered batch, no app-visible fact -- which makes "the row
+did not come back" equally true of an engine that ignored it and of a scenario
+where the stale event never arrived. Three things rule that out. The two stale
+relays are up, subscribed and empty from the start, so they are never a
+late-connecting first delivery; an ordinary client REQ confirms each holds
+nothing for the id before its phase. The stale event is written only after the
+app has been ASSERTED to hold the post-supersede / post-deletion state. And a
+CONTROL event the app has never seen is written to the SAME relay immediately
+after the stale one: the app's subscription to that relay is one TCP
+connection and the relay pushes in ingest order, so the control arriving is
+positive proof the stale event was pushed first and silently refused. The
+control's own `sources` is required to name that specific relay, which is what
+identifies whose push path was proven live.
+
+Falsified twice, each restored and re-confirmed green. **Writing the stale
+events to the stale relays BEFORE the supersede and the deletion instead of
+after** leaves `resurrected=[]` on both observations and every behaviour
+assertion green -- only the two "already held it before this phase"
+preconditions fail. Same shape as C3's and C13's, and the reason the
+sequencing is asserted rather than assumed. Removing kind 5 from the app's own
+filter fired four assertions at once with real values: the deletion never
+removed its target (`deleted=false`, the feed still holding both notes), and
+the stale relay then genuinely DID resurrect the target -- which is also an
+independent confirmation that the no-resurrection assertion is live rather
+than green by construction.
+
+**C5's API finding, and it is a real one for app authors.** The feed's filter
+has to include kind 5. Relays send only what an open subscription asked for,
+so an app that subscribes to kind 1 alone is never sent the deletion and its
+rows never go away -- NMP does not add kind:5 to an app's demand on the app's
+behalf. Nothing in the read API hints at this, and the failure mode is silent:
+deleted content simply stays on screen forever. The falsifier above is the
+proof. A consequence worth stating plainly: because the app must subscribe to
+kind 5, the deletion event itself is then delivered as an ordinary row in the
+feed. That is consistent with NMP doing mechanics only and leaving display
+policy app-owned, but it means every app doing deletions correctly also has to
+filter kind:5 out of its own rendering.
+
+**C6 is written and RED, and the red is a real finding (#1886), not a scenario
+defect.**
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C6DeepWindowingTests.swift`
+seeds 150 events one second apart over real `EVENT` frames, opens ONE
+`.expandable(initial: 10, max: 100)` observation and scrolls it to the
+ceiling, checking every page against a canonical `createdAt DESC, id ASC`
+order the scenario computes from the events it signed itself -- never against
+whatever NMP delivered. Runs in ~49s, of which 45 is the bounded wait that
+establishes the finding.
+
+Everything except the first advance PASSES: every page is the exact canonical
+prefix (order and gaplessness in one assertion, reporting the missing and
+unexpected ids and the first index that differs); every page EXTENDS its
+predecessor rather than rewriting it, so a row that moves or repeats under the
+app's scroll position fails even when the final set is right; no batch ever
+carried a duplicate id; no batch ever carried more rows than the target in
+force when it arrived; a request past `max` lands as a delivered
+`.atBound(max: 100)` fact rather than a throw, with the row count unmoved; and
+a live event arriving at an already-full window enters at the head and
+DISPLACES the tail instead of making the window one row bigger.
+
+**FAILING -- the first advance.** `requestRows(atLeast: 20)` on a window
+opened at `initial: 10` delivers `WindowLoad.returned(added: 0)` and leaves
+the window at 10 rows for a bounded 45s, with the relay up and holding all 150
+events. It never self-heals, and re-issuing the SAME target is a documented
+no-op, so an app has no way to ask again from where it is. Only raising the
+target AGAIN moves it -- and that next raise then delivers its own value
+exactly. In an app this is the first scroll-to-bottom of any windowed feed
+doing nothing. Deterministic 5/5 across `(initial, firstTarget)` of (10,11),
+(10,20), (10,50), (1,2) and (10,10)->(10,11), with 0ms/1s/3s settle beats
+before the call, so it is neither a race nor a function of step size. The
+assertion was NOT relaxed and the scenario was NOT reordered to warm the
+window up first; C17's `distinct` phase is the standing precedent.
+
+What the public API shows about the mechanism, printed on every run: the
+query's own `SourceEvidence.status` for the relay walks `finishedStoredEvents`
+-> `error` -> `awaitingRequest` -> `requesting` across that one advance, and
+the relay's own log shows a NIP-77 negentropy session opened and closed inside
+it. The engine-side root cause is in #1886.
+
+**A correction C6 forced on its own preconditions.** The first draft asserted
+that the relay reporting `finishedStoredEvents` meant the history was local,
+and used that to justify the no-gaps assertions. It does not:
+`SourceStatus.finishedStoredEvents`'s own doc calls it "a delivery fact about
+ONE source answering ONE request", and a windowed observation's opening
+request carries the window's `initial` as its wire limit, so only `initial`
+events are local at that point. The precondition now claims only what it
+proves -- that the opening request was answered, so the app is in the settled
+first-page state a user scrolls from -- and every page assertion waits on the
+delivered ROW COUNT rather than trusting any status to mean "everything is
+here".
+
+**C6's second finding: `WindowLoad.returned(added:)` is not a usable progress
+signal.** Across repeated runs the SAME advance reported `.returned(added: 20)`
+on some runs and `.returned(added: 0)` on others, with the 20 rows arriving in
+a LATER batch carrying `.idle`. An app therefore cannot use the delivered load
+fact to decide whether its scroll produced anything; the only reliable signal
+is the delivered row count. C6's first draft asserted a nonzero
+`returned(added:)` as its "the window really advanced" precondition and was
+flaky because of it. The assertion was **removed rather than inverted** and the
+value is printed on every run, so neither reading is silently promoted to a
+contract -- the same treatment C13 gave `wireSubCount` during an outage.
+
+Falsified twice besides, each restored: never writing history event #37 to the
+relay -- a genuine hole in the middle, with row COUNTS still reachable so only
+the order/gap check can see it -- failed at page 40 and every page after,
+naming the missing id, the unexpected id and index 37 exactly. Opening the
+observation with NO window failed the boundedness precondition with the real
+captured value (150 rows delivered against the declared `initial` of 10) and
+140 unexpected ids on the first page.
+
+**NIP-22 rather than NIP-29**, and the reason is about the lab rather than the
+SDK. NIP-29 has the larger Swift surface, but its group records
+(kind:39000/39001/39002 metadata, admins, members) are RELAY-generated, and
+strfry has no NIP-29 implementation: `createGroup` there publishes an event
+nothing acts on and `observeRecords` would report `.unavailable` forever.
+Proving NIP-29 end to end needs a NIP-29 relay in the lab — real work, and a
+separate scenario. NIP-22 comments are ordinary events any relay stores, so
+the capability rather than the relay's feature set is what is under test.
+
+**PASSING — the capability composes into both ordinary nouns.** Two apps: two
+`NMPEngine`s over two store paths, one relay, and no other channel between
+them, so "the reader saw it" cannot be satisfied by a row that never left the
+writer's own store. The author app composes a top-level comment with
+`commentIntent(on: .root(...))` on a NIP-73 web root and publishes it through
+the ordinary `NMPEngine.publish`; the reader app — which has never been told
+the event exists — is delivered it through `commentThreadDemand(root:)` on the
+ordinary `engine.observe`, replies with `commentIntent(on: .row(...))` off the
+row NMP delivered it, and the author's own still-open thread query then holds
+BOTH events. One demand covers the whole thread, exactly as documented. A
+third query, a plain `NMPFilter(kinds: [1111], authors: ...)` that has never
+heard of NIP-22, holds the same two rows — the capability's writes are
+ordinary events in the ordinary store. `decodeComment` closes the round trip:
+identical root at both depths, `parent == .root` for the top-level and
+`.comment(eventID:authorPubkey:)` for the reply, whose parent the app never
+stated. ~1.3-2.3s, stable over five runs.
+
+**The preconditions are asserted before the behaviour, twice per write.** A
+scenario that never actually sent anything reads green, so before any "the
+thread came back" assertion runs, each write must have reached
+`RelayState.published` for this exact relay on its own `receipt.status` AND
+been handed back by the relay itself over an independent real `REQ` by id
+(`RelayLabKit.queryById`, a plain socket with no NMP in it).
+
+**Falsified three ways, each restored and re-confirmed green.** Pointing both
+thread demands at a valid-but-different page left the write fully landed
+(`publishedHere=true`) and delivered `0 rows [] over 4 batches` — so the
+demand's `#I` scoping is doing real work rather than "any kind:1111 will do".
+Routing the comment to `ws://127.0.0.1:1` failed at the precondition with
+`publishedHere=false` before a single behaviour assertion ran. Inverting the
+reply's parent to `.root` failed on the real captured
+`comment(eventID: "a5ea1ba3...", authorPubkey: Optional("1544818d..."))`.
+
+**FAILING — `commentThreadDemand` cannot read back two of its three root
+shapes (#1876), left red on purpose.** The demand binds the root identifier to
+the `#I` tag for EVERY root shape, but the composer writes `E` for an event
+root and `A` for an address root — `I` only for a NIP-73 external one. So the
+app-shaped case, commenting on a note, composes and publishes perfectly and
+can then never be read back through the capability's own door. The scenario's
+second test proves it is the demand and nothing else: same comment, same
+relay, same run, provably on the relay by real `REQ`, delivered to a
+hand-built `NMPFilter(kinds: [1111], tags: ["E": ...])`
+(`1 rows`) and not to `commentThreadDemand(root: .event(...))` (`0 rows [] over
+6 batches`, selection tags `I=literal(["e7a36fe4..."])`). The assertion is
+written the right way round — it goes green with no edit when #1876 lands —
+rather than inverted into a claim that the current behaviour is correct, which
+would report the fix as a regression. Same discipline as C17's `distinct`
+phase.
+
+That workaround is itself the finding's shape: it requires the app to know
+NIP-22's uppercase-root tag vocabulary, which is exactly the knowledge the
+capability crate exists to own.
+
+**C11's second API finding (#1878): a NIP-73 web root does not survive its own
+round trip.** Composed as `Nip73.url(url:)`, it decodes back as
+`Nip73.general(value:kind: "web")` — deliberately, since the decoder never
+re-canonicalises a read and `.url`'s meaning is "already canonical". The two
+values carry the identical string, render identical `I`/`K` rows and produce
+the identical demand, but they are different cases of a `Hashable` enum, so
+`decoded.root == theRootIComposed` is `false` for every web thread and an app
+keying comments by their root splits one page's thread in two. Swift exposes
+no `iValue`/`kValue` accessor and no canonicalising constructor, so the only
+public way to ask "same thread" is to build `commentThreadDemand` from each
+and compare the `NMPDemand`s — which is what the scenario asserts, printing
+both values on every run so neither shape is silently promoted to a contract.
+The assertion was written on the demand rather than inverted onto the value,
+the same way C13 handled `wireSubCount`.
+
+**One ergonomics observation, not a defect.** `commentIntent` returns
+`WriteRouting.auto`, and `.auto` needs `NMPConfig.outboxRouting` indexers a
+lab engine does not have, so the app assigns `intent.routing =
+.explicit(relays:)` on the returned value — a plain public field on the
+ordinary write noun, exactly what C7 does. This is the same read/write routing
+asymmetry already recorded below, seen from the capability side.
+
+**C8 is proven live** (#1880), and it is the first publish in this suite
+into a relay that is *down* rather than *hung*.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C8PublishWhileRelaysFailTests.swift`
+publishes one real signed event to three real strfry destinations, two live
+and one whose process was started and then `SIGKILL`ed, in ~1.5s. The
+distinction from C9 case 3 is the whole point: that scenario's unreachable
+relay is `SIGSTOP`ed, so its listening socket stays open and the app's
+packets are accepted and never answered — a hung relay, which fails by
+timeout. C8's fails by `ECONNREFUSED` on the first syscall, and nothing here
+had ever published into that.
+
+Both healthy relays reach `.published` while the dead one is still
+`waiting(notConnected)`, and each of the three claims is asserted
+separately: the `destinations` fact names all three with `complete == true`;
+the receipt reports a fact of its own for the dead relay rather than falling
+silent about it; the durable `publishQueue` entry lists all three relays
+with a per-relay state for each; both live relays serve the event back over
+their OWN wire (relay-side truth, independent of anything NMP claims); and
+the single canonical row's provenance grows to exactly the two relays that
+echoed it, never the third.
+
+**The precondition needed a new instrument, and finding that out is a
+RelayLabKit finding.** The first draft asserted the dead relay was
+unreachable *and fast about it* through `RelayHandle.isReachable`, and failed
+on its first run with the relay genuinely dead: `isReachable(timeout: 2)`
+returned `false` after **2.0057 seconds** — the entire budget.
+`Network.framework` classifies a refused connection as
+`NWConnection.State.waiting(.posix(ECONNREFUSED))` and keeps retrying it, so
+a probe watching for `.failed` can only ever end on its own timeout, and a
+refused port is indistinguishable from a black-holed one through that door.
+`isReachable` remains correct for "wait until this stops answering", which is
+all C2 and C13 ask of it. C8 needed the errno, so `RelayLabKit` gained
+`RelayHandle.probe` — a non-blocking `connect(2)`/`poll(2)`/`SO_ERROR` probe
+reporting `.accepted`/`.refused`/`.failed(errno:)`/`.timedOut` with elapsed
+time. Measured against the same dead port: **`refused` in 0.0001s**.
+
+**Falsified two ways, each restored and re-confirmed green.** Not killing the
+third relay at all left every behavioural assertion green and failed on the
+refusal precondition (`accepted` vs `refused`), on the down relay's real
+history `["waiting(notConnected)", "waiting(needsAuth)", "sent(attempt=1)",
+"published"]`, and on the end-of-scenario re-probe. Routing the write to only
+the two healthy relays — the app quietly dropping the failed destination —
+failed on three independent assertions with real values: `destinations` named
+two rather than three, the receipt reported `(never reported)` for the third
+across 11 facts, and the queue entry listed `[]`.
+
+**What C8 deliberately does not assert.** The write never reaches
+`WriteOutcome.settled`, and that is correct rather than a defect: settlement
+needs every destination terminal, the only terminal a permanently-unreachable
+relay could reach is `.gaveUp`, and offline time deliberately consumes no
+attempt ordinal — so a relay that is simply down never spends the ceiling.
+`outcome=nil` is printed on every run.
+
+**C10 is proven live** (#1880-adjacent; see the issue list), the write-side
+half of the local-first claim C2 proved for reads.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C10OfflineWriteThenConvergenceTests.swift`
+publishes one note with **nothing reachable at all**, then restarts the relay
+on the same port and requires the write to go out and settle by itself. It
+does, in a measured **7.7-9.9s** after the relay returns (~7-12s per run), on
+the SAME `Receipt` the single `publish` call returned: no re-publish, no
+`reattachReceipt`, no second engine, no reopened query, no app-side retry
+anywhere in the file.
+
+Proven along the way: the row is visible through the app's own live query
+while offline with `sources` empty; the local key signs with no network; the
+relay serves the event back over its own wire afterwards with the right
+pubkey and content; the row's provenance grows to include the relay with the
+row count still 1; and the relay holds **exactly one** event by this author.
+
+**Two preconditions, and the falsification proves they are the only thing
+standing between this scenario and vacuity.** Leaving the relay UP for the
+write and taking it away only afterwards left *every single convergence
+assertion green* — `converged=true in 0.3s`, the relay serves it back,
+provenance grew, one row, one id — and was caught ONLY by the two
+preconditions: the port probed `accepted` at write time, and a second strfry
+process over the SAME LMDB directory on its own ephemeral port
+(`RelayHandle(dataDir:)`, C13's mechanism used to prove ABSENCE) found the
+event already in the relay's durable store while its port was dead. That is
+C13's fourth falsifier in write form, and it is now mechanically ruled out.
+The second falsifier — never restarting the relay — failed red with the real
+stuck values: `waiting(notConnected)` for the full 120s, `outcome=nil`.
+
+**What C10's duplicate check can and cannot prove.** The relay is asked for
+every event this author wrote and must hold exactly one, which rules out the
+failure that actually loses data: a write re-signed on the retry path is a
+DIFFERENT event id, since an id is the hash of its contents. It does NOT rule
+out NMP sending the identical EVENT frame twice — the relay deduplicates by
+id and the receipt looks the same. Same limit C9 recorded for its no-resend
+assertion; closing it needs relay-side inbound frame counts or a public
+delivery-attempt fact, and neither exists.
+
+**C12 is proven live, and it was the last scenario this document listed as
+blocked.** The blocker was recorded as "session identity did not survive
+restart… there was no identity for a resumed write to remain frozen to". It
+turns out C12 needs no restart at all: the switch it cares about happens
+inside one live engine, which is exactly what an app does when a user taps a
+different account.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C12IdentityFreezeTests.swift`
+covers the two moments a write can be frozen at, which fail differently:
+
+1. **Unsigned and parked** (~5.8s). Alice signs in with a PUBLIC KEY ONLY —
+   an ordinary app state, a user whose signer is not attached yet — and
+   publishes. The write parks at `awaitingSigner(alice)`. Bob is then added
+   WITH a private key and made current, and the scenario waits, deliberately,
+   giving a re-resolving engine every chance to sign alice's parked write
+   with bob's available key. It does not: the signing stage names alice and
+   only alice across the write's whole life. Alice's private key is then
+   added with `makeCurrent: false`, and her write signs, publishes and
+   settles **while bob is the current account**. Measured signing history:
+   `["awaitingSigner(alice)", "inFlight(alice)", "signed(...)"]`. This is the
+   case where re-resolution would be invisible — the wrong event would be
+   perfectly valid and perfectly signed.
+2. **Signed and undelivered** (~8-10s). Alice signs, her only relay is a
+   refused port, bob becomes current, the relay returns, and the delivered
+   event still carries alice's key.
+
+Both cases end at the RELAY, over its own wire: alice must hold exactly the
+one event and **bob must hold nothing at all**. A re-signed write shows up
+there as an event by the wrong author, and no amount of correct internal
+bookkeeping hides it. `PublishQueueEntry.pubkey` reads alice before and after
+the switch in both cases.
+
+**The mid-flight precondition is asserted, and falsification shows why.**
+Giving alice her signer FIRST — so the write signs, publishes and settles
+under her, and only then switching to bob — left every identity assertion
+green (alice has 1 event, bob has 0, stored pubkey is alice's) and was caught
+only by `PublishQueueEntry.outcome` reading `settled` at the instant of the
+switch. Not switching at all in case 2 failed on the switch precondition with
+the real key. Inverting case 1's relay-side identity claim (assert the event
+belongs to bob) failed showing the real values in both directions.
+
+**Three findings from C8/C10/C12, all small, all real.**
+
+`RelayWaiting.needsAuth` appears against a strfry with no NIP-42
+configuration that never sends an `AUTH` frame. Every write in C8 and C10
+walks `notConnected → needsAuth → sent → published`. Nothing is broken — the
+write lane needs its own identity-scoped session established before it can
+send — but the sentence an app builds out of that case is "this relay wants
+you to authenticate", which is not what happened. Recorded, not asserted.
+
+`publishQueue(forEventID:)` returns **zero entries once a write settles**
+(measured during C8's falsification, where all three relays succeeded). The
+queue is outstanding obligations, exactly as its doc says, not a history of
+writes — so an app that wants to know where a FINISHED write went must have
+been holding its receipt. Worth stating because "read your own publish queue
+back" reads like a durable record of writes, and it is a record of unfinished
+ones.
+
+`RelayHandle.isReachable` cannot distinguish a refused port from a
+black-holed one and costs its full timeout for both (the `NWConnection`
+finding above). That is a Canary-lab defect rather than an NMP one, and it is
+fixed by `RelayHandle.probe` rather than by changing `isReachable`, whose
+boolean is still the right tool for the waits C2 and C13 use it for.
+
+**C14 is proven live** (#1888), and the thing it proves is not "the events
+arrived" — that is equally true of a refetch — but that NMP **transferred the
+difference instead of the whole set**.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C14Nip77ReconciliationTests.swift`
+holds ONE feed open across a real strfry outage during which the relay's LMDB
+store gains ten events the local Redb store does not have. The two stores are
+named plainly: NMP's own durable store is one, the relay's is the other. There
+is no app-visible "reconcile these peers" call anywhere in the public API, so
+the scenario is written the way an app actually meets NIP-77 — it doesn't.
+
+The divergence is deterministic by construction, not a race won: the ten
+outage-window events are written by a SECOND strfry process on its own
+ephemeral port over the SAME LMDB directory (C13's `RelayHandle(dataDir:)`)
+while the port the app is dialing provably refuses a real TCP connection, and
+the scenario checks that the app is holding exactly the sixty overlap events at
+that moment.
+
+**The oracle is `RelayDiagnostics.eventsByKind`** — "events actually RECEIVED
+from a relay, counted by kind" — sampled before the outage and again after
+convergence. Measured, with `relay.negentropy.enabled = true`: 60 → 70, a
+delta of **10** for a 10-event difference, with `nip77Handoff` walking
+`none → awaiting_live_eose → backfilling → live` and `nip77Behavior` reaching
+`behaviorally_proven`. The identical flow against the identical relay with
+`relay.negentropy.enabled = false` also converges on all 70 rows — over a
+delta of **70**, 60 → 130, with `nip77Advertisement` at
+`advertised_unsupported`, `nip77Behavior` never leaving `unknown`, and
+`nip77Handoff` never leaving `none`. Both runs are committed; neither half is
+asserted alone, because "converged" without the count proves nothing about
+NIP-77 and the count without the negentropy-off control is not evidence that
+the count is caused by NIP-77.
+
+**A real finding, found by writing the scenario, and the reason it has the
+shape it has.** The first draft primed the store, shut the engine down, seeded
+the divergence and restarted — the obvious shape. It converged **while
+receiving all 70 events**, with NMP simultaneously reporting
+`nip77Behavior = behaviorally_proven` and `nip77Handoff = none`. The NIP-77
+capability probe is asynchronous: a fresh engine places its query's REQ as soon
+as the socket is up, and `begin_neg_handoff` is only reachable when
+`prober.probed(&relay)` already holds a verdict at the moment a request is
+placed. The verdict lands afterwards, and nothing re-plans the in-flight
+request. **A cold start therefore never reconciles — it always refetches, and
+learns the relay supports NIP-77 just too late to use it.** Reconciliation is
+reachable on a LATER request: a reconnect replay, or a new filter. So the
+committed scenario establishes the probe verdict first and asserts it as a
+precondition, which is exactly what makes the measurement afterwards a
+measurement of reconciliation being used rather than of it still being
+discovered.
+
+Falsified three ways, each restored and re-confirmed green. Seeding the
+divergence BEFORE the outage instead of during it left convergence trivially
+true and was caught only by the divergence precondition ("the app already held
+10 outage-window events before the outage ended") — C13's fourth falsifier,
+same shape, same lesson. Inverting the efficiency assertion failed on the real
+captured `10` against a deliberately wrong `60`. Pointing the negentropy
+scenario at the negentropy-disabled relay failed on all four NIP-77 assertions
+at once with real values: `advertised_unsupported`, `unknown`, handoff
+`["none"]`, and 70 events transferred.
+
+**C14's API finding.** Reconciliation is invisible to the app that benefits
+from it. There is no `sync()`/`reconcile()` call, no demand option, and — more
+consequentially — no PER-QUERY fact distinguishing "this coverage came from a
+completed negentropy round" from "this came from a plain REQ": NIP-77 coverage
+is attributed through the exact same `attribute_eose` path as EOSE, so
+`SourceEvidence.reconciledThrough` and `SourceStatus` are identical either way.
+The only public distinguisher is the per-RELAY, engine-global
+`RelayDiagnostics.nip77Advertisement`/`nip77Behavior`/`nip77Handoff` triple,
+and `nip77Handoff` is a transient — a snapshot read after reconciliation
+finished says `live` and nothing about how it got there, so an app must hold
+`observeDiagnostics()` open and accumulate. This scenario does exactly that,
+and would have measured nothing without it.
+
+**C15's relay lab is qualified; C15 itself is NOT proven** — and it is now
+proven not to work, which is a stronger and more useful result than "not
+executed". The distinction between lab and subject is the whole point of the
+paragraphs below, and an earlier revision of this section got it wrong by
+calling C15 "proven live".
+
+**C15 is committed and RED, on purpose** (#1887), with the failure diagnosed:
+**NMP's NIP-42 deadlocks against any relay that challenges in response to a
+request, which is to say against strfry (#1889).**
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C15NIP42AuthTests.swift`
+uses strfry's real native read trigger, `relay.auth.restrictedReadKinds`, and
+leaves `restrictReadToInvolvedPubkey` on, so the seeded events are `p`-tagged
+to NMP's own account and the relay serves them ONLY to a connection
+authenticated as exactly that key. "The row arrived" would therefore have meant
+"NMP authenticated as its own account", not merely "some AUTH happened".
+
+**Every precondition passes, and each is proven by an NMP-free client**
+(`RelayHandle.probeRead`, new in `RelayLabKit`): an unauthenticated plain
+client issuing the identical filter receives a real `["AUTH", <challenge>]`
+frame plus `CLOSED ... auth-required: requested filter requires
+authentication` and zero events; a client that authenticates as a DIFFERENT key
+completes the handshake (`successfully authenticated`) and is still served zero
+events; a client that authenticates as an involved pubkey is served the row. So
+the relay demands AUTH, the challenge is real, the identity scoping is live,
+and the data is retrievable.
+
+**Then NMP does nothing.** It opens the `.nip42` session, reports it under
+exactly the requested access identity, reaches
+`awaitingAuth(phase: .awaitingChallenge)` and stays there indefinitely. It
+transmits nothing at all — not the AUTH proof, not even the REQ. The installed
+`NMPAuthPolicy` is never consulted. `AuthDiagnostics` shows
+`policyBound=false`, `signerBound=false`, `challengeDescriptor=nil`,
+`transportGeneration` incrementing across reconnects and nothing else moving.
+
+**The scenario pins the cause through the public API alone**, with a control
+phase: the SAME relay and SAME filter observed under `.public` instead of
+`.nip42`. One field different, two outcomes —
+
+```
+CONTROL (.public):  status=error                           history=["connecting", "error"]
+SUBJECT (.nip42):   status=awaitingAuth(awaitingChallenge)  history=["connecting", "awaitingAuth(awaitingChallenge)"]
+```
+
+The `.public` session's REQ reaches the relay and is answered (with the
+auth-required refusal, hence `error`). The protected session is the one that
+never transmits. Recorded, not asserted — a diagnosis printed alongside a
+failure, never promoted to a contract, the same treatment C13 gave
+`wireSubCount`.
+
+The mechanism, confirmed in the engine: NMP drops a protected session's ops
+from the wire delta until that session has completed AUTH
+(`crates/nmp-engine/src/core/query.rs`), replays planned REQs at connect only
+for a `Public` session (`core/auth_transport.rs`), and constructs an
+`AuthSessionState` in exactly one place — on an INBOUND `["AUTH", challenge]`
+frame. strfry only emits that frame in response to a request it wants to gate;
+`canary.md` already records both of its genuine triggers as challenge-driven.
+So NMP waits for a challenge the relay will only send once NMP sends the
+request NMP is withholding until it is challenged. Neither side is wrong
+alone; together they never exchange a byte.
+
+**Why no existing test caught this.** Every green NIP-42 test uses a relay
+shape that challenges unsolicited, or fabricates the challenge outright:
+`auth_core_headless.rs` injects a synthetic `RelayMessage::Auth` directly into
+the reducer; `nmp-parity`'s scenarios use `ScriptedRelay`'s
+`auth_required_writes`, whose own doc says it does not challenge on connect and
+does not gate reads, so no protected-READ demand is exercised anywhere; and
+`crates/nmp/tests/integration_capstone.rs` had to hand-build a relay that
+sends AUTH "immediately after the WebSocket handshake, before the client has a
+chance to send a REQ or EVENT". That bespoke relay exists precisely because the
+standard fixture does not challenge unsolicited — which means the only relay
+shape the current engine can complete a NIP-42 round trip against is one built
+for it. This is the exact gap the Canary exists to find, found the first time
+an ordinary application drove the surface against a real third-party relay.
+
+**Left red rather than reshaped**, on the principle C17's #1846 phase
+established: the scenario is not weakened until something passes. It is written
+as the scenario that will be green when #1889 closes — the round trip, the
+denial surfacing as `authDenied`, recovery on a fresh session, and re-AUTH
+after a reconnect are all already asserted and all already have their
+preconditions — so closing the gap is what turns it green.
+
+Falsified twice, each restored and the red state re-confirmed. Because the
+scenario's *result* is a failure, what has to be falsifiable is its
+*preconditions*: pointing `restrictedReadKinds` at a kind the scenario does not
+use made the unauthenticated probe receive no challenge and be served the row
+outright, failing three preconditions with the real captured frames (and,
+usefully, turning the `.public` control green at `finishedStoredEvents`, which
+confirms the auth gate is the only thing holding it at `error`). Turning
+`restrictReadToInvolvedPubkey` off made the wrong-identity probe be served the
+row, failing exactly the one identity-scoping precondition and nothing else.
+
+**The lab qualification that came first**, and still stands: **strfry can be
+driven through a complete NIP-42 round trip on demand** — a prerequisite for
+the scenario, and a real result, since the first two attempts to obtain one
+failed. What it does not touch is NMP, since the handshake is driven by the
+*controller*. C15's own scenario above is what drives `NMPEngine`, and the
+`RestrictedReadProbe` it uses for its preconditions is the read-side successor
+to this write-side qualification.
+
+The route to that qualification corrected an earlier mistake worth keeping.
 
 The first probe gated writes with a strfry `writePolicy` plugin that rejects
 unless the connection is authenticated. That denial is real — but

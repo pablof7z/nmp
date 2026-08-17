@@ -1427,3 +1427,186 @@ fn a_refused_publish_mints_no_receipt_and_no_fact() {
         );
     }
 }
+
+/// Read one receipt's projected entry out of the enumeration door, which is
+/// the surface an app actually reads.
+fn queue_entry(core: &EngineCore, id: ReceiptId) -> PublishQueueEntry {
+    core.publish_queue_entries(None, u8::MAX)
+        .expect("enumerate publish queue")
+        .into_iter()
+        .find(|entry| entry.receipt_id == id)
+        .unwrap_or_else(|| panic!("receipt {id:?} is missing from the publish queue"))
+}
+
+fn state_at(states: &[(RelayUrl, RelayState)], relay: &RelayUrl) -> RelayState {
+    states
+        .iter()
+        .find(|(url, _)| url == relay)
+        .map(|(_, state)| state.clone())
+        .unwrap_or_else(|| panic!("no projected state for {relay}: {states:?}"))
+}
+
+/// A lane that is queued, or that has an attempt on the wire, is not a relay
+/// an app should tell a person it cannot reach.
+///
+/// Three durable lane states used to collapse into the single sentence "the
+/// connection is unavailable", and for every one of them that sentence was
+/// false:
+///
+/// - `Eligible` with a live session: routed and scheduled, waiting only for
+///   the relay's one attempt slot. Nothing is wrong with the connection.
+/// - `InFlight`/`AwaitingHandoff`: an attempt ordinal is SPENT and the bytes
+///   are with transport. There is still no proof they reached the socket, so
+///   it is not `Sent` either -- but it is emphatically not "not connected".
+/// - `InFlight`/`AwaitingAck` after a `Written` handoff: transport PROVED
+///   socket write and flush, and the relay simply has not answered yet.
+///
+/// The one case that legitimately reads as not-connected is kept: an
+/// `Eligible` lane whose session is gone stays durably `Eligible` on purpose
+/// (`schedule_ready` will not spend an fsync per pass to say so), and the
+/// projection asks `connected_relays` the same question the scheduler does.
+#[test]
+fn a_queued_or_in_flight_lane_is_never_reported_as_a_missing_connection() {
+    let a = Keys::generate();
+    let relay = RelayUrl::parse("wss://one-slot.example").unwrap();
+    let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
+    let mut core = new_core(dir);
+    activate(&mut core, &a);
+    connect_signer(&mut core, 0, &relay, a.public_key());
+    authenticate_signer(&mut core, 0, &relay, &a);
+
+    // First write: the relay's one attempt slot is taken, so this lane is in
+    // flight with transport holding the bytes.
+    let first = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Event(draft(1, "first in the slot")),
+        routing: WriteRouting::Auto,
+        identity: Identity::Active,
+    }));
+    let (first_id, generation, unsigned) = find_sign_request(&first);
+    let signed = unsigned.sign_with_keys(&a).unwrap();
+    let first_effects = core.handle(EngineMsg::SignerCompleted(
+        first_id,
+        generation,
+        Ok(signed.clone()),
+    ));
+
+    let state = state_at(&queue_entry(&core, first_id).relay_states, &relay);
+    assert!(
+        matches!(state, RelayState::Attempting { attempt: 1, .. }),
+        "an attempt whose bytes are with transport is attempting -- not \
+         unreachable, and not yet proved sent: {state:?}"
+    );
+
+    // Second write to the SAME relay: the slot is busy, so this lane stays
+    // durably `Eligible` -- over a perfectly live, authenticated session.
+    let second = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Event(draft(2, "waiting for the slot")),
+        routing: WriteRouting::Auto,
+        identity: Identity::Active,
+    }));
+    let (second_id, generation, unsigned) = find_sign_request(&second);
+    core.handle(EngineMsg::SignerCompleted(
+        second_id,
+        generation,
+        Ok(unsigned.sign_with_keys(&a).unwrap()),
+    ));
+
+    let state = state_at(&queue_entry(&core, second_id).relay_states, &relay);
+    assert!(
+        matches!(state, RelayState::Waiting(RelayWaiting::Eligible { .. })),
+        "a queued lane on a connected relay is eligible, not disconnected: \
+         {state:?}"
+    );
+
+    // Transport proves the bytes reached the socket. Now, and only now, the
+    // first lane may claim `Sent`.
+    mark_written(&mut core, &first_effects, &relay);
+    let state = state_at(&queue_entry(&core, first_id).relay_states, &relay);
+    assert!(
+        matches!(state, RelayState::Sent { attempt: 1, .. }),
+        "a proved handoff is sent: {state:?}"
+    );
+}
+
+/// A write that finished still knows where it went.
+///
+/// Settlement DELETES the in-memory pending row -- that deletion is precisely
+/// what `outcome: Settled` is derived from. The destination set and the
+/// per-relay picture used to be read off that same row, so the instant a
+/// write became wholly successful it began reporting that it had reached
+/// nobody. An app showing "published to 2 of 3" went blank on becoming 3 of
+/// 3, which is the worst possible moment to lose the answer.
+///
+/// The durable rows outlive settlement: `close_terminal_intent` removes the
+/// intent row and its deadlines and explicitly retains every route revision,
+/// lane, attempt and detail, which only `remove_publish_queue_entry`
+/// reclaims. The finished picture is still on disk, and this door must read
+/// it from there.
+#[test]
+fn a_settled_write_still_reports_every_relay_it_published_to() {
+    let a = Keys::generate();
+    let one = RelayUrl::parse("wss://settled-one.example").unwrap();
+    let two = RelayUrl::parse("wss://settled-two.example").unwrap();
+    let three = RelayUrl::parse("wss://settled-three.example").unwrap();
+    let dir = FixtureRoutingFacts::new()
+        .with_outbound_routes(a.public_key(), [one.clone(), two.clone(), three.clone()]);
+    let mut core = new_core(dir);
+    activate(&mut core, &a);
+    for (slot, relay) in [(0, &one), (1, &two), (2, &three)] {
+        connect_signer(&mut core, slot, relay, a.public_key());
+        authenticate_signer(&mut core, slot, relay, &a);
+    }
+
+    let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Event(draft(1, "three for three")),
+        routing: WriteRouting::Auto,
+        identity: Identity::Active,
+    }));
+    let (id, generation, unsigned) = find_sign_request(&accepted);
+    let signed = unsigned.sign_with_keys(&a).unwrap();
+    let effects = core.handle(EngineMsg::SignerCompleted(
+        id,
+        generation,
+        Ok(signed.clone()),
+    ));
+
+    for relay in [&one, &two, &three] {
+        mark_written(&mut core, &effects, relay);
+    }
+    for (slot, relay) in [(0, &one), (1, &two), (2, &three)] {
+        core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot,
+                generation: 1,
+            },
+            signer_session(relay, signed.pubkey),
+            RelayFrame::from(RelayMessage::ok(signed.id, true, "")),
+        ));
+    }
+
+    let entry = queue_entry(&core, id);
+    assert_eq!(
+        entry.outcome,
+        Some(WriteOutcome::Settled),
+        "every destination acked, so the write is settled"
+    );
+    assert_eq!(
+        entry.relays,
+        BTreeSet::from([one.clone(), two.clone(), three.clone()]),
+        "a settled write still names the three relays it was routed to"
+    );
+    assert_eq!(
+        entry.relay_states.len(),
+        3,
+        "one projected state per destination, after settlement as before it: \
+         {:?}",
+        entry.relay_states
+    );
+    for relay in [&one, &two, &three] {
+        assert_eq!(
+            state_at(&entry.relay_states, relay),
+            RelayState::Published,
+            "{relay} acked, and settlement must not erase that"
+        );
+    }
+}
