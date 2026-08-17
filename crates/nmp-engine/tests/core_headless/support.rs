@@ -224,20 +224,17 @@ fn signer_session(relay: &RelayUrl, signer: nostr::PublicKey) -> RelaySessionKey
 }
 
 fn protected_pinned_query(relay: &RelayUrl, signer: nostr::PublicKey, kind: u16) -> LiveQuery {
-    LiveQuery::single(
-        nmp_grammar::Demand::new(
+    {
+        let mut demand = nmp_grammar::Demand::new(
             Filter {
                 kinds: Some(BTreeSet::from([kind])),
                 ..Filter::default()
             },
             ReadRouting::Explicit(vec![relay.clone()]),
-        )
-        .map(|demand| Demand {
-            authenticate_as: Some(signer),
-            ..demand
-        })
-        .expect("protected pinned demand is valid"),
-    )
+        ).expect("protected pinned demand is valid");
+        demand.authenticate_as = Some(signer);
+        LiveQuery::single(demand)
+    }
 }
 
 fn subscribed_handle(effects: &[Effect]) -> ObservationId {

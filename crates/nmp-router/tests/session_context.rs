@@ -22,10 +22,10 @@ fn authorless_public_a_b_are_three_exact_session_plans() {
     ];
     let demand = accesses
         .into_iter()
-        .map(|access| ContextualAtom {
+        .map(|authenticate_as| ContextualAtom {
             filter: filter.clone(),
             routing: source.clone(),
-            authenticate_as: None,
+            authenticate_as,
             routing_evidence: BTreeSet::new(),
         })
         .collect();

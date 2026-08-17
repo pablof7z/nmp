@@ -36,22 +36,26 @@ use nostr::{Event, Timestamp};
 /// The `CoverageKey` schema version (#106): folded into every key's HASH
 /// (below) and PREFIXED onto its durable row key
 /// (`RedbStore::coverage_row_key`). The current identity is the full
-/// [`ContextualAtom`] (routing and session identity folded in), so two Demands differing
-/// only in intended authority never share a coverage row (bug-class ledger
-/// #18's store-side twin of the atom-refcount fix).
+/// [`ContextualAtom`] (routing and the demand's identity folded in), so two
+/// Demands that would authenticate as different keys never share a coverage
+/// row (bug-class ledger #18's store-side twin of the atom-refcount fix).
 ///
 /// It is a schema tag, not a compatibility discriminator: no reader decodes a
 /// different version, and `gc` has no purge pass for one (#867).
+///
+/// Bumped 2 -> 3 for the durable row-key format change alone. The DIGEST is
+/// byte-identical to version 2 for every value the fold can take, so this
+/// buys no correctness on its own and no aliasing bug motivated it.
 pub const COVERAGE_KEY_VERSION: u8 = 3;
 
 /// The coverage identity of a narrow demand atom: its [`ContextualAtom`]
-/// (selection + source + access, #106) with `since`/`until`/`limit` ERASED
+/// (selection + routing + identity, #106) with `since`/`until`/`limit` ERASED
 /// from the selection, canonically hashed and version-tagged (ruling §1,
 /// refined by Fable's C). Two atoms that differ only in their time window
 /// or result cap hash identically — a floored refetch (`since = T+1`) must
 /// find the SAME row, never a fresh one. Two atoms that differ in
-/// `ReadRouting` or authenticated identity must NEVER share a row, even with an
-/// otherwise-identical selection.
+/// `ReadRouting`, or in the identity they authenticate as, must NEVER share
+/// a row, even with an otherwise-identical selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CoverageKey(DescriptorHash);
 

@@ -30,21 +30,18 @@ fn signer_session(relay: &RelayUrl, signer: PublicKey) -> RelaySessionKey {
 /// this test drives through the AUTH sequence, and its evidence therefore
 /// tracks that session's AUTH phase directly.
 fn protected_pinned_query(relay: &RelayUrl, signer: PublicKey, authors: Binding) -> LiveQuery {
-    LiveQuery::single(
-        Demand::new(
+    {
+        let mut demand = Demand::new(
             Filter {
                 kinds: Some(BTreeSet::from([1u16])),
                 authors: Some(authors),
                 ..Filter::default()
             },
             ReadRouting::Explicit(vec![relay.clone()]),
-        )
-        .map(|demand| Demand {
-            authenticate_as: Some(signer),
-            ..demand
-        })
-        .expect("protected pinned demand is valid"),
-    )
+        ).expect("protected pinned demand is valid");
+        demand.authenticate_as = Some(signer);
+        LiveQuery::single(demand)
+    }
 }
 
 /// Drive one relay generation from `RelayConnected` through a successful

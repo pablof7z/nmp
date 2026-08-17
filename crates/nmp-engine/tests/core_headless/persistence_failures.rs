@@ -308,14 +308,12 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         nmp_grammar::Demand::new(selection.clone(), source.clone())
             .expect("public pinned demand"),
     );
-    let protected_query = LiveQuery::single(
-        nmp_grammar::Demand::new(selection, source.clone())
-            .map(|demand| nmp_grammar::Demand {
-                authenticate_as: Some(protected_author.public_key()),
-                ..demand
-            })
-            .expect("protected pinned demand"),
-    );
+    let protected_query = {
+        let mut demand = nmp_grammar::Demand::new(selection, source.clone())
+            .expect("protected pinned demand");
+        demand.authenticate_as = Some(protected_author.public_key());
+        LiveQuery::single(demand)
+    };
     let store = RedbStore::temporary_with_observation_precommit_io()
         .expect("temporary Redb observation-I/O fixture");
     let mut core =

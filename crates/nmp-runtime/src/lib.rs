@@ -502,20 +502,16 @@ mod relay_worker_reconciliation_tests {
     }
 
     fn protected_query(relay: &RelayUrl, signer: PublicKey, kind: u16) -> LiveQuery {
-        LiveQuery::single(
-            Demand::new(
-                Filter {
-                    kinds: Some(BTreeSet::from([kind])),
-                    ..Filter::default()
-                },
-                ReadRouting::Explicit(vec![relay.clone()]),
-            )
-            .map(|demand| Demand {
-                authenticate_as: Some(signer),
-                ..demand
-            })
-            .expect("protected pinned query"),
+        let mut demand = Demand::new(
+            Filter {
+                kinds: Some(BTreeSet::from([kind])),
+                ..Filter::default()
+            },
+            ReadRouting::Explicit(vec![relay.clone()]),
         )
+        .expect("protected pinned query");
+        demand.authenticate_as = Some(signer);
+        LiveQuery::single(demand)
     }
 
     /// #598's mechanical root cause at the runtime boundary: one relay's

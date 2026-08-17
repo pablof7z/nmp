@@ -414,7 +414,7 @@ mod tests {
     /// #106's anti-alias core: the identical `ConcreteFilter` under two
     /// distinct `ReadRouting`s must hash to two distinct
     /// `ContextualAtom` identities -- this is precisely the bug-class #18
-    /// collapse (same selection, different intended authority, same atom)
+    /// collapse (same selection, different identity, same atom)
     /// the whole `Demand`/`ContextualAtom` widening exists to close.
     #[test]
     fn contextual_atom_hash_distinguishes_identical_filters_under_different_read_routing() {
