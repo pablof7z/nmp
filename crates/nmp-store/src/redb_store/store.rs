@@ -600,7 +600,11 @@ impl RedbStore {
             *shared = Some(Arc::clone(&db));
         }
         self.db = Some(db);
-        super::publish_queue_ops::maintain_terminal_receipts(self)?;
+        super::publish_queue_ops::maintain_terminal_receipts_at(
+            self,
+            crate::terminal_retention::wall_clock_now(),
+            crate::terminal_retention::TerminalRetentionLimits::PRODUCTION,
+        )?;
         Ok(())
     }
 
@@ -1037,7 +1041,12 @@ impl RedbStore {
             #[cfg(test)]
             unstaged_lane_bootstraps: AtomicU64::new(0),
         };
-        super::publish_queue_ops::maintain_terminal_receipts(&mut store).map_err(|error| {
+        super::publish_queue_ops::maintain_terminal_receipts_at(
+            &mut store,
+            crate::terminal_retention::wall_clock_now(),
+            crate::terminal_retention::TerminalRetentionLimits::PRODUCTION,
+        )
+        .map_err(|error| {
             RedbStoreOpenError::Database(redb::Error::Corrupted(format!(
                 "terminal receipt maintenance failed during open: {error}"
             )))
