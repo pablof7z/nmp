@@ -321,6 +321,80 @@ fn an_explicit_identity_selects_a_secondary_author_and_pins_it_through_signing()
     assert!(matches!(effects.first(), Some(Effect::WriteAccepted(..))));
 }
 
+/// `on_publish`'s doc claims "acceptance pins the resolved key ... a later
+/// `set_current_account` cannot retarget it". Nothing in the workspace
+/// exercised the second half: every identity test either never moves the
+/// active account, or moves it before publishing rather than after. This is
+/// the missing falsifier. An app that publishes as itself and then switches
+/// account while the write is still unsigned must still have that write
+/// signed by the key that was current AT ACCEPTANCE, not by whoever is
+/// current when the signer finally answers.
+#[test]
+fn switching_the_active_account_after_acceptance_never_retargets_the_pinned_signer() {
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let mut core = new_core(FixtureRoutingFacts::new());
+    activate(&mut core, &a);
+
+    // The app names no identity at all -- `Active` resolves A at acceptance.
+    let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+        payload: WritePayload::Event(draft(1, "accepted while a is current")),
+        routing: WriteRouting::Auto,
+        identity: Identity::Active,
+        correlation: None,
+    }));
+    assert!(matches!(accepted.first(), Some(Effect::WriteAccepted(..))));
+    let (id, generation, template) = find_sign_request(&accepted);
+    assert_eq!(
+        template.pubkey,
+        a.public_key(),
+        "the write roots on the account that was current when it was accepted"
+    );
+
+    // The signer drops out, leaving the write accepted-but-unsigned: the
+    // exact window in which an app can switch account.
+    core.handle(EngineMsg::SignerUnavailable(id, generation));
+
+    // Switching to B must not hand this write to B. `SetActivePubkey`
+    // re-arms matching accepted work for the newly-current key, so this is
+    // precisely where a retarget would show up if one existed.
+    let switched = core.handle(EngineMsg::SetActivePubkey(Some(b.public_key())));
+    assert!(
+        !switched
+            .iter()
+            .any(|effect| matches!(effect, Effect::RequestSign(..))),
+        "B becoming current must re-arm nothing: this write is not B's -- got {switched:?}"
+    );
+
+    // A's signer returning re-arms the exact write, still targeting A, even
+    // though A is no longer the current account.
+    let rearmed = core.handle(EngineMsg::SignerAttached(a.public_key()));
+    let (rearmed_id, rearmed_generation, rearmed_template) = find_sign_request(&rearmed);
+    assert_eq!(rearmed_id, id, "the same obligation, not a second write");
+    assert_eq!(
+        rearmed_template.pubkey,
+        a.public_key(),
+        "the pinned author survives an account switch"
+    );
+
+    // And it settles under A while B is current.
+    let signed = rearmed_template.sign_with_keys(&a).unwrap();
+    let expected_id = signed.id;
+    let settled = core.handle(EngineMsg::SignerCompleted(
+        rearmed_id,
+        rearmed_generation,
+        Ok(signed),
+    ));
+    assert!(
+        settled.iter().any(|effect| matches!(
+            effect,
+            Effect::EmitReceipt(rid, WriteFact::Signing(SigningState::Signed { event_id }))
+                if *rid == id && *event_id == expected_id
+        )),
+        "the A-authored body promotes to Signed with B current -- got {settled:?}"
+    );
+}
+
 /// #47 falsifier (b), restated for a payload that cannot state an author.
 /// The "draft author disagrees with the current account" refusal is gone --
 /// not weakened, DELETED, because a builder has no author field for the
