@@ -1,5 +1,6 @@
 //! Exact local REQ attempt, refusal, and retry ownership (#849).
 
+use nmp_grammar::RelaySessionKey;
 use std::{borrow::Cow, collections::BTreeSet};
 
 use nmp_grammar::{Binding, Demand, Filter, IndexedTagName};
@@ -173,7 +174,7 @@ fn repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_
             ))),
         )
     });
-    assert!(core.store.get_coverage(claim, &relay).unwrap().is_none());
+    assert!(core.store.get_coverage(claim, &RelaySessionKey::unauthenticated(relay.clone())).unwrap().is_none());
 
     let retry_one = core.handle(EngineMsg::Tick(due_one));
     let (_, _, _, second_attempt) = only_request(&retry_one);

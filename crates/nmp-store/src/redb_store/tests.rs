@@ -1,3 +1,4 @@
+use nmp_grammar::RelaySessionKey;
 use super::publish_queue_codec::{NEXT_RELAY_ID_KEY, PUBLISH_QUEUE_CODEC_VERSION_KEY};
 use super::*;
 use crate::{DurabilityOutcome, PersistenceFault};
@@ -932,12 +933,20 @@ fn configured_coverage_write_failure_targets_one_row_rolls_back_and_is_consumed_
         .expect("persistent Redb coverage-write failure fixture");
 
     store
-        .record_coverage(&[(unrelated, relay.clone(), interval)])
+        .record_coverage(&[(unrelated, RelaySessionKey::unauthenticated(relay.clone()), interval)])
         .expect("an unrelated row cannot consume the exact construction arm");
 
     let batch = [
-        (target, relay.clone(), interval),
-        (collateral, relay.clone(), interval),
+        (
+            target,
+            RelaySessionKey::unauthenticated(relay.clone()),
+            interval,
+        ),
+        (
+            collateral,
+            RelaySessionKey::unauthenticated(relay.clone()),
+            interval,
+        ),
     ];
     let error = store
         .record_coverage(&batch)
@@ -946,10 +955,10 @@ fn configured_coverage_write_failure_targets_one_row_rolls_back_and_is_consumed_
         error.to_string(),
         "durable-store persistence failure: injected coverage write failure"
     );
-    assert_eq!(store.get_coverage(target_key, &relay).unwrap(), None);
-    assert_eq!(store.get_coverage(collateral_key, &relay).unwrap(), None);
+    assert_eq!(store.get_coverage(target_key, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(), None);
+    assert_eq!(store.get_coverage(collateral_key, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(), None);
     assert_eq!(
-        store.get_coverage(unrelated_key, &relay).unwrap(),
+        store.get_coverage(unrelated_key, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
         Some(interval),
         "the independently committed unrelated row survives"
     );
@@ -958,11 +967,11 @@ fn configured_coverage_write_failure_targets_one_row_rolls_back_and_is_consumed_
         .record_coverage(&batch)
         .expect("the same store retries after consuming the one-shot refusal");
     assert_eq!(
-        store.get_coverage(target_key, &relay).unwrap(),
+        store.get_coverage(target_key, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
         Some(interval)
     );
     assert_eq!(
-        store.get_coverage(collateral_key, &relay).unwrap(),
+        store.get_coverage(collateral_key, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
         Some(interval)
     );
 }
@@ -1267,7 +1276,7 @@ fn coverage_row_key_carries_the_full_256_bit_digest() {
     };
     let key = compute_coverage_key(&atom);
     let relay = RelayUrl::parse("wss://relay.example").unwrap();
-    let row_key = RedbStore::coverage_row_key(key, &relay);
+    let row_key = RedbStore::coverage_row_key(key, &nmp_grammar::RelaySessionKey::unauthenticated(relay.clone()));
 
     // Row key shape is now `<version-prefix><hex>:<relay>` (#106) --
     // skip the version prefix before taking the hex segment.
@@ -3343,7 +3352,7 @@ fn a_persisted_coverage_row_carries_no_filter_derived_bytes() {
     store
         .record_coverage(&[(
             atom,
-            relay,
+            RelaySessionKey::unauthenticated(relay.clone()),
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
         )])
         .expect("record coverage");

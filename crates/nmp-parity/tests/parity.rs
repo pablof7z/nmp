@@ -831,15 +831,15 @@ fn ffi_auth_diagnostics_phase_name(phase: FfiAuthPhase) -> &'static str {
     }
 }
 
-fn direct_access_name(authenticate_as: AccessContext) -> String {
-    match access {
+fn direct_access_name(authenticate_as: Option<nostr::PublicKey>) -> String {
+    match authenticate_as {
         None => "public".to_string(),
         Some(public_key) => format!("nip42:{}", public_key.to_hex()),
     }
 }
 
-fn ffi_access_name(authenticate_as: FfiAccessContext) -> String {
-    match access {
+fn ffi_access_name(authenticate_as: Option<String>) -> String {
+    match authenticate_as {
         None => "public".to_string(),
         Some(public_key) => format!("nip42:{public_key}"),
     }
@@ -1286,7 +1286,7 @@ fn normalize_direct_diagnostics(snapshot: DiagnosticsSnapshot, relay: &str) -> N
         .into_iter()
         .map(|session| NormAuthSession {
             relay: normalize_url(session.relay.as_str(), relay),
-            authenticate_as: direct_access_name(session.authenticated_as),
+            authenticate_as: direct_access_name(session.authenticate_as),
             transport_generation: session.transport_generation,
             epoch_sequence: session.epoch_sequence,
             challenge_descriptor: session.challenge_hash,
@@ -1378,7 +1378,7 @@ fn normalize_ffi_diagnostics(snapshot: FfiDiagnosticsSnapshot, relay: &str) -> N
         .into_iter()
         .map(|session| NormAuthSession {
             relay: normalize_url(&session.relay, relay),
-            authenticate_as: ffi_access_name(session.authenticated_as),
+            authenticate_as: ffi_access_name(session.authenticate_as),
             transport_generation: session.transport_generation,
             epoch_sequence: session.epoch_sequence,
             challenge_descriptor: session.challenge_descriptor,
@@ -2048,7 +2048,7 @@ fn collect_ffi_receipts_until_awaiting_auth(
 }
 
 /// The exact ordered pre-ack facts every durable parity write now exposes.
-/// #8 U2: durable writes ride the cold `AccessContext::Nip42` session
+/// #8 U2: durable writes ride the cold identity-bound session
 /// instead of the already-warm public read session, so the reducer emits
 /// one deterministic `AwaitingRelay` beat between `Routed` and `Sent` (it
 /// schedules the eligible lane in the same turn that dials the session,

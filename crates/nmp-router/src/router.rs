@@ -754,7 +754,7 @@ impl Router {
         let mut budget_refused_requests: Vec<(RelaySessionKey, WireReq)> = Vec::new();
         for (session, by_source) in bag {
             let relay = session.relay.clone();
-            let authenticate_as = session.authenticated_as;
+            let authenticate_as = session.authenticate_as;
             let mut session_reqs: Vec<WireReq> = Vec::new();
             for (source, entries) in by_source {
                 let merged = self.rules.coalesce_with(entries);

@@ -747,7 +747,7 @@ fn record_coverage_and_gc_report_a_corrupt_coverage_row() {
         store
             .record_coverage(&[(
                 atom.clone(),
-                relay(),
+                RelaySessionKey::unauthenticated(relay()),
                 CoverageInterval::new(Timestamp::from(10), Timestamp::from(20)),
             )])
             .expect("record_coverage");
@@ -761,7 +761,7 @@ fn record_coverage_and_gc_report_a_corrupt_coverage_row() {
         assert_typed_refusal("record_coverage", || {
             store.record_coverage(&[(
                 atom.clone(),
-                relay(),
+                RelaySessionKey::unauthenticated(relay()),
                 CoverageInterval::new(Timestamp::from(30), Timestamp::from(40)),
             )])
         });
@@ -1242,7 +1242,7 @@ fn a_healthy_store_answers_every_hardened_door() {
         store
             .get_coverage(
                 crate::coverage::coverage_key(&healthy_atom(&keys())),
-                &relay()
+                &RelaySessionKey::unauthenticated(relay())
             )
             .expect("a healthy store answers the coverage peek"),
         None,

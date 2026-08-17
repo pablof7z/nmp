@@ -64,7 +64,7 @@ mod tests {
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Auto,
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
 
@@ -87,7 +87,7 @@ mod tests {
         let atom = ContextualAtom {
             filter: ConcreteFilter::default(),
             routing: ReadRouting::Auto,
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         assert_eq!(coverage_claim_atoms(&atom), BTreeSet::from([atom]));
@@ -104,7 +104,7 @@ mod tests {
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Auto,
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         assert!(coverage_claim_atoms(&atom).is_empty());
@@ -124,7 +124,7 @@ mod tests {
             routing: ReadRouting::Explicit(vec![
                 RelayUrl::parse("wss://coverage-claims.example").unwrap()
             ]),
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         assert_eq!(coverage_claim_atoms(&explicit), BTreeSet::from([explicit]));

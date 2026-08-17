@@ -1,5 +1,6 @@
 //! Admission-window and surgical lifecycle falsifiers for #1341/#1342.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 use nmp_grammar::{
     Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, IdentityField,
@@ -246,7 +247,7 @@ fn fresh_max_age_is_coverage_satisfied_alone_and_never_borrows_live_placement() 
     store
         .record_coverage(&[(
             atom,
-            relay.clone(),
+            RelaySessionKey::unauthenticated(relay.clone()),
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
         )])
         .unwrap();

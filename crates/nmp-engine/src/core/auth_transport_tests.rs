@@ -38,8 +38,11 @@ fn protected_pinned_query(relay: &RelayUrl, signer: PublicKey, authors: Binding)
                 ..Filter::default()
             },
             ReadRouting::Explicit(vec![relay.clone()]),
-            Some(signer),
         )
+        .map(|demand| Demand {
+            authenticate_as: Some(signer),
+            ..demand
+        })
         .expect("protected pinned demand is valid"),
     )
 }

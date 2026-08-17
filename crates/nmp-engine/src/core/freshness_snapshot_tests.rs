@@ -1,3 +1,4 @@
+use nmp_grammar::RelaySessionKey;
 use std::collections::BTreeSet;
 
 use nmp_grammar::{
@@ -34,7 +35,7 @@ fn fresh_max_age_reads_each_coverage_row_once() {
     store
         .record_coverage(&[(
             atom,
-            relay.clone(),
+            RelaySessionKey::unauthenticated(relay.clone()),
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(99_000u64)),
         )])
         .unwrap();
@@ -107,7 +108,7 @@ fn max_age_opening_retains_only_its_scoped_candidate_plan() {
     store
         .record_coverage(&[(
             candidate_atom,
-            candidate_relay.clone(),
+            RelaySessionKey::unauthenticated(candidate_relay.clone()),
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(99_000u64)),
         )])
         .unwrap();

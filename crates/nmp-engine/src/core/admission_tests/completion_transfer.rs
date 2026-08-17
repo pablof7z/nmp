@@ -1,5 +1,6 @@
 //! completion transfer admission proofs.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 use nmp_store::testing;
 
@@ -44,7 +45,7 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
     });
 
     let open_piece = |core: &mut EngineCore, piece: &ContextualAtom| {
-        let sub_id = SubId::for_wire(relay.clone(), &piece.filter, &piece.routing, piece.access);
+        let sub_id = SubId::for_wire(relay.clone(), &piece.filter, &piece.routing, piece.authenticate_as);
         let claim = coverage_key(piece);
         core.white_box("attribution.retain_live_request_claims", |s| {
             s.attribution
@@ -79,13 +80,13 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
         )
     });
     assert_eq!(
-        core.store.get_coverage(incumbent_claim, &relay).unwrap(),
+        core.store.get_coverage(incumbent_claim, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
         Some(CoverageInterval::new(
             Timestamp::from(0),
             Timestamp::from(180)
         ))
     );
-    assert_eq!(core.store.get_coverage(whole_claim, &relay).unwrap(), None);
+    assert_eq!(core.store.get_coverage(whole_claim, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(), None);
 
     core.white_box("clock", |s| s.clock = Timestamp::from(200u64));
     core.white_box("on_relay_frame", |s| {
@@ -98,14 +99,14 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
         )
     });
     assert_eq!(
-        core.store.get_coverage(residual_claim, &relay).unwrap(),
+        core.store.get_coverage(residual_claim, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
         Some(CoverageInterval::new(
             Timestamp::from(0),
             Timestamp::from(200)
         ))
     );
     assert_eq!(
-        core.store.get_coverage(whole_claim, &relay).unwrap(),
+        core.store.get_coverage(whole_claim, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
         Some(CoverageInterval::new(
             Timestamp::from(0),
             Timestamp::from(180)
@@ -167,7 +168,7 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
             store
                 .record_coverage(&[(
                     added.clone(),
-                    relay.clone(),
+                    RelaySessionKey::unauthenticated(relay.clone()),
                     CoverageInterval::new(Timestamp::from(0), Timestamp::from(99)),
                 )])
                 .expect("seed exact coverage row");
@@ -183,7 +184,7 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
             relay,
             &incumbent.filter,
             &incumbent.routing,
-            incumbent.authenticated_as,
+            incumbent.authenticate_as,
         );
         core.white_box("attribution.retain_live_request_claims", |s| {
             s.attribution
@@ -272,7 +273,7 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
         relay.clone(),
         &incumbent.filter,
         &incumbent.routing,
-        incumbent.authenticated_as,
+        incumbent.authenticate_as,
     );
     let added_for_generation = |generation: u16| ContextualAtom {
         filter: ConcreteFilter {

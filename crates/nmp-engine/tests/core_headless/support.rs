@@ -230,8 +230,7 @@ fn protected_pinned_query(relay: &RelayUrl, signer: nostr::PublicKey, kind: u16)
                 kinds: Some(BTreeSet::from([kind])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay.clone()]),
-            Some(signer),
+            ReadRouting::Explicit(vec![relay.clone()])
         )
         .expect("protected pinned demand is valid"),
     )
@@ -449,7 +448,7 @@ fn mark_written(core: &mut EngineCore, effects: &[Effect], relay: &RelayUrl) -> 
         .find_map(|effect| match effect {
             Effect::PublishEvent(candidate, event, correlation)
                 if &candidate.relay == relay
-                    && candidate.access == Some(event.pubkey) =>
+                    && candidate.authenticate_as == Some(event.pubkey) =>
             {
                 Some(*correlation)
             }

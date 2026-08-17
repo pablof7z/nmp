@@ -1,11 +1,12 @@
 //! Fresh-id request replacement and NIP-77 transition ownership.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 
 #[test]
 fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_accept() {
     let relay = RelayUrl::parse("wss://fresh-request-id.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let handle = TransportRelayHandle {
         slot: 82,
         generation: 1,
@@ -96,12 +97,12 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
     }
     assert!(core
         .store
-        .get_coverage(first_claim, &relay)
+        .get_coverage(first_claim, &RelaySessionKey::unauthenticated(relay.clone()))
         .unwrap()
         .is_none());
     assert!(core
         .store
-        .get_coverage(second_claim, &relay)
+        .get_coverage(second_claim, &RelaySessionKey::unauthenticated(relay.clone()))
         .unwrap()
         .is_some());
 
@@ -119,7 +120,7 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
 #[test]
 fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candidate_eose() {
     let relay = RelayUrl::parse("wss://fresh-nip77-id.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let handle = TransportRelayHandle {
         slot: 83,
         generation: 1,

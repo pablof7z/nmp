@@ -206,18 +206,16 @@ impl ConcreteFilter {
 pub struct ContextualAtom {
     pub filter: ConcreteFilter,
     pub routing: ReadRouting,
-    /// The demand's identity OVERRIDE, carried verbatim. `None` means the
-    /// demand named nobody and reads on the ordinary connection; `Some(key)`
-    /// means it asked to be authenticated as that key specifically.
+    /// The identity these reads authenticate as, carried verbatim from the
+    /// demand and passed straight into the session key by `nmp-router`.
+    /// Nothing resolves it and no current account is consulted — this crate
+    /// has no access to one, and an atom must not change identity when the
+    /// account changes.
     ///
-    /// Nothing is resolved here and no current account is consulted — this
-    /// crate has no access to one, and an atom must not change identity when
-    /// the account changes. It is part of atom identity only so that two
-    /// demands naming DIFFERENT overrides never collapse onto one wire
-    /// subscription; it is intent, never a claim about what a socket holds.
-    /// What a socket actually holds is `RelaySessionKey::authenticated_as`,
-    /// which is discovered, and it is that value — not this one — that keys
-    /// durable coverage.
+    /// It is part of atom identity because two demands naming different
+    /// identities are genuinely different acquisitions: what a relay serves
+    /// depends on who asked. It is the same value that keys durable coverage
+    /// (`nmp_store::coverage_key`).
     pub authenticate_as: Option<nostr::PublicKey>,
     /// Runtime routing facts projected with this atom. These facts are part
     /// of live atom identity so provenance growth produces an exact
@@ -268,7 +266,7 @@ impl ContextualAtom {
 pub fn fold_context(
     base: DescriptorHash,
     routing: &ReadRouting,
-    authenticated_as: Option<nostr::PublicKey>,
+    authenticate_as: Option<nostr::PublicKey>,
 ) -> DescriptorHash {
     let tagged = match routing {
         ReadRouting::Auto => fold_byte(base, 0),
@@ -302,7 +300,7 @@ pub fn fold_context(
     // fixed 32 bytes. A present key can therefore never be mistaken for an
     // absent one whose base digest happened to end in the key's bytes — the
     // tag byte sits between them and the width is fixed.
-    match authenticated_as {
+    match authenticate_as {
         None => fold_byte(tagged, 0),
         Some(public_key) => {
             let mut bytes = Vec::with_capacity(65);
@@ -424,7 +422,7 @@ mod tests {
         let auto = ContextualAtom {
             filter: filter.clone(),
             routing: crate::descriptor::ReadRouting::Auto,
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let explicit = ContextualAtom {
@@ -433,7 +431,7 @@ mod tests {
                 "wss://r1.example",
             )
             .unwrap()]),
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         assert_ne!(
@@ -455,13 +453,13 @@ mod tests {
         let pinned_r1 = ContextualAtom {
             filter: filter.clone(),
             routing: crate::descriptor::ReadRouting::Explicit(vec![r1]),
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let pinned_r2 = ContextualAtom {
             filter,
             routing: crate::descriptor::ReadRouting::Explicit(vec![r2]),
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         assert_ne!(
@@ -489,7 +487,7 @@ mod tests {
         let atom = |relays: Vec<nostr::RelayUrl>| ContextualAtom {
             filter: filter.clone(),
             routing: crate::descriptor::ReadRouting::Explicit(relays),
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let ascending = atom(vec![r1.clone(), r2.clone()]);
@@ -526,7 +524,7 @@ mod tests {
         let atom = |demand: Demand| ContextualAtom {
             filter: cf(vec!["aa"], vec![]),
             routing: demand.routing,
-            authenticated_as: demand.authenticate_as,
+            authenticate_as: demand.authenticate_as,
             routing_evidence: BTreeSet::new(),
         };
         assert_eq!(
@@ -540,7 +538,7 @@ mod tests {
         let mut hinted = ContextualAtom {
             filter: cf(vec!["aa"], vec![]),
             routing: crate::descriptor::ReadRouting::Auto,
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let plain = hinted.clone();

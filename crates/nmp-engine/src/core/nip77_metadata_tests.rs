@@ -1,5 +1,6 @@
 //! Exact plan-to-NIP-77 child metadata ownership (#1350).
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom};
@@ -44,7 +45,7 @@ impl Fixture {
             relay.clone(),
             &incumbent.filter,
             &incumbent.routing,
-            incumbent.authenticated_as,
+            incumbent.authenticate_as,
         );
         let incumbent_claims = BTreeSet::from([coverage_key(&incumbent)]);
         let incumbent_demands = BTreeSet::from([DemandKey::for_atom(&incumbent)]);

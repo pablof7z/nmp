@@ -1,5 +1,6 @@
 //! resolver delta admission proofs.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 
 #[test]
@@ -162,7 +163,7 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
             relay,
             &surviving.filter,
             &surviving.routing,
-            surviving.access,
+            surviving.authenticate_as,
         );
         core.white_box("record_observed_request", |s| {
             s.record_observed_request(RequestSend {

@@ -1,5 +1,6 @@
 //! execution targets admission proofs.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 
 #[test]
@@ -27,7 +28,7 @@ fn incompatible_requests_visit_only_their_exact_execution_targets() {
             .count(),
         OWNERS as usize
     );
-    let session = RelaySessionKey::public(relay);
+    let session = RelaySessionKey::unauthenticated(relay);
     let requests = core.router.plan().reqs[&session].clone();
     let relay_request_facts = requests
         .iter()
@@ -74,7 +75,7 @@ fn incompatible_requests_visit_only_their_exact_execution_targets() {
 fn cache_only_siblings_are_not_execution_targets_of_a_live_request() {
     for live_closes_first in [false, true] {
         let relay = RelayUrl::parse("wss://admission-request-target-owner.example").unwrap();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let live = observation_id(&core.handle(EngineMsg::Subscribe(query(
             &relay,
@@ -152,7 +153,7 @@ fn cache_only_siblings_are_not_execution_targets_of_a_live_request() {
 #[test]
 fn a_shared_request_targets_every_wire_active_owner_and_no_cache_only_sibling() {
     let relay = RelayUrl::parse("wss://admission-request-target-shared.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let live_a =
         observation_id(&core.handle(EngineMsg::Subscribe(query(&relay, "same", Freshness::Live))));
@@ -191,7 +192,7 @@ fn a_shared_request_targets_every_wire_active_owner_and_no_cache_only_sibling() 
 fn window_distinct_requests_target_only_their_exact_demand_owners_on_send_and_replay() {
     for limited_closes_first in [false, true] {
         let relay = RelayUrl::parse("wss://admission-request-target-window.example").unwrap();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let unbounded = observation_id(&core.handle(EngineMsg::Subscribe(query(
             &relay,
@@ -285,14 +286,14 @@ fn nested_same_demand_boundaries_target_only_wire_participating_scopes() {
     for outer_freshness in [Freshness::CacheOnly, Freshness::MaxAge { seconds: 60 }] {
         for nested_closes_first in [false, true] {
             let relay = RelayUrl::parse("wss://admission-request-target-scope.example").unwrap();
-            let session = RelaySessionKey::public(relay.clone());
+            let session = RelaySessionKey::unauthenticated(relay.clone());
             let author = Keys::generate();
             let mut store = seeded_profiles(&relay, &[&author]);
             if matches!(outer_freshness, Freshness::MaxAge { .. }) {
                 store
                     .record_coverage(&[(
                         profile_atom(&relay, author.public_key()),
-                        relay.clone(),
+                        RelaySessionKey::unauthenticated(relay.clone()),
                         CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
                     )])
                     .expect("seed fresh outer coverage");
@@ -398,7 +399,7 @@ fn reactive_nested_same_demand_replaces_only_the_live_scope_target_revision() {
     for outer_freshness in [Freshness::CacheOnly, Freshness::MaxAge { seconds: 60 }] {
         let relay =
             RelayUrl::parse("wss://admission-request-target-scope-revision.example").unwrap();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let account_a = Keys::generate();
         let account_b = Keys::generate();
         let mut store = seeded_profiles(&relay, &[&account_a, &account_b]);
@@ -406,7 +407,7 @@ fn reactive_nested_same_demand_replaces_only_the_live_scope_target_revision() {
             store
                 .record_coverage(&[(
                     profile_atom(&relay, account_a.public_key()),
-                    relay.clone(),
+                    RelaySessionKey::unauthenticated(relay.clone()),
                     CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
                 )])
                 .expect("seed fresh outer coverage");

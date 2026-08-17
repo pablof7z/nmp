@@ -9,6 +9,7 @@
 //! survive recovery without relying on another store implementation as an
 //! oracle.
 
+use nmp_grammar::RelaySessionKey;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -434,7 +435,7 @@ fn coverage_atom(keys: &Keys) -> ContextualAtom {
             limit: None,
         },
         routing: ReadRouting::Auto,
-        authenticated_as: None,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -521,7 +522,7 @@ fn normalized_state(
         .iter()
         .map(|(atom, relay)| {
             let interval = store
-                .get_coverage(coverage_key(atom), relay)
+                .get_coverage(coverage_key(atom), &RelaySessionKey::unauthenticated(relay.clone()))
                 .expect("oracle coverage read");
             json!({
                 "key": blake3::hash(coverage_key(atom).as_bytes()).to_hex().to_string(),
@@ -888,12 +889,12 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         .record_coverage(&[
             (
                 atom.clone(),
-                primary.clone(),
+                RelaySessionKey::unauthenticated(primary.clone()),
                 CoverageInterval::new(Timestamp::from(0), Timestamp::from(300)),
             ),
             (
                 atom.clone(),
-                secondary.clone(),
+                RelaySessionKey::unauthenticated(secondary.clone()),
                 CoverageInterval::new(Timestamp::from(0), Timestamp::from(300)),
             ),
         ])
@@ -929,7 +930,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         .store()
         .record_coverage(&[(
             max_atom.clone(),
-            primary.clone(),
+            RelaySessionKey::unauthenticated(primary.clone()),
             CoverageInterval::new(Timestamp::from(u64::MAX), Timestamp::from(u64::MAX)),
         )])
         .unwrap();

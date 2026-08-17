@@ -21,7 +21,7 @@
 //!   (b) host A's refusal reaches the app as an explicit PER-HOST fact:
 //!       `Frame::execution` carries an `ObservationFact::RelayClosed`
 //!       (facade kind `"relay_closed"`) naming host A and the relay's own
-//!       CLOSED reason string, host A's connected Public source reads
+//!       CLOSED reason string, host A's connected unbound source reads
 //!       `SourceStatus::Error` after that exact request is retired, AND it
 //!       never accumulates a `reconciled_through` watermark -- the type's own
 //!       documented meaning of "unproven", never silently upgraded to
@@ -46,7 +46,7 @@
 //! `CLOSED` does not drop the transport session -- host A's connection stays
 //! up -- but it does retire the exact accepted request. The router still
 //! plans that source while the reducer has neither a live placement nor an
-//! owned local retry, so a connected Public source truthfully reads
+//! owned local retry, so a connected unbound source truthfully reads
 //! `SourceStatus::Error`; a dropped session would instead read
 //! `Disconnected`. There is no invented `SourceStatus::Refused` variant.
 //! The honest, provable per-host facts are therefore the explicit
@@ -365,14 +365,14 @@ async fn a_join_request_is_delivered_while_the_same_groups_read_reports_one_host
         .find(|source| source.relay == host_a.url)
         .expect("host A still names a covering source for this query's subtree");
     assert_eq!(
-        host_a_source.access,
+        host_a_source.authenticate_as,
         None,
-        "the refused read remains scoped to the connected Public session"
+        "the refused read remains scoped to the connected session bound to no identity"
     );
     assert_eq!(
         host_a_source.status,
         SourceStatus::Error,
-        "CLOSED retires the accepted request without dropping host A's Public transport; \
+        "CLOSED retires the accepted request without dropping host A's unbound transport; \
          a dropped transport would read Disconnected, while this connected plan now has \
          neither a live placement nor an owned retry"
     );

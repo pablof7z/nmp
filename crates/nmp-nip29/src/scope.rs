@@ -317,7 +317,7 @@ mod tests {
                 "depth 0 (the listing) must be pinned to {expected} alone"
             );
             assert_eq!(outer.cache, CacheMode::Strict);
-            assert_eq!(outer.access, None);
+            assert_eq!(outer.authenticate_as, None);
 
             let inner = &derived(
                 outer
@@ -339,7 +339,7 @@ mod tests {
                 "depth 1 must also refuse a cached row {expected} never served -- Explicit \
                  scopes the wire, CacheMode scopes the cache, and both must name this host"
             );
-            assert_eq!(inner.access, None);
+            assert_eq!(inner.authenticate_as, None);
             assert_eq!(
                 inner.selection.kinds,
                 Some(BTreeSet::from([39002u16])),

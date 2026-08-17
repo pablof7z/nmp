@@ -1,5 +1,6 @@
 //! shortfall recovery admission integration proofs.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 
 #[test]

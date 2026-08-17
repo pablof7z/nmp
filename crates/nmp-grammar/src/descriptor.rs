@@ -56,38 +56,40 @@ pub enum ReadRouting {
 /// The complete identity of one physical relay session: a URL plus the
 /// identity that session is bound to.
 ///
-/// `None` is the ordinary connection, bound to nobody. It is NOT a category
-/// an app selects and it does not mean "will never authenticate": if the
-/// relay challenges it, NMP answers as the engine's current account. A read
-/// therefore never names an identity — it plans against the URL, and the
-/// connection authenticates if and when the relay asks.
+/// `Some(key)` is a session that authenticates as `key`. `None` is the
+/// ordinary connection, bound to nobody.
 ///
-/// `Some(key)` is a connection DEDICATED to one identity, which only a write
-/// lane requires: a write already knows the key it is publishing as, so it
-/// does not have to guess. One websocket carries at most one NIP-42 identity,
-/// which is why this — and not the URL alone — is the session key: two
-/// accounts publishing to the same relay concurrently are genuinely two
-/// sockets (`nmp-engine`'s
-/// `same_url_keeps_distinct_signing_identities_in_worker_demand`).
+/// What `None` means TODAY, exactly: such a connection never authenticates.
+/// `CoreState::on_auth_challenge` returns immediately for it, so a relay's
+/// challenge is dropped rather than routed to the installed policy. Making
+/// that challenge reach the policy — so that a connection can acquire an
+/// identity instead of being born with one — is issue #1889, and it is not
+/// done here. Until it is, an identity is only ever supplied up front: by a
+/// write, which knows the key it is publishing as, or by a read that names
+/// an override.
 ///
-/// NIP-42 visibility is connection-scoped, so a URL without the identity its
-/// socket is bound to is never a sufficient key for planning, transport,
+/// One websocket carries at most one NIP-42 identity, which is why this —
+/// and not the URL alone — is the session key: two accounts publishing to
+/// the same relay concurrently are genuinely two sockets (`nmp-engine`'s
+/// `same_url_keeps_distinct_signing_identities_in_worker_demand`). NIP-42
+/// visibility is connection-scoped, so a URL without the identity its socket
+/// is bound to is never a sufficient key for planning, transport,
 /// attribution, replay, or coverage.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RelaySessionKey {
     pub relay: nostr::RelayUrl,
-    pub authenticated_as: Option<nostr::PublicKey>,
+    pub authenticate_as: Option<nostr::PublicKey>,
 }
 
 impl RelaySessionKey {
     #[must_use]
     pub const fn new(
         relay: nostr::RelayUrl,
-        authenticated_as: Option<nostr::PublicKey>,
+        authenticate_as: Option<nostr::PublicKey>,
     ) -> Self {
         Self {
             relay,
-            authenticated_as,
+            authenticate_as,
         }
     }
 
@@ -173,16 +175,16 @@ pub struct Demand {
     /// Where this demand's reads come from. Defaults to
     /// [`ReadRouting::Auto`]: an app that says nothing gets NMP's routing.
     pub routing: ReadRouting,
-    /// OVERRIDE the identity NMP authenticates as if a relay challenges this
-    /// demand's connection. `None` — the default, and the overwhelmingly
-    /// ordinary case — means the app named nobody, and NMP answers a
-    /// challenge as the engine's current account.
+    /// The identity this demand's reads authenticate as. `None` — the
+    /// default, and the overwhelmingly ordinary case — reads on the
+    /// connection bound to nobody, which today never authenticates (see
+    /// [`RelaySessionKey`] for exactly what that means and for the issue
+    /// that changes it). `Some(key)` pins the reads to a session that
+    /// authenticates as `key`.
     ///
-    /// This is not a declaration that the demand *is* authenticated, and
-    /// there is no value meaning "unauthenticated": whether a connection
-    /// authenticates is decided by the relay challenging it and the installed
-    /// policy answering, never by what the app wrote here. Naming a key only
-    /// redirects that answer away from the current account.
+    /// Carried verbatim into [`crate::ContextualAtom`] and from there into
+    /// the session key: nothing resolves it, and no current account is
+    /// consulted anywhere on this path.
     ///
     /// A defaulted field, never a constructor argument — the common case says
     /// nothing (`docs/internals/writes/identity.md`).

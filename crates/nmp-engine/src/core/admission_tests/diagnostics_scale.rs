@@ -1,5 +1,6 @@
 //! diagnostics scale admission proofs.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 use nmp_store::testing;
 
@@ -17,7 +18,7 @@ fn a_diagnostics_snapshot_built_over_corrupt_coverage_says_so() {
         store
             .record_coverage(&[(
                 atom.clone(),
-                relay.clone(),
+                RelaySessionKey::unauthenticated(relay.clone()),
                 CoverageInterval::new(Timestamp::from(10u64), Timestamp::from(20u64)),
             )])
             .expect("seed exact coverage row");
@@ -127,7 +128,7 @@ fn a_later_admission_cohort_never_visits_ten_thousand_incumbents() {
     // doc.
     core.suppress_turn_level_consistency_for_named_exception();
     let relay = RelayUrl::parse("wss://incremental-admission.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let incumbent_atoms: BTreeSet<_> = (0..10_000)
         .map(|index| bounded_atom(&relay, &format!("incumbent-{index:05}")))
         .collect();

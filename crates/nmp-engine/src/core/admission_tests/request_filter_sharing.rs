@@ -7,7 +7,7 @@ use std::sync::Arc;
 fn grouped_handoff_shares_one_immutable_filter_across_every_observation_fact() {
     const OWNERS: usize = 207;
     let relay = RelayUrl::parse("wss://shared-request-filter.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let observations = (0..OWNERS)
         .map(|index| {
@@ -67,7 +67,7 @@ fn grouped_handoff_shares_one_immutable_filter_across_every_observation_fact() {
 #[test]
 fn an_accepted_request_reports_the_lane_that_asked_for_it() {
     let relay = RelayUrl::parse("wss://lane-reporting.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     core.handle(EngineMsg::Subscribe(query(
         &relay,

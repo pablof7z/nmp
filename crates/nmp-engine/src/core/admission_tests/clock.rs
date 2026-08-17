@@ -10,7 +10,7 @@ fn prove_nip77(
     transport: TransportRelayHandle,
     now: Timestamp,
 ) -> RelaySessionKey {
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     core.advance_clock(now);
     let mut connected = core.handle(EngineMsg::RelayConnected(transport, session.clone()));
     connected.extend(core.handle(EngineMsg::RelayInformationResolved(relay.clone(), None)));

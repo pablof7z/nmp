@@ -1,5 +1,6 @@
 //! lifecycle admission proofs.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 
 #[test]
@@ -7,7 +8,7 @@ fn outstanding_request_terminals_follow_current_exact_owners_after_attachment_ch
     for close_first_owner in [false, true] {
         for relay_closes_before_eose in [false, true] {
             let relay = RelayUrl::parse("wss://admission-active-request-owners.example").unwrap();
-            let session = RelaySessionKey::public(relay.clone());
+            let session = RelaySessionKey::unauthenticated(relay.clone());
             let mut core =
                 EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
             let first = observation_id(&core.handle(EngineMsg::Subscribe(query(
@@ -239,7 +240,7 @@ fn departing_shape_remains_owned_through_atomic_eose_persistence() {
     );
     for claim in &request.coverage_claims {
         assert!(
-            core.store.get_coverage(*claim, &relay).unwrap().is_some(),
+            core.store.get_coverage(*claim, &RelaySessionKey::unauthenticated(relay.clone())).unwrap().is_some(),
             "both coalesced claims commit even though one active owner departed"
         );
     }

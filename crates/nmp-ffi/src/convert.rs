@@ -1728,7 +1728,7 @@ fn source_status_to_ffi(s: SourceStatus) -> FfiSourceStatus {
 fn source_evidence_to_ffi(s: SourceEvidence) -> FfiSourceEvidence {
     FfiSourceEvidence {
         relay: s.relay.to_string(),
-        authenticated_as: auth_identity_to_ffi(s.authenticated_as),
+        authenticate_as: auth_identity_to_ffi(s.authenticate_as),
         reconciled_through: s.reconciled_through.map(|ts| ts.as_secs()),
         status: source_status_to_ffi(s.status),
     }
@@ -2193,7 +2193,7 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
     // record carries it too.
     let RelayDiagnosticsSnapshot {
         relay,
-        authenticated_as,
+        authenticate_as,
         wire_sub_count,
         subscription_budget,
         subscriptions_refused,
@@ -2214,7 +2214,7 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
     } = r;
     FfiRelayDiagnostics {
         relay: relay.to_string(),
-        authenticated_as: auth_identity_to_ffi(authenticated_as),
+        authenticate_as: auth_identity_to_ffi(authenticate_as),
         wire_sub_count: wire_sub_count as u32,
         subscription_budget: subscription_budget.map(|budget| budget as u32),
         subscriptions_refused: subscriptions_refused as u32,
@@ -2273,7 +2273,7 @@ fn auth_diagnostics_to_ffi(snapshot: AuthDiagnosticsSnapshot) -> FfiAuthDiagnost
     // record carries it too.
     let AuthDiagnosticsSnapshot {
         relay,
-        authenticated_as,
+        authenticate_as,
         transport_generation,
         epoch_sequence,
         challenge_hash,
@@ -2284,7 +2284,7 @@ fn auth_diagnostics_to_ffi(snapshot: AuthDiagnosticsSnapshot) -> FfiAuthDiagnost
     } = snapshot;
     FfiAuthDiagnostics {
         relay: relay.to_string(),
-        authenticated_as: auth_identity_to_ffi(authenticated_as),
+        authenticate_as: auth_identity_to_ffi(authenticate_as),
         transport_generation,
         epoch_sequence,
         challenge_descriptor: challenge_hash,
@@ -3241,10 +3241,8 @@ mod tests {
         assert_eq!(distinct.len(), auth_phases.len());
         assert_eq!(ffi.auth_sessions[0].relay, relay.to_string());
         assert_eq!(
-            ffi.auth_sessions[0].access,
-            FfiAccessContext::Nip42 {
-                public_key: pk_hex()
-            }
+            ffi.auth_sessions[0].authenticate_as,
+            Some(pk_hex())
         );
         assert_eq!(ffi.auth_sessions[0].transport_generation, 40);
         assert_eq!(ffi.auth_sessions[0].epoch_sequence, Some(80));
@@ -3328,7 +3326,7 @@ mod tests {
                         ..FfiFilter::default()
                     },
                     routing: FfiReadRouting::Auto,
-                    access: FfiAccessContext::Public,
+                    authenticate_as: None,
                     cache: FfiCacheMode::Agnostic,
                     freshness: FfiFreshness::Live,
                 },
@@ -3348,7 +3346,7 @@ mod tests {
                         ..FfiFilter::default()
                     },
                     routing: FfiReadRouting::Auto,
-                    access: FfiAccessContext::Public,
+                    authenticate_as: None,
                     cache: FfiCacheMode::Agnostic,
                     freshness: FfiFreshness::Live,
                 },
@@ -3389,14 +3387,12 @@ mod tests {
             routing: FfiReadRouting::Explicit {
                 relays: vec!["wss://inner.example.com".to_string()],
             },
-            access: FfiAccessContext::Nip42 {
-                public_key: pk_hex(),
-            },
+            authenticate_as: Some(pk_hex()),
             cache: FfiCacheMode::Strict,
             freshness: FfiFreshness::MaxAge { seconds: 600 },
         };
         let mut public_inner = inner.clone();
-        public_inner.access = FfiAccessContext::Public;
+        public_inner.authenticate_as = None;
         assert_ne!(
             inner, public_inner,
             "identical nested selections under different access contexts are distinct descriptors"
@@ -3415,7 +3411,7 @@ mod tests {
                 ..FfiFilter::default()
             },
             routing: FfiReadRouting::Auto,
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         };
@@ -3430,7 +3426,7 @@ mod tests {
             panic!("expected derived authors binding");
         };
         assert!(matches!(derived.inner.routing, GReadRouting::Explicit(_)));
-        assert!(matches!(derived.inner.access, Some(_)));
+        assert!(matches!(derived.inner.authenticate_as, Some(_)));
         assert_eq!(derived.inner.cache, GCacheMode::Strict);
         assert_eq!(derived.inner.freshness, GFreshness::MaxAge { seconds: 600 });
 
@@ -3450,7 +3446,7 @@ mod tests {
                 ..FfiFilter::default()
             },
             routing: FfiReadRouting::Auto,
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         };
@@ -4081,7 +4077,7 @@ mod tests {
                     "wss://a.example.com".to_string(),
                 ],
             },
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Strict,
             freshness: FfiFreshness::MaxAge { seconds: 14_400 },
         };
@@ -4118,7 +4114,7 @@ mod tests {
         let demand = FfiDemand {
             selection: ffi_filter_kind1_author(&pk_hex()),
             routing: FfiReadRouting::Explicit { relays: vec![] },
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         };
@@ -4142,7 +4138,7 @@ mod tests {
             routing: FfiReadRouting::Explicit {
                 relays: vec!["not-a-url".to_string()],
             },
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         };
@@ -4167,7 +4163,7 @@ mod tests {
                 ..FfiFilter::default()
             },
             routing: FfiReadRouting::Auto,
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         };
@@ -4187,7 +4183,7 @@ mod tests {
             let demand = FfiDemand {
                 selection: ffi_filter_kind1_author(&pk_hex()),
                 routing: FfiReadRouting::Auto,
-                access: FfiAccessContext::Public,
+                authenticate_as: None,
                 cache: FfiCacheMode::Agnostic,
                 freshness,
             };

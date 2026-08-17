@@ -36,7 +36,7 @@ use nostr::{Event, Timestamp};
 /// The `CoverageKey` schema version (#106): folded into every key's HASH
 /// (below) and PREFIXED onto its durable row key
 /// (`RedbStore::coverage_row_key`). The current identity is the full
-/// [`ContextualAtom`] (`source`/`access` folded in), so two Demands differing
+/// [`ContextualAtom`] (routing and session identity folded in), so two Demands differing
 /// only in intended authority never share a coverage row (bug-class ledger
 /// #18's store-side twin of the atom-refcount fix).
 ///
@@ -332,7 +332,7 @@ mod tests {
         ContextualAtom {
             filter,
             routing: nmp_grammar::ReadRouting::Auto,
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         }
     }
@@ -381,7 +381,7 @@ mod tests {
         let auto = ContextualAtom {
             filter: filter.clone(),
             routing: nmp_grammar::ReadRouting::Auto,
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let explicit = ContextualAtom {
@@ -390,7 +390,7 @@ mod tests {
                 "wss://coverage-anti-alias.example",
             )
             .unwrap()]),
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         assert_ne!(
@@ -409,13 +409,13 @@ mod tests {
         let public = ContextualAtom {
             filter: filter.clone(),
             routing: nmp_grammar::ReadRouting::Auto,
-            authenticated_as: None,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let authenticated = ContextualAtom {
             filter,
             routing: nmp_grammar::ReadRouting::Auto,
-            authenticated_as: Some(nostr::Keys::generate().public_key()),
+            authenticate_as: Some(nostr::Keys::generate().public_key()),
             routing_evidence: BTreeSet::new(),
         };
         assert_ne!(coverage_key(&public), coverage_key(&authenticated));

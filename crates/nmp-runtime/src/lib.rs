@@ -509,8 +509,11 @@ mod relay_worker_reconciliation_tests {
                     ..Filter::default()
                 },
                 ReadRouting::Explicit(vec![relay.clone()]),
-                Some(signer),
             )
+            .map(|demand| Demand {
+                authenticate_as: Some(signer),
+                ..demand
+            })
             .expect("protected pinned query"),
         )
     }
@@ -3363,7 +3366,7 @@ fn dispatch_relay_open_failure(
 /// synchronous disconnect fact is fed back through the ordinary engine
 /// inbox, and once the write lane becomes terminal exact worker
 /// reconciliation retires the protected worker. The ensuing
-/// `RelayWorkerRetired` retry restores the still-required Public session,
+/// `RelayWorkerRetired` retry restores the still-required session bound to no identity,
 /// whose Connected transition replays the plan once.
 ///
 /// This never exceeds the configured worker/thread envelope, never merges
@@ -3376,7 +3379,7 @@ fn ensure_write_effect_session(
     match pool.ensure_session(session) {
         Ok(handle) => Ok(handle),
         Err(nmp_transport::RelayOpenError::AtCapacity { .. })
-            if session.authenticated_as != None =>
+            if session.authenticate_as != None =>
         {
             let public = RelaySessionKey::unauthenticated(session.relay.clone());
             let Some(public_handle) = pool.live_session_handle(&public) else {
@@ -3407,7 +3410,7 @@ fn retry_required_relay_workers(core: &EngineCore, pool: &Pool) {
     // becomes reusable, restore the protected session first; reopening Public
     // first would consume the slot again and recreate the permanent
     // AwaitingRelay stall. Once the write becomes terminal, it leaves
-    // `required` and the still-owned Public session is the next retry.
+    // `required` and the still-owned session bound to no identity is the next retry.
     let mut all: Vec<_> = required.all.into_iter().collect();
     all.sort_by(|left, right| {
         let left_write = required.writes.contains(left);
@@ -3959,13 +3962,13 @@ fn dispatch_effect(
     }
 }
 
-/// What placing one NIP-77 frame on the Public session for `relay` actually
+/// What placing one NIP-77 frame on the session bound to no identity for `relay` actually
 /// achieved, for `EngineCore::on_nip77_handoff` (issue #775).
 ///
 /// A NIP-77 frame returns the same closed [`RequestHandoffOutcome`] fact as an
 /// ordinary REQ. The reducer consumes it through a door of its own rather than
 /// letting the runtime decide anything.
-/// Place `text` on `relay`'s Public session and report the exact outcome.
+/// Place `text` on `relay`'s session bound to no identity and report the exact outcome.
 ///
 /// The two local refusals are kept distinct because they are different facts
 /// about this process: no session could be opened at all, versus a worker that

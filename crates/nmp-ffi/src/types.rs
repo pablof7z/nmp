@@ -268,11 +268,12 @@ pub enum FfiFreshness {
 pub struct FfiDemand {
     pub selection: FfiFilter,
     pub routing: FfiReadRouting,
-    /// OVERRIDE the identity NMP authenticates as if a relay challenges this
-    /// demand's connection, as a 32-byte hex public key. `None` — the
-    /// default — means the engine's current account. There is no value
-    /// meaning "unauthenticated": whether a connection authenticates is
-    /// decided by the relay challenging it, never declared here.
+    /// The identity these reads authenticate as, a 32-byte hex public key.
+    /// `None` — the default and the ordinary case — reads on the connection
+    /// bound to no identity, which today never authenticates: a relay's
+    /// NIP-42 challenge on such a connection is currently dropped rather
+    /// than routed to the installed policy (issue #1889). `Some(key)` pins
+    /// the reads to a session that authenticates as `key`.
     pub authenticate_as: Option<String>,
     pub cache: FfiCacheMode,
     pub freshness: FfiFreshness,
@@ -597,7 +598,7 @@ pub enum FfiAuthPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiSourceEvidence {
     pub relay: String,
-    pub authenticated_as: Option<String>,
+    pub authenticate_as: Option<String>,
     pub reconciled_through: Option<u64>,
     pub status: FfiSourceStatus,
 }
@@ -905,7 +906,7 @@ pub struct FfiFilterCoverage {
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiRelayDiagnostics {
     pub relay: String,
-    pub authenticated_as: Option<String>,
+    pub authenticate_as: Option<String>,
     pub wire_sub_count: u32,
     /// This relay's own advertised concurrent-subscription budget (NIP-11
     /// `limitation.max_subscriptions`, #931). `None` means the relay
@@ -947,7 +948,7 @@ pub struct FfiRelayDiagnostics {
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiAuthDiagnostics {
     pub relay: String,
-    pub authenticated_as: Option<String>,
+    pub authenticate_as: Option<String>,
     pub transport_generation: u64,
     pub epoch_sequence: Option<u64>,
     pub challenge_descriptor: Option<String>,
@@ -1528,7 +1529,7 @@ mod live_query_union_tests {
                 routing: FfiReadRouting::Explicit {
                     relays: vec![format!("wss://{relay}.example.com")],
                 },
-                access: FfiAccessContext::Public,
+                authenticate_as: None,
                 cache: FfiCacheMode::Agnostic,
                 freshness: FfiFreshness::Live,
             }],

@@ -1182,7 +1182,7 @@ impl RedbStore {
     /// never share a row — merging either way would claim completeness that
     /// was never earned, silently.
     ///
-    /// The identity is DISCOVERED (`RelaySessionKey::authenticated_as`),
+    /// The identity is DISCOVERED (`RelaySessionKey::authenticate_as`),
     /// never the demand's override: the override says what was asked for,
     /// this says what was actually proven.
     pub(super) fn coverage_row_key(key: CoverageKey, session: &RelaySessionKey) -> String {
@@ -1201,7 +1201,7 @@ impl RedbStore {
         // way that aliases a different (relay, identity) pair, because the
         // identity field is fixed-width-or-empty and terminal.
         let identity = session
-            .authenticated_as
+            .authenticate_as
             .map(|key| key.to_hex())
             .unwrap_or_default();
         format!(

@@ -67,7 +67,7 @@ fn nip77_plan_indexes_mirror_their_forward_maps_through_open_and_close() {
 fn losing_a_relay_generation_leaves_no_orphaned_plan_edges() {
     const PLANS: u16 = 4;
     let relay = RelayUrl::parse("wss://plan-index-mirror-disconnect.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     core.white_box("prober.force_supported_for_test", |s| {
         s.prober.force_supported_for_test(relay.clone())

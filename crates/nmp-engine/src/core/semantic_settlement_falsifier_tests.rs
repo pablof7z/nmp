@@ -59,6 +59,7 @@
 //! any three of the four left it correctly inert. That defense-in-depth is
 //! itself evidence worth recording, not just the passing assertion.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 use nmp_grammar::{
     RegisteredReplaceableMaterializer, ReplaceableMaterializer, ReplaceableMaterializerOperation,

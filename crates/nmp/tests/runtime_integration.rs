@@ -17,6 +17,7 @@
 //! hex/id string round-trip below rather than by sharing a single `Keys`/
 //! `Event` type across both crate versions.
 
+use nmp_grammar::RelaySessionKey;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -169,7 +170,7 @@ fn subscribe_uses_current_wall_clock_for_the_one_time_max_age_decision() {
     store
         .record_coverage(&[(
             atom.clone(),
-            relay.clone(),
+            RelaySessionKey::unauthenticated(relay.clone()),
             CoverageInterval::new(
                 Timestamp::from(0u64),
                 Timestamp::from(now.saturating_sub(60)),

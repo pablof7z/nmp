@@ -698,7 +698,7 @@ mod tests {
         let demand = group_demand_at(&host(), GROUP, selection).expect("a plain selection scopes");
         assert_eq!(demand.selection.kinds, Some(BTreeSet::from([9, 30315])));
         assert_eq!(demand.routing, ReadRouting::Explicit(vec![host()]));
-        assert_eq!(demand.access, None);
+        assert_eq!(demand.authenticate_as, None);
         assert_eq!(
             demand.selection.tags.get(&context_tag()),
             Some(&Binding::Literal(BTreeSet::from([GROUP.to_string()])))

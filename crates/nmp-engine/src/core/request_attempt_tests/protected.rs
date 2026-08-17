@@ -16,7 +16,7 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
     let atom = ContextualAtom {
         filter: filter.clone(),
         routing: ReadRouting::Explicit(vec![relay]),
-        authenticated_as: session.authenticated_as,
+        authenticate_as: session.authenticate_as,
         routing_evidence: BTreeSet::new(),
     };
     let sub_id = SubId::for_wire(session.relay.clone(), &filter, &atom.routing, atom.authenticate_as);

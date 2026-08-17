@@ -65,7 +65,7 @@ impl FilterCoverageEntry {
 pub struct RelayDiagnosticsSnapshot {
     pub relay: RelayUrl,
     /// Frozen access identity of the physical session this row describes.
-    pub authenticated_as: Option<nostr::PublicKey>,
+    pub authenticate_as: Option<nostr::PublicKey>,
     pub wire_sub_count: usize,
     /// This relay's advertised concurrent-subscription budget (NIP-11
     /// `limitation.max_subscriptions`). `None` means the relay advertised
@@ -115,7 +115,7 @@ impl RelayDiagnosticsSnapshot {
         // this conversion until the mirror carries it too.
         let nmp_engine::core::RelayDiagnosticsSnapshot {
             relay,
-            authenticated_as,
+            authenticate_as,
             wire_sub_count,
             subscription_budget,
             subscriptions_refused,
@@ -136,7 +136,7 @@ impl RelayDiagnosticsSnapshot {
         } = value;
         Self {
             relay,
-            authenticated_as,
+            authenticate_as,
             wire_sub_count,
             subscription_budget,
             subscriptions_refused,
@@ -171,7 +171,7 @@ impl RelayDiagnosticsSnapshot {
 pub struct AuthDiagnosticsSnapshot {
     pub relay: RelayUrl,
     /// Frozen access identity of the protected session this row describes.
-    pub authenticated_as: Option<nostr::PublicKey>,
+    pub authenticate_as: Option<nostr::PublicKey>,
     pub transport_generation: u64,
     /// The current challenge epoch's engine-global sequence; `None` before
     /// the session's first challenge.
@@ -191,7 +191,7 @@ impl AuthDiagnosticsSnapshot {
     fn from_engine(value: nmp_engine::core::AuthDiagnosticsSnapshot) -> Self {
         let nmp_engine::core::AuthDiagnosticsSnapshot {
             relay,
-            authenticated_as,
+            authenticate_as,
             // `transport_slot` is deliberately absent from the facade: it is
             // a connection-pool allocator index (which physical slot
             // currently holds this session), meaningful only to the
@@ -211,7 +211,7 @@ impl AuthDiagnosticsSnapshot {
         } = value;
         Self {
             relay,
-            authenticated_as,
+            authenticate_as,
             transport_generation,
             epoch_sequence,
             challenge_hash,
@@ -525,7 +525,7 @@ mod tests {
         assert_eq!(facade.relays.len(), 1);
         let row = &facade.relays[0];
         assert_eq!(row.relay, relay);
-        assert_eq!(row.authenticated_as, None);
+        assert_eq!(row.authenticate_as, None);
         assert_eq!(row.wire_sub_count, 2);
         assert_eq!(row.subscription_budget, Some(20));
         assert_eq!(row.subscriptions_refused, 1);
@@ -556,7 +556,7 @@ mod tests {
         assert_eq!(facade.auth_sessions.len(), 1);
         let auth = &facade.auth_sessions[0];
         assert_eq!(auth.relay.to_string(), "wss://auth.example.com");
-        assert!(matches!(auth.authenticated_as, Some(_)));
+        assert!(matches!(auth.authenticate_as, Some(_)));
         assert_eq!(auth.transport_generation, 7);
         assert_eq!(auth.epoch_sequence, Some(11));
         assert_eq!(auth.challenge_hash.as_deref(), Some("blake3:abc"));

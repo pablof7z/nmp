@@ -11,6 +11,7 @@
 //! only way to tell a dead handle from a failed write was
 //! `contains("Previous I/O")`.
 
+use nmp_grammar::RelaySessionKey;
 use std::collections::BTreeSet;
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -716,7 +717,7 @@ fn seed_peekable_state(store: &mut RedbStore) {
     store
         .record_coverage(&[(
             peek_atom(),
-            peek_relay(),
+            RelaySessionKey::unauthenticated(peek_relay().clone()),
             crate::CoverageInterval::new(Timestamp::from(10), Timestamp::from(20)),
         )])
         .expect("seed a coverage row");
@@ -812,7 +813,7 @@ fn a_failing_read_makes_the_coverage_peek_report_rather_than_abort() {
     let (healthy, _control) = seeded_peekable_store(&dir, "peek-coverage-healthy.redb");
     assert_eq!(
         healthy
-            .get_coverage(key, &peek_relay())
+            .get_coverage(key, &RelaySessionKey::unauthenticated(peek_relay().clone()))
             .expect("healthy coverage peek"),
         Some(crate::CoverageInterval::new(
             Timestamp::from(10),
@@ -821,7 +822,7 @@ fn a_failing_read_makes_the_coverage_peek_report_rather_than_abort() {
         "a healthy peek answers the recorded interval"
     );
     assert_eq!(
-        healthy.get_coverage(key, &absent).expect("healthy peek"),
+        healthy.get_coverage(key, &RelaySessionKey::unauthenticated(absent.clone())).expect("healthy peek"),
         None,
         "an unrecorded row is honest absence"
     );
@@ -829,7 +830,7 @@ fn a_failing_read_makes_the_coverage_peek_report_rather_than_abort() {
 
     let (store, control) = seeded_peekable_store(&dir, "peek-coverage.redb");
     control.arm(FAIL_READ);
-    let outcome = catch_unwind(AssertUnwindSafe(|| store.get_coverage(key, &peek_relay())))
+    let outcome = catch_unwind(AssertUnwindSafe(|| store.get_coverage(key, &RelaySessionKey::unauthenticated(peek_relay().clone()))))
         .unwrap_or_else(|_| panic!("the coverage peek aborted the host process on a read error"));
     let error = outcome.expect_err("a failing backend read must surface as Err");
     assert!(
@@ -864,7 +865,7 @@ fn both_peeks_leave_the_host_alive_across_repeated_read_failures() {
         );
         faults.push(
             store
-                .get_coverage(key, &peek_relay())
+                .get_coverage(key, &RelaySessionKey::unauthenticated(peek_relay().clone()))
                 .expect_err("a failing read never answers coverage")
                 .fault(),
         );

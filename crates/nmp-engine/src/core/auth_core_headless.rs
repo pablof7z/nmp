@@ -1,3 +1,4 @@
+use nmp_grammar::RelaySessionKey;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
@@ -33,7 +34,7 @@ impl Fixture {
         let atom = ContextualAtom {
             filter,
             routing: ReadRouting::Explicit(vec![relay.clone()]),
-            authenticated_as: session.authenticated_as,
+            authenticate_as: session.authenticate_as,
             routing_evidence: BTreeSet::new(),
         };
         let directory = FixtureRoutingFacts::new().with_outbound_routes(keys.public_key(), [relay]);
@@ -676,7 +677,7 @@ fn exact_success_replays_once_and_only_then_allows_eose_credit() {
     assert_eq!(
         fixture
             .core
-            .get_coverage(&fixture.atom, &fixture.session.relay)
+            .get_coverage(&fixture.atom, &RelaySessionKey::unauthenticated(fixture.session.relay.clone()))
             .expect("coverage peek"),
         None
     );
@@ -718,7 +719,7 @@ fn exact_success_replays_once_and_only_then_allows_eose_credit() {
     ));
     assert!(fixture
         .core
-        .get_coverage(&fixture.atom, &fixture.session.relay)
+        .get_coverage(&fixture.atom, &RelaySessionKey::unauthenticated(fixture.session.relay.clone()))
         .expect("coverage peek")
         .is_some());
 }

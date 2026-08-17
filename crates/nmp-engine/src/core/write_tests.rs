@@ -1,5 +1,6 @@
 //! Ownership-domain tests moved with the implementation they falsify.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 
 #[cfg(test)]

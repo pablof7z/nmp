@@ -242,7 +242,7 @@ fn record(store: &mut RedbStore, atom: &ContextualAtom, relay: &RelayUrl, throug
     store
         .record_coverage(&[(
             atom.clone(),
-            relay.clone(),
+            RelaySessionKey::unauthenticated(relay.clone()),
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(through)),
         )])
         .unwrap();
@@ -847,7 +847,7 @@ fn stale_max_age_refreshes_coverage_once_and_remains_live() {
         "EOSE does not suppress the live tail"
     );
     assert_eq!(
-        core.get_coverage(&atom(&keys, ReadRouting::Auto), &relay)
+        core.get_coverage(&atom(&keys, ReadRouting::Auto), &RelaySessionKey::unauthenticated(relay.clone()))
             .expect("coverage peek")
             .expect("a proven row")
             .through,
@@ -922,7 +922,7 @@ fn future_event_time_never_inflates_coverage_or_freshness() {
         ))),
     ));
     assert_eq!(
-        core.get_coverage(&atom(&keys, ReadRouting::Auto), &relay)
+        core.get_coverage(&atom(&keys, ReadRouting::Auto), &RelaySessionKey::unauthenticated(relay.clone()))
             .expect("coverage peek")
             .expect("a proven row")
             .through,

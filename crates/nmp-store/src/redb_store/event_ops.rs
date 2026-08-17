@@ -618,8 +618,8 @@ pub(super) fn record_coverage(
         .fail_next_coverage_write
         .as_ref()
         .is_some_and(|(target_key, target_relay)| {
-            claims.iter().any(|(atom, relay, _)| {
-                compute_coverage_key(atom) == *target_key && relay == target_relay
+            claims.iter().any(|(atom, session, _)| {
+                compute_coverage_key(atom) == *target_key && session.relay == *target_relay
             })
         })
     {

@@ -81,7 +81,7 @@ pub struct AcquisitionEvidence {
 pub struct SourceEvidence {
     pub relay: RelayUrl,
     /// Frozen access identity of the physical session producing this fact.
-    pub authenticated_as: Option<nostr::PublicKey>,
+    pub authenticate_as: Option<nostr::PublicKey>,
     /// Durable per-(shape, relay) watermark evidence, min'd over the
     /// subtree atoms THIS source covers in THIS query, IFF every one of
     /// them has a coverage row whose `from` is at or before the query's own
@@ -246,7 +246,7 @@ pub(crate) struct AcquisitionEvidenceContext<'a> {
 ///   IFF every atom it covers has a proven row (`from <= window floor`),
 ///   else `None`. A scope whose acquisition decision suppressed wire work is
 ///   [`SourceStatus::CoverageSatisfied`] independently of link state. For a
-///   Live connected Public session, any exact pending attempt/retry is
+///   Live connected session bound to no identity, any exact pending attempt/retry is
 ///   [`SourceStatus::AwaitingRequest`], every required accepted placement is
 ///   `Requesting`, and a planned request with neither owner is `Error`.
 ///   Connected PROTECTED sessions retain their exact AUTH phase until ready,
@@ -367,7 +367,7 @@ pub(crate) fn acquisition_evidence(
                 let status = if acquisition == EvidenceAcquisition::CoverageSatisfied {
                     SourceStatus::CoverageSatisfied
                 } else if connected.contains(&session) {
-                    if session.authenticated_as == None {
+                    if session.authenticate_as == None {
                         request_placement_status(all_placed, any_awaiting)
                     } else {
                         match auth_status.get(&session).copied().unwrap_or(
@@ -398,7 +398,7 @@ pub(crate) fn acquisition_evidence(
                 };
                 SourceEvidence {
                     relay: session.relay,
-                    authenticated_as: session.authenticated_as,
+                    authenticate_as: session.authenticate_as,
                     reconciled_through: if all_proven { through } else { None },
                     status,
                 }
@@ -467,7 +467,7 @@ pub(crate) fn merge_acquisition_evidence(
 
     for part in parts {
         for source in part.sources {
-            let key = (source.relay.clone(), source.authenticated_as);
+            let key = (source.relay.clone(), source.authenticate_as);
             match sources.entry(key) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(source);

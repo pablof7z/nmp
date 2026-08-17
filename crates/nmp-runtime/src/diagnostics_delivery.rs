@@ -175,8 +175,8 @@ mod tests {
         )
         .expect("test pool construction");
         let first =
-            RelaySessionKey::public(RelayUrl::parse("ws://127.0.0.1:9").expect("first relay URL"));
-        let second = RelaySessionKey::public(
+            RelaySessionKey::unauthenticated(RelayUrl::parse("ws://127.0.0.1:9").expect("first relay URL"));
+        let second = RelaySessionKey::unauthenticated(
             RelayUrl::parse("ws://127.0.0.1:10").expect("second relay URL"),
         );
         pool.ensure_session(&first)

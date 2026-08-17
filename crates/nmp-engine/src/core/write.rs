@@ -3,6 +3,7 @@
 //! This module owns acceptance through signing, route snapshots, per-relay
 //! attempts and acknowledgements, cancellation/compensation, and boot recovery.
 
+use nmp_grammar::RelaySessionKey;
 use super::coordinate_coverage::CoordinateCoverage;
 use super::*;
 use nmp_grammar::ThreadPosition;
@@ -1269,7 +1270,7 @@ impl CoreState {
         for (_, id, lane) in eligible {
             // The write plane's connectivity check is against the lane's
             // identity-scoped authenticated session (#8 U2: a write rides
-            // `Nip42(signing pubkey)`, never the relay's Public read
+            // `Nip42(signing pubkey)`, never the relay's unbound read
             // session). A lane whose receipt has no live pending entry has
             // nothing to schedule.
             let Some(pending) = self.pending.get(&id) else {

@@ -1121,7 +1121,6 @@ mod thread_budget_tests {
 #[cfg(test)]
 mod ephemeral_send_tests {
     use super::*;
-    use nmp_grammar::AccessContext;
     use nostr::Keys;
     use std::sync::{mpsc, Arc};
 

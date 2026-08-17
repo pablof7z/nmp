@@ -345,7 +345,7 @@ impl CoreState {
         // public question and never for a protected one — the same
         // access-context rule the rest of this module keeps free by carrying
         // it in the session key.
-        if session.authenticated_as != None {
+        if session.authenticate_as != None {
             return None;
         }
         let mut found = None;
@@ -413,7 +413,7 @@ impl CoreState {
             // whoever that session already is — otherwise a coordinate check
             // on an authenticated socket would be answered by a demand that
             // named nobody.
-            authenticate_as: session.authenticated_as,
+            authenticate_as: session.authenticate_as,
             ..demand
         };
         #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -601,7 +601,6 @@ fn request_can_witness(filter: &ConcreteFilter) -> bool {
 mod tests {
     use std::borrow::Cow;
 
-    use nmp_grammar::AccessContext;
     use nmp_router_testkit::test_relay;
     use nmp_store::RedbStore;
     use nmp_transport::{RelayFrame, RelayHandle as TransportRelayHandle};

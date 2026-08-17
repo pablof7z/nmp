@@ -1,5 +1,6 @@
 //! Ownership-domain tests moved with the implementation they falsify.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 use nmp_grammar::{Binding, Demand, Filter};
 use nmp_router_testkit::test_relay;

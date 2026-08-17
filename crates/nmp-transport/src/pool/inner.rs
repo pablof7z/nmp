@@ -406,7 +406,7 @@ impl PoolInner {
             slot_id,
             worker_id,
             session.relay.clone(),
-            session.authenticated_as.is_some(),
+            session.authenticate_as.is_some(),
             self.worker_event_tx
                 .as_ref()
                 .expect("spawn_worker never called after shutdown (ensure_open guards it)")

@@ -3,6 +3,7 @@
 //! This module owns subscription lifetimes, router recompilation, discovery,
 //! NIP-77 handoff/repair, and committed-store mutations projected to observers.
 
+use nmp_grammar::RelaySessionKey;
 use super::attribution::CompletedCoverageClaim;
 use super::observation::StoredEvents;
 use super::*;
@@ -897,7 +898,7 @@ impl CoreState {
                     planned
                         .keys()
                         .filter(|session| {
-                            session.authenticated_as != None
+                            session.authenticate_as != None
                                 && !self.auth_ready_sessions.contains_key(*session)
                         })
                         .cloned()
@@ -919,7 +920,7 @@ impl CoreState {
                             .planned_read_session_counts_by_relay
                             .entry(session.relay.clone())
                             .or_insert(0) += 1;
-                        if session.authenticated_as != None
+                        if session.authenticate_as != None
                             && !self.auth_ready_sessions.contains_key(&session)
                         {
                             effects.push(Effect::EnsureReadRelay(session));
@@ -995,7 +996,7 @@ impl CoreState {
             // `finish_auth_ok`, replays the full planned set on readiness,
             // so nothing is lost), and no CLOSE is needed pre-auth — nothing
             // was ever sent on that socket for this plan to withdraw.
-            if session.authenticated_as != None
+            if session.authenticate_as != None
                 && !self.auth_ready_sessions.contains_key(session)
             {
                 continue;
@@ -1029,7 +1030,7 @@ impl CoreState {
                         // about an authenticated session's view.
                         let broad = filter.limit.is_none();
                         match (
-                            broad && session.authenticated_as == None,
+                            broad && session.authenticate_as == None,
                             self.prober.probed(&session.relay),
                         ) {
                             (true, Some(probed)) => {
@@ -2355,7 +2356,7 @@ impl CoreState {
         relay: &RelayUrl,
         effects: &mut Vec<Effect>,
     ) -> Option<BTreeSet<CoverageKey>> {
-        // Negentropy sessions are opened exclusively on the Public session
+        // Negentropy sessions are opened exclusively on the session bound to no identity
         // (#8), so their credit resolves through the same Public-session
         // attribution key `open_neg_session` recorded under.
         let attributed = self.attribution.attribute_correlated_completion(

@@ -1,3 +1,4 @@
+use nmp_grammar::RelaySessionKey;
 use super::*;
 use nmp_transport::{ConnState, PoolEventSink, RelayFrame, RelayHandle, RelayHealth};
 use nostr::{EventBuilder, Keys, RelayMessage, SubscriptionId};

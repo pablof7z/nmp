@@ -217,7 +217,7 @@ mod tests {
             Some(BTreeSet::from([39000u16, 39001, 39002]))
         );
         assert_eq!(demand.routing, pinned([host(1)]));
-        assert_eq!(demand.access, None);
+        assert_eq!(demand.authenticate_as, None);
         assert!(demand.selection.tags.contains_key(&join_key()));
     }
 
@@ -249,7 +249,7 @@ mod tests {
             Some(BTreeSet::from([39001u16]))
         );
         assert_eq!(derived.inner.routing, pinned([host(2)]));
-        assert_eq!(derived.inner.access, None);
+        assert_eq!(derived.inner.authenticate_as, None);
         assert_eq!(derived.inner.cache, CacheMode::Strict);
         assert_eq!(derived.inner.freshness, Freshness::Live);
     }

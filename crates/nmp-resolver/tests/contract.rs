@@ -799,16 +799,19 @@ fn derived_inner_and_outer_demands_keep_independent_source_and_access_contexts()
             project: Selector::Tag("h".to_string()),
         })),
     );
-    let outer = Demand::new(
+    let outer_base = Demand::new(
         Filter {
             kinds: Some(BTreeSet::from([9u16])),
             tags: outer_tags,
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![pinned.clone()]),
-        Some(a.public_key()),
+        ReadRouting::Explicit(vec![pinned.clone()])
     )
     .unwrap();
+    let outer = Demand {
+        authenticate_as: Some(a.public_key()),
+        ..outer_base
+    };
 
     let (_handle, opened) = h.subscribe(outer);
     let [DemandOp::Open(inner_atom)] = opened.ops.as_slice() else {
@@ -858,7 +861,7 @@ fn derived_inner_and_outer_demands_keep_independent_source_and_access_contexts()
         cf_kinds_authors(&[10_009], &[&b.public_key().to_hex()])
     );
     assert_eq!(opened[0].routing, ReadRouting::Auto);
-    assert_eq!(opened[0].access, None);
+    assert_eq!(opened[0].authenticate_as, None);
 }
 
 // ---- 1. depth1_myfollows_surgical_delta ---------------------------------
