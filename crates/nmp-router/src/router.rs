@@ -876,6 +876,29 @@ impl Router {
 
         // Physical diffing depends only on session, SubId, and filter. Do it
         // before moving incumbent metadata into the next immutable request.
+        // `diff_plans` walks every incumbent request in `self.prev_plan`;
+        // count exactly what it is about to walk. Isolated cohort admission
+        // (`Router::admit`) detaches `prev_plan` to empty first, so this is
+        // 0 there; a full `compile()` runs against the real incumbent plan.
+        //
+        // The incumbent `limited_demands` set is counted here too, not at
+        // its point of replacement below: this function's own internal
+        // `mem::take(&mut self.prev_plan)` (for exact-position matching)
+        // empties it before that point regardless of whether the outer
+        // isolation holds, which would make a counter placed there always
+        // read 0 -- a vacuous placement of exactly the kind #1781 was
+        // about. `next_plan.limited_demands` supersedes the incumbent set
+        // wholesale (built only from this call's `demand`, never merged
+        // into it), so what is counted here is genuinely what gets
+        // replaced.
+        self.admission_work.incumbent_plan_requests_visited = self
+            .admission_work
+            .incumbent_plan_requests_visited
+            .saturating_add(self.prev_plan.reqs.values().map(Vec::len).sum::<usize>() as u64);
+        self.admission_work.incumbent_limited_entries_visited = self
+            .admission_work
+            .incumbent_limited_entries_visited
+            .saturating_add(self.prev_plan.limited_demands.len() as u64);
         let delta = diff_plans(&self.prev_plan, &next_plan);
         self.reconcile_active_demands(
             demand

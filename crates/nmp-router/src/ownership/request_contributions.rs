@@ -204,12 +204,22 @@ impl Router {
     }
 
     pub(crate) fn reconcile_active_demands(&mut self, next: BTreeMap<DemandKey, ContextualAtom>) {
-        let removed: Vec<_> = self
-            .active_demands
-            .keys()
-            .filter(|demand| !next.contains_key(*demand))
-            .copied()
-            .collect();
+        // Every incumbent active-demand entry is dereferenced here to decide
+        // whether `next` still owns it. When admission isolates a pending
+        // cohort (`Router::admit`), `self.active_demands` is detached to
+        // empty before this runs, so a later cohort visits none of it; a
+        // full `compile()` runs this against the real incumbent set. Either
+        // way the count is exact, not a proxy.
+        let mut removed = Vec::new();
+        for demand in self.active_demands.keys().copied() {
+            self.admission_work.incumbent_active_entries_visited = self
+                .admission_work
+                .incumbent_active_entries_visited
+                .saturating_add(1);
+            if !next.contains_key(&demand) {
+                removed.push(demand);
+            }
+        }
         for demand in removed {
             if let Some(atom) = self.active_demands.get(&demand) {
                 if let AtomClass::Coverage { authors, .. } =

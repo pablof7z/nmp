@@ -378,6 +378,17 @@ impl Router {
                     subid_length_limit: None,
                     subid_length_rejects_our_ids: false,
                 });
+            // A full diagnostic projection re-derives every session's
+            // diagnostics from `self.prev_plan.reqs` wholesale. Ordinary
+            // withdrawal (`Router::withdraw`) never calls this -- it repairs
+            // diagnostics surgically per closed request instead -- so this
+            // stays 0 across a withdrawal-only sequence; a regression that
+            // made withdrawal fall back to a full recompile would make it
+            // visit every incumbent request again.
+            self.withdrawal_work.diagnostic_requests_visited = self
+                .withdrawal_work
+                .diagnostic_requests_visited
+                .saturating_add(requests.len() as u64);
             diagnostics.wire_sub_count = requests.len();
             diagnostics.filters = requests
                 .iter()
