@@ -797,9 +797,7 @@ impl EngineCore {
                 // state before this replay is built.
                 if !same_wire_generation {
                     self.nip77.drop_live_for_relay(&session.relay);
-                    self.nip77
-                        .handoffs
-                        .take_where(|_, handoff| handoff.probed.url() == &session.relay);
+                    self.nip77.take_handoffs_probed_on_relay(&session.relay);
                 }
 
                 let mut plain_reqs = Vec::new();
@@ -1062,12 +1060,8 @@ impl EngineCore {
                 // fallback REQ: the relay's own `Supported` verdict stays
                 // cached, and the NEXT `recompile()`/reconnect naturally
                 // re-opens whatever demand still wants this shape.
-                self.nip77
-                    .sessions
-                    .take_where(|_, neg| neg.relay == session.relay);
-                self.nip77
-                    .handoffs
-                    .take_where(|sub_id, _| sub_id.0 == session.relay);
+                self.nip77.take_sessions_on_relay(&session.relay);
+                self.nip77.take_handoffs_on_relay(&session.relay);
 
                 // One-shot repair REQs are reducer-owned even though the
                 // router never planned them. Remove their state when the
@@ -1075,8 +1069,7 @@ impl EngineCore {
                 // CLOSE is bookkeeping rather than a wire expectation.
                 let stale_temporary: Vec<SubId> = self
                     .nip77
-                    .backfills
-                    .take_where(|sub_id, _| sub_id.0 == session.relay)
+                    .take_backfills_on_relay(&session.relay)
                     .into_iter()
                     .map(|(sub_id, _)| sub_id)
                     .collect();
@@ -1753,7 +1746,7 @@ impl EngineCore {
                 // absence before NEG (and any missing-id backfill) finished.
                 let opens_neg = resolved
                     .as_ref()
-                    .is_some_and(|sub_id| self.nip77.handoffs.contains(sub_id));
+                    .is_some_and(|sub_id| self.nip77.is_pending_handoff(sub_id));
                 let committed_coverage = completed.and_then(|completed| {
                     self.persist_attributed_completion(completed, &session.relay, &mut effects)
                 });
@@ -1782,7 +1775,7 @@ impl EngineCore {
                     // This exact limited REQ is now proven active. Keep it
                     // open, overlap-close its predecessor, and only then
                     // begin Negentropy (#563).
-                    if let Some(handoff) = self.take_pending_neg_handoff(&resolved) {
+                    if let Some(handoff) = self.nip77.take_handoff(&resolved) {
                         nip77_changed = true;
                         self.abandon_sub(&resolved);
                         self.activate_live_and_open_neg(handoff, &mut effects);
@@ -1791,7 +1784,7 @@ impl EngineCore {
                     // Every repair REQ is one-shot and outside router-owned
                     // demand. Its EOSE closes it and either unlocks deferred
                     // NEG coverage or completes a handoff-timeout fallback.
-                    if let Some(request) = self.take_pending_backfill(&resolved) {
+                    if let Some(request) = self.nip77.take_backfill(&resolved) {
                         nip77_changed = true;
                         effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
                             ops: vec![(session.clone(), vec![WireOp::Close(resolved.clone())])],
@@ -1953,7 +1946,7 @@ impl EngineCore {
                 if self.prober.on_neg_unsupported(&session.relay, wire_id) {
                     // Probe classified Unsupported; cached, never re-probed.
                 } else if let Some(sub_id) = self.attribution.sub_id_for_wire(&session, wire_id) {
-                    if let Some(neg) = self.take_neg_session(&sub_id) {
+                    if let Some(neg) = self.nip77.take_session(&sub_id) {
                         self.neg_session_fallback_to_req(sub_id, neg, &mut effects);
                     }
                 }

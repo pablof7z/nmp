@@ -448,7 +448,7 @@ pub use diagnostics::{
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
 use history_lifecycle::HistorySessions;
-use nip77_sessions::Nip77Sessions;
+use nip77_sessions::{Nip77Sessions, PlanRepairWithdrawal, PlanRole};
 use observation::{
     ActiveRequestEvidence, LiveWireRequest, ObservationExecutionState, PendingRequestEvidence,
 };
@@ -3054,31 +3054,13 @@ impl EngineCore {
                 crate::negentropy::ProbeState::Supported => "behaviorally_proven",
                 crate::negentropy::ProbeState::Unsupported => "behaviorally_rejected",
             };
-            relay.nip77_handoff = if self.nip77.backfills.iter().any(|(sub_id, request)| {
-                sub_id.0 == relay.relay
-                    && matches!(
-                        request,
-                        TemporaryReq::Backlog { .. } | TemporaryReq::BacklogActivatesLive { .. }
-                    )
-            }) {
+            relay.nip77_handoff = if self.nip77.has_backlog_fallback_on_relay(&relay.relay) {
                 "fallback_backlog"
-            } else if self.nip77.backfills.iter().any(|(sub_id, request)| {
-                sub_id.0 == relay.relay && matches!(request, TemporaryReq::MissingIds { .. })
-            }) {
+            } else if self.nip77.has_missing_ids_backfill_on_relay(&relay.relay) {
                 "backfilling"
-            } else if self
-                .nip77
-                .sessions
-                .iter()
-                .any(|(_, session)| session.relay == relay.relay)
-            {
+            } else if self.nip77.has_reconciling_session_on_relay(&relay.relay) {
                 "reconciling"
-            } else if self
-                .nip77
-                .handoffs
-                .iter()
-                .any(|(sub_id, _)| sub_id.0 == relay.relay)
-            {
+            } else if self.nip77.has_pending_handoff_on_relay(&relay.relay) {
                 "awaiting_live_eose"
             } else if self.nip77.has_live_on_relay(&relay.relay)
                 && self
@@ -3178,16 +3160,14 @@ impl EngineCore {
         // predicate exists to satisfy.
         let stale_handoffs = self
             .nip77
-            .handoffs
-            .take_where(|_, handoff| now >= handoff.started_at + NEG_LIVENESS_DEADLINE_SECS);
+            .take_stale_handoffs(now, NEG_LIVENESS_DEADLINE_SECS);
         for (_, handoff) in stale_handoffs {
             self.handoff_fallback_to_req(handoff, &mut effects);
         }
 
         let stale_neg = self
             .nip77
-            .sessions
-            .take_where(|_, session| now >= session.started_at + NEG_LIVENESS_DEADLINE_SECS);
+            .take_stale_sessions(now, NEG_LIVENESS_DEADLINE_SECS);
         for (sub_id, session) in stale_neg {
             self.neg_session_fallback_to_req(sub_id, session, &mut effects);
         }
@@ -3243,16 +3223,7 @@ impl EngineCore {
         let expiry = self.store.next_expiration()?;
         let neg_liveness = self
             .nip77
-            .sessions
-            .iter()
-            .map(|(_, session)| session.started_at + NEG_LIVENESS_DEADLINE_SECS)
-            .chain(
-                self.nip77
-                    .handoffs
-                    .iter()
-                    .map(|(_, handoff)| handoff.started_at + NEG_LIVENESS_DEADLINE_SECS),
-            )
-            .min();
+            .earliest_liveness_deadline(NEG_LIVENESS_DEADLINE_SECS);
         // A persistence failure already latched by the write plane suppresses
         // this term until real work arrives (`handle` clears the flag), which
         // is a recorded decision rather than an erased read. The read itself

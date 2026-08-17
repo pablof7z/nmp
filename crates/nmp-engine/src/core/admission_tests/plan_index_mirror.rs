@@ -47,7 +47,7 @@ fn nip77_plan_indexes_mirror_their_forward_maps_through_open_and_close() {
     }
 
     flush(&mut core);
-    assert_eq!(core.nip77.handoffs.len(), PLANS as usize);
+    assert_eq!(core.nip77.counts().handoffs, PLANS as usize);
     assert_mirrors(&core, "after admission");
 
     for observation in observations {
@@ -85,7 +85,7 @@ fn losing_a_relay_generation_leaves_no_orphaned_plan_edges() {
         ))));
     }
     flush(&mut core);
-    assert_eq!(core.nip77.handoffs.len(), PLANS as usize);
+    assert_eq!(core.nip77.counts().handoffs, PLANS as usize);
     assert_mirrors(&core, "before disconnect");
 
     core.handle(EngineMsg::RelayDisconnected(
@@ -95,7 +95,7 @@ fn losing_a_relay_generation_leaves_no_orphaned_plan_edges() {
     ));
     assert_mirrors(&core, "after disconnect");
     assert!(
-        core.nip77.handoffs.is_empty(),
+        core.nip77.handoffs_is_empty(),
         "the dead generation's handoffs survived its disconnect"
     );
 
