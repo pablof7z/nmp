@@ -602,23 +602,23 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
     assert_eq!(interval.through, Timestamp::from(500u64));
 }
 
-/// #118's headline falsifier (fixed ahead of #107): a `Demand` explicitly
-/// declared `Public` over an author-bearing selection (#106's "new
-/// expressible behavior" -- "these authors, generic facts only, no outbox
-/// chase") is a genuinely DIFFERENT coverage identity than the SAME
-/// selection under the static-default `AuthorOutboxes` guess. Proves
-/// `get_coverage` now reads the atom's TRUE declared context: querying
-/// under the correct (`Public`) context finds the recorded coverage;
-/// querying under the static default's WRONG guess (`AuthorOutboxes`,
-/// since the filter IS author-bearing) does not -- exactly the silent
-/// re-alias #118 describes, now provably closed.
-/// Coverage is keyed by the DECLARED routing, not by the selection's shape.
+/// #118's headline falsifier, restated over the axis that survives:
+/// `get_coverage` reads the atom's TRUE declared routing, so coverage is
+/// keyed by what the demand DECLARED and never by what its selection looks
+/// like.
 ///
-/// What an `Auto` read proved — NMP chose the relays, and may choose others
-/// tomorrow — can never satisfy an `Explicit` demand that named its own relay
-/// set, and vice versa. This is ledger #18's store-side half over the source
-/// axis that survives: the axis narrowed from three values to two, but a
-/// coverage row still belongs to exactly one of them.
+/// #118 was a silent re-alias — `get_coverage` reconstructed a context by
+/// guessing from the filter's shape, so a coverage row proved under one
+/// routing answered a query made under another. The guess is gone (#847),
+/// but the property it broke is not, and this is what still enforces it:
+/// what an `Auto` read proved — NMP chose those relays, and may choose
+/// others tomorrow — can never satisfy an `Explicit` demand that named its
+/// own relay set, and vice versa.
+///
+/// The selection here is deliberately author-bearing while the routing is
+/// `Auto`, because that pairing is what a shape-derived key would get wrong:
+/// nothing about "this filter binds authors" may influence which coverage
+/// row answers. This is ledger #18's store-side half.
 #[test]
 fn get_coverage_distinguishes_auto_from_an_explicit_relay_set() {
     let a = Keys::generate();
@@ -690,8 +690,8 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     connect(&mut core, 0, &relay_other);
     connect(&mut core, 1, &relay_pinned);
 
-    // Seed the store: an ordinary AuthorOutboxes subscribe pulls the event
-    // in from relay_other, giving it Row.sources == {relay_other}.
+    // Seed the store: an ordinary Auto subscribe pulls the event in from
+    // relay_other, giving it Row.sources == {relay_other}.
     let outbox_effects = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &a.public_key().to_hex(),
@@ -749,7 +749,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
             effect,
             Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r.relay == relay_other)
         )),
-        "an ExplicitPinned atom's subscribe must never recompile a Req/Close at any \
+        "an Explicit atom's subscribe must never recompile a Req/Close at any \
          relay but its own declared set"
     );
     assert!(
@@ -860,7 +860,7 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
         !effects1.iter().any(
             |e| matches!(e, Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r.relay == relay2))
         ),
-        "demand1's Pinned({{relay1}}) atom must never touch relay2"
+        "demand1's Explicit({{relay1}}) atom must never touch relay2"
     );
 
     let effects2 = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::single(demand2)));
@@ -885,7 +885,7 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
         !effects2.iter().any(
             |e| matches!(e, Effect::Wire(delta) if delta.ops.iter().any(|(r, _)| r.relay == relay1))
         ),
-        "demand2's Pinned({{relay2}}) atom must never touch relay1 -- and must not even \
+        "demand2's Explicit({{relay2}}) atom must never touch relay1 -- and must not even \
          re-touch relay1's already-open sub, since these are independent graph nodes"
     );
 

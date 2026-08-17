@@ -73,7 +73,7 @@ fn author_query(pubkey: &str) -> FfiLiveQuery {
     )
 }
 
-/// One demand branch under the named wire authority, on an unauthenticated
+/// One demand branch under the named routing, on an unauthenticated
 /// connection with the default cache and freshness policies.
 fn single(selection: FfiFilter, routing: FfiReadRouting) -> FfiLiveQuery {
     FfiLiveQuery {

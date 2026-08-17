@@ -166,12 +166,12 @@ impl SubId {
 pub struct WireReq {
     pub sub_id: SubId,
     pub filter: ConcreteFilter,
-    /// The declared wire authority this req was routed under. `SubId` already
+    /// The declared routing this req was compiled under. `SubId` already
     /// carries the relay and the [`AccessContext`]; this is the missing half
     /// of the identity context, and it is what makes the previous plan
-    /// re-partitionable for signature matching (`crate::wire_id`) — a
-    /// `Public`-sourced filter must never inherit an `AuthorOutboxes`-sourced
-    /// filter's token, which is the wire-side half of the #106 anti-alias.
+    /// re-partitionable for signature matching (`crate::wire_id`) — an
+    /// `Auto`-routed filter must never inherit an `Explicit`-routed filter's
+    /// token, which is the wire-side half of the #106 anti-alias.
     pub routing: ReadRouting,
     pub provenance: BTreeSet<RouteProvenance>,
     /// Exact durable coverage-claim keys carried independently of the

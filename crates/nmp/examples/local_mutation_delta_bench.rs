@@ -117,7 +117,7 @@ fn scenario_demand(scenario: Scenario, author: &Keys) -> Demand {
             .public_key()
             .to_hex()])))
     };
-    // Each scenario names its own source authority. The two author-bearing
+    // Each scenario names its own routing. The two author-bearing
     // shapes chase outboxes because that is what they are measuring, not
     // because they happen to bind `authors`.
     match scenario {

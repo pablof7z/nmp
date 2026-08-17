@@ -120,7 +120,7 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     #[test]
-    fn bookmarks_demand_uses_current_account_author_outboxes() {
+    fn bookmarks_demand_uses_the_current_account_and_names_no_routing() {
         let demand = current_account_bookmarks_demand();
         assert_eq!(demand.selection.kinds, Some(BTreeSet::from([10_003])));
         assert_eq!(

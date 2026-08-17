@@ -32,14 +32,14 @@
 //! builds AND on every inner demand it nests, at depth 1, 2, or deeper.
 //!
 //! Pinning alone is NOT sufficient, and assuming otherwise is the mistake this
-//! module was shipped with: `Pinned` scopes only which relays are ASKED, while
+//! module was shipped with: `Explicit` scopes only which relays are ASKED, while
 //! `CacheMode` governs which locally cached rows may ANSWER, and the grammar's
 //! `Agnostic` default ignores provenance entirely. The two axes are
 //! independent and NIP-29 needs both.
 //!
-//! Nothing here ever inherits an outer demand's source or cache mode, and
-//! nothing here ever rewrites the authority of a binding the CALLER supplied
-//! (a `$myFollows`-shaped kind:3 lookup keeps its own `AuthorOutboxes` and its
+//! Nothing here ever inherits an outer demand's routing or cache mode, and
+//! nothing here ever rewrites the routing of a binding the CALLER supplied
+//! (a `$myFollows`-shaped kind:3 lookup keeps its own `Auto` routing and its
 //! own cache mode).
 //!
 //! Assembling one branch per host into a single live query is
@@ -85,7 +85,7 @@ const SUBJECT_TAG: char = 'p';
 #[must_use]
 pub fn groups_whose_record_matches_at(host: &RelayUrl, selection: Filter) -> Binding {
     Binding::Derived(Box::new(Derived {
-        inner: pinned_public_at(host, selection),
+        inner: explicit_at(host, selection),
         project: Selector::Tag(JOIN_KEY_TAG.to_string()),
     }))
 }
@@ -130,8 +130,8 @@ fn list_evidence_at(host: &RelayUrl, kind: u16, subjects: Binding) -> Binding {
 /// # Both axes, because one is not enough
 ///
 /// `ReadRouting::Explicit` and `CacheMode` are ORTHOGONAL, and NIP-29 needs
-/// both pointed at the same host. `Pinned` scopes only the WIRE request: which
-/// relays are asked. Which locally CACHED rows may answer is governed
+/// both pointed at the same host. `Explicit` scopes only the WIRE request:
+/// which relays are asked. Which locally CACHED rows may answer is governed
 /// separately by `CacheMode`, and the grammar's default `Agnostic` means
 /// "serve every matching cached row regardless of provenance".
 ///
@@ -158,17 +158,17 @@ fn list_evidence_at(host: &RelayUrl, kind: u16, subjects: Binding) -> Binding {
 /// NIP-29's to decide, and nothing in this crate implements or varies it.
 ///
 /// Infallible for the same reason the deleted single-host door was, and for
-/// that reason ONLY: a one-element pinned set cannot be empty, and the source
-/// is never `AuthorOutboxes`. The caller-suppliable relay SET is validated
-/// once, where it enters -- [`crate::on`] -- and the nonempty scope proves
-/// every host handed down here.
-pub(crate) fn pinned_public_at(host: &RelayUrl, selection: Filter) -> Demand {
+/// that reason ONLY: a one-element relay set cannot be empty, which is the
+/// only thing `Demand::new` refuses. The caller-suppliable relay SET is
+/// validated once, where it enters -- [`crate::on`] -- and the nonempty scope
+/// proves every host handed down here.
+pub(crate) fn explicit_at(host: &RelayUrl, selection: Filter) -> Demand {
     let mut demand = Demand::new(
         selection,
         ReadRouting::Explicit(vec![host.clone()]),
         AccessContext::Public,
     )
-    .expect("a singleton pinned relay set with a non-outbox source is always constructible");
+    .expect("a singleton explicit relay set is always constructible");
     demand.cache = CacheMode::Strict;
     demand
 }
@@ -258,7 +258,7 @@ mod tests {
     /// Every level a NIP-29 constructor OWNS is stamped with the exact host on
     /// BOTH host-scoping axes; nothing relies on inheritance or on a default.
     ///
-    /// The cache half is not decoration. `Pinned` scopes the wire only, so a
+    /// The cache half is not decoration. `Explicit` scopes the wire only, so a
     /// demand that pins the host but leaves `CacheMode::Agnostic` is answered
     /// by any cached row regardless of which relay served it -- host A's
     /// member-list row then answers host B's structurally-identical lookup and

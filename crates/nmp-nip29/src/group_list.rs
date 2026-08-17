@@ -6,9 +6,9 @@ use nmp_grammar::{Binding, Demand, Filter, IdentityField};
 
 /// The signed-in account's remembered-groups list demand: `kinds:[10009],
 /// authors: Reactive(ActivePubkey)`, read from the account's own outboxes
-/// (#108's issue text asks for exactly that authority). `Reactive` IS a
-/// bound `authors` field, same as any other `Binding` variant, so
-/// `Demand::author_outboxes` accepts it.
+/// (#108's issue text asks for exactly that). It names no routing, so it
+/// gets `ReadRouting::Auto`, whose outbox lane solves for whichever author
+/// `Reactive(ActivePubkey)` resolves to.
 ///
 /// Signed-out (no active pubkey) resolves this to zero atoms through the
 /// ordinary `Reactive(ActivePubkey)` empty-resolution path (#106) -- no
@@ -31,7 +31,7 @@ mod tests {
     use nmp_grammar::ReadRouting;
 
     #[test]
-    fn current_account_demand_uses_reactive_authors_and_author_outboxes_default() {
+    fn current_account_demand_uses_reactive_authors_and_names_no_routing() {
         let demand = current_account_group_list_demand();
         assert_eq!(demand.selection.kinds, Some(BTreeSet::from([10009u16])));
         assert_eq!(

@@ -105,7 +105,7 @@ fn simple_groups_list_to_ffi(list: &nmp_nip29::SimpleGroupsList) -> FfiSimpleGro
 
 /// The signed-in account's Simple-groups-list demand (#108,
 /// `nmp_nip29::current_account_group_list_demand` mirror): `kinds:[10009]`,
-/// `AuthorOutboxes + Public`. Signed-out (no current account) resolves to
+/// naming no routing and no NIP-42 identity. Signed-out (no current account) resolves to
 /// zero atoms through the ordinary reactive-binding empty-resolution path
 /// -- no special case needed on either side of this boundary.
 ///

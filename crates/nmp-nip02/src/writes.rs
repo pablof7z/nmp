@@ -34,7 +34,7 @@ const FOLLOW_OPERATION_LEN: usize = 34;
 /// The handle names only this crate's program/format. Publishing through an
 /// engine that was not constructed with [`follow_capability`] is refused
 /// before custody. It exposes typed follow/unfollow composition, not replay
-/// ids, opaque bytes, source authority, or contributor membership.
+/// ids, opaque bytes, routing, or contributor membership.
 #[derive(Clone, Copy)]
 pub struct FollowWrites {
     registration: RegisteredReplaceableMaterializer,

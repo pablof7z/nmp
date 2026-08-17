@@ -38,7 +38,7 @@ fn engine() -> Arc<NmpEngine> {
 /// #1033's own multi-host falsifier, verified through the FFI objects: a
 /// two-host group `read` yields ONE `FfiLiveQuery` with one complete branch
 /// per host, each branch pinned to its own host alone -- never
-/// `Pinned({A, B})`, never a list the app has to merge.
+/// `Explicit({A, B})`, never a list the app has to merge.
 #[test]
 fn a_multi_host_listing_is_one_live_query_with_one_branch_per_host() {
     let scope = FfiRelayScope::on(vec![host(1), host(2)]).expect("two hosts parse");

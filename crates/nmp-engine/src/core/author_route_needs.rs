@@ -1,5 +1,5 @@
 //! Typed ownership for the neutral author-outbox provider need: which
-//! authors currently have live `AuthorOutboxes` wire demand, and which of
+//! authors are currently named by a live `Auto` wire atom, and which of
 //! those still lack a positive outbound route.
 //!
 //! Three fields used to sit directly on `CoreState`, maintained by *two*
@@ -51,9 +51,11 @@
 //! see [`AuthorRouteNeeds::finish_rebuild`] below for why that gate needs an
 //! exact answer.
 //!
-//! Likewise, which live-wire atoms even name an author for `AuthorOutboxes`
-//! demand is a `ContextualAtom` question the coordinator answers before
-//! calling in; this owner works in plain `PublicKey`s.
+//! Likewise, which live-wire atoms even name an author whose outboxes will
+//! be solved for is a `ContextualAtom` question the coordinator answers
+//! before calling in (`nmp_router::route::outbox_authors`: the atom's
+//! authors under `Auto`, none under `Explicit`); this owner works in plain
+//! `PublicKey`s.
 //!
 //! ## One refcount rule
 //!
@@ -97,15 +99,15 @@ pub(super) struct AuthorRouteNeedsCounts {
     pub(super) needs: usize,
 }
 
-/// Exact live-wire owner count per author contributed by `AuthorOutboxes`
-/// demand, and the subset of those authors still needing a neutral provider.
+/// Exact live-wire owner count per author contributed by `Auto` atoms, and
+/// the subset of those authors still needing a neutral provider.
 #[derive(Default)]
 pub(super) struct AuthorRouteNeeds {
-    /// Every author with at least one live `AuthorOutboxes` wire owner, and
-    /// exactly how many. Never holds a zero entry.
+    /// Every author with at least one live `Auto` wire owner, and exactly
+    /// how many. Never holds a zero entry.
     wire_owner_counts: BTreeMap<PublicKey, usize>,
-    /// Authors with live `AuthorOutboxes` demand and, as of the moment their
-    /// count first went from zero to one, no positive outbound route. A
+    /// Authors named by a live `Auto` atom that, as of the moment their
+    /// count first went from zero to one, had no positive outbound route. A
     /// subset of `wire_owner_counts`'s keys.
     needs: BTreeSet<PublicKey>,
     /// Whether the live need set may have changed since the last check.
@@ -113,7 +115,7 @@ pub(super) struct AuthorRouteNeeds {
 }
 
 impl AuthorRouteNeeds {
-    /// Add one live-wire owner of `author`'s `AuthorOutboxes` demand.
+    /// Add one live-wire `Auto` owner of `author`'s outbox demand.
     ///
     /// `has_positive_outbox` is consulted only on the zero-to-one transition:
     /// a continuing owner cannot change whether `author` was already
@@ -129,7 +131,7 @@ impl AuthorRouteNeeds {
         }
     }
 
-    /// Remove one live-wire owner of `author`'s `AuthorOutboxes` demand.
+    /// Remove one live-wire `Auto` owner of `author`'s outbox demand.
     ///
     /// `author` must already be counted -- a release with nothing to release
     /// is a bug in the caller (an atom's authors are a pure function of the

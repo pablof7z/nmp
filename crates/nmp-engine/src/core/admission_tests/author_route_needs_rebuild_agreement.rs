@@ -30,7 +30,7 @@ fn rebuilding_author_route_needs_reproduces_the_incremental_state_exactly() {
     let distinct = Keys::generate().public_key();
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
 
-    // Two branches sharing one author's AuthorOutboxes demand (owner count
+    // Two branches sharing one author's Auto outbox demand (owner count
     // two) plus a distinct author on its own (owner count one).
     core.handle(EngineMsg::Subscribe(routeless_outbox_query(shared)));
     core.handle(EngineMsg::Subscribe(routeless_outbox_query(shared)));

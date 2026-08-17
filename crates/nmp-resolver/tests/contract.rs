@@ -79,17 +79,15 @@ fn atom(filter: ConcreteFilter, routing: ReadRouting) -> ContextualAtom {
     }
 }
 
-/// The `AuthorOutboxes` context these fixtures declare for any filter whose
-/// root FilterNode binds `authors`
-/// (my_follows/follows_minus_mutes/address_coord's root atoms).
-fn outbox_atom(filter: ConcreteFilter) -> ContextualAtom {
-    atom(filter, ReadRouting::Auto)
-}
-
-/// The `Public` context these fixtures declare for a filter whose root
-/// FilterNode binds only tags (nip29_groups/bookmarks' root and outer
-/// atoms).
-fn public_atom(filter: ConcreteFilter) -> ContextualAtom {
+/// The `Auto` context every fixture in this file declares, whether its root
+/// FilterNode binds `authors` (my_follows/follows_minus_mutes/address_coord)
+/// or only tags (nip29_groups/bookmarks).
+///
+/// These were two helpers, `outbox_atom` and `public_atom`, named for the two
+/// authorities a filter's shape used to select between. Both already returned
+/// the identical value once the inference was deleted (#847); the shape of the
+/// selection has not chosen a routing since, so there is one helper.
+fn auto_atom(filter: ConcreteFilter) -> ContextualAtom {
     atom(filter, ReadRouting::Auto)
 }
 
@@ -489,8 +487,8 @@ fn derived_inner_limit_selects_newest_events_and_refills_after_retraction() {
     assert_eq!(
         delta.ops,
         vec![
-            DemandOp::Close(outbox_atom(outer_b.clone())),
-            DemandOp::Open(outbox_atom(outer_d.clone()))
+            DemandOp::Close(auto_atom(outer_b.clone())),
+            DemandOp::Open(auto_atom(outer_d.clone()))
         ],
         "a newer event evicts exactly the previous top-N floor"
     );
@@ -503,8 +501,8 @@ fn derived_inner_limit_selects_newest_events_and_refills_after_retraction() {
     assert_eq!(
         delta.ops,
         vec![
-            DemandOp::Close(outbox_atom(outer_d)),
-            DemandOp::Open(outbox_atom(outer_b.clone()))
+            DemandOp::Close(auto_atom(outer_d)),
+            DemandOp::Open(auto_atom(outer_b.clone()))
         ],
         "retracting a top-N row pulls the next-newest event back in"
     );
@@ -914,8 +912,8 @@ fn depth1_myfollows_surgical_delta() {
     assert_eq!(
         delta.ops,
         vec![
-            DemandOp::Close(with_fixture_provenance(outbox_atom(atom_c.clone()))),
-            DemandOp::Open(with_fixture_provenance(outbox_atom(atom_d.clone())))
+            DemandOp::Close(with_fixture_provenance(auto_atom(atom_c.clone()))),
+            DemandOp::Open(with_fixture_provenance(auto_atom(atom_d.clone())))
         ]
     );
     let after = h.metrics();
@@ -964,7 +962,7 @@ fn depth2_nip29_groups_cascade_one_level() {
 
     assert_eq!(
         delta.ops,
-        vec![DemandOp::Open(public_atom(outer_g3.clone()))]
+        vec![DemandOp::Open(auto_atom(outer_g3.clone()))]
     );
     let after = h.metrics();
     assert_eq!(
@@ -1031,9 +1029,9 @@ fn identity_reroot_closes_old_before_new() {
     assert_eq!(
         closes,
         BTreeSet::from([
-            outbox_atom(old_inner.clone()),
-            with_fixture_provenance(outbox_atom(old_a.clone())),
-            with_fixture_provenance(outbox_atom(old_b.clone()))
+            auto_atom(old_inner.clone()),
+            with_fixture_provenance(auto_atom(old_a.clone())),
+            with_fixture_provenance(auto_atom(old_b.clone()))
         ]),
         "all old atoms closed"
     );
@@ -1041,13 +1039,13 @@ fn identity_reroot_closes_old_before_new() {
     // construction) is closed LAST.
     assert_eq!(
         delta.closed().last(),
-        Some(&&outbox_atom(old_inner.clone()))
+        Some(&&auto_atom(old_inner.clone()))
     );
 
     let new_inner = cf_kinds_authors(&[3], &[&b.public_key().to_hex()]);
     assert_eq!(
         delta.opened(),
-        vec![&outbox_atom(new_inner.clone())],
+        vec![&auto_atom(new_inner.clone())],
         "only the new inner atom opens"
     );
 
@@ -1068,8 +1066,8 @@ fn identity_reroot_closes_old_before_new() {
     assert_eq!(
         opened,
         BTreeSet::from([
-            with_fixture_provenance(outbox_atom(atom_e)),
-            with_fixture_provenance(outbox_atom(atom_f)),
+            with_fixture_provenance(auto_atom(atom_e)),
+            with_fixture_provenance(auto_atom(atom_f)),
         ])
     );
 }
@@ -1195,8 +1193,8 @@ fn concurrent_depth2_changes_batch_one_delta() {
     assert_eq!(
         delta.ops,
         vec![
-            DemandOp::Close(public_atom(g1)),
-            DemandOp::Open(public_atom(g3))
+            DemandOp::Close(auto_atom(g1)),
+            DemandOp::Open(auto_atom(g3))
         ]
     );
 
@@ -1241,7 +1239,7 @@ fn identical_descriptors_share_graph() {
     assert_eq!(h.demand(), demand_with_both);
 
     let close_second = h.unsubscribe(handle2.id());
-    assert_eq!(close_second.closed(), vec![&outbox_atom(inner.clone())]);
+    assert_eq!(close_second.closed(), vec![&auto_atom(inner.clone())]);
     assert!(h.demand().is_empty());
 }
 
@@ -1331,8 +1329,8 @@ fn shared_graph_closes_an_atom_a_recompute_dropped() {
     assert_eq!(
         delta.ops,
         vec![
-            DemandOp::Close(with_fixture_provenance(outbox_atom(atom_c.clone()))),
-            DemandOp::Open(with_fixture_provenance(outbox_atom(atom_d.clone()))),
+            DemandOp::Close(with_fixture_provenance(auto_atom(atom_c.clone()))),
+            DemandOp::Open(with_fixture_provenance(auto_atom(atom_d.clone()))),
         ],
         "two handles must not suppress the Close of a departed atom"
     );
@@ -1374,7 +1372,7 @@ fn shared_graph_keeps_a_recompute_added_atom_when_one_handle_leaves() {
     let atom_d = cf_kinds_authors(&[1], &[&d.public_key().to_hex()]);
     assert_eq!(
         delta.opened(),
-        vec![&with_fixture_provenance(outbox_atom(atom_d.clone()))],
+        vec![&with_fixture_provenance(auto_atom(atom_d.clone()))],
         "D opened once for the one FilterNode that gained it"
     );
 
@@ -1425,7 +1423,7 @@ fn follows_minus_mutes_surgical() {
 
     assert_eq!(
         delta.ops,
-        vec![DemandOp::Close(with_fixture_provenance(outbox_atom(
+        vec![DemandOp::Close(with_fixture_provenance(auto_atom(
             atom_a.clone()
         )))]
     );
@@ -1486,7 +1484,7 @@ fn address_coord_fans_out_per_coordinate() {
 
     assert_eq!(
         delta.ops,
-        vec![DemandOp::Open(with_fixture_provenance(outbox_atom(
+        vec![DemandOp::Open(with_fixture_provenance(auto_atom(
             atom_g3
         )))]
     );
@@ -1517,8 +1515,8 @@ fn arbitrary_depth1_shape_needs_no_engine_change() {
     assert_eq!(
         opened,
         BTreeSet::from([
-            with_fixture_provenance(public_atom(atom_e1.clone())),
-            with_fixture_provenance(public_atom(atom_e2.clone())),
+            with_fixture_provenance(auto_atom(atom_e1.clone())),
+            with_fixture_provenance(auto_atom(atom_e2.clone())),
         ])
     );
     assert!(h.demand().contains(&atom_e1));
@@ -1549,7 +1547,7 @@ fn tag_e_explicit_hint_reaches_the_projected_atom() {
             relay: hint,
             origin: RoutingEvidenceKind::Hint,
         }]),
-        ..public_atom(cf_kinds_tag(&[1], 'e', &[&target.to_hex()]))
+        ..auto_atom(cf_kinds_tag(&[1], 'e', &[&target.to_hex()]))
     };
     assert_eq!(delta.opened(), vec![&expected]);
 }
@@ -1671,7 +1669,7 @@ fn derived_set_retracts_deleted_member_that_new_winner_does_not_match() {
     assert!(
         delta
             .ops
-            .contains(&DemandOp::Close(public_atom(outer_g1.clone()))),
+            .contains(&DemandOp::Close(auto_atom(outer_g1.clone()))),
         "deleting g1's membership event must close its derived atom even \
          though the deleting kind:5 event itself matches no inner filter: \
          {:?}",
@@ -1715,7 +1713,7 @@ fn metrics_witness_only_retracted_member_atoms_churn() {
     let outer_kinds = [39_000u16, 39_001, 39_002];
     let outer_g1 = cf_kinds_tag(&outer_kinds, 'd', &["g1"]);
 
-    assert_eq!(delta.ops, vec![DemandOp::Close(public_atom(outer_g1))]);
+    assert_eq!(delta.ops, vec![DemandOp::Close(auto_atom(outer_g1))]);
     let after = h.metrics();
     assert_eq!(
         after.atoms_closed - before.atoms_closed,

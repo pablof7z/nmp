@@ -297,8 +297,9 @@ fn an_authorless_demand_is_not_narrowed_by_an_author_bearing_sibling() {
 ///
 /// `active_outbox_authors` is incremented at two sites and decremented at
 /// two more, with a fifth that rebuilds it from scratch. Before the collapse
-/// each site asked "is this atom `AuthorOutboxes`?"; five copies of one
-/// predicate is exactly the shape that lets counting and decrementing drift
+/// each site asked its own version of "does this atom solve outboxes?";
+/// five copies of one predicate is exactly the shape that lets counting and
+/// decrementing drift
 /// apart, and a demand whose count never reaches zero is a demand whose
 /// request never closes.
 ///

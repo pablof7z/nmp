@@ -21,7 +21,7 @@
 ## Read path
 
 - Filter/binding:
-- Source authority/access/cache mode:
+- Routing/access/cache mode:
 - Observation shape:
 - Evidence/shortfall UI:
 - Cancellation and pagination:

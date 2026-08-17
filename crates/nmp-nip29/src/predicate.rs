@@ -9,7 +9,7 @@
 //! lowered once per host in the scope, each time against that host and no
 //! other. A finished `Binding` has already answered that question and answered
 //! it once; using one as the currency would force either a flattened
-//! `Pinned({A, B})` -- which cross-products evidence observed at A onto a
+//! `Explicit({A, B})` -- which cross-products evidence observed at A onto a
 //! listing at B, a confidently wrong answer -- or a recursive repin of a
 //! caller's own binding, which is the silent inheritance `nmp_grammar::Derived`
 //! exists to forbid.

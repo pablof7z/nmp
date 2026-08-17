@@ -83,10 +83,11 @@ mod tests {
         assert_ne!(a.selection, b.selection);
     }
 
-    /// Reusable public demand: defaults to `AuthorOutboxes`-free public
-    /// selection since this filter names no `authors` binding.
+    /// This filter names no `authors` binding and no routing, so it rides
+    /// `Auto` like any other selection -- `Auto`'s outbox lane simply has no
+    /// author to solve for, and the remaining lanes carry the whole route.
     #[test]
-    fn demand_defaults_to_public_source() {
+    fn demand_names_no_routing() {
         let root = CommentRoot::External(Nip73::podcast_episode("guid-1").unwrap());
         let demand = comment_thread_demand(&root);
         assert_eq!(demand.routing, ReadRouting::Auto);

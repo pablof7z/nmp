@@ -66,7 +66,7 @@ Feature: A group can live on more than one relay at once
   # nmp:status=built
   # nmp:evidence=rust:nmp::a_group_read_is_one_complete_branch_per_host
   # nmp:evidence=rust:nmp::a_multi_host_read_is_one_live_query_with_one_branch_per_host
-  # nmp:falsifier=Collapse a multi-host group read into one `Demand` pinned to `Pinned({every host})` instead of one `LiveQuery` branch per host; a row genuinely observed only at host A would then read as evidence for host B too.
+  # nmp:falsifier=Collapse a multi-host group read into one `Demand` routed `ReadRouting::Explicit({every host})` instead of one `LiveQuery` branch per host; a row genuinely observed only at host A would then read as evidence for host B too.
   @nip29
   Scenario: A multi-host group read is one live query, one complete branch per host
     Given a group narrowed from that relay scope
@@ -78,7 +78,7 @@ Feature: A group can live on more than one relay at once
   # nmp:id=GROUPS-DISCOVERY-001
   # nmp:status=built
   # nmp:evidence=rust:nmp::scope_stamps_exact_hosts_on_every_nested_nip29_demand
-  # nmp:falsifier=Verified red-then-green in `nmp_nip29::discovery::list_evidence_at` by replacing one inner pin (`pinned_public_at`) with a default `Demand`: `assertion left == right failed: depth 1 (the member-list evidence) must be routed to wss://host-1.example.com alone, not inherited and not cross-hosted -- left: Auto, right: Explicit([RelayUrl("wss://host-1.example.com")])`.
+  # nmp:falsifier=Verified red-then-green in `nmp_nip29::discovery::list_evidence_at` by replacing one inner pin (`explicit_at`) with a default `Demand`: `assertion left == right failed: depth 1 (the member-list evidence) must be routed to wss://host-1.example.com alone, not inherited and not cross-hosted -- left: Auto, right: Explicit([RelayUrl("wss://host-1.example.com")])`.
   @nip29
   Scenario: Every NIP-29-owned nesting level is pinned to its own branch host, never inherited
     Given a group-discovery predicate asking which groups name a subject as a member

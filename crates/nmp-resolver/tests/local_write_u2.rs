@@ -102,7 +102,7 @@ fn deletions_by_etag_filter() -> Filter {
 /// the SET, keeping them robust to that ordering while still exact on
 /// membership). `DemandOp` carries a full `ContextualAtom` (#106), but
 /// every fixture in this file is `my_follows_filter()`-shaped (uniformly
-/// `AuthorOutboxes`), so these tests are about atom identity, not context;
+/// `Auto`), so these tests are about atom identity, not context;
 /// extracting `.filter` keeps every existing assertion unchanged.
 fn opened(delta: &nmp_grammar::DemandDelta) -> BTreeSet<ConcreteFilter> {
     delta

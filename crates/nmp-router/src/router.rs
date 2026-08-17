@@ -696,11 +696,11 @@ impl Router {
             );
         }
 
-        // #107: explicit, query-declared pinned wire authority — route
-        // DIRECTLY to the Demand's own relay set. NO additive lane
-        // (indexer/app/fallback) is ever applied here: that's the #107
-        // Contract's core guarantee ("Pinned author filters never contact
-        // directory, author-outbox, app, fallback, or indexer relays").
+        // #107: an explicit, query-declared relay set — route DIRECTLY to
+        // it. NO additive lane (indexer/app/fallback) is ever applied here:
+        // that's the #107 Contract's core guarantee ("Explicit author
+        // filters never contact directory, author-outbox, app, fallback, or
+        // indexer relays").
         for (atom, relays) in &exact_atoms {
             let filter = &atom.filter;
             let access = atom.access;

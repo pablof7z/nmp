@@ -22,7 +22,7 @@ mod tests {
     use nmp_grammar::ReadRouting;
 
     #[test]
-    fn contact_list_uses_current_account_author_outboxes() {
+    fn contact_list_uses_the_current_account_and_names_no_routing() {
         let demand = current_account_demand();
         assert_eq!(demand.selection.kinds, Some(BTreeSet::from([3])));
         assert_eq!(

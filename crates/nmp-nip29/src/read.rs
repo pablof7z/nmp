@@ -14,7 +14,7 @@
 //! many hosts -> the canonical nonempty set of complete branches
 //! ```
 //!
-//! Never `Pinned({A, B})` -- that cross-products a value derived at A onto B.
+//! Never `Explicit({A, B})` -- that cross-products a value derived at A onto B.
 //! Never `Vec<Demand>` handed to the app -- that moves coherent row, evidence,
 //! window and cancellation ownership into every app. Never a NIP-29-specific
 //! observe door.
@@ -36,7 +36,7 @@ pub enum GroupReadError {
     /// (`LiveQuery::MAX_BRANCHES`).
     ///
     /// A refusal, never a degraded answer: collapsing branches into one
-    /// `Pinned` set would return a confidently wrong cross-product, and
+    /// `Explicit` set would return a confidently wrong cross-product, and
     /// dropping branches would silently under-resolve.
     Declaration(LiveQueryError),
 }

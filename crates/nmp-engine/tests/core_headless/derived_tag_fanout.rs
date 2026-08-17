@@ -54,9 +54,9 @@ fn group_admins(
         .expect("test fixture event must sign cleanly")
 }
 
-/// The query under study, pinned to `relays` — mosaico reaches the wire via
-/// `ReadRouting::Explicit` (`ExplicitPinned`), never via outbox routing,
-/// so the study must too or the outer atom never routes at all.
+/// The query under study, scoped to `relays` — mosaico reaches the wire via
+/// `ReadRouting::Explicit`, never via outbox routing, so the study must too
+/// or the outer atom never routes at all.
 fn group_state_of_my_admin_groups(relays: &[RelayUrl]) -> LiveQuery {
     let pinned: BTreeSet<RelayUrl> = relays.iter().cloned().collect();
     let inner = nmp_grammar::Demand::new(

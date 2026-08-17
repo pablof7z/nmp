@@ -53,7 +53,7 @@ use nmp_grammar::{Binding, Demand, Filter};
 use nostr::{Event, EventId, PublicKey, RelayUrl, Timestamp};
 
 use crate::discovery::{
-    join_key, pinned_public_at, subject, GROUP_ADMINS_KIND, GROUP_MEMBERS_KIND, GROUP_METADATA_KIND,
+    join_key, explicit_at, subject, GROUP_ADMINS_KIND, GROUP_MEMBERS_KIND, GROUP_METADATA_KIND,
 };
 
 /// Which of NIP-29's three relay-signed group records an app is asking for.
@@ -255,7 +255,7 @@ pub fn group_records_at(
         !records.is_empty(),
         "the facade proves the record selection is nonempty before lowering it"
     );
-    pinned_public_at(
+    explicit_at(
         host,
         Filter {
             kinds: Some(records.iter().map(|record| record.record_kind()).collect()),

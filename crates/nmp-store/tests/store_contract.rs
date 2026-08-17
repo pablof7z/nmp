@@ -83,8 +83,8 @@ fn shape(kinds: &[u16], authors: Option<&Keys>) -> ConcreteFilter {
     }
 }
 
-/// Wrap a filter into a fixed-context (`AuthorOutboxes`/`Public`) demand
-/// atom (#106): `coverage_key`/`record_coverage` now take a full
+/// Wrap a filter into a fixed-context (`Auto`, unauthenticated) demand
+/// atom (#106): `coverage_key`/`record_coverage` take a full
 /// `ContextualAtom`, not a bare `ConcreteFilter` -- this contract suite
 /// exercises the SELECTION/interval-merge axis, so every atom here shares a
 /// uniform context (a dedicated context-anti-alias falsifier lives in

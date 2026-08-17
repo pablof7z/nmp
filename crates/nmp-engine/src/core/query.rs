@@ -3411,11 +3411,11 @@ impl CoreState {
     /// `Derived.inner` Demand owns an independent source and cache policy,
     /// so consulting a descendant here would let its pins contaminate the
     /// caller-owned root projection.
-    /// `CacheMode::Strict` is only meaningful over a `ReadRouting::
-    /// Pinned` selection (the Contract: "pinned cache policy is part of
-    /// source identity") -- over any other source there is no pinned relay
-    /// set to intersect against, so Strict is a no-op there, identical to
-    /// Agnostic.
+    /// `CacheMode::Strict` is only meaningful over a
+    /// `ReadRouting::Explicit` selection (the Contract: "pinned cache policy
+    /// is part of source identity") -- under `Auto` there is no declared
+    /// relay set to intersect against, so Strict is a no-op there, identical
+    /// to Agnostic.
     pub(in crate::core) fn rows_for(
         &self,
         id: HandleId,

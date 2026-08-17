@@ -176,7 +176,7 @@ pub fn group_demand_at(
         context_tag(),
         Binding::Literal(BTreeSet::from([group_id.to_string()])),
     );
-    Ok(crate::discovery::pinned_public_at(host, selection))
+    Ok(crate::discovery::explicit_at(host, selection))
 }
 
 /// Append one `h` row per group in `group_ids` to a draft, refusing a draft

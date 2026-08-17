@@ -104,7 +104,7 @@ Feature: Reading a group goes through the one read door
   # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-006
   # nmp:status=built
   # nmp:evidence=rust:nmp::a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox
-  # nmp:falsifier=sourcing a group read's Demand from ReadRouting::Auto instead of Pinned makes a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox see the discovered author outbox relay contacted alongside or instead of the retained pinned host
+  # nmp:falsifier=routing a group read's Demand ReadRouting::Auto instead of ReadRouting::Explicit makes a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox see the discovered author outbox relay contacted alongside or instead of the retained pinned host
   @nip29
   Scenario: The host is a query-declared pinning, not a directory fact
     Given a filter selecting kind 9
