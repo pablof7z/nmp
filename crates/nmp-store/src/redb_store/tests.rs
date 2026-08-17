@@ -3221,3 +3221,78 @@ fn ingest_supersession_no_longer_evicts_terminal_receipts() {
     assert_eq!(evicted, vec![receipt_id]);
     assert!(store.reattach_receipt(receipt_id).unwrap().is_none());
 }
+
+/// `apply_run_deaths` keeps dead keys in a binary counter of at most
+/// `MAX_DEATH_BLOCKS` (8) levels. When a death batch carries through every
+/// occupied level, the counter overflows and the run must be rewritten
+/// without its dead events.
+///
+/// That rewrite was unreachable *precisely* when it became necessary.
+/// Falling out of the carry loop means all 8 levels were occupied and
+/// `carry` already held their union; the code then pushed `carry` onto the
+/// 8 blocks it had read at the top of the function and re-merged all 9 —
+/// which `merge_dead_blocks` rejects, because its hard bound is 8. So the
+/// single case the rewrite path existed to handle was the one case that
+/// failed the entire write transaction instead.
+///
+/// This test drives the counter to overflow through the public door. It is
+/// deliberately slow-ish (one committed transaction per death) because the
+/// carry is a property of *separate* flushes: batching the removes would
+/// coalesce them into one death block and never fill a level.
+#[test]
+fn a_death_batch_that_overflows_the_counter_rewrites_the_run() {
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    let owner = nostr::Keys::generate();
+    let relay = RelayUrl::parse("wss://death.example").unwrap();
+
+    // One run, large enough that 256 deaths cannot empty it -- an emptied run
+    // takes the `delete_run` early return at the top and never reaches the
+    // carry at all.
+    let events: Vec<_> = (0..320u64)
+        .map(|index| {
+            nostr::EventBuilder::new(Kind::TextNote, format!("death-fanin-{index}"))
+                .custom_created_at(Timestamp::from(2_000 + index))
+                .sign_with_keys(&owner)
+                .expect("sign death fan-in event")
+        })
+        .collect();
+    let ids: Vec<_> = events.iter().map(|event| event.id).collect();
+    store
+        .insert_batch(
+            events
+                .into_iter()
+                .map(|event| {
+                    (
+                        event,
+                        RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
+                    )
+                })
+                .collect(),
+        )
+        .expect("seed one run");
+
+    // Levels occupied after `n` batches are the set bits of `n`. After 255 all
+    // eight are occupied; the 256th carries through every one of them and is
+    // the batch that reaches the rewrite. Before the fix it returned
+    // "packed postings: dead-key block fan-in exceeds the hard bound" and
+    // failed the write.
+    for (batch, id) in ids.iter().take(256).enumerate() {
+        store.remove(*id, RetractReason::Deleted).unwrap_or_else(|error| {
+            panic!("death batch {batch} must not fail the write transaction: {error}")
+        });
+    }
+
+    // The rewrite really did happen rather than the deaths silently no-oping:
+    // every removed event is gone, and every untouched one survives it.
+    let dead: Vec<_> = ids.iter().take(256).copied().collect();
+    let alive: Vec<_> = ids.iter().skip(256).copied().collect();
+    assert!(
+        store.query(&Filter::new().ids(dead)).unwrap().is_empty(),
+        "no removed event may survive the run rewrite"
+    );
+    assert_eq!(
+        store.query(&Filter::new().ids(alive.clone())).unwrap().len(),
+        alive.len(),
+        "the rewrite must preserve every event that was not dead"
+    );
+}
