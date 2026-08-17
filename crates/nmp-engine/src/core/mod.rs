@@ -34,6 +34,7 @@
 #[cfg(test)]
 mod admission_tests;
 mod attribution;
+mod author_route_needs;
 mod author_route_provider;
 pub use author_route_provider::{AuthorRouteProvider, AuthorRouteUpdate, ProviderReroot};
 #[cfg(test)]
@@ -458,6 +459,7 @@ pub use query::Nip77Frame;
 pub use request_attempt::{LocalSendRefusal, RequestAttemptId, RequestHandoffOutcome};
 use request_attempt::{RequestAttemptPurpose, RequestAttemptState, RequestAttempts, RequestSend};
 pub use request_effects::{AttemptedReplay, AttemptedWireDelta};
+use author_route_needs::AuthorRouteNeeds;
 use request_replacements::RequestReplacements;
 use request_targets::{ActiveRequestTarget, RequestTargets};
 use stalled_write_census::{StalledWriteCensus, StalledWriteInputs};
@@ -1107,6 +1109,9 @@ pub struct CoreOwnershipCensus {
     /// one of four, and a rebuild that double-counted was invisible.
     pub wire_owner_refs: usize,
     pub wire_reverse_owner_keys: usize,
+    pub author_outbox_wire_owner_keys: usize,
+    pub author_outbox_wire_owner_refs: usize,
+    pub author_outbox_route_needs: usize,
     pub wire_coverage_keys: usize,
     pub wire_coverage_edges: usize,
     pub wire_demand_keys: usize,
@@ -1912,16 +1917,12 @@ pub struct EngineCore {
     /// counting has exactly one implementation instead of an incremental path
     /// and a rebuild that open-coded it a second time.
     wire: WireOwnership,
-    /// Exact live-wire owner count per author contributed by
-    /// `AuthorOutboxes` demand. This keeps neutral provider work incremental:
-    /// unrelated handle teardown never scans the complete wire-demand set.
-    author_outbox_wire_owner_counts: BTreeMap<PublicKey, usize>,
-    /// Authors with live `AuthorOutboxes` demand and no positive outbound
-    /// route. This is the read half of `AuthorRouteNeedsChanged`.
-    author_outbox_route_needs: BTreeSet<PublicKey>,
-    /// Whether an incremental wire-owner change altered that read half since
-    /// the last provider-work edge was published.
-    author_outbox_route_needs_changed: bool,
+    /// Live-wire owner count per author contributed by `AuthorOutboxes`
+    /// demand, which authors still lack a positive outbound route, and the
+    /// pending-change flag for `AuthorRouteNeedsChanged`. Private to
+    /// `author_route_needs.rs`, so the incremental and wholesale-rebuild
+    /// paths share one algorithm instead of two that can drift.
+    author_outbox_route_needs: AuthorRouteNeeds,
     /// Per-OBSERVATION delivered projection, keyed by the id every mailbox
     /// and cancellation uses.
     observations: HashMap<ObservationId, ObservationState>,
@@ -2043,6 +2044,18 @@ pub struct EngineCore {
     /// positive outbound route. Keeping the prior value here makes provider
     /// synchronization an edge rather than a repeated side effect of every
     /// unrelated recompile.
+    ///
+    /// Deliberately stays here rather than moving into `AuthorRouteNeeds`:
+    /// it is the last-published snapshot of `author_route_needs()`'s UNION,
+    /// which mixes write-plane state (`pending`'s `route_needs`, refreshed
+    /// per intent by the route resolver in `write.rs`) with this owner's own
+    /// `needs`. `AuthorRouteNeeds` deliberately knows nothing about `pending`
+    /// or write intents -- giving it this field would mean giving it that
+    /// visibility too, trading one coordinator-level field for a real
+    /// boundary violation. The root composition/order state this field
+    /// represents (the last thing told to an outside consumer, unioning two
+    /// owners' contributions) belongs with the coordinator that computes the
+    /// union, not with either half of it.
     last_author_route_needs: BTreeSet<PublicKey>,
     /// Which open obligations are stuck and the bounded projection of them
     /// diagnostics snapshots carry (#1743). Its three fields are private to
@@ -2376,9 +2389,7 @@ impl EngineCore {
             handles: HashMap::new(),
             request_targets: RequestTargets::default(),
             wire: WireOwnership::default(),
-            author_outbox_wire_owner_counts: BTreeMap::new(),
-            author_outbox_route_needs: BTreeSet::new(),
-            author_outbox_route_needs_changed: false,
+            author_outbox_route_needs: AuthorRouteNeeds::default(),
             observations: HashMap::new(),
             next_observation_id: 0,
             history: HistorySessions::new(),
@@ -2628,6 +2639,7 @@ impl EngineCore {
     #[cfg(any(test, feature = "bench-instrumentation"))]
     pub fn assert_owner_consistency(&self, at: &str) {
         self.wire.assert_consistent(at);
+        self.author_outbox_route_needs.assert_consistent(at);
         self.request_targets.assert_consistent(at);
         self.nip77.assert_consistent(at);
         self.request_replacements.assert_consistent(at);
@@ -2662,6 +2674,7 @@ impl EngineCore {
         let attempts = self.attempts.counts();
         let history = self.history.counts();
         let wire = self.wire.counts();
+        let author_outbox = self.author_outbox_route_needs.counts();
         let targets = self.request_targets.counts();
         let nip77 = self.nip77.counts();
         let replacements = self.request_replacements.counts();
@@ -2699,6 +2712,9 @@ impl EngineCore {
             wire_owner_keys: wire.owner_keys,
             wire_owner_refs: wire.owner_refs,
             wire_reverse_owner_keys: wire.reverse_owner_keys,
+            author_outbox_wire_owner_keys: author_outbox.wire_owner_keys,
+            author_outbox_wire_owner_refs: author_outbox.wire_owner_refs,
+            author_outbox_route_needs: author_outbox.needs,
             wire_coverage_keys: wire.coverage_keys,
             wire_coverage_edges: wire.coverage_edges,
             wire_demand_keys: wire.demand_keys,
