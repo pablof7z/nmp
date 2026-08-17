@@ -240,13 +240,6 @@ pub enum FfiReadRouting {
     },
 }
 
-/// `nmp_grammar::AccessContext` mirror with a stable expected NIP-42 key.
-#[derive(Debug, Clone, PartialEq, Eq, Enum)]
-pub enum FfiAccessContext {
-    Public,
-    Nip42 { public_key: String },
-}
-
 /// `nmp_grammar::CacheMode` mirror (#107). Meaningful only alongside
 /// [`FfiReadRouting::Explicit`] -- see that type's doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
@@ -265,7 +258,7 @@ pub enum FfiFreshness {
 }
 
 /// The full live-query declaration an app supplies -- `selection + routing +
-/// access + cache + freshness` (`nmp_grammar::Demand` mirror,
+/// authenticate_as + cache + freshness` (`nmp_grammar::Demand` mirror,
 /// #106/#107/#565). Every branch of every `NmpEngine::observe` call is one
 /// of these: there is no bare-[`FfiFilter`] door, so routing is a declared
 /// value rather than something inferred from the selection's shape (#847) --
@@ -275,7 +268,12 @@ pub enum FfiFreshness {
 pub struct FfiDemand {
     pub selection: FfiFilter,
     pub routing: FfiReadRouting,
-    pub access: FfiAccessContext,
+    /// OVERRIDE the identity NMP authenticates as if a relay challenges this
+    /// demand's connection, as a 32-byte hex public key. `None` — the
+    /// default — means the engine's current account. There is no value
+    /// meaning "unauthenticated": whether a connection authenticates is
+    /// decided by the relay challenging it, never declared here.
+    pub authenticate_as: Option<String>,
     pub cache: FfiCacheMode,
     pub freshness: FfiFreshness,
 }
@@ -599,7 +597,7 @@ pub enum FfiAuthPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiSourceEvidence {
     pub relay: String,
-    pub access: FfiAccessContext,
+    pub authenticated_as: Option<String>,
     pub reconciled_through: Option<u64>,
     pub status: FfiSourceStatus,
 }
@@ -907,7 +905,7 @@ pub struct FfiFilterCoverage {
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiRelayDiagnostics {
     pub relay: String,
-    pub access: FfiAccessContext,
+    pub authenticated_as: Option<String>,
     pub wire_sub_count: u32,
     /// This relay's own advertised concurrent-subscription budget (NIP-11
     /// `limitation.max_subscriptions`, #931). `None` means the relay
@@ -949,7 +947,7 @@ pub struct FfiRelayDiagnostics {
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiAuthDiagnostics {
     pub relay: String,
-    pub access: FfiAccessContext,
+    pub authenticated_as: Option<String>,
     pub transport_generation: u64,
     pub epoch_sequence: Option<u64>,
     pub challenge_descriptor: Option<String>,

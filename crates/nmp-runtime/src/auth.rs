@@ -810,7 +810,7 @@ impl AuthTaskRegistry {
             .iter()
             .filter_map(|(session, task)| {
                 let same_pubkey = matches!(
-                    task.token.epoch.session.access,
+                    task.token.epoch.session.authenticated_as,
                     Some(current) if current == pubkey
                 );
                 (same_pubkey && task.capability == capability && task.instance == instance)
@@ -824,7 +824,7 @@ impl AuthTaskRegistry {
         }
         self.pending.retain(|_, task| {
             let same_pubkey = matches!(
-                task.token.epoch.session.access,
+                task.token.epoch.session.authenticated_as,
                 Some(current) if current == pubkey
             );
             !(same_pubkey && task.capability == capability && task.instance == instance)
@@ -1357,7 +1357,7 @@ mod tests {
         let (invoked_tx, invoked_rx) = std::sync::mpsc::channel();
         let (completion, operation) = AuthPolicyOp::pending_channel();
         let request_token = token();
-        let expected_pubkey = match request_token.epoch.session.access {
+        let expected_pubkey = match request_token.epoch.session.authenticated_as {
             Some(pubkey) => pubkey,
             None => unreachable!(),
         };
@@ -1443,7 +1443,7 @@ mod tests {
             let _ = cancel_tx.send(());
         });
         let request_token = token();
-        let expected_pubkey = match request_token.epoch.session.access {
+        let expected_pubkey = match request_token.epoch.session.authenticated_as {
             Some(pubkey) => pubkey,
             None => unreachable!(),
         };
@@ -1649,7 +1649,7 @@ mod tests {
         dispatch(
             AuthEffect::RequestPolicy {
                 token: policy_token.clone(),
-                expected_pubkey: match policy_token.epoch.session.access {
+                expected_pubkey: match policy_token.epoch.session.authenticated_as {
                     Some(pubkey) => pubkey,
                     None => unreachable!(),
                 },
@@ -1681,7 +1681,7 @@ mod tests {
         let sign_token = token();
         let unsigned =
             nostr::EventBuilder::auth("challenge", sign_token.epoch.session.relay.clone()).build(
-                match sign_token.epoch.session.access {
+                match sign_token.epoch.session.authenticated_as {
                     Some(pubkey) => pubkey,
                     None => unreachable!(),
                 },

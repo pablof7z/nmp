@@ -25,7 +25,6 @@
 //! `AwaitingRelayAck`, so a direct-Rust app and a native app read different
 //! phases for the same session.
 
-use nmp_grammar::AccessContext;
 
 use nmp_engine::core::AuthDiagnosticsPhase;
 use nmp_router::Lane;
@@ -116,7 +115,7 @@ impl RelayDiagnosticsSnapshot {
         // this conversion until the mirror carries it too.
         let nmp_engine::core::RelayDiagnosticsSnapshot {
             relay,
-            access,
+            authenticated_as,
             wire_sub_count,
             subscription_budget,
             subscriptions_refused,
@@ -137,7 +136,7 @@ impl RelayDiagnosticsSnapshot {
         } = value;
         Self {
             relay,
-            access,
+            authenticated_as,
             wire_sub_count,
             subscription_budget,
             subscriptions_refused,
@@ -192,7 +191,7 @@ impl AuthDiagnosticsSnapshot {
     fn from_engine(value: nmp_engine::core::AuthDiagnosticsSnapshot) -> Self {
         let nmp_engine::core::AuthDiagnosticsSnapshot {
             relay,
-            access,
+            authenticated_as,
             // `transport_slot` is deliberately absent from the facade: it is
             // a connection-pool allocator index (which physical slot
             // currently holds this session), meaningful only to the
@@ -212,7 +211,7 @@ impl AuthDiagnosticsSnapshot {
         } = value;
         Self {
             relay,
-            access,
+            authenticated_as,
             transport_generation,
             epoch_sequence,
             challenge_hash,
@@ -526,7 +525,7 @@ mod tests {
         assert_eq!(facade.relays.len(), 1);
         let row = &facade.relays[0];
         assert_eq!(row.relay, relay);
-        assert_eq!(row.access, None);
+        assert_eq!(row.authenticated_as, None);
         assert_eq!(row.wire_sub_count, 2);
         assert_eq!(row.subscription_budget, Some(20));
         assert_eq!(row.subscriptions_refused, 1);
@@ -557,7 +556,7 @@ mod tests {
         assert_eq!(facade.auth_sessions.len(), 1);
         let auth = &facade.auth_sessions[0];
         assert_eq!(auth.relay.to_string(), "wss://auth.example.com");
-        assert!(matches!(auth.access, Some(_)));
+        assert!(matches!(auth.authenticated_as, Some(_)));
         assert_eq!(auth.transport_generation, 7);
         assert_eq!(auth.epoch_sequence, Some(11));
         assert_eq!(auth.challenge_hash.as_deref(), Some("blake3:abc"));

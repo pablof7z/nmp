@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 
 use nmp::{
-    AccessContext as GAccessContext, AcquisitionEvidence, AuthDenialSource as GAuthDenialSource,
+    AcquisitionEvidence, AuthDenialSource as GAuthDenialSource,
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, AuthPhase, Binding as GBinding,
     CacheMode as GCacheMode, CancelWriteError, CancelWriteOutcome, CoverageInterval,
     Demand as GDemand, DemandError as GDemandError, Derived as GDerived, DiagnosticsSnapshot,
@@ -32,7 +32,7 @@ use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, Tag, Timestamp};
 
 use crate::types::{
-    FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthDiagnostics,
+    FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthDiagnostics,
     FfiAuthPhase, FfiBinding, FfiCacheMode, FfiCancelWriteError, FfiCancelWriteOutcome,
     FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiEventBuilder, FfiFilter,
     FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentity, FfiIdentityField, FfiKindCount,
@@ -1599,20 +1599,12 @@ fn read_routing_to_ffi(s: GReadRouting) -> FfiReadRouting {
     }
 }
 
-fn access_context_from_ffi(a: FfiAccessContext) -> Result<GAccessContext, FfiError> {
-    Ok(match a {
-        FfiAccessContext::Public => None,
-        FfiAccessContext::Nip42 { public_key } => Some(parse_pubkey(&public_key)?),
-    })
+fn auth_identity_from_ffi(a: Option<String>) -> Result<Option<nostr::PublicKey>, FfiError> {
+    a.as_deref().map(parse_pubkey).transpose()
 }
 
-fn access_context_to_ffi(a: GAccessContext) -> FfiAccessContext {
-    match a {
-        None => FfiAccessContext::Public,
-        Some(public_key) => FfiAccessContext::Nip42 {
-            public_key: public_key.to_hex(),
-        },
-    }
+fn auth_identity_to_ffi(a: Option<nostr::PublicKey>) -> Option<String> {
+    a.map(|public_key| public_key.to_hex())
 }
 
 fn cache_mode_from_ffi(c: FfiCacheMode) -> GCacheMode {
@@ -1653,7 +1645,7 @@ pub fn demand_from_ffi(d: FfiDemand) -> Result<GDemand, FfiError> {
     let mut demand = GDemand::new(
         filter_from_ffi(d.selection)?,
         read_routing_from_ffi(d.routing)?,
-        access_context_from_ffi(d.access)?,
+        auth_identity_from_ffi(d.authenticate_as)?,
     )?;
     demand.cache = cache_mode_from_ffi(d.cache);
     demand.freshness = freshness_from_ffi(d.freshness);
@@ -1664,7 +1656,7 @@ pub fn demand_to_ffi(d: GDemand) -> FfiDemand {
     FfiDemand {
         selection: filter_to_ffi(d.selection),
         routing: read_routing_to_ffi(d.routing),
-        access: access_context_to_ffi(d.access),
+        authenticate_as: auth_identity_to_ffi(d.authenticate_as),
         cache: cache_mode_to_ffi(d.cache),
         freshness: freshness_to_ffi(d.freshness),
     }
@@ -1736,7 +1728,7 @@ fn source_status_to_ffi(s: SourceStatus) -> FfiSourceStatus {
 fn source_evidence_to_ffi(s: SourceEvidence) -> FfiSourceEvidence {
     FfiSourceEvidence {
         relay: s.relay.to_string(),
-        access: access_context_to_ffi(s.access),
+        authenticated_as: auth_identity_to_ffi(s.authenticated_as),
         reconciled_through: s.reconciled_through.map(|ts| ts.as_secs()),
         status: source_status_to_ffi(s.status),
     }
@@ -2201,7 +2193,7 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
     // record carries it too.
     let RelayDiagnosticsSnapshot {
         relay,
-        access,
+        authenticated_as,
         wire_sub_count,
         subscription_budget,
         subscriptions_refused,
@@ -2222,7 +2214,7 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
     } = r;
     FfiRelayDiagnostics {
         relay: relay.to_string(),
-        access: access_context_to_ffi(access),
+        authenticated_as: auth_identity_to_ffi(authenticated_as),
         wire_sub_count: wire_sub_count as u32,
         subscription_budget: subscription_budget.map(|budget| budget as u32),
         subscriptions_refused: subscriptions_refused as u32,
@@ -2281,7 +2273,7 @@ fn auth_diagnostics_to_ffi(snapshot: AuthDiagnosticsSnapshot) -> FfiAuthDiagnost
     // record carries it too.
     let AuthDiagnosticsSnapshot {
         relay,
-        access,
+        authenticated_as,
         transport_generation,
         epoch_sequence,
         challenge_hash,
@@ -2292,7 +2284,7 @@ fn auth_diagnostics_to_ffi(snapshot: AuthDiagnosticsSnapshot) -> FfiAuthDiagnost
     } = snapshot;
     FfiAuthDiagnostics {
         relay: relay.to_string(),
-        access: access_context_to_ffi(access),
+        authenticated_as: auth_identity_to_ffi(authenticated_as),
         transport_generation,
         epoch_sequence,
         challenge_descriptor: challenge_hash,
