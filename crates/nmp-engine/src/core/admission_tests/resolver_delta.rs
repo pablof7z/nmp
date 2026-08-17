@@ -265,9 +265,6 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
             routing_evidence: BTreeSet::new(),
         };
         incumbent_claims.insert(coverage_key(&atom));
-        core.white_box("attribution.observe_atom", |s| {
-            s.attribution.observe_atom(&atom)
-        });
         atoms.push(atom);
     }
     let added_atom = ContextualAtom {
@@ -280,10 +277,8 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
         routing_evidence: BTreeSet::new(),
     };
     let added_claim = coverage_key(&added_atom);
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&added_atom)
-    });
     atoms.push(added_atom.clone());
+    core.set_active_demand(&atoms.iter().cloned().collect());
 
     let request_atom = atoms[0].clone();
     let sub_id = SubId::for_wire(
@@ -327,15 +322,11 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
     assert_eq!(core.request_claim_entries_examined.get(), 1);
     assert_eq!(core.request_owner_entries_examined.get(), 1);
 
-    core.white_box("attribution.release_live_request_claims", |s| {
-        s.attribution.release_live_request_claims(&sub_id)
+    core.white_box("retire_plan_execution_metadata", |s| {
+        s.retire_plan_execution_metadata(&sub_id)
     });
     core.white_box("abandon_sub", |s| s.abandon_sub(&sub_id));
-    for atom in atoms {
-        core.white_box("attribution.release_atom", |s| {
-            s.attribution.release_atom(&atom)
-        });
-    }
+    core.set_active_demand(&BTreeSet::new());
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()

@@ -113,6 +113,33 @@ impl EngineCore {
             .suppress_turn_level_consistency_for_named_exception();
     }
 
+    /// The engine's current logical demand is now exactly `demand`.
+    ///
+    /// This is the one thing `CoreState::recompile` does to attribution, and
+    /// a falsifier that drives the router by hand (rather than through a
+    /// resolver) has to do it too, or every coverage claim it later attributes
+    /// resolves to no retained shape. Sixty-seven sites did it a different
+    /// way: `white_box("attribution.observe_atom", ..)` for whatever arrived
+    /// and `white_box("attribution.release_atom", ..)` for whatever left,
+    /// spelling out a TRANSITION where production states a FACT. A transition
+    /// can be wrong in ways a fact cannot — `release_atom` silently no-ops on
+    /// an atom that was never observed — and none of the sixty-seven could
+    /// ever have caught `recompile` changing which calls it makes (#1850).
+    ///
+    /// Checked, not `white_box`: installing the demand set is a complete
+    /// transition of that owner, not a mid-turn sub-step, so the
+    /// owner-consistency proof holds across it.
+    ///
+    /// Takes the same `BTreeSet<ContextualAtom>` shape `CoreState::wire_demand`
+    /// hands `recompile`, so a falsifier states its demand in the type
+    /// production states it in.
+    #[cfg(test)]
+    pub(super) fn set_active_demand(&mut self, demand: &BTreeSet<ContextualAtom>) {
+        self.checked("set_active_demand", |s| {
+            s.attribution.set_active_demand(demand.iter())
+        })
+    }
+
     /// The reducer's own in-crate falsifiers reach a mid-turn sub-step here,
     /// and this is the ONLY way anything obtains a `&mut CoreState`.
     /// `#[cfg(test)]` and `pub(super)`: it does not exist in a production

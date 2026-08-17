@@ -25,9 +25,6 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
     core.white_box("ever_connected_relays.insert", |s| {
         s.ever_connected_relays.insert(session.clone())
     });
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&first)
-    });
 
     let opened = apply_compile(&mut core, BTreeSet::from([first.clone()]));
     let (_, first_sub_id, first_filter, first_attempt) = only_request(&opened);
@@ -39,12 +36,6 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
         .live_wire_requests
         .contains_key(&(session.clone(), first_sub_id.clone())));
 
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&second)
-    });
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&first)
-    });
     let replacement = apply_compile(&mut core, BTreeSet::from([second.clone()]));
     let (_, second_sub_id, second_filter, second_attempt) = only_request(&replacement);
     assert_ne!(first_sub_id, second_sub_id);
@@ -118,9 +109,6 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
     assert!(wire_ops(&closed)
         .iter()
         .any(|op| matches!(op, WireOp::Close(sub_id) if sub_id == &second_sub_id)));
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&second)
-    });
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -148,9 +136,6 @@ fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candida
     });
     core.white_box("ever_connected_relays.insert", |s| {
         s.ever_connected_relays.insert(session.clone())
-    });
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&first)
     });
 
     let opened = apply_compile(&mut core, BTreeSet::from([first.clone()]));
@@ -190,12 +175,6 @@ fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candida
     });
     assert_eq!(core.nip77.live_for_plan(&first_plan_sub), Some(&old_child));
 
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&second)
-    });
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&first)
-    });
     let replacement = apply_compile(&mut core, BTreeSet::from([second]));
     let (_, second_plan_child, _, second_attempt) = only_request(&replacement);
     assert_ne!(old_child, second_plan_child);

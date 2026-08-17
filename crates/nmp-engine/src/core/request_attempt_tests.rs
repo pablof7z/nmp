@@ -82,8 +82,12 @@ fn atom(relay: &RelayUrl, author: &str) -> ContextualAtom {
     }
 }
 
+/// One recompile, in the order `CoreState::recompile` performs it: install
+/// `demand` as attribution's current logical demand, then compile the router
+/// from the same set (#1850).
 fn apply_compile(core: &mut EngineCore, demand: BTreeSet<ContextualAtom>) -> Vec<Effect> {
-    let outcome = core.white_box("router.compile", |s| {
+    let outcome = core.white_box("recompile", |s| {
+        s.attribution.set_active_demand(demand.iter());
         s.router
             .compile(&demand, &s.routing_facts, s.compile_budget())
     });

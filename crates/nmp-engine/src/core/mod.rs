@@ -2673,9 +2673,13 @@ impl CoreState {
     /// Not covered, and known: `Prober` (`states`/`pending` have a real
     /// cross-map invariant) and `auth_ready_sessions` mirroring
     /// `auth_sessions[s].phase == Ready`. Both are live mirrors outside this
-    /// check.
+    /// check. `AttributionState` was a third such omission until #1850 — the
+    /// owner with the most test reach-through in the crate was the one owner
+    /// with no consistency proof at all, and its absence was not written down
+    /// here either.
     #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(in crate::core) fn assert_owner_consistency(&self, at: &str) {
+        self.attribution.assert_consistent(at);
         self.wire.assert_consistent(at);
         self.author_outbox_route_needs.assert_consistent(at);
         self.request_targets.assert_consistent(at);
@@ -2695,19 +2699,7 @@ impl CoreState {
     #[cfg(any(test, feature = "bench-instrumentation"))]
     #[doc(hidden)]
     pub(in crate::core) fn bench_ownership_census(&self) -> CoreOwnershipCensus {
-        let (
-            attribution_inflight_subs,
-            attribution_wire_keys,
-            attribution_shape_keys,
-            attribution_active_demands,
-            attribution_active_shape_keys,
-            attribution_active_shape_refs,
-            attribution_live_request_keys,
-            attribution_live_shape_keys,
-            attribution_live_shape_refs,
-            attribution_inflight_shape_keys,
-            attribution_inflight_shape_refs,
-        ) = self.attribution.ownership_census();
+        let attribution = self.attribution.counts();
         let router = self.router.ownership_census();
         let attempts = self.attempts.counts();
         let history = self.history.counts();
@@ -2788,17 +2780,17 @@ impl CoreState {
                 .values()
                 .map(|pending| pending.claims.len())
                 .sum(),
-            attribution_inflight_subs,
-            attribution_wire_keys,
-            attribution_shape_keys,
-            attribution_active_demands,
-            attribution_active_shape_keys,
-            attribution_active_shape_refs,
-            attribution_live_request_keys,
-            attribution_live_shape_keys,
-            attribution_live_shape_refs,
-            attribution_inflight_shape_keys,
-            attribution_inflight_shape_refs,
+            attribution_inflight_subs: attribution.inflight_subs,
+            attribution_wire_keys: attribution.wire_keys,
+            attribution_shape_keys: attribution.shape_keys,
+            attribution_active_demands: attribution.active_demands,
+            attribution_active_shape_keys: attribution.active_shape_keys,
+            attribution_active_shape_refs: attribution.active_shape_refs,
+            attribution_live_request_keys: attribution.live_request_keys,
+            attribution_live_shape_keys: attribution.live_shape_keys,
+            attribution_live_shape_refs: attribution.live_shape_refs,
+            attribution_inflight_shape_keys: attribution.inflight_shape_keys,
+            attribution_inflight_shape_refs: attribution.inflight_shape_refs,
             planned_read_sessions: self.planned_read_sessions.len(),
             planned_read_relays: self.planned_read_session_counts_by_relay.len(),
             plan_execution_metadata: self.plan_execution_metadata.len(),

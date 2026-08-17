@@ -42,8 +42,8 @@ impl Fixture {
             directory,
             10,
         );
-        core.white_box("attribution.observe_demand", |s| {
-            s.attribution.observe_demand([&atom])
+        core.white_box("attribution.set_active_demand", |s| {
+            s.attribution.set_active_demand([&atom])
         });
         core.white_box("router.compile", |s| {
             s.router

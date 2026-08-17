@@ -41,12 +41,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
     let store = RedbStore::open_with_failed_coverage_write(&path, added_claim, relay.clone())
         .expect("reopen exact coverage-write failure fixture");
     let mut core = EngineCore::new(store, 20);
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&incumbent)
-    });
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&added)
-    });
+    core.set_active_demand(&BTreeSet::from([incumbent.clone(), added.clone()]));
     let sub_id = SubId::for_wire(
         relay.clone(),
         &incumbent.filter,
@@ -112,9 +107,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
     assert_eq!(core.request_claim_transfer_claims_attempted.get(), 1);
     assert_eq!(core.request_claim_transfer_failures.get(), 1);
     assert_eq!(core.request_claim_transfer_commits.get(), 0);
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&added)
-    });
+    core.set_active_demand(&BTreeSet::from([incumbent.clone()]));
 
     core.white_box("retry_scheduler_blocked", |s| {
         s.retry_scheduler_blocked = true
@@ -145,12 +138,10 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
     core.white_box("live_wire_requests.remove", |s| {
         s.live_wire_requests.remove(&(session, sub_id.clone()))
     });
-    core.white_box("attribution.release_live_request_claims", |s| {
-        s.attribution.release_live_request_claims(&sub_id)
+    core.white_box("retire_plan_execution_metadata", |s| {
+        s.retire_plan_execution_metadata(&sub_id)
     });
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&incumbent)
-    });
+    core.set_active_demand(&BTreeSet::new());
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -188,12 +179,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
     let store = RedbStore::open_with_failed_coverage_write(&path, added_claim, relay.clone())
         .expect("persistent exact coverage-write failure fixture");
     let mut core = EngineCore::new(store, 20);
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&incumbent)
-    });
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&added)
-    });
+    core.set_active_demand(&BTreeSet::from([incumbent.clone(), added.clone()]));
     let sub_id = SubId::for_wire(
         relay.clone(),
         &incumbent.filter,
@@ -319,19 +305,14 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
         s.live_wire_requests
             .remove(&(session.clone(), sub_id.clone()))
     });
-    core.white_box("attribution.release_live_request_claims", |s| {
-        s.attribution.release_live_request_claims(&sub_id)
+    core.white_box("retire_plan_execution_metadata", |s| {
+        s.retire_plan_execution_metadata(&sub_id)
     });
     core.white_box("abandon_sub", |s| s.abandon_sub(&sub_id));
     core.white_box("slot_to_relay.remove", |s| {
         s.slot_to_relay.remove(&transport.slot)
     });
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&incumbent)
-    });
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&added)
-    });
+    core.set_active_demand(&BTreeSet::new());
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()
