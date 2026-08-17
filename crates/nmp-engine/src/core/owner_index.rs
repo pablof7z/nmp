@@ -168,6 +168,28 @@ where
         self.by_child.is_empty() && self.by_owner.is_empty()
     }
 
+    /// Test-only: swap which owner's reverse set names which owner's
+    /// children, touching `by_owner` alone -- the forward map, `len`,
+    /// `owner_keys`, and `owner_edges` are all unchanged by this call. This
+    /// is the exact cardinality-preserving corruption `assert_consistent`
+    /// exists to catch, reachable only from inside this module (both maps
+    /// are private everywhere else) or through this door, which exists
+    /// solely so a falsifier elsewhere in `core` can drive it without
+    /// duplicating this module's own field access.
+    #[cfg(test)]
+    pub(super) fn swap_owners_for_test(&mut self, a: &Owner, b: &Owner) {
+        let a_children = self
+            .by_owner
+            .remove(a)
+            .expect("swap_owners_for_test: owner `a` has no live children");
+        let b_children = self
+            .by_owner
+            .remove(b)
+            .expect("swap_owners_for_test: owner `b` has no live children");
+        self.by_owner.insert(a.clone(), b_children);
+        self.by_owner.insert(b.clone(), a_children);
+    }
+
     #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(super) fn owner_keys(&self) -> usize {
         self.by_owner.len()
@@ -284,5 +306,38 @@ mod tests {
         );
 
         let _ = index.take_owner(&7);
+    }
+
+    /// `assert_consistent`'s falsifier for the corruption a count can never
+    /// see: two owners, one child each, with the reverse sets SWAPPED
+    /// between them. `len`, `owner_keys`, and `owner_edges` are all
+    /// unchanged -- one child moved, zero created or destroyed -- so any
+    /// check built from those three numbers alone would read this as
+    /// healthy. `assert_consistent` compares by identity (does the child
+    /// insist it belongs to the owner naming it?), which is exactly what
+    /// this corruption breaks.
+    #[test]
+    #[should_panic(expected = "is not named by the owner it reports")]
+    fn assert_consistent_panics_on_a_cardinality_preserving_swap_between_owners() {
+        let mut index: OwnerIndexed<u32, u32, Widget> = OwnerIndexed::new("widget");
+        index.insert(1, Widget { owner: 7 });
+        index.insert(2, Widget { owner: 9 });
+
+        // Precondition: two owners, one child each, mirror intact.
+        assert_eq!(index.len(), 2);
+        assert_eq!(index.owner_keys(), 2);
+        assert_eq!(index.owner_edges(), 2);
+        index.assert_consistent("before swap");
+
+        index.swap_owners_for_test(&7, &9);
+
+        // Every count a size-only check could compare is identical to the
+        // precondition -- this corruption is invisible to `len`,
+        // `owner_keys`, and `owner_edges` alike.
+        assert_eq!(index.len(), 2);
+        assert_eq!(index.owner_keys(), 2);
+        assert_eq!(index.owner_edges(), 2);
+
+        index.assert_consistent("after swap");
     }
 }

@@ -531,71 +531,59 @@ impl EngineCore {
             metadata.filter.clone()
         };
 
-        let pending_handoffs = self.nip77.handoffs.children_of(&update.sub_id);
-        let has_pending_handoffs = !pending_handoffs.is_empty();
-        for child in pending_handoffs {
-            let Some(handoff) = self.nip77.handoffs.get(&child) else {
-                continue;
-            };
-            let filter_hash = ConcreteFilter {
-                limit: Some(0),
-                ..handoff.filter.clone()
-            }
-            .hash();
-            self.extend_nip77_role_generation(&update.session, &child, filter_hash, update);
-        }
-
-        let neg_sessions = self.nip77.sessions.children_of(&update.sub_id);
-        let has_neg_sessions = !neg_sessions.is_empty();
-        for child in neg_sessions {
-            let Some(filter_hash) = self
-                .nip77
-                .sessions
-                .get(&child)
-                .map(|role| role.filter.hash())
-            else {
-                continue;
-            };
-            self.extend_nip77_role_generation(&update.session, &child, filter_hash, update);
-        }
-
-        let backfills = self.nip77.backfills.children_of(&update.sub_id);
-        let has_backfills = !backfills.is_empty();
-        for child in backfills {
-            let Some(role) = self.nip77.backfills.get(&child) else {
-                continue;
-            };
-            let erased_hash = ConcreteFilter {
-                since: None,
-                until: None,
-                limit: None,
-                ..filter.clone()
-            }
-            .hash();
-            let targets = match role {
-                TemporaryReq::MissingIds { neg_sub_id, .. } => {
-                    vec![(neg_sub_id.clone(), erased_hash)]
-                }
-                TemporaryReq::Backlog { .. } => vec![(child.clone(), erased_hash)],
-                TemporaryReq::BacklogActivatesLive { live_sub_id, .. } => {
-                    let live_filter_hash = ConcreteFilter {
+        // One traversal across every cluster (`Nip77Sessions::roles_for_plan`)
+        // rather than three independent `children_of`/`get` pairs each
+        // computing its own answer -- collected into owned targets before any
+        // `&mut self` call below, since the traversal itself borrows
+        // `self.nip77`.
+        let targets: Vec<(SubId, DescriptorHash)> = self
+            .nip77
+            .roles_for_plan(&update.sub_id)
+            .into_iter()
+            .flat_map(|(child, role)| match role {
+                PlanRole::Handoff(handoff) => {
+                    let filter_hash = ConcreteFilter {
                         limit: Some(0),
+                        ..handoff.filter.clone()
+                    }
+                    .hash();
+                    vec![(child, filter_hash)]
+                }
+                PlanRole::Session(session) => vec![(child, session.filter.hash())],
+                PlanRole::Backfill(request) => {
+                    let erased_hash = ConcreteFilter {
+                        since: None,
+                        until: None,
+                        limit: None,
                         ..filter.clone()
                     }
                     .hash();
-                    vec![
-                        (live_sub_id.clone(), live_filter_hash),
-                        (child.clone(), erased_hash),
-                    ]
+                    match request {
+                        TemporaryReq::MissingIds { neg_sub_id, .. } => {
+                            vec![(neg_sub_id.clone(), erased_hash)]
+                        }
+                        TemporaryReq::Backlog { .. } => vec![(child, erased_hash)],
+                        TemporaryReq::BacklogActivatesLive { live_sub_id, .. } => {
+                            let live_filter_hash = ConcreteFilter {
+                                limit: Some(0),
+                                ..filter.clone()
+                            }
+                            .hash();
+                            vec![
+                                (live_sub_id.clone(), live_filter_hash),
+                                (child, erased_hash),
+                            ]
+                        }
+                    }
                 }
-            };
-            for (target, filter_hash) in targets {
-                self.extend_nip77_role_generation(&update.session, &target, filter_hash, update);
-            }
+            })
+            .collect();
+
+        for (target, filter_hash) in &targets {
+            self.extend_nip77_role_generation(&update.session, target, *filter_hash, update);
         }
 
-        let has_active_live = self.nip77.has_live(&update.sub_id);
-        if has_pending_handoffs || has_neg_sessions || has_backfills || has_active_live {
+        if self.nip77.has_repair_state(&update.sub_id) {
             self.attribution
                 .retain_added_live_request_claims(&update.sub_id, &update.added_coverage_claims);
         }
@@ -1667,32 +1655,6 @@ impl EngineCore {
             .any(|((candidate, _), live)| candidate == session && live.handle == handle)
     }
 
-    /// The three insert/take pairs these replaced were verbatim copies of
-    /// each other; the reverse index is `PlanIndexed`'s business now.
-    fn insert_pending_neg_handoff(&mut self, sub_id: SubId, handoff: PendingNegHandoff) {
-        self.nip77.handoffs.insert(sub_id, handoff);
-    }
-
-    pub(super) fn take_pending_neg_handoff(&mut self, sub_id: &SubId) -> Option<PendingNegHandoff> {
-        self.nip77.handoffs.take(sub_id)
-    }
-
-    fn insert_neg_session(&mut self, sub_id: SubId, session: NegSession) {
-        self.nip77.sessions.insert(sub_id, session);
-    }
-
-    pub(super) fn take_neg_session(&mut self, sub_id: &SubId) -> Option<NegSession> {
-        self.nip77.sessions.take(sub_id)
-    }
-
-    fn insert_pending_backfill(&mut self, sub_id: SubId, request: TemporaryReq) {
-        self.nip77.backfills.insert(sub_id, request);
-    }
-
-    pub(super) fn take_pending_backfill(&mut self, sub_id: &SubId) -> Option<TemporaryReq> {
-        self.nip77.backfills.take(sub_id)
-    }
-
     /// Start the gap-free NIP-77 handoff (#563). This function can only be
     /// called with a behaviorally-minted [`ProbedRelay`]. It sends a distinct
     /// candidate live REQ with `limit:0`, keeps the prior live REQ open, and
@@ -1738,7 +1700,7 @@ impl EngineCore {
                 plan_sub_id: plan_sub_id.clone(),
             },
         );
-        self.insert_pending_neg_handoff(
+        self.nip77.insert_handoff(
             live_sub_id.clone(),
             PendingNegHandoff {
                 probed,
@@ -1764,35 +1726,11 @@ impl EngineCore {
         plan_sub_id: &SubId,
         effects: &mut Vec<Effect>,
     ) -> Vec<WireOp> {
-        let mut closes = BTreeSet::new();
-
-        let pending = self.nip77.handoffs.take_owner(plan_sub_id);
-        #[cfg(any(test, feature = "bench-instrumentation"))]
-        self.nip77_plan_children_touched.set(
-            self.nip77_plan_children_touched
-                .get()
-                .saturating_add(pending.len() as u64),
-        );
-        for (live_id, _) in pending {
-            self.abandon_sub(&live_id);
-            closes.insert(live_id);
-        }
-
-        let neg_ids = self.nip77.sessions.take_owner(plan_sub_id);
-        #[cfg(any(test, feature = "bench-instrumentation"))]
-        self.nip77_plan_children_touched.set(
-            self.nip77_plan_children_touched
-                .get()
-                .saturating_add(neg_ids.len() as u64),
-        );
-        for (neg_id, session) in neg_ids {
-            self.abandon_sub(&neg_id);
-            effects.push(Effect::NegClose(session.relay, neg_id));
-        }
-
-        self.retire_temporary_reqs_for_plan(plan_sub_id, &mut closes);
-
-        closes.into_iter().map(WireOp::Close).collect()
+        let withdrawal = self.nip77.cancel_repair_for_plan(plan_sub_id);
+        self.apply_nip77_repair_withdrawal(withdrawal, effects)
+            .into_iter()
+            .map(WireOp::Close)
+            .collect()
     }
 
     /// Withdraw every temporary repair REQ owned by `plan_sub_id`, adding
@@ -1810,58 +1748,50 @@ impl EngineCore {
         plan_sub_id: &SubId,
         closes: &mut BTreeSet<SubId>,
     ) {
-        let temporary = self.nip77.backfills.take_owner(plan_sub_id);
+        let withdrawal = self.nip77.retire_backfills_for_plan(plan_sub_id);
+        debug_assert!(
+            withdrawal.neg_closes.is_empty(),
+            "a backfill retirement owns no reconciliation session to NEG-CLOSE"
+        );
+        let mut effects = Vec::new();
+        closes.extend(self.apply_nip77_repair_withdrawal(withdrawal, &mut effects));
+        debug_assert!(
+            effects.is_empty(),
+            "a backfill retirement produces no effects of its own"
+        );
+    }
+
+    /// Carry out every consequence a NIP-77 repair-state withdrawal owes
+    /// owners other than [`Nip77Sessions`]: release each wire id's
+    /// cross-owner bookkeeping (attempts, attribution, pending request
+    /// evidence, live wire requests -- none of which that owner holds), emit
+    /// each reconciliation's NEG-CLOSE, and bump the plan-children-touched
+    /// counter by the exact total the owner reports, once, rather than at
+    /// every call site that used to remember to add its own map's count in.
+    fn apply_nip77_repair_withdrawal(
+        &mut self,
+        withdrawal: PlanRepairWithdrawal,
+        effects: &mut Vec<Effect>,
+    ) -> BTreeSet<SubId> {
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.nip77_plan_children_touched.set(
             self.nip77_plan_children_touched
                 .get()
-                .saturating_add(temporary.len() as u64),
+                .saturating_add(withdrawal.children_touched),
         );
-        for (sub_id, request) in temporary {
-            match request {
-                TemporaryReq::MissingIds { neg_sub_id, .. } => {
-                    // NEG has already closed on the wire, but its coverage
-                    // snapshot intentionally remained alive while the missing
-                    // ids were in flight. Withdrawing/superseding that fetch
-                    // must release the deferred snapshot too.
-                    self.abandon_sub(&neg_sub_id);
-                }
-                TemporaryReq::BacklogActivatesLive {
-                    live_sub_id,
-                    prior_live_sub_id,
-                    ..
-                } => {
-                    // The live candidate REQ is tracked ONLY inside this
-                    // fallback entry while its own EOSE is still
-                    // outstanding -- it lives in neither
-                    // `pending_neg_handoffs` nor `active_nip77_live`.
-                    // Withdrawing/superseding demand mid-fallback must
-                    // close and discard it here, or it leaks forever: a
-                    // late EOSE on its orphaned wire id would otherwise
-                    // still resolve through `attribution` and mint
-                    // phantom coverage for demand that no longer exists.
-                    self.abandon_sub(&live_sub_id);
-                    closes.insert(live_sub_id);
-                    // `prior_live_sub_id` is ordinarily still the entry
-                    // tracked in `active_nip77_live[plan_sub_id]`, closed
-                    // either by `close_nip77_plan` (full withdrawal) or
-                    // carried forward into the next handoff's own
-                    // `prior_live_sub_id` (supersession, see
-                    // `begin_neg_handoff`). Only close it here if it has
-                    // already drifted away from that slot, so this never
-                    // double-closes a subscription another path owns.
-                    if let Some(prior) = prior_live_sub_id {
-                        if self.nip77.live_for_plan(plan_sub_id) != Some(&prior) {
-                            self.abandon_sub(&prior);
-                            closes.insert(prior);
-                        }
-                    }
-                }
-                TemporaryReq::Backlog { .. } => {}
-            }
+        for sub_id in &withdrawal.abandon_only {
+            self.abandon_sub(sub_id);
+        }
+        let mut closes = BTreeSet::new();
+        for sub_id in withdrawal.abandon_and_close {
             self.abandon_sub(&sub_id);
             closes.insert(sub_id);
         }
+        for (neg_id, relay) in withdrawal.neg_closes {
+            self.abandon_sub(&neg_id);
+            effects.push(Effect::NegClose(relay, neg_id));
+        }
+        closes
     }
 
     pub(super) fn close_nip77_plan(
@@ -2101,7 +2031,7 @@ impl EngineCore {
         // claim NMP had placed a question it may never place. The runtime
         // reports the real outcome through `on_nip77_handoff`, which either
         // activates this same record or consumes it as refused.
-        self.insert_neg_session(
+        self.nip77.insert_session(
             neg_sub_id.clone(),
             NegSession {
                 plan_sub_id,
@@ -2160,7 +2090,7 @@ impl EngineCore {
                 self.attempts.take(&outcome);
             }
             (Nip77Frame::Open, true) => {
-                let Some(_session) = self.nip77.sessions.get(&sub_id) else {
+                let Some(_session) = self.nip77.get_session(&sub_id) else {
                     return effects;
                 };
                 effects.extend(self.on_wire_request_handoff(outcome));
@@ -2178,7 +2108,7 @@ impl EngineCore {
                 }
             }
             (Nip77Frame::Open, false) => {
-                let Some(session) = self.take_neg_session(&sub_id) else {
+                let Some(session) = self.nip77.take_session(&sub_id) else {
                     return effects;
                 };
                 // Consume the still-pending request evidence as refused. This
@@ -2197,7 +2127,7 @@ impl EngineCore {
             }
             (Nip77Frame::Continue, false) => {
                 self.attempts.take(&outcome);
-                let Some(session) = self.take_neg_session(&sub_id) else {
+                let Some(session) = self.nip77.take_session(&sub_id) else {
                     return effects;
                 };
                 // The open WAS accepted, so this reconciliation exists on the
@@ -2228,7 +2158,7 @@ impl EngineCore {
         message_hex: &str,
         effects: &mut Vec<Effect>,
     ) {
-        let Some(session) = self.nip77.sessions.get_mut(&sub_id) else {
+        let Some(session) = self.nip77.get_session_mut(&sub_id) else {
             return;
         };
         let filter = session.filter.clone();
@@ -2253,7 +2183,8 @@ impl EngineCore {
             }
             Ok(NegStep::Done(need_ids)) => {
                 let session = self
-                    .take_neg_session(&sub_id)
+                    .nip77
+                    .take_session(&sub_id)
                     .expect("just matched via get_mut above -- still present");
                 self.finish_neg_session(sub_id, relay, session, need_ids, effects);
             }
@@ -2263,7 +2194,7 @@ impl EngineCore {
                 // back to a plain REQ for the same filter -- the same
                 // recovery path as the liveness-deadline/NEG-ERR cases,
                 // never a silent read-gap.
-                if let Some(session) = self.take_neg_session(&sub_id) {
+                if let Some(session) = self.nip77.take_session(&sub_id) {
                     self.neg_session_fallback_to_req(sub_id, session, effects);
                 }
             }
@@ -2339,7 +2270,7 @@ impl EngineCore {
                 .get(&missing_plan)
                 .map(|metadata| metadata.owner_demands.clone())
                 .expect("a missing-id role is derived from an installed plan request");
-            self.insert_pending_backfill(
+            self.nip77.insert_backfill(
                 backfill_sub.clone(),
                 TemporaryReq::MissingIds {
                     plan_sub_id,
@@ -2542,7 +2473,7 @@ impl EngineCore {
         let mut ops: Vec<WireOp> = displaced.into_iter().map(WireOp::Close).collect();
         let backlog_sub_id =
             self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_FALLBACK_ROLE, &filter);
-        self.insert_pending_backfill(backlog_sub_id.clone(), request);
+        self.nip77.insert_backfill(backlog_sub_id.clone(), request);
         let metadata = self
             .plan_execution_metadata
             .get(&plan_sub_id)
