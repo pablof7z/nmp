@@ -1,9 +1,9 @@
 //! #1782 falsifiers for the owner ruling: signature verification happens
 //! ONCE, at ingest, and no stored event is ever re-verified.
 //!
-//! The evidence is a COUNT, not a duration. `nmp_store::schnorr_verifications`
+//! The evidence is a COUNT, not a duration. [`crate::schnorr_verifications`]
 //! reports every schnorr check [`crate::VerifiedSignature::verify`] — the
-//! crate's only schnorr entry point — has run in this process. Population
+//! crate's only schnorr entry point — has run on this thread. Population
 //! moves it once per promoted event; a boot over that same store must not
 //! move it at all.
 //!
@@ -18,9 +18,6 @@
 //! `VerifiedSignature::verify` is the single spelling, and it is only ever
 //! reached from `nmp-engine`.
 
-use std::sync::atomic::Ordering;
-use std::sync::Mutex;
-
 use nmp_grammar::CorrelationToken;
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 use tempfile::TempDir;
@@ -31,11 +28,6 @@ use crate::{
     PromotionTarget, PublishQueueAttemptHandoff, PublishQueuePostHandoffState,
     PublishQueueTransientCause, PublishQueueWork, RelayObserved, VerifiedSignature,
 };
-
-/// The counter is process-global, so the two tests that read a DELTA across a
-/// boot must not interleave with anything else that verifies. Rust's test
-/// harness runs them on separate threads by default; this serializes them.
-static COUNTER_LOCK: Mutex<()> = Mutex::new(());
 
 /// Open intents populated by [`populate`]. Each contributes `RELAYS` lanes,
 /// and each lane one attempt row.
@@ -193,14 +185,13 @@ fn boot(path: &std::path::Path) -> usize {
 /// row.
 #[test]
 fn boot_over_a_populated_store_performs_zero_signature_verifications() {
-    let _serialized = COUNTER_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     let dir = TempDir::new().expect("fixture directory");
     let path = dir.path().join("boot-verification.redb");
     populate(&path);
 
-    let before = crate::SCHNORR_VERIFICATIONS.load(Ordering::Relaxed);
+    let before = crate::schnorr_verifications();
     let attempt_rows = boot(&path);
-    let after = crate::SCHNORR_VERIFICATIONS.load(Ordering::Relaxed);
+    let after = crate::schnorr_verifications();
 
     assert_eq!(
         attempt_rows,
@@ -223,13 +214,12 @@ fn boot_over_a_populated_store_performs_zero_signature_verifications() {
 /// counts anything.
 #[test]
 fn promotion_verifies_exactly_once_per_event() {
-    let _serialized = COUNTER_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     let dir = TempDir::new().expect("fixture directory");
     let path = dir.path().join("promotion-count.redb");
     let keys = keys();
     let mut store = RedbStore::open(&path).expect("open fixture store");
 
-    let before = crate::SCHNORR_VERIFICATIONS.load(Ordering::Relaxed);
+    let before = crate::schnorr_verifications();
     for index in 0..8usize {
         let signed = signed_event(&keys, 500_000 + index);
         let accepted = store
@@ -252,7 +242,7 @@ fn promotion_verifies_exactly_once_per_event() {
             )
             .expect("promote fixture write");
     }
-    let after = crate::SCHNORR_VERIFICATIONS.load(Ordering::Relaxed);
+    let after = crate::schnorr_verifications();
 
     assert_eq!(
         after - before,

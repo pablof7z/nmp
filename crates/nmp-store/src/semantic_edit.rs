@@ -1136,8 +1136,7 @@ mod source_verdict_tests {
     //! costs a signature check.
 
     use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::atomic::Ordering;
-
+    
     use nostr::{Event, EventBuilder, Keys, Kind, Timestamp};
 
     use super::{
@@ -1145,7 +1144,7 @@ mod source_verdict_tests {
     };
     use crate::{
         sentinel_signature, LocalOrigin, Provenance, SemanticRefusal, SigState, StoredEvent,
-        SCHNORR_VERIFICATIONS,
+        schnorr_verifications,
     };
 
     fn stored(local: Option<LocalOrigin>) -> StoredEvent {
@@ -1217,13 +1216,13 @@ mod source_verdict_tests {
     #[test]
     fn a_signed_local_row_qualifies_without_a_signature_check() {
         let source = stored(local(SigState::Signed));
-        let before = SCHNORR_VERIFICATIONS.load(Ordering::Relaxed);
+        let before = schnorr_verifications();
         assert_eq!(
             validate_source_event(&evidence(&source), Some(&source)),
             Ok(())
         );
         assert_eq!(
-            SCHNORR_VERIFICATIONS.load(Ordering::Relaxed),
+            schnorr_verifications(),
             before,
             "qualifying a stored source must not run schnorr"
         );
@@ -1232,13 +1231,13 @@ mod source_verdict_tests {
     #[test]
     fn a_relay_observed_row_qualifies_without_a_signature_check() {
         let source = stored(None);
-        let before = SCHNORR_VERIFICATIONS.load(Ordering::Relaxed);
+        let before = schnorr_verifications();
         assert_eq!(
             validate_source_event(&evidence(&source), Some(&source)),
             Ok(())
         );
         assert_eq!(
-            SCHNORR_VERIFICATIONS.load(Ordering::Relaxed),
+            schnorr_verifications(),
             before,
             "a relay-observed row was verified by the transport gate before insert; \
              qualifying it must not verify again"

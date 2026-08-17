@@ -335,28 +335,35 @@ pub use nmp_grammar::sentinel_signature;
 /// down, and no store implementation runs a second Schnorr check. This is
 /// the crate's ONLY schnorr entry point — after #1782 nothing in
 /// `nmp-store` calls it on a path a store read can reach, which is what
-/// makes [`schnorr_verifications`] a usable zero-assertion over a boot.
+/// makes [`SCHNORR_VERIFICATIONS`] a usable zero-assertion over a boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedSignature {
     event_id: EventId,
     signature: Signature,
 }
 
-/// Every schnorr check this crate has ever performed in this process.
-///
-/// Read through [`schnorr_verifications`]. Absent from production builds so
-/// the one verification an accepted signer result must pass does not pay an
-/// atomic increment to support a test.
-#[cfg(any(test, feature = "test-instrumentation"))]
-static SCHNORR_VERIFICATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+thread_local! {
+    /// Every schnorr check [`VerifiedSignature::verify`] has run ON THIS
+    /// THREAD.
+    ///
+    /// The falsifier for #1782's owner ruling: a boot over an already-
+    /// populated store must not move this number at all. Per-THREAD rather
+    /// than per-process because the test harness runs the rest of the crate's
+    /// suite in parallel and plenty of it verifies fixture events — a global
+    /// counter reads their work as this boot's. Nothing in `nmp-store`
+    /// verifies off the calling thread (the crate owns no workers), so a
+    /// thread-local count is exact for every store door.
+    ///
+    /// Absent from production builds so the one verification an accepted
+    /// signer result must pass pays nothing to support a test.
+    static SCHNORR_VERIFICATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
-/// How many schnorr checks [`VerifiedSignature::verify`] has run in this
-/// process. The falsifier for #1782's ruling: a boot over an already-
-/// populated store must not move this number at all.
-#[cfg(any(test, feature = "test-instrumentation"))]
-#[must_use]
-pub fn schnorr_verifications() -> u64 {
-    SCHNORR_VERIFICATIONS.load(std::sync::atomic::Ordering::Relaxed)
+/// Schnorr checks run on this thread so far. See [`SCHNORR_VERIFICATIONS`].
+#[cfg(test)]
+pub(crate) fn schnorr_verifications() -> u64 {
+    SCHNORR_VERIFICATIONS.with(std::cell::Cell::get)
 }
 
 impl VerifiedSignature {
@@ -364,8 +371,8 @@ impl VerifiedSignature {
     /// signature checked against that id and `event.pubkey` — and keep the
     /// proof. `Err` is `nostr`'s own verification failure, unchanged.
     pub fn verify(event: &Event) -> Result<Self, nostr::event::Error> {
-        #[cfg(any(test, feature = "test-instrumentation"))]
-        SCHNORR_VERIFICATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(test)]
+        SCHNORR_VERIFICATIONS.with(|count| count.set(count.get() + 1));
         event.verify()?;
         Ok(Self {
             event_id: event.id,

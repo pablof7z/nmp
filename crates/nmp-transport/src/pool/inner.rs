@@ -1012,6 +1012,11 @@ fn apply_worker_event_with_verdict(
                     session: state.session.clone(),
                     frame,
                 }),
+                // A known id redelivered with a different but valid
+                // signature. Drop the frame and record NOTHING: the event is
+                // already durable (that is why its id is known), and the
+                // relay did nothing wrong. See `Verdict::Skip`.
+                Verdict::Skip => None,
                 Verdict::RejectMisbehavior => {
                     record_misbehavior(&mut state.health);
                     Some(PoolEvent::Health {
