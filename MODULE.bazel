@@ -1,0 +1,68 @@
+module(name = "nmp", version = "0.1.0")
+
+# rules_rust is the authoritative Rust build system. Cargo remains the
+# dependency-metadata source of truth (Cargo.toml/Cargo.lock), imported below
+# via crate_universe so Bazel and Cargo agree on exactly the same third-party
+# dependency graph and versions.
+bazel_dep(name = "rules_rust", version = "0.73.0")
+
+# Already in the graph beneath rules_rust; named directly because //platforms
+# references @apple_support//constraints:device / :simulator by label, and a
+# bzlmod repo is only visible to the module that declares it. Those two
+# constraints are what separate `aarch64-apple-ios` from
+# `aarch64-apple-ios-sim`, which share an OS and a CPU and are otherwise
+# indistinguishable to Bazel. It also supplies the Apple cc toolchains the
+# cross-compiled slices resolve against.
+bazel_dep(name = "apple_support", version = "1.24.2")
+
+# Same reason: //platforms names @platforms//cpu:* and @platforms//os:*
+# directly, so this module has to declare it rather than inherit it.
+bazel_dep(name = "platforms", version = "1.1.0")
+
+# Pin the Rust toolchain to the same nightly the repo pins in
+# rust-toolchain.toml (nightly-2026-07-07), so a `bazel build` produces the
+# same compiler output a `cargo build` does. Clippy ships with nightly; rustfmt
+# is pinned to the same date.
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    versions = ["nightly/2026-07-07"],
+    rustfmt_version = "nightly/2026-07-07",
+    # The cross-compilation slices the shipped artifacts are assembled from.
+    # This list is native/features.toml's `slices` + `abis` -- the Apple
+    # xcframework's three device/simulator/macOS slices and the two Android
+    # ABIs -- so the build system targets exactly what NMP ships, no more.
+    # See //platforms for the platform each triple is selected by.
+    extra_target_triples = [
+        "aarch64-apple-ios",
+        "aarch64-apple-ios-sim",
+        "x86_64-apple-ios",
+        "aarch64-linux-android",
+        "x86_64-linux-android",
+    ],
+)
+use_repo(rust, "rust_toolchains")
+
+# Import the entire Cargo workspace's third-party dependency graph from the
+# single source of truth: the workspace Cargo.toml + Cargo.lock. This is what
+# keeps Cargo as the dependency-metadata authority while Bazel owns the build.
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    manifests = ["//:Cargo.toml"],
+    # Third-party crates carry a `target_compatible_with` naming exactly the
+    # triples they were rendered for, so a triple missing here is not a
+    # missing optimization -- every dependency becomes `@platforms//:incompatible`
+    # and the cross-compile fails at analysis. The default set is six desktop
+    # and wasm triples; these are the host plus the five slices NMP ships,
+    # matching `extra_target_triples` above.
+    supported_platform_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-apple-ios",
+        "aarch64-apple-ios-sim",
+        "x86_64-apple-ios",
+        "aarch64-linux-android",
+        "x86_64-linux-android",
+    ],
+)
+use_repo(crate, "crates")

@@ -1,0 +1,2 @@
+# Pin the Bazel version for reproducible builds across worktrees and agents.
+USE_BAZEL_VERSION=9.2.0

@@ -81,7 +81,10 @@ impl Router {
             .admission_work
             .incumbent_refusal_entries_visited
             .saturating_add(
-                self.refusals_by_demand.values().map(BTreeMap::len).sum::<usize>() as u64,
+                self.refusals_by_demand
+                    .values()
+                    .map(BTreeMap::len)
+                    .sum::<usize>() as u64,
             );
         self.refusals_by_demand.clear();
         self.refused_request_owner_counts.clear();

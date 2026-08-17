@@ -17,6 +17,9 @@
 /target*
 **/target*/
 **/*.rs.bk
+# Bazel output symlinks (--symlink_prefix=bazel- in .bazelrc). Same discipline
+# as /target*: these are per-worktree generated artifacts, never committed.
+/bazel-*
 __pycache__/
 *.pyc
 Cargo.lock.orig

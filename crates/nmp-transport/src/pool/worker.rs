@@ -43,7 +43,9 @@ use crate::keepalive::{
     apply_resume_gap, KeepaliveAction, KeepaliveState, SuspendGapDetector, SUSPEND_GAP_THRESHOLD,
 };
 
-use super::connect::{handshake_http_status, open_relay_socket, RelaySocket, MAX_OUTBOUND_FRAME_BYTES};
+use super::connect::{
+    handshake_http_status, open_relay_socket, RelaySocket, MAX_OUTBOUND_FRAME_BYTES,
+};
 use super::frame::{classify_message, ClassifiedFrame};
 use super::spawn::ThreadSpawner;
 use super::{

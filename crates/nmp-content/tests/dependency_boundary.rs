@@ -3,7 +3,19 @@ use std::process::Command;
 
 #[test]
 fn normal_dependency_tree_contains_no_engine_or_mechanism_crate() {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // `cargo tree` needs the real workspace, and under `bazel test` the
+    // process starts in a runfiles tree rather than the source checkout, so
+    // CARGO_MANIFEST_DIR is a relative path into that tree. Bazel stages
+    // source FILES as symlinks back to the checkout (the directories are
+    // real), so canonicalizing this crate's own manifest is what recovers the
+    // checkout. Under Cargo the path is already absolute and real, and
+    // canonicalizing it changes nothing -- one spelling, both build systems.
+    let manifest_dir =
+        std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .expect("nmp-content's own manifest must resolve")
+            .parent()
+            .expect("a manifest has a directory")
+            .to_owned();
     let workspace = manifest_dir
         .parent()
         .and_then(Path::parent)
