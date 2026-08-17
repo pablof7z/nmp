@@ -91,13 +91,12 @@ final class C9CrashDuringPublicationTests: XCTestCase {
     private func spawnPublisher(
         storePath: String,
         sessionPayloadPath: String,
-        correlation: String,
         mode: String,
         relays: [String]
     ) throws -> (process: Process, reader: ProcessLineReader) {
         let process = Process()
         process.executableURL = try Self.publisherBinaryURL()
-        process.arguments = [storePath, sessionPayloadPath, correlation, mode] + relays
+        process.arguments = [storePath, sessionPayloadPath, mode] + relays
         let reader = ProcessLineReader()
         reader.attach(to: process)
         try process.run()
@@ -138,6 +137,7 @@ final class C9CrashDuringPublicationTests: XCTestCase {
 
     private enum RecoveryOutcome: Sendable {
         case settled(finalRowCount: Int, finalIDs: Set<String>, sources: [String], relayRegressed: Bool)
+        case notFoundInQueue
         case notReattached
         case rowNeverVisible
         case receiptNeverSettled(String)
@@ -145,16 +145,19 @@ final class C9CrashDuringPublicationTests: XCTestCase {
     }
 
     /// Opens a FRESH engine over the SAME store path + restored session,
-    /// reattaches the receipt by correlation, and races the row query
-    /// against the reattached receipt stream until both a settled outcome
-    /// and full row visibility are observed -- exactly the C7 shape, plus
-    /// tracking whether `watchForResend` (when given) ever regresses from
-    /// `.published` back to `.waiting`/`.sent`, which would mean that
-    /// relay was asked to redo work it had already finished.
+    /// finds the crashed write by enumerating `publishQueue` -- NOT by a
+    /// correlation token handed down from the test, since NMP's own publish
+    /// queue is the durable ledger of open obligations, and an app finding
+    /// its own writes after a restart by re-scanning a token it minted
+    /// itself is exactly the pattern #1770 removed -- reattaches to it, and
+    /// races the row query against the reattached receipt stream until both
+    /// a settled outcome and full row visibility are observed -- exactly the
+    /// C7 shape, plus tracking whether `watchForResend` (when given) ever
+    /// regresses from `.published` back to `.waiting`/`.sent`, which would
+    /// mean that relay was asked to redo work it had already finished.
     private func assertRecovery(
         storePath: String,
         sessionPayloadPath: String,
-        correlation: String,
         accountHex: String,
         appRelays: [String],
         expectedSources: [String],
@@ -168,7 +171,13 @@ final class C9CrashDuringPublicationTests: XCTestCase {
         )
         defer { engine.shutdown() }
 
-        let reattachment = try engine.reattachReceipt(correlation: correlation)
+        // The enumeration door (#1770): find the one open obligation for
+        // this test's account, by nothing but what NMP itself retained.
+        guard let entry = try engine.publishQueue(limit: 64).first(where: { $0.pubkey == accountHex }) else {
+            return .notFoundInQueue
+        }
+
+        let reattachment = try engine.reattachReceipt(id: entry.receiptID)
         guard case .attached(let receipt) = reattachment else {
             return .notReattached
         }
@@ -313,11 +322,10 @@ final class C9CrashDuringPublicationTests: XCTestCase {
 
         let storePath = root.appendingPathComponent("store").path
         let sessionPayloadPath = root.appendingPathComponent("session.bin").path
-        let correlation = UUID().uuidString
 
         let (process, reader) = try spawnPublisher(
             storePath: storePath, sessionPayloadPath: sessionPayloadPath,
-            correlation: correlation, mode: "plain", relays: [relay.url]
+            mode: "plain", relays: [relay.url]
         )
 
         guard let accountHex = await reader.waitForLine(prefix: "ACCOUNT:", timeout: 10) else {
@@ -338,7 +346,7 @@ final class C9CrashDuringPublicationTests: XCTestCase {
 
         let outcome = try await assertRecovery(
             storePath: storePath, sessionPayloadPath: sessionPayloadPath,
-            correlation: correlation, accountHex: accountHex, appRelays: [relay.url],
+            accountHex: accountHex, appRelays: [relay.url],
             expectedSources: [relay.url]
         )
         try await relay.kill()
@@ -348,8 +356,10 @@ final class C9CrashDuringPublicationTests: XCTestCase {
             XCTAssertEqual(finalRowCount, 1, "expected exactly one canonical row, got \(finalRowCount)")
             XCTAssertEqual(finalIDs.count, 1)
             XCTAssertTrue(sources.contains(relay.url), "expected delivery to resume to \(relay.url)")
+        case .notFoundInQueue:
+            XCTFail("publishQueue did not enumerate the obligation after restart")
         case .notReattached:
-            XCTFail("reattachReceipt(correlation:) did not find the obligation after restart")
+            XCTFail("reattachReceipt(id:) did not find the obligation publishQueue just enumerated")
         case .rowNeverVisible:
             XCTFail("locally accepted canonical state did not survive the crash")
         case .receiptNeverSettled(let reason):
@@ -380,11 +390,10 @@ final class C9CrashDuringPublicationTests: XCTestCase {
 
         let storePath = root.appendingPathComponent("store").path
         let sessionPayloadPath = root.appendingPathComponent("session.bin").path
-        let correlation = UUID().uuidString
 
         let (process, reader) = try spawnPublisher(
             storePath: storePath, sessionPayloadPath: sessionPayloadPath,
-            correlation: correlation, mode: "plain", relays: [relay.url]
+            mode: "plain", relays: [relay.url]
         )
 
         guard let accountHex = await reader.waitForLine(prefix: "ACCOUNT:", timeout: 10) else {
@@ -409,7 +418,7 @@ final class C9CrashDuringPublicationTests: XCTestCase {
 
         let outcome = try await assertRecovery(
             storePath: storePath, sessionPayloadPath: sessionPayloadPath,
-            correlation: correlation, accountHex: accountHex, appRelays: [relay.url],
+            accountHex: accountHex, appRelays: [relay.url],
             expectedSources: [relay.url]
         )
         try await relay.kill()
@@ -422,8 +431,10 @@ final class C9CrashDuringPublicationTests: XCTestCase {
                 sources.contains(relay.url),
                 "expected delivery to resume to \(relay.url) once healed, got \(sources)"
             )
+        case .notFoundInQueue:
+            XCTFail("publishQueue did not enumerate the obligation after restart")
         case .notReattached:
-            XCTFail("reattachReceipt(correlation:) did not find the obligation after restart")
+            XCTFail("reattachReceipt(id:) did not find the obligation publishQueue just enumerated")
         case .rowNeverVisible:
             XCTFail("locally accepted canonical state did not survive the crash")
         case .receiptNeverSettled:
@@ -456,11 +467,10 @@ final class C9CrashDuringPublicationTests: XCTestCase {
 
         let storePath = root.appendingPathComponent("store").path
         let sessionPayloadPath = root.appendingPathComponent("session.bin").path
-        let correlation = UUID().uuidString
 
         let (process, reader) = try spawnPublisher(
             storePath: storePath, sessionPayloadPath: sessionPayloadPath,
-            correlation: correlation, mode: "await-partial", relays: [relayA.url, relayB.url]
+            mode: "await-partial", relays: [relayA.url, relayB.url]
         )
 
         guard let accountHex = await reader.waitForLine(prefix: "ACCOUNT:", timeout: 10) else {
@@ -481,7 +491,7 @@ final class C9CrashDuringPublicationTests: XCTestCase {
 
         let outcome = try await assertRecovery(
             storePath: storePath, sessionPayloadPath: sessionPayloadPath,
-            correlation: correlation, accountHex: accountHex,
+            accountHex: accountHex,
             appRelays: [relayA.url, relayB.url],
             expectedSources: [relayA.url, relayB.url], watchForResend: relayA.url
         )
@@ -498,8 +508,10 @@ final class C9CrashDuringPublicationTests: XCTestCase {
                 relayRegressed,
                 "relay A (already published before the crash) was asked to redo work as if new"
             )
+        case .notFoundInQueue:
+            XCTFail("publishQueue did not enumerate the obligation after restart")
         case .notReattached:
-            XCTFail("reattachReceipt(correlation:) did not find the obligation after restart")
+            XCTFail("reattachReceipt(id:) did not find the obligation publishQueue just enumerated")
         case .rowNeverVisible:
             XCTFail("locally accepted canonical state did not survive the crash")
         case .receiptNeverSettled:

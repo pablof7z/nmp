@@ -23,13 +23,13 @@ struct Account: Identifiable {
     let sessionAccount: NMPSessionAccount
 }
 
-/// One write whose correlation token survived a restart, paired back with a
-/// live receipt stream via `reattachReceipt(correlation:)`. `AppModel` only
-/// recovers the handle at launch; `ComposeView` is the one place that
-/// iterates `receipt.status`, so a fresh publish and a reattached one are
-/// observed by the exact same code.
+/// One write recovered at launch from NMP's own durable publish queue,
+/// paired back with a live receipt stream via `reattachReceipt(id:)`.
+/// `AppModel` only recovers the handle at launch; `ComposeView` is the one
+/// place that iterates `receipt.status`, so a fresh publish and a
+/// reattached one are observed by the exact same code.
 struct ReattachedWrite {
-    let correlation: String
+    let receiptID: UInt64
     let receipt: Receipt
 }
 
@@ -48,7 +48,7 @@ final class AppModel {
     var kinds: [UInt16] = [1]
     var lastError: String?
 
-    /// Writes recovered from a persisted correlation on THIS launch.
+    /// Writes recovered from NMP's own publish queue on THIS launch.
     /// `ComposeView` drains this once (`takeReattachedWrites()`) and starts
     /// observing each the same way it observes a freshly published write.
     private(set) var reattachedWrites: [ReattachedWrite] = []
@@ -64,9 +64,11 @@ final class AppModel {
         // The Redb store survives relaunch on its own, but accounts and the
         // current identity live only in the session NMP hands back here --
         // rebuild this app's own presentation records from it so a restored
-        // identity is visible again, not just usable.
-        if let restored = try? engine.session.accounts {
-            for sessionAccount in restored {
+        // identity is visible again, not just usable. A failure here used to
+        // be swallowed with `try?`, which makes a broken session look
+        // identical to an empty one -- surface it instead (#1797).
+        do {
+            for sessionAccount in try engine.session.accounts {
                 upsert(Account(
                     id: sessionAccount.publicKey.bytes,
                     label: Self.shortLabel(for: sessionAccount.publicKey.bytes),
@@ -74,32 +76,37 @@ final class AppModel {
                     sessionAccount: sessionAccount
                 ))
             }
-            if let current = (try? engine.session.current) ?? nil {
+            if let current = try engine.session.current {
                 currentPubkey = current.publicKey.bytes
             }
+        } catch {
+            lastError = "Session restore failed: \(error)"
         }
 
-        // Crash-during-publication recovery (C9): a write whose correlation
-        // made it to disk before the app could durably note its receipt id
-        // is picked back up here, by that token, not by re-scanning anything.
-        for correlation in Self.loadPendingCorrelations() {
-            do {
-                switch try engine.reattachReceipt(correlation: correlation) {
+        // Crash-during-publication recovery (C9): NMP's own publish queue
+        // already knows every open obligation durably -- enumerate it and
+        // reattach to each, rather than an app-owned correlation ledger
+        // (#1770). `publishQueue` is exactly the door for "what have I got
+        // outstanding, and what went wrong with it"; no app-side durable
+        // state is needed to find one after a restart.
+        do {
+            for entry in try engine.publishQueue(limit: 64) where !entry.isTerminal {
+                switch try engine.reattachReceipt(id: entry.receiptID) {
                 case .attached(let receipt):
-                    reattachedWrites.append(ReattachedWrite(correlation: correlation, receipt: receipt))
+                    reattachedWrites.append(ReattachedWrite(receiptID: entry.receiptID, receipt: receipt))
                 case .notFound:
-                    // Nothing was ever durably accepted under this token --
-                    // there is nothing to recover, so stop tracking it.
-                    Self.forgetPendingCorrelation(correlation)
+                    // The queue itself just reported this entry; nothing to
+                    // recover if it vanished between those two calls.
+                    break
                 case .retainedButUnreadable:
                     // Durable evidence exists but NMP could not read it back.
                     // NOT the same as "gone" -- surface it, do not drop it
                     // silently or invent a resolved state for it.
-                    lastError = "Write \(correlation) has retained but unreadable evidence."
+                    lastError = "Write \(entry.receiptID) has retained but unreadable evidence."
                 }
-            } catch {
-                lastError = "\(error)"
             }
+        } catch {
+            lastError = "\(error)"
         }
     }
 
@@ -112,51 +119,44 @@ final class AppModel {
 
     /// Generate a local-key account inside NMP and select it atomically.
     func addKeyedAccount(label: String) {
-        do {
-            let account = try engine.session.add(
-                privateKey: NMPPrivateKey.generate(),
-                makeCurrent: true
-            )
-            upsert(Account(
-                id: account.publicKey.bytes,
-                label: label,
-                kind: .keyed,
-                sessionAccount: account
-            ))
-            currentPubkey = account.publicKey.bytes
-            persistSession()
-        } catch {
-            lastError = "\(error)"
-        }
+        guard let account = withSessionMutation({
+            try engine.session.add(privateKey: NMPPrivateKey.generate(), makeCurrent: true)
+        }) else { return }
+        upsert(Account(id: account.publicKey.bytes, label: label, kind: .keyed, sessionAccount: account))
+        currentPubkey = account.publicKey.bytes
     }
 
     /// Add the fixed public-key-only demo account and select it atomically.
     func addPublicKeyOnlyAccount(label: String) {
-        do {
-            let account = try engine.session.add(
+        guard let account = withSessionMutation({
+            try engine.session.add(
                 publicKey: NMPPublicKey(bytes: Data(Self.readOnlyDemoPublicKey)),
                 makeCurrent: true
             )
-            upsert(Account(
-                id: account.publicKey.bytes,
-                label: label,
-                kind: .publicKeyOnly,
-                sessionAccount: account
-            ))
-            currentPubkey = account.publicKey.bytes
-            persistSession()
-        } catch {
-            lastError = "\(error)"
-        }
+        }) else { return }
+        upsert(Account(id: account.publicKey.bytes, label: label, kind: .publicKeyOnly, sessionAccount: account))
+        currentPubkey = account.publicKey.bytes
     }
 
     func makeCurrent(_ account: Account) {
+        guard withSessionMutation({ try engine.session.makeCurrent(account.sessionAccount) }) != nil else { return }
+        currentPubkey = account.id
+    }
+
+    /// Every `engine.session` mutation funnels through here so persistence
+    /// follows the mutation automatically rather than being remembered per
+    /// call site (#1797) -- the SDK has no change signal, so this is this
+    /// app's one choke point standing in for one. Failures inside `body`
+    /// (an SDK error) and failures persisting afterward (Keychain) are both
+    /// surfaced through `lastError`; neither is swallowed.
+    private func withSessionMutation<T>(_ body: () throws -> T) -> T? {
         do {
-            try engine.session.makeCurrent(account.sessionAccount)
-            currentPubkey = account.id
+            let result = try body()
             persistSession()
+            return result
         } catch {
             lastError = "\(error)"
+            return nil
         }
     }
 
@@ -207,57 +207,46 @@ final class AppModel {
         return NMPSessionPayload(bytes: bytes)
     }
 
-    /// Re-export the whole session and overwrite the stored payload. Called
-    /// after every account add/select so a killed app resumes with the same
-    /// accounts and current identity it had a moment before.
+    /// Re-export the whole session and overwrite the stored payload. Called,
+    /// via `withSessionMutation`, after every account add/select.
+    ///
+    /// `SecItemUpdate`-or-add, never delete-then-add: the previous
+    /// implementation did `SecItemDelete` followed by `SecItemAdd`, so a
+    /// crash in the gap between those two calls destroyed every account,
+    /// including the local key material that makes them signable again
+    /// (#1797). `Session.swift:206` calls the exported payload "suitable for
+    /// atomic app storage"; delete-then-add was not using that property --
+    /// update-in-place (falling back to add only when nothing exists yet)
+    /// never leaves the Keychain item absent.
+    ///
+    /// A failed export used to be swallowed with `try?`, leaving a stale
+    /// Keychain entry with no signal anywhere; both the export and the
+    /// Keychain write now surface through `lastError` on failure.
     private func persistSession() {
-        guard let payload = try? engine.session.export() else { return }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: Self.keychainAccount,
-        ]
-        SecItemDelete(query as CFDictionary)
-        var attributes = query
-        attributes[kSecValueData as String] = payload.bytes
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        SecItemAdd(attributes as CFDictionary, nil)
-    }
-
-    // MARK: - Pending-write correlations
-    //
-    // A correlation token is an app-generated opaque label, not a secret, so
-    // `UserDefaults` (unlike the session payload above) is the ordinary place
-    // for it. `ComposeView` calls `rememberPendingWrite` BEFORE calling
-    // `engine.publish`, so a crash inside that call itself still leaves a
-    // token on disk for `reattachReceipt(correlation:)` to find on relaunch.
-
-    private static let pendingCorrelationsKey = "canary.pendingWriteCorrelations"
-
-    private static func loadPendingCorrelations() -> [String] {
-        UserDefaults.standard.stringArray(forKey: pendingCorrelationsKey) ?? []
-    }
-
-    private static func savePendingCorrelations(_ correlations: [String]) {
-        UserDefaults.standard.set(correlations, forKey: pendingCorrelationsKey)
-    }
-
-    private static func forgetPendingCorrelation(_ correlation: String) {
-        var pending = loadPendingCorrelations()
-        pending.removeAll { $0 == correlation }
-        savePendingCorrelations(pending)
-    }
-
-    func rememberPendingWrite(correlation: String) {
-        var pending = Self.loadPendingCorrelations()
-        guard !pending.contains(correlation) else { return }
-        pending.append(correlation)
-        Self.savePendingCorrelations(pending)
-    }
-
-    /// The write reached a terminal outcome, or was proven never accepted;
-    /// stop tracking its correlation.
-    func forgetPendingWrite(correlation: String) {
-        Self.forgetPendingCorrelation(correlation)
+        do {
+            let payload = try engine.session.export()
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: Self.keychainService,
+                kSecAttrAccount as String: Self.keychainAccount,
+            ]
+            let updateAttributes: [String: Any] = [
+                kSecValueData as String: payload.bytes,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            ]
+            var status = SecItemUpdate(query as CFDictionary, updateAttributes as CFDictionary)
+            if status == errSecItemNotFound {
+                var attributes = query
+                attributes[kSecValueData as String] = payload.bytes
+                attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+                status = SecItemAdd(attributes as CFDictionary, nil)
+            }
+            guard status == errSecSuccess else {
+                lastError = "Keychain session write failed: OSStatus \(status)"
+                return
+            }
+        } catch {
+            lastError = "Session export failed: \(error)"
+        }
     }
 }
