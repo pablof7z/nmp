@@ -599,3 +599,5 @@ impl EngineThread {
 
 #[cfg(test)]
 mod reentrant_shutdown_tests;
+#[cfg(test)]
+mod route_provider_panic_tests;
