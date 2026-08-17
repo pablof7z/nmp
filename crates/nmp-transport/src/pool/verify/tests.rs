@@ -2,12 +2,12 @@
 //!
 //! The first four tests are the TDD red→green falsifiers for the
 //! durable-dedup invariant (#1677): a cold-start replay of already-ingested
-//! ids performs zero schnorr checks, unknown ids perform schnorr, a tampered
-//! known id is rejected without schnorr, and an LRU hit skips both the
-//! durable read and schnorr.
+//! ids performs zero schnorr checks, unknown ids perform schnorr, a known id
+//! carrying a different signature is skipped without schnorr, and an LRU hit
+//! skips both the durable read and schnorr.
 
 use super::*;
-use nostr::{EventBuilder, Keys, Kind};
+use nostr::{EventBuilder, Keys, Kind, UnsignedEvent};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -107,27 +107,84 @@ fn unknown_ids_perform_schnorr() {
     );
 }
 
+/// A known id whose signature does not byte-match is SKIPPED, not accused.
+///
+/// One event id admits many valid signatures by design: NIP-01's id preimage
+/// is `[0, pubkey, created_at, kind, tags, content]`, so `sig` is not covered,
+/// and `nostr` signs with `OsRng` auxiliary randomness — the same author
+/// signing the same body twice produces two different, equally valid
+/// signatures. A mismatch is therefore evidence of nothing about the relay.
+/// Owner ruling (2026-08-17): equal means that relay sent a good event, not
+/// equal means skip it.
+///
+/// Both shapes a mismatch can take are covered, because a known id never runs
+/// schnorr and so the gate cannot — and need not — tell them apart: the event
+/// is already durable either way.
 #[test]
-fn known_id_with_tampered_sig_is_rejected_without_schnorr() {
+fn known_id_with_a_different_signature_is_skipped_without_schnorr() {
     let keys = Keys::generate();
     let genuine = signed_event(&keys, "genuine");
+
+    // (a) The legitimate shape: the SAME body signed a second time. Different
+    // aux randomness, different 64 bytes, same id, and perfectly valid.
+    let resigned = UnsignedEvent::new(
+        genuine.pubkey,
+        genuine.created_at,
+        genuine.kind,
+        genuine.tags.clone(),
+        genuine.content.clone(),
+    )
+    .sign_with_keys(&keys)
+    .expect("fixture keys sign cleanly");
+    assert_eq!(
+        resigned.id, genuine.id,
+        "NOTHING TO OBSERVE -- re-signing the same body must reproduce the id, \
+         or this fixture is not the case under test"
+    );
+    assert_ne!(
+        resigned.sig, genuine.sig,
+        "NOTHING TO OBSERVE -- `nostr` must sign with fresh aux randomness, or \
+         there is no mismatch to skip"
+    );
+    assert!(
+        resigned.verify().is_ok(),
+        "NOTHING TO OBSERVE -- the second signature must itself be valid"
+    );
+
+    // (b) A signature lifted from a different event entirely.
     let other = signed_event(&keys, "other-signature-source");
-    let mut tampered = genuine.clone();
-    // Swap in a structurally-valid signature that belongs to a different
-    // event — the id is known, but this signature does not match it.
-    tampered.sig = other.sig;
+    let mut transplanted = genuine.clone();
+    transplanted.sig = other.sig;
 
     let known: HashMap<_, _> = [(genuine.id, genuine.sig)].into_iter().collect();
     let known_sig: Arc<dyn KnownSig> = Arc::new(MapKnownSig { known });
     let mut verifier = default_verifier(known_sig);
 
-    let verdicts = verifier.verify_batch(&[Arc::new(tampered)]);
+    let verdicts = verifier.verify_batch(&[
+        Arc::new(resigned.clone()),
+        Arc::new(transplanted.clone()),
+    ]);
 
     assert_eq!(
         verdicts,
-        vec![Verdict::RejectMisbehavior],
-        "a known id with a mismatched signature is misbehavior"
+        vec![Verdict::Skip, Verdict::Skip],
+        "a known id carrying a different signature is skipped by the DURABLE \
+         byte-compare, never accused"
     );
+
+    // Same two events again, now against a primed LRU rather than the durable
+    // seam: accepting the genuine event first puts `(id, sig)` in the cache,
+    // so the second batch resolves on the LRU branch.
+    assert_eq!(
+        verifier.verify_batch(&[Arc::new(genuine)]),
+        vec![Verdict::Accept]
+    );
+    assert_eq!(
+        verifier.verify_batch(&[Arc::new(resigned), Arc::new(transplanted)]),
+        vec![Verdict::Skip, Verdict::Skip],
+        "the LRU branch must skip a different signature too, never accuse"
+    );
+
     assert_eq!(
         verifier.schnorr_verifications(),
         0,

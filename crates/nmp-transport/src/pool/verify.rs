@@ -78,10 +78,30 @@ impl KnownSig for NullKnownSig {
 /// internal verifier-worker failure must drop the affected event and surface
 /// as relay health, but must not falsely accuse the relay of cryptographic
 /// misbehavior. Transport maps `RejectMisbehavior`/`RejectUnavailable` onto
-/// `RelayHealth` accounting.
+/// `RelayHealth` accounting; `Skip` records nothing at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Accept,
+    /// The relay sent an event whose id we already know, carrying a
+    /// DIFFERENT signature. Drop the frame; accuse nobody.
+    ///
+    /// Rule 3 of `docs/internals/conventions/signature-verification.md`,
+    /// which owns this. In short: one event id has arbitrarily many valid
+    /// signatures — NIP-01's id preimage is
+    /// `[0, pubkey, created_at, kind, tags, content]`, so `sig` is not
+    /// covered, and `nostr` signs with `OsRng` auxiliary randomness. A
+    /// mismatch is therefore evidence of nothing about the relay, and this
+    /// used to be `RejectMisbehavior` on exactly that false premise.
+    ///
+    /// The consequence, stated honestly because it is not free: a skipped
+    /// frame never becomes a `PoolEvent`, so **a live query can silently
+    /// lose the event**. On the durable branch that is nearly harmless — the
+    /// id is known because the row is resident, so nothing is lost but the
+    /// provenance merge. On the LRU branch it is not: the cache outlives
+    /// residency, so an id refused, tombstoned, superseded or GC'd since it
+    /// was cached still reads as known, and a redelivery carrying a second
+    /// valid signature is dropped rather than re-admitted. Tracked in #1862.
+    Skip,
     RejectMisbehavior,
     RejectUnavailable,
 }
@@ -198,9 +218,9 @@ impl Verifier {
     ///
     /// Per event:
     /// 1. LRU hit → byte-compare stored sig vs `event.sig` (no schnorr, no
-    ///    durable read): `Accept` if equal else `RejectMisbehavior`.
+    ///    durable read): `Accept` if equal else [`Verdict::Skip`].
     /// 2. Else durable `KnownSig` hit → byte-compare (no schnorr): `Accept`
-    ///    (also inserted into the LRU) or `RejectMisbehavior`.
+    ///    (also inserted into the LRU) or [`Verdict::Skip`].
     /// 3. Else candidate → submit to the worker pool for schnorr. Identical
     ///    unknown `(id, sig)` pairs share ONE schnorr check within the burst,
     ///    but every input still gets its own verdict.
@@ -218,11 +238,15 @@ impl Verifier {
         // unique candidate index their (id, sig) pair resolved to.
         let mut pending: Vec<(usize, usize)> = Vec::new();
         for (index, event) in events.iter().enumerate() {
+            // Equal means this relay sent a good event. Unequal means only
+            // that it signed the same body with different aux randomness (or
+            // that a second, equally valid signature of the same body is in
+            // circulation) — skip it, do not accuse. See `Verdict::Skip`.
             if let Some(known) = self.cache.get(&event.id) {
                 verdicts[index] = Some(if known == event.sig {
                     Verdict::Accept
                 } else {
-                    Verdict::RejectMisbehavior
+                    Verdict::Skip
                 });
                 continue;
             }
@@ -231,7 +255,7 @@ impl Verifier {
                     self.cache.insert(event.id, event.sig);
                     verdicts[index] = Some(Verdict::Accept);
                 } else {
-                    verdicts[index] = Some(Verdict::RejectMisbehavior);
+                    verdicts[index] = Some(Verdict::Skip);
                 }
                 continue;
             }
@@ -284,9 +308,12 @@ fn resolve_candidate(
 ) -> Verdict {
     match (cache.get(&event.id), cryptographically_valid) {
         (Some(known), VerificationOutcome::Valid) if known == event.sig => Verdict::Accept,
-        (Some(_), VerificationOutcome::Valid | VerificationOutcome::Invalid) => {
-            Verdict::RejectMisbehavior
-        }
+        // The cache filled while this candidate was in flight and now holds a
+        // different signature for the same id. A schnorr-VALID signature that
+        // merely differs is not misbehavior (see `Verdict::Skip`); a schnorr-
+        // INVALID one is, and stays an accusation.
+        (Some(_), VerificationOutcome::Valid) => Verdict::Skip,
+        (Some(_), VerificationOutcome::Invalid) => Verdict::RejectMisbehavior,
         (Some(_), VerificationOutcome::Unavailable) => Verdict::RejectUnavailable,
         (None, VerificationOutcome::Valid) => {
             cache.insert(event.id, event.sig);

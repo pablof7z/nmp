@@ -9,7 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use nostr::nips::nip01::Coordinate;
 use nostr::{EventId, Timestamp, UnsignedEvent};
 
-use crate::{IntentId, IntentSigState, MaterializationRef, PersistenceError, StoredEvent};
+use crate::{
+    IntentId, IntentSigState, LocalOrigin, MaterializationRef, PersistenceError, SigState,
+    StoredEvent,
+};
 
 pub(crate) const MAX_PROGRAM_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_COORDINATE_IDENTIFIER_BYTES: usize = 65_536;
@@ -799,6 +802,20 @@ pub(crate) fn plan_source_install(
     Ok(plan)
 }
 
+/// Does `source` — a row this store already holds — actually answer for the
+/// identity `evidence` names?
+///
+/// Three conditions, none of them schnorr. Id and `created_at` equality bind
+/// the row to the named revision. The third is the row's stored SIGNATURE
+/// VERDICT: a locally-accepted row still carrying [`crate::SigState`]`::Pending`
+/// holds the sentinel signature, not a real one, so it is not yet anybody's
+/// source of record. Any other row — relay-observed (verified by the
+/// transport gate before `insert`) or locally `Signed` (verified to mint the
+/// `VerifiedSignature` that `promote_signed` demanded) — was verified once on
+/// the way in, and #1782's ruling is that it is never verified again. Reading
+/// the verdict back is exact where the deleted `source.event.verify()` was
+/// merely equivalent: it separates "not signed yet" from "signed and stored",
+/// which is the distinction this call actually needs.
 fn validate_source_event(
     evidence: &SourceEvidence,
     source: Option<&StoredEvent>,
@@ -812,7 +829,13 @@ fn validate_source_event(
             Some(source),
         ) if source.event.id == event_id
             && source.event.created_at == created_at
-            && source.event.verify().is_ok() =>
+            && !matches!(
+                source.provenance.local,
+                Some(LocalOrigin {
+                    sig_state: SigState::Pending,
+                    ..
+                })
+            ) =>
         {
             Ok(())
         }
@@ -1099,5 +1122,141 @@ pub(crate) fn recovered(state: SemanticResourceState) -> RecoveredSemanticResour
             program_digest,
             generation: state.generation,
         },
+    }
+}
+
+#[cfg(test)]
+mod source_verdict_tests {
+    //! #1782: source qualification reads the stored signature VERDICT
+    //! instead of recomputing schnorr over a row this store already holds.
+    //!
+    //! The two facts that must survive the swap: a locally-accepted row still
+    //! carrying the sentinel signature is refused, and the same row once
+    //! `promote_signed` has written `SigState::Signed` qualifies. Neither
+    //! costs a signature check.
+
+    use std::collections::{BTreeMap, BTreeSet};
+    
+    use nostr::{Event, EventBuilder, Keys, Kind, Timestamp};
+
+    use super::{
+        validate_source_event, AccessContextId, QualifiedSource, SourceEvidence, SourcePlanId,
+    };
+    use crate::{
+        sentinel_signature, LocalOrigin, Provenance, SemanticRefusal, SigState, StoredEvent,
+        schnorr_verifications,
+    };
+
+    fn stored(local: Option<LocalOrigin>) -> StoredEvent {
+        let keys = Keys::parse("0000000000000000000000000000000000000000000000000000000000000007")
+            .expect("fixture key");
+        let signed = EventBuilder::new(Kind::TextNote, "source-verdict")
+            .custom_created_at(Timestamp::from(1_700_000_000))
+            .sign_with_keys(&keys)
+            .expect("fixture signs cleanly");
+        let pending = matches!(
+            local,
+            Some(LocalOrigin {
+                sig_state: SigState::Pending,
+                ..
+            })
+        );
+        // A pending local row carries the sentinel, not a signature.
+        let event = if pending {
+            Event::new(
+                signed.id,
+                signed.pubkey,
+                signed.created_at,
+                signed.kind,
+                signed.tags.clone(),
+                signed.content.clone(),
+                sentinel_signature(),
+            )
+        } else {
+            signed
+        };
+        StoredEvent {
+            event,
+            provenance: Provenance {
+                seen: BTreeMap::new(),
+                local,
+            },
+        }
+    }
+
+    fn evidence(source: &StoredEvent) -> SourceEvidence {
+        SourceEvidence {
+            plan: SourcePlanId([1; 32]),
+            access: AccessContextId([2; 32]),
+            qualified: QualifiedSource::Event {
+                event_id: source.event.id,
+                created_at: source.event.created_at,
+            },
+        }
+    }
+
+    fn local(sig_state: SigState) -> Option<LocalOrigin> {
+        Some(LocalOrigin {
+            owners: BTreeSet::new(),
+            sig_state,
+        })
+    }
+
+    #[test]
+    fn a_pending_local_row_is_not_a_source_of_record() {
+        let source = stored(local(SigState::Pending));
+        assert_eq!(
+            validate_source_event(&evidence(&source), Some(&source)),
+            Err(SemanticRefusal::InvalidSourceRevision),
+            "a row whose stored verdict is Pending holds the sentinel signature, \
+             not a real one -- it cannot qualify as a source revision"
+        );
+    }
+
+    #[test]
+    fn a_signed_local_row_qualifies_without_a_signature_check() {
+        let source = stored(local(SigState::Signed));
+        let before = schnorr_verifications();
+        assert_eq!(
+            validate_source_event(&evidence(&source), Some(&source)),
+            Ok(())
+        );
+        assert_eq!(
+            schnorr_verifications(),
+            before,
+            "qualifying a stored source must not run schnorr"
+        );
+    }
+
+    #[test]
+    fn a_relay_observed_row_qualifies_without_a_signature_check() {
+        let source = stored(None);
+        let before = schnorr_verifications();
+        assert_eq!(
+            validate_source_event(&evidence(&source), Some(&source)),
+            Ok(())
+        );
+        assert_eq!(
+            schnorr_verifications(),
+            before,
+            "a relay-observed row was verified by the transport gate before insert; \
+             qualifying it must not verify again"
+        );
+    }
+
+    #[test]
+    fn a_row_that_is_not_the_named_revision_is_still_refused() {
+        let source = stored(local(SigState::Signed));
+        let mut wrong = evidence(&source);
+        wrong.qualified = QualifiedSource::Event {
+            event_id: source.event.id,
+            created_at: Timestamp::from(1),
+        };
+        assert_eq!(
+            validate_source_event(&wrong, Some(&source)),
+            Err(SemanticRefusal::InvalidSourceRevision),
+            "NOTHING TO OBSERVE -- if identity mismatch also passed, the three \
+             checks above would prove nothing"
+        );
     }
 }

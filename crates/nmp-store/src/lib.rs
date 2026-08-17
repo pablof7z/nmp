@@ -66,6 +66,32 @@
 //! mutating anything. The engine's send-time attribution snapshots stay out
 //! of scope too (this crate only stores whatever interval it is told to
 //! record).
+//!
+//! Verification is a once-at-ingest act and nothing on the way OUT of this
+//! crate ever re-verifies. `docs/internals/conventions/signature-verification.md`
+//! owns that rule and enumerates every admitting door; what follows is only
+//! what it means here, and it deliberately does not restate the doc.
+//!
+//! This crate's own doors: [`RedbStore::insert`] takes relay-observed bytes
+//! the transport gate already proved, and
+//! [`RedbStore::accept_write`]/[`RedbStore::promote_signed`] take a
+//! [`VerifiedSignature`] that cannot exist without one successful check.
+//! Not every door is sound — `insert`'s adoption path proves nothing but a
+//! comment, which is a standing violation tracked as #1800, not a precedent.
+//!
+//! Whatever a later read needs to know about that check it reads back as
+//! DATA — [`SigState`] on the row, [`IntentSigState`] on the intent — never
+//! by recomputing schnorr over bytes this crate wrote itself. Three sites
+//! used to recompute it (attempt-row decode on every boot, the attempt-start
+//! door, and semantic source qualification); #1782 deleted all three, and
+//! with them the only integrity check those rows had — an accepted trade the
+//! convention records, whose instrument if ever wanted is a codec checksum,
+//! never schnorr.
+//!
+//! The stored 64-byte signature stays load-bearing regardless: the publish
+//! queue re-serves those exact bytes to relays, and the transport gate
+//! compares them byte-for-byte to settle a redelivery without schnorr. It is
+//! simply never re-checked here.
 
 mod address_key;
 mod binary_event;
@@ -316,11 +342,50 @@ pub use nmp_grammar::sentinel_signature;
 ///
 /// Verification stays a caller-side act performed exactly once (#387): the
 /// engine's signer-result validation constructs this value and hands it
-/// down, and no store implementation runs a second Schnorr check.
+/// down, and no store implementation runs a second Schnorr check. This is
+/// the crate's ONLY schnorr entry point — after #1782 nothing in
+/// `nmp-store` calls it on a path a store read can reach, which is what
+/// makes [`SCHNORR_VERIFICATIONS`] a usable zero-assertion over a boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedSignature {
     event_id: EventId,
     signature: Signature,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Every schnorr check [`VerifiedSignature::verify`] has run ON THIS
+    /// THREAD.
+    ///
+    /// The falsifier for rule 4 of
+    /// `docs/internals/conventions/signature-verification.md` (#1782): a boot
+    /// over an already-populated store must not move this number at all.
+    ///
+    /// Per-THREAD rather than per-process because the test harness runs the
+    /// rest of the crate's suite in parallel and plenty of it verifies fixture
+    /// events — a global counter reads their work as this boot's. Nothing in
+    /// `nmp-store` verifies off the calling thread (the crate owns no
+    /// workers), so a thread-local count is exact for every store door.
+    ///
+    /// On that convention's "instrumentation must not be able to lie": this
+    /// counts ATTEMPTS, incremented unconditionally on entry, before
+    /// `Event::verify` can return. `nostr` owns the schnorr operation and
+    /// cannot be instrumented from outside it, so the increment sits beside
+    /// the call rather than inside it — but there is no runtime switch that
+    /// can skip the call while the counter still moves, and the direction of
+    /// error is the safe one for the claim being made. The claim is ZERO; an
+    /// attempt counter can over-report, never under-report, so it cannot read
+    /// clean while verification is happening.
+    ///
+    /// Absent from production builds so the one verification an accepted
+    /// signer result must pass pays nothing to support a test.
+    static SCHNORR_VERIFICATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Schnorr checks run on this thread so far. See [`SCHNORR_VERIFICATIONS`].
+#[cfg(test)]
+pub(crate) fn schnorr_verifications() -> u64 {
+    SCHNORR_VERIFICATIONS.with(std::cell::Cell::get)
 }
 
 impl VerifiedSignature {
@@ -328,6 +393,8 @@ impl VerifiedSignature {
     /// signature checked against that id and `event.pubkey` — and keep the
     /// proof. `Err` is `nostr`'s own verification failure, unchanged.
     pub fn verify(event: &Event) -> Result<Self, nostr::event::Error> {
+        #[cfg(test)]
+        SCHNORR_VERIFICATIONS.with(|count| count.set(count.get() + 1));
         event.verify()?;
         Ok(Self {
             event_id: event.id,

@@ -1165,14 +1165,16 @@ pub(super) fn start_lane_attempt(
             ))
         }
     };
+    // The stored verdict IS the check (#1782): `Signed` can only have been
+    // written by `promote_signed`, which only a `VerifiedSignature` opens,
+    // and byte-identity binds these attempt bytes to that same promoted
+    // body. Re-running schnorr here proved nothing the two lines above had
+    // not already established.
     if sig_state != IntentSigState::Signed || intent_event != event {
         return Err(PersistenceError::invariant(
             "attempt bytes are not the intent's promoted signed bytes",
         ));
     }
-    event
-        .verify()
-        .map_err(|e| PersistenceError::invariant(format!("attempt event is invalid: {e}")))?;
     let relay_id = store.publish_queue_relay_id(&key.relay)?;
     let write_txn = store.database()?.begin_write().map_err(persist_err)?;
     let (attempt, lane) = {

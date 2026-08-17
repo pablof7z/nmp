@@ -1012,6 +1012,13 @@ fn apply_worker_event_with_verdict(
                     session: state.session.clone(),
                     frame,
                 }),
+                // A known id redelivered with a different signature. Drop the
+                // frame and record NOTHING against the relay: a mismatch is
+                // not evidence of misbehavior (rule 3 of
+                // `conventions/signature-verification.md`). Dropping is not
+                // free — see `Verdict::Skip` for what a live query can lose
+                // on the LRU branch, tracked in #1862.
+                Verdict::Skip => None,
                 Verdict::RejectMisbehavior => {
                     record_misbehavior(&mut state.health);
                     Some(PoolEvent::Health {
