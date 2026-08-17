@@ -9,7 +9,7 @@ import org.junit.jupiter.api.Test
 // is lossless for every ReadRouting/AccessContext/CacheMode/Freshness case.
 class NMPDemandTest {
     @Test
-    fun authorOutboxesSourceRoundTrips() {
+    fun aDemandThatNamesNoRoutingRoundTripsAsAuto() {
         val demand = NMPDemand(selection = NMPFilter(kinds = listOf(1u)))
         val ffi = demand.toFfi()
         assertEquals(uniffi.nmp_ffi.FfiReadRouting.Auto, ffi.routing)
@@ -20,7 +20,7 @@ class NMPDemandTest {
     }
 
     @Test
-    fun pinnedSourceRoundTripsWithStrictCache() {
+    fun explicitRoutingRoundTripsWithStrictCache() {
         val demand =
             NMPDemand(
                 selection = NMPFilter(kinds = listOf(1u)),
@@ -28,8 +28,8 @@ class NMPDemandTest {
                 cache = NMPCacheMode.Strict,
             )
         val ffi = demand.toFfi()
-        val source = ffi.routing as uniffi.nmp_ffi.FfiReadRouting.Explicit
-        assertEquals(listOf("wss://relay.example.com"), source.relays)
+        val routing = ffi.routing as uniffi.nmp_ffi.FfiReadRouting.Explicit
+        assertEquals(listOf("wss://relay.example.com"), routing.relays)
         assertEquals(uniffi.nmp_ffi.FfiCacheMode.STRICT, ffi.cache)
         assertEquals(demand, NMPDemand.from(ffi))
     }

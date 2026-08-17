@@ -168,7 +168,7 @@ feature.
 
 ## Selection is not the whole descriptor
 
-The same selection can be acquired under different source or access authority:
+The same selection can be acquired under different routing or access context:
 
 ```swift
 let publicDemand = NMPDemand(

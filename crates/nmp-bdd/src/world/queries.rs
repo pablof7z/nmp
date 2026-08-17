@@ -61,7 +61,7 @@ pub struct WatchShape {
 
 /// `kinds:[1]` narrowed to ONE value of ONE single-letter tag and PINNED to
 /// `relay` -- the smallest demand that exercises the tag axis of wire
-/// subscription aggregation. Pinned rather than outbox-routed on purpose: the
+/// subscription aggregation. `Explicit` rather than outbox-routed on purpose: the
 /// contract under specification is about what reaches a NAMED relay, so the
 /// scenario must not also depend on relay discovery choosing that relay.
 pub fn tagged_note_query(relay: &RelayUrl, tag: char, value: &str, shape: WatchShape) -> LiveQuery {
@@ -131,7 +131,7 @@ pub(super) fn authored_note_query_from_relays(
 /// `core_headless/derived_tag_fanout.rs` fixture, and the reason the tag axis
 /// matters -- the resolved value set here is a CATALOG, not a handful.
 ///
-/// Pinned, like the literal shapes above: group state has no author whose
+/// `Explicit`, like the literal shapes above: group state has no author whose
 /// outbox could be discovered, so a real client names its relay.
 pub fn my_group_state_query(relay: &RelayUrl) -> LiveQuery {
     let pinned = BTreeSet::from([relay.clone()]);
@@ -173,7 +173,7 @@ pub fn my_group_state_query(relay: &RelayUrl) -> LiveQuery {
 ///
 /// The unbound author is the whole shape: NIP-29 metadata is signed by the
 /// host relay, so an author-scoped read could only ever return one host's
-/// version and could not observe two hosts disagreeing. Pinned, like every
+/// version and could not observe two hosts disagreeing. `Explicit`, like every
 /// other literal shape here, because group state has no author whose outbox
 /// could be discovered.
 pub(super) fn group_metadata_query(relays: BTreeSet<RelayUrl>, group_id: &str) -> LiveQuery {
@@ -195,9 +195,9 @@ pub(super) fn group_metadata_query(relays: BTreeSet<RelayUrl>, group_id: &str) -
 }
 
 /// One author's contact list -- the replaceable coordinate
-/// `features/writes/replaceable-edits.feature` CAS-es against. Pinned like
+/// `features/writes/replaceable-edits.feature` CAS-es against. `Explicit` like
 /// every other literal shape: what the scenario reads is the LOCAL winner,
-/// and pinning keeps the read from also depending on relay discovery.
+/// and naming the relay keeps the read from also depending on relay discovery.
 pub fn contact_list_query(relay: &RelayUrl, author_hex: &str) -> LiveQuery {
     pinned_query(
         relay,

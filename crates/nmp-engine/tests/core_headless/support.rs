@@ -95,10 +95,10 @@ fn cf(kinds: &[u16], authors: &[&str]) -> ConcreteFilter {
     }
 }
 
-/// An `AuthorOutboxes`-sourced atom (#118): every `cf(...)` fixture in this
-/// file is author-bearing, so this is the exact true context each one was
-/// actually acquired under -- `EngineCore::get_coverage` now takes the
-/// atom's real `ContextualAtom`, never a reconstruction.
+/// An `Auto`-routed atom (#118): every `cf(...)` fixture in this file is
+/// acquired under a demand that named no routing, so this is the exact true
+/// context each one was actually acquired under -- `EngineCore::get_coverage`
+/// takes the atom's real `ContextualAtom`, never a reconstruction.
 fn ctx_atom(filter: ConcreteFilter) -> ContextualAtom {
     ctx_atom_with(filter, ReadRouting::Auto)
 }

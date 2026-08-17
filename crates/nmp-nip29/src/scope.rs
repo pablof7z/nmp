@@ -336,7 +336,7 @@ mod tests {
             assert_eq!(
                 inner.cache,
                 CacheMode::Strict,
-                "depth 1 must also refuse a cached row {expected} never served -- Pinned \
+                "depth 1 must also refuse a cached row {expected} never served -- Explicit \
                  scopes the wire, CacheMode scopes the cache, and both must name this host"
             );
             assert_eq!(inner.access, AccessContext::Public);
@@ -371,7 +371,7 @@ mod tests {
     }
 
     /// Multi-relay reads are ONE ordinary live query with one complete
-    /// singleton-host branch per host -- never `Pinned({A, B})`, never a
+    /// singleton-host branch per host -- never `Explicit({A, B})`, never a
     /// `Vec<Demand>` the app has to merge, never a NIP-29 observe door.
     #[test]
     fn a_multi_host_read_is_one_live_query_with_one_branch_per_host() {

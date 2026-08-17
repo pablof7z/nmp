@@ -39,7 +39,7 @@ fn author(n: u32) -> String {
     format!("{n:064x}")
 }
 
-/// A filter routed by EXPLICIT pinned authority: one relay, no directory, no
+/// A filter routed `Explicit`: one relay, no directory, no
 /// additive lane. Keeps every test below focused on wire identity rather than
 /// on routing.
 fn pinned_atom(filter: ConcreteFilter) -> ContextualAtom {

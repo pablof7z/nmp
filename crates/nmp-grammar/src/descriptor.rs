@@ -278,10 +278,9 @@ mod tests {
 
     /// `Auto` is TOTAL: it has no precondition, so the same routing value is
     /// legal over an author-bearing and an authorless selection alike. The
-    /// deleted `AuthorOutboxesRequiresBoundAuthors` refusal existed only
-    /// because the old vocabulary let a caller name a routing that its
-    /// selection could not satisfy; there is no such combination left to
-    /// refuse.
+    /// refusal deleted alongside the old vocabulary existed only because that
+    /// vocabulary let a caller name a routing its selection could not
+    /// satisfy; there is no such combination left to refuse.
     #[test]
     fn auto_is_legal_over_both_an_author_bearing_and_an_authorless_selection() {
         let authorless = Demand::new(
@@ -309,7 +308,7 @@ mod tests {
 
     /// A $myFollows-shaped DERIVED authors binding rides `Auto` like any
     /// other selection — the reactive follow feed needs no routing word at
-    /// all. This is the shape #106's `author_outboxes` guardrail protected;
+    /// all. This is the shape #106's bound-authors guardrail protected;
     /// with `Auto` total there is nothing left to guard, and the query is
     /// simply declared.
     #[test]

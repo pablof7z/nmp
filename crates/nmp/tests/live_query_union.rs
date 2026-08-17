@@ -8,7 +8,7 @@
 //!
 //! | falsifier | disablement that must turn it red |
 //! |---|---|
-//! | `branch_sources_are_never_flattened_into_one_pinned_set` | merge every branch's `Pinned` set into one branch |
+//! | `branch_relay_sets_are_never_flattened_into_one_explicit_set` | merge every branch's `Explicit` set into one branch |
 //! | `equal_branches_keep_independent_evidence_entries` | return one merged `AcquisitionEvidence` for the observation |
 //! | `an_unplannable_branch_reports_its_own_shortfall` | union every branch's shortfall into one entry |
 //! | `rows_union_by_event_id_with_merged_provenance` | deliver one frame per branch above the subscription |
@@ -244,11 +244,11 @@ fn evidence_relays(evidence: &AcquisitionEvidence) -> BTreeSet<RelayUrl> {
 }
 
 // ---------------------------------------------------------------------------
-// Falsifier: "Flatten all branch sources into one unioned `Pinned` set."
+// Falsifier: "Flatten all branch relay sets into one unioned `Explicit` set."
 // ---------------------------------------------------------------------------
 
 #[test]
-fn branch_sources_are_never_flattened_into_one_pinned_set() {
+fn branch_relay_sets_are_never_flattened_into_one_explicit_set() {
     let (a, b) = (relay("a"), relay("b"));
     let mut core = core();
 
@@ -276,7 +276,7 @@ fn branch_sources_are_never_flattened_into_one_pinned_set() {
             scope.len(),
             1,
             "each branch's evidence must name only its OWN pinned host; \
-             a flattened Pinned({{a,b}}) would give one entry naming both: {scopes:?}"
+             a flattened Explicit({{a,b}}) would give one entry naming both: {scopes:?}"
         );
     }
     assert_eq!(
@@ -300,7 +300,7 @@ fn equal_branches_keep_independent_evidence_entries() {
     let host = relay("shared");
     let mut core = core();
 
-    // Same selection, same source authority, same access: only the per-handle
+    // Same selection, same routing, same access: only the per-handle
     // freshness policy differs. These two branches may share every atom, wire
     // request and coverage row underneath -- and must STILL be two branches,
     // because collapsing them would silently discard one branch's own policy.

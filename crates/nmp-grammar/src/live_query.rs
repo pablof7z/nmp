@@ -2,7 +2,7 @@
 //!
 //! One live query is one or more complete, independent [`Demand`] branches
 //! observed through ONE lifecycle. `Demand` itself stays atomic: it owns a
-//! selection, a source authority, an access context, a cache mode and a
+//! selection, a routing, an access context, a cache mode and a
 //! freshness policy, and it never nests another `Demand` except at the exact
 //! `Derived` boundary the grammar already defines. Composition of independent
 //! branches is a property of the DECLARATION, not of `Demand`, which is why

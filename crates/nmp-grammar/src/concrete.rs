@@ -427,10 +427,10 @@ mod tests {
 
     /// #107's headline anti-alias falsifier (Done-when: "Equal filters
     /// pinned to R1 and R2 retain distinct row projections, evidence, EOSE
-    /// facts, and teardown"): the IDENTICAL selection pinned to two
-    /// DIFFERENT relay sets must hash differently.
+    /// facts, and teardown"): the IDENTICAL selection under two DIFFERENT
+    /// `Explicit` relay sets must hash differently.
     #[test]
-    fn contextual_atom_hash_distinguishes_different_pinned_relay_sets() {
+    fn contextual_atom_hash_distinguishes_different_explicit_relay_sets() {
         let filter = cf(vec!["aa"], vec![]);
         let r1 = nostr::RelayUrl::parse("wss://r1.example").unwrap();
         let r2 = nostr::RelayUrl::parse("wss://r2.example").unwrap();

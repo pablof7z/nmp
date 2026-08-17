@@ -5069,10 +5069,10 @@ impl CoreState {
     ///
     /// Write needs come straight from reducer memory (`route_needs`, refreshed
     /// by the last resolution of each intent). Read needs come from the
-    /// resolver's current wire-contributing `AuthorOutboxes` atoms whose
+    /// resolver's current wire-contributing `Auto` atoms whose
     /// author lacks a positive outbound route, including authors produced by
-    /// a derived query. Pinned provider queries do not feed themselves back
-    /// into this set.
+    /// a derived query. `Explicit` provider queries do not feed themselves
+    /// back into this set.
     pub(in crate::core) fn author_route_needs(&self) -> BTreeSet<PublicKey> {
         let mut needs: BTreeSet<PublicKey> = self
             .pending

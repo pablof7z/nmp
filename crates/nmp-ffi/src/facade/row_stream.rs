@@ -118,9 +118,9 @@ impl NmpEngine {
     /// [`FfiError::WindowSelectionHasLimit`].
     ///
     /// The query is always a complete [`FfiLiveQuery`]: one or more demand
-    /// branches, each naming its own source authority, access context, cache
+    /// branches, each naming its own routing, access context, cache
     /// mode and freshness. There is no bare-filter door -- selection syntax
-    /// never decides wire authority (#847).
+    /// never decides routing (#847).
     ///
     /// Branches are observed through this ONE subscription: rows are unioned
     /// by event id with provenance merged, each frame carries one evidence

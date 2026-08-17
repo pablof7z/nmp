@@ -1520,8 +1520,8 @@ fn direct_filter(pubkey: &str, kind: u16) -> Filter {
 }
 
 /// The FFI mirror of `direct_filter`, carried as the complete live query the
-/// FFI door takes: one branch that names `AuthorOutboxes` explicitly, exactly
-/// as the direct-Rust side does.
+/// FFI door takes: one branch that names no routing, exactly as the
+/// direct-Rust side does.
 fn ffi_live_query(pubkey: &str, kind: u16) -> FfiLiveQuery {
     FfiLiveQuery {
         branches: vec![FfiDemand {

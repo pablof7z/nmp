@@ -374,7 +374,7 @@ grammar's `Agnostic` default ignores provenance — so a naive pinned demand
 could let host A's cached kind:39002 row answer host B's structurally
 identical lookup, reporting a member nothing at B actually supports. Every
 NIP-29-owned demand sets `CacheMode::Strict` at the one choke point
-(`pinned_public_at`) every constructor passes through, closing that leak. The
+(`explicit_at`) every constructor passes through, closing that leak. The
 user-visible consequence: a just-published group message appears under a
 host once *that host* has ACKed it, not immediately under every host in the
 scope — showing an event under a host that rejected it would be exactly the
@@ -406,7 +406,7 @@ state the underlying kinds cannot establish.
 - `crates/nmp-nip29/src/discovery.rs` — `GROUP_METADATA_KIND` /
   `GROUP_ADMINS_KIND` / `GROUP_MEMBERS_KIND` (39000/39001/39002),
   `member_list_includes_at`, `admin_list_includes_at`: one host's complete
-  discovery branch, every NIP-29-owned nesting level pinned to that host. `pinned_public_at` is the one choke point every NIP-29 demand
+  discovery branch, every NIP-29-owned nesting level pinned to that host. `explicit_at` is the one choke point every NIP-29 demand
   passes through for BOTH axes: `ReadRouting::Explicit` (which relay is
   asked) and `CacheMode::Strict` (which cached rows may answer) — closing the
   cross-host cache leak a merely-pinned-but-`Agnostic` demand would otherwise

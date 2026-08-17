@@ -80,7 +80,7 @@ public enum GroupListActionError: Error, Sendable, Equatable {
 }
 
 /// The signed-in account's Simple-groups-list demand (#108): `kinds:
-/// [10009]`, `AuthorOutboxes + Public`. Signed-out (no current account)
+/// [10009]`, naming no routing and no NIP-42 identity. Signed-out (no current account)
 /// resolves to zero rows through the ordinary reactive-binding empty-
 /// resolution path -- no special case needed on the caller's side.
 ///

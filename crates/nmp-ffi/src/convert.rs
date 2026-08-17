@@ -1646,10 +1646,9 @@ fn freshness_to_ffi(freshness: GFreshness) -> FfiFreshness {
 }
 
 /// `FfiDemand -> nmp_grammar::Demand` -- the explicit, validating
-/// constructor (#107). It can fail: an unbound-author `AuthorOutboxes`
-/// selection or an empty `Pinned` relay set is rejected here with a typed
-/// [`FfiError`], never a panic, mirroring `Demand::new`'s own `DemandError`
-/// exactly.
+/// constructor (#107). It can fail: an empty `Explicit` relay set is rejected
+/// here with a typed [`FfiError`], never a panic, mirroring `Demand::new`'s
+/// own `DemandError` exactly.
 pub fn demand_from_ffi(d: FfiDemand) -> Result<GDemand, FfiError> {
     let mut demand = GDemand::new(
         filter_from_ffi(d.selection)?,
@@ -4074,14 +4073,14 @@ mod tests {
         }
     }
 
-    /// #107: an `FfiDemand` declaring `Pinned` relays round-trips through
+    /// #107: an `FfiDemand` declaring `Explicit` relays round-trips through
     /// `demand_from_ffi`/`demand_to_ffi` with the relay set canonicalized
     /// (parsed via `RelayUrl::parse`, sorted+deduped via `BTreeSet`) and
     /// every other field preserved -- including `cache: Strict`, which
     /// `Demand::new` itself never sets (it always starts `Agnostic`; this
     /// proves the FFI boundary applies it as a second, explicit step).
     #[test]
-    fn demand_round_trips_pinned_source_and_strict_cache() {
+    fn demand_round_trips_explicit_routing_and_strict_cache() {
         let demand = FfiDemand {
             selection: ffi_filter_kind1_author(&pk_hex()),
             routing: FfiReadRouting::Explicit {

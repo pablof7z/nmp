@@ -7,7 +7,7 @@ import XCTest
 import NMPFFI
 
 final class NMPDemandTests: XCTestCase {
-    func testAuthorOutboxesSourceRoundTrips() {
+    func testADemandThatNamesNoRoutingRoundTripsAsAuto() {
         let demand = NMPDemand(
             selection: NMPFilter(kinds: [1])
         )
@@ -19,7 +19,7 @@ final class NMPDemandTests: XCTestCase {
         XCTAssertEqual(NMPDemand(ffi), demand)
     }
 
-    func testPinnedSourceRoundTripsWithStrictCache() {
+    func testExplicitRoutingRoundTripsWithStrictCache() {
         let demand = NMPDemand(
             selection: NMPFilter(kinds: [1]),
             routing: .explicit(["wss://relay.example.com"]),
@@ -27,7 +27,7 @@ final class NMPDemandTests: XCTestCase {
         )
         let ffi = demand.toFfi()
         guard case .explicit(let relays) = ffi.routing else {
-            return XCTFail("expected a pinned source")
+            return XCTFail("expected explicit routing")
         }
         XCTAssertEqual(relays, ["wss://relay.example.com"])
         XCTAssertEqual(ffi.cache, .strict)

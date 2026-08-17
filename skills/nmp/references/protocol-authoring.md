@@ -43,7 +43,7 @@ Do not add a callback registry that chooses routing, admission, signer, ordering
 ## Read path workflow
 
 1. Define exact protocol input values and validate them before demand opens.
-2. Express selection and source/access authority as printable closed demand.
+2. Express selection, routing and access context as printable closed demand.
 3. Reconstruct protocol state from canonical query rows; do not keep a second event store.
 4. Return semantic values plus the ordinary source evidence required to interpret them.
 5. Bind nested observations to a typed resource with deterministic close/drop.

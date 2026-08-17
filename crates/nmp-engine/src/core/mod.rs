@@ -1267,7 +1267,7 @@ pub enum Effect {
         published: Vec<CommittedObservationPublication>,
     },
     /// The complete current set of public keys whose neutral author-route
-    /// provider is still needed. Live `AuthorOutboxes` reads retain authors
+    /// provider is still needed. Live `Auto` reads retain authors
     /// until a positive outbound route exists; zero-destination writes also
     /// retain settled zero-route contributors so a later positive replacement
     /// can unpark them. This is a need declaration, never a subscription;
@@ -1957,8 +1957,8 @@ pub struct CoreState {
     /// counting has exactly one implementation instead of an incremental path
     /// and a rebuild that open-coded it a second time.
     wire: WireOwnership,
-    /// Live-wire owner count per author contributed by `AuthorOutboxes`
-    /// demand, which authors still lack a positive outbound route, and the
+    /// Live-wire owner count per author contributed by `Auto` atoms,
+    /// which authors still lack a positive outbound route, and the
     /// pending-change flag for `AuthorRouteNeedsChanged`. Private to
     /// `author_route_needs.rs`, so the incremental and wholesale-rebuild
     /// paths share one algorithm instead of two that can drift.
@@ -2082,7 +2082,7 @@ pub struct CoreState {
     pending: PendingWrites,
     /// Last complete neutral author-route provider-work set published to the
     /// optional protocol assembly. The set is the union of unresolved write
-    /// contributors and authors in live `AuthorOutboxes` reads without a
+    /// contributors and authors in live `Auto` reads without a
     /// positive outbound route. Keeping the prior value here makes provider
     /// synchronization an edge rather than a repeated side effect of every
     /// unrelated recompile.

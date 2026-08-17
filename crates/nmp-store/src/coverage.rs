@@ -324,7 +324,7 @@ mod tests {
         }
     }
 
-    /// Wrap a filter into a fixed-context (`AuthorOutboxes`/`Public`) demand
+    /// Wrap a filter into a fixed-context (`Auto`, unauthenticated) demand
     /// atom -- these tests exercise the SELECTION axis of `coverage_key`;
     /// the context-anti-alias property has its own dedicated falsifier
     /// below.

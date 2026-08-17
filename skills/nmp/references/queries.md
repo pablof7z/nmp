@@ -24,14 +24,14 @@ Branch order and duplicates are canonicalized, so any permutation of the same br
 Filter fields are kinds, authors, ids, indexed single-character tags, since, until, and limit. `Selector::Tag(name)` projects already acquired rows locally and may use arbitrary tag names; that is different from the filter tag map's NIP-01 single-character keys.
 
 `Derived.inner` is a full `Demand` on Rust, FFI, Swift, and Kotlin. The inner
-query declares source, access, cache, and freshness independently from the
+query declares routing, access, cache, and freshness independently from the
 outer query; no platform implicitly inherits or reapplies defaults.
 
-## Source and cache rules
+## Routing and cache rules
 
-- `Auto` requires an authors binding.
-- `Pinned` requires a nonempty relay set and asks only those relays.
-- `CacheMode::Strict` matters only with pinned authority; it limits cached rows to provenance intersecting the pinned relay set.
+- `Auto` is the default and has no precondition: a demand that names no routing gets it, whatever its selection binds.
+- `Explicit` requires a nonempty relay set and asks only those relays.
+- `CacheMode::Strict` matters only under `Explicit`; it limits cached rows to provenance intersecting that relay set.
 - `AccessContext` is `Public` or `Nip42(expectedPublicKey)`. NIP-42 freezes the
   expected identity in the demand; active-account changes cannot redirect it.
 - `Freshness` is per-handle acquisition policy — `Live`, `MaxAge { seconds }`, or `CacheOnly` — and is deliberately excluded from atom, wire, and coverage identity, so it never splits a shared subscription.

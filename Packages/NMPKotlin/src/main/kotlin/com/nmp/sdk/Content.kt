@@ -103,7 +103,7 @@ enum class NostrReferencePlacement {
 
 /** Exact decoded public NIP-19/NIP-21 locator data.
  *
- * No variant implies an event schema, source authority, relay admission
+ * No variant implies an event schema, routing, relay admission
  * decision, or observation. In particular, [Pubkey] is not a profile query.
  */
 sealed class NostrReferenceTarget {

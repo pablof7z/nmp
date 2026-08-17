@@ -87,7 +87,7 @@ fn engine_reading_lists_from(indexer: &ScriptedRelay, keys: &Keys) -> Engine {
     engine
 }
 
-/// A bare engine with no indexer at all -- the shape a purely `Pinned`
+/// A bare engine with no indexer at all -- the shape a purely `Explicit`
 /// (records observation) call needs, and nothing more: it never consults a
 /// directory.
 fn bare_engine() -> Engine {
@@ -610,19 +610,19 @@ async fn a_signing_failure_leaves_no_event_frame_and_no_delivery_implying_receip
 /// nothing observed AT host B supports it.
 ///
 /// This test found a real defect when it landed, and the defect is fixed.
-/// `pinned_public_at` used to build every `Pinned`-sourced NIP-29 demand (the
-/// outer listing AND every nested evidence lookup) leaving
+/// `explicit_at` used to build every `Explicit`-routed NIP-29 demand
+/// (the outer listing AND every nested evidence lookup) leaving
 /// `nmp_grammar::Demand`'s default `CacheMode::Agnostic` -- "serve every
 /// matching cached row regardless of provenance".
 /// `ReadRouting::Explicit` alone scopes only the WIRE request; which locally
 /// cached rows may ANSWER is governed independently by `CacheMode`. So once
 /// host A's own kind:39002 event landed in the shared store, host B's
 /// structurally-identical inner evidence lookup (same kind, same `#p`,
-/// different `Pinned` host) resolved against that SAME cached row and answered
+/// different `Explicit` host) resolved against that SAME cached row and answered
 /// non-empty for host B -- the cross-host leak this design exists to prevent,
 /// at the cache layer rather than the graph-shape layer.
 ///
-/// `pinned_public_at` now sets `cache = CacheMode::Strict` at every level it
+/// `explicit_at` now sets `cache = CacheMode::Strict` at every level it
 /// builds, so a cached row answers a branch only when its own provenance names
 /// that branch's host. Host B's outer branch resolves zero atoms and never
 /// sends its `#d` REQ.
