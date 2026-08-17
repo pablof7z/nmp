@@ -70,6 +70,19 @@ impl Router {
         cap_refused_coverage_assignments: BTreeSet<(DemandKey, PublicKey)>,
         budget_refused_requests: Vec<(RelaySessionKey, WireReq)>,
     ) {
+        // `rebuild_refusal_indexes` always wipes and rebuilds from this
+        // call's own `cap_refused_demands`/`budget_refused_requests`, never
+        // merging forward what was already indexed. Count every incumbent
+        // refusal-owner entry about to be discarded this way. Isolated
+        // cohort admission detaches `refusals_by_demand` to empty first, so
+        // this is 0 there; a full `compile()` runs against the real
+        // incumbent set.
+        self.admission_work.incumbent_refusal_entries_visited = self
+            .admission_work
+            .incumbent_refusal_entries_visited
+            .saturating_add(
+                self.refusals_by_demand.values().map(BTreeMap::len).sum::<usize>() as u64,
+            );
         self.refusals_by_demand.clear();
         self.refused_request_owner_counts.clear();
         self.refused_owner_counts_by_session.clear();
