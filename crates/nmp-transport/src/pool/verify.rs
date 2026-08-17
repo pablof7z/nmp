@@ -85,19 +85,22 @@ pub enum Verdict {
     /// The relay sent an event whose id we already know, carrying a
     /// DIFFERENT signature. Drop the frame; accuse nobody.
     ///
-    /// This used to be `RejectMisbehavior` on a false premise: that one
-    /// event id admits one signature. It does not. NIP-01's id preimage is
-    /// `[0, pubkey, created_at, kind, tags, content]` — `sig` is not
-    /// covered — and `nostr` signs with `OsRng` auxiliary randomness, so the
-    /// same author signing the same body twice produces two different,
-    /// equally valid 64-byte signatures BY DESIGN. A byte-compare mismatch
-    /// is therefore evidence of nothing about the relay.
+    /// Rule 3 of `docs/internals/conventions/signature-verification.md`,
+    /// which owns this. In short: one event id has arbitrarily many valid
+    /// signatures — NIP-01's id preimage is
+    /// `[0, pubkey, created_at, kind, tags, content]`, so `sig` is not
+    /// covered, and `nostr` signs with `OsRng` auxiliary randomness. A
+    /// mismatch is therefore evidence of nothing about the relay, and this
+    /// used to be `RejectMisbehavior` on exactly that false premise.
     ///
-    /// Owner ruling (2026-08-17, with #1782): compare the signatures; equal
-    /// means that relay sent a good event, not equal means skip it. Skip,
-    /// not accuse. Dropping is safe rather than lossy for the event itself —
-    /// the id is known precisely BECAUSE the event is already durable — but
-    /// see the caller: the relay's delivery is not merged into provenance.
+    /// The consequence, stated honestly because it is not free: a skipped
+    /// frame never becomes a `PoolEvent`, so **a live query can silently
+    /// lose the event**. On the durable branch that is nearly harmless — the
+    /// id is known because the row is resident, so nothing is lost but the
+    /// provenance merge. On the LRU branch it is not: the cache outlives
+    /// residency, so an id refused, tombstoned, superseded or GC'd since it
+    /// was cached still reads as known, and a redelivery carrying a second
+    /// valid signature is dropped rather than re-admitted. Tracked in #1862.
     Skip,
     RejectMisbehavior,
     RejectUnavailable,

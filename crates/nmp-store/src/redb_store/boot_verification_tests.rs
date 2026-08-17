@@ -18,7 +18,6 @@
 //! `VerifiedSignature::verify` is the single spelling, and it is only ever
 //! reached from `nmp-engine`.
 
-use nmp_grammar::CorrelationToken;
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 use tempfile::TempDir;
 
@@ -99,10 +98,6 @@ fn populate(path: &std::path::Path) {
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "boot-verification".into(),
                 accepted_at: Timestamp::from(3_000_000 + index as u64),
-                correlation: Some(
-                    CorrelationToken::try_from(format!("boot-verification-{index:08}").as_str())
-                        .expect("bounded correlation"),
-                ),
             })
             .expect("accept fixture write");
         let intent_id = accepted.journaled_intent_id().expect("accepted intent");
@@ -232,7 +227,6 @@ fn promotion_verifies_exactly_once_per_event() {
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "boot-verification".into(),
                 accepted_at: Timestamp::from(3_000_000 + index as u64),
-                correlation: None,
             })
             .expect("accept fixture write");
         store
