@@ -23,7 +23,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
 use nostr::nips::nip01::Coordinate;
-use nostr::{EventBuilder, Keys, Tag};
+use nostr::{Alphabet, EventBuilder, Keys, SingleLetterTag, Tag};
 use redb::ReadableDatabase;
 use tempfile::TempDir;
 
@@ -838,6 +838,90 @@ fn query_reports_a_corrupt_canonical_event() {
             .expect("unknown id is a healthy empty result"),
         Vec::new()
     );
+}
+
+/// #1816: `from_trusted` validates the fixed header, the total length, and
+/// `arena_start <= content_start`, but never the per-tag directory. The
+/// fixture above (`b"NMPE-truncated"`) is rejected at the length check
+/// before it ever reaches a tag or content read, so it cannot exercise that
+/// gap. This one is length-consistent -- only a single tag-end byte inside
+/// an otherwise healthy row is corrupted -- so `from_trusted` accepts it and
+/// the corruption is only visible once the query walks tags.
+///
+/// The corrupted tag is the *first* of two: `TagsIter` carries its
+/// (corrupted) end forward as the *next* tag's start, so the second tag's
+/// element walk begins at a bogus atom index derived straight from the
+/// corrupted directory entry.
+#[test]
+fn query_reports_a_corrupt_tag_directory() {
+    let fixture = Fixture::new();
+    let keys = keys();
+    let event = EventBuilder::new(Kind::TextNote, "")
+        .tags([
+            Tag::parse(["a", "bb"]).expect("short inline tag"),
+            Tag::parse(["c", "dd"]).expect("short inline tag"),
+        ])
+        .custom_created_at(Timestamp::from(1_000))
+        .sign_with_keys(&keys)
+        .expect("sign");
+    {
+        let mut store = fixture.open();
+        store.insert(event.clone(), observed()).expect("insert");
+    }
+    // The first event stored in a fresh store owns surrogate key 1.
+    let event_key: EventKey = 1;
+
+    let mut bytes = {
+        let db = fixture.raw();
+        let read_txn = db.begin_read().expect("raw begin_read");
+        let events = read_txn.open_table(EVENTS).expect("raw open events");
+        events
+            .get(event_row_key(event_key).as_slice())
+            .expect("raw get")
+            .expect("canonical row exists")
+            .value()
+            .to_vec()
+    };
+    // Event v4's fixed header is exactly 158 bytes (magic + version +
+    // reserved + id + pubkey + sig + created_at + kind + tag_count +
+    // tag_section_len + content_len); the first tag-end `u32` of the
+    // directory follows immediately. Total length is untouched, so every
+    // check `from_trusted` performs -- header, magic, version, reserved,
+    // `expected_len == bytes.len()`, `arena_start <= content_start` --
+    // still holds.
+    const EVENT_HEADER_LEN: usize = 158;
+    bytes[EVENT_HEADER_LEN..EVENT_HEADER_LEN + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+    {
+        let db = fixture.raw();
+        let write_txn = db.begin_write().expect("raw begin_write");
+        {
+            let mut events = write_txn.open_table(EVENTS).expect("raw open events");
+            events
+                .insert(event_row_key(event_key).as_slice(), bytes.as_slice())
+                .expect("raw insert");
+        }
+        write_txn.commit().expect("raw commit");
+    }
+
+    let store = fixture.open();
+    // The id fast path (`event_ops::query`) always evaluates
+    // `matches_prepared_filter_after_index` with `IndexedMatch::None`, so a
+    // tag predicate here is never pre-proven by an index and always forces
+    // the tag walk this falsifier targets.
+    let by_id = Filter::new()
+        .id(event.id)
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::Z), "unmatched");
+    assert_typed_refusal("query (id fast path, corrupt tag directory)", || {
+        store.query(&by_id)
+    });
+    // The ordered path with an empty filter never calls
+    // `matches_prepared_filter_after_index`'s tag loop (there is no tag
+    // predicate to prove), so this exercises the same corrupted directory
+    // through the other consumer: `decode_row` -> `materialize_event`, which
+    // walks every tag unconditionally once a row is selected.
+    assert_typed_refusal("query (ordered path, corrupt tag directory)", || {
+        store.query(&Filter::new())
+    });
 }
 
 // -------------------------------------------------------- packed postings
