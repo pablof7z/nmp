@@ -142,7 +142,9 @@ final class LiveRelayTests: XCTestCase {
             openQuery: {
                 try NMPQuery(
                     engine: failedStartEngine,
-                    filter: NMPFilter(kinds: [1]).toFfi(),
+                    liveQuery: NMPLiveQuery.single(
+                        NMPDemand(selection: NMPFilter(kinds: [1]), source: .public)
+                    ).toFfi(),
                     window: nil
                 )
             },
@@ -159,7 +161,9 @@ final class LiveRelayTests: XCTestCase {
         let oldEngine = DiagnosticsRaceEngine(state: oldState)
         let retainedQuery = try NMPQuery(
             engine: oldEngine,
-            filter: NMPFilter(kinds: [1]).toFfi(),
+            liveQuery: NMPLiveQuery.single(
+                NMPDemand(selection: NMPFilter(kinds: [1]), source: .public)
+            ).toFfi(),
             window: nil
         )
         let oldRows = await Self.firstNonEmptyBatch(from: retainedQuery, timeoutSeconds: 1)
@@ -189,7 +193,9 @@ final class LiveRelayTests: XCTestCase {
             openQuery: {
                 try NMPQuery(
                     engine: correctedEngine,
-                    filter: NMPFilter(kinds: [1]).toFfi(),
+                    liveQuery: NMPLiveQuery.single(
+                        NMPDemand(selection: NMPFilter(kinds: [1]), source: .public)
+                    ).toFfi(),
                     window: nil
                 )
             },
