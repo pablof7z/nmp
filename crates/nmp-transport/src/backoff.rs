@@ -77,12 +77,23 @@ pub fn jittered(base: Duration, url: &str, jitter_max: Duration) -> Duration {
     base + Duration::from_millis(jitter_ms)
 }
 
-/// HTTP-level denial: the relay explicitly rejected the connection (401/403).
-/// Permanent — the pool must not keep reconnecting on its own; recovery
-/// requires an explicit `ensure_open` after the caller addresses the denial.
+/// HTTP-level denial: the relay's WebSocket handshake explicitly returned
+/// 401 or 403. Permanent — the pool must not keep reconnecting on its own;
+/// recovery requires an explicit `ensure_open` after the caller addresses
+/// the denial.
+///
+/// Takes the typed HTTP status the handshake actually returned (`None` when
+/// the failure never reached one — a bare TCP-connect error, a DNS failure,
+/// a stalled TLS/HTTP upgrade, or a post-handshake read error), never a
+/// rendered error string. A message built from the relay's own host and
+/// port — e.g. `pool::connect::open_relay_socket`'s
+/// `"tcp connect {host}:{port}: {error}"` — can contain "401" or "403" for
+/// reasons that have nothing to do with an HTTP response (a relay on port
+/// 4031, or a hostname with those digits in it), so substring-matching over
+/// it is unsound (issue #1788).
 #[must_use]
-pub fn is_permanent_error(error: &str) -> bool {
-    error.contains("403") || error.contains("401") || error.contains("Forbidden")
+pub fn is_permanent_error(status: Option<u16>) -> bool {
+    matches!(status, Some(401 | 403))
 }
 
 #[cfg(test)]
@@ -166,10 +177,21 @@ mod tests {
 
     #[test]
     fn is_permanent_error_matches_documented_codes() {
-        assert!(is_permanent_error("401 Unauthorized"));
-        assert!(is_permanent_error("403 Forbidden"));
-        assert!(is_permanent_error("Forbidden — bring NIP-42"));
-        assert!(!is_permanent_error("502 Bad Gateway"));
-        assert!(!is_permanent_error("connection reset by peer"));
+        assert!(is_permanent_error(Some(401)));
+        assert!(is_permanent_error(Some(403)));
+        assert!(!is_permanent_error(Some(502)));
+        assert!(!is_permanent_error(None));
+    }
+
+    /// Issue #1788 falsifier (typed form): no status at all — the shape
+    /// every non-HTTP failure carries (TCP connect refusal, DNS failure,
+    /// stalled TLS/HTTP upgrade, post-handshake read error) — must never be
+    /// permanent, regardless of what digits happen to appear in whatever
+    /// message accompanies it. See `pool::connect::tests::
+    /// plain_refusal_to_port_4031_is_not_a_permanent_denial` for the
+    /// end-to-end version against the real `open_relay_socket` producer.
+    #[test]
+    fn is_permanent_error_none_is_never_permanent() {
+        assert!(!is_permanent_error(None));
     }
 }

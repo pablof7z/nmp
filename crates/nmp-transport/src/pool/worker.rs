@@ -43,7 +43,7 @@ use crate::keepalive::{
     apply_resume_gap, KeepaliveAction, KeepaliveState, SuspendGapDetector, SUSPEND_GAP_THRESHOLD,
 };
 
-use super::connect::{open_relay_socket, RelaySocket, MAX_OUTBOUND_FRAME_BYTES};
+use super::connect::{handshake_http_status, open_relay_socket, RelaySocket, MAX_OUTBOUND_FRAME_BYTES};
 use super::frame::{classify_message, ClassifiedFrame};
 use super::spawn::ThreadSpawner;
 use super::{
@@ -943,15 +943,15 @@ fn run_worker(
                     }
                 }
             }
-            Err(message) => {
-                let permanent = backoff::is_permanent_error(&message);
+            Err(failure) => {
+                let permanent = backoff::is_permanent_error(failure.status);
                 let retry_in = (!permanent).then(|| backoff::advance(&mut backoff_delay, None));
                 if event_tx
                     .send(WorkerEvent {
                         slot,
                         generation,
                         kind: WorkerEventKind::Failed {
-                            message,
+                            message: failure.message,
                             permanent,
                             retry_in,
                         },
@@ -2082,8 +2082,8 @@ fn drain_reads(
                 return None;
             }
             Err(error) => {
+                let permanent = backoff::is_permanent_error(handshake_http_status(&error));
                 let message = error.to_string();
-                let permanent = backoff::is_permanent_error(&message);
                 return Some(ConnectedOutcome::Reconnect { message, permanent });
             }
         }
