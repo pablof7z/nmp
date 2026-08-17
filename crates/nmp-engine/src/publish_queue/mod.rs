@@ -333,6 +333,45 @@ pub enum WriteFact {
     Outcome(WriteOutcome),
 }
 
+impl WriteFact {
+    /// Whether this fact states the same thing about the same subject as
+    /// `queued`, so that keeping both says nothing the newer one does not.
+    ///
+    /// The subject is what the fact is ABOUT, not the fact's value: the
+    /// signing state of this write, the picture of where it is going, its
+    /// whole-write outcome, or one exact `(event_id, relay)` lane. Two facts
+    /// about the same subject are ordered in time, and the later one is the
+    /// current truth — attempt 2 backing off replaces attempt 1 having been
+    /// sent. Two facts about DIFFERENT subjects never supersede: relay A
+    /// being published says nothing about relay B, and the lane for a
+    /// successor generation's bytes is a different lane from its
+    /// predecessor's even at the same relay.
+    ///
+    /// Used only under delivery back-pressure — see
+    /// `nmp_runtime::superseding_fifo_channel`. It is deliberately NOT used
+    /// to decide what the engine emits: the reducer emits every transition,
+    /// and a consumer that keeps up sees every one of them.
+    #[must_use]
+    pub fn supersedes(&self, queued: &Self) -> bool {
+        match (self, queued) {
+            (Self::Signing(_), Self::Signing(_)) => true,
+            (Self::Destinations { .. }, Self::Destinations { .. }) => true,
+            (Self::Outcome(_), Self::Outcome(_)) => true,
+            (
+                Self::Relay {
+                    event_id, relay, ..
+                },
+                Self::Relay {
+                    event_id: queued_event_id,
+                    relay: queued_relay,
+                    ..
+                },
+            ) => event_id == queued_event_id && relay == queued_relay,
+            _ => false,
+        }
+    }
+}
+
 /// One write in the queue, as the app reads it back (#1039).
 ///
 /// Enumerating the queue is how an app answers "what have I got outstanding,
@@ -523,4 +562,87 @@ impl std::error::Error for CancelWriteError {}
 /// fact stream — never a `bool`/`()`.
 pub struct Receipt {
     pub id: ReceiptId,
+}
+
+#[cfg(test)]
+mod supersede_tests {
+    use super::*;
+
+    fn relay(url: &str) -> RelayUrl {
+        RelayUrl::parse(url).expect("fixture relay url")
+    }
+
+    fn event(byte: u8) -> EventId {
+        EventId::from_slice(&[byte; 32]).expect("fixture event id")
+    }
+
+    fn lane(event_byte: u8, url: &str, attempt: u64) -> WriteFact {
+        WriteFact::Relay {
+            event_id: event(event_byte),
+            relay: relay(url),
+            state: RelayState::Sent {
+                attempt,
+                written_at: Timestamp::from(attempt),
+            },
+        }
+    }
+
+    /// The whole point of the relation: attempt N+1 at a relay states the
+    /// current truth about that lane, so attempt N queued behind it says
+    /// nothing more. This is the sequence that used to consume the entire
+    /// delivery bound one retry at a time.
+    #[test]
+    fn a_later_attempt_supersedes_an_earlier_one_at_the_same_lane() {
+        assert!(lane(1, "wss://a.example", 2).supersedes(&lane(1, "wss://a.example", 1)));
+        assert!(lane(1, "wss://a.example", 500).supersedes(&lane(1, "wss://a.example", 499)));
+    }
+
+    /// Relay A publishing says NOTHING about relay B. Superseding across
+    /// relays would silently drop a destination's only evidence, which is the
+    /// one thing the per-relay vocabulary exists to keep.
+    #[test]
+    fn a_different_relay_is_a_different_subject() {
+        assert!(!lane(1, "wss://a.example", 1).supersedes(&lane(1, "wss://b.example", 1)));
+    }
+
+    /// A successor generation's bytes travel their own lane even at the same
+    /// relay: the receipt is stable across generations, so the event id is
+    /// what identifies the lane, not the relay alone.
+    #[test]
+    fn a_different_generation_is_a_different_subject_at_the_same_relay() {
+        assert!(!lane(2, "wss://a.example", 1).supersedes(&lane(1, "wss://a.example", 1)));
+    }
+
+    /// Signing, destinations and the whole-write outcome each have exactly
+    /// one subject, so a later value of each replaces the earlier -- and none
+    /// of them ever supersedes a lane or another variant.
+    #[test]
+    fn each_single_subject_variant_supersedes_itself_only() {
+        let signing = WriteFact::Signing(SigningState::AwaitingSigner {
+            pubkey: nostr::Keys::generate().public_key(),
+        });
+        let destinations = WriteFact::Destinations {
+            relays: BTreeSet::new(),
+            complete: false,
+            awaiting_author_routes: BTreeSet::new(),
+        };
+        let outcome = WriteFact::Outcome(WriteOutcome::NoDestination);
+        let a_lane = lane(1, "wss://a.example", 1);
+
+        assert!(signing.supersedes(&signing));
+        assert!(destinations.supersedes(&destinations));
+        assert!(outcome.supersedes(&outcome));
+
+        for (left, right) in [
+            (&signing, &destinations),
+            (&signing, &outcome),
+            (&destinations, &outcome),
+            (&signing, &a_lane),
+            (&destinations, &a_lane),
+            (&outcome, &a_lane),
+        ] {
+            assert!(!left.supersedes(right), "{left:?} must not supersede {right:?}");
+            assert!(!right.supersedes(left), "{right:?} must not supersede {left:?}");
+        }
+    }
 }

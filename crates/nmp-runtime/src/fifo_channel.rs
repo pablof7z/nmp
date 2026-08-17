@@ -41,6 +41,11 @@ struct Queue<T> {
     state: FifoState,
     waker: Option<Waker>,
     close_hook: Option<Box<dyn FnOnce() + Send + 'static>>,
+    /// How a newly-sent value SUPERSEDES one still queued, if this channel's
+    /// facts have that relation at all. Consulted only under back-pressure:
+    /// while there is room, every value is retained in order, so a consumer
+    /// that keeps up still observes every intermediate state.
+    supersedes: Option<fn(&T, &T) -> bool>,
 }
 
 struct Inner<T> {
@@ -91,13 +96,39 @@ pub struct FifoReceiver<T> {
 }
 
 /// A fresh empty, open FIFO channel with a fixed finite live-delivery bound.
+/// Nothing supersedes anything: a full queue lags, exactly as before.
 pub fn fifo_channel<T>() -> (FifoSender<T>, FifoReceiver<T>) {
+    channel_with(None)
+}
+
+/// A FIFO channel whose facts have a SUPERSEDING relation: `supersedes(new,
+/// queued)` is true when `new` states the same thing about the same subject as
+/// `queued`, so retaining both says nothing the newer one does not.
+///
+/// The relation is consulted ONLY when the queue is full. Below the bound this
+/// behaves identically to [`fifo_channel`] and every intermediate state is
+/// delivered in order — a consumer that keeps up loses nothing. At the bound,
+/// a value that supersedes queued ones evicts them instead of poisoning the
+/// channel: the consumer may then miss states it was too slow to read, but it
+/// always converges on the current one, and a stream can no longer be killed
+/// outright by a subject that keeps changing (a relay retrying, say).
+///
+/// The bound therefore stops being load-bearing for correctness. It is the
+/// point at which delivery starts compressing, not the point at which it dies.
+pub fn superseding_fifo_channel<T>(
+    supersedes: fn(&T, &T) -> bool,
+) -> (FifoSender<T>, FifoReceiver<T>) {
+    channel_with(Some(supersedes))
+}
+
+fn channel_with<T>(supersedes: Option<fn(&T, &T) -> bool>) -> (FifoSender<T>, FifoReceiver<T>) {
     let inner = Arc::new(Inner {
         queue: Mutex::new(Queue {
             items: VecDeque::new(),
             state: FifoState::Open,
             waker: None,
             close_hook: None,
+            supersedes,
         }),
         cvar: Condvar::new(),
     });
@@ -111,9 +142,13 @@ pub fn fifo_channel<T>() -> (FifoSender<T>, FifoReceiver<T>) {
 
 impl<T> FifoSender<T> {
     /// Append a fact and wake the receiver. Returns `false` once the consumer
-    /// has cancelled or this finite queue has lagged. On the first overflow,
-    /// the already-buffered prefix is retained and the rejected value remains
-    /// available through its durable owner rather than being claimed live.
+    /// has cancelled or this finite queue has lagged.
+    ///
+    /// At the bound, a channel built by [`superseding_fifo_channel`] first
+    /// tries to make room by evicting queued values this one supersedes. Only
+    /// when nothing can be evicted — every queued value states something this
+    /// one does not — is the prefix retained and the channel lagged, leaving
+    /// the rejected value to its durable owner rather than claiming it live.
     pub fn send(&self, value: T) -> bool {
         let (accepted, waker) = {
             let mut queue = self.inner.queue.lock().unwrap();
@@ -121,9 +156,23 @@ impl<T> FifoSender<T> {
                 return false;
             }
             if queue.items.len() == FACT_CHANNEL_CAPACITY {
-                queue.state = FifoState::Lagged;
-                self.inner.cvar.notify_all();
-                (false, queue.waker.take())
+                let evicted = match queue.supersedes {
+                    Some(supersedes) => {
+                        let before = queue.items.len();
+                        queue.items.retain(|queued| !supersedes(&value, queued));
+                        before != queue.items.len()
+                    }
+                    None => false,
+                };
+                if evicted {
+                    queue.items.push_back(value);
+                    self.inner.cvar.notify_one();
+                    (true, queue.waker.take())
+                } else {
+                    queue.state = FifoState::Lagged;
+                    self.inner.cvar.notify_all();
+                    (false, queue.waker.take())
+                }
             } else {
                 queue.items.push_back(value);
                 self.inner.cvar.notify_one();
@@ -477,6 +526,105 @@ mod tests {
         let rx = rx.into_async();
         for value in 0..FACT_CHANNEL_CAPACITY {
             assert_eq!(rx.next().await, Ok(Some(value)));
+        }
+        assert_eq!(rx.next().await, Err(FifoNextError::Lagged));
+    }
+
+    /// A `(subject, generation)` stand-in for the shape `WriteFact` has: two
+    /// values about the same subject are ordered in time, two about different
+    /// subjects are not comparable at all.
+    fn same_subject(new: &(u8, usize), queued: &(u8, usize)) -> bool {
+        new.0 == queued.0
+    }
+
+    /// The defect this channel had: ONE subject that keeps changing — a relay
+    /// retrying, whose durable retry has no attempt ceiling — could exhaust
+    /// the whole finite bound and latch `Lagged` permanently, killing a
+    /// stream whose other subjects had already settled.
+    ///
+    /// Superseding delivery removes the death, not the bound: the churning
+    /// subject evicts its own stale value instead of the settled ones.
+    #[tokio::test]
+    async fn one_churning_subject_can_no_longer_kill_the_stream() {
+        let (tx, rx) = superseding_fifo_channel::<(u8, usize)>(same_subject);
+
+        // Two subjects settle and are never spoken of again.
+        assert!(tx.send((b'a', 0)));
+        assert!(tx.send((b'b', 0)));
+        // A third fills the bound and then keeps going, far past it.
+        for generation in 0..FACT_CHANNEL_CAPACITY * 20 {
+            assert!(
+                tx.send((b'c', generation)),
+                "a subject superseding its own queued value must never be refused \
+                 (generation {generation})"
+            );
+        }
+
+        assert_eq!(rx.try_recv(), Ok((b'a', 0)), "a settled and kept");
+        assert_eq!(rx.try_recv(), Ok((b'b', 0)), "b settled and kept");
+        let mut seen = Vec::new();
+        while let Ok(value) = rx.try_recv() {
+            seen.push(value);
+        }
+        assert_eq!(
+            seen.last().copied(),
+            Some((b'c', FACT_CHANNEL_CAPACITY * 20 - 1)),
+            "the consumer converges on the churning subject's CURRENT value"
+        );
+        assert!(
+            seen.len() <= FACT_CHANNEL_CAPACITY,
+            "memory stays bounded: {} retained for an unbounded sequence",
+            seen.len()
+        );
+    }
+
+    /// Below the bound nothing is compressed, so a consumer that keeps up
+    /// still observes every intermediate state in order. This is what makes
+    /// superseding delivery safe for the guarantees the receipt stream
+    /// documents (ledger #9's "the first value is never a terminal", and
+    /// per-relay `Sent` evidence).
+    #[tokio::test]
+    async fn below_the_bound_every_intermediate_state_survives() {
+        let (tx, rx) = superseding_fifo_channel::<(u8, usize)>(same_subject);
+        for generation in 0..FACT_CHANNEL_CAPACITY {
+            assert!(tx.send((b'c', generation)));
+        }
+        let rx = rx.into_async();
+        for generation in 0..FACT_CHANNEL_CAPACITY {
+            assert_eq!(
+                rx.next().await,
+                Ok(Some((b'c', generation))),
+                "no compression happens while there is room"
+            );
+        }
+    }
+
+    /// The bound is still real. When every queued value is about a DIFFERENT
+    /// subject, nothing can be evicted and the channel lags exactly as it
+    /// always did -- superseding delivery removes a failure mode, it does not
+    /// make the queue unbounded.
+    #[tokio::test]
+    async fn nothing_to_supersede_still_lags() {
+        let (tx, rx) = superseding_fifo_channel::<(u8, usize)>(same_subject);
+        for subject in 0..FACT_CHANNEL_CAPACITY {
+            assert!(tx.send((
+                u8::try_from(subject).expect("bound fits a subject byte"),
+                0
+            )));
+        }
+        assert!(
+            !tx.send((u8::MAX, 0)),
+            "a value with nothing to supersede cannot make room"
+        );
+        let rx = rx.into_async();
+        for subject in 0..FACT_CHANNEL_CAPACITY {
+            assert_eq!(
+                rx.next().await,
+                Ok(Some((
+                    u8::try_from(subject).expect("bound fits a subject byte"),
+                    0
+                )))
+            );
         }
         assert_eq!(rx.next().await, Err(FifoNextError::Lagged));
     }

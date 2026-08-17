@@ -9,7 +9,9 @@ use nmp_engine::core::{
 };
 use nmp_engine::publish_queue::{ReceiptResult, ReceiptResultError, WriteFact};
 
-use super::{fifo_channel, Cmd, FifoReceiver, FifoRecvError, FifoSender, Handle};
+use super::{
+    superseding_fifo_channel, Cmd, FifoReceiver, FifoRecvError, FifoSender, Handle,
+};
 
 /// Runtime-private identity for one exact live receipt mailbox.
 #[derive(Clone)]
@@ -305,7 +307,7 @@ impl Handle {
     /// I/O, or ACKs. If shutdown or another pre-acceptance refusal wins, this
     /// returns a typed error before any stream or identity is fabricated.
     pub fn publish(&self, intent: WriteIntent) -> Result<ReceiptStream, PublishError> {
-        let (tx, rx) = fifo_channel();
+        let (tx, rx) = superseding_fifo_channel(WriteFact::supersedes);
         let registration = ReceiptDeliveryRegistration::new();
         let (reply_tx, reply_rx) = mpsc::channel();
         self.inbox
@@ -366,7 +368,7 @@ impl Handle {
         id: ReceiptId,
         cursor: Option<ReceiptReplayCursor>,
     ) -> ReceiptReattachment {
-        let (tx, rx) = fifo_channel();
+        let (tx, rx) = superseding_fifo_channel(WriteFact::supersedes);
         let registration = ReceiptDeliveryRegistration::new();
         arm_receipt_delivery_close(&rx, self.inbox.clone(), id, registration.clone());
         let (reply_tx, reply_rx) = mpsc::channel();
