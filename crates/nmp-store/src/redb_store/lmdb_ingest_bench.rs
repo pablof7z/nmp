@@ -5,6 +5,13 @@
 //! packed-postings codec, but exposes no app-facing storage surface. LMDB is
 //! opened with its synchronous defaults: no `MDB_NOSYNC`, `MDB_NOMETASYNC`,
 //! `MDB_WRITEMAP`, or `MDB_MAPASYNC` flags.
+//!
+//! The packed-postings run-management algorithm itself — allocation,
+//! publication, death application, compaction — is not reimplemented here.
+//! [`LmdbPostingsTxn`] implements `postings_store`'s `PackedPostingsTxn` door
+//! over these tables, and every write goes through the same shared functions
+//! the production redb backend uses (#1820). Only physical key layout and
+//! this benchmark's own instrumentation counters are backend-specific.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -22,10 +29,10 @@ use crate::RedbStore;
 use super::ingest::insert_with_tables;
 use super::ingest_txn::{GovernedIngestTxn, GovernedPublishQueueMap};
 use super::postings::{
-    compact_segment, encode_dictionary, encode_run, merge_dead_blocks, shard_for,
-    validate_run_metas, CompactionSegmentSource, DeadKeys, DictionaryView, Family, Membership,
-    Prefix, RunEvent, RunMeta, SegmentView, MAX_DEATH_BLOCKS, SHARD_MASK,
+    merge_dead_blocks, shard_for, validate_run_metas, DeadKeys, DictionaryView, Family,
+    Membership, Prefix, RunEvent, RunMeta, SegmentView, MAX_DEATH_BLOCKS, SHARD_MASK,
 };
+use super::postings_store::{apply_deaths, publish_run, PackedPostingsTxn};
 use super::query::{
     author_cardinality_key, event_is_cardinality_sample, global_cardinality_key,
     kind_cardinality_key, tag_cardinality_key, tag_index_prefix,
@@ -999,11 +1006,12 @@ impl LmdbPostingsBatch {
         txn: &mut RwTxn<'_>,
         work: &mut LmdbPackedWork,
     ) -> Result<(), PersistenceError> {
+        let mut postings_txn = LmdbPostingsTxn { db, txn, work };
         if !self.deaths.is_empty() {
-            apply_deaths(db, txn, &self.deaths, work)?;
+            apply_deaths(&mut postings_txn, &self.deaths)?;
         }
         if !self.additions.is_empty() {
-            publish_events(db, txn, &self.additions, work)?;
+            publish_events(&mut postings_txn, &self.additions)?;
         }
         self.additions.clear();
         self.deaths.clear();
@@ -1012,23 +1020,17 @@ impl LmdbPostingsBatch {
 }
 
 fn publish_events(
-    db: &LmdbDatabases,
-    txn: &mut RwTxn<'_>,
+    txn: &mut LmdbPostingsTxn<'_, '_, '_>,
     events: &BTreeMap<EventKey, Event>,
-    work: &mut LmdbPackedWork,
 ) -> Result<(), PersistenceError> {
-    let run_id = allocate_run_id(db, txn, work)?;
-    let encoded = encode_run(memberships_for_events(events)).map_err(packed_err)?;
-    let meta = RunMeta {
-        run_id,
-        level: 0,
-        min_event_key: *events.first_key_value().expect("nonempty additions").0,
-        max_event_key: *events.last_key_value().expect("nonempty additions").0,
-        live_events: encoded.dictionary_entries,
-    };
-    insert_run(db, txn, meta, encoded, work)?;
-    work.runs_published = work.runs_published.saturating_add(1);
-    compact_overfull_levels(db, txn, work)
+    let min_event_key = *events.first_key_value().expect("nonempty additions").0;
+    let max_event_key = *events.last_key_value().expect("nonempty additions").0;
+    publish_run(
+        txn,
+        memberships_for_events(events),
+        min_event_key,
+        max_event_key,
+    )
 }
 
 fn memberships_for_events(events: &BTreeMap<EventKey, Event>) -> Vec<Membership> {
@@ -1090,405 +1092,240 @@ fn push_membership(
     });
 }
 
-fn allocate_run_id(
-    db: &LmdbDatabases,
-    txn: &mut RwTxn<'_>,
-    work: &mut LmdbPackedWork,
-) -> Result<u64, PersistenceError> {
-    let run_id = get_u64(db.postings_meta, txn, b"next_run_id")?.unwrap_or(1);
-    let next = run_id
-        .checked_add(1)
-        .ok_or_else(|| packed_err("run id space exhausted"))?;
-    put(
-        db.postings_meta,
-        txn,
-        b"next_run_id",
-        &next.to_be_bytes(),
-        work,
-    )?;
-    Ok(run_id)
+/// Physical storage door for the packed-postings write algorithm over this
+/// benchmark's own layout: one LMDB database per concern, rather than
+/// redb's single byte-prefixed catalog table. This is the only place that
+/// layout is expressed — `postings_store`'s free functions (`publish_run`,
+/// `apply_deaths`, `apply_run_deaths`, `compact_overfull_levels`,
+/// `compact_cohort`, `rewrite_run_without_dead`, `delete_run`, …) run
+/// unmodified against it, so this benchmark measures the real protocol
+/// instead of a forked copy of it (#1820).
+struct LmdbPostingsTxn<'db, 'txn, 'work> {
+    db: &'db LmdbDatabases,
+    txn: &'txn mut RwTxn<'db>,
+    work: &'work mut LmdbPackedWork,
 }
 
-fn insert_run(
-    db: &LmdbDatabases,
-    txn: &mut RwTxn<'_>,
-    meta: RunMeta,
-    encoded: super::postings::EncodedRun,
-    work: &mut LmdbPackedWork,
-) -> Result<(), PersistenceError> {
-    work.dictionary_output_bytes = work
-        .dictionary_output_bytes
-        .saturating_add(encoded.dictionary.len() as u64);
-    put(
-        db.dictionaries,
-        txn,
-        &meta.run_id.to_be_bytes(),
-        &encoded.dictionary,
-        work,
-    )?;
-    for (family, shard, value) in encoded.segments {
-        work.segment_output_bytes = work.segment_output_bytes.saturating_add(value.len() as u64);
-        put(
-            db.segments,
-            txn,
-            &segment_key(family, shard, meta.run_id),
-            &value,
-            work,
-        )?;
+impl PackedPostingsTxn for LmdbPostingsTxn<'_, '_, '_> {
+    fn dictionary_get(&mut self, run_id: u64) -> Result<Option<Vec<u8>>, PersistenceError> {
+        let Some(bytes) = self
+            .db
+            .dictionaries
+            .get(self.txn, &run_id.to_be_bytes())
+            .map_err(lmdb_err)?
+        else {
+            return Ok(None);
+        };
+        self.work.dictionary_input_bytes = self
+            .work
+            .dictionary_input_bytes
+            .saturating_add(bytes.len() as u64);
+        Ok(Some(bytes.to_vec()))
     }
-    insert_run_catalog(db, txn, meta, work)
-}
 
-fn insert_run_catalog(
-    db: &LmdbDatabases,
-    txn: &mut RwTxn<'_>,
-    meta: RunMeta,
-    work: &mut LmdbPackedWork,
-) -> Result<(), PersistenceError> {
-    let encoded = meta.encode().map_err(packed_err)?;
-    put(db.run_meta, txn, &meta.run_id.to_be_bytes(), &encoded, work)?;
-    put(
-        db.run_by_min,
-        txn,
-        &meta.min_event_key.to_be_bytes(),
-        &meta.run_id.to_be_bytes(),
-        work,
-    )
-}
-
-fn apply_deaths(
-    db: &LmdbDatabases,
-    txn: &mut RwTxn<'_>,
-    deaths: &BTreeSet<EventKey>,
-    work: &mut LmdbPackedWork,
-) -> Result<(), PersistenceError> {
-    let metas = load_run_metas(db, txn)?;
-    let mut by_run: BTreeMap<u64, Vec<EventKey>> = BTreeMap::new();
-    for &event_key in deaths {
-        if let Some(meta) = metas
-            .iter()
-            .find(|meta| (meta.min_event_key..=meta.max_event_key).contains(&event_key))
-        {
-            by_run.entry(meta.run_id).or_default().push(event_key);
-        }
+    fn dictionary_put(&mut self, run_id: u64, bytes: &[u8]) -> Result<(), PersistenceError> {
+        self.db
+            .dictionaries
+            .put(self.txn, &run_id.to_be_bytes(), bytes)
+            .map_err(lmdb_err)?;
+        self.work.logical_puts = self.work.logical_puts.saturating_add(1);
+        self.work.dictionary_output_bytes = self
+            .work
+            .dictionary_output_bytes
+            .saturating_add(bytes.len() as u64);
+        Ok(())
     }
-    for (run_id, keys) in by_run {
-        apply_run_deaths(db, txn, run_id, keys, work)?;
-    }
-    Ok(())
-}
 
-fn compact_overfull_levels(
-    db: &LmdbDatabases,
-    txn: &mut RwTxn<'_>,
-    work: &mut LmdbPackedWork,
-) -> Result<(), PersistenceError> {
-    let mut level = 0u8;
-    loop {
-        loop {
-            let fan_in = if level == 0 {
-                BASE_RUN_FAN_IN
-            } else {
-                LARGE_RUN_FAN_IN
-            };
-            let mut cohort = Vec::new();
-            let mut has_higher_level = false;
-            for meta in load_run_metas(db, txn)? {
-                if meta.level == level {
-                    cohort.push(meta);
-                } else if meta.level > level {
-                    has_higher_level = true;
-                }
-            }
-            if cohort.len() < fan_in {
-                if has_higher_level {
-                    level = level
-                        .checked_add(1)
-                        .ok_or_else(|| packed_err("packed run level space exhausted"))?;
-                } else {
-                    return Ok(());
-                }
-                break;
-            }
-            cohort.sort_unstable_by_key(|meta| meta.min_event_key);
-            cohort.truncate(fan_in);
-            compact_cohort(db, txn, level, &cohort, work)?;
-        }
-    }
-}
-
-fn apply_run_deaths(
-    db: &LmdbDatabases,
-    txn: &mut RwTxn<'_>,
-    run_id: u64,
-    keys: Vec<EventKey>,
-    work: &mut LmdbPackedWork,
-) -> Result<(), PersistenceError> {
-    let mut meta = load_run_meta(db, txn, run_id)?
-        .ok_or_else(|| packed_err("death target has no run metadata"))?;
-    let mut existing = Vec::new();
-    for level in 0..MAX_DEATH_BLOCKS {
-        if let Some(value) = db
-            .dead_keys
-            .get(txn, &death_key(run_id, level))
+    fn dictionary_delete(&mut self, run_id: u64) -> Result<(), PersistenceError> {
+        if self
+            .db
+            .dictionaries
+            .delete(self.txn, &run_id.to_be_bytes())
             .map_err(lmdb_err)?
         {
-            existing.push(DeadKeys::decode(value).map_err(packed_err)?);
+            self.work.logical_deletes = self.work.logical_deletes.saturating_add(1);
         }
-    }
-    let existing_union = merge_dead_blocks(&existing).map_err(packed_err)?;
-    let mut fresh: Vec<_> = keys
-        .into_iter()
-        .filter(|key| {
-            existing_union
-                .as_ref()
-                .is_none_or(|dead| !dead.contains(*key))
-        })
-        .collect();
-    fresh.sort_unstable();
-    fresh.dedup();
-    if fresh.is_empty() {
-        return Ok(());
-    }
-    let fresh_count = fresh.len() as u64;
-    if fresh_count > meta.live_events {
-        return Err(packed_err("death count exceeds run live count"));
-    }
-    meta.live_events -= fresh_count;
-    if meta.live_events == 0 {
-        return delete_run(db, txn, meta, work);
+        Ok(())
     }
 
-    let mut carry = DeadKeys::new(fresh).map_err(packed_err)?;
-    for level in 0..MAX_DEATH_BLOCKS {
-        let key = death_key(run_id, level);
-        let prior = db
+    fn dictionary_count(&mut self) -> Result<u64, PersistenceError> {
+        self.db.dictionaries.len(self.txn).map_err(lmdb_err)
+    }
+
+    fn segment_get(
+        &mut self,
+        family: Family,
+        shard: u8,
+        run_id: u64,
+    ) -> Result<Option<Vec<u8>>, PersistenceError> {
+        let key = segment_key(family, shard, run_id);
+        let Some(bytes) = self.db.segments.get(self.txn, &key).map_err(lmdb_err)? else {
+            return Ok(None);
+        };
+        self.work.segment_input_bytes =
+            self.work.segment_input_bytes.saturating_add(bytes.len() as u64);
+        Ok(Some(bytes.to_vec()))
+    }
+
+    fn segment_put(
+        &mut self,
+        family: Family,
+        shard: u8,
+        run_id: u64,
+        bytes: &[u8],
+    ) -> Result<(), PersistenceError> {
+        let key = segment_key(family, shard, run_id);
+        self.db
+            .segments
+            .put(self.txn, &key, bytes)
+            .map_err(lmdb_err)?;
+        self.work.logical_puts = self.work.logical_puts.saturating_add(1);
+        self.work.segment_output_bytes =
+            self.work.segment_output_bytes.saturating_add(bytes.len() as u64);
+        Ok(())
+    }
+
+    fn segment_delete(
+        &mut self,
+        family: Family,
+        shard: u8,
+        run_id: u64,
+    ) -> Result<(), PersistenceError> {
+        let key = segment_key(family, shard, run_id);
+        if self.db.segments.delete(self.txn, &key).map_err(lmdb_err)? {
+            self.work.logical_deletes = self.work.logical_deletes.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn run_meta_get(&mut self, run_id: u64) -> Result<Option<RunMeta>, PersistenceError> {
+        self.db
+            .run_meta
+            .get(self.txn, &run_id.to_be_bytes())
+            .map_err(lmdb_err)?
+            .map(|value| RunMeta::decode(value).map_err(packed_err))
+            .transpose()
+    }
+
+    fn run_meta_put(&mut self, meta: &RunMeta) -> Result<(), PersistenceError> {
+        let encoded = meta.encode().map_err(packed_err)?;
+        self.db
+            .run_meta
+            .put(self.txn, &meta.run_id.to_be_bytes(), &encoded)
+            .map_err(lmdb_err)?;
+        self.work.logical_puts = self.work.logical_puts.saturating_add(1);
+        Ok(())
+    }
+
+    fn run_meta_delete(&mut self, run_id: u64) -> Result<(), PersistenceError> {
+        if self
+            .db
+            .run_meta
+            .delete(self.txn, &run_id.to_be_bytes())
+            .map_err(lmdb_err)?
+        {
+            self.work.logical_deletes = self.work.logical_deletes.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn list_run_metas(&mut self) -> Result<Vec<RunMeta>, PersistenceError> {
+        let metas = load_run_metas(self.db, self.txn)?;
+        validate_run_metas(&metas).map_err(packed_err)?;
+        Ok(metas)
+    }
+
+    fn by_min_put(&mut self, min_event_key: u64, run_id: u64) -> Result<(), PersistenceError> {
+        self.db
+            .run_by_min
+            .put(self.txn, &min_event_key.to_be_bytes(), &run_id.to_be_bytes())
+            .map_err(lmdb_err)?;
+        self.work.logical_puts = self.work.logical_puts.saturating_add(1);
+        Ok(())
+    }
+
+    fn by_min_delete(&mut self, min_event_key: u64) -> Result<(), PersistenceError> {
+        if self
+            .db
+            .run_by_min
+            .delete(self.txn, &min_event_key.to_be_bytes())
+            .map_err(lmdb_err)?
+        {
+            self.work.logical_deletes = self.work.logical_deletes.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn death_block_get(
+        &mut self,
+        run_id: u64,
+        level: usize,
+    ) -> Result<Option<DeadKeys>, PersistenceError> {
+        self.db
             .dead_keys
-            .get(txn, &key)
+            .get(self.txn, &death_key(run_id, level))
             .map_err(lmdb_err)?
             .map(|value| DeadKeys::decode(value).map_err(packed_err))
-            .transpose()?;
-        if let Some(prior) = prior {
-            delete(db.dead_keys, txn, &key, work)?;
-            carry = merge_dead_blocks(&[prior, carry])
-                .map_err(packed_err)?
-                .expect("two nonempty death blocks");
-        } else {
-            let encoded = carry.encode().map_err(packed_err)?;
-            put(db.dead_keys, txn, &key, &encoded, work)?;
-            let encoded_meta = meta.encode().map_err(packed_err)?;
-            put(db.run_meta, txn, &run_id.to_be_bytes(), &encoded_meta, work)?;
-            return Ok(());
-        }
+            .transpose()
     }
 
-    // Same correction as `postings_store::apply_run_deaths`: `carry` already
-    // holds the union of `fresh` and every level it consumed, so re-merging
-    // it against `existing` exceeds `merge_dead_blocks`' fan-in bound and
-    // makes this path unreachable. Forked from that function, and the defect
-    // was forked with it.
-    rewrite_run_without_dead(db, txn, meta, &carry, work)
-}
-
-fn compact_cohort(
-    db: &LmdbDatabases,
-    txn: &mut RwTxn<'_>,
-    level: u8,
-    cohort: &[RunMeta],
-    work: &mut LmdbPackedWork,
-) -> Result<(), PersistenceError> {
-    let output_level = level
-        .checked_add(1)
-        .ok_or_else(|| packed_err("packed run level space exhausted"))?;
-    let dead = cohort
-        .iter()
-        .map(|meta| load_run_deaths(db, txn, meta.run_id))
-        .collect::<Result<Vec<_>, _>>()?;
-    let output = stream_compaction_cohort(db, txn, cohort, &dead, work)?;
-    for &meta in cohort {
-        delete_run(db, txn, meta, work)?;
+    fn death_block_put(
+        &mut self,
+        run_id: u64,
+        level: usize,
+        keys: &DeadKeys,
+    ) -> Result<(), PersistenceError> {
+        let encoded = keys.encode().map_err(packed_err)?;
+        self.db
+            .dead_keys
+            .put(self.txn, &death_key(run_id, level), &encoded)
+            .map_err(lmdb_err)?;
+        self.work.logical_puts = self.work.logical_puts.saturating_add(1);
+        Ok(())
     }
-    work.compactions = work.compactions.saturating_add(1);
-    work.compaction_input_runs = work
-        .compaction_input_runs
-        .saturating_add(cohort.len() as u64);
-    let Some((run_id, min_event_key, max_event_key, live_events)) = output else {
-        return Ok(());
-    };
-    work.compaction_events_rewritten = work.compaction_events_rewritten.saturating_add(live_events);
-    insert_run_catalog(
-        db,
-        txn,
-        RunMeta {
-            run_id,
-            level: output_level,
-            min_event_key,
-            max_event_key,
-            live_events,
-        },
-        work,
-    )
-}
 
-fn rewrite_run_without_dead(
-    db: &LmdbDatabases,
-    txn: &mut RwTxn<'_>,
-    old_meta: RunMeta,
-    dead: &DeadKeys,
-    work: &mut LmdbPackedWork,
-) -> Result<(), PersistenceError> {
-    let output = stream_compaction_cohort(db, txn, &[old_meta], &[Some(dead.clone())], work)?;
-    delete_run(db, txn, old_meta, work)?;
-    work.compactions = work.compactions.saturating_add(1);
-    work.compaction_input_runs = work.compaction_input_runs.saturating_add(1);
-    let Some((run_id, min_event_key, max_event_key, live_events)) = output else {
-        return Ok(());
-    };
-    work.compaction_events_rewritten = work.compaction_events_rewritten.saturating_add(live_events);
-    insert_run_catalog(
-        db,
-        txn,
-        RunMeta {
-            run_id,
-            level: old_meta.level,
-            min_event_key,
-            max_event_key,
-            live_events,
-        },
-        work,
-    )
-}
-
-fn stream_compaction_cohort(
-    db: &LmdbDatabases,
-    txn: &mut RwTxn<'_>,
-    cohort: &[RunMeta],
-    dead: &[Option<DeadKeys>],
-    work: &mut LmdbPackedWork,
-) -> Result<Option<(u64, u64, u64, u64)>, PersistenceError> {
-    if cohort.len() != dead.len() {
-        return Err(packed_err("compaction death-map count mismatch"));
-    }
-    let mut dictionary_entries = Vec::new();
-    let mut ordinal_maps = Vec::with_capacity(cohort.len());
-    for (source, meta) in cohort.iter().enumerate() {
-        let dictionary_bytes = db
-            .dictionaries
-            .get(txn, &meta.run_id.to_be_bytes())
+    fn death_block_delete(&mut self, run_id: u64, level: usize) -> Result<(), PersistenceError> {
+        if self
+            .db
+            .dead_keys
+            .delete(self.txn, &death_key(run_id, level))
             .map_err(lmdb_err)?
-            .ok_or_else(|| packed_err("run has no dictionary"))?;
-        work.dictionary_input_bytes = work
-            .dictionary_input_bytes
-            .saturating_add(dictionary_bytes.len() as u64);
-        let dictionary = DictionaryView::parse(dictionary_bytes)
-            .and_then(DictionaryView::validate)
-            .map_err(packed_err)?;
-        let mut ordinal_map = Vec::with_capacity(dictionary.len());
-        for ordinal in 0..dictionary.len() {
-            let (event_key, id) = dictionary.entry(ordinal).map_err(packed_err)?;
-            if dead[source]
-                .as_ref()
-                .is_some_and(|keys| keys.contains(event_key))
-            {
-                ordinal_map.push(None);
-                continue;
-            }
-            if dictionary_entries
-                .last()
-                .is_some_and(|(prior, _)| *prior >= event_key)
-            {
-                return Err(packed_err(
-                    "compaction cohort dictionaries are not range ordered",
-                ));
-            }
-            let output_ordinal = u32::try_from(dictionary_entries.len())
-                .map_err(|_| packed_err("compaction dictionary exceeds u32"))?;
-            dictionary_entries.push((event_key, id));
-            ordinal_map.push(Some(output_ordinal));
+        {
+            self.work.logical_deletes = self.work.logical_deletes.saturating_add(1);
         }
-        ordinal_maps.push(ordinal_map);
+        Ok(())
     }
-    if dictionary_entries.is_empty() {
-        return Ok(None);
-    }
-    let min_event_key = dictionary_entries
-        .first()
-        .expect("nonempty compaction dictionary")
-        .0;
-    let max_event_key = dictionary_entries
-        .last()
-        .expect("nonempty compaction dictionary")
-        .0;
-    let live_events = dictionary_entries.len() as u64;
-    let dictionary = encode_dictionary(&dictionary_entries).map_err(packed_err)?;
-    let run_id = allocate_run_id(db, txn, work)?;
-    work.dictionary_output_bytes = work
-        .dictionary_output_bytes
-        .saturating_add(dictionary.len() as u64);
-    put(
-        db.dictionaries,
-        txn,
-        &run_id.to_be_bytes(),
-        &dictionary,
-        work,
-    )?;
-    let output_dictionary = DictionaryView::parse(&dictionary).map_err(packed_err)?;
 
-    let mut postings = 0u64;
-    for family in Family::ALL {
-        for shard in 0..=SHARD_MASK {
-            let mut segment_values = Vec::new();
-            for (source, meta) in cohort.iter().enumerate() {
-                let key = segment_key(family, shard, meta.run_id);
-                let Some(value) = db.segments.get(txn, &key).map_err(lmdb_err)? else {
-                    continue;
-                };
-                work.segment_input_bytes =
-                    work.segment_input_bytes.saturating_add(value.len() as u64);
-                segment_values.push((source, value.to_vec()));
-            }
-            if segment_values.is_empty() {
-                continue;
-            }
-            let segment_views = segment_values
-                .iter()
-                .map(|(source, value)| {
-                    SegmentView::parse(value)
-                        .map(|segment| (*source, segment))
-                        .map_err(packed_err)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let sources = segment_views
-                .iter()
-                .map(|(source, segment)| CompactionSegmentSource {
-                    segment: *segment,
-                    ordinal_map: &ordinal_maps[*source],
-                })
-                .collect::<Vec<_>>();
-            let Some(compacted) =
-                compact_segment(family, shard, &sources, output_dictionary).map_err(packed_err)?
-            else {
-                continue;
-            };
-            postings = postings.saturating_add(compacted.postings);
-            work.segment_output_bytes = work
-                .segment_output_bytes
-                .saturating_add(compacted.value.len() as u64);
-            put(
-                db.segments,
-                txn,
-                &segment_key(family, shard, run_id),
-                &compacted.value,
-                work,
-            )?;
+    fn next_run_id_get(&mut self) -> Result<Option<u64>, PersistenceError> {
+        get_u64(self.db.postings_meta, self.txn, b"next_run_id")
+    }
+
+    fn next_run_id_put(&mut self, value: u64) -> Result<(), PersistenceError> {
+        self.db
+            .postings_meta
+            .put(self.txn, b"next_run_id", &value.to_be_bytes())
+            .map_err(lmdb_err)?;
+        self.work.logical_puts = self.work.logical_puts.saturating_add(1);
+        Ok(())
+    }
+
+    fn note_run_published(&mut self) {
+        self.work.runs_published = self.work.runs_published.saturating_add(1);
+    }
+
+    fn note_compaction(&mut self, input_runs: usize, live_events: Option<u64>) {
+        self.work.compactions = self.work.compactions.saturating_add(1);
+        self.work.compaction_input_runs = self
+            .work
+            .compaction_input_runs
+            .saturating_add(input_runs as u64);
+        if let Some(live_events) = live_events {
+            self.work.compaction_events_rewritten = self
+                .work
+                .compaction_events_rewritten
+                .saturating_add(live_events);
         }
     }
-    if postings == 0 {
-        return Err(packed_err(
-            "nonempty compaction dictionary produced no live segments",
-        ));
-    }
-    Ok(Some((run_id, min_event_key, max_event_key, live_events)))
 }
 
 fn load_run_metas(db: &LmdbDatabases, txn: &RoTxn<'_>) -> Result<Vec<RunMeta>, PersistenceError> {

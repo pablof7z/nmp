@@ -19,7 +19,7 @@ use redb::{Database, ReadableDatabase};
 use super::postings::{DeadKeys, RunMeta};
 use super::postings_store::{
     apply_run_deaths, catalog_key, catalog_run_metas, publish_pending, rewrite_run_without_dead,
-    PendingEvent, CATALOG_RUN_META,
+    PendingEvent, RedbPostingsTxn, CATALOG_RUN_META,
 };
 use super::schema::{EventKey, POSTINGS_CATALOG};
 
@@ -68,14 +68,18 @@ fn a_corrupted_live_events_counter_is_overwritten_by_the_next_death_not_compound
 
     let write_txn = db.begin_write().expect("begin publish txn");
     let events = pending_batch(10);
-    publish_pending(&write_txn, &events).expect("publish fixture run");
+    publish_pending(&mut RedbPostingsTxn::new(&write_txn), &events).expect("publish fixture run");
     write_txn.commit().expect("commit publish txn");
 
     // Two ordinary deaths first, so there is a real death block on disk for
     // the corrupted step to have to agree with.
     let write_txn = db.begin_write().expect("begin first death txn");
-    apply_run_deaths(&write_txn, only_run_meta(&db).run_id, vec![1, 2])
-        .expect("apply first deaths");
+    apply_run_deaths(
+        &mut RedbPostingsTxn::new(&write_txn),
+        only_run_meta(&db).run_id,
+        vec![1, 2],
+    )
+    .expect("apply first deaths");
     write_txn.commit().expect("commit first death txn");
     let run_id = only_run_meta(&db).run_id;
     assert_eq!(
@@ -117,7 +121,8 @@ fn a_corrupted_live_events_counter_is_overwritten_by_the_next_death_not_compound
     // dictionary (10 events) and the true dead set ({1, 2, 3}), the correct
     // answer is 7.
     let write_txn = db.begin_write().expect("begin second death txn");
-    apply_run_deaths(&write_txn, run_id, vec![3]).expect("apply second death");
+    apply_run_deaths(&mut RedbPostingsTxn::new(&write_txn), run_id, vec![3])
+        .expect("apply second death");
     write_txn.commit().expect("commit second death txn");
 
     assert_eq!(
@@ -143,7 +148,7 @@ fn rewrite_run_without_dead_refuses_a_death_set_that_empties_a_run_it_should_not
 
     let write_txn = db.begin_write().expect("begin publish txn");
     let events = pending_batch(4);
-    publish_pending(&write_txn, &events).expect("publish fixture run");
+    publish_pending(&mut RedbPostingsTxn::new(&write_txn), &events).expect("publish fixture run");
     write_txn.commit().expect("commit publish txn");
     let meta = only_run_meta(&db);
     assert_eq!(meta.live_events, 4);
@@ -154,7 +159,7 @@ fn rewrite_run_without_dead_refuses_a_death_set_that_empties_a_run_it_should_not
     let dead = DeadKeys::new(vec![1, 2, 3, 4]).expect("build full-run dead set");
 
     let write_txn = db.begin_write().expect("begin rewrite txn");
-    let result = rewrite_run_without_dead(&write_txn, meta, &dead);
+    let result = rewrite_run_without_dead(&mut RedbPostingsTxn::new(&write_txn), meta, &dead);
     assert!(
         result.is_err(),
         "rewrite_run_without_dead must refuse a death set that empties a run \
