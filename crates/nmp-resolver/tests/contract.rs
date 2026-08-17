@@ -1191,6 +1191,101 @@ fn freshness_is_per_handle_and_does_not_split_the_shared_graph() {
     assert!(!h.unsubscribe(live_handle.id()).is_empty());
 }
 
+// ---- 8b. the atom table counts FilterNode contributions, not handles ----
+//
+// #1848. `identical_descriptors_share_graph` above and the scale proofs in
+// `nmp-router` (`scale_withdrawal.rs`) and `nmp-engine`
+// (`admission_tests/scale_teardown.rs`) all drive ONE handle per key, which
+// is exactly the shape where a per-handle atom claim and a per-node atom
+// claim are the same number. These two tests drive the shape where they
+// differ: two handles on one `AcquisitionKey`, a `Derived`/`Reactive` node,
+// and a recompute that moves the root FilterNode's atom set. Both assert the
+// emitted `DemandDelta`, not only the census -- the census is a map the bug
+// merely retains, while the wire demand is what the bug leaves live.
+
+/// A recompute that DROPS an atom must close it on the wire even when two
+/// handles share the graph. The atom left the only FilterNode that
+/// contributed it; no live node wants it, so no handle count can keep it
+/// open.
+#[test]
+fn shared_graph_closes_an_atom_a_recompute_dropped() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let c = Keys::generate();
+    let d = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (_handle1, _delta1) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    let (_handle2, delta2) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    assert!(delta2.is_empty(), "second handle shares the graph");
+
+    h.deliver(vec![kind3(&a, &[b.public_key(), c.public_key()], 100)]);
+    let atom_b = cf_kinds_authors(&[1], &[&b.public_key().to_hex()]);
+    let atom_c = cf_kinds_authors(&[1], &[&c.public_key().to_hex()]);
+    assert!(h.demand().contains(&atom_c), "C is demanded to begin with");
+
+    // C leaves the root FilterNode's atom set; D joins it.
+    let before = h.metrics();
+    let delta = h.deliver(vec![kind3(&a, &[b.public_key(), d.public_key()], 101)]);
+    let atom_d = cf_kinds_authors(&[1], &[&d.public_key().to_hex()]);
+
+    // The wire demand: C must be CLOSED, not merely dropped from a map.
+    assert_eq!(
+        delta.ops,
+        vec![
+            DemandOp::Close(with_fixture_provenance(outbox_atom(atom_c.clone()))),
+            DemandOp::Open(with_fixture_provenance(outbox_atom(atom_d.clone()))),
+        ],
+        "two handles must not suppress the Close of a departed atom"
+    );
+    let after = h.metrics();
+    assert_eq!(after.atoms_closed - before.atoms_closed, 1);
+    assert_eq!(after.atoms_opened - before.atoms_opened, 1);
+
+    // The census agrees: the entry is gone, and nothing else moved.
+    let demand = h.demand();
+    assert!(!demand.contains(&atom_c), "C's atom entry is gone");
+    assert!(demand.contains(&atom_b), "B untouched");
+    assert!(demand.contains(&atom_d), "D opened");
+}
+
+/// The mirror of the same asymmetry: an atom a recompute ADDED while two
+/// handles shared the graph must survive one of those handles leaving. The
+/// FilterNode that contributes it is still live, so its demand is still
+/// wanted.
+#[test]
+fn shared_graph_keeps_a_recompute_added_atom_when_one_handle_leaves() {
+    let mut h = Harness::new();
+    let a = Keys::generate();
+    let b = Keys::generate();
+    let d = Keys::generate();
+
+    h.set_active(Some(a.public_key()));
+    let (handle1, _delta1) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    let (_handle2, delta2) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    assert!(delta2.is_empty(), "second handle shares the graph");
+
+    h.deliver(vec![kind3(&a, &[b.public_key()], 100)]);
+    let delta = h.deliver(vec![kind3(&a, &[b.public_key(), d.public_key()], 101)]);
+    let atom_d = cf_kinds_authors(&[1], &[&d.public_key().to_hex()]);
+    assert_eq!(
+        delta.opened(),
+        vec![&with_fixture_provenance(outbox_atom(atom_d.clone()))],
+        "D opened once for the one FilterNode that gained it"
+    );
+
+    let withdrawal = h.unsubscribe(handle1.id());
+    assert!(
+        withdrawal.is_empty(),
+        "one of two handles leaving closes nothing: {withdrawal:?}"
+    );
+    assert!(
+        h.demand().contains(&atom_d),
+        "D is still contributed by a live FilterNode a live handle holds"
+    );
+}
+
 // ---- 9. follows_minus_mutes_surgical ------------------------------------
 
 #[test]
