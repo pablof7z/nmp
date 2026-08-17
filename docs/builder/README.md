@@ -59,7 +59,7 @@ library, or like an application framework in disguise?
 
 ### Write
 
-- [Drafts, acceptance, pending rows, and receipts](14-writing.md)
+- [Writing: acceptance, pending rows, and receipts](14-writing.md)
 - [Editing replaceable state safely](15-editing-replaceable.md)
 - [Current pubkey and signer selection](16-identity.md)
 

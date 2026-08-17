@@ -11,7 +11,7 @@
   - [No global completeness](11-coverage.md)
   - [Delivery transforms](13-delivery-transforms.md)
 - **Write**
-  - [Drafts and receipts](14-writing.md)
+  - [Writing and receipts](14-writing.md)
   - [Replaceable edits](15-editing-replaceable.md)
   - [Identity and signers](16-identity.md)
 - **Route and operate**
