@@ -62,8 +62,8 @@
 // derived from a phase whose true answer was established independently;
 // it was not raised until something went green. Stated plainly: this
 // scenario cannot resolve a heap leak smaller than about 128 bytes per
-// cycle in the single-engine phases. Footprint keeps a coarse 4 KiB (one
-// page) per cycle bound, and is reported either way.
+// cycle in the single-engine phases. Footprint is bounded on TOTAL drift
+// instead of a rate, for the reason given at its assertion.
 //
 // Set `C17_CYCLES` to re-run any phase at a different length; that is the
 // lever the cross-length comparison above was made with, and it is the
@@ -221,19 +221,28 @@ final class C17RepeatedLifecycleChurnTests: XCTestCase {
                 + "4x higher, a one-time cost ends in the same place."
         )
 
-        // 5: footprint, at one 4 KiB page per cycle. Coarser than the heap
-        // number above and kept only because it is the figure macOS charges
-        // a process against its memory limit -- the number that decides
-        // whether a long-lived app gets killed.
-        let footprintPerCycle = Self.growthPerCycle(
-            early: early.map(\.footprintBytes), late: late.map(\.footprintBytes)
-        )
+        // 5: footprint, as a TOTAL drift bound rather than a per-cycle rate.
+        // This is the figure macOS charges a process against its memory
+        // limit, so it is the number that decides whether a long-lived app
+        // eventually gets killed -- worth an assertion of its own. But it is
+        // page granular and the OS reclaims pages in bursts: measured swings
+        // of +-900 KB between the two windows on runs with no per-cycle
+        // growth at all, in both directions, at every run length tried. A
+        // per-cycle rate divides that fixed swing by the run length, so the
+        // same behaviour reads as -33,810 B/cycle at 60 cycles and -3,166 at
+        // 300 -- a bound on the rate is a coin flip that gets luckier the
+        // longer the run. A bound on the TOTAL drift is length-independent
+        // and sits above the measured noise.
+        let footprintDrift = Self.mean(late.map(\.footprintBytes))
+            - Self.mean(early.map(\.footprintBytes))
         XCTAssertLessThan(
-            footprintPerCycle, 4096,
-            "phase \(phase): phys_footprint grew \(String(format: "%.1f", footprintPerCycle)) bytes "
-                + "per cycle (early mean \(UInt64(Self.mean(early.map(\.footprintBytes)))) B, "
-                + "late mean \(UInt64(Self.mean(late.map(\.footprintBytes)))) B) -- more than one "
-                + "4 KiB page per open/close cycle"
+            footprintDrift, Self.footprintDriftBound,
+            "phase \(phase): phys_footprint drifted up by \(UInt64(footprintDrift)) bytes across "
+                + "the measured window (early mean \(UInt64(Self.mean(early.map(\.footprintBytes)))) B, "
+                + "late mean \(UInt64(Self.mean(late.map(\.footprintBytes)))) B, first sample "
+                + "\(UInt64(run.samples[0].footprintBytes)) B, last sample "
+                + "\(UInt64(run.samples[run.samples.count - 1].footprintBytes)) B) -- well past the "
+                + "+-900 KB this measurement swings by on its own"
         )
 
         // 6: with nothing open, the engine's own count is back to zero.
@@ -249,6 +258,11 @@ final class C17RepeatedLifecycleChurnTests: XCTestCase {
     /// Bytes of heap growth per churn cycle this measurement can actually
     /// resolve. See the file header: measured, not chosen.
     private static let heapBytesPerCycleBound = 128.0
+
+    /// Total upward footprint drift allowed across the measured window --
+    /// 2 MB, roughly 2.3x the +-900 KB this page-granular figure swings by
+    /// on runs proven to have no per-cycle growth. See the assertion.
+    private static let footprintDriftBound = 2_097_152.0
 
     private static func mean(_ values: [Double]) -> Double {
         values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count)
