@@ -58,12 +58,14 @@ let demand = NMPDemand(
 )
 ```
 
-**This does not work yet against a relay that requires AUTH (#1889).** A
-protected session withholds its request until authentication completes, and a
-relay like strfry only challenges in response to a request, so neither side
-moves first and nothing is transmitted. The failure is silent — the query
-returns no rows and reports `awaitingAuth(awaitingChallenge)` forever. Canary
-scenario C15 is the committed reproduction and is red until this closes.
+**This works only against a relay that challenges on connect.** Against one
+that challenges in response to a request — strfry, and most deployed relays —
+the protected session withholds its request until AUTH completes while the
+relay waits for a request before challenging, so neither side moves first
+(#1889). The failure is silent: no rows, and `awaitingAuth(awaitingChallenge)`
+forever. Canary scenario C15 is the committed reproduction and is red until
+this closes. Writes are unaffected — they transmit first and authenticate on
+the challenge that provokes.
 
 A protocol module composes these for you rather than handing you a relay to
 pass around: `NMPGroup.read` returns a live query already carrying one branch
