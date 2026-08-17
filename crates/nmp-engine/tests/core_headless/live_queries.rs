@@ -117,13 +117,21 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
 /// `refresh_all_handles`), and asserts the TOTAL number of row-delta
 /// entries delivered across every `EmitRows` batch stays close to N (each
 /// distinct row delivered ~once), nowhere near the O(N^2) blow-up the old
-/// full-set-re-emit behavior produced. Bounded/deterministic: a fixed N,
-/// no network, and a generous wall-clock ceiling. N=1,000 retains a 250x+
-/// separation between the linear bound and quadratic failure while keeping
-/// the real per-event Redb transaction fixture proportional for local runs.
+/// full-set-re-emit behavior produced. Bounded/deterministic: a fixed N and
+/// no network. N=1,000 retains a 250x+ separation between the linear bound
+/// and quadratic failure while keeping the real per-event Redb transaction
+/// fixture proportional for local runs.
+///
+/// #1796: this used to also assert a 30s wall-clock ceiling on the whole
+/// test body, justified as "an O(N^2) regression would blow this budget".
+/// It could only ever weaken the test. The claim -- redelivery is O(N), not
+/// O(N^2) -- is a relationship between two COUNTS, and the entry count below
+/// settles it exactly and instantly; the stopwatch restated the same claim
+/// through a machine-wide quantity that every concurrent test and every
+/// unrelated process on the host contributes to, so it could fail with the
+/// invariant intact and pass with it broken. A quantity beats a stopwatch.
 #[test]
 fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared() {
-    let start = Instant::now();
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay0.clone()]);
@@ -179,13 +187,6 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
         total_delta_entries < (N as usize) * 2,
         "total delivered row-delta entries ({total_delta_entries}) must stay ~O(N) -- the \
          old full-set-re-emit bug would have delivered ~{quadratic_blowup} (O(N^2))"
-    );
-
-    assert!(
-        start.elapsed() < Duration::from_secs(30),
-        "load test must complete quickly -- an O(N^2) regression would blow this budget \
-         (elapsed: {:?})",
-        start.elapsed()
     );
 }
 

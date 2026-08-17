@@ -54,6 +54,13 @@ pub struct EngineThread {
     /// from. See [`EngineClock`] for why the runtime reads a clock at all
     /// instead of calling `Timestamp::now()` at each site.
     clock: EngineClock,
+    /// How many times this engine thread's loop has come around to arm its
+    /// wait. See [`EngineThread::wait_arms`]. The engine loop publishes the
+    /// count unconditionally — a falsifier that only holds for a specially
+    /// built loop proves nothing about the shipped one — and only this
+    /// reader's end of the `Arc` is gated.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    wait_arms: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
     runtime_threads: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -380,6 +387,7 @@ impl EngineThread {
         let relay_information = RelayInformationService::new(runtime.handle().clone());
         #[cfg(test)]
         let runtime_threads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wait_arms = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let max_engine_batch = pool_config.max_engine_batch.max(1);
         let max_engine_batch_bytes = pool_config.max_engine_batch_bytes.max(1);
         let max_engine_batch_wait = pool_config
@@ -461,6 +469,7 @@ impl EngineThread {
         let engine_relay_information = relay_information.clone();
         #[cfg(test)]
         let engine_runtime_threads = Arc::clone(&runtime_threads);
+        let engine_wait_arms = Arc::clone(&wait_arms);
         let engine_join =
             match thread::Builder::new()
                 .name("nmp-engine".to_string())
@@ -488,6 +497,7 @@ impl EngineThread {
                                 cmd_rx: &cmd_rx,
                                 self_inbox: &self_inbox,
                                 startup_ready: startup_ready_tx,
+                                wait_arms: engine_wait_arms,
                             },
                         )
                     })
@@ -522,6 +532,8 @@ impl EngineThread {
                 drain_inbox: cmd_tx.clone(),
                 runtime,
                 clock,
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                wait_arms,
                 #[cfg(test)]
                 runtime_threads,
             },
@@ -530,6 +542,29 @@ impl EngineThread {
                 relay_information,
             },
         ))
+    }
+
+    /// How many times THIS engine thread's loop has come around to arm its
+    /// wait, counted since the thread started.
+    ///
+    /// #1796: the direct reading of "the engine thread is parked on `recv()`",
+    /// which is what the deadline-armed driver (§3.3, #39) claims when nothing
+    /// is due. A parked thread has not reached the top of the loop again, so
+    /// this count does not move at all while it waits; a busy-spinning
+    /// `recv_timeout(0)` loop moves it once per spin, millions of times a
+    /// second. The count belongs to one engine thread, so no concurrent test,
+    /// engine, or ambient machine load can change what it reads — which is
+    /// exactly what the process-wide `getrusage` sample it replaced could not
+    /// promise.
+    ///
+    /// Reading it is a plain relaxed atomic load: it sends no command and
+    /// wakes nothing, so sampling cannot itself disturb the parked wait it is
+    /// measuring.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn wait_arms(&self) -> u64 {
+        self.wait_arms.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// #704: the engine-owned adapter runtime handle. Protocol adapters

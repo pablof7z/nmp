@@ -105,6 +105,7 @@ pub use auth::{
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 // #1624 removed this module's only production thread spawn; the inline
@@ -1531,6 +1532,9 @@ struct EngineWiring<'a> {
     cmd_rx: &'a Receiver<Cmd>,
     self_inbox: &'a Sender<Cmd>,
     startup_ready: Sender<()>,
+    /// Published once per pass of [`engine_loop`]'s wait — see
+    /// [`EngineThread::wait_arms`] for what reads it and why.
+    wait_arms: Arc<AtomicU64>,
 }
 
 /// Shutdown is finished when no lifecycle can still run FOREIGN code.
@@ -1578,6 +1582,7 @@ fn engine_loop(
         cmd_rx,
         self_inbox,
         startup_ready,
+        wait_arms,
     } = wiring;
     let EnginePoolRuntime {
         pool,
@@ -1693,6 +1698,11 @@ fn engine_loop(
     let mut shutting_down = false;
     let mut store_recovery = StoreRecoveryDriver::default();
     loop {
+        // One increment per pass, before the wait this pass arms. A loop
+        // parked in `recv()`/`recv_timeout(wait)` has not reached here again,
+        // so the count standing still IS "still blocked on the same wait" --
+        // which is what `EngineThread::wait_arms` exists to let a test read.
+        wait_arms.fetch_add(1, Ordering::Relaxed);
         if core.take_store_recovery_request().is_some() {
             store_recovery.arm_now(Instant::now());
         }
