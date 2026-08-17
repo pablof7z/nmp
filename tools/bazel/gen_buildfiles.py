@@ -36,8 +36,9 @@ Run from the workspace root:
     python3 tools/bazel/gen_buildfiles.py
 
 Re-runnable; overwrites every first-party BUILD.bazel it owns (header-marked so
-a human can tell generated from hand-edited). nmp-ffi is hand-maintained (multi
-crate-type + optional feature surface) and skipped here.
+a human can tell generated from hand-edited). Every workspace member is
+generated, nmp-ffi included: its staticlib/cdylib crate types and its
+uniffi-bindgen bin are emitted by gen_for like any other target.
 """
 
 import json
@@ -297,6 +298,49 @@ def active_optional_default(pkg):
         elif e in features:
             stack.extend(features[e])
     return active
+
+
+def all_features_closure(pkg):
+    """Every feature of `pkg` turned on, plus the first-party optional deps that
+    activates -- Cargo's `--all-features` for one package.
+
+    The shipped Apple artifact is not the workspace-unified build. The
+    xcframework script builds nmp-ffi with `--no-default-features
+    --all-features`, so the staticlib inside NMP.xcframework carries every
+    capability, while `cargo build --workspace` gives it only the features some
+    other workspace member happens to request. Those are two different
+    libraries and the product is the first one.
+
+    Cascades within the package only: an entry naming another crate's feature
+    (`othercrate/feat`) is followed for dep activation, but no feature is
+    pushed onto another workspace crate, so this variant can reuse the ordinary
+    `:lib` of each dependency.
+    """
+    ftable = pkg.get("features", {})
+    optional_names = {
+        d["name"] for d in pkg["dependencies"]
+        if d.get("kind") is None and d.get("optional") and is_first_party(d["name"])
+    }
+    feats = {f for f in ftable if f != "default"}
+    active = set()
+    changed = True
+    while changed:
+        changed = False
+        for f in list(feats):
+            for e in ftable.get(f, []):
+                if e.startswith("dep:"):
+                    dep = e[4:]
+                elif "/" in e:
+                    dep = e.split("/", 1)[0]
+                else:
+                    dep = e
+                    if e in ftable and e not in feats:
+                        feats.add(e)
+                        changed = True
+                if dep in optional_names and dep not in active:
+                    active.add(dep)
+                    changed = True
+    return sorted(feats), sorted(active)
 
 
 def unified_features(members_by_name, include_dev):
@@ -655,9 +699,26 @@ def gen_for(pkg, prod_feats, prod_opt, test_feats, test_opt_all, bin_label_by_na
         L.append(")")
         L.append("")
 
-    # staticlib / cdylib companions to :lib (same srcs, prod features, prod dep
-    # edges). Cargo's `crate-type = [rlib, staticlib, cdylib]` builds all three;
-    # rules_rust builds one crate type per target, so emit one per extra type.
+    # Both shipped native artifacts -- the staticlib inside NMP.xcframework and
+    # the cdylib the Kotlin/JVM build loads -- are produced with
+    # `--no-default-features --all-features` (scripts/build-swift-xcframework.sh,
+    # scripts/build-kotlin-jvm.sh), so that, not the workspace-unified set, is
+    # the feature set these targets carry. The unified staticlib is a byproduct
+    # of `cargo build --workspace` that nothing consumes; emitting it alongside
+    # this one would also collide, since rules_rust names both `libnmp_ffi.a`.
+    # `:lib` continues to model the workspace-unified build.
+    ship_feats, ship_opt = all_features_closure(pkg)
+    if ship_feats:
+        ship_flags = []
+        for f in ship_feats:
+            ship_flags.append('"--cfg"')
+            ship_flags.append("'feature=\"%s\"'" % f)
+        ship_deps_line = "    deps = all_crate_deps(normal=True) + [%s]," % ", ".join(
+            '"%s"' % label(d, False) for d in sorted(set(fp_normal) | set(ship_opt)))
+    else:
+        ship_flags = prod_flags
+        ship_deps_line = "    deps = %s," % deps_block(test_graph=False)
+
     if "staticlib" in extra_crate_types:
         L.append("rust_static_library(")
         L.append('    name = "%s_static",' % crate_name)
@@ -665,14 +726,15 @@ def gen_for(pkg, prod_feats, prod_opt, test_feats, test_opt_all, bin_label_by_na
         L.append(srcs)
         L.append("    edition = crate_edition(),")
         L.append("    aliases = aliases(),")
-        L.append("    deps = %s," % deps_block(test_graph=False))
+        L.append(ship_deps_line)
         L.append("    proc_macro_deps = all_crate_deps(proc_macro=True),")
         L.extend(compile_data_lines(lib_src_files))
-        if prod_flags:
-            L.append("    rustc_flags = [%s]," % ", ".join(prod_flags))
+        if ship_flags:
+            L.append("    rustc_flags = [%s]," % ", ".join(ship_flags))
         L.append(PUBLIC)
         L.append(")")
         L.append("")
+
     if "cdylib" in extra_crate_types:
         L.append("rust_shared_library(")
         L.append('    name = "%s_cdylib",' % crate_name)
@@ -680,14 +742,15 @@ def gen_for(pkg, prod_feats, prod_opt, test_feats, test_opt_all, bin_label_by_na
         L.append(srcs)
         L.append("    edition = crate_edition(),")
         L.append("    aliases = aliases(),")
-        L.append("    deps = %s," % deps_block(test_graph=False))
+        L.append(ship_deps_line)
         L.append("    proc_macro_deps = all_crate_deps(proc_macro=True),")
         L.extend(compile_data_lines(lib_src_files))
-        if prod_flags:
-            L.append("    rustc_flags = [%s]," % ", ".join(prod_flags))
+        if ship_flags:
+            L.append("    rustc_flags = [%s]," % ", ".join(ship_flags))
         L.append(PUBLIC)
         L.append(")")
         L.append("")
+
 
     # test-closure library variant -- the dep edge other crates' test closures
     # link against. Carries the test-unified feature cfgs but NO --cfg test and

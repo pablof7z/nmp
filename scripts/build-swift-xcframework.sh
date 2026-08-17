@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Build the generated Swift bindings and NMP.xcframework from nmp-ffi.
 #
+# Compilation is Bazel; lipo/uniffi-bindgen/xcodebuild are the Apple and UniFFI
+# packaging steps that turn the compiled slices into a distributable framework.
+# No Cargo invocation remains in this path.
+#
 # The default keeps the historical device + simulator + macOS output.
 # `--sim-only` keeps the historical simulator + macOS CI output, while
 # `--macos-only` prepares only the host artifact needed by SwiftPM builds and
@@ -20,9 +24,9 @@ Options:
   -h, --help    show this help without building
 
 With no option, build iOS device, iOS simulator, and macOS slices.
-Any Rust target the selected slices need is installed onto the toolchain
-rust-toolchain.toml pins. CARGO_TARGET_DIR is honored when supplied by the
-caller.
+Each slice is a Bazel build under its own platform; Bazel supplies the Rust
+standard library for every target triple, so nothing has to be installed
+first.
 USAGE
 }
 
@@ -88,93 +92,48 @@ if [[ -z "$MACOS_DEPLOYMENT_TARGET" ]]; then
   echo "error: no macOS deployment target found in $SWIFT_PACKAGE_DIR/Package.swift" >&2
   exit 1
 fi
-# Some native build scripts fingerprint CFLAGS but not MACOSX_DEPLOYMENT_TARGET.
-# Set both so cached C/C++ objects are rebuilt when the package minimum changes.
-MACOS_CFLAGS="${CFLAGS:+$CFLAGS }-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET"
-MACOS_CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-mmacosx-version-min=$MACOS_DEPLOYMENT_TARGET"
+# No CFLAGS/CXXFLAGS plumbing: those existed to push the macOS minimum into
+# Cargo's C build scripts. Bazel passes it to the cc toolchain with
+# --macos_minimum_os and to rustc with extra_rustc_env (.bazelrc).
 
-# Cargo resolves a relative CARGO_TARGET_DIR from its working directory. The
-# script runs Cargo at the repository root, so make it absolute first.
-TARGET_DIR_VALUE=${CARGO_TARGET_DIR:-target}
-if [[ "$TARGET_DIR_VALUE" == /* ]]; then
-  TARGET_DIR="$TARGET_DIR_VALUE"
-else
-  TARGET_DIR="$REPO_ROOT/$TARGET_DIR_VALUE"
-fi
+# Bazel downloads the Rust standard library for every target triple it is
+# configured for (MODULE.bazel `extra_target_triples`), so there is no rustup
+# step here any more and no dependency on the host toolchain having the targets
+# installed.
 
-REQUIRED_TARGETS="$MACOS_TARGET"
-if [[ "$MODE" != macos ]]; then
-  REQUIRED_TARGETS="$REQUIRED_TARGETS $SIM_ARM_TARGET $SIM_X86_TARGET"
-fi
-if [[ "$MODE" == all ]]; then
-  REQUIRED_TARGETS="$REQUIRED_TARGETS $DEVICE_TARGET"
-fi
+STAGE="$REPO_ROOT/target/xcframework-slices"
+rm -rf "$STAGE"
 
-# A cross-compilation target's standard library is installed per toolchain, and
-# this repository pins its toolchain in rust-toolchain.toml. This script is the
-# only place that knows both the pin and the target set, so it installs the
-# targets it is about to build for. Cargo without a target's std fails as
-# `error[E0463]: can't find crate for core`, which reads like a source break in
-# nmp-ffi and is not one.
-echo "== 0. Rust targets for the toolchain this repository pins =="
-if ! command -v rustup >/dev/null 2>&1; then
-  echo "error: rustup is required: rust-toolchain.toml selects the toolchain this build must use" >&2
-  echo "error: this build needs the Rust standard library for: $REQUIRED_TARGETS" >&2
+# One Bazel build per platform. `-c opt` is the `--release` the Cargo build
+# used; the feature set is not passed here because the staticlib target IS the
+# all-features artifact (crates/nmp-ffi/BUILD.bazel).
+build_slice() {  # <bazelrc config> <slice dir name>  -> prints the slice dir
+  bazel build -c opt --config="$1" //crates/nmp-ffi:nmp_ffi_static 1>&2
+  mkdir -p "$STAGE/$2"
+  # Bazel outputs are read-only, so replace rather than overwrite.
+  rm -f "$STAGE/$2/$LIB_NAME"
+  cp "$REPO_ROOT/bazel-bin/crates/nmp-ffi/$LIB_NAME" "$STAGE/$2/$LIB_NAME"
+  chmod u+w "$STAGE/$2/$LIB_NAME"
+  printf '%s\n' "$STAGE/$2"
+}
+
+# The macOS minimum lives in Package.swift and again in .bazelrc, because
+# rustc reads it from its own environment. Two spellings of one number is a
+# mirror, so check them rather than trusting them.
+BAZELRC_MACOS_MIN=$(sed -nE 's/^build:macos-arm64 .*MACOSX_DEPLOYMENT_TARGET=([0-9.]+).*/\1/p' "$REPO_ROOT/.bazelrc")
+if [[ "$BAZELRC_MACOS_MIN" != "$MACOS_DEPLOYMENT_TARGET" ]]; then
+  echo "error: macOS minimum disagrees: Package.swift says $MACOS_DEPLOYMENT_TARGET, .bazelrc says ${BAZELRC_MACOS_MIN:-<unset>}" >&2
   exit 1
 fi
-# `rustup target` acts on the ACTIVE toolchain, and the working directory is the
-# repository root, so rust-toolchain.toml selects it. Installing against any
-# other toolchain (`rustup +nightly target add ...`) leaves this build with no
-# std for the target it names.
-ACTIVE_TOOLCHAIN=$(rustup show active-toolchain)
-ACTIVE_TOOLCHAIN=${ACTIVE_TOOLCHAIN%% *}
-INSTALLED_TARGETS=$(rustup target list --installed)
-MISSING_TARGETS=
-for required_target in $REQUIRED_TARGETS; do
-  grep -Fqx -- "$required_target" <<<"$INSTALLED_TARGETS" \
-    || MISSING_TARGETS="${MISSING_TARGETS:+$MISSING_TARGETS }$required_target"
-done
-if [[ -n "$MISSING_TARGETS" ]]; then
-  echo "installing on $ACTIVE_TOOLCHAIN: $MISSING_TARGETS"
-  # shellcheck disable=SC2086 # target triples never contain whitespace
-  if ! rustup target add $MISSING_TARGETS; then
-    echo "error: no Rust standard library for: $MISSING_TARGETS" >&2
-    echo "error: install it from the repository root, so rust-toolchain.toml selects the toolchain:" >&2
-    echo "error:   rustup target add $MISSING_TARGETS" >&2
-    echo "error: the active toolchain here is $ACTIVE_TOOLCHAIN; installing onto another one leaves cargo reporting a missing \`core\`" >&2
-    exit 1
-  fi
-else
-  echo "$ACTIVE_TOOLCHAIN already has: $REQUIRED_TARGETS"
-fi
 
-build_target() {
-  CARGO_TARGET_DIR="$TARGET_DIR" \
-    cargo build --frozen -p "$CRATE" --no-default-features --all-features --release --target "$1" 1>&2
-  printf '%s\n' "$TARGET_DIR/$1/release"
-}
-
-build_target_without_macos() {
-  env -u MACOSX_DEPLOYMENT_TARGET bash -c \
-    'CARGO_TARGET_DIR="$1" cargo build --frozen -p "$2" --no-default-features --all-features --release --target "$3" 1>&2' \
-    _ "$TARGET_DIR" "$CRATE" "$1"
-  printf '%s\n' "$TARGET_DIR/$1/release"
-}
-
-echo "== 1. cargo build (release) =="
-cargo fetch --locked
+echo "== 1. bazel build (opt) =="
 if [[ "$MODE" != macos ]]; then
-  SIM_ARM_RELEASE_DIR=$(build_target_without_macos "$SIM_ARM_TARGET")
-  SIM_X86_RELEASE_DIR=$(build_target_without_macos "$SIM_X86_TARGET")
+  SIM_ARM_RELEASE_DIR=$(build_slice ios-sim-arm64 ios-sim-arm64)
+  SIM_X86_RELEASE_DIR=$(build_slice ios-sim-x86_64 ios-sim-x86_64)
 fi
-MACOS_RELEASE_DIR=$(
-  MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
-  CFLAGS="$MACOS_CFLAGS" \
-  CXXFLAGS="$MACOS_CXXFLAGS" \
-    build_target "$MACOS_TARGET"
-)
+MACOS_RELEASE_DIR=$(build_slice macos-arm64 macos-arm64)
 if [[ "$MODE" == all ]]; then
-  DEVICE_RELEASE_DIR=$(build_target_without_macos "$DEVICE_TARGET")
+  DEVICE_RELEASE_DIR=$(build_slice ios-device ios-device)
 fi
 
 SIM_ARM_LIB="${SIM_ARM_RELEASE_DIR:-}/$LIB_NAME"
@@ -184,7 +143,7 @@ DEVICE_LIB="${DEVICE_RELEASE_DIR:-}/$LIB_NAME"
 
 if [[ "$MODE" != macos ]]; then
   echo "== 2. lipo the two simulator arches into one fat staticlib =="
-  FAT_SIM_DIR="$TARGET_DIR/ios-sim-fat"
+  FAT_SIM_DIR="$STAGE/ios-sim-fat"
   mkdir -p "$FAT_SIM_DIR"
   FAT_SIM_LIB="$FAT_SIM_DIR/$LIB_NAME"
   lipo -create "$SIM_ARM_LIB" "$SIM_X86_LIB" -output "$FAT_SIM_LIB"
@@ -197,15 +156,16 @@ fi
 
 echo "== 3. uniffi-bindgen (library mode) -> Swift bindings =="
 mkdir -p "$GEN_DIR"
-env -u MACOSX_DEPLOYMENT_TARGET \
-  cargo run --locked -p "$CRATE" --bin "$BINDGEN_BIN" --no-default-features --all-features -- generate \
+# `bazel run` starts in the runfiles tree, so every path handed to the tool
+# must be absolute.
+bazel run -c opt "//crates/nmp-ffi:$BINDGEN_BIN" -- generate \
   --library "$BINDGEN_LIB" \
   --language swift \
   --out-dir "$GEN_DIR"
 
 # The xcframework carries only the generated C header and modulemap. The
 # generated Swift source remains an ordinary NMPFFI target source.
-HEADERS_DIR="$TARGET_DIR/ios-ffi-headers"
+HEADERS_DIR="$STAGE/ios-ffi-headers"
 rm -rf "$HEADERS_DIR"
 mkdir -p "$HEADERS_DIR"
 cp "$GEN_DIR/${LIB_STEM}FFI.h" "$HEADERS_DIR/"
@@ -242,7 +202,7 @@ xcodebuild -create-xcframework \
   -output "$XCFRAMEWORK_OUT"
 
 echo "== done =="
-echo "Cargo target directory:    $TARGET_DIR"
+echo "Bazel slice staging:       $STAGE"
 echo "Raw bindgen output:        $GEN_DIR/"
 echo "xcframework:               $XCFRAMEWORK_OUT ($SLICES)"
 echo "Swift bindings source:     $SWIFT_SOURCE"

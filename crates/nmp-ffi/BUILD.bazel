@@ -26,10 +26,10 @@ rust_static_library(
     srcs = glob(["src/**/*.rs"]),
     edition = crate_edition(),
     aliases = aliases(),
-    deps = all_crate_deps(normal=True) + ["//crates/nmp:lib", "//crates/nmp-content:lib", "//crates/nmp-nip02:lib", "//crates/nmp-nip22:lib", "//crates/nmp-nip29:lib", "//crates/nmp-outbox:lib"],
+    deps = all_crate_deps(normal=True) + ["//crates/nmp:lib", "//crates/nmp-asset:lib", "//crates/nmp-blossom:lib", "//crates/nmp-content:lib", "//crates/nmp-media:lib", "//crates/nmp-nip02:lib", "//crates/nmp-nip18:lib", "//crates/nmp-nip22:lib", "//crates/nmp-nip25:lib", "//crates/nmp-nip29:lib", "//crates/nmp-nipc7:lib", "//crates/nmp-outbox:lib"],
     proc_macro_deps = all_crate_deps(proc_macro=True),
     compile_data = ["Cargo.toml"],
-    rustc_flags = ["--cfg", 'feature="content"', "--cfg", 'feature="nip02"', "--cfg", 'feature="nip22"', "--cfg", 'feature="nip29"', "--cfg", 'feature="nip65"'],
+    rustc_flags = ["--cfg", 'feature="asset"', "--cfg", 'feature="blossom"', "--cfg", 'feature="content"', "--cfg", 'feature="media"', "--cfg", 'feature="nip02"', "--cfg", 'feature="nip18"', "--cfg", 'feature="nip22"', "--cfg", 'feature="nip25"', "--cfg", 'feature="nip29"', "--cfg", 'feature="nip65"', "--cfg", 'feature="nipc7"'],
     visibility = ["//visibility:public"],
 )
 
@@ -39,10 +39,10 @@ rust_shared_library(
     srcs = glob(["src/**/*.rs"]),
     edition = crate_edition(),
     aliases = aliases(),
-    deps = all_crate_deps(normal=True) + ["//crates/nmp:lib", "//crates/nmp-content:lib", "//crates/nmp-nip02:lib", "//crates/nmp-nip22:lib", "//crates/nmp-nip29:lib", "//crates/nmp-outbox:lib"],
+    deps = all_crate_deps(normal=True) + ["//crates/nmp:lib", "//crates/nmp-asset:lib", "//crates/nmp-blossom:lib", "//crates/nmp-content:lib", "//crates/nmp-media:lib", "//crates/nmp-nip02:lib", "//crates/nmp-nip18:lib", "//crates/nmp-nip22:lib", "//crates/nmp-nip25:lib", "//crates/nmp-nip29:lib", "//crates/nmp-nipc7:lib", "//crates/nmp-outbox:lib"],
     proc_macro_deps = all_crate_deps(proc_macro=True),
     compile_data = ["Cargo.toml"],
-    rustc_flags = ["--cfg", 'feature="content"', "--cfg", 'feature="nip02"', "--cfg", 'feature="nip22"', "--cfg", 'feature="nip29"', "--cfg", 'feature="nip65"'],
+    rustc_flags = ["--cfg", 'feature="asset"', "--cfg", 'feature="blossom"', "--cfg", 'feature="content"', "--cfg", 'feature="media"', "--cfg", 'feature="nip02"', "--cfg", 'feature="nip18"', "--cfg", 'feature="nip22"', "--cfg", 'feature="nip25"', "--cfg", 'feature="nip29"', "--cfg", 'feature="nip65"', "--cfg", 'feature="nipc7"'],
     visibility = ["//visibility:public"],
 )
 
