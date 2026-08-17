@@ -72,6 +72,7 @@ mod request_replacement_transition_tests;
 mod semantic_delivery;
 #[cfg(test)]
 mod semantic_settlement_falsifier_tests;
+mod session_registry;
 #[cfg(test)]
 mod transport_tests;
 mod write;
@@ -448,6 +449,7 @@ pub use query::Nip77Frame;
 pub use request_attempt::{LocalSendRefusal, RequestAttemptId, RequestHandoffOutcome};
 use request_attempt::{RequestAttemptPurpose, RequestAttemptState, RequestAttempts, RequestSend};
 pub use request_effects::{AttemptedReplay, AttemptedWireDelta};
+use session_registry::{AuthTransition, SessionRegistry, WriteGate};
 // `runtime` (C) needs the EXACT same wire subscription-id string
 // `attribution.rs` records at send time (`AttributionState::record_send`) so
 // that a REQ actually placed on the wire under this string round-trips back
@@ -2010,51 +2012,12 @@ pub struct EngineCore {
     retired_coverage_observations: BTreeSet<ObservationId>,
     pending_request_claim_transfers:
         BTreeMap<(RelaySessionKey, SubId), PendingRequestClaimTransfer>,
-    /// EngineCore's memory of the exact connection generation and SESSION
-    /// that currently occupy each pool slot. Disconnects are asynchronous;
-    /// the generation prevents a delayed old disconnect from erasing a slot
-    /// that has already reopened, and the session key prevents a frame
-    /// reported for one access context from ever being read as another's
-    /// (#8: both halves of the (handle, session) pair must match exactly).
-    slot_to_relay: HashMap<u32, (TransportRelayHandle, RelaySessionKey)>,
-    /// Sessions CURRENTLY connected — feeds `AcquisitionEvidence.sources[_]
-    /// .status` (`Requesting` iff a member here covers the atom;
-    /// `Disconnected` iff it was a member of `ever_connected_relays` but
-    /// isn't a member here; `Connecting` otherwise). Additive bookkeeping:
-    /// `slot_to_relay`'s own semantics (populated on connect, never cleared on
-    /// disconnect) are untouched by this.
-    connected_relays: BTreeSet<RelaySessionKey>,
-    /// Every session that has connected at least once, ever — distinguishes
-    /// `Disconnected` (was connected, dropped) from `Connecting` (never yet
-    /// connected) for the same evidence computation.
-    ever_connected_relays: BTreeSet<RelaySessionKey>,
-    /// The exact connection generation that has completed NIP-42 AUTH for
-    /// each PROTECTED session (#8). Public sessions never enter this map. A
-    /// fresh generation is never pre-authorized (`on_relay_connected` removes
-    /// the entry), and readiness dies with the connection
-    /// (`on_relay_disconnected` removes it too) — so "ready" always means
-    /// "THIS socket, after THIS socket's AUTH handshake", never an earlier
-    /// generation's leftover.
-    auth_ready_sessions: HashMap<RelaySessionKey, TransportRelayHandle>,
-    /// Newly connected author sessions whose first inbound frame is still
-    /// being observed for a proactive AUTH challenge. Unlike sticky
-    /// `auth_required_sessions`, this exact-generation gate is released by a
-    /// transport's ordered first-read completion when an ordinary relay has
-    /// no already-available challenge.
-    auth_probe_sessions: HashMap<RelaySessionKey, TransportRelayHandle>,
-    /// Exact live sessions for which the relay has actually required AUTH:
-    /// an AUTH challenge, auth-required write response, or restricted close.
-    /// Merely using a frozen NIP-42 access identity does not populate this
-    /// set; ordinary relays are released only after the transport's ordered
-    /// first socket read-drain completes without an available challenge.
-    auth_required_sessions: BTreeSet<RelaySessionKey>,
-    /// Current reducer-owned AUTH epoch for each exact protected session.
-    /// Entries are removed on disconnect/reconnect teardown; the separate
-    /// monotonic counters below deliberately survive that removal so stale
-    /// callbacks can never alias a future generation.
-    auth_sessions: HashMap<RelaySessionKey, AuthSessionState>,
-    next_auth_epoch: Option<u64>,
-    next_auth_operation: Option<u64>,
+    /// Which physical connection currently speaks for each relay session,
+    /// and whether it has proven its identity via NIP-42 -- ten fields,
+    /// moved into their own owner (#1606 step 3; see `session_registry.rs`
+    /// for the fields, and `proposal-session-auth.md` for the audit this
+    /// extraction is testing).
+    session_registry: SessionRegistry,
     /// Persisted ordinary-write rows of reserved kind:22242 discovered at
     /// boot. They remain durably inspectable but never regain reducer
     /// ownership, attempt correlations, or a reattachable live delivery.
@@ -2247,10 +2210,6 @@ pub struct EngineCore {
     /// The fault is retained as typed evidence; its presence, never an
     /// adjacent boolean or diagnostic string, owns the recovery transition.
     store_recovery_requested: Option<PersistenceFault>,
-    /// Runtime relay-worker open failures keyed by their exact current owner.
-    /// Entries are pruned whenever demand/write ownership changes and cleared
-    /// by a successful connection for that session.
-    relay_open_failures: BTreeMap<RelaySessionKey, String>,
     /// Transport health/verifier degradation from a live worker. Kept
     /// separate from open failures so clearing one recovered session cannot
     /// erase an independent transport-health fact.
@@ -2426,15 +2385,7 @@ impl EngineCore {
             semantic_publish_coverage_parked: BTreeSet::new(),
             retired_coverage_observations: BTreeSet::new(),
             pending_request_claim_transfers: BTreeMap::new(),
-            slot_to_relay: HashMap::new(),
-            connected_relays: BTreeSet::new(),
-            ever_connected_relays: BTreeSet::new(),
-            auth_ready_sessions: HashMap::new(),
-            auth_probe_sessions: HashMap::new(),
-            auth_required_sessions: BTreeSet::new(),
-            auth_sessions: HashMap::new(),
-            next_auth_epoch: Some(1),
-            next_auth_operation: Some(1),
+            session_registry: SessionRegistry::new(),
             quarantined_auth_receipts: HashMap::new(),
             clock: Timestamp::from(0u64),
             #[cfg(any(test, feature = "test-instrumentation"))]
@@ -2473,7 +2424,6 @@ impl EngineCore {
             store_degraded: None,
             store_failure_epoch: 0,
             store_recovery_requested: None,
-            relay_open_failures: BTreeMap::new(),
             transport_degraded: None,
             retry_scheduler_blocked: false,
             max_publish_attempts: crate::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
@@ -3010,14 +2960,17 @@ impl EngineCore {
             snapshot.store_degraded = self.store_degraded.clone();
         }
         snapshot.transport_degraded = self
+            .session_registry
             .relay_open_failures
             .iter()
             .next()
             .map(|(session, reason)| format!("{}: {reason}", session.relay))
             .or_else(|| self.transport_degraded.clone());
         let mut auth_sessions = BTreeMap::new();
-        for (handle, session) in self.slot_to_relay.values() {
-            if session.access == AccessContext::Public || !self.connected_relays.contains(session) {
+        for (handle, session) in self.session_registry.slot_to_relay.values() {
+            if session.access == AccessContext::Public
+                || !self.session_registry.connected_relays.contains(session)
+            {
                 continue;
             }
             auth_sessions.insert(
@@ -3036,7 +2989,7 @@ impl EngineCore {
                 },
             );
         }
-        for (session, state) in &self.auth_sessions {
+        for (session, state) in &self.session_registry.auth_sessions {
             let (phase, auth_event_id) = match &state.phase {
                 AuthSessionPhase::AwaitingPolicy { .. } => {
                     (AuthDiagnosticsPhase::AwaitingPolicy, None)
@@ -3142,6 +3095,7 @@ impl EngineCore {
                 .keys()
                 .any(|plan_sub_id| plan_sub_id.0 == relay.relay)
                 && self
+                    .session_registry
                     .connected_relays
                     .contains(&RelaySessionKey::public(relay.relay.clone()))
             {
@@ -3393,7 +3347,9 @@ impl EngineCore {
                     .relay_worker_requirements()
                     .is_some_and(|required| required.all.contains(&session))
                 {
-                    self.relay_open_failures.insert(session, reason);
+                    self.session_registry
+                        .relay_open_failures
+                        .insert(session, reason);
                     let mut effects = vec![Effect::EmitDiagnostics(self.diagnostics_snapshot())];
                     self.refresh_all_observations(&mut effects);
                     self.refresh_all_histories(&mut effects);
@@ -3476,18 +3432,22 @@ impl EngineCore {
     }
 
     fn prune_unowned_relay_state(&mut self) -> bool {
-        if self.relay_open_failures.is_empty() && self.auth_required_sessions.is_empty() {
+        if self.session_registry.relay_open_failures.is_empty()
+            && self.session_registry.auth_required_sessions.is_empty()
+        {
             return false;
         }
         let Some(required) = self.relay_worker_requirements() else {
             return false;
         };
-        let before = self.relay_open_failures.len();
-        self.relay_open_failures
+        let before = self.session_registry.relay_open_failures.len();
+        self.session_registry
+            .relay_open_failures
             .retain(|session, _| required.all.contains(session));
-        self.auth_required_sessions
+        self.session_registry
+            .auth_required_sessions
             .retain(|session| required.all.contains(session));
-        self.relay_open_failures.len() != before
+        self.session_registry.relay_open_failures.len() != before
     }
 
     fn on_relay_health(
@@ -3501,7 +3461,9 @@ impl EngineCore {
         // session: accept it only when BOTH halves of the reported
         // (handle, session) pair are exactly the slot's current occupant
         // (#8) — health from a slot never seen connected proves nothing.
-        let Some((current, current_session)) = self.slot_to_relay.get(&handle.slot) else {
+        let Some((current, current_session)) =
+            self.session_registry.slot_to_relay.get(&handle.slot)
+        else {
             return Vec::new();
         };
         if *current != handle || *current_session != session {

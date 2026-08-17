@@ -23,10 +23,15 @@ impl Fixture {
             generation: 1,
         };
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-        core.slot_to_relay
+        core.session_registry
+            .slot_to_relay
             .insert(handle.slot, (handle, session.clone()));
-        core.connected_relays.insert(session.clone());
-        core.ever_connected_relays.insert(session.clone());
+        core.session_registry
+            .connected_relays
+            .insert(session.clone());
+        core.session_registry
+            .ever_connected_relays
+            .insert(session.clone());
         Self {
             core,
             relay,

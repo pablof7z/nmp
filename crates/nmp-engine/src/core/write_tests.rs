@@ -1799,7 +1799,10 @@ mod semantic_successor_tests {
             "stale delivery callbacks advanced the current signer generation"
         );
         assert!(
-            !core.auth_required_sessions.contains(&sessions[2]),
+            !core
+                .session_registry
+                .auth_required_sessions
+                .contains(&sessions[2]),
             "an auth-required result for retired E1 must not park E2"
         );
         assert!(

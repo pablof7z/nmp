@@ -920,7 +920,10 @@ impl EngineCore {
                         .keys()
                         .filter(|session| {
                             session.access != AccessContext::Public
-                                && !self.auth_ready_sessions.contains_key(*session)
+                                && !self
+                                    .session_registry
+                                    .auth_ready_sessions
+                                    .contains_key(*session)
                         })
                         .cloned()
                         .map(Effect::EnsureReadRelay),
@@ -942,7 +945,10 @@ impl EngineCore {
                             .entry(session.relay.clone())
                             .or_insert(0) += 1;
                         if session.access != AccessContext::Public
-                            && !self.auth_ready_sessions.contains_key(&session)
+                            && !self
+                                .session_registry
+                                .auth_ready_sessions
+                                .contains_key(&session)
                         {
                             effects.push(Effect::EnsureReadRelay(session));
                         }
@@ -1016,7 +1022,10 @@ impl EngineCore {
             // so nothing is lost), and no CLOSE is needed pre-auth — nothing
             // was ever sent on that socket for this plan to withdraw.
             if session.access != AccessContext::Public
-                && !self.auth_ready_sessions.contains_key(session)
+                && !self
+                    .session_registry
+                    .auth_ready_sessions
+                    .contains_key(session)
             {
                 continue;
             }
@@ -1711,10 +1720,10 @@ impl EngineCore {
                 plan,
                 evidence::AcquisitionEvidenceContext {
                     store: &self.store,
-                    connected: &self.connected_relays,
+                    connected: &self.session_registry.connected_relays,
                     auth_status: &auth_status,
-                    ever_connected: &self.ever_connected_relays,
-                    relay_open_failures: &self.relay_open_failures,
+                    ever_connected: &self.session_registry.ever_connected_relays,
+                    relay_open_failures: &self.session_registry.relay_open_failures,
                     finished_stored_events: &finished_stored_events,
                     placed_requests: &placed_requests,
                     awaiting_requests: &awaiting_requests,
@@ -1748,10 +1757,10 @@ impl EngineCore {
             plan,
             evidence::AcquisitionEvidenceContext {
                 store: &self.store,
-                connected: &self.connected_relays,
+                connected: &self.session_registry.connected_relays,
                 auth_status: &auth_status,
-                ever_connected: &self.ever_connected_relays,
-                relay_open_failures: &self.relay_open_failures,
+                ever_connected: &self.session_registry.ever_connected_relays,
+                relay_open_failures: &self.session_registry.relay_open_failures,
                 finished_stored_events: &finished_stored_events,
                 placed_requests: &placed_requests,
                 awaiting_requests: &awaiting_requests,

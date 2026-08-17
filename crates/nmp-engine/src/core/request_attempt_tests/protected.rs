@@ -40,7 +40,8 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
         claims.clone(),
         owners.clone(),
     );
-    core.slot_to_relay
+    core.session_registry
+        .slot_to_relay
         .insert(first_handle.slot, (first_handle, session.clone()));
     core.record_observed_request(RequestSend {
         session: &session,

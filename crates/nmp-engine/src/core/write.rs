@@ -690,7 +690,8 @@ impl EngineCore {
             return None;
         }
         if live.iter().any(|relay| {
-            self.connected_relays
+            self.session_registry
+                .connected_relays
                 .contains(&RelaySessionKey::new((*relay).clone(), access))
         }) {
             return None;
@@ -1270,30 +1271,11 @@ impl EngineCore {
             HandoffResult::NotHandedOff => {
                 self.remove_active_lane(target.receipt, &target.session.relay);
                 // `NotHandedOff` is the transport reporting it has NO session
-                // for this relay -- `pool.ensure_session` failed, so nothing
-                // was sent and no socket was observed closing. That is a
-                // connectivity fact, so the session leaves `connected_relays`.
-                //
-                // It deliberately does NOT touch `slot_to_relay` or
-                // `auth_sessions`, and the resulting two-thirds state is safe
-                // in exactly one direction. Every predicate over those three
-                // (`exact_current_auth_epoch`, `is_current_transport_session`
-                // in `auth_transport.rs`) is a CONJUNCTION, so a missing term
-                // can only cause a rejection, never an acceptance: the cost
-                // is a discarded AUTH operation, never an accepted stale one.
-                //
-                // The state repairs itself through the `EnsureWriteRelay`
-                // below. A protected reconnect runs `invalidate_auth_epoch`
-                // BEFORE re-inserting into `connected_relays`, so the auth
-                // entries left behind here are cleared by the same edge that
-                // restores connectivity -- in that order, which is what makes
-                // it safe.
-                //
-                // Do not "complete" this by also clearing `slot_to_relay` or
-                // `auth_sessions`: this path never observed a generation end,
-                // so retiring one here would discard a socket that is still
-                // live for reads.
-                self.connected_relays.remove(&target.session);
+                // for this relay -- a connectivity fact, owned and explained
+                // by `SessionRegistry::transport_has_no_session`. The state
+                // repairs itself through the `EnsureWriteRelay` below.
+                self.session_registry
+                    .transport_has_no_session(&target.session);
                 self.emit_write_fact(
                     target.receipt,
                     WriteFact::Relay {
@@ -1485,7 +1467,7 @@ impl EngineCore {
             // stays `Eligible` and this same loop picks it up on the
             // `schedule_ready` that closes every `wake_relay_lanes`, so
             // nothing is stranded by leaving it alone.
-            if !self.connected_relays.contains(&session) {
+            if !self.session_registry.is_connected(&session) {
                 // A coordinate answer is a fact about one relay SESSION. The
                 // session this lane needs is gone, so whatever it learned
                 // about that relay's current value died with it and the lane
@@ -1506,10 +1488,7 @@ impl EngineCore {
             // reveals auth-requirement via `OK false auth-required:` still
             // parks through `handle_write_ack`'s `RelayAckClass::WaitingAuth`
             // path.
-            if self.auth_probe_sessions.contains_key(&session)
-                || (self.auth_required_sessions.contains(&session)
-                    && !self.auth_ready_sessions.contains_key(&session))
-            {
+            if !matches!(self.session_registry.write_gate(&session), WriteGate::Open) {
                 if self
                     .commit_lane_waiting(&lane.key, lane.revision, true)
                     .is_ok()
@@ -1556,11 +1535,7 @@ impl EngineCore {
                 // unconditionally would park every write to an ordinary
                 // relay behind an authenticated READ session that relay
                 // will never open.
-                let read_session = if self.auth_ready_sessions.contains_key(&session) {
-                    session.clone()
-                } else {
-                    RelaySessionKey::public(lane.key.relay.clone())
-                };
+                let read_session = self.session_registry.authenticated_view(&session);
                 if !self.coordinate_is_current_for_lane(
                     id,
                     &coordinate,
@@ -2579,7 +2554,7 @@ impl EngineCore {
             .map(|lane| {
                 RelaySessionKey::new(lane.key.relay.clone(), AccessContext::Nip42(signing_pubkey))
             })
-            .filter(|session| self.connected_relays.contains(session))
+            .filter(|session| self.session_registry.connected_relays.contains(session))
             .collect();
         self.open_bootstrapped_lanes(id, signing_pubkey, lanes, effects);
         // Boot can assume nothing is connected yet, but a retry runs
@@ -4857,7 +4832,7 @@ impl EngineCore {
                 // session (#8 U2), the exact session `schedule_ready` will
                 // publish on.
                 let session = RelaySessionKey::new(lane.key.relay.clone(), write_access);
-                if self.connected_relays.contains(&session) {
+                if self.session_registry.connected_relays.contains(&session) {
                     let _ = self.commit_lane_eligible(&lane.key, lane.revision, self.clock);
                 } else {
                     self.emit_write_fact(
@@ -5810,8 +5785,7 @@ impl EngineCore {
                     );
                 }
                 RelayAckClass::WaitingAuth => {
-                    self.auth_probe_sessions.remove(session);
-                    self.auth_required_sessions.insert(session.clone());
+                    self.session_registry.relay_demanded_auth(session);
                     if self
                         .commit_lane_suspension(
                             &key,

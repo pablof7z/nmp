@@ -8,67 +8,20 @@ use super::*;
 
 impl EngineCore {
     // ---- transport wiring (slot bookkeeping only — C owns the pool) -----
-
-    /// `u64::MAX` is structurally reserved for [`AUTH_SEQUENCE_SENTINEL`]:
-    /// the counter treats it as already-exhausted and never issues it, so a
-    /// REAL epoch/operation sequence can never compare equal to the
-    /// counter-exhausted fallback epoch `on_auth_challenge`/
-    /// `on_auth_restricted` install. Sentinel distinctness therefore no
-    /// longer rests on the `Error`-phase guard alone (#8 U2's deferred
-    /// latent item): even a registry or correlation path that only compares
-    /// epochs is safe.
-    pub(super) fn mint_auth_sequence(next: &mut Option<u64>) -> Option<u64> {
-        let issued = (*next)?;
-        if issued == AUTH_SEQUENCE_SENTINEL {
-            *next = None;
-            return None;
-        }
-        *next = issued.checked_add(1);
-        Some(issued)
-    }
-
-    pub(super) fn mint_auth_epoch(
-        &mut self,
-        handle: TransportRelayHandle,
-        session: &RelaySessionKey,
-    ) -> Option<AuthEpoch> {
-        Some(AuthEpoch {
-            handle,
-            session: session.clone(),
-            sequence: Self::mint_auth_sequence(&mut self.next_auth_epoch)?,
-        })
-    }
-
-    pub(super) fn mint_auth_operation(&mut self, epoch: &AuthEpoch) -> Option<AuthOpToken> {
-        Some(AuthOpToken {
-            epoch: epoch.clone(),
-            sequence: Self::mint_auth_sequence(&mut self.next_auth_operation)?,
-        })
-    }
-
-    pub(super) fn exact_current_auth_epoch(&self, epoch: &AuthEpoch) -> bool {
-        self.connected_relays.contains(&epoch.session)
-            && matches!(
-                self.slot_to_relay.get(&epoch.handle.slot),
-                Some((handle, session)) if *handle == epoch.handle && *session == epoch.session
-            )
-            && self
-                .auth_sessions
-                .get(&epoch.session)
-                .is_some_and(|state| state.epoch == *epoch)
-    }
-
+    //
+    // `mint_auth_sequence`/`mint_auth_epoch`/`mint_auth_operation` and
+    // `exact_current_auth_epoch` moved to `SessionRegistry` (#1606 step 3
+    // experiment) -- called below as `self.session_registry.<name>(..)`.
+    // `is_current_transport_session` is `nmp-runtime`'s own public call
+    // (`lib.rs:2142`), so it stays a thin forwarding `pub fn` here rather
+    // than becoming crate-internal.
     pub fn is_current_transport_session(
         &self,
         handle: TransportRelayHandle,
         session: &RelaySessionKey,
     ) -> bool {
-        self.connected_relays.contains(session)
-            && matches!(
-                self.slot_to_relay.get(&handle.slot),
-                Some((current, current_session))
-                    if *current == handle && current_session == session
-            )
+        self.session_registry
+            .is_current_transport_session(handle, session)
     }
 
     pub(super) fn close_protected_reqs(&self, session: &RelaySessionKey) -> Option<Effect> {
@@ -154,14 +107,14 @@ impl EngineCore {
         close_wire: bool,
         effects: &mut Vec<Effect>,
     ) -> Option<AuthSessionState> {
-        let was_ready = self.auth_ready_sessions.remove(session).is_some();
+        let was_ready = self.session_registry.take_ready(session);
         self.abandon_session_subs(session);
         if close_wire && was_ready {
             if let Some(close) = self.close_protected_reqs(session) {
                 effects.push(close);
             }
         }
-        let previous = self.auth_sessions.remove(session);
+        let previous = self.session_registry.take_auth_state(session);
         if let Some(state) = previous.as_ref() {
             effects.push(Effect::RelayAuth(AuthEffect::Cancel(state.epoch.clone())));
         }
@@ -175,7 +128,7 @@ impl EngineCore {
         // relay that never challenges, because the ONLY wake for
         // `WaitingAuth` is `finish_auth_ok` — which for that relay never
         // fires.
-        if self.auth_required_sessions.contains(session) {
+        if self.session_registry.requires_auth(session) {
             self.park_relay_lanes_for_auth(session, effects);
         }
         previous
@@ -190,14 +143,16 @@ impl EngineCore {
         let AccessContext::Nip42(expected_pubkey) = session.access else {
             return Vec::new();
         };
-        self.auth_probe_sessions.remove(&session);
-        self.auth_required_sessions.insert(session.clone());
+        self.session_registry.auth_probe_sessions.remove(&session);
+        self.session_registry
+            .auth_required_sessions
+            .insert(session.clone());
         let mut effects = Vec::new();
         let previous = self.invalidate_auth_epoch(&session, true, &mut effects);
         let last_created_at = previous.as_ref().and_then(|state| state.last_created_at);
         let fallback_epoch = previous.map(|state| state.epoch);
-        let Some(epoch) = self.mint_auth_epoch(handle, &session) else {
-            self.auth_sessions.insert(
+        let Some(epoch) = self.session_registry.mint_auth_epoch(handle, &session) else {
+            self.session_registry.auth_sessions.insert(
                 session.clone(),
                 AuthSessionState {
                     epoch: fallback_epoch.unwrap_or(AuthEpoch {
@@ -216,7 +171,7 @@ impl EngineCore {
             return effects;
         };
         if challenge.is_empty() {
-            self.auth_sessions.insert(
+            self.session_registry.auth_sessions.insert(
                 session,
                 AuthSessionState {
                     epoch,
@@ -230,8 +185,8 @@ impl EngineCore {
             self.refresh_all_observation_evidence(&mut effects);
             return effects;
         }
-        let Some(token) = self.mint_auth_operation(&epoch) else {
-            self.auth_sessions.insert(
+        let Some(token) = self.session_registry.mint_auth_operation(&epoch) else {
+            self.session_registry.auth_sessions.insert(
                 session,
                 AuthSessionState {
                     epoch,
@@ -245,7 +200,7 @@ impl EngineCore {
             self.refresh_all_observation_evidence(&mut effects);
             return effects;
         };
-        self.auth_sessions.insert(
+        self.session_registry.auth_sessions.insert(
             session,
             AuthSessionState {
                 epoch: epoch.clone(),
@@ -275,13 +230,16 @@ impl EngineCore {
         if session.access == AccessContext::Public {
             return Vec::new();
         }
-        self.auth_probe_sessions.remove(&session);
-        self.auth_required_sessions.insert(session.clone());
+        self.session_registry.auth_probe_sessions.remove(&session);
+        self.session_registry
+            .auth_required_sessions
+            .insert(session.clone());
         let mut effects = Vec::new();
         let previous = self.invalidate_auth_epoch(&session, true, &mut effects);
         let last_created_at = previous.as_ref().and_then(|state| state.last_created_at);
         let fallback_epoch = previous.map(|state| state.epoch);
         let epoch = self
+            .session_registry
             .mint_auth_epoch(handle, &session)
             .or(fallback_epoch)
             .unwrap_or(AuthEpoch {
@@ -289,7 +247,7 @@ impl EngineCore {
                 session: session.clone(),
                 sequence: AUTH_SEQUENCE_SENTINEL,
             });
-        self.auth_sessions.insert(
+        self.session_registry.auth_sessions.insert(
             session,
             AuthSessionState {
                 epoch,
@@ -376,102 +334,40 @@ impl EngineCore {
         effects.extend(self.schedule_ready(self.clock));
     }
 
+    /// Routing shell over [`SessionRegistry::apply_policy_completion`]
+    /// (#1606 step 3 experiment). The AUTH phase decision itself -- the
+    /// remove/decide/reinsert dance this function used to BE -- moved onto
+    /// the owner, where the state never leaves the map. What is left here is
+    /// exactly what the coordinator keeps per `proposal-session-auth.md`:
+    /// routing the transition to whichever other plane reacts, in the order
+    /// that already applied (denial before the evidence refresh; the
+    /// refresh runs regardless of which arm fired, same as before).
     pub(super) fn on_auth_policy_completed(
         &mut self,
         token: AuthOpToken,
         instance: Option<AuthCapabilityInstance>,
         outcome: AuthPolicyOutcome,
     ) -> Vec<Effect> {
-        if !self.exact_current_auth_epoch(&token.epoch) {
-            return Vec::new();
-        }
-        let session = token.epoch.session.clone();
-        let Some(mut state) = self.auth_sessions.remove(&session) else {
-            return Vec::new();
-        };
-        if !matches!(
-            &state.phase,
-            AuthSessionPhase::AwaitingPolicy { token: current } if *current == token
-        ) {
-            self.auth_sessions.insert(session, state);
-            return Vec::new();
-        }
-        let missing_capability = instance.is_none()
-            && state.policy_instance.is_none()
-            && matches!(outcome, AuthPolicyOutcome::Unavailable);
-        let exact_bound = instance.is_some() && instance == state.policy_instance;
-        if !missing_capability && !exact_bound {
-            self.auth_sessions.insert(session, state);
-            return Vec::new();
-        }
         let mut effects = Vec::new();
-        let denial = match outcome {
-            AuthPolicyOutcome::Allow => {
-                let AccessContext::Nip42(expected_pubkey) = state.epoch.session.access else {
-                    return Vec::new();
-                };
-                let clock = self.clock.as_secs();
-                let minimum = match state.last_created_at {
-                    Some(last) => {
-                        let Some(next) = last.as_secs().checked_add(1) else {
-                            state.phase = AuthSessionPhase::Error;
-                            self.auth_sessions.insert(session, state);
-                            self.refresh_all_observation_evidence(&mut effects);
-                            return effects;
-                        };
-                        next.max(clock)
-                    }
-                    None => clock,
-                };
-                let Some(maximum) = clock.checked_add(AUTH_MAX_FUTURE_SECS) else {
-                    state.phase = AuthSessionPhase::Error;
-                    self.auth_sessions.insert(session, state);
-                    self.refresh_all_observation_evidence(&mut effects);
-                    return effects;
-                };
-                if minimum > maximum {
-                    state.phase = AuthSessionPhase::Error;
-                    self.auth_sessions.insert(session, state);
-                    self.refresh_all_observation_evidence(&mut effects);
-                    return effects;
-                }
-                let created_at = Timestamp::from(minimum);
-                let unsigned = NostrEventBuilder::auth(
-                    state.challenge.clone(),
-                    state.epoch.session.relay.clone(),
-                )
-                .custom_created_at(created_at)
-                .build(expected_pubkey);
-                let Some(sign_token) = self.mint_auth_operation(&state.epoch) else {
-                    state.phase = AuthSessionPhase::Error;
-                    self.auth_sessions.insert(session, state);
-                    self.refresh_all_observation_evidence(&mut effects);
-                    return effects;
-                };
-                state.last_created_at = Some(created_at);
-                state.policy_instance = instance;
-                state.phase = AuthSessionPhase::AwaitingSignature {
-                    token: sign_token.clone(),
-                    unsigned: unsigned.clone(),
-                };
+        match self
+            .session_registry
+            .apply_policy_completion(token, instance, outcome, self.clock)
+        {
+            AuthTransition::NoChange => return effects,
+            AuthTransition::SignatureRequested { token, unsigned } => {
                 effects.push(Effect::RelayAuth(AuthEffect::RequestSignature {
-                    token: sign_token,
+                    token,
                     unsigned: Box::new(unsigned),
                 }));
-                None
             }
-            AuthPolicyOutcome::Deny { reason } => {
-                state.phase = AuthSessionPhase::Denied;
-                Some((StoredAuthDenialSource::Policy, reason))
+            AuthTransition::Denied {
+                session,
+                source,
+                reason,
+            } => {
+                self.deny_write_lanes_for_auth(&session, source, reason, &mut effects);
             }
-            AuthPolicyOutcome::Unavailable | AuthPolicyOutcome::Error { reason: _ } => {
-                state.phase = AuthSessionPhase::Error;
-                None
-            }
-        };
-        self.auth_sessions.insert(session.clone(), state);
-        if let Some((source, reason)) = denial {
-            self.deny_write_lanes_for_auth(&session, source, reason, &mut effects);
+            AuthTransition::Errored { .. } => {}
         }
         self.refresh_all_observation_evidence(&mut effects);
         effects
@@ -514,7 +410,8 @@ impl EngineCore {
     /// without an entry are the "connected but never challenged" case the
     /// evidence layer defaults to `AwaitingAuth { AwaitingChallenge }`.
     pub(super) fn auth_status_map(&self) -> BTreeMap<RelaySessionKey, SourceStatus> {
-        self.auth_sessions
+        self.session_registry
+            .auth_sessions
             .iter()
             .map(|(session, state)| (session.clone(), Self::auth_source_status(state)))
             .collect()
@@ -526,11 +423,11 @@ impl EngineCore {
         instance: Option<AuthCapabilityInstance>,
         outcome: AuthSignerOutcome,
     ) -> Vec<Effect> {
-        if !self.exact_current_auth_epoch(&token.epoch) {
+        if !self.session_registry.exact_current_auth_epoch(&token.epoch) {
             return Vec::new();
         }
         let session = token.epoch.session.clone();
-        let Some(mut state) = self.auth_sessions.remove(&session) else {
+        let Some(mut state) = self.session_registry.auth_sessions.remove(&session) else {
             return Vec::new();
         };
         let unsigned = match &state.phase {
@@ -539,7 +436,7 @@ impl EngineCore {
                 unsigned,
             } if *current == token => unsigned.clone(),
             _ => {
-                self.auth_sessions.insert(session, state);
+                self.session_registry.auth_sessions.insert(session, state);
                 return Vec::new();
             }
         };
@@ -548,7 +445,7 @@ impl EngineCore {
             && matches!(outcome, AuthSignerOutcome::Unavailable);
         let exact_bound = instance.is_some() && instance == state.signer_instance;
         if !missing_capability && !exact_bound {
-            self.auth_sessions.insert(session, state);
+            self.session_registry.auth_sessions.insert(session, state);
             return Vec::new();
         }
         let mut effects = Vec::new();
@@ -556,9 +453,10 @@ impl EngineCore {
             AuthSignerOutcome::Signed(event)
                 if Self::signed_auth_matches_frozen(&unsigned, &event) =>
             {
-                let Some(send_token) = self.mint_auth_operation(&state.epoch) else {
+                let Some(send_token) = self.session_registry.mint_auth_operation(&state.epoch)
+                else {
                     state.phase = AuthSessionPhase::Error;
-                    self.auth_sessions.insert(session, state);
+                    self.session_registry.auth_sessions.insert(session, state);
                     self.refresh_all_observation_evidence(&mut effects);
                     return effects;
                 };
@@ -584,7 +482,9 @@ impl EngineCore {
                 None
             }
         };
-        self.auth_sessions.insert(session.clone(), state);
+        self.session_registry
+            .auth_sessions
+            .insert(session.clone(), state);
         if let Some((source, reason)) = denial {
             self.deny_write_lanes_for_auth(&session, source, reason, &mut effects);
         }
@@ -598,10 +498,14 @@ impl EngineCore {
         capability: AuthCapability,
         instance: AuthCapabilityInstance,
     ) -> Vec<Effect> {
-        if !self.exact_current_auth_epoch(&token.epoch) {
+        if !self.session_registry.exact_current_auth_epoch(&token.epoch) {
             return Vec::new();
         }
-        let Some(state) = self.auth_sessions.get_mut(&token.epoch.session) else {
+        let Some(state) = self
+            .session_registry
+            .auth_sessions
+            .get_mut(&token.epoch.session)
+        else {
             return Vec::new();
         };
         match (&state.phase, capability) {
@@ -637,7 +541,7 @@ impl EngineCore {
             operation,
             outcome,
         } = completion;
-        let Some(state) = self.auth_sessions.get(&session) else {
+        let Some(state) = self.session_registry.auth_sessions.get(&session) else {
             return Vec::new();
         };
         let AuthSessionPhase::AwaitingSend {
@@ -656,10 +560,11 @@ impl EngineCore {
         }
         let (event_id, early_ok) = (*event_id, early_ok.clone());
         let epoch = token.epoch.clone();
-        if !self.exact_current_auth_epoch(&epoch) {
+        if !self.session_registry.exact_current_auth_epoch(&epoch) {
             return Vec::new();
         }
         let mut state = self
+            .session_registry
             .auth_sessions
             .remove(&session)
             .expect("the awaiting session was just read under this exact key");
@@ -673,7 +578,7 @@ impl EngineCore {
             }
             AuthSendOutcome::Unavailable => state.phase = AuthSessionPhase::Error,
         }
-        self.auth_sessions.insert(session, state);
+        self.session_registry.auth_sessions.insert(session, state);
         self.refresh_all_observation_evidence(&mut effects);
         effects
     }
@@ -685,6 +590,7 @@ impl EngineCore {
         instance: AuthCapabilityInstance,
     ) -> Vec<Effect> {
         let sessions: Vec<_> = self
+            .session_registry
             .auth_sessions
             .iter()
             .filter_map(|(session, state)| {
@@ -700,7 +606,7 @@ impl EngineCore {
         for session in sessions {
             if let Some(mut state) = self.invalidate_auth_epoch(&session, true, &mut effects) {
                 state.phase = AuthSessionPhase::Error;
-                self.auth_sessions.insert(session, state);
+                self.session_registry.auth_sessions.insert(session, state);
             }
         }
         self.refresh_all_observation_evidence(&mut effects);
@@ -712,32 +618,24 @@ impl EngineCore {
         handle: TransportRelayHandle,
         session: RelaySessionKey,
     ) -> Vec<Effect> {
-        if self
-            .slot_to_relay
-            .get(&handle.slot)
-            .is_some_and(|(current, _)| current.generation > handle.generation)
-        {
+        if self.session_registry.is_stale_generation(handle) {
             return Vec::new();
         }
         let mut effects = Vec::new();
-        let same_physical_session = matches!(
-            self.slot_to_relay.get(&handle.slot),
-            Some((current, current_session)) if *current == handle && *current_session == session
-        );
+        let same_physical_session = self.session_registry.same_slot_owner(handle, &session);
         let same_wire_generation =
             same_physical_session || self.session_has_live_generation(&session, handle);
-        let open_failure_cleared = self.relay_open_failures.remove(&session).is_some();
-        if let Some((_, displaced_session)) = self.slot_to_relay.get(&handle.slot).cloned() {
-            if displaced_session != session {
-                // A pool slot has one physical owner. If a newer connection
-                // replaces its access context before an old disconnect arrives,
-                // release the displaced session here; otherwise its AUTH epoch
-                // and apparent connectivity could survive forever even though
-                // no transport handle can ever make them current again.
-                self.invalidate_auth_epoch(&displaced_session, false, &mut effects);
-                self.connected_relays.remove(&displaced_session);
-                self.auth_probe_sessions.remove(&displaced_session);
-            }
+        let open_failure_cleared = self.session_registry.clear_open_failure(&session);
+        if let Some(displaced_session) =
+            self.session_registry.displaced_slot_owner(handle, &session)
+        {
+            // A pool slot has one physical owner. If a newer connection
+            // replaces its access context before an old disconnect arrives,
+            // release the displaced session here; otherwise its AUTH epoch
+            // and apparent connectivity could survive forever even though
+            // no transport handle can ever make them current again.
+            self.invalidate_auth_epoch(&displaced_session, false, &mut effects);
+            self.session_registry.release_displaced(&displaced_session);
         }
         // A fresh PROTECTED connection generation is NEVER pre-authorized
         // (#8): any AUTH readiness earned by an earlier generation died with
@@ -747,8 +645,6 @@ impl EngineCore {
         if session.access != AccessContext::Public {
             self.invalidate_auth_epoch(&session, false, &mut effects);
         }
-        self.slot_to_relay
-            .insert(handle.slot, (handle, session.clone()));
         // A connection can also exist solely for a compiled/persisted write
         // route. It is live for the durable write scheduler and ACK
         // attribution, but it must never receive read replay/probing unless
@@ -761,16 +657,10 @@ impl EngineCore {
         // never again `Connecting` for the lifetime of this `EngineCore`
         // (`ever_connected_relays` is append-only -- a later drop reads
         // `Disconnected`, not `Connecting`, per the doc's "was connected,
-        // then dropped" fact).
-        self.connected_relays.insert(session.clone());
-        self.ever_connected_relays.insert(session.clone());
-        if !same_physical_session && session.access != AccessContext::Public {
-            if self.auth_required_sessions.contains(&session) {
-                self.auth_probe_sessions.remove(&session);
-            } else {
-                self.auth_probe_sessions.insert(session.clone(), handle);
-            }
-        }
+        // then dropped" fact). `claim_slot` also resolves probe bookkeeping
+        // for a genuinely new physical connection.
+        self.session_registry
+            .claim_slot(handle, &session, same_physical_session);
         // Reconnect (new generation): clear stale attribution, then rebuild
         // every currently-planned REQ for this session. The first Connected
         // callback may follow a REQ that the runtime already accepted on this
@@ -889,6 +779,7 @@ impl EngineCore {
         session: RelaySessionKey,
     ) -> Vec<Effect> {
         if !self
+            .session_registry
             .slot_to_relay
             .get(&handle.slot)
             .is_some_and(|(current, current_session)| {
@@ -897,13 +788,13 @@ impl EngineCore {
         {
             return Vec::new();
         }
-        if self.auth_ready_sessions.get(&session) == Some(&handle) {
+        if self.session_registry.auth_ready_sessions.get(&session) == Some(&handle) {
             return vec![Effect::ReleaseInitialRead(handle)];
         }
-        if self.auth_probe_sessions.get(&session) != Some(&handle) {
+        if self.session_registry.auth_probe_sessions.get(&session) != Some(&handle) {
             return Vec::new();
         }
-        self.auth_probe_sessions.remove(&session);
+        self.session_registry.auth_probe_sessions.remove(&session);
         let mut effects = vec![Effect::ReleaseInitialRead(handle)];
         effects.extend(self.wake_relay_lanes(&session, true));
         effects
@@ -964,7 +855,10 @@ impl EngineCore {
             // `on_set_active_pubkey`.
             self.recompile(&mut effects);
         }
-        if self.connected_relays.contains(&public_session)
+        if self
+            .session_registry
+            .connected_relays
+            .contains(&public_session)
             && self.router.plan().reqs.contains_key(&public_session)
             && advertises_nip77 != Some(false)
         {
@@ -1029,14 +923,19 @@ impl EngineCore {
         reason: DisconnectReason,
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
-        if let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned() {
-            // Exact (handle, session) match or nothing (#8): a delayed old
-            // disconnect for a superseded generation, or one reported for a
-            // session that no longer occupies this slot, must not tear down
-            // the session that actually lives there now.
-            if current != handle || session != reported_session {
-                return effects;
-            }
+        // Exact (handle, session) match or nothing (#8): a delayed old
+        // disconnect for a superseded generation, or one reported for a
+        // session that no longer occupies this slot, must not tear down
+        // the session that actually lives there now -- and must not run
+        // the unconditional evidence refresh below either, exactly as the
+        // early return this replaced did not.
+        let Some(session) = self
+            .session_registry
+            .validated_occupant(handle, &reported_session)
+        else {
+            return effects;
+        };
+        {
             self.close_requests_for_session(
                 &session,
                 handle,
@@ -1120,8 +1019,7 @@ impl EngineCore {
             // already earned survives (the #49 "offline cached rows remain
             // usable" acceptance criterion -- watermark and link status are
             // deliberately orthogonal fields, never one enum).
-            self.connected_relays.remove(&session);
-            self.auth_probe_sessions.remove(&session);
+            self.session_registry.mark_disconnected(&session);
             match reason {
                 DisconnectReason::PermanentlyFailed => {
                     // #506: the pool already retired this worker for good --
@@ -1195,7 +1093,9 @@ impl EngineCore {
         let mut effects = Vec::new();
         if !status {
             state.phase = AuthSessionPhase::Denied;
-            self.auth_sessions.insert(session.clone(), state);
+            self.session_registry
+                .auth_sessions
+                .insert(session.clone(), state);
             self.deny_write_lanes_for_auth(
                 session,
                 StoredAuthDenialSource::Relay,
@@ -1207,7 +1107,8 @@ impl EngineCore {
         }
 
         state.phase = AuthSessionPhase::Ready { event_id };
-        self.auth_ready_sessions
+        self.session_registry
+            .auth_ready_sessions
             .insert(session.clone(), state.epoch.handle);
         effects.push(Effect::ReleaseInitialRead(state.epoch.handle));
         if let Some(reqs) = self.router.plan().reqs.get(session).cloned() {
@@ -1235,7 +1136,9 @@ impl EngineCore {
                 ));
             }
         }
-        self.auth_sessions.insert(session.clone(), state);
+        self.session_registry
+            .auth_sessions
+            .insert(session.clone(), state);
         effects.extend(self.wake_relay_lanes(session, true));
         let replay = effects
             .iter()
@@ -1254,11 +1157,16 @@ impl EngineCore {
         status: bool,
         message: String,
     ) -> Option<Vec<Effect>> {
-        let epoch = self.auth_sessions.get(session)?.epoch.clone();
-        if !self.exact_current_auth_epoch(&epoch) {
+        let epoch = self
+            .session_registry
+            .auth_sessions
+            .get(session)?
+            .epoch
+            .clone();
+        if !self.session_registry.exact_current_auth_epoch(&epoch) {
             return None;
         }
-        let mut state = self.auth_sessions.remove(session)?;
+        let mut state = self.session_registry.auth_sessions.remove(session)?;
         let current_event_id = match &mut state.phase {
             AuthSessionPhase::AwaitingOk { event_id: current } if *current == event_id => *current,
             AuthSessionPhase::AwaitingSend {
@@ -1269,15 +1177,21 @@ impl EngineCore {
                 if early_ok.is_none() {
                     *early_ok = Some((status, message));
                 }
-                self.auth_sessions.insert(session.clone(), state);
+                self.session_registry
+                    .auth_sessions
+                    .insert(session.clone(), state);
                 return Some(Vec::new());
             }
             AuthSessionPhase::Ready { event_id: current } if *current == event_id => {
-                self.auth_sessions.insert(session.clone(), state);
+                self.session_registry
+                    .auth_sessions
+                    .insert(session.clone(), state);
                 return Some(Vec::new());
             }
             _ => {
-                self.auth_sessions.insert(session.clone(), state);
+                self.session_registry
+                    .auth_sessions
+                    .insert(session.clone(), state);
                 return None;
             }
         };
@@ -1604,7 +1518,11 @@ impl EngineCore {
             let frame = match frame {
                 RelayFrame::CommittedObservation(hit) => {
                     self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
-                    let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned()
+                    let Some((current, session)) = self
+                        .session_registry
+                        .slot_to_relay
+                        .get(&handle.slot)
+                        .cloned()
                     else {
                         continue;
                     };
@@ -1627,7 +1545,12 @@ impl EngineCore {
             };
             #[cfg(feature = "bench-instrumentation")]
             if let Some((event_kind, _)) = frame.diagnostic_duplicate_ceiling() {
-                let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned() else {
+                let Some((current, session)) = self
+                    .session_registry
+                    .slot_to_relay
+                    .get(&handle.slot)
+                    .cloned()
+                else {
                     self.ingest_relay_observations(std::mem::take(&mut candidates), &mut effects);
                     continue;
                 };
@@ -1653,7 +1576,11 @@ impl EngineCore {
                 Ok((subscription_id, event, candidate)) => {
                     #[cfg(feature = "bench-instrumentation")]
                     let phase_started = std::time::Instant::now();
-                    let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned()
+                    let Some((current, session)) = self
+                        .session_registry
+                        .slot_to_relay
+                        .get(&handle.slot)
+                        .cloned()
                     else {
                         self.ingest_relay_observations(
                             std::mem::take(&mut candidates),
@@ -1722,7 +1649,12 @@ impl EngineCore {
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
         let msg = frame.into_message();
-        let Some((current, session)) = self.slot_to_relay.get(&handle.slot).cloned() else {
+        let Some((current, session)) = self
+            .session_registry
+            .slot_to_relay
+            .get(&handle.slot)
+            .cloned()
+        else {
             return effects; // frame from a slot we never saw RelayConnected for.
         };
         // BOTH halves must match (#8): the exact current generation AND the

@@ -143,9 +143,13 @@ impl Fixture {
             generation: 1,
         };
         self.core
+            .session_registry
             .slot_to_relay
             .insert(handle.slot, (handle, self.session.clone()));
-        self.core.connected_relays.insert(self.session.clone());
+        self.core
+            .session_registry
+            .connected_relays
+            .insert(self.session.clone());
         self.core.on_relay_frame(
             handle,
             self.session.clone(),
@@ -251,10 +255,12 @@ fn exact_public_disconnect_retires_the_active_nip77_child_and_every_reverse_owne
     };
     fixture
         .core
+        .session_registry
         .slot_to_relay
         .insert(handle.slot, (handle, fixture.session.clone()));
     fixture
         .core
+        .session_registry
         .connected_relays
         .insert(fixture.session.clone());
 

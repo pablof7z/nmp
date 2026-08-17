@@ -36,7 +36,8 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
         slot: 81,
         generation: 1,
     };
-    core.slot_to_relay
+    core.session_registry
+        .slot_to_relay
         .insert(transport.slot, (transport, session.clone()));
 
     let open_piece = |core: &mut EngineCore, piece: &ContextualAtom| {
@@ -106,7 +107,7 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
         core.attribution.release_live_request_claims(&sub_id);
         core.abandon_sub(&sub_id);
     }
-    core.slot_to_relay.remove(&transport.slot);
+    core.session_registry.slot_to_relay.remove(&transport.slot);
     for shape in [&whole, &incumbent_piece, &residual_piece] {
         core.attribution.release_atom(shape);
     }

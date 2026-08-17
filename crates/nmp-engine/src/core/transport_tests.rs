@@ -359,9 +359,9 @@ mod relay_session_key_tests {
             DisconnectReason::Closed,
         ));
 
-        assert!(core.connected_relays.contains(&public));
-        assert!(!core.connected_relays.contains(&session_a));
-        assert!(core.connected_relays.contains(&session_b));
+        assert!(core.session_registry.connected_relays.contains(&public));
+        assert!(!core.session_registry.connected_relays.contains(&session_a));
+        assert!(core.session_registry.connected_relays.contains(&session_b));
     }
 
     #[test]

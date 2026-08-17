@@ -1280,11 +1280,12 @@ mod tests {
             slot: 7,
             generation: 1,
         };
-        core.slot_to_relay.insert(
+        core.session_registry.slot_to_relay.insert(
             handle.slot,
             (handle, RelaySessionKey::public(relay.clone())),
         );
-        core.connected_relays
+        core.session_registry
+            .connected_relays
             .insert(RelaySessionKey::public(relay.clone()));
         let same_effective_set = EventBuilder::new(Kind::ContactList, "")
             .tag(Tag::public_key(followed_b.public_key()))

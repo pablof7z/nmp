@@ -146,7 +146,7 @@ impl Fixture {
 }
 
 fn auth_phase(fixture: &Fixture) -> &AuthSessionPhase {
-    &fixture.core.auth_sessions[&fixture.session].phase
+    &fixture.core.session_registry.auth_sessions[&fixture.session].phase
 }
 
 fn bind(
@@ -701,6 +701,7 @@ fn exact_success_replays_once_and_only_then_allows_eose_credit() {
     );
     assert!(fixture
         .core
+        .session_registry
         .auth_ready_sessions
         .contains_key(&fixture.session));
     assert!(matches!(
@@ -736,6 +737,7 @@ fn exact_early_ok_waits_for_successful_handoff_and_failed_handoff_never_readies(
     assert!(fixture.ok(event.id, true).is_empty());
     assert!(!fixture
         .core
+        .session_registry
         .auth_ready_sessions
         .contains_key(&fixture.session));
     let ready = fixture.core.handle(EngineMsg::AuthSendCompleted(
@@ -758,6 +760,7 @@ fn exact_early_ok_waits_for_successful_handoff_and_failed_handoff_never_readies(
     ));
     assert!(!fixture
         .core
+        .session_registry
         .auth_ready_sessions
         .contains_key(&fixture.session));
     assert!(matches!(auth_phase(&fixture), AuthSessionPhase::Error));
@@ -918,11 +921,14 @@ fn capability_identity_and_teardown_invalidate_only_the_exact_live_epoch() {
         .any(|effect| matches!(effect, Effect::Wire(_))));
     assert!(!fixture
         .core
+        .session_registry
         .auth_ready_sessions
         .contains_key(&fixture.session));
     assert!(matches!(auth_phase(&fixture), AuthSessionPhase::Error));
 
-    let epoch = fixture.core.auth_sessions[&fixture.session].epoch.clone();
+    let epoch = fixture.core.session_registry.auth_sessions[&fixture.session]
+        .epoch
+        .clone();
     let disconnected = fixture.core.handle(EngineMsg::RelayDisconnected(
         fixture.handle,
         fixture.session.clone(),
@@ -932,8 +938,8 @@ fn capability_identity_and_teardown_invalidate_only_the_exact_live_epoch() {
         effect,
         Effect::RelayAuth(AuthEffect::Cancel(cancelled)) if cancelled == &epoch
     )));
-    assert!(fixture.core.auth_sessions.is_empty());
-    assert!(fixture.core.auth_ready_sessions.is_empty());
+    assert!(fixture.core.session_registry.auth_sessions.is_empty());
+    assert!(fixture.core.session_registry.auth_ready_sessions.is_empty());
 }
 
 #[test]
@@ -948,8 +954,8 @@ fn auth_state_stays_one_entry_per_session_under_churn_and_kind_is_reserved() {
         assert!(token.sequence > last_operation);
         last_epoch = token.epoch.sequence;
         last_operation = token.sequence;
-        assert_eq!(fixture.core.auth_sessions.len(), 1);
-        assert!(fixture.core.auth_ready_sessions.len() <= 1);
+        assert_eq!(fixture.core.session_registry.auth_sessions.len(), 1);
+        assert!(fixture.core.session_registry.auth_ready_sessions.len() <= 1);
     }
 
     let effects = fixture.core.handle(EngineMsg::Publish(WriteIntent {
@@ -1081,7 +1087,11 @@ fn unchallenged_protected_write_parks_only_for_the_bounded_probe_then_proceeds()
             }
         )
     )));
-    assert!(!fixture.core.auth_sessions.contains_key(&fixture.session));
+    assert!(!fixture
+        .core
+        .session_registry
+        .auth_sessions
+        .contains_key(&fixture.session));
 }
 
 #[test]
@@ -1245,8 +1255,8 @@ fn disconnect_releases_every_pending_and_ready_phase_and_stale_callbacks_are_ine
         assert!(disconnected
             .iter()
             .any(|effect| matches!(effect, Effect::RelayAuth(AuthEffect::Cancel(_)))));
-        assert!(fixture.core.auth_sessions.is_empty());
-        assert!(fixture.core.auth_ready_sessions.is_empty());
+        assert!(fixture.core.session_registry.auth_sessions.is_empty());
+        assert!(fixture.core.session_registry.auth_ready_sessions.is_empty());
         assert!(fixture
             .core
             .handle(EngineMsg::AuthSendCompleted(
@@ -1312,11 +1322,14 @@ fn auth_required_closed_revokes_ready_and_restricted_closed_is_denied() {
         .any(|effect| matches!(effect, Effect::Wire(_))));
     assert!(!fixture
         .core
+        .session_registry
         .auth_ready_sessions
         .contains_key(&fixture.session));
     assert!(matches!(auth_phase(&fixture), AuthSessionPhase::Denied));
     assert_eq!(
-        EngineCore::auth_source_status(&fixture.core.auth_sessions[&fixture.session]),
+        EngineCore::auth_source_status(
+            &fixture.core.session_registry.auth_sessions[&fixture.session]
+        ),
         SourceStatus::AuthDenied
     );
 
@@ -1367,7 +1380,7 @@ fn auth_timestamps_enforce_future_window_and_survive_backward_clock() {
 #[test]
 fn auth_counter_exhaustion_is_terminal_error_without_wrap_or_request() {
     let mut epoch = Fixture::new();
-    epoch.core.next_auth_epoch = None;
+    epoch.core.session_registry.next_auth_epoch = None;
     let (effects, token) = epoch.challenge("epoch exhausted");
     assert!(token.is_none());
     assert!(!effects
@@ -1376,7 +1389,7 @@ fn auth_counter_exhaustion_is_terminal_error_without_wrap_or_request() {
     assert!(matches!(auth_phase(&epoch), AuthSessionPhase::Error));
 
     let mut operation = Fixture::new();
-    operation.core.next_auth_operation = None;
+    operation.core.session_registry.next_auth_operation = None;
     let (_, token) = operation.challenge("operation exhausted");
     assert!(token.is_none());
     assert!(matches!(auth_phase(&operation), AuthSessionPhase::Error));
@@ -1385,7 +1398,7 @@ fn auth_counter_exhaustion_is_terminal_error_without_wrap_or_request() {
     let (_, policy) = signer.challenge("sign operation exhausted");
     let policy = policy.unwrap();
     bind(&mut signer, &policy, AuthCapability::Policy, POLICY);
-    signer.core.next_auth_operation = None;
+    signer.core.session_registry.next_auth_operation = None;
     assert!(signer
         .core
         .handle(EngineMsg::AuthPolicyCompleted(
@@ -1401,7 +1414,7 @@ fn auth_counter_exhaustion_is_terminal_error_without_wrap_or_request() {
     let (sign_token, unsigned) = send.allow(policy.unwrap());
     bind(&mut send, &sign_token, AuthCapability::Signer, SIGNER);
     let signed = unsigned.sign_with_keys(&send.keys).unwrap();
-    send.core.next_auth_operation = None;
+    send.core.session_registry.next_auth_operation = None;
     assert!(send
         .core
         .handle(EngineMsg::AuthSignerCompleted(
@@ -1539,7 +1552,9 @@ fn auth_send_source_census_has_no_parallel_epoch_field() {
 fn slot_replacement_releases_the_displaced_session_without_waiting_for_disconnect() {
     let mut fixture = Fixture::new();
     fixture.challenge("old session");
-    let old_epoch = fixture.core.auth_sessions[&fixture.session].epoch.clone();
+    let old_epoch = fixture.core.session_registry.auth_sessions[&fixture.session]
+        .epoch
+        .clone();
     let replacement = RelaySessionKey::new(
         fixture.session.relay.clone(),
         AccessContext::Nip42(Keys::generate().public_key()),
@@ -1557,10 +1572,25 @@ fn slot_replacement_releases_the_displaced_session_without_waiting_for_disconnec
         effect,
         Effect::RelayAuth(AuthEffect::Cancel(epoch)) if epoch == &old_epoch
     )));
-    assert!(!fixture.core.auth_sessions.contains_key(&fixture.session));
-    assert!(!fixture.core.connected_relays.contains(&fixture.session));
-    assert!(fixture.core.connected_relays.contains(&replacement));
-    assert!(fixture.core.auth_sessions.len() <= fixture.core.connected_relays.len());
+    assert!(!fixture
+        .core
+        .session_registry
+        .auth_sessions
+        .contains_key(&fixture.session));
+    assert!(!fixture
+        .core
+        .session_registry
+        .connected_relays
+        .contains(&fixture.session));
+    assert!(fixture
+        .core
+        .session_registry
+        .connected_relays
+        .contains(&replacement));
+    assert!(
+        fixture.core.session_registry.auth_sessions.len()
+            <= fixture.core.session_registry.connected_relays.len()
+    );
 }
 
 /// #8 U4 latent-item hardening: `u64::MAX` is reserved BY VALUE for the
@@ -1571,7 +1601,7 @@ fn slot_replacement_releases_the_displaced_session_without_waiting_for_disconnec
 fn auth_sequence_counter_reserves_the_sentinel_and_exhaustion_fails_closed() {
     // The last REAL mintable epoch sequence is u64::MAX - 1.
     let mut fixture = Fixture::new();
-    fixture.core.next_auth_epoch = Some(u64::MAX - 1);
+    fixture.core.session_registry.next_auth_epoch = Some(u64::MAX - 1);
     let (_, policy) = fixture.challenge("last-real-epoch");
     let token = policy.expect("u64::MAX - 1 is still a real mintable epoch");
     assert_eq!(token.epoch.sequence, u64::MAX - 1);
@@ -1580,7 +1610,7 @@ fn auth_sequence_counter_reserves_the_sentinel_and_exhaustion_fails_closed() {
     // challenge records the sentinel fallback epoch in phase Error and
     // requests nothing.
     let mut fixture = Fixture::new();
-    fixture.core.next_auth_epoch = Some(u64::MAX);
+    fixture.core.session_registry.next_auth_epoch = Some(u64::MAX);
     let (effects, policy) = fixture.challenge("sentinel-reserved");
     assert!(
         policy.is_none(),
@@ -1589,7 +1619,12 @@ fn auth_sequence_counter_reserves_the_sentinel_and_exhaustion_fails_closed() {
     assert!(!effects
         .iter()
         .any(|effect| matches!(effect, Effect::RelayAuth(AuthEffect::RequestPolicy { .. }))));
-    let state = fixture.core.auth_sessions.get(&fixture.session).unwrap();
+    let state = fixture
+        .core
+        .session_registry
+        .auth_sessions
+        .get(&fixture.session)
+        .unwrap();
     assert_eq!(state.epoch.sequence, u64::MAX);
     assert!(matches!(state.phase, AuthSessionPhase::Error));
 
@@ -1611,7 +1646,12 @@ fn auth_sequence_counter_reserves_the_sentinel_and_exhaustion_fails_closed() {
             effect,
             Effect::RelayAuth(AuthEffect::RequestSignature { .. })
         )));
-    let state = fixture.core.auth_sessions.get(&fixture.session).unwrap();
+    let state = fixture
+        .core
+        .session_registry
+        .auth_sessions
+        .get(&fixture.session)
+        .unwrap();
     assert!(matches!(state.phase, AuthSessionPhase::Error));
 
     // Once exhausted, later challenges stay failed-closed instead of reusing

@@ -191,7 +191,8 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
         slot: 80,
         generation: 1,
     };
-    core.slot_to_relay
+    core.session_registry
+        .slot_to_relay
         .insert(first_transport.slot, (first_transport, session.clone()));
     accept_request(
         &mut core,
@@ -238,7 +239,8 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
         slot: 80,
         generation: 2,
     };
-    core.slot_to_relay
+    core.session_registry
+        .slot_to_relay
         .insert(transport.slot, (transport, session.clone()));
     accept_request(
         &mut core,
@@ -277,7 +279,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
         .remove(&(session.clone(), sub_id.clone()));
     core.attribution.release_live_request_claims(&sub_id);
     core.abandon_sub(&sub_id);
-    core.slot_to_relay.remove(&transport.slot);
+    core.session_registry.slot_to_relay.remove(&transport.slot);
     core.attribution.release_atom(&incumbent);
     core.attribution.release_atom(&added);
     assert_eq!(
