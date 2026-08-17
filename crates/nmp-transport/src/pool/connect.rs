@@ -76,6 +76,42 @@ fn relay_websocket_config() -> WebSocketConfig {
 
 pub(super) type RelaySocket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
 
+/// Failure from [`open_relay_socket`]. `status` is `Some` only when the
+/// relay's WebSocket handshake actually completed an HTTP exchange and that
+/// response carried a status — a genuine HTTP-level denial, per
+/// `backoff::is_permanent_error`. Every other failure shape reaching this
+/// type (DNS resolution, a bare TCP connect, a stalled TLS/HTTP upgrade, an
+/// interrupted handshake) carries `status: None`, so it can never be
+/// misclassified as permanent by matching digits in `message` — which may
+/// embed the relay's own host and port (issue #1788).
+#[derive(Debug)]
+pub(super) struct ConnectFailure {
+    pub(super) message: String,
+    pub(super) status: Option<u16>,
+}
+
+impl ConnectFailure {
+    /// A failure with no HTTP status — every path except a completed
+    /// handshake response.
+    fn no_status(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            status: None,
+        }
+    }
+}
+
+/// Extract the HTTP status a WebSocket handshake's response actually
+/// carried, when the error is that kind of error. `None` for every other
+/// tungstenite error shape (I/O, protocol, capacity, TLS, ...) — none of
+/// those are an HTTP-level denial and must never be misclassified as one.
+pub(super) fn handshake_http_status(error: &tungstenite::Error) -> Option<u16> {
+    match error {
+        WsError::Http(response) => Some(response.status().as_u16()),
+        _ => None,
+    }
+}
+
 fn install_rustls_provider() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(|| {
@@ -87,22 +123,22 @@ fn install_rustls_provider() {
 /// [`CONNECT_TIMEOUT`]: a stuck TCP connect or a stalled TLS/HTTP upgrade
 /// fails fast rather than wedging the worker thread.
 ///
-pub(super) fn open_relay_socket(relay_url: &str) -> Result<RelaySocket, String> {
+pub(super) fn open_relay_socket(relay_url: &str) -> Result<RelaySocket, ConnectFailure> {
     install_rustls_provider();
 
     let mut request = relay_url
         .into_client_request()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| ConnectFailure::no_status(error.to_string()))?;
     request.headers_mut().insert(
         "User-Agent",
         tungstenite::http::HeaderValue::from_static(concat!("nmp/", env!("CARGO_PKG_VERSION"))),
     );
     let uri = request.uri();
-    let mode = uri_mode(uri).map_err(|error| error.to_string())?;
+    let mode = uri_mode(uri).map_err(|error| ConnectFailure::no_status(error.to_string()))?;
 
     let host = uri
         .host()
-        .ok_or_else(|| WsError::Url(UrlError::NoHostName).to_string())?;
+        .ok_or_else(|| ConnectFailure::no_status(WsError::Url(UrlError::NoHostName).to_string()))?;
     let host = if let Some(stripped) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
         stripped
     } else {
@@ -114,10 +150,10 @@ pub(super) fn open_relay_socket(relay_url: &str) -> Result<RelaySocket, String> 
     });
 
     let stream = connect_with_timeout(host, port, CONNECT_TIMEOUT)
-        .map_err(|error| format!("tcp connect {host}:{port}: {error}"))?;
+        .map_err(|error| ConnectFailure::no_status(format!("tcp connect {host}:{port}: {error}")))?;
     stream
         .set_nodelay(true)
-        .map_err(|error| format!("set_nodelay: {error}"))?;
+        .map_err(|error| ConnectFailure::no_status(format!("set_nodelay: {error}")))?;
     // Bound the TLS + HTTP-upgrade handshake the same way: a relay that
     // completes the TCP handshake but stalls the upgrade would otherwise
     // wedge the blocking `client_tls_with_config` reads/writes indefinitely.
@@ -125,17 +161,24 @@ pub(super) fn open_relay_socket(relay_url: &str) -> Result<RelaySocket, String> 
     // timeout does not leak into the steady state.
     stream
         .set_read_timeout(Some(CONNECT_TIMEOUT))
-        .map_err(|error| format!("set handshake read timeout: {error}"))?;
+        .map_err(|error| ConnectFailure::no_status(format!("set handshake read timeout: {error}")))?;
     stream
         .set_write_timeout(Some(CONNECT_TIMEOUT))
-        .map_err(|error| format!("set handshake write timeout: {error}"))?;
+        .map_err(|error| ConnectFailure::no_status(format!("set handshake write timeout: {error}")))?;
 
     let (socket, _response) =
         client_tls_with_config(request, stream, Some(relay_websocket_config()), None).map_err(
             |error| match error {
-                HandshakeError::Failure(f) => f.to_string(),
+                // The only shape that can carry an HTTP status: the relay
+                // completed the HTTP upgrade exchange and responded with a
+                // rejection (e.g. 401/403). Preserve that status as a typed
+                // value instead of discarding it into `message`.
+                HandshakeError::Failure(f) => ConnectFailure {
+                    status: handshake_http_status(&f),
+                    message: f.to_string(),
+                },
                 HandshakeError::Interrupted(_) => {
-                    "handshake interrupted on blocking stream".to_string()
+                    ConnectFailure::no_status("handshake interrupted on blocking stream")
                 }
             },
         )?;
@@ -237,5 +280,43 @@ mod tests {
             "loopback is an ordinary relay destination: {result:?}"
         );
         accept_thread.join().unwrap();
+    }
+
+    /// Issue #1788 falsifier: a plain connection refusal to a relay on port
+    /// 4031 (or any port/hostname whose digits happen to spell "403") is an
+    /// ordinary transient failure, not an HTTP-level denial. `open_relay_socket`
+    /// still renders its TCP-connect error through the exact
+    /// `"tcp connect {host}:{port}: {error}"` format at this file's
+    /// `connect_with_timeout` call, so `message` genuinely contains the
+    /// substring "403" -- but a bare TCP-connect failure never reaches an
+    /// HTTP response, so `status` must be `None`, and
+    /// `backoff::is_permanent_error` must therefore say "not permanent"
+    /// regardless of what `message` contains. Before the fix, this exact
+    /// message was fed to a substring-matching classifier and misclassified
+    /// as a permanent HTTP-level denial, retiring the relay for the process
+    /// lifetime (`pool.rs`'s documented "never self-reopens").
+    #[test]
+    fn plain_refusal_to_port_4031_is_not_a_permanent_denial() {
+        // Nothing listens here: the OS refuses the connection immediately.
+        let failure = open_relay_socket("ws://127.0.0.1:4031")
+            .err()
+            .expect("nothing should be listening on 127.0.0.1:4031");
+        assert!(
+            failure.message.contains("403"),
+            "test setup: expected the rendered message to embed the port's digits, got {:?}",
+            failure.message
+        );
+        assert_eq!(
+            failure.status, None,
+            "a plain TCP connect refusal never reaches an HTTP response, so it must \
+             carry no status, got message {:?}",
+            failure.message
+        );
+        assert!(
+            !crate::backoff::is_permanent_error(failure.status),
+            "issue #1788: a plain TCP connect refusal to port 4031 must not be \
+             classified as a permanent HTTP-level denial, got message {:?}",
+            failure.message
+        );
     }
 }
