@@ -84,6 +84,35 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   10+ minutes (verified dead socket), foreground, confirm the feed catches up
   and diagnostics show re-established wire subs plus repaired coverage, with zero
   app code. Not reproducible in a simulator or headless test.
+- **A relay's message on a SUCCESSFUL publish is discarded, and no app can
+  reach it.** The frame's text survives as far as
+  `handle_write_ack(event_id, status, message, ..)`
+  (`crates/nmp-engine/src/core/write.rs:5455`, fed the whole `RelayMessage::Ok`
+  at `crates/nmp-engine/src/core/auth_transport.rs:1866`), and is then thrown
+  away by classification: `classify_relay_ack`
+  (`crates/nmp-engine/src/core/mod.rs:435`) returns the UNIT variant
+  `RelayAckClass::Acked` for every `ok=true`, and also for `ok=false` with a
+  `duplicate:` prefix — whose explanation is lost the same way. The `Acked` arm
+  (`write.rs:5507`) commits the unit `PublishQueueAttemptOutcome::Acked`
+  (`crates/nmp-store/src/lib.rs:1347`) and emits the unit
+  `RelayState::Published` (`crates/nmp-engine/src/publish_queue/mod.rs:194`),
+  so the text is in no store row, no `WriteFact`, and nothing across the FFI.
+  Every OTHER answer keeps the relay's words — `Rejected { reason }`,
+  `AuthFailed { reason }`, `RelayWaiting::BackingOff { detail }` — so success
+  is the one outcome an app cannot quote. Carrying it means a payload on all
+  four of those types, in that order; anything less stops at the store
+  boundary. Canary's `ComposeView` renders the absence in words rather than
+  substituting an empty string for a message that was never kept.
+- **`Receipt` does not carry the event id.** `publish` returns a `Receipt`
+  whose only identifier is `id`, the store-issued RECEIPT id
+  (`Packages/NMP/Sources/NMP/Receipt.swift:55`, from
+  `crates/nmp-ffi/src/facade/receipt_stream.rs:208`), even though acceptance
+  has already frozen the event and `PublishQueueEntry.eventID` calls that id
+  "the write's identity from acceptance onward". An app that wants to show
+  what it just published must instead wait for a fact that happens to quote
+  the id (`WriteFact.relay`, or `SigningState.signed`), or re-find its own
+  entry in a `publishQueue` page. Canary's `ComposeView` harvests it from the
+  facts and shows "not reported yet" until one arrives.
 - **Direct-Rust unwindowed observation evidence is built; windowed and native
   SDK parity remain open (#718).** `Frame.execution` carries
   resolver/reducer/runtime-owned observation-scoped facts, but windowed
