@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::{testing, CoverageInterval, PersistenceFault, RedbStore, RelayObserved};
-use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Tag, Timestamp};
+use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag, Timestamp};
 
 use super::*;
 
@@ -567,31 +567,25 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
     }
 }
 
+/// One window's whole projection plus the owner's global handle index: the
+/// two questions "did this transition leave the window byte-identical" and
+/// "did it leave I4 byte-identical" are separate, because the second is not
+/// a property of any one window -- a failed open can leave a stale reverse
+/// edge for a session that no longer exists at all.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HistorySnapshot {
-    target_rows: usize,
-    acquired_tie_seconds: BTreeSet<u64>,
-    last_rows: BTreeMap<EventId, Row>,
-    order: BTreeSet<(Reverse<u64>, EventId)>,
-    last_evidence: Option<Vec<AcquisitionEvidence>>,
-    projection_complete: bool,
-    load: WindowLoad,
-    handle_ids: BTreeSet<HandleId>,
+    window: WindowProjection,
     history_by_handle: HashMap<HandleId, HistorySessionId>,
 }
 
 fn snapshot(core: &EngineCore, id: HistorySessionId) -> HistorySnapshot {
-    let state = &core.history.expect_live(id);
-    assert!(state.pending_load.is_none());
+    let window = core.history.projection(id);
+    assert!(
+        !window.advance_staged,
+        "a baseline snapshot is only meaningful with no advance in flight"
+    );
     HistorySnapshot {
-        target_rows: state.target_rows,
-        acquired_tie_seconds: state.acquired_tie_seconds.clone(),
-        last_rows: state.last_rows.clone(),
-        order: state.order.clone(),
-        last_evidence: state.last_evidence.clone(),
-        projection_complete: state.projection_complete,
-        load: state.load,
-        handle_ids: state.handle_ids.clone(),
+        window,
         history_by_handle: core.history.handle_index_snapshot(),
     }
 }
@@ -655,12 +649,12 @@ fn literal_history_query() -> HistoryQuery {
 /// behind. Derived from state now that windows carry no continuation token.
 fn boundary_second(core: &EngineCore, id: HistorySessionId) -> u64 {
     core.history
-        .expect_live(id)
-        .last_rows
-        .values()
-        .map(|row| row.created_at().as_secs())
-        .min()
+        .projection(id)
+        .rows
+        .last()
         .expect("an opened window holds at least one row")
+        .created_at()
+        .as_secs()
 }
 
 fn open_history(
@@ -789,12 +783,8 @@ fn tie_second_read_failure_dispatches_diagnostics_and_exact_rollback() {
 fn older_window_read_failure_dispatches_diagnostics_and_exact_rollback() {
     let (_directory, mut core, id) = derived_fixture();
     let boundary_secs = boundary_second(&core, id);
-    core.white_box("history.get_mut", |s| {
-        s.history
-            .get_mut(id)
-            .unwrap()
-            .acquired_tie_seconds
-            .insert(boundary_secs)
+    core.white_box("history.force_tie_second_acquired", |s| {
+        s.history.force_tie_second_acquired(id, boundary_secs)
     });
     let before = snapshot(&core, id);
     latch_redb_generation_without_core_diagnostics(&mut core);

@@ -97,11 +97,85 @@ impl Fixture {
         });
         self.core
             .nip77
-            .handoff_children_of(&self.plan_sub_id)
-            .iter()
-            .next()
-            .cloned()
-            .unwrap()
+            .sole_child_in_phase(&self.plan_sub_id, RepairPhase::Handoff)
+    }
+
+    /// Advance the candidate out of its handoff and into an open
+    /// reconciliation session, returning the NEG wire id.
+    ///
+    /// The three steps are the reducer's own -- `take_handoff` hands the
+    /// typed value to `open_neg_session` exactly as `on_relay_frame`'s EOSE
+    /// arm does -- and they are written once here rather than five times
+    /// across the proofs below. A proof that repeats a transition inline is
+    /// a proof that can get the transition subtly wrong in one copy.
+    fn open_neg(&mut self, candidate: &SubId) -> SubId {
+        let handoff = self.core.white_box("nip77.take_handoff", |s| {
+            s.nip77
+                .take_handoff(candidate)
+                .expect("the candidate is a pending handoff")
+        });
+        self.core
+            .white_box("abandon_sub", |s| s.abandon_sub(candidate));
+        self.core.white_box("open_neg_session", |s| {
+            s.open_neg_session(handoff, &mut Vec::new())
+        });
+        self.core
+            .nip77
+            .sole_child_in_phase(&self.plan_sub_id, RepairPhase::Reconciling)
+    }
+
+    /// Promote the candidate to this plan's live tail and open its
+    /// reconciliation session in one step, as an accepted candidate's EOSE
+    /// does.
+    fn activate_live(&mut self, candidate: &SubId) {
+        let handoff = self.core.white_box("nip77.take_handoff", |s| {
+            s.nip77
+                .take_handoff(candidate)
+                .expect("the candidate is a pending handoff")
+        });
+        self.core.white_box("activate_live_and_open_neg", |s| {
+            s.activate_live_and_open_neg(handoff, &mut Vec::new())
+        });
+    }
+
+    /// Abandon the NIP-77 route for the candidate and fall back to an
+    /// ordinary backlog REQ, returning the backlog wire id.
+    fn fallback_to_backlog(&mut self, candidate: &SubId) -> SubId {
+        let handoff = self.core.white_box("nip77.take_handoff", |s| {
+            s.nip77
+                .take_handoff(candidate)
+                .expect("the candidate is a pending handoff")
+        });
+        self.core.white_box("handoff_fallback_to_req", |s| {
+            s.handoff_fallback_to_req(handoff, &mut Vec::new())
+        });
+        self.core
+            .nip77
+            .sole_child_in_phase(&self.plan_sub_id, RepairPhase::Backfill)
+    }
+
+    /// Complete the reconciliation session with one missing id outstanding,
+    /// returning the temporary missing-ids fetch's wire id.
+    fn finish_neg_with_missing_id(&mut self, neg: &SubId, missing: EventId) -> SubId {
+        let session = self.core.white_box("nip77.take_session", |s| {
+            s.nip77
+                .take_session(neg)
+                .expect("the reconciliation session is open")
+        });
+        let relay = self.relay.clone();
+        let neg = neg.clone();
+        self.core.white_box("finish_neg_session", |s| {
+            s.finish_neg_session(
+                neg,
+                relay,
+                session,
+                BTreeSet::from([missing]),
+                &mut Vec::new(),
+            )
+        });
+        self.core
+            .nip77
+            .sole_child_in_phase(&self.plan_sub_id, RepairPhase::Backfill)
     }
 
     fn update(&mut self) {
@@ -212,23 +286,7 @@ fn zero_wire_metadata_attach_extends_the_live_candidate_generation() {
 fn zero_wire_metadata_attach_extends_the_open_neg_generation() {
     let mut fixture = Fixture::new();
     let candidate = fixture.begin_candidate();
-    let handoff = fixture.core.white_box("nip77.take_handoff", |s| {
-        s.nip77.take_handoff(&candidate).unwrap()
-    });
-    fixture
-        .core
-        .white_box("abandon_sub", |s| s.abandon_sub(&candidate));
-    fixture.core.white_box("open_neg_session", |s| {
-        s.open_neg_session(handoff, &mut Vec::new())
-    });
-    let neg = fixture
-        .core
-        .nip77
-        .session_children_of(&fixture.plan_sub_id)
-        .iter()
-        .next()
-        .cloned()
-        .unwrap();
+    let neg = fixture.open_neg(&candidate);
     fixture.update();
     fixture.assert_role_updated(&neg);
     fixture.finish();
@@ -238,35 +296,8 @@ fn zero_wire_metadata_attach_extends_the_open_neg_generation() {
 fn zero_wire_metadata_attach_extends_the_retained_neg_owner_during_missing_id_backfill() {
     let mut fixture = Fixture::new();
     let candidate = fixture.begin_candidate();
-    let handoff = fixture.core.white_box("nip77.take_handoff", |s| {
-        s.nip77.take_handoff(&candidate).unwrap()
-    });
-    fixture
-        .core
-        .white_box("abandon_sub", |s| s.abandon_sub(&candidate));
-    fixture.core.white_box("open_neg_session", |s| {
-        s.open_neg_session(handoff, &mut Vec::new())
-    });
-    let neg = fixture
-        .core
-        .nip77
-        .session_children_of(&fixture.plan_sub_id)
-        .iter()
-        .next()
-        .cloned()
-        .unwrap();
-    let session = fixture.core.white_box("nip77.take_session", |s| {
-        s.nip77.take_session(&neg).unwrap()
-    });
-    fixture.core.white_box("finish_neg_session", |s| {
-        s.finish_neg_session(
-            neg.clone(),
-            fixture.relay.clone(),
-            session,
-            BTreeSet::from([EventId::from_byte_array([7; 32])]),
-            &mut Vec::new(),
-        )
-    });
+    let neg = fixture.open_neg(&candidate);
+    fixture.finish_neg_with_missing_id(&neg, EventId::from_byte_array([7; 32]));
     fixture.update();
     fixture.assert_role_updated(&neg);
     fixture.finish();
@@ -276,20 +307,7 @@ fn zero_wire_metadata_attach_extends_the_retained_neg_owner_during_missing_id_ba
 fn zero_wire_metadata_attach_extends_candidate_and_backlog_generations() {
     let mut fixture = Fixture::new();
     let candidate = fixture.begin_candidate();
-    let handoff = fixture.core.white_box("nip77.take_handoff", |s| {
-        s.nip77.take_handoff(&candidate).unwrap()
-    });
-    fixture.core.white_box("handoff_fallback_to_req", |s| {
-        s.handoff_fallback_to_req(handoff, &mut Vec::new())
-    });
-    let backlog = fixture
-        .core
-        .nip77
-        .backfill_children_of(&fixture.plan_sub_id)
-        .iter()
-        .next()
-        .cloned()
-        .unwrap();
+    let backlog = fixture.fallback_to_backlog(&candidate);
     fixture.update();
     fixture.assert_role_updated(&candidate);
     fixture.assert_role_updated(&backlog);
@@ -320,28 +338,26 @@ fn exact_public_disconnect_retires_the_active_nip77_child_and_every_reverse_owne
     fixture
         .core
         .on_wire_request_handoff(RequestHandoffOutcome::Accepted { attempt_id, handle });
-    let handoff = fixture.core.white_box("nip77.take_handoff", |s| {
-        s.nip77.take_handoff(&candidate).unwrap()
-    });
-    fixture.core.white_box("activate_live_and_open_neg", |s| {
-        s.activate_live_and_open_neg(handoff, &mut Vec::new())
-    });
+    fixture.activate_live(&candidate);
     assert_eq!(
         fixture.core.nip77.live_for_plan(&fixture.plan_sub_id),
         Some(&candidate)
     );
-    assert!(!fixture.core.nip77.sessions_is_empty());
+    let neg = fixture
+        .core
+        .nip77
+        .sole_child_in_phase(&fixture.plan_sub_id, RepairPhase::Reconciling);
 
     fixture.core.white_box("on_relay_disconnected", |s| {
         s.on_relay_disconnected(handle, fixture.session.clone(), DisconnectReason::Error)
     });
-    assert!(fixture.core.nip77.live_is_empty());
-    assert!(fixture.core.nip77.handoffs_is_empty());
-    assert!(fixture.core.nip77.handoffs_is_empty());
-    assert!(fixture.core.nip77.sessions_is_empty());
-    assert!(fixture.core.nip77.sessions_is_empty());
-    assert!(fixture.core.nip77.backfills_is_empty());
-    assert!(fixture.core.nip77.backfills_is_empty());
+    // The disconnect alone -- not `finish`'s later plan cancellation -- must
+    // leave this plan owning no repair state of any kind: no live tail, no
+    // pending handoff, no reconciliation, no backlog fallback. One question
+    // over all four, so a fifth cluster cannot be added and quietly escape it.
+    assert!(!fixture.core.nip77.has_repair_state(&fixture.plan_sub_id));
+    assert_eq!(fixture.core.nip77.phase_of(&neg), None);
+    assert_eq!(fixture.core.nip77.phase_of(&candidate), None);
     assert_eq!(fixture.core.attempts.counts().attempts, 0);
     assert_eq!(fixture.core.attempts.counts().session_keys, 0);
     assert_eq!(fixture.core.attempts.counts().retry_jobs, 0);

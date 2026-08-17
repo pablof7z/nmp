@@ -212,17 +212,48 @@ impl HistorySessions {
         self.by_handle.get(&handle).copied()
     }
 
-    /// Exact structural consistency for I4, by identity rather than by
-    /// count: every handle a session reports in `handle_ids` must resolve
+    /// Exact structural consistency for I4 and for a window's own
+    /// membership/order agreement, by identity rather than by count.
+    ///
+    /// I4: every handle a session reports in `handle_ids` must resolve
     /// back through `by_handle` to that SAME session, and every `by_handle`
     /// entry must point at a session that still reports the handle it names.
     /// `counts()` -- checked elsewhere -- verifies totals; it cannot see one
     /// handle indexed under the wrong session, because that swap preserves
     /// every count it reports (same reasoning as `OwnerIndexed::
     /// assert_consistent` and `RequestAttempts::assert_consistent`).
+    ///
+    /// Membership/order: `HistoryState::order` documents itself as "same
+    /// membership as `last_rows`, ordered canonically newest-first", and
+    /// until #1850 nothing checked it. It has to be checked here because
+    /// [`Self::projection`] answers "which rows, in what order" as ONE
+    /// value derived by walking `order` and looking rows up in `last_rows`
+    /// -- exactly what `history_batch` does on the production path, where
+    /// its `filter_map` silently drops a row `order` names and `last_rows`
+    /// has lost. Without this assertion that fusion would be lossy in both
+    /// directions and the falsifiers reading it would go quiet on the one
+    /// corruption they exist to catch.
     #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (id, state) in &self.sessions {
+            assert_eq!(
+                state.last_rows.len(),
+                state.order.len(),
+                "{at}: history session {id:?} holds {} rows but orders {}",
+                state.last_rows.len(),
+                state.order.len()
+            );
+            for (Reverse(created_at), event_id) in &state.order {
+                let row = state.last_rows.get(event_id).unwrap_or_else(|| {
+                    panic!("{at}: history session {id:?} orders row {event_id}, which it does not hold")
+                });
+                assert_eq!(
+                    row.created_at().as_secs(),
+                    *created_at,
+                    "{at}: history session {id:?} orders row {event_id} at {created_at}, but the row itself is at {}",
+                    row.created_at().as_secs()
+                );
+            }
             for handle_id in &state.handle_ids {
                 let owner = self.by_handle.get(handle_id).unwrap_or_else(|| {
                     panic!(
@@ -308,6 +339,134 @@ impl HistorySessions {
             .filter_map(ScopeAcquisition::opening_evidence)
             .map(|evidence| evidence.sources.len())
             .sum()
+    }
+}
+
+/// What one window currently projects, as ONE comparable value (#1850).
+///
+/// Every field here was reached for individually through `expect_live`, a
+/// production accessor that hands a falsifier the whole `HistoryState`. Two
+/// of them were reconstructed from two fields apiece and are stated as facts
+/// instead:
+///
+/// - `rows` fuses `last_rows` (membership) and `order` (canonical position)
+///   into the one list a `HistoryBatch` would carry. A test that asked
+///   "which rows, newest-first" used to walk `order` and index `last_rows`
+///   by hand; the two agreeing is now [`HistorySessions::assert_consistent`]'s
+///   business, not each caller's.
+/// - `advance_staged` is `pending_load.is_some()` -- the only thing any
+///   falsifier ever asked that `Option` -- so no test holds a
+///   `PendingHistoryLoad`, whose eight rollback-bookkeeping fields are the
+///   window's own business.
+///
+/// `PartialEq` is the point of the struct: the rollback and refused-open
+/// falsifiers assert a failed transition left a window *byte-identical*, and
+/// that claim is one comparison of one value here rather than eight
+/// hand-listed field comparisons that the ninth field silently escapes.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WindowProjection {
+    /// The canonical current row set, newest-first -- membership AND order
+    /// as one fact.
+    pub(super) rows: Vec<Row>,
+    /// Per-branch acquisition evidence in canonical branch order, exactly as
+    /// last delivered (`None` before the first delivery).
+    pub(super) evidence: Option<Vec<AcquisitionEvidence>>,
+    pub(super) load: WindowLoad,
+    pub(super) target_rows: usize,
+    pub(super) acquired_tie_seconds: BTreeSet<u64>,
+    pub(super) projection_complete: bool,
+    pub(super) handle_ids: BTreeSet<HandleId>,
+    /// Whether an advance is staged but not yet committed or rolled back.
+    pub(super) advance_staged: bool,
+}
+
+#[cfg(test)]
+impl WindowProjection {
+    /// The projected row ids, newest-first.
+    pub(super) fn ids(&self) -> Vec<EventId> {
+        self.rows.iter().map(Row::id).collect()
+    }
+
+    /// The projected row with this id, if the window holds it.
+    pub(super) fn row(&self, id: &EventId) -> Option<&Row> {
+        self.rows.iter().find(|row| &row.id() == id)
+    }
+
+    /// Whether the window currently projects this row.
+    pub(super) fn holds(&self, id: &EventId) -> bool {
+        self.row(id).is_some()
+    }
+
+    /// How many rows the window currently projects.
+    pub(super) fn len(&self) -> usize {
+        self.rows.len()
+    }
+}
+
+/// The reads and forced states the window falsifiers need, as questions
+/// rather than fields (#1850).
+///
+/// Before this block existed the only way into a window from a test was
+/// [`HistorySessions::expect_live`] -- a `pub(super)` PRODUCTION accessor
+/// that panics if the window is not live and then hands back the entire
+/// `HistoryState`. 39 test sites used it. `AuthorRouteNeeds` shipped its
+/// question interface with the owner and had 16 clean reads over the same
+/// period; this is that interface, arriving late.
+#[cfg(test)]
+impl HistorySessions {
+    /// Everything one live window projects. Panics exactly where
+    /// [`Self::expect_live`] does, and for the same reason: every caller
+    /// here has already established the window is live, and a silently
+    /// `None`-shaped answer would let a falsifier pass because the window it
+    /// was asking about had vanished.
+    pub(super) fn projection(&self, id: HistorySessionId) -> WindowProjection {
+        let state = self.expect_live(id);
+        WindowProjection {
+            rows: state
+                .order
+                .iter()
+                .map(|(_, event_id)| {
+                    state
+                        .last_rows
+                        .get(event_id)
+                        .expect("history order and membership stay identical")
+                        .clone()
+                })
+                .collect(),
+            evidence: state.last_evidence.clone(),
+            load: state.load,
+            target_rows: state.target_rows,
+            acquired_tie_seconds: state.acquired_tie_seconds.clone(),
+            projection_complete: state.projection_complete,
+            handle_ids: state.handle_ids.clone(),
+            advance_staged: state.pending_load.is_some(),
+        }
+    }
+
+    /// Put one window into the state an evidence refresh must NOT be able to
+    /// serve from its own retained projection, so the falsifier can prove the
+    /// fallback store read happens. A named door for the corruption, like
+    /// `Nip77Sessions::swap_handoff_owners_for_test`: the field it flips is
+    /// private even to `CoreState`, and a test writing it by hand is a test
+    /// that also silently depends on nothing else in the window changing.
+    pub(super) fn force_projection_incomplete(&mut self, id: HistorySessionId) {
+        self.get_mut(id)
+            .expect("forcing a projection incomplete requires a live session")
+            .projection_complete = false;
+    }
+
+    /// Record `second` as a tie second this window already acquired, so the
+    /// next advance takes the older-range path rather than re-proving the
+    /// boundary second. The store-failure falsifiers need to reach the older
+    /// read specifically; driving a real advance to get there first is not
+    /// available to them, because the whole point of the fixture is a store
+    /// that fails the moment it is read.
+    pub(super) fn force_tie_second_acquired(&mut self, id: HistorySessionId, second: u64) {
+        self.get_mut(id)
+            .expect("forcing an acquired tie second requires a live session")
+            .acquired_tie_seconds
+            .insert(second);
     }
 }
 

@@ -7,10 +7,13 @@ fn refused_live_candidate_never_becomes_active_and_keeps_one_owned_retry_deadlin
     let mut fixture = Fixture::new();
     let candidate = fixture.begin_candidate();
     fixture.refuse(&candidate);
-    assert!(fixture.core.nip77.live_is_empty());
+    assert_eq!(fixture.core.nip77.live_for_plan(&fixture.plan_sub_id), None);
     assert_eq!(
-        fixture.core.nip77.handoff_children_of(&fixture.plan_sub_id),
-        BTreeSet::from([candidate.clone()])
+        fixture
+            .core
+            .nip77
+            .sole_child_in_phase(&fixture.plan_sub_id, RepairPhase::Handoff),
+        candidate
     );
     assert_eq!(fixture.core.attempts.counts().retry_jobs, 1);
     assert!(fixture.core.next_deadline().unwrap().is_some());
@@ -20,7 +23,7 @@ fn refused_live_candidate_never_becomes_active_and_keeps_one_owned_retry_deadlin
     assert!(retried
         .iter()
         .any(|effect| matches!(effect, Effect::Wire(_))));
-    assert!(fixture.core.nip77.live_is_empty());
+    assert_eq!(fixture.core.nip77.live_for_plan(&fixture.plan_sub_id), None);
     assert_eq!(fixture.core.attempts.counts().attempts, 1);
     fixture.finish();
 }
@@ -71,75 +74,42 @@ fn stray_eose_cannot_advance_refused_candidate_missing_id_or_backlog_roles() {
     let candidate_id = candidate.begin_candidate();
     candidate.refuse(&candidate_id);
     assert!(candidate.stray_eose(&candidate_id).is_empty());
-    assert!(candidate.core.nip77.is_pending_handoff(&candidate_id));
-    assert!(candidate.core.nip77.live_is_empty());
+    assert_eq!(
+        candidate.core.nip77.phase_of(&candidate_id),
+        Some(RepairPhase::Handoff),
+        "a stray EOSE must not advance the refused candidate out of its handoff"
+    );
+    assert_eq!(
+        candidate.core.nip77.live_for_plan(&candidate.plan_sub_id),
+        None
+    );
     assert_eq!(candidate.core.attempts.counts().retry_jobs, 1);
     candidate.finish();
 
     let mut missing = Fixture::new();
     let live = missing.begin_candidate();
-    let handoff = missing.core.white_box("nip77.take_handoff", |s| {
-        s.nip77.take_handoff(&live).unwrap()
-    });
-    missing
-        .core
-        .white_box("abandon_sub", |s| s.abandon_sub(&live));
-    missing.core.white_box("open_neg_session", |s| {
-        s.open_neg_session(handoff, &mut Vec::new())
-    });
-    let neg = missing
-        .core
-        .nip77
-        .session_children_of(&missing.plan_sub_id)
-        .iter()
-        .next()
-        .cloned()
-        .unwrap();
-    let session = missing.core.white_box("nip77.take_session", |s| {
-        s.nip77.take_session(&neg).unwrap()
-    });
-    missing.core.white_box("finish_neg_session", |s| {
-        s.finish_neg_session(
-            neg,
-            missing.relay.clone(),
-            session,
-            BTreeSet::from([EventId::from_byte_array([11; 32])]),
-            &mut Vec::new(),
-        )
-    });
-    let missing_id = missing
-        .core
-        .nip77
-        .backfill_children_of(&missing.plan_sub_id)
-        .iter()
-        .next()
-        .cloned()
-        .unwrap();
+    let neg = missing.open_neg(&live);
+    let missing_id = missing.finish_neg_with_missing_id(&neg, EventId::from_byte_array([11; 32]));
     missing.refuse(&missing_id);
     assert!(missing.stray_eose(&missing_id).is_empty());
-    assert!(missing.core.nip77.is_pending_backfill(&missing_id));
+    assert_eq!(
+        missing.core.nip77.phase_of(&missing_id),
+        Some(RepairPhase::Backfill),
+        "a stray EOSE must not advance the refused missing-ids fetch out of its backfill"
+    );
     assert_eq!(missing.core.attempts.counts().retry_jobs, 1);
     missing.finish();
 
     let mut backlog = Fixture::new();
     let live = backlog.begin_candidate();
-    let handoff = backlog.core.white_box("nip77.take_handoff", |s| {
-        s.nip77.take_handoff(&live).unwrap()
-    });
-    backlog.core.white_box("handoff_fallback_to_req", |s| {
-        s.handoff_fallback_to_req(handoff, &mut Vec::new())
-    });
-    let backlog_id = backlog
-        .core
-        .nip77
-        .backfill_children_of(&backlog.plan_sub_id)
-        .iter()
-        .next()
-        .cloned()
-        .unwrap();
+    let backlog_id = backlog.fallback_to_backlog(&live);
     backlog.refuse(&backlog_id);
     assert!(backlog.stray_eose(&backlog_id).is_empty());
-    assert!(backlog.core.nip77.is_pending_backfill(&backlog_id));
+    assert_eq!(
+        backlog.core.nip77.phase_of(&backlog_id),
+        Some(RepairPhase::Backfill),
+        "a stray EOSE must not advance the refused backlog fallback out of its backfill"
+    );
     assert_eq!(backlog.core.attempts.counts().retry_jobs, 1);
     backlog.finish();
 }
@@ -148,67 +118,19 @@ fn stray_eose_cannot_advance_refused_candidate_missing_id_or_backlog_roles() {
 fn refused_missing_id_and_backlog_roles_each_keep_one_retry_and_teardown_exactly() {
     let mut missing = Fixture::new();
     let candidate = missing.begin_candidate();
-    let handoff = missing.core.white_box("nip77.take_handoff", |s| {
-        s.nip77.take_handoff(&candidate).unwrap()
-    });
-    missing
-        .core
-        .white_box("abandon_sub", |s| s.abandon_sub(&candidate));
-    missing.core.white_box("open_neg_session", |s| {
-        s.open_neg_session(handoff, &mut Vec::new())
-    });
-    let neg = missing
-        .core
-        .nip77
-        .session_children_of(&missing.plan_sub_id)
-        .iter()
-        .next()
-        .cloned()
-        .unwrap();
-    let session = missing.core.white_box("nip77.take_session", |s| {
-        s.nip77.take_session(&neg).unwrap()
-    });
-    missing.core.white_box("finish_neg_session", |s| {
-        s.finish_neg_session(
-            neg,
-            missing.relay.clone(),
-            session,
-            BTreeSet::from([EventId::from_byte_array([9; 32])]),
-            &mut Vec::new(),
-        )
-    });
-    let missing_id = missing
-        .core
-        .nip77
-        .backfill_children_of(&missing.plan_sub_id)
-        .iter()
-        .next()
-        .cloned()
-        .unwrap();
+    let neg = missing.open_neg(&candidate);
+    let missing_id = missing.finish_neg_with_missing_id(&neg, EventId::from_byte_array([9; 32]));
     missing.refuse(&missing_id);
     assert_eq!(missing.core.attempts.counts().retry_jobs, 1);
-    assert!(missing.core.nip77.live_is_empty());
+    assert_eq!(missing.core.nip77.live_for_plan(&missing.plan_sub_id), None);
     missing.finish();
 
     let mut backlog = Fixture::new();
     let candidate = backlog.begin_candidate();
-    let handoff = backlog.core.white_box("nip77.take_handoff", |s| {
-        s.nip77.take_handoff(&candidate).unwrap()
-    });
-    backlog.core.white_box("handoff_fallback_to_req", |s| {
-        s.handoff_fallback_to_req(handoff, &mut Vec::new())
-    });
-    let backlog_id = backlog
-        .core
-        .nip77
-        .backfill_children_of(&backlog.plan_sub_id)
-        .iter()
-        .next()
-        .cloned()
-        .unwrap();
+    let backlog_id = backlog.fallback_to_backlog(&candidate);
     backlog.refuse(&backlog_id);
     assert_eq!(backlog.core.attempts.counts().retry_jobs, 1);
-    assert!(backlog.core.nip77.live_is_empty());
+    assert_eq!(backlog.core.nip77.live_for_plan(&backlog.plan_sub_id), None);
     backlog.finish();
 }
 
@@ -216,43 +138,8 @@ fn refused_missing_id_and_backlog_roles_each_keep_one_retry_and_teardown_exactly
 fn missing_id_retry_stays_claimless_when_plan_metadata_grows() {
     let mut fixture = Fixture::new();
     let candidate = fixture.begin_candidate();
-    let handoff = fixture.core.white_box("nip77.take_handoff", |s| {
-        s.nip77.take_handoff(&candidate).unwrap()
-    });
-    fixture
-        .core
-        .white_box("abandon_sub", |s| s.abandon_sub(&candidate));
-    fixture.core.white_box("open_neg_session", |s| {
-        s.open_neg_session(handoff, &mut Vec::new())
-    });
-    let neg = fixture
-        .core
-        .nip77
-        .session_children_of(&fixture.plan_sub_id)
-        .iter()
-        .next()
-        .cloned()
-        .unwrap();
-    let session = fixture.core.white_box("nip77.take_session", |s| {
-        s.nip77.take_session(&neg).unwrap()
-    });
-    fixture.core.white_box("finish_neg_session", |s| {
-        s.finish_neg_session(
-            neg,
-            fixture.relay.clone(),
-            session,
-            BTreeSet::from([EventId::from_byte_array([13; 32])]),
-            &mut Vec::new(),
-        )
-    });
-    let missing_id = fixture
-        .core
-        .nip77
-        .backfill_children_of(&fixture.plan_sub_id)
-        .iter()
-        .next()
-        .cloned()
-        .unwrap();
+    let neg = fixture.open_neg(&candidate);
+    let missing_id = fixture.finish_neg_with_missing_id(&neg, EventId::from_byte_array([13; 32]));
     fixture.refuse(&missing_id);
     fixture.update();
     let due = fixture.core.next_deadline().unwrap().unwrap();

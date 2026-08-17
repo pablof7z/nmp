@@ -94,8 +94,9 @@ fn losing_a_relay_generation_leaves_no_orphaned_plan_edges() {
         DisconnectReason::Error,
     ));
     assert_mirrors(&core, "after disconnect");
-    assert!(
-        core.nip77.handoffs_is_empty(),
+    assert_eq!(
+        core.nip77.counts().handoffs,
+        0,
         "the dead generation's handoffs survived its disconnect"
     );
 

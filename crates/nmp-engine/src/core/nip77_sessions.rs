@@ -163,11 +163,6 @@ impl Nip77Sessions {
         self.live.get(plan)
     }
 
-    #[cfg(test)]
-    pub(super) fn has_live(&self, plan: &SubId) -> bool {
-        self.live.contains_key(plan)
-    }
-
     pub(super) fn set_live(&mut self, plan: SubId, live_sub_id: SubId) {
         self.live.insert(plan, live_sub_id);
     }
@@ -179,11 +174,6 @@ impl Nip77Sessions {
     /// Forget every plan whose live tail was being served by one relay.
     pub(super) fn drop_live_for_relay(&mut self, relay: &RelayUrl) {
         self.live.retain(|plan_sub_id, _| &plan_sub_id.0 != relay);
-    }
-
-    #[cfg(test)]
-    pub(super) fn live_is_empty(&self) -> bool {
-        self.live.is_empty()
     }
 
     pub(super) fn has_live_on_relay(&self, relay: &RelayUrl) -> bool {
@@ -251,11 +241,6 @@ impl Nip77Sessions {
 
     pub(super) fn take_backfill(&mut self, sub_id: &SubId) -> Option<TemporaryReq> {
         self.backfills.take(sub_id)
-    }
-
-    #[cfg(test)]
-    pub(super) fn is_pending_backfill(&self, sub_id: &SubId) -> bool {
-        self.backfills.contains(sub_id)
     }
 
     /// Whether `sub_id` is the exact live candidate one plan's pending
@@ -588,40 +573,90 @@ impl Nip77Sessions {
     pub(super) fn swap_handoff_owners_for_test(&mut self, a: &SubId, b: &SubId) {
         self.handoffs.swap_owners_for_test(a, b);
     }
+}
 
-    // -- test-only reads ------------------------------------------------------
-    //
-    // What the plan-metadata proofs need to see into one cluster without a
-    // raw field, mirroring `live_is_empty` above.
+/// Which of this owner's three clusters currently holds one wire
+/// subscription -- the repair state machine's own vocabulary, so a falsifier
+/// names a phase rather than a map (#1850).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RepairPhase {
+    /// A candidate live REQ waiting for its exact EOSE barrier.
+    Handoff,
+    /// An open reconciliation session.
+    Reconciling,
+    /// A temporary NIP-01 request outside router demand.
+    Backfill,
+}
 
-    #[cfg(test)]
-    pub(super) fn handoffs_is_empty(&self) -> bool {
-        self.handoffs.is_empty()
+/// The reads the NIP-77 proofs need, as questions rather than maps (#1850).
+///
+/// The block this replaces had three `*_is_empty` and three `*_children_of`
+/// accessors -- one per private map. That is namespacing, not a protocol: it
+/// let a proof assert "the candidate is still a pending handoff" with a bool
+/// that says nothing about where the candidate went if the answer is no, and
+/// it let a fixture take `children_of(plan).iter().next()` and call it "the"
+/// child without ever establishing there was only one. Both questions are
+/// answered here once, over the whole state machine rather than one map at a
+/// time.
+#[cfg(test)]
+impl Nip77Sessions {
+    /// Which phase `sub_id` occupies, or `None` if this owner does not hold
+    /// it in any cluster.
+    ///
+    /// A subscription is in at most one cluster: `handoffs`, `sessions` and
+    /// `backfills` are keyed by wire id and every transition between them
+    /// takes from one before inserting into the next. Asserting this rather
+    /// than assuming it is what makes the answer a phase instead of three
+    /// independent bools -- a candidate that failed to leave the handoff
+    /// cluster on its way to reconciliation reads as a broken state machine
+    /// here, where three bools would just both be true and nobody would ask
+    /// the second one.
+    ///
+    /// Given the three clusters' current doors, no production path was found
+    /// that can actually reach this panic: every transition between them
+    /// mints a fresh role id rather than reusing the source cluster's key
+    /// (#932), so a leaked entry keeps its own id and occupies one phase. It
+    /// stays as the same defense-in-depth `author_route_needs.rs`'s
+    /// `checked_sub` is documented as, not because a falsifier reaches it
+    /// today.
+    pub(super) fn phase_of(&self, sub_id: &SubId) -> Option<RepairPhase> {
+        let phases: Vec<RepairPhase> = [
+            (self.handoffs.contains(sub_id), RepairPhase::Handoff),
+            (self.sessions.contains(sub_id), RepairPhase::Reconciling),
+            (self.backfills.contains(sub_id), RepairPhase::Backfill),
+        ]
+        .into_iter()
+        .filter_map(|(held, phase)| held.then_some(phase))
+        .collect();
+        assert!(
+            phases.len() <= 1,
+            "NIP-77 subscription {sub_id:?} occupies more than one repair phase: {phases:?}"
+        );
+        phases.first().copied()
     }
 
-    #[cfg(test)]
-    pub(super) fn sessions_is_empty(&self) -> bool {
-        self.sessions.is_empty()
-    }
-
-    #[cfg(test)]
-    pub(super) fn backfills_is_empty(&self) -> bool {
-        self.backfills.is_empty()
-    }
-
-    #[cfg(test)]
-    pub(super) fn handoff_children_of(&self, plan: &SubId) -> BTreeSet<SubId> {
-        self.handoffs.children_of(plan)
-    }
-
-    #[cfg(test)]
-    pub(super) fn session_children_of(&self, plan: &SubId) -> BTreeSet<SubId> {
-        self.sessions.children_of(plan)
-    }
-
-    #[cfg(test)]
-    pub(super) fn backfill_children_of(&self, plan: &SubId) -> BTreeSet<SubId> {
-        self.backfills.children_of(plan)
+    /// The one child `plan` currently owns in `phase`.
+    ///
+    /// Panics unless there is exactly one. Every caller drove a single
+    /// transition and wants the wire id it minted; the spelling this replaces
+    /// (`children_of(plan).iter().next().cloned().unwrap()`) took the
+    /// lowest-sorting of however many there were, so a transition that opened
+    /// a second child by mistake went unnoticed and the rest of the proof
+    /// silently ran against an arbitrary one of them.
+    pub(super) fn sole_child_in_phase(&self, plan: &SubId, phase: RepairPhase) -> SubId {
+        let children = match phase {
+            RepairPhase::Handoff => self.handoffs.children_of(plan),
+            RepairPhase::Reconciling => self.sessions.children_of(plan),
+            RepairPhase::Backfill => self.backfills.children_of(plan),
+        };
+        assert_eq!(
+            children.len(),
+            1,
+            "plan {plan:?} owns {} children in {phase:?}, not one: {children:?}",
+            children.len()
+        );
+        children.into_iter().next().expect("checked exactly one")
     }
 }
 

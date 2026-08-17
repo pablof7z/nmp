@@ -72,19 +72,30 @@ mod history_mutation_tests {
             Effect::HistoryLoadResult(session, Ok(())) if *session == id
         )));
         core.handle(EngineMsg::CommitHistoryLoad(id));
-        assert_eq!(core.history.expect_live(id).last_rows.len(), 6);
+        assert_eq!(core.history.projection(id).len(), 6);
         core.history_store_queries.set(0);
         core.history_rows_examined.set(0);
         (core, id)
     }
 
     fn ordered_ids(core: &EngineCore, id: HistorySessionId) -> Vec<EventId> {
-        core.history
-            .expect_live(id)
-            .order
-            .iter()
-            .map(|(_, event_id)| *event_id)
-            .collect()
+        core.history.projection(id).ids()
+    }
+
+    /// The window's incremental projection against a full recomputation from
+    /// the canonical store, compared as the ordered row list rather than as
+    /// the `last_rows` map the oracle happens to return: the incremental path
+    /// maintains membership and canonical position in two collections, and
+    /// only comparing the fused list can see them disagree.
+    fn assert_matches_oracle(core: &EngineCore, id: HistorySessionId, at: &str) {
+        let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
+        let mut expected: Vec<_> = oracle.into_values().collect();
+        expected.sort_by_key(|row| (Reverse(row.created_at().as_secs()), row.id()));
+        assert_eq!(
+            core.history.projection(id).rows,
+            expected,
+            "incremental history diverged from the full oracle {at}"
+        );
     }
 
     fn ingest(
@@ -147,7 +158,7 @@ mod history_mutation_tests {
             .deltas
             .iter()
             .any(|delta| matches!(delta, RowDelta::Removed(_))));
-        assert_eq!(core.history.expect_live(id).last_rows.len(), 6);
+        assert_eq!(core.history.projection(id).len(), 6);
 
         // Middle provenance growth is exact from the committed fact.
         let middle = ordered_ids(&core, id)[2];
@@ -271,13 +282,11 @@ mod history_mutation_tests {
             })
             .unwrap();
         assert_eq!(
-            ordered_ids(&core, id)
+            core.history
+                .projection(id)
+                .rows
                 .iter()
-                .map(|event_id| {
-                    core.history.expect_live(id).last_rows[event_id]
-                        .created_at()
-                        .as_secs()
-                })
+                .map(|row| row.created_at().as_secs())
                 .collect::<Vec<_>>(),
             vec![400, 300]
         );
@@ -285,13 +294,11 @@ mod history_mutation_tests {
         core.handle(EngineMsg::RequestRows(id, 4));
         core.handle(EngineMsg::CommitHistoryLoad(id));
         assert_eq!(
-            ordered_ids(&core, id)
+            core.history
+                .projection(id)
+                .rows
                 .iter()
-                .map(|event_id| {
-                    core.history.expect_live(id).last_rows[event_id]
-                        .created_at()
-                        .as_secs()
-                })
+                .map(|row| row.created_at().as_secs())
                 .collect::<Vec<_>>(),
             vec![400, 300, 200, 100]
         );
@@ -380,7 +387,8 @@ mod history_mutation_tests {
         assert_eq!(core.history_rows_examined.get(), 0);
         assert_eq!(core.history_affected_row_queries.get(), 1);
         assert_eq!(ordered_ids(&core, strict_id)[0], new.id);
-        let strict_new = &core.history.expect_live(strict_id).last_rows[&new.id];
+        let projection = core.history.projection(strict_id);
+        let strict_new = projection.row(&new.id).expect("the new row is projected");
         assert_eq!(
             strict_new.sources,
             BTreeSet::from([other.clone(), wanted.clone()]),
@@ -413,8 +421,7 @@ mod history_mutation_tests {
         );
 
         for history_id in [strict_id, agnostic_id] {
-            let (oracle, _) = core.history_rows_and_evidence_for(history_id).unwrap();
-            assert_eq!(core.history.expect_live(history_id).last_rows, oracle);
+            assert_matches_oracle(&core, history_id, "after the strict/agnostic deletion");
         }
     }
 
@@ -432,11 +439,7 @@ mod history_mutation_tests {
             .unwrap();
         base.push(replaceable.clone());
         let (mut core, id) = open_six(&base, BTreeSet::from([9, 10_000]), &relay);
-        assert!(core
-            .history
-            .expect_live(id)
-            .last_rows
-            .contains_key(&replaceable.id));
+        assert!(core.history.projection(id).holds(&replaceable.id));
         let replacement = EventBuilder::new(Kind::from(10_000u16), "new")
             .tag(room_tag(47))
             .custom_created_at(Timestamp::from(1_000u64))
@@ -564,11 +567,7 @@ mod history_mutation_tests {
             "one old-boundary reconciliation finds Z despite predecessor restoring count"
         );
         assert_eq!(ordered_ids(&core, id), vec![x.id, y.id, z.id]);
-        assert!(!core
-            .history
-            .expect_live(id)
-            .last_rows
-            .contains_key(&predecessor.id));
+        assert!(!core.history.projection(id).holds(&predecessor.id));
         assert!(batch
             .deltas
             .iter()
@@ -645,12 +644,7 @@ mod history_mutation_tests {
             assert!(core.history_store_queries.get() <= 1);
             assert!(core.history_rows_examined.get() <= 1);
 
-            let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
-            assert_eq!(
-                core.history.expect_live(id).last_rows,
-                oracle,
-                "incremental history diverged from full oracle at mixed batch {step}"
-            );
+            assert_matches_oracle(&core, id, &format!("at mixed batch {step}"));
         }
     }
 
@@ -706,8 +700,13 @@ mod history_mutation_tests {
             .unwrap();
         core.handle(EngineMsg::RequestRows(id, 6));
         core.handle(EngineMsg::CommitHistoryLoad(id));
-        assert_eq!(core.history.expect_live(id).last_rows.len(), 6);
-        let primary = *core.history.expect_live(id).handle_ids.first().unwrap();
+        assert_eq!(core.history.projection(id).len(), 6);
+        let primary = *core
+            .history
+            .projection(id)
+            .handle_ids
+            .first()
+            .expect("an opened window holds at least one resolver handle");
         assert_eq!(core.resolver.root_atoms(primary).len(), 8);
         assert!(core.resolver.subtree_atoms(primary).len() > 8);
 
@@ -723,8 +722,7 @@ mod history_mutation_tests {
             .deltas
             .iter()
             .any(|delta| matches!(delta, RowDelta::Added(row) if row.id() == replacement.id)));
-        let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
-        assert_eq!(core.history.expect_live(id).last_rows, oracle);
+        assert_matches_oracle(&core, id, "after the multi-root replacement");
     }
 
     #[test]
@@ -750,16 +748,9 @@ mod history_mutation_tests {
         let batch = assert_one_atomic_batch(&effects, id);
         assert_eq!(core.history_store_queries.get(), 0);
         assert_eq!(core.history_rows_examined.get(), 0);
-        assert!(core
-            .history
-            .expect_live(id)
-            .last_rows
-            .contains_key(&late.id));
-        assert!(!core
-            .history
-            .expect_live(id)
-            .last_rows
-            .contains_key(&old_boundary.id));
+        let projection = core.history.projection(id);
+        assert!(projection.holds(&late.id));
+        assert!(!projection.holds(&old_boundary.id));
         assert!(batch
             .deltas
             .iter()
@@ -767,8 +758,7 @@ mod history_mutation_tests {
         assert!(batch.deltas.iter().any(
             |delta| matches!(delta, RowDelta::Removed(event_id) if *event_id == old_boundary.id)
         ));
-        let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
-        assert_eq!(core.history.expect_live(id).last_rows, oracle);
+        assert_matches_oracle(&core, id, "after the late tie-second insert");
     }
 
     #[test]
@@ -823,8 +813,7 @@ mod history_mutation_tests {
         assert_one_atomic_batch(&effects, id);
         assert_eq!(core.history_store_queries.get(), 1);
         assert_eq!(core.history_rows_examined.get(), 1);
-        let (oracle, _) = core.history_rows_and_evidence_for(id).unwrap();
-        assert_eq!(core.history.expect_live(id).last_rows, oracle);
+        assert_matches_oracle(&core, id, "after the Redb insert and retraction");
     }
 
     #[test]
@@ -883,15 +872,10 @@ mod history_mutation_tests {
             })
             .unwrap();
 
-        let prior_rows = core.history.expect_live(id).last_rows.clone();
-        let prior_order = core.history.expect_live(id).order.clone();
-        let prior_evidence = core.history.expect_live(id).last_evidence.clone();
-        let prior_handles = core.history.expect_live(id).handle_ids.clone();
+        let prior = core.history.projection(id);
         let ordinary_prior_rows = core.observations[&ordinary_id].last_rows.clone();
         let ordinary_prior_evidence = core.observations[&ordinary_id].last_evidence.clone();
-        let second_prior_rows = core.history.expect_live(second_id).last_rows.clone();
-        let second_prior_evidence = core.history.expect_live(second_id).last_evidence.clone();
-        let second_prior_handles = core.history.expect_live(second_id).handle_ids.clone();
+        let second_prior = core.history.projection(second_id);
 
         // A staged advance mutates only this session's retained projection
         // and emits no delivery fact until commit; every other projection
@@ -901,8 +885,8 @@ mod history_mutation_tests {
             effect,
             Effect::HistoryLoadResult(session, Ok(())) if *session == id
         )));
-        assert!(core.history.expect_live(id).pending_load.is_some());
-        assert_eq!(core.history.expect_live(id).last_rows.len(), 6);
+        assert!(core.history.projection(id).advance_staged);
+        assert_eq!(core.history.projection(id).len(), 6);
         assert!(!staged
             .iter()
             .any(|effect| matches!(effect, Effect::EmitHistory(..) | Effect::EmitRows(..))));
@@ -915,26 +899,18 @@ mod history_mutation_tests {
             ordinary_prior_evidence
         );
         assert_eq!(
-            core.history.expect_live(second_id).last_rows,
-            second_prior_rows
-        );
-        assert_eq!(
-            core.history.expect_live(second_id).last_evidence,
-            second_prior_evidence
-        );
-        assert_eq!(
-            core.history.expect_live(second_id).handle_ids,
-            second_prior_handles
+            core.history.projection(second_id),
+            second_prior,
+            "a staged advance on one window must leave every other window byte-identical"
         );
 
         let rolled_back = core.handle(EngineMsg::RollbackHistoryLoad(id));
-        let state = &core.history.expect_live(id);
-        assert_eq!(state.last_rows, prior_rows);
-        assert_eq!(state.order, prior_order);
-        assert_eq!(state.last_evidence, prior_evidence);
-        assert_eq!(state.target_rows, 3);
-        assert_eq!(state.handle_ids, prior_handles);
-        assert!(state.pending_load.is_none());
+        assert_eq!(
+            core.history.projection(id),
+            prior,
+            "rollback must restore the window byte-identical"
+        );
+        assert_eq!(prior.target_rows, 3, "the window was at its opening target");
         assert!(!rolled_back
             .iter()
             .any(|effect| matches!(effect, Effect::EmitHistory(..) | Effect::EmitRows(..))));
@@ -946,7 +922,7 @@ mod history_mutation_tests {
             Effect::HistoryLoadResult(session, Ok(())) if *session == id
         )));
         let committed = core.handle(EngineMsg::CommitHistoryLoad(id));
-        assert_eq!(core.history.expect_live(id).last_rows.len(), 6);
+        assert_eq!(core.history.projection(id).len(), 6);
         let delivered: Vec<_> = retried
             .iter()
             .chain(committed.iter())
@@ -967,7 +943,7 @@ mod history_mutation_tests {
             3,
             "initial, exact tie-second, and older handles all contribute evidence"
         );
-        let owned_handles = core.history.expect_live(id).handle_ids.clone();
+        let owned_handles = core.history.projection(id).handle_ids;
         core.handle(EngineMsg::UnsubscribeHistory(id));
         assert!(core.history.is_retired(id));
         for handle in owned_handles {
@@ -986,11 +962,11 @@ mod history_mutation_tests {
             })
             .unwrap();
         core.handle(EngineMsg::RequestRows(active_id, 6));
-        let active_handles = core.history.expect_live(active_id).handle_ids.clone();
-        assert!(core.history.expect_live(active_id).pending_load.is_some());
+        let active = core.history.projection(active_id);
+        assert!(active.advance_staged);
         core.handle(EngineMsg::UnsubscribeHistory(active_id));
         assert!(core.history.is_retired(active_id));
-        for handle in active_handles {
+        for handle in active.handle_ids {
             assert!(core.resolver.root_atoms(handle).is_empty());
         }
     }

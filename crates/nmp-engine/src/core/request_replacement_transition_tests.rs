@@ -282,7 +282,11 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
     let third_plan = fixture.core.router.plan().reqs[&fixture.session][0]
         .sub_id
         .clone();
-    assert!(!fixture.core.nip77.is_pending_handoff(&second_candidate));
+    assert_eq!(
+        fixture.core.nip77.phase_of(&second_candidate),
+        None,
+        "a superseded candidate must leave every repair phase, not merely its handoff"
+    );
     assert!(!fixture
         .core
         .pending_request_evidence

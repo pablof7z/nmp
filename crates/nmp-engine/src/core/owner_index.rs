@@ -163,11 +163,6 @@ where
         self.by_child.len()
     }
 
-    #[cfg(test)]
-    pub(super) fn is_empty(&self) -> bool {
-        self.by_child.is_empty() && self.by_owner.is_empty()
-    }
-
     /// Test-only: swap which owner's reverse set names which owner's
     /// children, touching `by_owner` alone -- the forward map, `len`,
     /// `owner_keys`, and `owner_edges` are all unchanged by this call. This
