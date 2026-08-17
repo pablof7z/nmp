@@ -53,18 +53,22 @@ struct AutoAtomGroup {
     /// Routing facts keyed by the author they were projected for — the
     /// coverage solve's extra candidates.
     evidence_by_author: BTreeMap<PublicKey, BTreeSet<RoutingEvidence>>,
-    /// Every member atom's routing facts, unioned. Routed DIRECTLY, whether
-    /// or not the atom that carried them named an author: an `nevent` hint
-    /// names a relay for one event, and an event has no author dimension to
-    /// solve over.
+    /// Every member atom's routing facts, unioned. Routed directly ONLY when
+    /// the group is unbound: an author-bearing group's hints already reach it
+    /// through `evidence_by_author` above, inside the solve. The union is
+    /// exactly why the direct lane must stay narrow — one member's `nevent`
+    /// hint appears here on behalf of the whole group.
     routing_evidence: BTreeSet<RoutingEvidence>,
     /// Union of the resolved authors across the group.
     authors: BTreeSet<PublicKey>,
-    /// True iff some atom here resolved NO authors. Such an atom is only
-    /// covered by the author-erased skeleton, so when it is present the
-    /// additive lanes must carry that bare skeleton rather than the group's
-    /// author union — the union would silently narrow an unbounded demand
-    /// into one that names other people's authors.
+    /// True iff some atom here left `authors` UNBOUND — asked about everyone,
+    /// as opposed to bound-but-resolved-to-nobody, which asked about no one
+    /// and is not this. Such an atom is only covered by the author-erased
+    /// skeleton, so when it is present the additive lanes must carry that
+    /// bare skeleton rather than the group's author union — the union would
+    /// silently narrow an unbounded demand into one that names other
+    /// people's authors. It is also the only case whose hints have nowhere
+    /// to go but the direct lane.
     unbounded: bool,
     demands: BTreeSet<DemandKey>,
     authors_by_demand: BTreeMap<DemandKey, BTreeSet<PublicKey>>,
@@ -450,7 +454,14 @@ impl Router {
                     group
                         .routing_evidence
                         .extend(atom.routing_evidence.iter().cloned());
-                    if authors.is_empty() {
+                    // UNBOUND, not "resolved to nobody". `Skeleton::of`
+                    // reports an empty author set for both `authors: None`
+                    // and `authors: Some(∅)`, and those are different
+                    // demands: the first asked about everyone, the second
+                    // asked about nobody. `coverage_claims` already draws
+                    // exactly that line, and the two halves of this change
+                    // must not disagree about it.
+                    if atom.filter.authors.is_none() {
                         group.unbounded = true;
                     }
                     for author in authors {
@@ -609,12 +620,6 @@ impl Router {
                     .push((filter, provenance, ownership));
             }
 
-            // The group's own routing facts, routed DIRECTLY. This runs for
-            // every `Auto` group, not only for one whose selection happened
-            // to name no authors: an `nevent`'s relay hint says where THAT
-            // event lives, which is an answer the per-author coverage solve
-            // above cannot express and, for a hinted event by an author
-            // whose outbox is already covered, would otherwise discard.
             let lane_ownership = auto_ownership(
                 skeleton,
                 access,
@@ -623,14 +628,35 @@ impl Router {
                 &BTreeSet::new(),
                 group.unbounded,
             );
-            push_routes(
-                &mut bag,
-                &lane_filter,
-                &source,
-                access,
-                route::provenance_for_projected(&group.routing_evidence),
-                &lane_ownership,
-            );
+
+            // The group's own routing facts, routed DIRECTLY -- but ONLY for
+            // an unbound group.
+            //
+            // Hints reach an author-bearing group already, as per-author
+            // candidates in the solve above (`add_projected_candidates`),
+            // where they compete for the k=2 slots and earn coverage like
+            // any other relay. An unbound group has no authors to key those
+            // candidates on, so its hints have nowhere to enter and would
+            // simply vanish. This lane is that gap and nothing more.
+            //
+            // Running it unconditionally would ADD a lane author-bearing
+            // atoms never had: a hinted relay would get a REQ outside the
+            // solve and outside coverage, `routing_evidence` is unioned
+            // across the group so one member's `nevent` hint would drag
+            // every sibling's filter to that relay, and the durable claim
+            // would cover every author in the group. That is a behaviour
+            // expansion, not a consequence of collapsing two routing values,
+            // so it stays out.
+            if group.unbounded {
+                push_routes(
+                    &mut bag,
+                    &lane_filter,
+                    &source,
+                    access,
+                    route::provenance_for_projected(&group.routing_evidence),
+                    &lane_ownership,
+                );
+            }
 
             // Operator app policy supplements the group's full author set,
             // and routes every atom including the unbounded ones (closes #7

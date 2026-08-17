@@ -158,11 +158,22 @@ class.
 
 Two consequences worth naming:
 
-- **`provenance_for_projected` now runs for author-bearing atoms too.** An
-  `nevent`'s relay hint says where *that event* lives, which the per-author
-  coverage solve cannot express and, for a hinted event whose author is already
-  covered, previously discarded. This is a real behaviour change and it moved
-  the differential oracle's plan (see below).
+- **The direct hint lane stays narrow.** `provenance_for_projected` runs only
+  when the group is unbound. That is the case that motivated it: an unbound
+  selection resolves no authors, so its hints have no author to enter the solve
+  as candidates for and would simply vanish. An author-bearing group's hints
+  already reach it through `add_projected_candidates`, inside the solve, where
+  they compete for the k=2 slots and earn coverage like any other relay — so
+  routing for author-bearing groups is **byte-for-byte master's**.
+
+  An earlier revision ran this lane unconditionally. That was a behaviour
+  expansion rather than a consequence of collapsing two routing values: a
+  hinted relay got a REQ outside the solve and outside coverage, one member's
+  `nevent` hint dragged every sibling's filter along (`routing_evidence` is
+  unioned across the group), the durable claim covered every author in the
+  group, and with an unbound member the hint relay received the bare skeleton —
+  `kind:1` from anyone, no limit. Narrowed, with a falsifier in both directions
+  (BREAK D).
 - **The bag partition merges.** `bag.entry(routing)` is the coalescing unit, so
   what used to be the outbox lane and the supplemental lane now share one
   partition and may merge. That is intended — they are one strategy now — but
@@ -177,11 +188,27 @@ group's author union would silently narrow "kind:1 from anyone" into "kind:1
 from alice" — the app asks for everyone, receives one author, and nothing
 reports a loss.
 
-`AutoAtomGroup::unbounded` records that some member named no authors; the
-additive lanes then carry the bare skeleton, which supersets every
+`AutoAtomGroup::unbounded` records that some member left `authors` **unbound**;
+the additive lanes then carry the bare skeleton, which supersets every
 author-bearing sibling. `auto_ownership` gives that member its own coverage
 claim and owner edge, which the per-author walk cannot produce (an empty author
 set has nothing to iterate, and `is_disjoint` against it is vacuously true).
+
+`unbound` is read from `atom.filter.authors.is_none()`, deliberately not from
+`Skeleton::of`'s empty author set — that reports empty for both `None` and
+`Some(∅)`, and those are different demands. "Asked about everyone" is unbound;
+"asked about nobody" is not, and gets no claim. `coverage_claim_atoms` already
+draws exactly that line, and the two halves of this change must agree about it.
+(Unreachable today, since the resolver yields no atom for an empty bound slot,
+but the disagreement should not ship.)
+
+**Adversarial review found this accounting sound.** It tried to construct an
+over-crediting case — durable coverage minted for authors never served, the
+unrecoverable direction — and could not, for structural reasons: the unbounded
+claim widens in lockstep with `lane_filter` (one `if` decides both, so they
+cannot drift), coverage rows are exact-key lookups so a bare-skeleton credit
+never satisfies a narrower key, and `both_constrain` refuses to union an
+unbounded operand with a bounded one, so the bare member ships as its own REQ.
 
 ## `RelayRequest` reports which lane asked
 
@@ -287,7 +314,7 @@ Baseline measured, not assumed: a throwaway worktree at `origin/master`
 | Tree | Bazel targets | passed | failed | ignored |
 |---|---|---|---|---|
 | `0ab58e7c` (`origin/master`, rebased parent) | 121 / 121 pass | 2067 | 0 | 10 |
-| this branch | 121 / 121 pass | 2074 | 0 | 10 |
+| this branch | 121 / 121 pass | 2077 | 0 | 10 |
 
 Target set **identical** (121 both sides; the only `BUILD.bazel` diff in the
 whole change is one blank line, now canonical from
@@ -300,10 +327,10 @@ Reconciled per target rather than in aggregate — a diff of the 121-row
 |---|---|---|---|
 | `nmp-grammar:unit_tests` | 68 | 69 | inference tests deleted, routing/normalization tests added |
 | `nmp-engine:unit_tests` | 305 | 306 | the lane-reporting falsifier |
-| `nmp-router:contract` | 7 | 9 | the bag-merge and refcount falsifiers |
+| `nmp-router:contract` | 7 | 12 | bag-merge, refcount, hint-lane (x2) and admit-path falsifiers |
 | `nmp-router:unit_tests` | 71 | 74 | `classify`/`outbox_authors` and wire-id routing tests |
 
-`+7` total, `0` failed everywhere, `ignored` unchanged. No offsetting errors
+`+10` total, `0` failed everywhere, `ignored` unchanged. No offsetting errors
 hide inside the total.
 
 ### Other tiers
@@ -324,6 +351,20 @@ hide inside the total.
 signatures only; it cannot be compiled here because `ANDROID_HOME` points at a
 path that does not exist. The change is one import and one constructor
 (`NMPSourceAuthority.Pinned(setOf(relay))` → `NMPReadRouting.Explicit(listOf(relay))`).
+
+### The admit path
+
+`compile` sees the whole demand set at once; `admit` compiles one cohort
+against an empty incumbent namespace and appends. Both are covered by
+`an_authorless_atom_keeps_its_reach_whichever_order_admission_sees_it`, over
+three shapes.
+
+It needed **a test, not a fix**, and the reason is worth recording: the two
+sequential shapes are structurally immune — a lone unbound atom forms its own
+group and never meets a sibling's author set — so breaking the widen leaves
+them green. Only **both atoms in one cohort** reproduces the grouping, and that
+shape does redden under the break. A test asserting only the sequential orders
+would have been false assurance.
 
 ### The semantic oracle
 
@@ -398,7 +439,31 @@ Guard: `an_authorless_demand_is_not_narrowed_by_an_author_bearing_sibling`.
 
 Both reddened for their intended reason. Reverted; 9 / 0.
 
-### BREAK D — the lane reporting
+### BREAK D — the direct hint lane, both directions
+
+Guard pair: `an_author_bearing_group_never_reaches_a_hint_relay_outside_the_solve`
+and `an_unbound_group_routes_its_hints_directly`.
+
+Making the `if group.unbounded` guard unconditional again reddened the first
+and left the second green — the discrimination the narrowing exists for:
+
+```
+an author-bearing group's hints belong to the solve; a Supplemental hint route
+is the direct lane leaking into a group that never had it
+```
+
+The discriminator is exact rather than positional: a hint relay chosen **by the
+solve** carries `RouteKind::Coverage`, while the direct lane mints
+`RouteKind::Supplemental`. The solver remains free to pick a hint relay on
+merit, and that is not what this forbids.
+
+Independent confirmation that the narrowing restores master's behaviour for
+author-bearing groups: `differential_oracle` — whose demand is entirely
+author-bearing — needed its fixture universe widened to include the harness's
+ingest relay while the lane was unconditional, and passes with master's
+original universe now that it is narrow. That widening has been reverted.
+
+### BREAK E — the lane reporting
 
 `let lanes = self.router.request_lanes(session, sub_id)…` replaced with
 `BTreeSet::new()` at the plan-install site that feeds the observation fact:
@@ -435,10 +500,9 @@ would have shipped as false assurance.
 2. **~20 bare-filter `observe` sites in Canary scenario tests**, invisible to
    `swift build`.
 3. **The differential oracle panicked on a relay outside its fixture universe**
-   — the intended behaviour change from routing provenance directly, surfacing
-   as a plan that reaches the harness's own ingest relay. Its universe now
-   covers that relay, so the oracle compares delivery across it rather than
-   crashing on it.
+   — the unconditional hint lane reaching the harness's own ingest relay. This
+   was the first visible symptom of the over-reach that BREAK D now bounds; with
+   the lane narrowed, the oracle passes against its original universe.
 
 ## Rebase note
 

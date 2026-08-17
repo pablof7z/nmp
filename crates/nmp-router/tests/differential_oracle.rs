@@ -87,19 +87,8 @@ fn differential_oracle_identical_delivery() {
     let pool = vec![test_relay(0), test_relay(1), test_relay(2)];
     let dir = FixtureRoutingFacts::shared_pool_mailboxes(&follow_pks, &pool);
 
-    // The universe covers the mailbox pool AND the relay the harness
-    // attributes its own ingest to. `ReadRouting::Auto` routes prior
-    // source provenance directly, so that relay is in the plan: the
-    // derived kind:1 atoms carry the kind:3's provenance, and "we already
-    // saw the source event there" is one of the things `Auto` means.
-    // Leaving it out of the universe would make this oracle panic on a
-    // relay it is supposed to be comparing delivery across.
-    let mut universe = pool.clone();
-    universe
-        .push(RelayUrl::parse("wss://resolver-ingest.fixture.invalid").expect("fixture relay url"));
-
     let mut relay_store: BTreeMap<RelayUrl, Vec<Event>> = BTreeMap::new();
-    for relay in &universe {
+    for relay in &pool {
         let mut events = Vec::new();
         // Each follow contributes a matching kind:1 note...
         for follow in &follows {

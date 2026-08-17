@@ -353,3 +353,186 @@ fn the_outbox_author_refcount_returns_to_zero_across_auto_and_explicit() {
          that can never close"
     );
 }
+
+/// An author-bearing `Auto` group never reaches a hint relay OUTSIDE the
+/// coverage solve.
+///
+/// Hints already reach such a group: `add_projected_candidates` enters them
+/// as per-author candidates, where they compete for the k=2 slots and earn
+/// coverage like any other relay. Routing them a second time, directly,
+/// would give a hinted relay a REQ outside the solve and outside coverage —
+/// and because `routing_evidence` is unioned across the group, one member's
+/// `nevent` hint would drag every sibling's filter along with it.
+///
+/// The discriminator is exact rather than positional: a hint relay CHOSEN BY
+/// THE SOLVE carries `RouteKind::Coverage`, while the direct lane mints
+/// `RouteKind::Supplemental`. So this asserts on the pair, not on whether the
+/// relay appears at all — the solver is free to pick the hint relay on merit,
+/// and that is not what this forbids.
+///
+/// Break it by making the `if group.unbounded` guard around
+/// `provenance_for_projected` in `Router::compile` unconditional.
+#[test]
+fn an_author_bearing_group_never_reaches_a_hint_relay_outside_the_solve() {
+    let alice = author();
+    let hint = test_relay(7);
+    let facts = FixtureRoutingFacts::new()
+        .with_author_routes(alice, [test_relay(0), test_relay(1)], [])
+        .with_operator_app([test_relay(8)]);
+    let mut router = router();
+
+    let mut hinted = outbox(1, &[alice]);
+    hinted.routing_evidence = BTreeSet::from([nmp_grammar::RoutingEvidence {
+        relay: hint.clone(),
+        origin: nmp_grammar::RoutingEvidenceKind::Hint,
+    }]);
+
+    router.compile(&BTreeSet::from([hinted]), &facts, 10);
+
+    let smuggled: Vec<_> = router
+        .plan()
+        .reqs
+        .iter()
+        .flat_map(|(session, reqs)| reqs.iter().map(move |request| (session, request)))
+        .flat_map(|(session, request)| {
+            request
+                .provenance
+                .iter()
+                .map(move |route| (session.relay.clone(), route))
+        })
+        .filter(|(_, route)| {
+            route.lane == Lane::Hint && route.route_kind == RouteKind::Supplemental
+        })
+        .collect();
+
+    assert!(
+        smuggled.is_empty(),
+        "an author-bearing group's hints belong to the solve; a Supplemental \
+         hint route is the direct lane leaking into a group that never had \
+         it: {smuggled:#?}"
+    );
+}
+
+/// The other half of the same rule: an UNBOUND group's hints DO get routed
+/// directly, because they have nowhere else to go.
+///
+/// An unbound selection resolves no authors, so `add_projected_candidates`
+/// has no author to key its candidates on and the hint would simply vanish.
+/// This is the entire case the direct lane exists for, and narrowing it to
+/// `unbounded` must not narrow it to nothing.
+#[test]
+fn an_unbound_group_routes_its_hints_directly() {
+    let hint = test_relay(7);
+    let facts = FixtureRoutingFacts::new().with_operator_app([test_relay(8)]);
+    let mut router = router();
+
+    let unbound = ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1u16])),
+            ..ConcreteFilter::default()
+        },
+        routing: ReadRouting::Auto,
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::from([nmp_grammar::RoutingEvidence {
+            relay: hint.clone(),
+            origin: nmp_grammar::RoutingEvidenceKind::Hint,
+        }]),
+    };
+
+    router.compile(&BTreeSet::from([unbound]), &facts, 10);
+
+    let reqs = router
+        .plan()
+        .reqs
+        .get(&session(hint))
+        .expect("an unbound group's hint relay must be asked -- nothing else would ask it");
+    assert!(reqs.iter().any(|request| request
+        .provenance
+        .iter()
+        .any(|route| route.lane == Lane::Hint)));
+}
+
+/// The same non-narrowing rule, but through `admit` rather than `compile`.
+///
+/// `compile` sees the whole demand set at once, so the group is assembled
+/// complete and `unbounded` is known before any lane runs. `admit` does not:
+/// it compiles one cohort against an EMPTY incumbent namespace and appends
+/// the result to a plan that already has requests. An authorless atom
+/// arriving after its author-bearing sibling therefore forms its group with
+/// no knowledge of the sibling, and vice versa.
+///
+/// Both arrival orders are asserted, because they are different code paths
+/// and only one of them was covered by the compile-time guard.
+#[test]
+fn an_authorless_atom_keeps_its_reach_whichever_order_admission_sees_it() {
+    let alice = author();
+    let app = test_relay(9);
+
+    let authorless = ContextualAtom {
+        filter: ConcreteFilter {
+            kinds: Some(BTreeSet::from([1u16])),
+            ..ConcreteFilter::default()
+        },
+        routing: ReadRouting::Auto,
+        access: AccessContext::Public,
+        routing_evidence: BTreeSet::new(),
+    };
+    let bearing = outbox(1, &[alice]);
+
+    // Three shapes. The two sequential ones are structurally immune -- `admit`
+    // compiles each cohort against an empty incumbent namespace, so a lone
+    // authorless atom forms its own group and never meets the sibling's
+    // author set. The THIRD is the one that can actually bite: both atoms in
+    // ONE cohort are grouped exactly as `compile` would group them.
+    let cohorts: [(Vec<ContextualAtom>, &str); 3] = [
+        (
+            vec![bearing.clone(), authorless.clone()],
+            "author-bearing cohort, then authorless",
+        ),
+        (
+            vec![authorless.clone(), bearing.clone()],
+            "authorless cohort, then author-bearing",
+        ),
+        (vec![], "both in one cohort"),
+    ];
+    for (sequence, order) in cohorts {
+        let facts = FixtureRoutingFacts::new()
+            .with_author_routes(alice, [test_relay(0)], [])
+            .with_operator_app([app.clone()]);
+        let mut router = router();
+
+        if sequence.is_empty() {
+            router.admit(
+                &BTreeSet::from([bearing.clone(), authorless.clone()]),
+                &facts,
+                10,
+            );
+        } else {
+            for atom in sequence {
+                router.admit(&BTreeSet::from([atom]), &facts, 10);
+            }
+        }
+
+        let owner = nmp_router::DemandKey::for_atom(&authorless);
+        let serving: Vec<_> = router
+            .plan()
+            .reqs
+            .values()
+            .flatten()
+            .filter(|request| request.owner_demands.contains(&owner))
+            .collect();
+
+        assert!(
+            !serving.is_empty(),
+            "{order}: the authorless demand must own some request"
+        );
+        assert!(
+            serving
+                .iter()
+                .any(|request| request.filter.authors.is_none()),
+            "{order}: the authorless demand must be served by an author-unbound \
+             filter -- being merged into a sibling's author set is the silent \
+             under-fetch: {serving:#?}"
+        );
+    }
+}
