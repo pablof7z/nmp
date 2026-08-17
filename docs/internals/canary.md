@@ -580,6 +580,175 @@ the session is restored, because a literal-author filter needs no account.
 The identity half and the feed half are independent claims and are separately
 falsifiable, which is why both are asserted.
 
+**C3 is proven live**, and it is this suite's first exercise of the same
+event arriving from SEVERAL relays.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C3MultiRelayDedupProvenanceTests.swift`
+runs three separate strfry processes with three independent LMDB stores, all
+three in the engine's relay set. One event is seeded into relay A only; then
+the IDENTICAL bytes -- same id, same signature, a real duplicate on the wire
+rather than a re-signed lookalike -- are written into relay B, and later into
+relay C, each over a real `EVENT` frame answered by a real `OK`. Throughout,
+the app holds ONE canonical row whose `sources` grows
+`[A]` -> `[A, B]` -> `[A, B, C]`. Passes in ~1.4s, stable over five runs.
+
+**Three different failures are in scope, and the row count catches only one
+of them.** Two rows is caught by the count and the id set. LOST PROVENANCE is
+caught by requiring the exact three-relay set. A REPLACED row -- the row
+removed and re-added rather than updated in place -- survives both, so C3
+seeds a companion event alongside the shared one purely to give the delivered
+array a second entry and therefore an INDEX that a remove-and-re-add would
+disturb: an unbounded observation folds exact rebased deltas in arrival order,
+so an in-place `sourcesGrew` leaves the position untouched while a
+reinsertion moves the row to the end. The index is pinned before the first
+growth and required to hold across both. Measured at index 1 on every run.
+A fourth check exists because `sources` would otherwise be free to mean
+nothing: the companion event never leaves relay A, and its provenance must
+stay `[A]` -- an engine that unioned every relay it ever talked to into every
+row would pass everything else.
+
+**The precondition is the whole point.** "One row naming three relays" is
+trivially true of an app handed the event by all three at cold start, with no
+moment when the row had fewer sources than it finished with. So B and C start
+EMPTY while being genuinely subscribed, and the scenario asserts before
+seeding them: the row is delivered naming EXACTLY relay A; all three relays
+report a wire subscription off `observeDiagnostics()`; and an ordinary client
+REQ against B and C for that id comes back empty -- a fact about the fixture,
+established over the relay's own wire protocol, never a reading of NMP state.
+
+Falsified twice, each restored and re-confirmed green. **Seeding all three
+relays up front is the one that matters**: `grewToB` and `grewToC` both stay
+true, the final row is one row naming three relays, and every behaviour
+assertion is green -- ONLY the three preconditions fail (`onlyRelayA=false`,
+`relayBHasIt=true`, `relayCHasIt=true`). That is precisely the vacuous dedup
+proof this scenario would otherwise have been, and it is the C13-fourth-
+falsifier lesson repeating. Seeding relay C with a re-signed lookalike instead
+(same author and content, `created_at + 1`, therefore a DIFFERENT id -- what a
+lost-dedup engine effectively produces) failed on six assertions with the real
+values: 3 rows against 2 distinct events, `maxRows=3`, the shared row's
+`sources` stuck at two relays, and the pinned index moved from 1 to 0.
+
+No API finding for C3 -- `Row.sources`, the `sourcesGrew` in-place update and
+the per-relay diagnostics all behaved exactly as documented.
+
+**C5 is proven live**, including the part most likely to have been broken.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C5ReplaceableDeletionStaleRedeliveryTests.swift`
+drives three real relay processes and two concurrent observations, and proves
+in ~4.7s: alice's kind:0 profile is superseded by a newer version and the old
+one disappears (one row, v2's id, v2's content -- not two rows, not v1's text
+under v2's id); a kind:5 carrying `["e", target]` removes exactly its target
+and leaves the untargeted note alone; and a relay redelivering either the
+superseded version or the deleted event AFTERWARDS resurrects neither.
+
+**A correct engine's answer to a stale redelivery is to do nothing at all** --
+no row change, no delivered batch, no app-visible fact -- which makes "the row
+did not come back" equally true of an engine that ignored it and of a scenario
+where the stale event never arrived. Three things rule that out. The two stale
+relays are up, subscribed and empty from the start, so they are never a
+late-connecting first delivery; an ordinary client REQ confirms each holds
+nothing for the id before its phase. The stale event is written only after the
+app has been ASSERTED to hold the post-supersede / post-deletion state. And a
+CONTROL event the app has never seen is written to the SAME relay immediately
+after the stale one: the app's subscription to that relay is one TCP
+connection and the relay pushes in ingest order, so the control arriving is
+positive proof the stale event was pushed first and silently refused. The
+control's own `sources` is required to name that specific relay, which is what
+identifies whose push path was proven live.
+
+Falsified twice, each restored and re-confirmed green. **Writing the stale
+events to the stale relays BEFORE the supersede and the deletion instead of
+after** leaves `resurrected=[]` on both observations and every behaviour
+assertion green -- only the two "already held it before this phase"
+preconditions fail. Same shape as C3's and C13's, and the reason the
+sequencing is asserted rather than assumed. Removing kind 5 from the app's own
+filter fired four assertions at once with real values: the deletion never
+removed its target (`deleted=false`, the feed still holding both notes), and
+the stale relay then genuinely DID resurrect the target -- which is also an
+independent confirmation that the no-resurrection assertion is live rather
+than green by construction.
+
+**C5's API finding, and it is a real one for app authors.** The feed's filter
+has to include kind 5. Relays send only what an open subscription asked for,
+so an app that subscribes to kind 1 alone is never sent the deletion and its
+rows never go away -- NMP does not add kind:5 to an app's demand on the app's
+behalf. Nothing in the read API hints at this, and the failure mode is silent:
+deleted content simply stays on screen forever. The falsifier above is the
+proof. A consequence worth stating plainly: because the app must subscribe to
+kind 5, the deletion event itself is then delivered as an ordinary row in the
+feed. That is consistent with NMP doing mechanics only and leaving display
+policy app-owned, but it means every app doing deletions correctly also has to
+filter kind:5 out of its own rendering.
+
+**C6 is written and RED, and the red is a real finding (#1886), not a scenario
+defect.**
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C6DeepWindowingTests.swift`
+seeds 150 events one second apart over real `EVENT` frames, opens ONE
+`.expandable(initial: 10, max: 100)` observation and scrolls it to the
+ceiling, checking every page against a canonical `createdAt DESC, id ASC`
+order the scenario computes from the events it signed itself -- never against
+whatever NMP delivered. Runs in ~49s, of which 45 is the bounded wait that
+establishes the finding.
+
+Everything except the first advance PASSES: every page is the exact canonical
+prefix (order and gaplessness in one assertion, reporting the missing and
+unexpected ids and the first index that differs); every page EXTENDS its
+predecessor rather than rewriting it, so a row that moves or repeats under the
+app's scroll position fails even when the final set is right; no batch ever
+carried a duplicate id; no batch ever carried more rows than the target in
+force when it arrived; a request past `max` lands as a delivered
+`.atBound(max: 100)` fact rather than a throw, with the row count unmoved; and
+a live event arriving at an already-full window enters at the head and
+DISPLACES the tail instead of making the window one row bigger.
+
+**FAILING -- the first advance.** `requestRows(atLeast: 20)` on a window
+opened at `initial: 10` delivers `WindowLoad.returned(added: 0)` and leaves
+the window at 10 rows for a bounded 45s, with the relay up and holding all 150
+events. It never self-heals, and re-issuing the SAME target is a documented
+no-op, so an app has no way to ask again from where it is. Only raising the
+target AGAIN moves it -- and that next raise then delivers its own value
+exactly. In an app this is the first scroll-to-bottom of any windowed feed
+doing nothing. Deterministic 5/5 across `(initial, firstTarget)` of (10,11),
+(10,20), (10,50), (1,2) and (10,10)->(10,11), with 0ms/1s/3s settle beats
+before the call, so it is neither a race nor a function of step size. The
+assertion was NOT relaxed and the scenario was NOT reordered to warm the
+window up first; C17's `distinct` phase is the standing precedent.
+
+What the public API shows about the mechanism, printed on every run: the
+query's own `SourceEvidence.status` for the relay walks `finishedStoredEvents`
+-> `error` -> `awaitingRequest` -> `requesting` across that one advance, and
+the relay's own log shows a NIP-77 negentropy session opened and closed inside
+it. The engine-side root cause is in #1886.
+
+**A correction C6 forced on its own preconditions.** The first draft asserted
+that the relay reporting `finishedStoredEvents` meant the history was local,
+and used that to justify the no-gaps assertions. It does not:
+`SourceStatus.finishedStoredEvents`'s own doc calls it "a delivery fact about
+ONE source answering ONE request", and a windowed observation's opening
+request carries the window's `initial` as its wire limit, so only `initial`
+events are local at that point. The precondition now claims only what it
+proves -- that the opening request was answered, so the app is in the settled
+first-page state a user scrolls from -- and every page assertion waits on the
+delivered ROW COUNT rather than trusting any status to mean "everything is
+here".
+
+**C6's second finding: `WindowLoad.returned(added:)` is not a usable progress
+signal.** Across repeated runs the SAME advance reported `.returned(added: 20)`
+on some runs and `.returned(added: 0)` on others, with the 20 rows arriving in
+a LATER batch carrying `.idle`. An app therefore cannot use the delivered load
+fact to decide whether its scroll produced anything; the only reliable signal
+is the delivered row count. C6's first draft asserted a nonzero
+`returned(added:)` as its "the window really advanced" precondition and was
+flaky because of it. The assertion was **removed rather than inverted** and the
+value is printed on every run, so neither reading is silently promoted to a
+contract -- the same treatment C13 gave `wireSubCount` during an outage.
+
+Falsified twice besides, each restored: never writing history event #37 to the
+relay -- a genuine hole in the middle, with row COUNTS still reachable so only
+the order/gap check can see it -- failed at page 40 and every page after,
+naming the missing id, the unexpected id and index 37 exactly. Opening the
+observation with NO window failed the boundedness precondition with the real
+captured value (150 rows delivered against the declared `initial` of 10) and
+140 unexpected ids on the first page.
+
 **C15's relay lab is qualified; C15 itself is NOT proven.** The distinction is
 the whole point of the paragraph below, and an earlier revision of this section
 got it wrong by calling C15 "proven live".
