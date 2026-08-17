@@ -1,5 +1,5 @@
 //! `nmp-router` — the per-relay compiler + router + coalescing + diagnostics
-//! (M2). See `docs/plans/M2-compiler-router-plan.md` for the full spec this
+//! (M2). See the M2 compiler-router plan (git history) for the full spec this
 //! crate implements.
 //!
 //! The compiler is a **pure function of `(demand set, neutral routing

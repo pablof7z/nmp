@@ -1,4 +1,4 @@
-//! Unit U2 (`docs/design/crashsafe-accepted-2-3-plan.md` §1.2 / §6-U2,
+//! Unit U2 (#2/#3, §6-U2,
 //! issues #2/#3 under epic #23): the resolver's LOCAL-authorship add path,
 //! [`Engine::accept_local`]. A locally-composed write enters the ONE store
 //! through the `RedbStore::accept_write` door and its [`AcceptOutcome`] is

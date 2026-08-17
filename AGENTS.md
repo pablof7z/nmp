@@ -6,12 +6,11 @@ Canonical contributor guide for the NMP repo. Every rule here applies to agents 
 
 1. `README.md` — what NMP is (two nouns: a live query, a write intent) and the honest current status.
 2. `docs/VISION.md` — the north star, the milestone plan (M0–M6), the two thesis-gates, and the numbered principles (P1…) work is measured against.
-3. `docs/design-record.md` — why the architecture is shaped this way (the first-principles exploration and the decisions that fell out).
-4. `docs/bug-class-ledger.md` — the bug classes structurally ruled out, and the mechanism that rules each out. This replaces governance-by-policing: correctness lives in the shape of the API, not a police force patrolling it.
-5. `docs/known-gaps.md` — the truth-anchor companion: everything built-but-incomplete or deliberately deferred, so nothing hides.
-6. `docs/internals/architecture-boundaries.md` — where a decision ends, where a commit begins, and what may happen before it. What "functional" and "reactive" mean *here*, the transaction/effect rules, and the ownership rules — plus the current honest exceptions to each.
-7. `docs/internals/crate-architecture.md` — the target crate set: what each crate owns, which *seams* are settled (engine/runtime, capability eviction, the store transaction), which questions are still open (including the internal decomposition of the deterministic engine), the capability rule (`nmp` knows no event-kind capability) with its measure, and the rule that a crate is first a unit of responsibility and authority. A distinct dependency list is not required. Issues encode older decisions; this is the destination they are checked against.
-8. **GitHub Issues** — the single tactical tracker: what is being worked on, what is queued, and the *why* behind each.
+3. `docs/bug-class-ledger.md` — the bug classes structurally ruled out, and the mechanism that rules each out. This replaces governance-by-policing: correctness lives in the shape of the API, not a police force patrolling it.
+4. `docs/known-gaps.md` — the truth-anchor companion: everything built-but-incomplete or deliberately deferred, so nothing hides.
+5. `docs/internals/architecture-boundaries.md` — where a decision ends, where a commit begins, and what may happen before it. What "functional" and "reactive" mean *here*, the transaction/effect rules, and the ownership rules — plus the current honest exceptions to each.
+6. `docs/internals/crate-architecture.md` — the target crate set: what each crate owns, which *seams* are settled (engine/runtime, capability eviction, the store transaction), which questions are still open (including the internal decomposition of the deterministic engine), the capability rule (`nmp` knows no event-kind capability) with its measure, and the rule that a crate is first a unit of responsibility and authority. A distinct dependency list is not required. Issues encode older decisions; this is the destination they are checked against.
+7. **GitHub Issues** — the single tactical tracker: what is being worked on, what is queued, and the *why* behind each.
 
 ## Internal-development skill
 

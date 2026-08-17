@@ -11,7 +11,6 @@ owns:
   - relay subscription/array limits and what enforces them
   - what a widening subscription costs the relay, and why (§11)
 related:
-  - docs/consults/2026-07-11-fable-coverage-attribution.md
   - docs/design/routing-and-ownership.md
   - docs/design/query-demand-and-evidence.md
 issues:
@@ -105,7 +104,7 @@ atoms, each carrying one value.
 
 This looks like the bug. It is not. Narrow atoms are the ratified identity for
 coverage, evidence, and routing
-(`docs/consults/2026-07-11-fable-coverage-attribution.md` §1). Specifically:
+(the coverage-attribution rationale). Specifically:
 
 - **Coverage** is keyed per narrow atom (`CoverageKey`), so a wide-keyed row
   would orphan per-value coverage.

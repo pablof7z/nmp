@@ -20,7 +20,6 @@ related:
   - docs/internals/routing/outbox.md
   - docs/internals/routing/resolvers.md
   - docs/internals/routing/preview-and-observability.md
-  - docs/internals/routing/removed-routes.md
   - docs/internals/nip29/group-publication.md
   - docs/internals/conventions/no-backwards-compatibility.md
   - docs/internals/conventions/bech32-boundary.md

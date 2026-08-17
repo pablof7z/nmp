@@ -523,7 +523,7 @@ pub enum WriteRouting {
     /// is a routing property; a group host and an archive relay are public
     /// targets, and calling an exact route "private" was the category error
     /// of the route this replaces
-    /// (`docs/internals/routing/removed-routes.md`).
+    /// (removed-routes).
     Explicit(Vec<RelayUrl>),
 }
 

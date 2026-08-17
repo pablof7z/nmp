@@ -15,7 +15,6 @@ related:
   - docs/internals/routing/knowledge-and-settlement.md
   - docs/internals/routing/outbox.md
   - docs/internals/routing/resolvers.md
-  - docs/internals/routing/removed-routes.md
   - docs/internals/writes/event-builder.md
   - docs/internals/writes/identity.md
 issues:

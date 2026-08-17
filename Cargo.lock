@@ -920,13 +920,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fjall-journal-fault-harness"
-version = "0.1.0"
-dependencies = [
- "tempfile",
-]
-
-[[package]]
 name = "flume"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1924,14 +1917,6 @@ dependencies = [
  "nmp-nip29",
  "nmp-nipc7",
  "nmp-outbox",
-]
-
-[[package]]
-name = "nmp-consumer-nip29"
-version = "0.1.0"
-dependencies = [
- "nmp",
- "nmp-nip29",
 ]
 
 [[package]]

@@ -78,7 +78,7 @@ impl Harness {
 
     /// Script a LOCAL optimistic write: enter `accept` through the
     /// `RedbStore::accept_write` door and let the engine react
-    /// (`crashsafe-accepted-2-3-plan.md` §1.2, U2). The pass-through mirror
+    /// (#2/#3 §1.2, U2). The pass-through mirror
     /// of `deliver` for the write side; unwraps the persistence `Result`
     /// through the temporary Redb store and returns both the
     /// store outcome (so a test can assert the `Inserted`/`Superseded`/
@@ -251,7 +251,7 @@ pub fn expiring_kind1(
 /// into the sentinel-sig `AcceptWrite` the local write door takes — the
 /// NIP-01 id never depends on `sig`, so the frozen body keeps the exact id
 /// and matches queries identically to its eventual signed form
-/// (`crashsafe-accepted-2-3-plan.md` §1.1 Q1). Mirrors
+/// (#2/#3 §1.1 Q1). Mirrors
 /// `nmp-store/tests/delivery_contract.rs`'s `compose`+`accept` fixtures so the
 /// resolver's local-add contract exercises the SAME door shape. `accepted_at`
 /// is the journal timestamp; the frozen body keeps its own `created_at`.

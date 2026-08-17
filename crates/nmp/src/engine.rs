@@ -1,5 +1,5 @@
 //! [`Engine`] -- the one supported construction call plus the two nouns
-//! (canonical-facade-52-plan.md §1). Owns config -> store/routing-fact
+//! (#52 §1). Owns config -> store/routing-fact
 //! selection and the router cap `nmp-ffi` used to duplicate by hand.
 //!
 //! No `Signed`-payload verify lives here: that guarantee moved to
@@ -71,7 +71,7 @@ struct Inner {
     engine_thread: EngineThread,
 }
 
-/// The one supported Rust product surface (canonical-facade-52-plan.md §1).
+/// The one supported Rust product surface (#52 §1).
 /// Owns the `EngineThread` + `Handle` pair; every mechanism crate
 /// (`nmp-store`/`nmp-router`/`nmp-transport`/`nmp-resolver`) is reached only
 /// through here. See this module's doc for the serialized lifecycle gate

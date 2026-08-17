@@ -27,7 +27,7 @@ Feature: The routes that were removed stay removed
   `crates/nmp/tests/group_publication_door.rs` is the group door's runtime
   proof: the app supplies content only, the host alone receives, and the
   author's own discovered outbox is never contacted
-  (`docs/internals/routing/removed-routes.md`).
+  (removed-routes tombstone now in git history).
 
   Every scenario below now carries its own status, so this preamble no longer
   speaks for any of them. Three remain `specified` because nothing executes

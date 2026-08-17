@@ -151,8 +151,7 @@ control store first, then project the pending row through a deterministic,
 idempotent journal before normal queries or transport resume. The reverse order
 is forbidden. Canonical rows and all event-local indexes, tombstones,
 replacement state, and expiry state remain atomic inside the event store. The
-settled invariant and relay-echo reconciliation rule are recorded in
-`docs/design-record.md`.
+settled invariant and relay-echo reconciliation rule are recorded in `docs/internals/architecture-boundaries.md`.
 
 NIP-01 event identity does not include the signature, so the pending row has a
 stable id. Its signature state is typed:

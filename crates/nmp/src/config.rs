@@ -1,5 +1,5 @@
 //! [`EngineConfig`] -- the ONLY relay/persistence input an app gives
-//! [`Engine::new`](crate::Engine::new) (canonical-facade-52-plan.md §1).
+//! [`Engine::new`](crate::Engine::new) (#52 §1).
 //! Lifted out of `nmp-ffi`'s `NmpEngineConfig` (facade.rs), minus the
 //! `uniffi::Record` derive -- that boundary now converts into this type
 //! instead of assembling the engine itself (Unit B).

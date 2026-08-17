@@ -9,8 +9,7 @@ Put each kind of information in one place:
   which classes of bugs it prevents.
 
 Do not copy the same rule into several places. Current BDD syntax, status, and
-runner rules live in
-[`docs/bdd/000-bdd-approach.md`](../../../../docs/bdd/000-bdd-approach.md).
+runner rules live in [`behavior-specification.md`](behavior-specification.md).
 
 ## Three layers
 

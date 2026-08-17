@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "BDD acceptance layer: cucumber-rs Gherkin scenarios driven against the REAL engine (docs/bdd/000-bdd-approach.md)."
+description = "BDD acceptance layer: cucumber-rs Gherkin scenarios driven against the REAL engine."
 
 # Test-only crate: no lib target of production value, never depended on by
 # any other crate. `src/` is a thin library purely so `tests/bdd.rs` (the

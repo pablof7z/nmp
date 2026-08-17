@@ -135,8 +135,7 @@ Tags: ✅ solid & test-proven · 🧪 experimental / partial · ⛔ not yet
   advertises", expressed as the absence of a `#d` constraint
   ([#1252](https://github.com/pablof7z/nmp/issues/1252)). The former kind:9 composer/content catalog remains
   removed because C7 owns chat and `q` replies. A direct-Rust and macOS-host
-  Swift consumer exercised the public API against two real local relays in
-  the [NIP-29 consumer capstone](docs/reviews/2026-08-02-nip29-consumer-capstone.md);
+  Swift consumer exercised the public API against two real local relays;
   that evidence does not claim iOS-device or Android-runtime qualification.
 - 🧪 NIP-29 remembered-groups product capability — `nmp-nip29` exposes observational reading of NIP-51 kind:10009, while `nmp::nip29` owns typed group and relay-in-use add/remove operations through the ordinary durable semantic-write receipt across Rust, FFI, Swift, and Kotlin ([#1552](https://github.com/pablof7z/nmp/issues/1552))
 - 🧪 Blossom (BUD-11) media/blob — `nmp-blossom` ships kind:24242-authorized, sha256-verified blob upload plus mirror/delete/list, each with its own bound authorization ([#216](https://github.com/pablof7z/nmp/issues/216) epic, closes [#545](https://github.com/pablof7z/nmp/issues/545)/[#551](https://github.com/pablof7z/nmp/issues/551), [#552](https://github.com/pablof7z/nmp/pull/552)/[#557](https://github.com/pablof7z/nmp/pull/557)) — and **projected through FFI to Swift and Kotlin** ([#555](https://github.com/pablof7z/nmp/issues/555) closes, [#560](https://github.com/pablof7z/nmp/pull/560) merged): a native app can call upload/mirror/delete/list from Rust, Swift, or Kotlin today, each with typed error taxonomies and no collapsed variants. Upload durability is currently **app-owned** (a standalone async call, not yet a persisted/retried engine obligation) — an engine-integrated durable-upload upgrade is tracked as an explicit additive follow-up ([#562](https://github.com/pablof7z/nmp/issues/562)), not a silent gap.
@@ -261,7 +260,6 @@ Diagnostics are a **permanent, read-only proof plane** — source plan, wire fil
 
 - [Builder guide](docs/builder/README.md) — product model, examples, platform guidance
 - [Vision](docs/VISION.md) — north star and settled invariants
-- [Design record](docs/design-record.md) — the exploration and decisions
 - [Known gaps](docs/known-gaps.md) — the honest built-vs-missing list
 - [Contributor guide](AGENTS.md) — issue-first workflow and verification discipline
 

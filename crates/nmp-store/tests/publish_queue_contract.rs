@@ -1,5 +1,5 @@
 //! The publish-queue door contract (issues #2/#3, Unit U1 —
-//! `docs/design/crashsafe-accepted-2-3-plan.md` + its Fable checkpoint
+//! issues #2/#3 + the Fable checkpoint
 //! verdict R1-R8, plus post-build architecture-review corrections:
 //! `IntentId`/receipt-id store allocation, refused-at-acceptance receipt-only
 //! persistence, intent-KEYED `promote_signed`/`compensate_write` (an
@@ -466,7 +466,7 @@ fn pending_row_is_not_gc_evicted_while_intent_open() {
 /// `Refused` call leaves neither. A literal kill-mid-transaction fault
 /// injection (interrupting `redb`'s own `Database` between the event-table
 /// write and the delivery-table write) is U5's dedicated crash-injection
-/// suite's job (crashsafe-accepted-2-3-plan.md §6 U5); this test proves the
+/// suite's job (§6 U5); this test proves the
 /// structural property — everything inside ONE `write_txn`/`commit()` call
 /// — that is what makes such a kill safe by construction.
 #[test]

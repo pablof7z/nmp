@@ -18,7 +18,6 @@ related:
   - docs/internals/routing/outbox.md
   - docs/internals/routing/resolvers.md
   - docs/internals/routing/preview-and-observability.md
-  - docs/internals/routing/removed-routes.md
   - docs/internals/writes/identity.md
 issues:
   - "DEFECT on master: a routing error at on_signed terminally Fails and drops the intent (§8) — publishing before the first relay-list fetch dies permanently; the design parks as AwaitingRoute instead"

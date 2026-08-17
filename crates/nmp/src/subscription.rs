@@ -2,7 +2,7 @@
 //! [`Engine::observe`](crate::Engine::observe)/
 //! [`Engine::observe_diagnostics`](crate::Engine::observe_diagnostics)
 //! return. Both fold `nmp-ffi`'s `NmpQueryHandle`/`NmpDiagnosticsHandle`
-//! `Drop` discipline into the direct-Rust surface (canonical-facade-52-plan.md
+//! `Drop` discipline into the direct-Rust surface (#52
 //! §1): withdrawing a subscription is never a step an app must remember to
 //! take, only one it may take early via [`Subscription::cancel`]/
 //! [`DiagnosticsSubscription::cancel`].

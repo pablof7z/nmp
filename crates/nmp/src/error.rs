@@ -1,5 +1,5 @@
 //! [`EngineError`] -- the semantic error subset [`Engine`](crate::Engine)'s
-//! verbs can fail with (canonical-facade-52-plan.md §1).
+//! verbs can fail with (#52 §1).
 //!
 //! This set is deliberately SMALL: construction-time failures, identity
 //! parsing, and the closed-lifecycle state. The one thing it explicitly

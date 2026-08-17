@@ -15,7 +15,6 @@ owns:
   - the rebuildable in-memory projection that removes those reads
   - the projection's ordering, restart, and degraded-state requirements
 related:
-  - docs/design-record.md
   - docs/bug-class-ledger.md
   - docs/known-gaps.md
   - docs/internals/writes/publish-queue.md

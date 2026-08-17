@@ -17,7 +17,6 @@ related:
   - docs/internals/routing/knowledge-and-settlement.md
   - docs/internals/routing/outbox.md
   - docs/internals/routing/preview-and-observability.md
-  - docs/internals/routing/removed-routes.md
   - docs/internals/writes/event-builder.md
   - docs/internals/nip29/group-publication.md
   - docs/internals/conventions/naming-no-invented-categories.md

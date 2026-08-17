@@ -1,4 +1,4 @@
-//! M2 contract test 16 -- THE M2 KILL (`docs/plans/M2-compiler-router-plan.md`
+//! M2 contract test 16 -- THE M2 KILL (M2 plan
 //! §6). Builds a realistic falsifier demand (~300 follows over a realistic,
 //! overlapping write-relay distribution: a handful of "big" relays most
 //! authors share, plus a wider spread of smaller relays), compiles it

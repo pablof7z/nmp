@@ -1,14 +1,13 @@
 # Pull-based async observation handles (#680)
 
-Supersedes the ownership model in `native-task-executor.md` (#442/#446) for the
+Supersedes the earlier OS-thread-per-observation ownership model (#442/#446) for the
 observation-delivery path. Progresses #46 (bounded delivery). This document is
 the durable record of the replacement architecture.
 
 > **Runtime follow-up:** #704 subsequently removed the rescoped
 > blocking-adapter pool and per-session executors described below. Current
 > logical adapter work runs on the shared async runtime with private physical
-> backpressure; see
-> [`internal-executor-elimination.md`](internal-executor-elimination.md).
+> backpressure.
 > The observation-handle and mailbox contract in this record remains current.
 
 ## The defect being removed

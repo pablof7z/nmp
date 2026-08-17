@@ -15,7 +15,6 @@ owns:
 related:
   - docs/internals/routing/auto-and-explicit.md
   - docs/internals/routing/resolvers.md
-  - docs/internals/routing/removed-routes.md
   - docs/internals/writes/event-builder.md
   - docs/internals/writes/identity.md
   - docs/internals/conventions/no-backwards-compatibility.md

@@ -1075,7 +1075,7 @@ impl Engine {
     }
 
     /// The local-authorship mirror of [`Self::ingest_observed`]
-    /// (`crashsafe-accepted-2-3-plan.md` §1.2, #2/#3 under epic #23): a
+    /// (#2/#3 under epic #23): a
     /// locally-composed write enters the ONE store through the
     /// [`RedbStore::accept_write`] door (local provenance +
     /// `SigState::Pending` instead of a `RelayObserved`) and its

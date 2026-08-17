@@ -625,7 +625,7 @@ pub struct FfiAcquisitionEvidence {
 /// An earlier premise held that letting an app route a write to a chosen
 /// relay was a dangerous primitive, and this enum having exactly ONE variant
 /// was the enforcement of that ban. The premise was reversed
-/// outright (`docs/internals/routing/removed-routes.md` §2-3): publishing to
+/// outright (removed-routes, §2-3): publishing to
 /// chosen relays is a first-class GENERAL capability with many legitimate
 /// consumers — an app offering "publish this event to relay: [user input]",
 /// a wiki crate publishing to the user's preferred wiki relays, a DM crate

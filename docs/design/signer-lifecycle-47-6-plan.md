@@ -18,8 +18,7 @@
   §3 (signer selection + reattachment), §4 (secret-material boundary), §6
   (retry ownership table); `docs/known-gaps.md` "Signer selection is globally
   coupled today" + "Secret zeroization and platform signer-provider boundary".
-- **Coordination with #2/#3 (`docs/design/crashsafe-accepted-2-3-plan.md`,
-  Fable GO):** #2/#3 build the **persistence substrate** — the `OUTBOX_INTENTS`
+- **Coordination with #2/#3 (Fable GO):** #2/#3 build the **persistence substrate** — the `OUTBOX_INTENTS`
   journal already carries `expected_pubkey`, an opaque `signing_identity_ref`
   placeholder, and a `sig_state` that includes `AwaitingSigner(pubkey)`; its §4
   builds the *persistence field* + a *stub* "reattach triggers `RequestSign`"
@@ -357,7 +356,7 @@ paths proven on every surface; memory-only disposable key lost → intent stays
 `WriteIntent.identity` + `publish(draft, as: identityRef)` are a **public
 write-surface change** — the facade projection (`publish` overload / an
 `as`-parameter) is #52's serialized surface work. `add_signer` and `add_account`
-already exist (`canonical-facade-52-plan.md` §A). S5's Swift/Kotlin override path
+already exist. S5's Swift/Kotlin override path
 threads through #52. Sequence S1's `WriteIntent` change with #52's `publish`
 surface; do not add a second public publish entry point.
 

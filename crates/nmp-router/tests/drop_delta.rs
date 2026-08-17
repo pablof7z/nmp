@@ -1,5 +1,5 @@
 //! M2 contract test 15: `dropped_handle_close_reaches_wire`
-//! (`docs/plans/M2-compiler-router-plan.md` §8.2). Discharges M1 nit #2:
+//! (M2 plan §8.2). Discharges M1 nit #2:
 //! `QueryHandle::Drop` used to enqueue its withdrawal but the engine
 //! discarded the resulting `DemandDelta` (`let _ = ...`), so a dropped
 //! handle's CLOSE never reached anything past the resolver. The M2 fix

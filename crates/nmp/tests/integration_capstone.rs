@@ -1,6 +1,6 @@
 //! M3 Step F — the integration capstone: the full falsifier suite driven
 //! against a live in-process relay, headlined by [`watermark_cold_start_offline`]
-//! (plan `docs/plans/M3-store-transport-outbox-plan.md` §5 test 9, THE M3
+//! (M3 plan §5 test 9, THE M3
 //! pass criterion — ledger #7, "cache-miss treated as empty"). The other
 //! three tests here round out the LIVE tier of the remaining ledger
 //! falsifiers that weren't already exercised end-to-end: #5 (provenance/

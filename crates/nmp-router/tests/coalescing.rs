@@ -1,4 +1,4 @@
-//! M2 contract tests 10, 11, 13 (`docs/plans/M2-compiler-router-plan.md`
+//! M2 contract tests 10, 11, 13 (M2 plan
 //! §4.2, §4.3, §5) — the widen-only property test per `MergeRule`, the
 //! local-refilter exactness property, and the non-widening-rule drop
 //! mechanism.

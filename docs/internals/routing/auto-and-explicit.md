@@ -16,7 +16,6 @@ related:
   - docs/internals/routing/outbox.md
   - docs/internals/routing/resolvers.md
   - docs/internals/routing/preview-and-observability.md
-  - docs/internals/routing/removed-routes.md
   - docs/internals/writes/event-builder.md
   - docs/internals/nip29/group-publication.md
   - docs/internals/conventions/no-backwards-compatibility.md
@@ -262,7 +261,7 @@ invariant, which is exactly why reusing it for group hosts was rejected in the
 NIP-29 exploration — a group host is a public target, and journal snapshots
 describing a group write as "private" would be lying. Fail-closed is a routing
 property; privacy is one reason among several to want it. The full accounting
-of what each removed variant's callers migrate to is in `removed-routes.md`.
+of what each removed variant's callers migrate to.
 
 ---
 

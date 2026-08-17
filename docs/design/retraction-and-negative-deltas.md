@@ -3,8 +3,7 @@
 - **Date:** 2026-07-11
 - **Status:** Design with the store/resolver retraction substrate now partially
   landed. Answers the "supersession retraction blindness" item in
-  `docs/known-gaps.md` and triage item #6 in
-  `docs/reviews/2026-07-11-external-feedback-triage.md`; composes with issues #2 (local
+  `docs/known-gaps.md` and triage item #6 (external-feedback triage); composes with issues #2 (local
   echo), #3 (durable intents), #6 (async signer / optimistic pipeline), #14 (verify gate).
 - **Promotion correction:** write compensation is **pre-signature only**. A
   durable `Accepted` intent atomically creates a canonical pending row; cancel or

@@ -23,7 +23,7 @@
 //! tracked in a persistent index so `expire_due`/`next_expiration` are
 //! index-backed, not O(stored rows).
 //!
-//! Durable write-delivery (`docs/design/crashsafe-accepted-2-3-plan.md`,
+//! Durable write-delivery (issues #2/#3,
 //! issues #2/#3, Fable checkpoint verdict Q2): this crate is now the event
 //! **and** publish-queue store in the current Redb implementation — one
 //! atomic `redb::Database` boundary. This is an implementation shape, not a

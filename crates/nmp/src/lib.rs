@@ -1,5 +1,5 @@
 //! `nmp` -- THE supported Rust product API (#52,
-//! `docs/design/canonical-facade-52-plan.md`). Every direct-Rust app and
+//! #52). Every direct-Rust app and
 //! `nmp-ffi` both depend on this crate alone; the mechanism crates
 //! (`nmp-store`, `nmp-router`, `nmp-transport`, `nmp-resolver`, `nmp-signer`,
 //! `nmp-local-signer`) are internal implementation detail behind it, present
