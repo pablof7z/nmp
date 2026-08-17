@@ -1,0 +1,29 @@
+module(name = "nmp", version = "0.1.0")
+
+# rules_rust is the authoritative Rust build system. Cargo remains the
+# dependency-metadata source of truth (Cargo.toml/Cargo.lock), imported below
+# via crate_universe so Bazel and Cargo agree on exactly the same third-party
+# dependency graph and versions.
+bazel_dep(name = "rules_rust", version = "0.73.0")
+
+# Pin the Rust toolchain to the same nightly the repo pins in
+# rust-toolchain.toml (nightly-2026-07-07), so a `bazel build` produces the
+# same compiler output a `cargo build` does. Clippy ships with nightly; rustfmt
+# is pinned to the same date.
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    versions = ["nightly/2026-07-07"],
+    rustfmt_version = "nightly/2026-07-07",
+)
+use_repo(rust, "rust_toolchains")
+
+# Import the entire Cargo workspace's third-party dependency graph from the
+# single source of truth: the workspace Cargo.toml + Cargo.lock. This is what
+# keeps Cargo as the dependency-metadata authority while Bazel owns the build.
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    manifests = ["//:Cargo.toml"],
+)
+use_repo(crate, "crates")

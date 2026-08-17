@@ -1,0 +1,22 @@
+# Bazel rc for NMP. The authoritative build is `bazel test //...`; Cargo stays
+# the dependency-metadata authority via crate_universe (see MODULE.bazel).
+
+# Select the pinned nightly toolchain registered in MODULE.bazel
+# (nightly/2026-07-07, matching rust-toolchain.toml). rules_rust defaults to the
+# stable channel, so this flag is what makes Bazel use the same compiler Cargo
+# does. Universal scope so it applies to every configuration.
+common --@rules_rust//rust/toolchain/channel:channel=nightly
+
+# A shared disk cache so concurrent git worktrees reuse compiled artifacts
+# without cross-worktree contamination (see the concurrent-worktree proof
+# test). The cache key is the action digest, which is independent of the
+# workspace path, so two worktrees building the same action hit one store.
+common --disk_cache=~/.cache/bazel-nmp-diskcache
+
+# Keep Bazel's own output symlinks out of Cargo's `target/` to avoid the two
+# build systems fighting over the same directory tree.
+build --symlink_prefix=bazel-
+test --symlink_prefix=bazel-
+
+# Color output for terminal use.
+common --color=yes

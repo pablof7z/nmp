@@ -1,0 +1,6 @@
+# Keep Bazel out of Cargo output dirs and the detached Cargo workspaces under
+# `tools/` (nip29-consumer, fjall probes). Same bug class as the .gitignore
+# `target*` rule: a nested `target/` must never become a Bazel package.
+target
+**/target
+crates/nmp-ui
