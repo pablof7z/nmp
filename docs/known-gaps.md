@@ -77,6 +77,26 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   determined through the public API — `DiagnosticsSnapshot` exposes no
   retained-bookkeeping or memory fact at all. C17's `distinct` phase is red
   until this is answered.
+- **Two of NIP-22's three root shapes cannot be read back through the
+  capability's own demand (#1876).** `commentThreadDemand(root:)` binds the
+  root identifier to the `#I` tag whatever the root is, but the composer writes
+  `E` for an event root and `A` for an address root. So commenting on a note —
+  the app-shaped case — composes and publishes correctly and can then never be
+  observed through NIP-22's own read door; the app must hand-build
+  `NMPFilter(kinds: [1111], tags: ["E": ...])`, i.e. own NIP-22's tag
+  vocabulary itself. Measured end to end against a real strfry process by
+  Canary C11, whose second test is red until this is fixed. Every existing test
+  of the demand, at every layer, uses an external NIP-73 root, which is why the
+  two shapes built ahead of the behaviour were never exercised.
+- **A NIP-73 web root does not survive its own round trip (#1878).** Composed
+  as `Nip73.url`, it decodes back as `Nip73.general(value:kind: "web")`. Both
+  name one page and produce one demand, but they are different cases of a
+  `Hashable` enum, so `decoded.root == theRootIComposed` is false and an app
+  keying comments by their root splits one thread in two. No public
+  `iValue`/`kValue` accessor or canonicalising constructor exists on any SDK
+  surface, so the only way to ask "same thread" is to build the demand from
+  each and compare. Recorded by Canary C11, which asserts the demand equality
+  and prints both values rather than freezing either shape.
 - **Suspend/resume transparency (#4): the on-device pass is pending.** Transport
   hardening (`SuspendGapDetector`/`apply_resume_gap`, wall-clock gap detection)
   and the clock audit of every suspension-spanning wait are done; what remains

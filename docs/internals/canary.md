@@ -216,9 +216,22 @@ C1 cold start and live feed; C2 cache then offline restart; C3 multi-relay
 dedup and provenance; C4 reactive derived query; C5 replaceable, deletion and
 stale redelivery; C6 deep windowing; C7 normal publish; C8 publish while
 relays fail; C9 crash/restart during publication; C10 offline write then
-convergence; C11 semantic capability; C12 identity freeze; C13 relay
-disconnect/reconnect; C14 NIP-77 reconciliation; C15 NIP-42 AUTH; C16 slow
-consumer and backpressure; C17 repeated lifecycle churn; C18 clean shutdown.
+convergence; C11 capability end to end (NIP-22 comments); C12 identity
+freeze; C13 relay disconnect/reconnect; C14 NIP-77 reconciliation; C15
+NIP-42 AUTH; C16 slow consumer and backpressure; C17 repeated lifecycle
+churn; C18 clean shutdown.
+
+**C11 was renamed** (#1875). It was listed as "semantic capability" — a phrase
+that appeared exactly once in this entire repository, in the line above,
+introduced by the commit that created the Canary. No definition anywhere, no
+matching public API, no `semantic` surface in `crates/nmp/src/`, and no
+protocol category by that name: a named category that does not exist, which
+standing convention 3 forbids
+(`docs/internals/conventions/naming-no-invented-categories.md`). The name now
+comes from the public surface — "capability" is
+`docs/internals/crate-architecture.md` rule 2's own word and `nmp-ffi`'s own
+feature keys, "NIP-22 comments" is the protocol's name and the name of
+`Packages/NMP/Sources/NMP/NIP22.swift`.
 
 **C1 is proven live** against a real strfry child process:
 `apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C1ColdStartLiveFeedTests.swift` seeds
@@ -579,6 +592,99 @@ observation rather than a finding: the cached feed comes back whether or not
 the session is restored, because a literal-author filter needs no account.
 The identity half and the feed half are independent claims and are separately
 falsifiable, which is why both are asserted.
+
+**C11 is proven live for the root shape that works, and its second half is a
+real finding left red on purpose** (#1875).
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C11CommentCapabilityEndToEndTests.swift`
+is the first exercise anywhere of a capability driven end to end against a
+real relay. Every other test of a capability — `NIP22Tests.swift`,
+`NIP22Test.kt`, the Rust crate tests — runs in-process with no relay, so
+composition and decoding were covered and "the composed write reaches a relay
+and comes back through an ordinary query" was not covered at all.
+
+**NIP-22 rather than NIP-29**, and the reason is about the lab rather than the
+SDK. NIP-29 has the larger Swift surface, but its group records
+(kind:39000/39001/39002 metadata, admins, members) are RELAY-generated, and
+strfry has no NIP-29 implementation: `createGroup` there publishes an event
+nothing acts on and `observeRecords` would report `.unavailable` forever.
+Proving NIP-29 end to end needs a NIP-29 relay in the lab — real work, and a
+separate scenario. NIP-22 comments are ordinary events any relay stores, so
+the capability rather than the relay's feature set is what is under test.
+
+**PASSING — the capability composes into both ordinary nouns.** Two apps: two
+`NMPEngine`s over two store paths, one relay, and no other channel between
+them, so "the reader saw it" cannot be satisfied by a row that never left the
+writer's own store. The author app composes a top-level comment with
+`commentIntent(on: .root(...))` on a NIP-73 web root and publishes it through
+the ordinary `NMPEngine.publish`; the reader app — which has never been told
+the event exists — is delivered it through `commentThreadDemand(root:)` on the
+ordinary `engine.observe`, replies with `commentIntent(on: .row(...))` off the
+row NMP delivered it, and the author's own still-open thread query then holds
+BOTH events. One demand covers the whole thread, exactly as documented. A
+third query, a plain `NMPFilter(kinds: [1111], authors: ...)` that has never
+heard of NIP-22, holds the same two rows — the capability's writes are
+ordinary events in the ordinary store. `decodeComment` closes the round trip:
+identical root at both depths, `parent == .root` for the top-level and
+`.comment(eventID:authorPubkey:)` for the reply, whose parent the app never
+stated. ~1.3-2.3s, stable over five runs.
+
+**The preconditions are asserted before the behaviour, twice per write.** A
+scenario that never actually sent anything reads green, so before any "the
+thread came back" assertion runs, each write must have reached
+`RelayState.published` for this exact relay on its own `receipt.status` AND
+been handed back by the relay itself over an independent real `REQ` by id
+(`RelayLabKit.queryById`, a plain socket with no NMP in it).
+
+**Falsified three ways, each restored and re-confirmed green.** Pointing both
+thread demands at a valid-but-different page left the write fully landed
+(`publishedHere=true`) and delivered `0 rows [] over 4 batches` — so the
+demand's `#I` scoping is doing real work rather than "any kind:1111 will do".
+Routing the comment to `ws://127.0.0.1:1` failed at the precondition with
+`publishedHere=false` before a single behaviour assertion ran. Inverting the
+reply's parent to `.root` failed on the real captured
+`comment(eventID: "a5ea1ba3...", authorPubkey: Optional("1544818d..."))`.
+
+**FAILING — `commentThreadDemand` cannot read back two of its three root
+shapes (#1876), left red on purpose.** The demand binds the root identifier to
+the `#I` tag for EVERY root shape, but the composer writes `E` for an event
+root and `A` for an address root — `I` only for a NIP-73 external one. So the
+app-shaped case, commenting on a note, composes and publishes perfectly and
+can then never be read back through the capability's own door. The scenario's
+second test proves it is the demand and nothing else: same comment, same
+relay, same run, provably on the relay by real `REQ`, delivered to a
+hand-built `NMPFilter(kinds: [1111], tags: ["E": ...])`
+(`1 rows`) and not to `commentThreadDemand(root: .event(...))` (`0 rows [] over
+6 batches`, selection tags `I=literal(["e7a36fe4..."])`). The assertion is
+written the right way round — it goes green with no edit when #1876 lands —
+rather than inverted into a claim that the current behaviour is correct, which
+would report the fix as a regression. Same discipline as C17's `distinct`
+phase.
+
+That workaround is itself the finding's shape: it requires the app to know
+NIP-22's uppercase-root tag vocabulary, which is exactly the knowledge the
+capability crate exists to own.
+
+**C11's second API finding (#1878): a NIP-73 web root does not survive its own
+round trip.** Composed as `Nip73.url(url:)`, it decodes back as
+`Nip73.general(value:kind: "web")` — deliberately, since the decoder never
+re-canonicalises a read and `.url`'s meaning is "already canonical". The two
+values carry the identical string, render identical `I`/`K` rows and produce
+the identical demand, but they are different cases of a `Hashable` enum, so
+`decoded.root == theRootIComposed` is `false` for every web thread and an app
+keying comments by their root splits one page's thread in two. Swift exposes
+no `iValue`/`kValue` accessor and no canonicalising constructor, so the only
+public way to ask "same thread" is to build `commentThreadDemand` from each
+and compare the `NMPDemand`s — which is what the scenario asserts, printing
+both values on every run so neither shape is silently promoted to a contract.
+The assertion was written on the demand rather than inverted onto the value,
+the same way C13 handled `wireSubCount`.
+
+**One ergonomics observation, not a defect.** `commentIntent` returns
+`WriteRouting.auto`, and `.auto` needs `NMPConfig.outboxRouting` indexers a
+lab engine does not have, so the app assigns `intent.routing =
+.explicit(relays:)` on the returned value — a plain public field on the
+ordinary write noun, exactly what C7 does. This is the same read/write routing
+asymmetry already recorded below, seen from the capability side.
 
 **C15's relay lab is qualified; C15 itself is NOT proven.** The distinction is
 the whole point of the paragraph below, and an earlier revision of this section
