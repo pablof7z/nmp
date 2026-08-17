@@ -881,12 +881,17 @@ fn apply_run_deaths(
         }
     }
 
-    existing.push(carry);
-    let all_dead = merge_dead_blocks(&existing)
-        .map_err(packed_err)?
-        .expect("fresh deaths are nonempty");
+    // Falling out of the loop means every level was occupied, so `carry` is
+    // already `fresh` merged with all `MAX_DEATH_BLOCKS` prior blocks — the
+    // carry removed each one as it consumed it. Re-merging it against
+    // `existing` would hand `merge_dead_blocks` that same union plus the 8
+    // blocks a second time, exceeding the fan-in bound it enforces and
+    // failing the whole write transaction. That made this rewrite path
+    // unreachable precisely when it became necessary: the only way to arrive
+    // here is a full counter, which is exactly the case the re-merge
+    // rejected.
     drop(catalog);
-    rewrite_run_without_dead(write_txn, meta, &all_dead)
+    rewrite_run_without_dead(write_txn, meta, &carry)
 }
 
 fn stream_compaction_cohort(

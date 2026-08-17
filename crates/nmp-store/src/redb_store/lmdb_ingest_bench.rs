@@ -1282,11 +1282,12 @@ fn apply_run_deaths(
         }
     }
 
-    existing.push(carry);
-    let all_dead = merge_dead_blocks(&existing)
-        .map_err(packed_err)?
-        .expect("fresh deaths are nonempty");
-    rewrite_run_without_dead(db, txn, meta, &all_dead, work)
+    // Same correction as `postings_store::apply_run_deaths`: `carry` already
+    // holds the union of `fresh` and every level it consumed, so re-merging
+    // it against `existing` exceeds `merge_dead_blocks`' fan-in bound and
+    // makes this path unreachable. Forked from that function, and the defect
+    // was forked with it.
+    rewrite_run_without_dead(db, txn, meta, &carry, work)
 }
 
 fn compact_cohort(
