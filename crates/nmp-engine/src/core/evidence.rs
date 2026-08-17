@@ -150,7 +150,7 @@ pub enum SourceStatus {
     /// fact: rows already acquired through this source remain usable; this
     /// status alone never invalidates them.
     Disconnected,
-    /// #8: a PROTECTED (`AccessContext::Nip42`) session is connected, but
+    /// #8: an identity-bound session is connected, but
     /// its exact current connection generation has not yet completed AUTH —
     /// its planned REQs are parked, so it is honestly not `Requesting` yet.
     AwaitingAuth {

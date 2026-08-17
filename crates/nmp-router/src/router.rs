@@ -420,7 +420,7 @@ impl Router {
         let budget = budget.into();
         // Step 1: group demand by (Skeleton) / classify
         // explicit. Classification is by DECLARED `ReadRouting` and nothing
-        // else — never by filter shape. Grouping by `AccessContext`
+        // else — never by filter shape. Grouping by authenticated identity
         // alongside the skeleton keeps the seam ready for a future
         // present authenticated identity (#8's NIP-42 AUTH) without needing a
         // second widening later; every atom reaching this branch shares

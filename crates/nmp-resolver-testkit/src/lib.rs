@@ -104,7 +104,7 @@ impl Harness {
 
     /// The context-aware demand set (#106): identity-domain atoms, source/
     /// authenticate_as included -- for tests that need to assert on
-    /// `ReadRouting`/`AccessContext`, e.g. equal-context-only
+    /// `ReadRouting`/authenticated identity, e.g. equal-context-only
     /// coalescing (Fable D).
     pub fn demand_with_context(&self) -> BTreeSet<ContextualAtom> {
         self.engine.active_demand()

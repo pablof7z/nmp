@@ -116,7 +116,7 @@ impl SubId {
     }
 
     /// DERIVE a sub-id for `filter` on `relay` from the filter's OWN skeleton
-    /// (authors erased) folded with its [`ReadRouting`]/[`AccessContext`]
+    /// (authors erased) folded with its [`ReadRouting`] and authenticated identity
     /// (#106, atlas's 3rd proof floor).
     ///
     /// **This is NO LONGER how planned subscriptions are identified.** The
@@ -167,7 +167,7 @@ pub struct WireReq {
     pub sub_id: SubId,
     pub filter: ConcreteFilter,
     /// The declared routing this req was compiled under. `SubId` already
-    /// carries the relay and the [`AccessContext`]; this is the missing half
+    /// carries the relay and the authenticated identity; this is the missing half
     /// of the identity context, and it is what makes the previous plan
     /// re-partitionable for signature matching (`crate::wire_id`) — an
     /// `Auto`-routed filter must never inherit an `Explicit`-routed filter's

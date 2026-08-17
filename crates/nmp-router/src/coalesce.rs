@@ -350,7 +350,7 @@ impl RuleRegistry {
     /// filter folded into a merge.
     ///
     /// Deliberately PURE selection-only (#106, Fable D "locus fixed"): this
-    /// engine never learns about `ReadRouting`/`AccessContext` at all --
+    /// engine never learns about `ReadRouting` or authenticated identity at all --
     /// equal-context-only coalescing is enforced one level up, by
     /// `Router::compile` partitioning its per-relay bag by `ContextKey`
     /// BEFORE calling this on each partition separately. Two atoms that
