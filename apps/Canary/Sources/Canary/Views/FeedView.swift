@@ -76,7 +76,11 @@ struct FeedView: View {
     private func observe() async {
         rows = []
         evidence = []
-        guard let query = try? model.engine.observe(FeedFilters.follows(kinds: model.kinds)) else {
+        let feed = NMPDemand(
+            selection: FeedFilters.follows(kinds: model.kinds),
+            source: .authorOutboxes
+        )
+        guard let query = try? model.engine.observe(.single(feed)) else {
             return
         }
         // #680: an observation is a throwing AsyncSequence; a throw here is

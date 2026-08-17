@@ -81,7 +81,7 @@ final class C1ColdStartLiveFeedTests: XCTestCase {
         // no account/session needed for a literal-author read (mirrors
         // `LiveRelayTests.testAuthorsOwnNotesArriveThroughOperatorAppRelays`).
         let filter = NMPFilter(kinds: [1], authors: .literal([keyPair.pubkeyHex]))
-        let query = try engine.observe(filter)
+        let query = try engine.observe(.single(NMPDemand(selection: filter, source: .authorOutboxes)))
 
         let outcome = await withTaskGroup(of: Outcome.self) { group in
             group.addTask {

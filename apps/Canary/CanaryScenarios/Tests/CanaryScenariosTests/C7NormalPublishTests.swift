@@ -110,7 +110,7 @@ final class C7NormalPublishTests: XCTestCase {
         // ANY row this query ever delivers is unambiguously the published
         // event -- no need to know its id in advance to recognize it.
         let filter = NMPFilter(kinds: [1], authors: .literal([authorHex]))
-        let query = try engine.observe(filter)
+        let query = try engine.observe(.single(NMPDemand(selection: filter, source: .authorOutboxes)))
 
         let coordinator = Coordinator()
 
