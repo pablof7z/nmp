@@ -1,11 +1,12 @@
 //! The stalled-obligation change detector and the projection it caches
 //! (#1743).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use nmp_grammar::{AccessContext, RelaySessionKey};
 
 use super::diagnostics::{stalled_write_id, STALLED_WRITE_DETAIL_LIMIT};
+use super::pending_writes::PendingWrites;
 use super::{
     PendingWrite, ReceiptId, RelayUrl, StalledWrite, StalledWriteStage, StalledWriteTotals,
 };
@@ -22,7 +23,7 @@ use super::{
 /// half of the input can change with no receipt involved.
 pub(super) struct StalledWriteInputs<'a> {
     /// Every open durable obligation this reducer owns.
-    pub(super) pending: &'a HashMap<ReceiptId, PendingWrite>,
+    pub(super) pending: &'a PendingWrites,
     /// Sessions CURRENTLY connected. Only reachability is read from it.
     pub(super) connected: &'a BTreeSet<RelaySessionKey>,
 }

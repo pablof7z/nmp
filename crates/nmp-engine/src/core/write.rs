@@ -292,10 +292,6 @@ impl CoreState {
         self.quarantined_auth_receipts.clear();
         self.pending.clear();
         self.stalled_writes = StalledWriteCensus::default();
-        self.event_to_receipts.clear();
-        self.intent_receipts.clear();
-        self.receipts_by_lane_relay.clear();
-        self.lane_relay_index_degraded = false;
         self.lane_projection_unprovable = false;
         self.lane_bootstrap_retries.clear();
         self.attempt_correlations.clear();
@@ -341,114 +337,27 @@ impl CoreState {
         Ok(AttemptCorrelation(id))
     }
 
-    /// O(1) via `intent_receipts` (epic #507 finding E5) -- this door used
-    /// to be a full `self.pending` linear scan, run once per due deadline in
-    /// `consume_due_publish_queue_deadlines`.
-    pub(in crate::core) fn receipt_for_intent(&self, intent_id: IntentId) -> Option<ReceiptId> {
-        self.intent_receipts.get(&intent_id).copied()
-    }
-
-    /// Name one receipt as owning these exact frozen bytes.
+    /// Everything a permanently-discarded pending write leaves behind ACROSS
+    /// owners, at every REAL removal (epic #507 finding E5, #903).
     ///
-    /// The one door into `event_to_receipts`, paired with
-    /// [`Self::unindex_receipt_from_event`]. Six sites used to spell this
-    /// `entry(id).or_default().insert(receipt)` by hand.
-    pub(in crate::core) fn index_receipt_under_event(&mut self, event_id: EventId, id: ReceiptId) {
-        self.event_to_receipts
-            .entry(event_id)
-            .or_default()
-            .insert(id);
-    }
-
-    /// Release one receipt's claim on these frozen bytes, dropping the entry
-    /// entirely once no receipt names them.
-    ///
-    /// Pruning is not housekeeping. `event_to_receipts` answers "which live
-    /// obligations own these exact bytes", so an entry surviving with an
-    /// empty set asserts that bytes nothing owns are still owned. Three sites
-    /// used to spell the removal by hand and only two of them pruned: the
-    /// successor rewrite in `write/replaceable_operation.rs` left an empty
-    /// set under every retired generation's event id, once per rewrite, until
-    /// the next boot recovery (#1606). One door, so the two spellings cannot
-    /// diverge again.
-    pub(in crate::core) fn unindex_receipt_from_event(&mut self, event_id: EventId, id: ReceiptId) {
-        let Some(receipts) = self.event_to_receipts.get_mut(&event_id) else {
-            return;
-        };
-        receipts.remove(&id);
-        if receipts.is_empty() {
-            self.event_to_receipts.remove(&event_id);
-        }
-    }
-
-    /// Remove a permanently-discarded pending write's entries from the
-    /// `intent_receipts`, `event_to_receipts`, and `receipts_by_lane_relay`
-    /// indexes (epic #507 finding E5, #903). Call this at every REAL removal
-    /// from `self.pending` --
-    /// never at `fail_and_compensate`'s transient remove-then-reinsert
-    /// (`CompensateOutcome::NotFound`/`Err`), which must leave both indexes
+    /// The owner's own three indexes are its business and are forgotten
+    /// through its one door; what stays here is the state this reducer holds
+    /// on the write's behalf but does not keep inside it. Never call this at
+    /// `fail_and_compensate`'s transient remove-then-reinsert
+    /// (`CompensateOutcome::NotFound`/`Err`), which must leave everything
     /// untouched because the obligation and its lanes are still live.
     pub(in crate::core) fn forget_pending_indexes(
         &mut self,
         id: ReceiptId,
         pending: &PendingWrite,
     ) {
-        self.intent_receipts.remove(&pending.intent_id);
-        // Every event this receipt is indexed under, not just its current
-        // frozen one. A semantic receipt that rode a predecessor generation
-        // to a relay is still named by that predecessor's entry, and the
-        // index means "this receipt has live work on this event". Leaving a
-        // stale name behind used to be invisible only because a semantic
-        // receipt could never reach a terminal state; once it settles, the
-        // publish-queue projection reads that name and finds a receipt whose
-        // payload is no longer `Contributing`.
-        self.event_to_receipts.retain(|_, receipts| {
-            receipts.remove(&id);
-            !receipts.is_empty()
-        });
+        self.pending.forget_indexes(id, pending);
         // A removed write owns no projection to reconcile, so its bootstrap
         // gap is closed by the removal. Leaving the entry would keep
         // rearming a deadline for a receipt that can never bootstrap again
         // and, for a blind gap, would suppress worker reconciliation forever.
         self.lane_bootstrap_retries.remove(&id);
-        for relay in &pending.lane_projection.persisted {
-            if let Some(receipts) = self.receipts_by_lane_relay.get_mut(relay) {
-                receipts.remove(&id);
-                if receipts.is_empty() {
-                    self.receipts_by_lane_relay.remove(relay);
-                }
-            }
-        }
         self.release_all_coordinate_coverage(id);
-    }
-
-    /// I1's INSERTION half, the mirror of [`Self::forget_pending_indexes`].
-    ///
-    /// Same rule, stated once instead of open-coded at three call sites: call
-    /// this at every REAL insertion into `self.pending`, never at
-    /// `fail_and_compensate`'s transient remove-then-reinsert, which never
-    /// changes which intent a receipt owns or which event it materializes.
-    /// Having only the removal half be a door is what let three copies of the
-    /// insertion drift apart unnoticed; two indexes are few enough to
-    /// hand-write and exactly enough to forget one of.
-    ///
-    /// `intent_id` is `None` only for Ephemeral, which owns no pending row
-    /// and no lane, so there is nothing to index for it (epic #507 finding
-    /// E5). `receipts_by_lane_relay` and `lane_bootstrap_retries` are
-    /// deliberately absent: neither exists yet at insertion time — a lane is
-    /// indexed when its projection persists, and a bootstrap retry when one
-    /// is actually armed.
-    pub(in crate::core) fn remember_pending_indexes(
-        &mut self,
-        id: ReceiptId,
-        intent_id: Option<IntentId>,
-        event_id: EventId,
-    ) {
-        let Some(intent_id) = intent_id else {
-            return;
-        };
-        self.intent_receipts.insert(intent_id, id);
-        self.index_receipt_under_event(event_id, id);
     }
 
     /// Ask the ordinary query owner whether this relay's current value for
@@ -730,8 +639,8 @@ impl CoreState {
     ) {
         let recipients = match &fact {
             WriteFact::Relay { event_id, .. } => self
-                .event_to_receipts
-                .get(event_id)
+                .pending
+                .receipts_for_event(event_id)
                 .cloned()
                 .unwrap_or_else(|| BTreeSet::from([id])),
             WriteFact::Destinations { .. }
@@ -741,7 +650,7 @@ impl CoreState {
             {
                 self.pending
                     .get(&id)
-                    .and_then(|pending| self.event_to_receipts.get(&pending.frozen.id))
+                    .and_then(|pending| self.pending.receipts_for_event(&pending.frozen.id))
                     .cloned()
                     .unwrap_or_else(|| BTreeSet::from([id]))
             }
@@ -952,7 +861,7 @@ impl CoreState {
         let Some(owner_intent) = generation.members.first().copied() else {
             return;
         };
-        let Some(owner_receipt) = self.intent_receipts.get(&owner_intent).copied() else {
+        let Some(owner_receipt) = self.pending.receipt_for_intent(owner_intent) else {
             return;
         };
         let Some(pending) = self.pending.get(&owner_receipt) else {
@@ -979,7 +888,7 @@ impl CoreState {
         match self.store.close_replaceable_operation_cohort(close) {
             Ok(nmp_store::SemanticCohortCloseOutcome::Closed { members }) => {
                 for member in members {
-                    let Some(receipt) = self.intent_receipts.get(&member).copied() else {
+                    let Some(receipt) = self.pending.receipt_for_intent(member) else {
                         continue;
                     };
                     if let Some(pending) = self.pending.remove(&receipt) {
@@ -1220,8 +1129,9 @@ impl CoreState {
         &self,
     ) -> Result<Vec<(ReceiptId, PublishQueueLane)>, PersistenceError> {
         let mut lanes = Vec::new();
-        for (id, pending) in &self.pending {
-            if self.lane_relay_index_degraded || !pending.lane_projection.uncertain.is_empty() {
+        let degraded = self.pending.lane_index_is_degraded();
+        for (id, pending) in self.pending.iter() {
+            if degraded || !pending.lane_projection.uncertain.is_empty() {
                 lanes.extend(
                     self.store
                         .recover_publish_queue_lanes(pending.intent_id)?
@@ -1515,7 +1425,7 @@ impl CoreState {
                     .attempt_ordinals
                     .insert(lane.key.relay.clone(), attempt.ordinal);
             }
-            self.index_receipt_under_event(event.id, id);
+            self.pending.index_receipt_under_event(event.id, id);
             self.attempt_correlations.insert(
                 correlation,
                 AttemptCorrelationTarget {
@@ -1544,7 +1454,8 @@ impl CoreState {
     /// pending write's signing identity, decides whether a lane belongs to
     /// THIS session.)
     ///
-    /// While `lane_relay_index_degraded`, this falls back to the OLD full
+    /// While the owner reports its lane index degraded, this falls back to
+    /// the OLD full
     /// scan, unchanged: the index cannot be trusted to be a superset of
     /// live lanes right now, and guessing wrong here means a lane never
     /// wakes -- a permanently wedged durable write, the worst bug class in
@@ -1558,7 +1469,7 @@ impl CoreState {
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
 
-        if self.lane_relay_index_degraded {
+        if self.pending.lane_index_is_degraded() {
             let Ok(lanes) = self.recover_all_lanes() else {
                 self.retry_scheduler_blocked = true;
                 return effects;
@@ -1568,17 +1479,10 @@ impl CoreState {
             return effects;
         }
 
-        // Clone the candidate receipt set first: the loop below needs a
-        // mutable borrow of `self` (store reads, `retry_scheduler_blocked`),
-        // so it cannot hold a live borrow of `self.receipts_by_lane_relay`
-        // at the same time.
-        let candidates: Vec<ReceiptId> = self
-            .receipts_by_lane_relay
-            .get(&session.relay)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        // Take the candidate receipt set by value first: the loop below needs
+        // a mutable borrow of `self` (store reads, `retry_scheduler_blocked`),
+        // so it cannot hold a live borrow of the lane index at the same time.
+        let candidates = self.pending.receipts_with_lane_on(&session.relay);
 
         let mut lanes: Vec<(ReceiptId, PublishQueueLane)> = Vec::new();
         for id in candidates {
@@ -1710,7 +1614,7 @@ impl CoreState {
                 break;
             }
             for deadline in due {
-                let id = self.receipt_for_intent(deadline.key.intent_id);
+                let id = self.pending.receipt_for_intent(deadline.key.intent_id);
                 let lane = self
                     .store
                     .recover_publish_queue_lanes(deadline.key.intent_id)
@@ -1977,14 +1881,14 @@ impl CoreState {
         // panicking the host mid-boot. An `Err` here is NOT "nothing is
         // open": the durable obligation set could not be proven, so this
         // fabricates nothing from it -- no receipt, no lane, no signer
-        // request, no route resolution, no wire effect -- and leaves
-        // `pending`/`lane_relay_index_degraded` in the untrustworthy state
-        // they must be in for a set that was never rebuilt. The one-shot
+        // request, no route resolution, no wire effect -- and leaves the
+        // pending writes owner, lane index included, in the untrustworthy
+        // state it must be in for a set that was never rebuilt. The one-shot
         // #122 degradation is the whole visible outcome.
         let mut recovered = match self.store.recover_publish_queue() {
             Ok(recovered) => recovered,
             Err(error) => {
-                self.lane_relay_index_degraded = true;
+                self.pending.degrade_lane_index();
                 // Nothing was rebuilt, so there is no intent to retry a
                 // bootstrap for. A later engine-supervised store
                 // reconstruction re-enters this whole recovery door.
@@ -2012,9 +1916,9 @@ impl CoreState {
         let mut recovered_semantic_coordinates = Vec::new();
         // This is the one deterministic, from-scratch rebuild of `pending`
         // (and, with it, every index derived from `pending`) -- the exact
-        // moment `receipts_by_lane_relay` can be trusted again regardless of
-        // what happened in a prior process (epic #507 finding E5).
-        self.lane_relay_index_degraded = false;
+        // moment the lane index can be trusted again regardless of what
+        // happened in a prior process (epic #507 finding E5).
+        self.pending.begin_lane_index_rebuild();
         self.lane_projection_unprovable = false;
         // Every gap recorded against the previous `pending` set refers to
         // receipt ids this rebuild is about to re-derive from the store.
@@ -2097,7 +2001,7 @@ impl CoreState {
                         route_needs: BTreeSet::new(),
                     },
                 );
-                self.remember_pending_indexes(
+                self.pending.remember_indexes(
                     id,
                     Some(intent.intent_id),
                     generation.materialization.event_id,
@@ -2127,7 +2031,7 @@ impl CoreState {
                         frozen: frozen.clone(),
                     },
                 );
-                self.index_receipt_under_event(frozen.id, id);
+                self.pending.index_receipt_under_event(frozen.id, id);
                 effects.push(Effect::EmitReceipt(
                     id,
                     WriteFact::Signing(SigningState::Refused { reason }),
@@ -2175,7 +2079,8 @@ impl CoreState {
                     route_needs: BTreeSet::new(),
                 },
             );
-            self.remember_pending_indexes(id, Some(intent.intent_id), frozen.id);
+            self.pending
+                .remember_indexes(id, Some(intent.intent_id), frozen.id);
             recovered_ids.push(id);
 
             if !already_signed {
@@ -2191,7 +2096,7 @@ impl CoreState {
                     // for it this boot, so the reverse index can never learn
                     // those lanes -- an unprovable gap, so degrade rather
                     // than silently under-index (epic #507 finding E5).
-                    self.lane_relay_index_degraded = true;
+                    self.pending.degrade_lane_index();
                     self.record_store_failure(&error);
                     // The durable route set is exactly what could not be
                     // read, so nothing can be held as `uncertain` and the
@@ -2261,7 +2166,7 @@ impl CoreState {
                         // The projection door has already recorded the
                         // retryable gap that gets this intent out of its
                         // conservative retention (#1000).
-                        self.lane_relay_index_degraded = true;
+                        self.pending.degrade_lane_index();
                         self.record_store_failure(&error);
                         continue;
                     }
@@ -2406,7 +2311,7 @@ impl CoreState {
                     match self.commit_lane_waiting(&lane.key, lane.revision, false) {
                         Ok(_) => effects.push(Effect::EnsureWriteRelay(session)),
                         Err(error) => {
-                            self.lane_relay_index_degraded = true;
+                            self.pending.degrade_lane_index();
                             self.record_store_failure(&error);
                         }
                     }
@@ -2590,7 +2495,7 @@ impl CoreState {
             receipt.intent_id
         };
         let projection_id = evidence_intent
-            .and_then(|intent| self.intent_receipts.get(&intent).copied())
+            .and_then(|intent| self.pending.receipt_for_intent(intent))
             .unwrap_or(id);
         if self
             .pending
@@ -2639,7 +2544,7 @@ impl CoreState {
         };
         let mut replay = Vec::new();
         let retained_status =
-            if receipt_state == ReceiptState::Signed && !self.pending.contains_key(&id) {
+            if receipt_state == ReceiptState::Signed && !self.pending.contains(&id) {
                 Some(WriteFact::Outcome(WriteOutcome::Settled))
             } else {
                 Self::retained_receipt_fact(&receipt)
@@ -2977,7 +2882,7 @@ impl CoreState {
     }
 
     pub(in crate::core) fn receipt_is_live(&self, id: ReceiptId) -> bool {
-        self.pending.contains_key(&id)
+        self.pending.contains(&id)
             || self
                 .store
                 .reattach_receipt(id.0)
@@ -3067,7 +2972,7 @@ impl CoreState {
             .map(|generation| generation.members.iter().copied().collect::<Vec<_>>())
             .unwrap_or_default();
         for member in &members {
-            let Some(receipt) = self.intent_receipts.get(member).copied() else {
+            let Some(receipt) = self.pending.receipt_for_intent(*member) else {
                 self.degrade_store(
                     nmp_store::PersistenceError::invariant(
                         "active semantic member is missing its runtime receipt",
@@ -3181,7 +3086,7 @@ impl CoreState {
             .unwrap_or_default();
         let mut member_receipts = Vec::with_capacity(members.len());
         for member in &members {
-            let Some(receipt) = self.intent_receipts.get(member).copied() else {
+            let Some(receipt) = self.pending.receipt_for_intent(*member) else {
                 self.degrade_store(
                     nmp_store::PersistenceError::invariant(
                         "active semantic member is missing its runtime receipt",
@@ -3251,9 +3156,9 @@ impl CoreState {
             .operations
             .iter()
             .find_map(|operation| {
-                self.intent_receipts
-                    .get(&operation.intent_id)
-                    .and_then(|receipt| self.pending.get(receipt))
+                self.pending
+                    .receipt_for_intent(operation.intent_id)
+                    .and_then(|receipt| self.pending.get(&receipt))
                     .map(|pending| Self::routing_snapshot(&pending.routing))
             })
             .unwrap_or_else(|| Self::routing_snapshot(&WriteRouting::Auto));
@@ -3351,7 +3256,8 @@ impl CoreState {
                 .expect("semantic runtime members were preflighted before commit")
                 .frozen
                 .id;
-            self.unindex_receipt_from_event(old_event_id, receipt);
+            self.pending
+                .unindex_receipt_from_event(old_event_id, receipt);
             let pending = self
                 .pending
                 .get_mut(&receipt)
@@ -3367,12 +3273,12 @@ impl CoreState {
             pending.route_blocked_relays.clear();
             pending.attempt_ordinals.clear();
             // `lane_projection` was already reset above.
-            self.index_receipt_under_event(installed.event.id, receipt);
+            self.pending
+                .index_receipt_under_event(installed.event.id, receipt);
         }
         let owner_receipt = self
-            .intent_receipts
-            .get(&delivery_owner.physical_owner())
-            .copied()
+            .pending
+            .receipt_for_intent(delivery_owner.physical_owner())
             .expect("semantic delivery owner was runtime-preflighted");
         if let Some(pending) = self.pending.get_mut(&owner_receipt) {
             pending.sign_request_in_flight = true;
@@ -3456,11 +3362,8 @@ impl CoreState {
 
         let payload = match payload {
             WritePayload::ReplaceableOperation(operation) => {
-                return self.prepare_body_complete_replaceable_operation(
-                    operation,
-                    routing,
-                    identity,
-                )
+                return self
+                    .prepare_body_complete_replaceable_operation(operation, routing, identity)
             }
             payload => payload,
         };
@@ -3672,7 +3575,7 @@ impl CoreState {
                 route_needs: BTreeSet::new(),
             },
         );
-        self.remember_pending_indexes(id, intent_id, frozen.id);
+        self.pending.remember_indexes(id, intent_id, frozen.id);
 
         for retired in retired_intents {
             let retired_id = ReceiptId(retired.receipt_id);
@@ -3685,7 +3588,7 @@ impl CoreState {
             if let Some(retired_pending) = self.pending.remove(&retired_id) {
                 self.forget_pending_indexes(retired_id, &retired_pending);
             } else {
-                self.intent_receipts.remove(&retired.intent_id);
+                self.pending.forget_intent(retired.intent_id);
             }
         }
 
@@ -3792,8 +3695,8 @@ impl CoreState {
     pub(in crate::core) fn on_signer_attached(&mut self, pk: PublicKey) -> Vec<Effect> {
         let mut effects = Vec::new();
         let semantic_owners = self
-            .event_to_receipts
-            .iter()
+            .pending
+            .indexed_events()
             .filter_map(|(event_id, receipts)| {
                 receipts
                     .iter()
@@ -3812,10 +3715,13 @@ impl CoreState {
                     .map(|(_, receipt)| (*event_id, receipt))
             })
             .collect::<BTreeMap<_, _>>();
-        for (id, pending) in &mut self.pending {
+        for id in self.pending.receipt_ids() {
+            let Some(pending) = self.pending.get_mut(&id) else {
+                continue;
+            };
             let is_physical_owner =
                 !matches!(pending.target, PendingWriteTarget::ReplaceableOperation(_))
-                    || semantic_owners.get(&pending.frozen.id) == Some(id);
+                    || semantic_owners.get(&pending.frozen.id) == Some(&id);
             if pending.signing_pubkey == pk
                 && is_physical_owner
                 && pending.event_id.is_none()
@@ -3828,11 +3734,11 @@ impl CoreState {
                 // alarm the park raised (#1261). A park nobody can see end
                 // is as misleading as one nobody can see start.
                 effects.push(Effect::EmitReceipt(
-                    *id,
+                    id,
                     WriteFact::Signing(SigningState::InFlight { pubkey: pk }),
                 ));
                 effects.push(Effect::RequestSign(
-                    *id,
+                    id,
                     pending.sign_generation,
                     unsigned_from_frozen(&pending.frozen),
                 ));
@@ -3935,7 +3841,7 @@ impl CoreState {
         after: Option<ReceiptId>,
         limit: u8,
     ) -> Result<Vec<PublishQueueEntry>, PersistenceError> {
-        let Some(ids) = self.event_to_receipts.get(&event_id) else {
+        let Some(ids) = self.pending.receipts_for_event(&event_id) else {
             return Ok(Vec::new());
         };
         let receipts = ids
@@ -3971,8 +3877,8 @@ impl CoreState {
             } = &receipt.payload
             {
                 let owner_pending = self
-                    .event_to_receipts
-                    .get(&current.materialization.event_id)
+                    .pending
+                    .receipts_for_event(&current.materialization.event_id)
                     .and_then(|receipts| {
                         receipts
                             .iter()
@@ -4308,7 +4214,7 @@ impl CoreState {
         &mut self,
         id: ReceiptId,
     ) -> Result<(), RemoveQueueEntryError> {
-        if self.pending.contains_key(&id) {
+        if self.pending.contains(&id) {
             return Err(RemoveQueueEntryError::StillActive { receipt_id: id });
         }
         match self.store.remove_publish_queue_entry(id.0) {
@@ -4345,7 +4251,7 @@ impl CoreState {
                             Err(error) => self.degrade_store(error, &mut effects),
                         }
                         self.quarantined_auth_receipts.remove(&id);
-                        self.unindex_receipt_from_event(event_id, id);
+                        self.pending.unindex_receipt_from_event(event_id, id);
                         effects.push(Effect::EmitReceipt(
                             id,
                             WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Cancelled)),
@@ -4534,13 +4440,8 @@ impl CoreState {
                         // an offline co-owner could remain stranded forever
                         // behind a row that is already validly signed.
                         for co_intent in co_signed {
-                            if let Some((receipt_id, co_pending)) = self
-                                .pending
-                                .iter_mut()
-                                .find(|(_, candidate)| candidate.intent_id == co_intent)
-                            {
-                                co_pending.already_signed = true;
-                                co_receipts.push(*receipt_id);
+                            if let Some(receipt_id) = self.pending.adopt_co_signature(co_intent) {
+                                co_receipts.push(receipt_id);
                             }
                         }
                     }
@@ -4560,14 +4461,9 @@ impl CoreState {
                         // journals atomically; advance their in-memory
                         // projections without invoking promotion again.
                         for member in members {
-                            if let Some((receipt_id, member_pending)) = self
-                                .pending
-                                .iter_mut()
-                                .find(|(_, candidate)| candidate.intent_id == member)
-                            {
-                                member_pending.already_signed = true;
-                                if *receipt_id != id {
-                                    co_receipts.push(*receipt_id);
+                            if let Some(receipt_id) = self.pending.adopt_co_signature(member) {
+                                if receipt_id != id {
+                                    co_receipts.push(receipt_id);
                                 }
                             }
                         }
@@ -4642,8 +4538,8 @@ impl CoreState {
         // durable, already-journaled obligation.
         let resolution = if semantic_promotion {
             let member_receipts = self
-                .event_to_receipts
-                .get(&event.id)
+                .pending
+                .receipts_for_event(&event.id)
                 .cloned()
                 .unwrap_or_else(|| BTreeSet::from([id]));
             let mut answer = RouteAnswer {
@@ -4683,7 +4579,7 @@ impl CoreState {
         // lane, and a parked intent has none, but the index must be complete
         // the moment the bytes are final so a LATER resolution's lanes need
         // no second registration step.
-        self.index_receipt_under_event(event.id, id);
+        self.pending.index_receipt_under_event(event.id, id);
         let RouteResolution {
             answer,
             parent_provenance_error,
@@ -5288,17 +5184,21 @@ impl CoreState {
         let semantic = matches!(pending.target, PendingWriteTarget::ReplaceableOperation(_));
         let event = pending.frozen.clone();
         if semantic
-            && self.event_to_receipts.get(&event.id).and_then(|receipts| {
-                receipts
-                    .iter()
-                    .filter_map(|receipt| {
-                        self.pending
-                            .get(receipt)
-                            .map(|candidate| (candidate.intent_id, *receipt))
-                    })
-                    .min_by_key(|(intent, _)| *intent)
-                    .map(|(_, receipt)| receipt)
-            }) != Some(id)
+            && self
+                .pending
+                .receipts_for_event(&event.id)
+                .and_then(|receipts| {
+                    receipts
+                        .iter()
+                        .filter_map(|receipt| {
+                            self.pending
+                                .get(receipt)
+                                .map(|candidate| (candidate.intent_id, *receipt))
+                        })
+                        .min_by_key(|(intent, _)| *intent)
+                        .map(|(_, receipt)| receipt)
+                })
+                != Some(id)
         {
             return;
         }
@@ -5312,7 +5212,7 @@ impl CoreState {
                 ..RouteAnswer::default()
             };
             let mut error = None;
-            if let Some(receipts) = self.event_to_receipts.get(&event.id) {
+            if let Some(receipts) = self.pending.receipts_for_event(&event.id) {
                 for receipt in receipts {
                     let Some(member) = self.pending.get(receipt) else {
                         continue;
@@ -5517,7 +5417,7 @@ impl CoreState {
                     // intent's lanes failed, so the index cannot learn what
                     // may or may not exist -- degrade rather than assume "no
                     // lanes" (epic #507 finding E5).
-                    self.lane_relay_index_degraded = true;
+                    self.pending.degrade_lane_index();
                     for relay in &new_relays {
                         self.emit_write_fact(
                             id,
@@ -5596,7 +5496,7 @@ impl CoreState {
         session: &RelaySessionKey,
         effects: &mut Vec<Effect>,
     ) {
-        let Some(ids) = self.event_to_receipts.get(&event_id).cloned() else {
+        let Some(ids) = self.pending.receipts_for_event(&event_id).cloned() else {
             return;
         };
         let class = classify_relay_ack(status, &message);

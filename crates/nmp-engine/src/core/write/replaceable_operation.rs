@@ -831,12 +831,12 @@ impl CoreState {
             let member_receipt = if member == intent_id {
                 Some(receipt_id)
             } else {
-                self.intent_receipts.get(&member).copied()
+                self.pending.receipt_for_intent(member)
             };
             let Some(member_receipt) = member_receipt else {
                 continue;
             };
-            if self.pending.contains_key(&member_receipt) {
+            if self.pending.contains(&member_receipt) {
                 // Releases every relay this member's old generation had
                 // persisted lanes on from `receipts_by_lane_relay` before the
                 // field reset below, through the one diff both this rewrite
@@ -857,7 +857,8 @@ impl CoreState {
                     .expect("just confirmed present")
                     .frozen
                     .id;
-                self.unindex_receipt_from_event(old_event_id, member_receipt);
+                self.pending
+                    .unindex_receipt_from_event(old_event_id, member_receipt);
                 let previous = self
                     .pending
                     .get_mut(&member_receipt)
@@ -904,16 +905,16 @@ impl CoreState {
                         route_needs: BTreeSet::new(),
                     },
                 );
-                self.intent_receipts.insert(member, member_receipt);
+                self.pending.adopt_intent(member, member_receipt);
             }
-            self.index_receipt_under_event(frozen.id, member_receipt);
+            self.pending
+                .index_receipt_under_event(frozen.id, member_receipt);
         }
         if let Some(owner) = current
             .generation
             .as_ref()
             .and_then(|generation| generation.members.first())
-            .and_then(|owner| self.intent_receipts.get(owner))
-            .copied()
+            .and_then(|owner| self.pending.receipt_for_intent(*owner))
         {
             if let Some(pending) = self.pending.get_mut(&owner) {
                 if !pending.sign_request_in_flight && !pending.already_signed {
