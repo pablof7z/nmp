@@ -23,7 +23,7 @@ impl EngineCore {
     /// they only ever add -- but it made this "the one door" true for removal
     /// and false for addition, which is how the divergence this function
     /// exists to end began: one rewrite site pruning and its sibling not
-    /// (#1562). A door that is only sometimes the door is not a door.
+    /// (#1606). A door that is only sometimes the door is not a door.
     fn update_lane_relay_index(
         &mut self,
         id: ReceiptId,
@@ -84,7 +84,7 @@ impl EngineCore {
     /// assign `LaneWorkerProjection::default()` to the field directly and
     /// never told this index, so every relay the old generation had
     /// persisted lanes on kept naming the receipt in
-    /// `receipts_by_lane_relay` until the next full boot recovery (#1562).
+    /// `receipts_by_lane_relay` until the next full boot recovery (#1606).
     pub(super) fn reset_lane_projection_for_successor(&mut self, id: ReceiptId) {
         let previous = self
             .pending

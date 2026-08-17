@@ -549,7 +549,7 @@ struct NormRelayDiagnostics {
 /// surfaces claim to carry (#1616). `transport_slot` is deliberately
 /// absent: it is a connection-pool allocator index, not a fact either
 /// surface documents a use for, so it does not cross the FFI boundary and
-/// has nothing to compare here (#1562 boundary audit).
+/// has nothing to compare here (#1767 boundary audit).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct NormAuthSession {
     relay: String,

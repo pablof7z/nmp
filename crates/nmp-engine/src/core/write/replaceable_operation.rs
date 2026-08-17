@@ -861,7 +861,7 @@ impl EngineCore {
                 // Releases every relay this member's old generation had
                 // persisted lanes on from `receipts_by_lane_relay` before the
                 // field reset below, through the one diff both this rewrite
-                // and `replace_lane_projection` share (#1562). Done first, as
+                // and `replace_lane_projection` share (#1606). Done first, as
                 // its own `&mut self` call, because it cannot run while
                 // `previous` below holds `self.pending`'s only mutable
                 // borrow.
@@ -869,7 +869,7 @@ impl EngineCore {
                 // Release the retired generation's bytes through the one
                 // door, which prunes the entry once nothing owns them. This
                 // site used to remove the receipt by hand and leave the
-                // emptied set behind (#1562). Read the old id and release it
+                // emptied set behind (#1606). Read the old id and release it
                 // before taking `previous`, since the door borrows all of
                 // `self`.
                 let old_event_id = self

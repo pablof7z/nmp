@@ -309,7 +309,7 @@ fn ten_thousand_distinct_pending_cancellations_never_rebuild_surviving_demand() 
     // This test drives `handle()` directly, once per item, specifically to
     // prove the production entrypoint never revisits O(n) state on a
     // cancellation -- it is an amortized-COST proof, not a mirror-structure
-    // one. The turn-level check (#1562) already covers these same
+    // one. The turn-level check (#1606) already covers these same
     // Subscribe/Unsubscribe transitions via hundreds of other, bounded
     // tests; scanning full mirror structure at each of the 20,000 direct
     // calls below turns this O(n) claim into O(n^2) test-suite cost with no
