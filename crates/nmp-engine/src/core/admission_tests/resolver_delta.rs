@@ -33,12 +33,20 @@ fn one_handle_partial_resolver_closes_touch_only_departing_refcounts_in_both_ord
             assert!(atoms.insert(atom.clone()));
             departing.push(atom);
         }
-        // Build the fixture through the owner's own doors: re-indexing derives
+        // Build the fixture through the owner's own doors: indexing derives
         // the per-handle refcounts, and one retain per added atom derives the
         // owner count. Both then equal ATOMS because every atom here shares
         // one DemandKey and one claim -- a state the production path reaches,
-        // not one assigned into the maps.
-        core.wire.reindex_handle(handle, atoms);
+        // not one assigned into the maps. `index_handle` refuses re-indexing
+        // an already-indexed handle (#1774), so the door sequence is spelled
+        // out: unindex, then index the grown set. Nothing needs releasing --
+        // `base` is still present in `atoms`, only `departing` is new.
+        let previous = core.wire.unindex_handle(handle);
+        debug_assert!(
+            previous.is_subset(&atoms),
+            "this fixture only grows the handle's atom set"
+        );
+        core.wire.index_handle(handle, atoms);
         for atom in &departing {
             core.wire.retain(atom);
         }
@@ -115,7 +123,16 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
             None,
         );
         atoms.insert(surviving.clone());
-        core.wire.reindex_handle(handle, atoms);
+        // `index_handle` refuses re-indexing an already-indexed handle
+        // (#1774); the door sequence is spelled out here too. Nothing needs
+        // releasing -- `departing` is still present in `atoms`, only
+        // `surviving` is new.
+        let previous = core.wire.unindex_handle(handle);
+        debug_assert!(
+            previous.is_subset(&atoms),
+            "this fixture only grows the handle's atom set"
+        );
+        core.wire.index_handle(handle, atoms);
         core.retain_wire_atom_owner(&surviving);
         core.activate_request_targets_for_handle(handle);
 
