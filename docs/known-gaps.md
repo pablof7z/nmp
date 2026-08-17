@@ -148,6 +148,15 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   `WindowLoad.returned(added:)` is not a usable progress signal — across runs
   the same advance reported `added: 20` and `added: 0`, with the rows arriving
   in a later `.idle` batch.
+
+- **A derived binding is proven to GROW; nothing proves it retracts.** Canary
+  C4 (#1871) drives `NMPBinding.derived` end to end against a real relay: a
+  feed over "my kind:3 contact list projected through its `p` tags" starts
+  delivering a newly-followed author's notes with no app action. What is
+  untested and unclaimed is the other direction — whether an UNFOLLOW (a
+  replacement kind:3 naming fewer authors) retracts the rows that author
+  already contributed. `RowDelta.removed` makes retraction expressible, so
+  both answers are plausible and neither is written down.
 - **Suspend/resume transparency (#4): the on-device pass is pending.** Transport
   hardening (`SuspendGapDetector`/`apply_resume_gap`, wall-clock gap detection)
   and the clock audit of every suspension-spanning wait are done; what remains

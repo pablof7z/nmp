@@ -63,6 +63,34 @@ let package = Package(
                 .product(name: "NMP", package: "NMP")
             ]
         ),
+        // C16's reading half. The reader's own CADENCE is the primary
+        // measurement -- how many batches it was delivered while it was
+        // deliberately behind -- and "how many batches did this reader
+        // accept in ten seconds" measured inside a shared XCTest binary is
+        // a measurement of the machine's load, not of NMP (#1796 again).
+        // Peak heap, file descriptors and threads under a backlog are
+        // process properties for the same reason. So the app that reads
+        // slowly is its own process. Needs NMP only; the relay's lifecycle
+        // and the flood stay the parent test's job.
+        .executableTarget(
+            name: "canary-c16-consumer",
+            dependencies: [
+                .product(name: "NMP", package: "NMP")
+            ]
+        ),
+        // C18's quitting half. "The process exited, on its own, with status
+        // 0, within a bound" is not observable from inside the process that
+        // is supposed to exit, and neither is "its threads and sockets are
+        // gone" -- a process that failed to terminate is exactly the one
+        // that cannot report so. It is also the only way to hold NMP's
+        // cross-process store lock (#489) from a SECOND process and watch
+        // it be released. Needs NMP only.
+        .executableTarget(
+            name: "canary-c18-quitter",
+            dependencies: [
+                .product(name: "NMP", package: "NMP")
+            ]
+        ),
         .testTarget(
             name: "CanaryScenariosTests",
             dependencies: [

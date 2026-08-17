@@ -612,6 +612,185 @@ real relay. Every other test of a capability — `NIP22Tests.swift`,
 composition and decoding were covered and "the composed write reaches a relay
 and comes back through an ordinary query" was not covered at all.
 
+**C16 is proven live** (#1869), and it is the first measurement anywhere of
+what NMP does when events arrive faster than the app reads them.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C16SlowConsumerBackpressureTests.swift`
+floods a real strfry process with 400 real signed events, one every 25 ms, at
+a reader that deliberately sleeps a full second inside its own `for try await`
+loop body — the only lever an app has, since there is no app-facing
+backpressure knob to turn instead.
+
+**Why the primary oracle is a count, not memory.** `NMPQuery`'s doc says "the
+engine mailbox conflates intermediate reducer emits for a slow observer" and
+`PullDriver.swift` says an app `next()` inherits "the engine's bounded
+latest-value mailbox instead of gaining a second Swift queue". Memory is the
+obvious instrument and the wrong one twice over: what an unbounded queue would
+retain here is a few hundred delta frames, i.e. a few hundred kilobytes against
+a ~76 MB live-engine heap — below the noise floor, exactly C17's 16 B/cycle
+trap — and peaks cannot be compared across different flood sizes at all,
+because N more events genuinely IS more durable data. So the oracle is
+**batches delivered against events published**, an exact integer with no noise
+floor: a mailbox that retained every emit would have to hand all of them to the
+reader before the stream could drain, so the count would approach the published
+count however slowly the app read.
+
+**The answer, measured, stable over four runs.** For 400 published events the
+slow reader was delivered **13-14 batches**; the fast control, identical in
+every other respect, **102-108**. No row was lost in either: both ended holding
+all 402 ids in their latest snapshot, no duplicate, and the slow reader stopped
+because it had seen everything it was told to expect rather than on its
+deadline. File descriptors and threads were flat. Peak heap differed by
++51,920 / +77,712 / +96,608 / +97,520 B between the arms — kilobytes, not the
+megabytes a per-event retention would cost. **NMP conflates; it does not queue,
+it does not drop, and it does not wedge.**
+
+**Getting the precondition right was C16's first real result, and it is a
+finding in its own right.** The obvious precondition — "when the producer
+finished, the reader had not yet seen most of the events" — is FALSE here, and
+measuring it is what taught why. A reader pulling eight times less often still
+held **389 of 401 ids** at flood end. Because every delivery is the complete
+current snapshot rather than the next item in a queue, **a slow consumer falls
+behind in notifications, not in content**. Currency is therefore the wrong axis
+for "was it slower", and the committed preconditions instead assert how many
+times the reader managed to read during the flood, and the deepest backlog a
+single delivery handed it (measured 36-40 unseen ids at once for the slow arm
+against 4-7 for the fast one) — a directly measured queue depth rather than an
+inference.
+
+Falsified three ways, each restored and re-confirmed green. Setting the slow
+arm's delay to zero failed three assertions with real values (102 deliveries
+against a bound of 50; deepest backlog 5 against 8; 104 batches against the
+fast arm's 102) — so both the precondition and the control are live. Dropping
+one row in ten inside the reader failed the no-drop assertions at **361 against
+402** on both the distinct-id and latest-snapshot counts, and additionally
+tripped the wedge assertion, since a reader missing rows never reaches its
+expected total and stops on its deadline instead.
+
+No API finding for C16, and one honest observation: NMP's Swift iterator
+cadence-limits deliveries to ~60/s of its own accord (`NMPPullIteratorCore`'s
+16 ms throttle, #17), so the "fast" arm is not unbounded either. That is why
+the boundedness claim is asserted as a comparison between two arms rather than
+as an absolute rate.
+
+**C18 is proven live** (#1870) in both of its modes. Nothing previously proved
+that an NMP app *terminates*.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C18CleanShutdownTests.swift`
+spawns `canary-c18-quitter`, an app that signs in with a real local-key
+account, opens a live observation, opens a diagnostics stream, publishes and
+signs a real event of its own, and then waits on stdin — with all three
+consuming tasks still running and nothing cancelled. This is the **fourth
+distinct reason** this suite splits parent from child, and it is not
+interchangeable with the others: exit status, termination reason and "the OS
+process is gone" are facts only something outside the process can state, and a
+process that failed to terminate is precisely the one that cannot report so.
+
+C17's `engine` phase is deliberately not this evidence: it shuts down sixty
+engines inside one process that stays alive for the next cycle, so a thread
+that never exits is still merely counted and a half-written store is never read
+back.
+
+**The preconditions are asserted from outside, and that is the good part.**
+`lsof` reports the child's exact pid holding **2 ESTABLISHED TCP connections**
+to the relay's exact port — the kernel's answer, not NMP's, which matters
+because C13 already recorded that `wireSubCount` counts *planned* subscriptions
+rather than live sockets (confirmed again here: with the child pointed at a
+dead address it still reported `wireSubs=1`). And constructing an `NMPEngine`
+over the child's store path from the test process throws
+`NMPError.storeAlreadyOpen` — #489's cross-process ownership lock, read from a
+second process, which the child cannot fabricate. That same call is the
+post-condition: after the child exits it must succeed, so one mechanism gives
+both "it genuinely held the store" and "it genuinely let go".
+
+**Measured, stable across runs.** From QUIT to a real exit: **0.03-0.04 s**,
+`terminationReason == .exit`, status 0, pid gone by `kill(pid, 0)`/`ESRCH`.
+Resources, sampled in the one window where NMP's teardown is distinguishable
+from the kernel's — after the last engine reference is dropped and *before* the
+process ends:
+
+| | baseline | live | after teardown | after release |
+|---|---|---|---|---|
+| `explicit` | 3 fds / 15 threads | 14 / 30 | **6 / 15** | **3 / 15** |
+| `implicit` | 3 fds / 15 threads | 14 / 30 | 14 / 30 | **3 / 15** |
+
+Both modes return **exactly** to the pre-engine baseline. `shutdown()` does its
+own work — 14 fds/30 threads down to 6/15 the instant it returns, asserted only
+in `explicit` mode because without it that test would be indistinguishable from
+the implicit one. And **`NMPEngine.deinit`'s advertised safety net is real**:
+`implicit` mode never calls `shutdown()` at all and still lands on 3/15, which
+nothing else in this repository tested. A fresh engine then opens the store the
+dead app left behind, with the relay SIGKILLed and provably refusing TCP, and
+reads back both the relay-served row and the app's own signed published event.
+
+**A falsification changed the assertion, which is the point of doing them.**
+The first draft asserted only that post-release counts were *below* the live
+ones. Deliberately leaking the engine into a global **passed** that: releasing
+the query and diagnostics handles alone moved 14 fds/30 threads to 11/18, which
+is strictly less than live and nowhere near released. The assertion now
+compares against the app's own **pre-engine baseline**, which cannot be
+half-satisfied, and the same falsifier then failed correctly at 11 fds against
+a baseline of 3 and 18 threads against 15. Two others: pointing the child at
+`ws://127.0.0.1:1` failed the `lsof` precondition at 0 connections, the
+relay-sourced-rows precondition at 0, and the durable read-back; making
+teardown never return (a 120 s sleep before `TORNDOWN`) failed five assertions
+— teardown never returned, the app had to be SIGKILLed after 90 s,
+`terminationReason` came back `uncaughtSignal`, status 9, and no post-release
+reading was ever reported.
+
+The thread baseline is taken **after** warming Swift's cooperative pool with
+real concurrent work. Without that the baseline is 1 thread against a
+post-release reading of 15, and Swift's own workers get charged to NMP. Stated
+plainly because it is a real weakening of the thread half: the file-descriptor
+assertion is the sharp one, and it is exact (3 → 14 → 3).
+
+One recorded non-finding: `accounts=0` after the restart is correct, not a
+defect — an account lives in the exported `NMPSessionPayload`, not the store,
+and this app deliberately never exports one. C2 owns the restore path.
+
+**C4 is proven live** (#1871), and it is the first end-to-end exercise of
+`NMPBinding.derived` anywhere — every other scenario in this suite uses
+`.literal(...)`, an author set the app already knew.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C4ReactiveDerivedQueryTests.swift`
+writes the composition an ordinary Nostr app writes on day one, and the one
+`NMPBinding.derived`'s own doc names: a feed of kind:1 notes whose authors are
+"my kind:3 contact list, projected through their `p` tags". It runs in process,
+unlike C16/C17/C18 — no process-wide quantity is measured, and the claim is
+that ONE never-reopened handle changes what it delivers while the process keeps
+running, which a restart would destroy rather than prove.
+
+Publishing a replacement kind:3 naming a second author makes the derived feed
+start delivering that author's notes with **no app action whatsoever** — no
+reopened query, no new engine, no re-`observe`. Passes in ~0.5 s. The
+already-followed author's note survives the change, so reacting re-resolves the
+author set rather than restarting the result set.
+
+Three things are asserted so it is not vacuous, each with real captured values:
+the derived feed delivers the followed author's note and has **never** been
+delivered the unfollowed author's — whose note is on the same relay, matches
+the same kind, and is proven deliverable by a control query over a literal
+filter naming him; the **base query genuinely changed**, watched through its
+own separate handle and required to go from one projected `p` value to two; and
+the feed ends holding exactly the two expected ids, two rows, no duplicate.
+
+Falsified three ways, each restored and re-confirmed green. **The middle one is
+the one that matters**: replacing the derived binding with a literal set naming
+both authors from the start leaves the reactive half fully green
+(`feedFollowed=true`) and ONLY the phase-1 negative catches it — the same shape
+as C13's fourth falsifier, and the same lesson. Never publishing the
+replacement contact list failed the base-changed precondition and then the
+claim itself. Projecting through `.authors` instead of `.tag("p")` — a plausible
+one-word mistake — resolved to the contact list's own author and delivered
+nothing at all, failing the positive precondition; it is caught before any
+reactive assertion can be reached.
+
+No API finding for C4. The composition was expressible exactly as documented,
+with no internal knowledge required and no app-side workaround. Two honest
+observations rather than findings. First, the lab pins both the inner and outer
+demand to the one relay (`.pinned`) because `.authorOutboxes` would need
+`NMPConfig.outboxRouting` indexers the lab does not have — the read/write
+routing asymmetry already recorded below, not a C4 defect. Second, C4 proves
+the binding **grows**; whether it retracts rows when a derived set *shrinks*
+(an unfollow) is untested and unclaimed here.
+
 **C3 is proven live**, and it is this suite's first exercise of the same
 event arriving from SEVERAL relays.
 `apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C3MultiRelayDedupProvenanceTests.swift`
