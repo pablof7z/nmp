@@ -1319,7 +1319,14 @@ impl RedbStore {
                     "decode canonical event view {event_key}: {error:?}"
                 ))
             })?;
-            if !view.matches_prepared_filter_after_index(&prepared_filter, plan.index.matched()) {
+            let matches = view
+                .matches_prepared_filter_after_index(&prepared_filter, plan.index.matched())
+                .map_err(|error| {
+                    PersistenceError::invariant(format!(
+                        "match canonical event against filter {event_key}: {error:?}"
+                    ))
+                })?;
+            if !matches {
                 return Ok(None);
             }
             if suppression_possible {
@@ -1446,7 +1453,14 @@ impl RedbStore {
                     "decode canonical event view {event_key}: {error:?}"
                 ))
             })?;
-            if !view.matches_prepared_filter_after_index(&prepared_filter, plan.index.matched()) {
+            let matches = view
+                .matches_prepared_filter_after_index(&prepared_filter, plan.index.matched())
+                .map_err(|error| {
+                    PersistenceError::invariant(format!(
+                        "match canonical event against filter {event_key}: {error:?}"
+                    ))
+                })?;
+            if !matches {
                 return Ok(None);
             }
             let local_value = match local_value {
