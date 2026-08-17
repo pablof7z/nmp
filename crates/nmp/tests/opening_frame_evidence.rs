@@ -63,8 +63,7 @@ fn branch(host: &str) -> LiveQuery {
             kinds: Some(BTreeSet::from([1u16])),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![RelayUrl::parse(host).expect("fixture url")]),
-        None,
+        ReadRouting::Explicit(vec![RelayUrl::parse(host).expect("fixture url")])
     )
     .expect("a one-relay pinned set is nonempty");
     demand.freshness = Freshness::CacheOnly;

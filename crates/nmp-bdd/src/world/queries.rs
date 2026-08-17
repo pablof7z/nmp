@@ -144,8 +144,7 @@ pub fn my_group_state_query(relay: &RelayUrl) -> LiveQuery {
             )]),
             ..Filter::default()
         },
-        ReadRouting::Explicit(pinned.clone().into_iter().collect()),
-        None,
+        ReadRouting::Explicit(pinned.clone().into_iter().collect())
     )
     .expect("nmp-bdd: a pinned inner demand over a nonempty relay set is constructible");
     LiveQuery::single(
@@ -161,8 +160,7 @@ pub fn my_group_state_query(relay: &RelayUrl) -> LiveQuery {
                 )]),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(pinned.into_iter().collect()),
-            None,
+            ReadRouting::Explicit(pinned.into_iter().collect())
         )
         .expect("nmp-bdd: a pinned outer demand over a nonempty relay set is constructible"),
     )
@@ -187,8 +185,7 @@ pub(super) fn group_metadata_query(relays: BTreeSet<RelayUrl>, group_id: &str) -
                 )]),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(relays.into_iter().collect()),
-            None,
+            ReadRouting::Explicit(relays.into_iter().collect())
         )
         .expect("nmp-bdd: a pinned demand over a nonempty relay set is constructible"),
     )
@@ -217,8 +214,7 @@ fn pinned_query_from_relays(relays: BTreeSet<RelayUrl>, filter: Filter) -> LiveQ
     LiveQuery::single(
         Demand::new(
             filter,
-            ReadRouting::Explicit(relays.into_iter().collect()),
-            None,
+            ReadRouting::Explicit(relays.into_iter().collect())
         )
         .expect("nmp-bdd: a pinned demand over a nonempty relay set is constructible"),
     )

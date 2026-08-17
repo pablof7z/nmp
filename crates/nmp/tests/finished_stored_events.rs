@@ -69,8 +69,7 @@ fn query(relays: &[&RelayUrl], limit: Option<usize>) -> LiveQuery {
                     limit,
                     ..Filter::default()
                 },
-                ReadRouting::Explicit(vec![(*relay).clone()]),
-                None,
+                ReadRouting::Explicit(vec![(*relay).clone()])
             )
             .expect("a one-relay pinned set is nonempty")
         })

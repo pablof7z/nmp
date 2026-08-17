@@ -1654,8 +1654,7 @@ fn pinned_contact_list(author: PublicKey, relay: RelayUrl) -> Demand {
             authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![relay]),
-        None,
+        ReadRouting::Explicit(vec![relay])
     )
     .expect("the contact-list source is pinned to one relay")
 }
@@ -1672,8 +1671,7 @@ fn pinned_follow_feed(author: PublicKey, relay: RelayUrl) -> LiveQuery {
             }))),
             ..Filter::default()
         },
-        ReadRouting::Explicit(relays.into_iter().collect()),
-        None,
+        ReadRouting::Explicit(relays.into_iter().collect())
     )
     .expect("the derived feed is pinned to the same relay");
     LiveQuery::single(feed)

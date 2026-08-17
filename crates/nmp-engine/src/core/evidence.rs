@@ -342,7 +342,7 @@ pub(crate) fn acquisition_evidence(
                 entry.2 &= finished;
                 entry.3 &= placed;
                 entry.4 |= awaiting;
-                match store.get_coverage(key, &session.relay)? {
+                match store.get_coverage(key, session)? {
                     Some(interval) if interval.from <= window_start => {
                         entry.1 = Some(match entry.1 {
                             None => interval.through,

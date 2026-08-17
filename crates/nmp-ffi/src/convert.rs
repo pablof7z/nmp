@@ -1645,8 +1645,8 @@ pub fn demand_from_ffi(d: FfiDemand) -> Result<GDemand, FfiError> {
     let mut demand = GDemand::new(
         filter_from_ffi(d.selection)?,
         read_routing_from_ffi(d.routing)?,
-        auth_identity_from_ffi(d.authenticate_as)?,
     )?;
+    demand.authenticate_as = auth_identity_from_ffi(d.authenticate_as)?;
     demand.cache = cache_mode_from_ffi(d.cache);
     demand.freshness = freshness_from_ffi(d.freshness);
     Ok(demand)

@@ -206,14 +206,18 @@ impl ConcreteFilter {
 pub struct ContextualAtom {
     pub filter: ConcreteFilter,
     pub routing: ReadRouting,
-    /// The identity this atom's reads authenticate as if a relay challenges
-    /// them — the demand's override, or the engine's current account,
-    /// resolved when the demand was compiled. Part of atom identity because
-    /// two demands that would authenticate as different people are genuinely
-    /// different acquisitions: what a relay serves depends on who asked.
+    /// The demand's identity OVERRIDE, carried verbatim. `None` means the
+    /// demand named nobody and reads on the ordinary connection; `Some(key)`
+    /// means it asked to be authenticated as that key specifically.
     ///
-    /// This is intent, not outcome. The identity a socket actually holds is
-    /// `RelaySessionKey::authenticated_as`, discovered from a challenge.
+    /// Nothing is resolved here and no current account is consulted — this
+    /// crate has no access to one, and an atom must not change identity when
+    /// the account changes. It is part of atom identity only so that two
+    /// demands naming DIFFERENT overrides never collapse onto one wire
+    /// subscription; it is intent, never a claim about what a socket holds.
+    /// What a socket actually holds is `RelaySessionKey::authenticated_as`,
+    /// which is discovered, and it is that value — not this one — that keys
+    /// durable coverage.
     pub authenticate_as: Option<nostr::PublicKey>,
     /// Runtime routing facts projected with this atom. These facts are part
     /// of live atom identity so provenance growth produces an exact
@@ -515,8 +519,7 @@ mod tests {
         let declare = |relays: Vec<nostr::RelayUrl>| {
             Demand::new(
                 Filter::default(),
-                ReadRouting::Explicit(relays),
-                None,
+                ReadRouting::Explicit(relays)
             )
             .expect("a nonempty explicit relay set is legal")
         };

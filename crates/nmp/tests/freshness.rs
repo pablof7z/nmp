@@ -85,8 +85,7 @@ fn nested_query(
 ) -> LiveQuery {
     let mut inner = Demand::new(
         filter(keys),
-        ReadRouting::Explicit(vec![inner_relay.clone()]),
-        None,
+        ReadRouting::Explicit(vec![inner_relay.clone()])
     )
     .unwrap();
     inner.freshness = inner_freshness;
@@ -100,8 +99,7 @@ fn nested_query(
     };
     let mut outer = Demand::new(
         outer_selection,
-        ReadRouting::Explicit(vec![outer_relay.clone()]),
-        None,
+        ReadRouting::Explicit(vec![outer_relay.clone()])
     )
     .unwrap();
     outer.freshness = outer_freshness;
@@ -111,8 +109,7 @@ fn nested_query(
 fn pinned_query(keys: &Keys, relay: &RelayUrl, freshness: Freshness) -> LiveQuery {
     let mut demand = Demand::new(
         filter(keys),
-        ReadRouting::Explicit(vec![relay.clone()]),
-        None,
+        ReadRouting::Explicit(vec![relay.clone()])
     )
     .unwrap();
     demand.freshness = freshness;
@@ -467,8 +464,7 @@ fn nested_strict_pins_do_not_contaminate_public_root_cache_projection() {
 
     let mut inner = Demand::new(
         filter(&inner_author),
-        ReadRouting::Explicit(vec![inner_relay]),
-        None,
+        ReadRouting::Explicit(vec![inner_relay])
     )
     .unwrap();
     inner.cache = CacheMode::Strict;
@@ -482,8 +478,7 @@ fn nested_strict_pins_do_not_contaminate_public_root_cache_projection() {
             }))),
             ..Filter::default()
         },
-        ReadRouting::Auto,
-        None,
+        ReadRouting::Auto
     )
     .unwrap();
     root.cache = CacheMode::Strict;
@@ -878,7 +873,7 @@ fn pinned_strict_max_age_uses_pinned_scope_for_coverage_and_rows() {
         )
         .unwrap();
     record(&mut store, &demand_atom, &pinned, 99_000);
-    let mut demand = Demand::new(filter(&keys), source, None).unwrap();
+    let mut demand = Demand::new(filter(&keys), source).unwrap();
     demand.cache = CacheMode::Strict;
     demand.freshness = Freshness::MaxAge { seconds: 3_600 };
     let mut core = EngineCore::new(store, 10);

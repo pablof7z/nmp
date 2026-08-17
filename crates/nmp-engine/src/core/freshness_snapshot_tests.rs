@@ -44,8 +44,7 @@ fn fresh_max_age_reads_each_coverage_row_once() {
 
     let mut demand = Demand::new(
         filter,
-        ReadRouting::Explicit(vec![relay]),
-        None,
+        ReadRouting::Explicit(vec![relay])
     )
     .unwrap();
     demand.freshness = Freshness::MaxAge { seconds: 3_600 };
@@ -82,8 +81,7 @@ fn pinned_profile_query(author: &str, relay: RelayUrl, freshness: Freshness) -> 
     };
     let mut demand = Demand::new(
         filter,
-        ReadRouting::Explicit(vec![relay]),
-        None,
+        ReadRouting::Explicit(vec![relay])
     )
     .unwrap();
     demand.freshness = freshness;

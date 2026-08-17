@@ -812,8 +812,7 @@ fn public_engine_nested_strict_cache_uses_independent_relay_witnesses_before_lim
             limit: Some(2),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![relay_a.clone()]),
-        None,
+        ReadRouting::Explicit(vec![relay_a.clone()])
     )
     .unwrap();
     inner.cache = CacheMode::Strict;
@@ -827,8 +826,7 @@ fn public_engine_nested_strict_cache_uses_independent_relay_witnesses_before_lim
             }))),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![relay_a]),
-        None,
+        ReadRouting::Explicit(vec![relay_a])
     )
     .unwrap();
     outer.freshness = Freshness::CacheOnly;

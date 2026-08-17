@@ -263,8 +263,7 @@ pub fn relay_list_demand(
             )),
             ..Filter::default()
         },
-        ReadRouting::Explicit(sources.iter().cloned().collect()),
-        None,
+        ReadRouting::Explicit(sources.iter().cloned().collect())
     )
     .ok()
 }

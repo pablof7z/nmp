@@ -67,8 +67,7 @@ fn pinned(relay: &RelayUrl, filter: Filter) -> LiveQuery {
     LiveQuery::single(
         Demand::new(
             filter,
-            ReadRouting::Explicit(vec![relay.clone()]),
-            None,
+            ReadRouting::Explicit(vec![relay.clone()])
         )
         .expect("pinned demand with a nonempty relay set"),
     )

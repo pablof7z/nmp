@@ -2864,10 +2864,10 @@ impl CoreState {
     pub(in crate::core) fn get_coverage(
         &self,
         atom: &ContextualAtom,
-        relay: &RelayUrl,
+        session: &RelaySessionKey,
     ) -> Result<Option<nmp_store::CoverageInterval>, PersistenceError> {
         self.store
-            .get_coverage(nmp_store::coverage_key(atom), relay)
+            .get_coverage(nmp_store::coverage_key(atom), session)
     }
 
     /// The planning-relevant projection of one relay's retained NIP-11
@@ -2931,7 +2931,7 @@ impl CoreState {
             self.router.diagnostics(),
             self.router.plan(),
             &self.events_by_session_kind,
-            |relay, key| self.store.get_coverage(key, relay),
+            |session: &RelaySessionKey, key| self.store.get_coverage(key, session),
         );
         // Surface the read-only degrade signal (issue #122) if an ingest/read
         // door has failed — the one persistence-health fact `build` cannot

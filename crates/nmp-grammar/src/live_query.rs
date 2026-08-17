@@ -252,8 +252,7 @@ mod tests {
         let relay = nostr::RelayUrl::parse("wss://a.example").unwrap();
         let pinned = Demand::new(
             demand(1).selection,
-            ReadRouting::Explicit(vec![relay]),
-            None,
+            ReadRouting::Explicit(vec![relay])
         )
         .unwrap();
         let query = LiveQuery::union(

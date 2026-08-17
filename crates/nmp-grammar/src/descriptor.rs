@@ -174,14 +174,18 @@ pub struct Demand {
     /// [`ReadRouting::Auto`]: an app that says nothing gets NMP's routing.
     pub routing: ReadRouting,
     /// OVERRIDE the identity NMP authenticates as if a relay challenges this
-    /// demand's connection. `None` — the default, and the ordinary case —
-    /// means the engine's current account.
+    /// demand's connection. `None` — the default, and the overwhelmingly
+    /// ordinary case — means the app named nobody, and NMP answers a
+    /// challenge as the engine's current account.
     ///
     /// This is not a declaration that the demand *is* authenticated, and
     /// there is no value meaning "unauthenticated": whether a connection
     /// authenticates is decided by the relay challenging it and the installed
     /// policy answering, never by what the app wrote here. Naming a key only
     /// redirects that answer away from the current account.
+    ///
+    /// A defaulted field, never a constructor argument — the common case says
+    /// nothing (`docs/internals/writes/identity.md`).
     pub authenticate_as: Option<nostr::PublicKey>,
     /// Orthogonal to `routing`/`access` (see [`CacheMode`]'s doc) — a
     /// sibling field, deliberately excluded from `ContextualAtom`'s hashed
@@ -220,10 +224,12 @@ impl std::fmt::Display for DemandError {
 impl std::error::Error for DemandError {}
 
 impl Demand {
-    /// The validating constructor, for the combinations the plain
+    /// The validating constructor, for the one combination the plain
     /// `Demand { selection, ..Demand::default() }` declaration does not
-    /// cover -- [`ReadRouting::Explicit`], and any routing under an explicit
-    /// `authenticate_as` override.
+    /// cover -- [`ReadRouting::Explicit`], whose relay set must be validated
+    /// and normalized. `authenticate_as` is a defaulted FIELD, not an
+    /// argument here: taxing every caller to write `None` is exactly the
+    /// ceremony `docs/internals/writes/identity.md` exists to delete.
     ///
     /// Normalizes an `Explicit` relay set on the way in: sorted and
     /// deduplicated, so one routing intent has exactly ONE representation.
@@ -233,11 +239,7 @@ impl Demand {
     /// normalization `Explicit([b, a])` and `Explicit([a, b])` would be two
     /// distinct atoms, two refcount entries and two wire subscriptions for
     /// one demand.
-    pub fn new(
-        selection: Filter,
-        routing: ReadRouting,
-        authenticate_as: Option<nostr::PublicKey>,
-    ) -> Result<Self, DemandError> {
+    pub fn new(selection: Filter, routing: ReadRouting) -> Result<Self, DemandError> {
         let routing = match routing {
             ReadRouting::Auto => ReadRouting::Auto,
             ReadRouting::Explicit(relays) if relays.is_empty() => {
@@ -252,7 +254,7 @@ impl Demand {
         Ok(Self {
             selection,
             routing,
-            authenticate_as,
+            authenticate_as: None,
             cache: CacheMode::Agnostic,
             freshness: Freshness::Live,
         })
@@ -309,8 +311,7 @@ mod tests {
                 kinds: Some(BTreeSet::from([1u16])),
                 ..Filter::default()
             },
-            ReadRouting::Auto,
-            None,
+            ReadRouting::Auto
         )
         .expect("Auto is total");
         let author_bearing = Demand::new(
@@ -319,8 +320,7 @@ mod tests {
                 authors: Some(Binding::Literal(BTreeSet::from(["a".repeat(64)]))),
                 ..Filter::default()
             },
-            ReadRouting::Auto,
-            None,
+            ReadRouting::Auto
         )
         .expect("Auto is total");
         assert_eq!(authorless.routing, ReadRouting::Auto);
@@ -372,8 +372,7 @@ mod tests {
         };
         let explicit = Demand::new(
             selection.clone(),
-            ReadRouting::Explicit(vec![relay("relay.example")]),
-            None,
+            ReadRouting::Explicit(vec![relay("relay.example")])
         )
         .expect("a nonempty explicit relay set is legal");
 
@@ -391,8 +390,7 @@ mod tests {
                 kinds: Some(BTreeSet::from([1u16])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(Vec::new()),
-            None,
+            ReadRouting::Explicit(Vec::new())
         )
         .unwrap_err();
         assert_eq!(err, DemandError::ExplicitRequiresNonemptyRelaySet);
@@ -405,8 +403,7 @@ mod tests {
                 kinds: Some(BTreeSet::from([1u16])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay("relay.example")]),
-            None,
+            ReadRouting::Explicit(vec![relay("relay.example")])
         )
         .expect("a nonempty explicit relay set is legal");
         assert_eq!(
@@ -431,14 +428,12 @@ mod tests {
                 relay("b.example"),
                 relay("a.example"),
                 relay("b.example"),
-            ]),
-            None,
+            ])
         )
         .expect("a nonempty explicit relay set is legal");
         let canonical = Demand::new(
             selection,
-            ReadRouting::Explicit(vec![relay("a.example"), relay("b.example")]),
-            None,
+            ReadRouting::Explicit(vec![relay("a.example"), relay("b.example")])
         )
         .expect("a nonempty explicit relay set is legal");
 

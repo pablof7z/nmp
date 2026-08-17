@@ -165,8 +165,7 @@ fn list_evidence_at(host: &RelayUrl, kind: u16, subjects: Binding) -> Binding {
 pub(crate) fn explicit_at(host: &RelayUrl, selection: Filter) -> Demand {
     let mut demand = Demand::new(
         selection,
-        ReadRouting::Explicit(vec![host.clone()]),
-        None,
+        ReadRouting::Explicit(vec![host.clone()])
     )
     .expect("a singleton explicit relay set is always constructible");
     demand.cache = CacheMode::Strict;

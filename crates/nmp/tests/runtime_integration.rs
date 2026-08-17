@@ -124,8 +124,7 @@ fn pinned_tag_value(relay: &RelayUrl, value: &str) -> LiveQuery {
                 )]),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay.clone()]),
-            None,
+            ReadRouting::Explicit(vec![relay.clone()])
         )
         .expect("a pinned demand over one relay is constructible"),
     )

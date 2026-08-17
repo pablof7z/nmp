@@ -404,12 +404,16 @@ impl CoreState {
         let demand = Demand::new(
             coordinate_filter(coordinate),
             ReadRouting::Explicit(vec![session.relay.clone()]),
-            session.authenticated_as,
         )
         .expect("one relay-pinned coordinate demand is never empty");
         let demand = Demand {
             cache: CacheMode::Strict,
             freshness: Freshness::Live,
+            // This read is pinned to ONE existing session, so it must ask as
+            // whoever that session already is — otherwise a coordinate check
+            // on an authenticated socket would be answered by a demand that
+            // named nobody.
+            authenticate_as: session.authenticated_as,
             ..demand
         };
         #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -685,8 +689,7 @@ mod tests {
         core.handle(EngineMsg::RelayConnected(handle, session.clone()));
         let demand = Demand::new(
             filter,
-            ReadRouting::Explicit(vec![relay]),
-            None,
+            ReadRouting::Explicit(vec![relay])
         )
         .expect("a relay-pinned read is nonempty");
         core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));
@@ -996,8 +999,7 @@ mod tests {
                 kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay()]),
-            None,
+            ReadRouting::Explicit(vec![relay()])
         )
         .expect("a relay-pinned read is nonempty");
         fixture

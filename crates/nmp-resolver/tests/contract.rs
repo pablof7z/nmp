@@ -558,8 +558,7 @@ fn derived_inner_strict_cache_filters_provenance_before_limit() {
             limit: Some(2),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![pinned.clone()]),
-        None,
+        ReadRouting::Explicit(vec![pinned.clone()])
     )
     .unwrap();
     inner.cache = CacheMode::Strict;
@@ -627,8 +626,7 @@ fn derived_inner_agnostic_cache_accepts_rows_from_any_provenance_before_limit() 
             limit: Some(1),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![pinned]),
-        None,
+        ReadRouting::Explicit(vec![pinned])
     )
     .unwrap();
     let outer = Filter {
@@ -710,8 +708,7 @@ fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
                 kinds: Some(BTreeSet::from([1u16])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![pinned.clone()]),
-            None,
+            ReadRouting::Explicit(vec![pinned.clone()])
         )
         .unwrap();
         inner.cache = cache;
@@ -791,8 +788,7 @@ fn derived_inner_and_outer_demands_keep_independent_source_and_access_contexts()
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
         },
-        ReadRouting::Auto,
-        None,
+        ReadRouting::Auto
     )
     .unwrap();
     let mut outer_tags = BTreeMap::new();

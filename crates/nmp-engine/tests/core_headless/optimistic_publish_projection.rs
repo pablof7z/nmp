@@ -37,8 +37,7 @@ fn pinned_strict(hosts: &[RelayUrl], kind: u16) -> LiveQuery {
             kinds: Some(BTreeSet::from([kind])),
             ..Filter::default()
         },
-        ReadRouting::Explicit(hosts.to_vec()),
-        None,
+        ReadRouting::Explicit(hosts.to_vec())
     )
     .expect("a nonempty pinned set with a non-outbox source is constructible");
     demand.cache = nmp_grammar::CacheMode::Strict;

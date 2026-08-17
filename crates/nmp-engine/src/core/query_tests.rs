@@ -39,8 +39,7 @@ fn author_outbox_queries_need_a_provider_until_a_positive_route_or_withdrawal() 
 
     let pinned = Demand::new(
         filter,
-        ReadRouting::Explicit(vec![test_relay(65)]),
-        None,
+        ReadRouting::Explicit(vec![test_relay(65)])
     )
     .expect("exact provider query");
     let provider = core.handle(EngineMsg::Subscribe(LiveQuery::single(pinned)));
@@ -1537,8 +1536,7 @@ mod coverage_evidence_refresh_tests {
                     kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
                     ..Filter::default()
                 },
-                ReadRouting::Explicit(vec![relay.clone()]),
-                None,
+                ReadRouting::Explicit(vec![relay.clone()])
             )
             .unwrap(),
         )
@@ -1561,8 +1559,7 @@ mod coverage_evidence_refresh_tests {
                     limit,
                     ..Filter::default()
                 },
-                ReadRouting::Explicit(vec![relay.clone()]),
-                None,
+                ReadRouting::Explicit(vec![relay.clone()])
             )
             .unwrap(),
         )

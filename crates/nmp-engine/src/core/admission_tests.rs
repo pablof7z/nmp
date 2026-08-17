@@ -183,8 +183,7 @@ fn routeless_outbox_query(author: PublicKey) -> LiveQuery {
                 authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
                 ..Filter::default()
             },
-            ReadRouting::Auto,
-            None,
+            ReadRouting::Auto
         )
         .unwrap(),
     )

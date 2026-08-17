@@ -175,8 +175,7 @@ fn pinned_contact_lists(
                 authors: Some(nmp::Binding::Literal(BTreeSet::from([author.to_hex()]))),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(relays.into_iter().collect()),
-            None,
+            ReadRouting::Explicit(relays.into_iter().collect())
         )
         .expect("one pinned source is valid"),
     )
@@ -194,8 +193,7 @@ fn pinned_kind(
                 authors: Some(nmp::Binding::Literal(BTreeSet::from([author.to_hex()]))),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(relays.into_iter().collect()),
-            None,
+            ReadRouting::Explicit(relays.into_iter().collect())
         )
         .expect("one pinned source is valid"),
     )

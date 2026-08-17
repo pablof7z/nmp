@@ -304,7 +304,7 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         ..Filter::default()
     };
     let public_query = LiveQuery::single(
-        nmp_grammar::Demand::new(selection.clone(), source.clone(), None)
+        nmp_grammar::Demand::new(selection.clone(), source.clone())
             .expect("public pinned demand"),
     );
     let protected_query = LiveQuery::single(
@@ -637,8 +637,7 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
                 kinds: Some(BTreeSet::from([5u16])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay.clone()]),
-            None,
+            ReadRouting::Explicit(vec![relay.clone()])
         )
         .expect("a literal kind:5 request can be pinned to the fixture relay"),
     );

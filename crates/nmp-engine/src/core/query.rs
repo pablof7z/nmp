@@ -44,7 +44,7 @@ impl CoreState {
     /// commits one request-scoped batch atomically through this door.
     fn record_request_coverage_batch(
         &mut self,
-        batch: &[(ContextualAtom, RelayUrl, CoverageInterval)],
+        batch: &[(ContextualAtom, RelaySessionKey, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
         self.store.record_coverage(batch)
     }
@@ -722,7 +722,7 @@ impl CoreState {
             .claims
             .values()
             .cloned()
-            .map(|atom| (atom, pending.session.relay.clone(), pending.interval))
+            .map(|atom| (atom, pending.session.clone(), pending.interval))
             .collect();
         if let Err(error) = self.record_request_coverage_batch(&batch) {
             #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -2390,7 +2390,13 @@ impl CoreState {
 
         let mut batch = Vec::with_capacity(claims.len());
         for claim in &claims {
-            batch.push((claim.atom.clone(), relay.clone(), claim.interval));
+            // Negentropy runs only on the connection bound to nobody (#8),
+            // the same session `open_neg_session` recorded attribution under.
+            batch.push((
+                claim.atom.clone(),
+                RelaySessionKey::unauthenticated(relay.clone()),
+                claim.interval,
+            ));
         }
 
         if let Err(error) = self.record_request_coverage_batch(&batch) {

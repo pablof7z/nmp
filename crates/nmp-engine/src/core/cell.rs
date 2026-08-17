@@ -308,9 +308,9 @@ impl EngineCore {
     pub fn get_coverage(
         &self,
         atom: &ContextualAtom,
-        relay: &RelayUrl,
+        session: &RelaySessionKey,
     ) -> Result<Option<nmp_store::CoverageInterval>, PersistenceError> {
-        self.state.get_coverage(atom, relay)
+        self.state.get_coverage(atom, session)
     }
 
     pub fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {

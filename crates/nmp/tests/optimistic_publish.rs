@@ -124,8 +124,7 @@ fn pinned_strict_branch(hosts: &[RelayUrl], kind: u16) -> Demand {
             kinds: Some(BTreeSet::from([kind])),
             ..Filter::default()
         },
-        ReadRouting::Explicit(hosts.to_vec()),
-        None,
+        ReadRouting::Explicit(hosts.to_vec())
     )
     .expect("a nonempty pinned set with a non-outbox source is constructible");
     demand.cache = CacheMode::Strict;

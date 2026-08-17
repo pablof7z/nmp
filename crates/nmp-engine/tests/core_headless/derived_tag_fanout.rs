@@ -68,8 +68,7 @@ fn group_state_of_my_admin_groups(relays: &[RelayUrl]) -> LiveQuery {
             )]),
             ..Filter::default()
         },
-        ReadRouting::Explicit(pinned.clone().into_iter().collect()),
-        None,
+        ReadRouting::Explicit(pinned.clone().into_iter().collect())
     )
     .expect("pinned inner demand with a nonempty relay set is constructible");
     let outer = Filter {
@@ -86,8 +85,7 @@ fn group_state_of_my_admin_groups(relays: &[RelayUrl]) -> LiveQuery {
     LiveQuery::single(
         nmp_grammar::Demand::new(
             outer,
-            ReadRouting::Explicit(pinned.into_iter().collect()),
-            None,
+            ReadRouting::Explicit(pinned.into_iter().collect())
         )
         .expect("pinned outer demand with a nonempty relay set is constructible"),
     )
@@ -830,8 +828,7 @@ fn posts_by_my_follows(relays: &[RelayUrl]) -> LiveQuery {
             authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
             ..Filter::default()
         },
-        ReadRouting::Explicit(pinned.clone().into_iter().collect()),
-        None,
+        ReadRouting::Explicit(pinned.clone().into_iter().collect())
     )
     .expect("pinned inner demand with a nonempty relay set is constructible");
     let outer = Filter {
@@ -845,8 +842,7 @@ fn posts_by_my_follows(relays: &[RelayUrl]) -> LiveQuery {
     LiveQuery::single(
         nmp_grammar::Demand::new(
             outer,
-            ReadRouting::Explicit(pinned.into_iter().collect()),
-            None,
+            ReadRouting::Explicit(pinned.into_iter().collect())
         )
         .expect("pinned outer demand with a nonempty relay set is constructible"),
     )

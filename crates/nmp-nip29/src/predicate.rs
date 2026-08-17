@@ -418,8 +418,7 @@ mod tests {
                     authors: Some(me()),
                     ..Filter::default()
                 },
-                ReadRouting::Auto,
-                None,
+                ReadRouting::Auto
             )
             .expect("an author-bound outbox demand is constructible"),
             project: Selector::Tag("p".to_string()),
@@ -436,8 +435,7 @@ mod tests {
                     authors: Some(me()),
                     ..Filter::default()
                 },
-                ReadRouting::Auto,
-                None,
+                ReadRouting::Auto
             )
             .expect("an author-bound outbox demand is constructible"),
             project: Selector::Tag("group".to_string()),

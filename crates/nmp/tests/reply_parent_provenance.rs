@@ -114,8 +114,7 @@ async fn verified_parent_provenance_becomes_a_real_lane_while_raw_hint_text_does
             ids: Some(Binding::Literal(BTreeSet::from([parent.id.to_hex()]))),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![parent_relay.url.clone()]),
-        None,
+        ReadRouting::Explicit(vec![parent_relay.url.clone()])
     )
     .expect("one pinned parent query is valid");
     parent_demand.cache = CacheMode::Strict;
