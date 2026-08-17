@@ -144,6 +144,16 @@ pub enum RelayWaiting {
     /// This relay requires AUTH before the lane may try again. AUTH-blocked
     /// time has no retry deadline and consumes no new attempt.
     NeedsAuth,
+    /// Nothing is blocking this lane: it is routed, scheduled, and its turn
+    /// to send has not come yet. No attempt is running, so no ordinal is
+    /// spent and the give-up ceiling is untouched.
+    ///
+    /// This is where a healthy lane sits between being routed and being sent,
+    /// and it is deliberately not [`Self::NotConnected`] — an app that tells
+    /// a person the relay is unreachable while the write is merely queued has
+    /// reported a fault that does not exist. `since` is the instant the lane
+    /// became eligible, not a deadline.
+    Eligible { since: Timestamp },
     /// The last attempt failed in a way that permits another one, and
     /// `cause`/`detail` say WHY.
     ///
@@ -178,12 +188,26 @@ pub enum RelayWaiting {
 /// What is true at ONE relay.
 ///
 /// [`Self::Published`], [`Self::Rejected`], [`Self::AuthFailed`] and
-/// [`Self::GaveUp`] are terminal for that relay; [`Self::Waiting`] and
-/// [`Self::Sent`] are not. A write is settled when the destination set is
-/// closed and every member is terminal — see [`WriteOutcome::Settled`].
+/// [`Self::GaveUp`] are terminal for that relay; [`Self::Waiting`],
+/// [`Self::Attempting`] and [`Self::Sent`] are not. A write is settled when
+/// the destination set is closed and every member is terminal — see
+/// [`WriteOutcome::Settled`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayState {
     Waiting(RelayWaiting),
+    /// An attempt is running at this relay and its ordinal is already spent,
+    /// but nothing about the wire is proved: transport has either not
+    /// answered the handoff yet, or answered that it cannot say whether the
+    /// bytes reached the socket.
+    ///
+    /// Deliberately separate from [`Self::Sent`], whose whole content is the
+    /// proof. Collapsing the two would let an app tell a person their write
+    /// is on the wire on the strength of an attempt that may never have left
+    /// the process.
+    Attempting {
+        attempt: u64,
+        started_at: Timestamp,
+    },
     /// Transport proved socket write + flush for this persisted attempt.
     /// Not an ack, and not terminal: the relay has not answered yet.
     Sent {
@@ -221,7 +245,7 @@ impl RelayState {
             Self::Published | Self::Rejected { .. } | Self::AuthFailed { .. } | Self::GaveUp => {
                 true
             }
-            Self::Waiting(_) | Self::Sent { .. } => false,
+            Self::Waiting(_) | Self::Attempting { .. } | Self::Sent { .. } => false,
         }
     }
 }
