@@ -867,6 +867,23 @@ def main():
         '    visibility = ["//visibility:public"],',
         ")",
         "",
+        "# Dev-tooling entry points, so no workflow needs to reach for Cargo.",
+        "# `bazel run //:nmp -- <args>` is the CLI (`cargo run -p nmp-cli`).",
+        "alias(",
+        '    name = "nmp",',
+        '    actual = "//crates/nmp-cli:nmp",',
+        '    visibility = ["//visibility:public"],',
+        ")",
+        "",
+        "# `bazel run //:fmt` rewrites every crate's sources in place, the way",
+        "# `cargo fmt` does. The read-only counterpart is `--config=fmt-check`,",
+        "# which reports without writing (see .bazelrc).",
+        "alias(",
+        '    name = "fmt",',
+        '    actual = "@rules_rust//tools/rustfmt",',
+        '    visibility = ["//visibility:public"],',
+        ")",
+        "",
     ])
     with open(os.path.join(root, "BUILD.bazel"), "w") as f:
         f.write(root_build)
