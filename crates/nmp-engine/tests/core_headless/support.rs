@@ -230,8 +230,12 @@ fn protected_pinned_query(relay: &RelayUrl, signer: nostr::PublicKey, kind: u16)
                 kinds: Some(BTreeSet::from([kind])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay.clone()])
+            ReadRouting::Explicit(vec![relay.clone()]),
         )
+        .map(|demand| Demand {
+            authenticate_as: Some(signer),
+            ..demand
+        })
         .expect("protected pinned demand is valid"),
     )
 }
