@@ -18,8 +18,9 @@ issues:
   - "#900 AuthorUnion narrows an unconstrained authors filter"
   - "the tag axis has no merge rule (§3.4)"
   - "#933 per-EOSE delta subscriptions — measured, analysed, NOT BUILT (§11)"
-  - "#1340 observation admission no longer reprojects every sibling"
-  - "#1341 pending app demand is grouped before immutable relay admission"
+  - "#1340 observation admission no longer reprojects every sibling — CLOSED"
+  - "#1341 pending app demand is grouped before immutable relay admission — OPEN: the 10ms cohort and coverage containment ship, the uncovered residual does not (§3.2, §11.5)"
+  - "#1731 nmp-runtime coordinator split — where the 10ms window's constant now lives (crates/nmp-runtime/src/wire_admission.rs)"
 ---
 
 # Subscription identity, grouping, and relay limits
@@ -53,7 +54,8 @@ pending admission (10ms from first uncovered app demand)
    ↓
 router     → route and MERGE only that unsent cohort, per relay/context/source
    ↓
-admission  → append immutable REQs, or attach to exact active coverage
+admission  → append immutable REQs, or attach to active coverage that
+             already contains the candidate (§3.2)
    ↓
 transport  → one REQ frame per filter, on a socket
 ```
@@ -66,14 +68,15 @@ wrong.
 (`max_verify_batch`, `max_engine_batch` in `crates/nmp-transport/src/pool.rs`)
 and never coalesces outbound REQs. The final emission is
 `ClientMessage::req(wire_id, vec![filter])` in
-`crates/nmp-engine/src/runtime/mod.rs` — **one filter per REQ frame, one REQ per
-`WireOp::Req`**. `Router::compile` step 5 is the only place filters are ever
-combined.
+`crates/nmp-runtime/src/request_wire.rs:118` — **one filter per REQ frame, one
+REQ per `WireOp::Req`**. `Router::compile` step 5 is the only place filters are
+ever combined.
 
 **App admission and global replanning are different transitions.** Opening an
 observation reads only that observation's canonical local projection. If an
-active REQ already carries its exact `CoverageKey`, the new observation simply
-attaches to it. Otherwise the first uncovered app request arms a 10ms,
+already-sent REQ already contains that observation's demand — byte-exactly, or
+by the filter containment §3.2 describes — the new observation simply attaches
+to it. Otherwise the first uncovered app request arms a 10ms,
 first-arrival-anchored deadline. More compatible observations may join that
 pending cohort without extending the deadline. When it expires, NMP routes the
 cohort and coalesces it inside each `(RelaySessionKey, SourceAuthority)`
@@ -164,10 +167,53 @@ each partition. Coalescing is **equal-context-only**: two atoms differing in
 During ordinary app admission, coalescing runs over the **pending cohort**, not
 per query and not over already-sent requests. Two unrelated observations that
 arrive in the same cohort and land in the same relay/context/source partition
-can therefore combine. Existing REQs participate only through their exact
-absorbed coverage keys: they can satisfy a new observation, but are never
-merge candidates. A true routing invalidation still uses the whole-demand
+can therefore combine. A true routing invalidation still uses the whole-demand
 compiler described in §1.
+
+**Already-sent REQs are never merge candidates — but they satisfy a candidate
+by CONTAINMENT, not only by byte equality.** Nothing on the wire is widened,
+renamed, or rewritten; the question asked of an incumbent is only "does what
+you already asked for select every event this candidate wants?", and since
+2026-08-10 (`3e835f5d`) that question is answered per axis rather than by
+comparing filter bytes.
+
+`physical_filter_covers`
+(`crates/nmp-router/src/admission/metadata.rs:30`) is the predicate:
+`kinds`, `authors` and `ids` subset-test through `option_set_covers` (`:16`) —
+an absent axis on the incumbent covers everything, an absent axis on the
+candidate is covered by nothing; every tag NAME the incumbent constrains must
+also be present on the candidate at a subset of values (`:43`); `since` must be
+at or below and `until` at or above the candidate's window; and a `limit` on
+**either** side refuses outright (`:34`), because a limit caps the result count
+rather than the predicate and cannot be reconstructed for a later owner.
+
+`Router::covering_request_key` (`:94`) is the lookup: the exact
+`(session, source, filter)` index first, then the reverse claim index, gated on
+the candidate's coverage claims being a subset of the incumbent's *plus*
+`physical_filter_covers`. `Router::reactivate_covered_atom` (`:137`) runs the
+same predicate for a single atom reactivating outside any cohort. A covered
+candidate is `take()`n in `admission.rs:190` and becomes metadata on the
+incumbent — **no REQ is emitted at all.**
+
+Two residual gaps, both real and both worth knowing before designing against
+this section:
+
+- **Partial coverage re-asks the whole later filter, not the uncovered
+  remainder.** A running `{kinds:[0,1], authors:[a,b]}` followed by
+  `{kinds:[1], authors:[a,b,c]}` keeps the incumbent byte-identical and sends
+  the later filter *in full*, re-asking for `a` and `b`. Over-fetching, never
+  under-fetching — pinned by
+  `partial_running_coverage_never_underfetches_the_uncovered_author_residual`
+  (`crates/nmp-router/tests/admission/coverage_behavior.rs:83`). The wanted
+  behaviour — send exactly `{kinds:[1], authors:[c]}` and own both pieces —
+  sits in an `#[ignore]`d test at `:132` naming issue #1341.
+- **Containment is consulted against sent work only, never between two
+  candidates inside one cohort.** Collapsing within a cohort is still
+  `StructuralUnion`, so a superset/subset pair arriving together that differs
+  in more than one component ships BOTH REQs — measured:
+  `{kinds:[0,1], authors:[a,b]}` and `{kinds:[1], authors:[a]}` in one cohort
+  produce two REQs, one wholly contained in the other. A one-component pair
+  does merge, because the union of a set and its subset is the superset.
 
 ### 3.3 The rule as shipped
 
@@ -935,8 +981,15 @@ across the whole engine suite confirmed the old collision branch never fired.
 - **Emitting `wide_concrete` to the wire** while keeping narrow atoms for
   attribution. Dual demand truth; bypasses the widen-only proof and the
   coverage-containment mechanism.
-- **Coverage-aware merging.** A merge that asks for *less* than the naive union
-  cannot satisfy the widening contract. Not a difficulty — a contradiction.
+- **Coverage-aware SUBTRACTION inside a merge.** A merged filter that asks for
+  *less* than the naive union of its operands — because coverage says some of
+  it is already held — cannot satisfy the widening contract. Not a difficulty
+  — a contradiction. This is about the merge rule's output only. It says
+  nothing against attaching a candidate to an already-sent request that
+  already contains it (§3.2): that emits no filter, subtracts nothing from any
+  union, and asks the relay for nothing new. Nor does it rule out a separate
+  residual REQ alongside an untouched incumbent (#1341) — the residual is its
+  own filter, not a narrowed merge.
 - **Multi-filter REQs.** NIP-01 allows a filter list per subscription, which
   would make collisions structurally impossible. But EOSE and CLOSE are
   per-subscription, so a list coarsens per-filter completion and forbids
@@ -960,6 +1013,8 @@ Everything asserted above is measured, not reasoned. Reproduce with:
 | fan-out and pre-batched compiling to one plan; the #899 falsifier and its control | `crates/nmp-router/tests/tag_fanout_churn.rs` |
 | 300 groups INSIDE a 20-subscription cap; strict improvement over dedup-only | `crates/nmp-router/tests/tag_kill_measurement.rs` |
 | widen-only over the full component-shape space with PER-AXIS fire counters; the tag polarity, both ends; the two-tag-name refusal; cap chunking | `crates/nmp-router/tests/coalescing.rs`, `crates/nmp-router/src/coalesce.rs` |
+| §3.2 the containment predicate itself, both legs per axis and the `limit` refusal on both sides | `crates/nmp-router/src/admission/metadata_tests.rs` |
+| §3.2 what containment does at admission: exact reuse, an uncovered later filter executing, and the partial-coverage over-fetch (plus its `#[ignore]`d #1341 target) | `crates/nmp-router/tests/admission/coverage_behavior.rs` |
 | author-axis limits under `AuthorUnion` (the pre-existing twin) | `crates/nmp-router/tests/kill_measurement.rs` |
 | live REQ frames against a real relay | `crates/nmp/examples/tag_fanout_live.rs` |
 | intended behaviour, `@wip` | `features/routing/subscription-collapse.feature` |
@@ -1116,7 +1171,7 @@ Two conjuncts must hold before any of the above applies, and both are one
 line of code each.
 
 **`limit` must be absent, or nothing widens in the first place.**
-`neither_limited` (`crates/nmp-router/src/coalesce.rs:221`) is
+`neither_limited` (`crates/nmp-router/src/coalesce.rs:240`) is
 `a.limit.is_none() && b.limit.is_none()`. A limited filter never merges, so
 its atoms never coalesce, so nothing ever overwrites, so there is no re-serve
 to save. **Limited queries are already in delta mode by accident** — one
@@ -1126,7 +1181,7 @@ queries already sit.
 
 **The relay must not be NIP-77-capable on a Public session**, or the
 overwrite the design attacks never reaches the wire. `crates/nmp-engine/src/
-core/query.rs:203` is `let broad = filter.limit.is_none();` and the arm below
+core/query.rs:1021` is `let broad = filter.limit.is_none();` and the arm below
 it diverts every broad Public REQ on a probed relay into `begin_neg_handoff`
 — the plan's op is **never pushed to `kept_ops`**. So the whole benefit set is
 `unlimited AND mergeable AND (non-Public OR unprobed) AND multi-step growth`.
@@ -1150,7 +1205,7 @@ mechanism, and the floor is the dependent half.**
 **#2 — one interval per row. Confirmed, and it binds the two TIERS against
 each other, not just time-chunked backfill — but it is a satisfiable
 constraint, not an unanswered problem.** `merge_interval`
-(`crates/nmp-store/src/coverage.rs:122`) treats `incoming.from <=
+(`crates/nmp-store/src/coverage.rs:120`) treats `incoming.from <=
 cur.through + 1` as touching and unions; anything else keeps whichever
 interval has the greater `through` and **discards the other outright**. The
 issue's conclusion (chunk descending only) is right. What it misses is that
@@ -1188,7 +1243,7 @@ mid-backfill loses them silently.
 **#4 — on a NIP-77 relay the premise is false, and more so than stated.** The
 plan Req is not overwritten on the wire; it is dropped. What actually happens
 is a fresh `0x71` live candidate, then `open_neg_session`
-(`crates/nmp-engine/src/core/query.rs:813`) stripping `since`/`until`/`limit`
+(`crates/nmp-engine/src/core/query.rs:1971`) stripping `since`/`until`/`limit`
 and re-querying the **entire local store** for the shape to seed
 `Reconciler::open`. Scoping that reconciliation to the delta values would mean
 seeding the reconciler with a deliberately partial view of what we hold, which
@@ -1264,7 +1319,7 @@ live in the same compile step: when `planned + 1 > allowed`, emit the current
 unfloored merged filter for that session as the full-query successor instead
 of a separate backfill.
 
-### 11.5 The cheaper change — BUILT for app-admission bursts
+### 11.5 The cheaper change — BUILT for app-admission bursts, #1341 still OPEN
 
 The common interactive burst is not derived growth. A render pass asks for a
 set of independent live queries -- for example many kind:0 avatar profiles --
@@ -1273,12 +1328,26 @@ the next call exists. Replanning all live demand after each call groups them,
 but repeatedly rewrites already-running subscriptions and, before #1340, also
 reread every sibling's canonical rows.
 
-#1340/#1341 split that lifecycle into three explicit facts:
+PR #1343 (2026-08-09, refs #1340 and #1341) split that lifecycle into three
+explicit facts:
 
 1. Project the new observation from cache immediately and read no sibling.
-2. If exact active coverage already exists, attach locally with no compile.
+   #1340 is closed by this.
+2. If an already-sent REQ contains the new demand — byte-exactly, or by the
+   per-axis containment of `physical_filter_covers` (§3.2) — attach locally
+   with no compile and no wire work. Containment landed later, on 2026-08-10
+   in `3e835f5d`; before that this really was exact-only.
 3. Otherwise hold only the unsent relay demand for 10ms from its first
-   arrival, route/coalesce that cohort once, and append immutable REQs.
+   arrival, route/coalesce that cohort once, and append immutable REQs. The
+   window is `WIRE_ADMISSION_WINDOW = Duration::from_millis(10)` in
+   `crates/nmp-runtime/src/wire_admission.rs:7` — that module is where #1731's
+   coordinator split moved it; it is not where it was introduced.
+
+**#1341 remains OPEN**, and what is missing is the residual: when running work
+covers only *part* of a later demand, the issue asks for the incumbent to stay
+byte-identical while exactly the uncovered remainder is compiled and sent.
+Today the whole later filter is re-sent instead (§3.2's first residual gap).
+Do not read "BUILT" here as "#1341 is done".
 
 The timer is not a sliding debounce, does not sit in the resolver, and does
 not postpone cache delivery. Its grouping locus is the router's existing
