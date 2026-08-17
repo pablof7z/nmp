@@ -1,8 +1,10 @@
 //! Pending-only admission and immutable withdrawal for relay plans.
 //!
 //! A cohort is compiled in an empty incumbent namespace, then appended to
-//! the running plan. Existing requests are therefore candidates for exact
-//! coverage reuse, never candidates for widening or identity reassignment.
+//! the running plan. Existing requests are therefore candidates for coverage
+//! reuse — byte-exact, or by the per-axis containment of
+//! `metadata::physical_filter_covers` — never candidates for widening or
+//! identity reassignment.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,6 +20,9 @@ use crate::route;
 use crate::{AdmissionOutcome, Router};
 
 mod metadata;
+#[cfg(test)]
+#[path = "admission/metadata_tests.rs"]
+mod metadata_tests;
 mod preview;
 #[cfg(test)]
 #[path = "admission/preview_tests.rs"]
