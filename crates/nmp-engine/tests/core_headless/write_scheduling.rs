@@ -877,6 +877,98 @@ fn transient_deadline_is_consumed_once_without_polling_or_duplicate_queue() {
     );
 }
 
+/// How many `WriteFact`s one ordinary write actually emits, measured rather
+/// than reasoned about.
+///
+/// The runtime delivers these through a `FifoSender` whose capacity is
+/// [`REPLAY_PAGE_CAPACITY`]'s twin, and that queue REJECTS the overflowing
+/// value and latches `Lagged` permanently rather than dropping the oldest.
+/// So the fact count per retry decides whether an ordinary write can outlive
+/// its own status stream. This test measures the two numbers that decide it:
+/// what a write spends settling the relays that work, and what each retry of
+/// a relay that does not costs on top.
+///
+/// It asserts the arithmetic, not a policy — if the emission shape changes so
+/// that a flaky relay no longer consumes the queue, this test is what says so.
+#[test]
+fn one_flaky_relay_costs_the_whole_delivery_queue() {
+    let author = Keys::generate();
+    let good = RelayUrl::parse("wss://settles.example").unwrap();
+    let flaky = RelayUrl::parse("wss://never-settles.example").unwrap();
+    let mut core = new_core_without_attempt_ceiling(FixtureRoutingFacts::new());
+    for (slot, relay) in [(0, &good), (1, &flaky)] {
+        connect_signer(&mut core, slot, relay, author.public_key());
+        authenticate_signer(&mut core, slot, relay, &author);
+    }
+
+    let (_receipt, event, scheduled) =
+        publish_explicit(&mut core, &author, [good.clone(), flaky.clone()]);
+    let mut spent = receipt_statuses(&scheduled).len();
+
+    // The relay that works, settled once and never spoken of again.
+    let written = mark_written(&mut core, &scheduled, &good);
+    spent += receipt_statuses(&written).len();
+    let acked = core.handle(EngineMsg::RelayFrame(
+        RelayHandle {
+            slot: 0,
+            generation: 1,
+        },
+        signer_session(&good, event.pubkey),
+        RelayFrame::from(RelayMessage::ok(event.id, true, "")),
+    ));
+    spent += receipt_statuses(&acked).len();
+    let settled = spent;
+
+    // The relay that does not. Every pass is one full retry of ONE relay on a
+    // write whose other destination is already done.
+    let mut scheduled = scheduled;
+    let mut retries = 0u32;
+    let mut first_over = None;
+    while retries < 40 {
+        let written = mark_written(&mut core, &scheduled, &flaky);
+        spent += receipt_statuses(&written).len();
+        let refused = core.handle(EngineMsg::RelayFrame(
+            RelayHandle {
+                slot: 1,
+                generation: 1,
+            },
+            signer_session(&flaky, event.pubkey),
+            RelayFrame::from(RelayMessage::ok(event.id, false, "rate-limited: measurement")),
+        ));
+        spent += receipt_statuses(&refused).len();
+        retries += 1;
+        if first_over.is_none() && spent > REPLAY_PAGE_CAPACITY {
+            first_over = Some(retries);
+        }
+        let due = core
+            .next_deadline()
+            .expect("deadline peek")
+            .expect("every transient durable attempt schedules its retry");
+        scheduled = core.handle(EngineMsg::Tick(due));
+    }
+
+    let per_retry = (spent - settled) / retries as usize;
+    let crossed = first_over.expect("a bounded queue is crossed within 40 retries");
+    println!(
+        "settled={settled} facts, per_retry={per_retry} facts, \
+         queue={REPLAY_PAGE_CAPACITY}, crossed at retry {crossed}, total={spent}"
+    );
+
+    assert_eq!(
+        per_retry, 2,
+        "each retry of one relay emits Sent + BackingOff"
+    );
+    assert!(
+        crossed <= 16,
+        "a single flaky relay must exhaust the delivery queue within 16 retries \
+         to be the failure this measures -- crossed at {crossed}"
+    );
+    assert!(
+        spent > REPLAY_PAGE_CAPACITY * 2,
+        "40 retries of one relay must far exceed one queue's worth -- got {spent}"
+    );
+}
+
 /// #680 / #845: durable retry history is exposed as finite pages of reducer
 /// facts. Delivery pressure belongs to the runtime, so the headless reducer
 /// test asserts only the replay vocabulary and cursor boundary.
