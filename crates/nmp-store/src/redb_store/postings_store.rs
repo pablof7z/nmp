@@ -302,6 +302,14 @@ pub(super) fn scan_packed<T>(
     // wrong-id, duplicate-range, or orphan catalog entry is not a run this
     // scan may quietly skip.
     let runs = load_run_catalog(&catalog)?;
+    // Phase 1: gather, per run, every segment that could hold a queried
+    // prefix (by shard) and that run's dictionary and death blocks — pure
+    // I/O, no decoding. These guards must all be collected before anything
+    // borrows from them in phase 2: `loaded` growing is not allowed to
+    // invalidate a view already taken into an element pushed earlier, which
+    // is exactly the shape a validate-then-reuse-the-view restructure would
+    // need and exactly what phase 2's fresh (and cheap — parsing touches no
+    // posting data) parse sidesteps.
     let mut loaded = Vec::new();
     for meta in &runs {
         let mut candidates = Vec::new();
@@ -318,31 +326,6 @@ pub(super) fn scan_packed<T>(
             .get(catalog_key(CATALOG_DICTIONARY, meta.run_id).as_slice())
             .map_err(persist_err)?
             .ok_or_else(|| packed_err(format!("run {} has no dictionary", meta.run_id)))?;
-        // Validate the dictionary once and every candidate segment against
-        // it BEFORE `prefix` binary-searches the directory or a cursor
-        // binary-searches a posting list. Both searches assume sorted input;
-        // on unsorted input they land in the wrong place and answer "no
-        // such prefix"/"no such row" — a false miss, not an error.
-        let mut run_segments = Vec::new();
-        {
-            let dictionary = DictionaryView::parse(dictionary.value())
-                .and_then(DictionaryView::validate_order)
-                .map_err(packed_err)?;
-            for value in candidates {
-                let segment = SegmentView::parse(value.value()).map_err(packed_err)?;
-                segment.validate(dictionary).map_err(packed_err)?;
-                let mut matches = false;
-                for prefix in scan.prefixes {
-                    matches |= segment.prefix(prefix).map_err(packed_err)?.is_some();
-                }
-                if matches {
-                    run_segments.push(value);
-                }
-            }
-        }
-        if run_segments.is_empty() {
-            continue;
-        }
         let mut blocks = Vec::new();
         for level in 0..MAX_DEATH_BLOCKS {
             let key = death_key(meta.run_id, level);
@@ -352,22 +335,34 @@ pub(super) fn scan_packed<T>(
         }
         loaded.push((
             dictionary,
-            run_segments,
+            candidates,
             merge_dead_blocks(&blocks).map_err(packed_err)?,
         ));
     }
+    // Phase 2: validate and search exactly what this query touches. The
+    // prefix directory is validated once per segment — O(prefixes in the
+    // segment), required before `ValidatedSegment::prefix`'s binary search
+    // is safe to run — then, for each prefix this scan actually asked for,
+    // that one posting list's canonical order is validated before a cursor
+    // is built from it (#1818: previously every prefix in the segment and
+    // the whole run dictionary were scanned regardless of what was
+    // queried). `ValidatedSegment`/`ValidatedPostingList` carry proof of
+    // what was checked, so a future restructure of this loop cannot
+    // silently detach the search from the validation the way the old
+    // two-scope split relied on adjacency to avoid (#790).
     let before = scan
         .before
         .map(|cursor| (cursor.created_at.as_secs(), *cursor.event_id.as_bytes()));
     let mut sources = Vec::new();
-    for (dictionary, segments, dead) in &loaded {
-        // Already parsed and validated above; this is the borrow the cursors
-        // actually hold, not a second decoded copy of the index.
+    for (dictionary, segment_values, dead) in &loaded {
         let dictionary = DictionaryView::parse(dictionary.value()).map_err(packed_err)?;
-        for bytes in segments {
-            let segment = SegmentView::parse(bytes.value()).map_err(packed_err)?;
+        for value in segment_values {
+            let segment = SegmentView::parse(value.value())
+                .map_err(packed_err)?
+                .validated()
+                .map_err(packed_err)?;
             for prefix in scan.prefixes {
-                let Some(list) = segment.prefix(prefix).map_err(packed_err)? else {
+                let Some(list) = segment.prefix(dictionary, prefix).map_err(packed_err)? else {
                     continue;
                 };
                 sources.push(ScanSource {

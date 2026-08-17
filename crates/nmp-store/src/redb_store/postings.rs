@@ -344,10 +344,27 @@ impl<'a> DictionaryView<'a> {
     }
 
     /// Constant-memory half of [`Self::validate`]: the entries are strictly
-    /// ordered by event key. This is the half the query path runs (#790),
-    /// because it is the half that costs nothing but a running maximum —
-    /// the issue requires packed validation on the production read boundary
-    /// *and* bounded query memory, and only this half satisfies both.
+    /// ordered by event key. Every dictionary lookup addresses an entry by
+    /// its stored ordinal directly ([`Self::event`]), never by searching on
+    /// event key — but that ordinal is only meaningful because the encoder
+    /// assigned it to a specific event, so a dictionary whose on-disk
+    /// storage order has been tampered with (two entries transposed, say)
+    /// desyncs a posting's stored ordinal from the event that belongs
+    /// there. That is a real hazard, not a cosmetic one, which is why this
+    /// check exists at all.
+    ///
+    /// This full `0..count` sweep is no longer what the query path runs to
+    /// guard against it, though (#1818). A query only ever dereferences the
+    /// ordinals its matched postings reference, and a subsequence of a
+    /// genuinely ordered dictionary is itself ordered — so
+    /// [`PostingListView::validate_order`] proves the identical guarantee
+    /// for exactly those ordinals, in memory bounded by that one list
+    /// rather than the whole run. This whole-dictionary version remains
+    /// part of [`Self::validate`], run at compaction and by the integrity
+    /// audit, both of which already materialize the entire dictionary — the
+    /// trade-off it was originally recorded for (bounded memory, #790)
+    /// holds for those callers; it never bounded query *time*, which is what
+    /// made it the wrong check to run unconditionally on the query path.
     pub(super) fn validate_order(self) -> Result<Self, String> {
         let mut previous = None;
         for ordinal in 0..self.count {
@@ -513,28 +530,37 @@ impl<'a> SegmentView<'a> {
         Ok(None)
     }
 
-    /// Prefix directory plus canonical posting order, in constant memory.
+    /// Validate only the prefix directory, in O(prefixes in the segment) —
+    /// required before [`Self::prefix`]'s binary search is safe to run, and
+    /// cheap regardless of how many postings each prefix owns. Returns proof
+    /// of that so the query path (#1818) is not relying on a reader's memory
+    /// that this ran before [`ValidatedSegment::prefix`] searches it; a
+    /// `SegmentView` on its own carries no such evidence.
+    pub(super) fn validated(self) -> Result<ValidatedSegment<'a>, String> {
+        self.validate_prefix_directory()?;
+        Ok(ValidatedSegment { segment: self })
+    }
+
+    /// Prefix directory plus canonical posting order for every prefix in the
+    /// segment, in constant memory. Used by the integrity audit and
+    /// benchmarks, which touch every prefix anyway; the query path validates
+    /// only the directory plus the specific prefixes it searches — see
+    /// [`Self::validated`] and [`ValidatedSegment::prefix`] (#1818).
     ///
-    /// Both halves are load-bearing for the query path and neither is
-    /// optional (#790). [`Self::prefix`] binary-searches the directory and
+    /// Both halves are load-bearing and neither is optional (#790).
+    /// [`Self::prefix`] binary-searches the directory and
     /// [`PostingListView::cursor`] binary-searches the posting list, so an
     /// unsorted directory or an out-of-order posting list does not merely
     /// read oddly — it silently lands the cursor in the wrong place and the
     /// query returns a *false miss*. That is why this cannot be deferred to
     /// the cursor as it walks: by then the search has already happened.
+    #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(super) fn validate(self, dictionary: DictionaryView<'_>) -> Result<u64, String> {
         self.validate_prefix_directory()?;
         let mut postings = 0u64;
         for ordinal in 0..self.prefix_count {
             let record = self.record(ordinal)?;
-            let mut previous = None;
-            for posting in 0..record.list.posting_count {
-                let event = record.list.event(dictionary, posting)?;
-                if previous.is_some_and(|prior| canonical_order(&prior, &event) != Ordering::Less) {
-                    return Err("posting list violates canonical order".to_owned());
-                }
-                previous = Some(event);
-            }
+            record.list.validate_order(dictionary)?;
             postings = postings.saturating_add(record.list.posting_count as u64);
         }
         Ok(postings)
@@ -595,6 +621,61 @@ impl<'a> SegmentView<'a> {
             return Err("invalid prefix record bounds".to_owned());
         }
         parse_prefix_record(&self.value[start..end])
+    }
+}
+
+/// A [`SegmentView`] whose prefix directory has been validated. The only way
+/// to get one is [`SegmentView::validated`], which just ran that check — so
+/// [`Self::prefix`]'s binary search over the directory cannot run against
+/// unvalidated bytes, whatever shape the surrounding code takes (#1818).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ValidatedSegment<'a> {
+    segment: SegmentView<'a>,
+}
+
+impl<'a> ValidatedSegment<'a> {
+    /// Binary-search the (already validated) prefix directory for `wanted`
+    /// and, only if it exists, validate that one posting list's canonical
+    /// order plus the dictionary ordinal order it touches
+    /// ([`PostingListView::validate_order`]) before handing back proof it is
+    /// safe to seek within. Narrowed from validating every prefix in the
+    /// segment against the whole run dictionary ([`SegmentView::validate`])
+    /// to only the one requested (#1818) — a query for one author no longer
+    /// pays for every other author sharing its shard, nor for the rest of
+    /// the run's dictionary.
+    pub(super) fn prefix(
+        self,
+        dictionary: DictionaryView<'_>,
+        wanted: &[u8],
+    ) -> Result<Option<ValidatedPostingList<'a>>, String> {
+        let Some(list) = self.segment.prefix(wanted)? else {
+            return Ok(None);
+        };
+        list.validate_order(dictionary)?;
+        Ok(Some(ValidatedPostingList { list }))
+    }
+}
+
+/// A [`PostingListView`] proven to be in canonical order, referencing
+/// dictionary ordinals proven internally consistent among themselves. The
+/// only way to get one is [`ValidatedSegment::prefix`], which just proved
+/// both — so [`Self::cursor`]'s binary search cannot run against an
+/// unvalidated list (#1818, following the same pattern as
+/// [`ValidatedSegment`]).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ValidatedPostingList<'a> {
+    list: PostingListView<'a>,
+}
+
+impl<'a> ValidatedPostingList<'a> {
+    pub(super) fn cursor(
+        self,
+        dictionary: DictionaryView<'a>,
+        before: Option<(u64, [u8; 32])>,
+        since: u64,
+        until: u64,
+    ) -> Result<PostingCursor<'a>, String> {
+        self.list.cursor(dictionary, before, since, until)
     }
 }
 
@@ -901,6 +982,43 @@ impl<'a> PostingListView<'a> {
         let created_at = self.created_at(ordinal);
         let dictionary_ordinal = self.dictionary_ordinal(ordinal);
         dictionary.event(dictionary_ordinal, created_at)
+    }
+
+    /// Canonical order across this one posting list, in constant memory —
+    /// plus the run dictionary's ordinal ordering, restricted to the
+    /// ordinals this list actually dereferences. Both are required before
+    /// [`Self::cursor`]'s binary search: an out-of-order posting list makes
+    /// that search land in the wrong place (#790), and a dictionary whose
+    /// on-disk ordinal order has been tampered with desyncs a posting's
+    /// stored ordinal from the event the encoder assigned it there. Either
+    /// way the result is a false miss or a wrong id, not a decode error,
+    /// unless caught here.
+    ///
+    /// Narrowed from every ordinal in the run — `DictionaryView`'s own
+    /// `validate_order`, which used to run unconditionally over `0..count`
+    /// before #1818 — to only the ordinals this one list touches: a
+    /// subsequence of a genuinely ordered dictionary is itself ordered, so
+    /// checking the touched subsequence proves exactly as much as the full
+    /// scan for what this list can actually reach. Tampering outside that
+    /// reach is invisible to this query, same as it always was to every
+    /// other check on this path — compaction and the integrity audit are
+    /// what catch corruption in data no live query happens to touch.
+    fn validate_order(self, dictionary: DictionaryView<'_>) -> Result<(), String> {
+        let mut previous = None;
+        let mut touched = Vec::with_capacity(self.posting_count);
+        for posting in 0..self.posting_count {
+            let event = self.event(dictionary, posting)?;
+            if previous.is_some_and(|prior| canonical_order(&prior, &event) != Ordering::Less) {
+                return Err("posting list violates canonical order".to_owned());
+            }
+            touched.push((self.dictionary_ordinal(posting), event.event_key));
+            previous = Some(event);
+        }
+        touched.sort_unstable_by_key(|&(ordinal, _)| ordinal);
+        if touched.windows(2).any(|pair| pair[0].1 >= pair[1].1) {
+            return Err("dictionary keys are not strictly ordered".to_owned());
+        }
+        Ok(())
     }
 
     fn search(
@@ -1297,6 +1415,178 @@ mod tests {
         assert_eq!(encoded.postings, 300);
         assert_eq!(encoded.prefixes, 1);
         assert_eq!(encoded.posting_bytes, 3_600);
+    }
+
+    /// #1818: the query path no longer validates the whole run dictionary's
+    /// ordinal order up front — it validates only the ordinals a query's
+    /// matched postings actually dereference (`PostingListView::validate_order`).
+    /// This shares one dictionary between author A and author B, corrupts
+    /// only the two ordinals author B's postings reference (a transposition,
+    /// the same corruption shape as `packed_scan_reports_an_unsorted_dictionary`
+    /// in `corruption_tests.rs`, at this module's level), and shows both
+    /// halves of the narrowing at once: author A's query — which never
+    /// dereferences the corrupted ordinals — resolves correctly, while
+    /// author B's query — which does — is rejected outright rather than
+    /// resolving to the wrong ids. Corruption that isn't reachable by a
+    /// query is invisible to it; corruption that is reachable is never
+    /// silently accepted.
+    #[test]
+    fn dictionary_corruption_is_caught_only_when_the_query_touches_it() {
+        let author_a = id(1);
+        let author_b = id(2);
+        let shard_a = shard_for(Family::Author, &author_a);
+        let shard_b = shard_for(Family::Author, &author_b);
+
+        // Correct by construction: strictly increasing event key by ordinal.
+        let mut dictionary_entries = vec![
+            (1u64, id(101)),
+            (2u64, id(102)),
+            (3u64, id(103)),
+            (4u64, id(104)),
+        ];
+        let ordinals: HashMap<u64, u32> = dictionary_entries
+            .iter()
+            .enumerate()
+            .map(|(ordinal, (event_key, _))| (*event_key, ordinal as u32))
+            .collect();
+
+        let a_memberships = vec![
+            Membership {
+                family: Family::Author,
+                shard: shard_a,
+                prefix: Prefix::author(author_a),
+                event: RunEvent {
+                    created_at: 200,
+                    id: id(101),
+                    event_key: 1,
+                }
+                .into(),
+            },
+            Membership {
+                family: Family::Author,
+                shard: shard_a,
+                prefix: Prefix::author(author_a),
+                event: RunEvent {
+                    created_at: 100,
+                    id: id(102),
+                    event_key: 2,
+                }
+                .into(),
+            },
+        ];
+        let b_memberships = vec![
+            Membership {
+                family: Family::Author,
+                shard: shard_b,
+                prefix: Prefix::author(author_b),
+                event: RunEvent {
+                    created_at: 200,
+                    id: id(103),
+                    event_key: 3,
+                }
+                .into(),
+            },
+            Membership {
+                family: Family::Author,
+                shard: shard_b,
+                prefix: Prefix::author(author_b),
+                event: RunEvent {
+                    created_at: 100,
+                    id: id(104),
+                    event_key: 4,
+                }
+                .into(),
+            },
+        ];
+        let a_segment_bytes =
+            encode_segment(Family::Author, shard_a, &a_memberships, &ordinals).unwrap();
+        let b_segment_bytes =
+            encode_segment(Family::Author, shard_b, &b_memberships, &ordinals).unwrap();
+
+        // Tamper with the dictionary's on-disk storage after encoding —
+        // transpose ordinals 2 and 3 (author B's entries) — leaving the
+        // segments, and author A's ordinals 0 and 1, untouched.
+        dictionary_entries.swap(2, 3);
+        let dictionary_bytes = encode_dictionary(&dictionary_entries).unwrap();
+        let unordered = DictionaryView::parse(&dictionary_bytes).unwrap();
+        assert!(
+            unordered.validate_order().is_err(),
+            "test dictionary must actually be out of order"
+        );
+        let dictionary = DictionaryView::parse(&dictionary_bytes).unwrap();
+
+        let a_segment = SegmentView::parse(&a_segment_bytes)
+            .unwrap()
+            .validated()
+            .unwrap();
+        let list = a_segment.prefix(dictionary, &author_a).unwrap().unwrap();
+        let mut cursor = list.cursor(dictionary, None, 0, u64::MAX).unwrap();
+        let mut rows = Vec::new();
+        while let Some(event) = cursor.next().unwrap() {
+            rows.push((event.created_at, event.id));
+        }
+        assert_eq!(rows, vec![(200, id(101)), (100, id(102))]);
+
+        let b_segment = SegmentView::parse(&b_segment_bytes)
+            .unwrap()
+            .validated()
+            .unwrap();
+        let error = b_segment.prefix(dictionary, &author_b).unwrap_err();
+        assert!(
+            error.contains("dictionary keys are not strictly ordered"),
+            "expected a dictionary-order rejection, got: {error}"
+        );
+    }
+
+    /// The load-bearing half of #1818's narrowing: scoping validation to
+    /// the queried prefix must not become skipping validation for it. An
+    /// out-of-order posting list for the prefix actually being searched has
+    /// to fail loudly — never resolve to a (necessarily wrong, because
+    /// unsorted) binary search result.
+    #[test]
+    fn out_of_order_queried_prefix_is_rejected_not_silently_missed() {
+        let wanted = id(9);
+        let shard = shard_for(Family::Author, &wanted);
+        let dictionary_bytes = encode_dictionary(&[(1, id(1)), (2, id(2))]).unwrap();
+        let dictionary = DictionaryView::parse(&dictionary_bytes).unwrap();
+        let ordinals: HashMap<u64, u32> = [(1u64, 0u32), (2u64, 1u32)].into_iter().collect();
+        // created_at ascending violates the newest-first canonical order
+        // (`canonical_order`), which `PostingListView::cursor`'s binary
+        // search over this list depends on.
+        let memberships = vec![
+            Membership {
+                family: Family::Author,
+                shard,
+                prefix: Prefix::author(wanted),
+                event: RunEvent {
+                    created_at: 50,
+                    id: id(1),
+                    event_key: 1,
+                }
+                .into(),
+            },
+            Membership {
+                family: Family::Author,
+                shard,
+                prefix: Prefix::author(wanted),
+                event: RunEvent {
+                    created_at: 100,
+                    id: id(2),
+                    event_key: 2,
+                }
+                .into(),
+            },
+        ];
+        let segment_bytes = encode_segment(Family::Author, shard, &memberships, &ordinals).unwrap();
+        let segment = SegmentView::parse(&segment_bytes)
+            .unwrap()
+            .validated()
+            .unwrap();
+        let error = segment.prefix(dictionary, &wanted).unwrap_err();
+        assert!(
+            error.contains("canonical order"),
+            "expected a canonical-order rejection, got: {error}"
+        );
     }
 
     #[test]
