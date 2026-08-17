@@ -257,6 +257,12 @@ public enum RelayWaiting: Sendable, Hashable {
     /// spend the give-up ceiling.
     case notConnected
     case needsAuth
+    /// Nothing is blocking this lane: it is routed, scheduled, and its turn to
+    /// send has not come. No attempt is running, so no ordinal is spent.
+    /// Deliberately NOT `.notConnected` -- a queued write is not an
+    /// unreachable relay, and only one of those is worth troubling a person
+    /// with. `since` is the instant the lane became eligible, not a deadline.
+    case eligible(since: UInt64)
     /// The last attempt failed in a way that permits another one, and
     /// `cause`/`detail` say WHY -- "we will try again" and "we will try again
     /// because the relay rate-limited us" are different messages and only the
@@ -277,6 +283,7 @@ public enum RelayWaiting: Sendable, Hashable {
         switch ffi {
         case .notConnected: self = .notConnected
         case .needsAuth: self = .needsAuth
+        case .eligible(let since): self = .eligible(since: since)
         case .backingOff(let attempt, let eligibleAt, let cause, let detail):
             self = .backingOff(
                 attempt: attempt,
@@ -290,9 +297,15 @@ public enum RelayWaiting: Sendable, Hashable {
 }
 
 /// What is true at ONE relay. `.published`, `.rejected`, `.authFailed` and
-/// `.gaveUp` are terminal for that relay; `.waiting` and `.sent` are not.
+/// `.gaveUp` are terminal for that relay; `.waiting`, `.attempting` and
+/// `.sent` are not.
 public enum RelayState: Sendable, Hashable {
     case waiting(RelayWaiting)
+    /// An attempt is running and its ordinal is spent, but nothing about the
+    /// wire is proved: transport has not answered the handoff yet, or cannot
+    /// say whether the bytes reached the socket. Deliberately NOT folded into
+    /// `.sent`, whose whole content is the proof.
+    case attempting(attempt: UInt64, startedAt: UInt64)
     /// Transport proved socket write + flush. Not an ack, and not terminal.
     case sent(attempt: UInt64, writtenAt: UInt64)
     case published
@@ -312,13 +325,15 @@ public enum RelayState: Sendable, Hashable {
     public var isTerminal: Bool {
         switch self {
         case .published, .rejected, .authFailed, .gaveUp: return true
-        case .waiting, .sent: return false
+        case .waiting, .attempting, .sent: return false
         }
     }
 
     init(_ ffi: FfiRelayState) {
         switch ffi {
         case .waiting(let waiting): self = .waiting(RelayWaiting(waiting))
+        case .attempting(let attempt, let startedAt):
+            self = .attempting(attempt: attempt, startedAt: startedAt)
         case .sent(let attempt, let writtenAt):
             self = .sent(attempt: attempt, writtenAt: writtenAt)
         case .published: self = .published

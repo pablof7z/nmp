@@ -262,13 +262,21 @@ database byte-identical:
 - lane bootstrap is idempotent and runs once per open intent on every boot, so
   the overwhelmingly common call finds a complete lane set. It now commits only
   when it stages a row, and aborts the transaction otherwise.
-- connectivity is process-local. `Eligible` and `WaitingConnection` already read
-  back as the identical `RelayState::Waiting(NotConnected)` through the
-  enumeration door, so re-parking an eligible lane whose relay is merely not
-  connected — which at boot is every eligible lane, because nothing is connected
-  yet — recorded nothing a later boot or an app could observe. The lane is left
-  alone; the same scheduler pass that closes every relay wake picks it up when a
-  session exists.
+- connectivity is process-local. An `Eligible` lane whose session is absent and
+  a `WaitingConnection` lane read back as the identical
+  `RelayState::Waiting(NotConnected)` through the enumeration door, so
+  re-parking an eligible lane whose relay is merely not connected — which at
+  boot is every eligible lane, because nothing is connected yet — recorded
+  nothing a later boot or an app could observe. The lane is left alone; the same
+  scheduler pass that closes every relay wake picks it up when a session exists.
+
+  The equivalence holds only for the absent-session half, and it holds because
+  the enumeration door asks `connected_relays` the same question the scheduler
+  does. An `Eligible` lane that DOES have a live session projects as
+  `RelayState::Waiting(Eligible { since })`: it is queued behind the relay's one
+  attempt slot, nothing is wrong with its connection, and telling an app
+  otherwise invents a fault. Widening this bullet back into "`Eligible` and
+  `WaitingConnection` are the same answer" would restore that lie.
 
 The consequence is the incident this bound exists for. A 4,000-intent store on
 the evidence host, every lane eligible and unreached:
