@@ -3125,3 +3125,99 @@ fn a_lane_bootstrap_that_stages_no_row_commits_nothing() {
         "the committed lane set survives, and the aborted ones changed nothing"
     );
 }
+
+/// #1799: `insert`/`insert_batch` used to call terminal-receipt retention
+/// maintenance -- hardcoded to `wall_clock_now()` and
+/// `TerminalRetentionLimits::PRODUCTION` -- whenever the write produced
+/// `InsertOutcome::Superseded`. An event write completely unrelated to any
+/// receipt could therefore silently destroy old terminal receipts. Prove
+/// the opposite is now true: a receipt old enough that `PRODUCTION`
+/// retention would evict it survives an ordinary ingest that produces
+/// `Superseded`, and only an explicit retention call still reclaims it.
+#[test]
+fn ingest_supersession_no_longer_evicts_terminal_receipts() {
+    let mut store = RedbStore::temporary().expect("temporary Redb store");
+    let owner = nostr::Keys::generate();
+
+    // Fabricate one terminal receipt directly, bypassing every public
+    // acceptance door, with `terminal_at` pinned to the epoch -- far more
+    // than `TERMINAL_RECEIPT_MAX_AGE_SECS` (24h) in the past relative to
+    // any real wall-clock reading this test can observe.
+    let receipt_id = {
+        let write_txn = store.database().unwrap().begin_write().unwrap();
+        let receipt_id = {
+            let mut meta = write_txn.open_table(PUBLISH_QUEUE_META).unwrap();
+            let mut receipts = write_txn.open_table(PUBLISH_QUEUE_RECEIPTS).unwrap();
+            let receipt_id = alloc_receipt_id_in_txn(&mut meta).unwrap();
+            let record = PublishQueueReceiptRecord {
+                intent_id: None,
+                expected_pubkey: owner.public_key(),
+                accepted_at: None,
+                payload: crate::PublishQueueReceiptPayload::Event {
+                    event_id: EventId::all_zeros(),
+                    state: ReceiptState::Cancelled,
+                },
+                correlation: None,
+                terminal_sequence: None,
+                terminal_at: None,
+                terminal_bytes: None,
+            };
+            let encoded = super::publish_queue_codec::encode_receipt(&record);
+            receipts
+                .insert(
+                    &super::publish_queue_codec::receipt_key(receipt_id),
+                    encoded.as_slice(),
+                )
+                .unwrap();
+            mark_terminal_receipt(&mut receipts, &mut meta, receipt_id, Timestamp::from(1), 0)
+                .unwrap();
+            receipt_id
+        };
+        write_txn.commit().unwrap();
+        receipt_id
+    };
+    assert!(
+        store.reattach_receipt(receipt_id).unwrap().is_some(),
+        "fixture setup must actually retain the fabricated receipt"
+    );
+
+    // An ordinary relay-ingest write that produces `Superseded`: two
+    // replaceable events for the same author, the second replacing the
+    // first.
+    let older = nostr::EventBuilder::new(Kind::ContactList, "")
+        .custom_created_at(Timestamp::from(100))
+        .sign_with_keys(&owner)
+        .unwrap();
+    let newer = nostr::EventBuilder::new(Kind::ContactList, "")
+        .custom_created_at(Timestamp::from(200))
+        .sign_with_keys(&owner)
+        .unwrap();
+    let relay = RelayUrl::parse("wss://ingest.example").unwrap();
+    store
+        .insert(older, RelayObserved::new(relay.clone(), Timestamp::from(1)))
+        .unwrap();
+    let outcome = store
+        .insert(newer, RelayObserved::new(relay, Timestamp::from(2)))
+        .unwrap();
+    assert!(
+        matches!(outcome, InsertOutcome::Superseded { .. }),
+        "fixture ingest must actually supersede, or this proves nothing"
+    );
+
+    assert!(
+        store.reattach_receipt(receipt_id).unwrap().is_some(),
+        "an ordinary ingest write must never evict terminal receipts as a side effect"
+    );
+
+    // Confirm the receipt really was eviction-eligible under real
+    // production policy: an explicit retention call (the door #1799 leaves
+    // open for the engine/app to invoke deliberately) still reclaims it.
+    let evicted = super::publish_queue_ops::maintain_terminal_receipts_at(
+        &mut store,
+        crate::terminal_retention::wall_clock_now(),
+        crate::terminal_retention::TerminalRetentionLimits::PRODUCTION,
+    )
+    .unwrap();
+    assert_eq!(evicted, vec![receipt_id]);
+    assert!(store.reattach_receipt(receipt_id).unwrap().is_none());
+}
