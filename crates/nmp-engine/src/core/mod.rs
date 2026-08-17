@@ -111,7 +111,7 @@ use nostr::{
 #[cfg(test)]
 use nmp_grammar::RoutingEvidence;
 use nmp_grammar::{
-    fold_byte, AccessContext, CacheMode, ConcreteFilter, ContextualAtom, DemandDelta, DemandOp,
+    fold_byte, CacheMode, ConcreteFilter, ContextualAtom, DemandDelta, DemandOp,
     DescriptorHash, Freshness, Identity, LiveQuery, ReadRouting, RelaySessionKey,
     ReplaceableMaterializerOperation, ReplaceableMaterializerRegistration, WriteIntent,
     WritePayload, WriteRouting,
@@ -1370,7 +1370,7 @@ pub enum Effect {
     /// silently carried into a later connection. Since the AUTH-reducer wave
     /// (#8 U2) the write plane rides the lane's identity-scoped
     /// authenticated session — `RelaySessionKey::new(relay,
-    /// AccessContext::Nip42(signing pubkey))` — never the relay's Public
+    /// Some(signing pubkey))` — never the relay's Public
     /// read session: the reducer that can actually authenticate that
     /// session now exists, and an OK is only ever trusted from the exact
     /// session the write was published on.
@@ -2576,7 +2576,7 @@ impl CoreState {
             .collect();
 
         for pending in self.pending.values() {
-            let access = AccessContext::Nip42(pending.signing_pubkey);
+            let access = Some(pending.signing_pubkey);
             required.extend(
                 pending
                     .pending_relays
@@ -2953,7 +2953,7 @@ impl CoreState {
             .or_else(|| self.transport_degraded.clone());
         let mut auth_sessions = BTreeMap::new();
         for (handle, session) in self.slot_to_relay.values() {
-            if session.access == AccessContext::Public || !self.connected_relays.contains(session) {
+            if session.access == None || !self.connected_relays.contains(session) {
                 continue;
             }
             auth_sessions.insert(
@@ -3021,7 +3021,7 @@ impl CoreState {
             // the probe run outside/over the unauthenticated session, so a
             // protected session's row must never inherit them — its
             // capability facts stay honestly "unknown".
-            if relay.access != AccessContext::Public {
+            if relay.access != None {
                 continue;
             }
             if let Some(information) = self.nip11_information.get(&relay.relay) {
@@ -3060,7 +3060,7 @@ impl CoreState {
             } else if self.nip77.has_live_on_relay(&relay.relay)
                 && self
                     .connected_relays
-                    .contains(&RelaySessionKey::public(relay.relay.clone()))
+                    .contains(&RelaySessionKey::unauthenticated(relay.relay.clone()))
             {
                 "live"
             } else {
@@ -3743,7 +3743,7 @@ impl CoreState {
             // path would attribute an unauthenticated observation to.
             *self
                 .events_by_session_kind
-                .entry(RelaySessionKey::public(observed.relay.clone()))
+                .entry(RelaySessionKey::unauthenticated(observed.relay.clone()))
                 .or_default()
                 .entry(event.kind.as_u16())
                 .or_insert(0) += 1;

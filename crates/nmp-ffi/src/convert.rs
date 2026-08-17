@@ -1601,15 +1601,15 @@ fn read_routing_to_ffi(s: GReadRouting) -> FfiReadRouting {
 
 fn access_context_from_ffi(a: FfiAccessContext) -> Result<GAccessContext, FfiError> {
     Ok(match a {
-        FfiAccessContext::Public => GAccessContext::Public,
-        FfiAccessContext::Nip42 { public_key } => GAccessContext::Nip42(parse_pubkey(&public_key)?),
+        FfiAccessContext::Public => None,
+        FfiAccessContext::Nip42 { public_key } => Some(parse_pubkey(&public_key)?),
     })
 }
 
 fn access_context_to_ffi(a: GAccessContext) -> FfiAccessContext {
     match a {
-        GAccessContext::Public => FfiAccessContext::Public,
-        GAccessContext::Nip42(public_key) => FfiAccessContext::Nip42 {
+        None => FfiAccessContext::Public,
+        Some(public_key) => FfiAccessContext::Nip42 {
             public_key: public_key.to_hex(),
         },
     }
@@ -2998,7 +2998,7 @@ mod tests {
             .enumerate()
             .map(|(index, status)| SourceEvidence {
                 relay: RelayUrl::parse(&format!("wss://source-{index}.example.com")).unwrap(),
-                access: GAccessContext::Public,
+                authenticate_as: None,
                 reconciled_through: (index % 2 == 0).then(|| Timestamp::from(index as u64 + 10)),
                 status,
             })
@@ -3085,7 +3085,7 @@ mod tests {
             .enumerate()
             .map(|(index, phase)| AuthDiagnosticsSnapshot {
                 relay: relay.clone(),
-                access: GAccessContext::Nip42(public_key),
+                authenticate_as: Some(public_key),
                 transport_generation: 40 + index as u64,
                 epoch_sequence: Some(80 + index as u64),
                 challenge_hash: Some(format!("challenge-descriptor-{index}")),
@@ -3099,7 +3099,7 @@ mod tests {
             auth_sessions,
             relays: vec![RelayDiagnosticsSnapshot {
                 relay: relay.clone(),
-                access: GAccessContext::Public,
+                authenticate_as: None,
                 wire_sub_count: 2,
                 subscription_budget: Some(20),
                 subscriptions_refused: 3,
@@ -3438,7 +3438,7 @@ mod tests {
             panic!("expected derived authors binding");
         };
         assert!(matches!(derived.inner.routing, GReadRouting::Explicit(_)));
-        assert!(matches!(derived.inner.access, GAccessContext::Nip42(_)));
+        assert!(matches!(derived.inner.access, Some(_)));
         assert_eq!(derived.inner.cache, GCacheMode::Strict);
         assert_eq!(derived.inner.freshness, GFreshness::MaxAge { seconds: 600 });
 

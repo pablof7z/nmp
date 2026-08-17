@@ -475,7 +475,7 @@ mod relay_worker_reconciliation_tests {
     use std::collections::BTreeSet;
 
     use nmp_grammar::{
-        AccessContext, Binding, Demand, Filter, Identity, ReadRouting, WriteIntent, WritePayload,
+        Binding, Demand, Filter, Identity, ReadRouting, WriteIntent, WritePayload,
         WriteRouting,
     };
     use nmp_router_testkit::FixtureRoutingFacts;
@@ -509,7 +509,7 @@ mod relay_worker_reconciliation_tests {
                     ..Filter::default()
                 },
                 ReadRouting::Explicit(vec![relay.clone()]),
-                AccessContext::Nip42(signer),
+                Some(signer),
             )
             .expect("protected pinned query"),
         )
@@ -523,9 +523,9 @@ mod relay_worker_reconciliation_tests {
     #[test]
     fn protected_write_session_preempts_same_relay_public_slot_at_cap_one() {
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
-        let public = RelaySessionKey::public(relay.clone());
+        let public = RelaySessionKey::unauthenticated(relay.clone());
         let protected =
-            RelaySessionKey::new(relay, AccessContext::Nip42(Keys::generate().public_key()));
+            RelaySessionKey::new(relay, Some(Keys::generate().public_key()));
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
         config.max_relays = 1;
@@ -555,9 +555,9 @@ mod relay_worker_reconciliation_tests {
     #[test]
     fn protected_read_session_cannot_claim_write_preemption_authority() {
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
-        let public = RelaySessionKey::public(relay.clone());
+        let public = RelaySessionKey::unauthenticated(relay.clone());
         let signer = Keys::generate().public_key();
-        let protected_read = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
+        let protected_read = RelaySessionKey::new(relay.clone(), Some(signer));
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 1);
         let mut effects = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
         effects.extend(core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
@@ -589,7 +589,7 @@ mod relay_worker_reconciliation_tests {
     fn fresh_protected_read_opens_one_worker_without_a_req_preamble_and_releases_on_withdrawal() {
         let signer = Keys::generate().public_key();
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
-        let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
+        let session = RelaySessionKey::new(relay.clone(), Some(signer));
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 1);
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
@@ -718,7 +718,7 @@ mod relay_worker_reconciliation_tests {
     fn relay_open_failure_refreshes_query_scoped_error_evidence() {
         let signer = Keys::generate().public_key();
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
-        let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
+        let session = RelaySessionKey::new(relay.clone(), Some(signer));
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 1);
         let opened = core.handle(EngineMsg::Subscribe(protected_query(&relay, signer, 1)));
         let id = opened
@@ -757,7 +757,7 @@ mod relay_worker_reconciliation_tests {
     fn relay_open_failure_clears_after_retry_connect_and_after_withdrawal() {
         let signer = Keys::generate().public_key();
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
-        let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer));
+        let session = RelaySessionKey::new(relay.clone(), Some(signer));
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 1);
         let (pool_tx, _pool_rx) = mpsc::channel();
         let mut config = PoolConfig::default();
@@ -998,7 +998,7 @@ mod relay_worker_reconciliation_tests {
         // owns is the Nip42 session for (relay, author).
         let write_session = RelaySessionKey::new(
             relay.clone(),
-            nmp_grammar::AccessContext::Nip42(author.public_key()),
+            Some(author.public_key()),
         );
         let directory =
             FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
@@ -1221,7 +1221,7 @@ mod auth_registry_admission_tests {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
         let session =
-            RelaySessionKey::new(relay, nmp_grammar::AccessContext::Nip42(keys.public_key()));
+            RelaySessionKey::new(relay, Some(keys.public_key()));
         let transport = nmp_transport::RelayHandle {
             slot: 23,
             generation: 1,
@@ -1270,7 +1270,7 @@ mod auth_registry_admission_tests {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
         let session =
-            RelaySessionKey::new(relay, nmp_grammar::AccessContext::Nip42(keys.public_key()));
+            RelaySessionKey::new(relay, Some(keys.public_key()));
         let transport = nmp_transport::RelayHandle {
             slot: 29,
             generation: 1,
@@ -1338,7 +1338,7 @@ mod auth_registry_admission_tests {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
         let session =
-            RelaySessionKey::new(relay, nmp_grammar::AccessContext::Nip42(keys.public_key()));
+            RelaySessionKey::new(relay, Some(keys.public_key()));
         let transport = nmp_transport::RelayHandle {
             slot: 19,
             generation: 1,
@@ -3376,9 +3376,9 @@ fn ensure_write_effect_session(
     match pool.ensure_session(session) {
         Ok(handle) => Ok(handle),
         Err(nmp_transport::RelayOpenError::AtCapacity { .. })
-            if session.access != nmp_grammar::AccessContext::Public =>
+            if session.access != None =>
         {
-            let public = RelaySessionKey::public(session.relay.clone());
+            let public = RelaySessionKey::unauthenticated(session.relay.clone());
             let Some(public_handle) = pool.live_session_handle(&public) else {
                 return pool.ensure_session(session);
             };

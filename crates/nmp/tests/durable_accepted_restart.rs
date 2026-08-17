@@ -13,7 +13,7 @@ use nmp_engine::publish_queue::{
     NotSentReason, RelayState, RelayWaiting, SigningState, WriteFact, WriteOutcome,
 };
 use nmp_grammar::{
-    AccessContext, EventBuilder as NmpEventBuilder, Identity, RelaySessionKey, WriteIntent,
+    EventBuilder as NmpEventBuilder, Identity, RelaySessionKey, WriteIntent,
     WritePayload, WriteRouting,
 };
 use nmp_router_testkit::FixtureRoutingFacts;
@@ -49,10 +49,10 @@ fn directory(pk: PublicKey, relay: RelayUrl) -> FixtureRoutingFacts {
 
 // With the #8 AUTH reducer landed, the write plane rides the signing
 // identity's authenticated session again: every durable write demands
-// `AccessContext::Nip42(signing pubkey)`, so restart falsifiers that expect
+// `Some(signing pubkey)`, so restart falsifiers that expect
 // attempts must connect exactly this session.
 fn signer_session(relay: &RelayUrl, signer: PublicKey) -> RelaySessionKey {
-    RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer))
+    RelaySessionKey::new(relay.clone(), Some(signer))
 }
 
 /// Complete the canonical NIP-42 handshake for one exact connected session.

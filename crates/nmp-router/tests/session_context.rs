@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey};
 use nmp_router::{Router, RuleRegistry};
 use nmp_router_testkit::{test_relay, FixtureRoutingFacts};
 use nostr::Keys;
@@ -16,9 +16,9 @@ fn authorless_public_a_b_are_three_exact_session_plans() {
     let a = Keys::generate().public_key();
     let b = Keys::generate().public_key();
     let accesses = [
-        AccessContext::Public,
-        AccessContext::Nip42(a),
-        AccessContext::Nip42(b),
+        None,
+        Some(a),
+        Some(b),
     ];
     let demand = accesses
         .into_iter()
@@ -34,9 +34,9 @@ fn authorless_public_a_b_are_three_exact_session_plans() {
     router.compile(&demand, &FixtureRoutingFacts::new(), 10);
 
     let expected = BTreeSet::from([
-        RelaySessionKey::public(relay.clone()),
-        RelaySessionKey::new(relay.clone(), AccessContext::Nip42(a)),
-        RelaySessionKey::new(relay, AccessContext::Nip42(b)),
+        RelaySessionKey::unauthenticated(relay.clone()),
+        RelaySessionKey::new(relay.clone(), Some(a)),
+        RelaySessionKey::new(relay, Some(b)),
     ]);
     assert_eq!(
         router.plan().reqs.keys().cloned().collect::<BTreeSet<_>>(),
@@ -76,13 +76,13 @@ fn same_session_different_source_partitions_are_extended_not_overwritten() {
         ContextualAtom {
             filter: filter.clone(),
             routing: ReadRouting::Auto,
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         },
         ContextualAtom {
             filter,
             routing: ReadRouting::Explicit(vec![relay.clone()]),
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         },
     ]);
@@ -94,7 +94,7 @@ fn same_session_different_source_partitions_are_extended_not_overwritten() {
         10,
     );
 
-    let reqs = &router.plan().reqs[&RelaySessionKey::public(relay)];
+    let reqs = &router.plan().reqs[&RelaySessionKey::unauthenticated(relay)];
     assert_eq!(reqs.len(), 2);
     assert_ne!(reqs[0].sub_id, reqs[1].sub_id);
 }

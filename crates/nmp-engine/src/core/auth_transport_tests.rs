@@ -22,7 +22,7 @@ fn protected_relay() -> RelayUrl {
 }
 
 fn signer_session(relay: &RelayUrl, signer: PublicKey) -> RelaySessionKey {
-    RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer))
+    RelaySessionKey::new(relay.clone(), Some(signer))
 }
 
 /// A protected, exact-provider query -- pinned to `relay` under `signer`'s
@@ -38,7 +38,7 @@ fn protected_pinned_query(relay: &RelayUrl, signer: PublicKey, authors: Binding)
                 ..Filter::default()
             },
             ReadRouting::Explicit(vec![relay.clone()]),
-            AccessContext::Nip42(signer),
+            Some(signer),
         )
         .expect("protected pinned demand is valid"),
     )

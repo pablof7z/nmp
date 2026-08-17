@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{AccessContext, RelaySessionKey};
+use nmp_grammar::{RelaySessionKey};
 
 use super::diagnostics::{stalled_write_id, STALLED_WRITE_DETAIL_LIMIT};
 use super::pending_writes::PendingWrites;
@@ -77,7 +77,7 @@ pub(super) fn stalled_write_stage(
     if !pending.pending_relays.is_empty() {
         return None;
     }
-    let access = AccessContext::Nip42(pending.signing_pubkey);
+    let access = Some(pending.signing_pubkey);
     let live: BTreeSet<&RelayUrl> = pending
         .lane_projection
         .required_relays()

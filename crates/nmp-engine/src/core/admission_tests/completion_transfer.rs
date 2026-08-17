@@ -7,7 +7,7 @@ use nmp_store::testing;
 #[ignore = "known violation #1341: split physical requests do not yet aggregate one wide logical coverage proof"]
 fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
     let relay = RelayUrl::parse("wss://split-request-coverage.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let alice = Keys::generate().public_key().to_hex();
     let bob = Keys::generate().public_key().to_hex();
     let carol = Keys::generate().public_key().to_hex();
@@ -18,7 +18,7 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let whole = atom(BTreeSet::from([alice.clone(), bob.clone(), carol.clone()]));
@@ -137,7 +137,7 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
 fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
     for replacement in [false, true] {
         let relay = RelayUrl::parse("wss://post-eose-transfer-cancel.example").unwrap();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let incumbent = ContextualAtom {
             filter: ConcreteFilter {
                 kinds: Some(BTreeSet::from([1, 2])),
@@ -145,7 +145,7 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Explicit(vec![relay.clone()]),
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let added = ContextualAtom {
@@ -155,7 +155,7 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Explicit(vec![relay.clone()]),
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let incumbent_claim = coverage_key(&incumbent);
@@ -256,7 +256,7 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
 fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_job() {
     const GENERATIONS: u16 = 1_000;
     let relay = RelayUrl::parse("wss://post-eose-transfer-bounded.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let incumbent = ContextualAtom {
         filter: ConcreteFilter {
             kinds: Some((1_000..2_001).collect()),
@@ -264,7 +264,7 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let incumbent_claim = coverage_key(&incumbent);
@@ -281,7 +281,7 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![sub_id.0.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let first_added_claim = coverage_key(&added_for_generation(1));

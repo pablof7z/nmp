@@ -27,7 +27,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting};
 use nmp_router::{RelayUrl, Router, RuleRegistry, MAX_TAG_VALUES_PER_FILTER};
 use nmp_router_testkit::{test_relay, FixtureRoutingFacts};
 
@@ -66,7 +66,7 @@ fn falsifier_demand() -> BTreeSet<ContextualAtom> {
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Explicit(hosts().into_iter().collect()),
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         })
         .collect()

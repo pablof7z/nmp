@@ -47,7 +47,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use nmp_grammar::{AccessContext, Demand, Filter, Freshness, LiveQuery, ReadRouting};
+use nmp_grammar::{Demand, Filter, Freshness, LiveQuery, ReadRouting};
 use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_runtime::EngineThread;
 use nmp_store::RedbStore;
@@ -64,7 +64,7 @@ fn branch(host: &str) -> LiveQuery {
             ..Filter::default()
         },
         ReadRouting::Explicit(vec![RelayUrl::parse(host).expect("fixture url")]),
-        AccessContext::Public,
+        None,
     )
     .expect("a one-relay pinned set is nonempty");
     demand.freshness = Freshness::CacheOnly;

@@ -750,7 +750,7 @@ fn peek_atom() -> nmp_grammar::ContextualAtom {
             limit: None,
         },
         routing: nmp_grammar::ReadRouting::Auto,
-        access: nmp_grammar::AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }

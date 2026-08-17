@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use proptest::prelude::*;
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting};
 use nmp_router::{CompileOutcome, RelayUrl, Router, RuleRegistry, SubId, WireOp, WireReq};
 use nmp_router_testkit::FixtureRoutingFacts;
 
@@ -46,7 +46,7 @@ fn pinned_atom(filter: ConcreteFilter) -> ContextualAtom {
     ContextualAtom {
         filter,
         routing: ReadRouting::Explicit(relays().into_iter().collect()),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }

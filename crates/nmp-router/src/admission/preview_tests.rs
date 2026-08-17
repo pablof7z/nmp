@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey};
 use nmp_store::coverage_key;
 use nostr::RelayUrl;
 
@@ -16,7 +16,7 @@ fn pinned(relay: &RelayUrl, kind: u16) -> ContextualAtom {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -102,7 +102,7 @@ fn one_preview_never_visits_ten_thousand_unrelated_incumbent_demand_edges() {
     const INCUMBENTS: u16 = 10_000;
     let incumbent_relay = RelayUrl::parse("wss://preview-10k-incumbent.example").unwrap();
     let candidate_relay = RelayUrl::parse("wss://preview-10k-candidate.example").unwrap();
-    let session = RelaySessionKey::public(incumbent_relay.clone());
+    let session = RelaySessionKey::unauthenticated(incumbent_relay.clone());
     let mut atoms = Vec::with_capacity(INCUMBENTS as usize);
     let mut kinds = BTreeSet::new();
     let mut owner_demands = BTreeSet::new();
@@ -120,14 +120,14 @@ fn one_preview_never_visits_ten_thousand_unrelated_incumbent_demand_edges() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![incumbent_relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let sub_id = SubId::for_wire(
         incumbent_relay,
         &physical.filter,
         &physical.routing,
-        physical.access,
+        physical.authenticate_as,
     );
     let mut router = Router::new(RuleRegistry::default_widen_only());
     router.prev_plan.reqs.insert(

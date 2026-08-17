@@ -38,7 +38,7 @@ fn pinned_strict(hosts: &[RelayUrl], kind: u16) -> LiveQuery {
             ..Filter::default()
         },
         ReadRouting::Explicit(hosts.to_vec()),
-        AccessContext::Public,
+        None,
     )
     .expect("a nonempty pinned set with a non-outbox source is constructible");
     demand.cache = nmp_grammar::CacheMode::Strict;

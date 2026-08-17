@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use nostr::{EventId, JsonUtil, RelayUrl, Timestamp};
 
-use nmp_grammar::{AccessContext, RelaySessionKey};
+use nmp_grammar::{RelaySessionKey};
 use nmp_router::{Diagnostics, Lane, RelayPlan, WireReq};
 use nmp_store::{CoverageInterval, CoverageKey, PersistenceError};
 
@@ -56,7 +56,7 @@ pub struct FilterCoverageEntry {
 pub struct RelayDiagnosticsSnapshot {
     pub relay: RelayUrl,
     /// Frozen access identity of the physical session this row describes.
-    pub access: AccessContext,
+    pub authenticated_as: Option<nostr::PublicKey>,
     pub wire_sub_count: usize,
     /// This relay's own advertised concurrent-subscription budget (NIP-11
     /// `limitation.max_subscriptions`, #931). `None` means the relay
@@ -115,7 +115,7 @@ pub struct RelayDiagnosticsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthDiagnosticsSnapshot {
     pub relay: RelayUrl,
-    pub access: AccessContext,
+    pub authenticated_as: Option<nostr::PublicKey>,
     pub transport_slot: u32,
     pub transport_generation: u64,
     pub epoch_sequence: Option<u64>,

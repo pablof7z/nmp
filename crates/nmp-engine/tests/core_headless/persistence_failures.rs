@@ -304,14 +304,14 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         ..Filter::default()
     };
     let public_query = LiveQuery::single(
-        nmp_grammar::Demand::new(selection.clone(), source.clone(), AccessContext::Public)
+        nmp_grammar::Demand::new(selection.clone(), source.clone(), None)
             .expect("public pinned demand"),
     );
     let protected_query = LiveQuery::single(
         nmp_grammar::Demand::new(
             selection,
             source.clone(),
-            AccessContext::Nip42(protected_author.public_key()),
+            Some(protected_author.public_key()),
         )
         .expect("protected pinned demand"),
     );
@@ -424,13 +424,13 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
     let public_atom = ContextualAtom {
         filter: concrete.clone(),
         routing: source.clone(),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let protected_atom = ContextualAtom {
         filter: concrete,
         routing: source,
-        access: AccessContext::Nip42(protected_author.public_key()),
+        authenticate_as: Some(protected_author.public_key()),
         routing_evidence: BTreeSet::new(),
     };
     assert_eq!(
@@ -638,7 +638,7 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
                 ..Filter::default()
             },
             ReadRouting::Explicit(vec![relay.clone()]),
-            AccessContext::Public,
+            None,
         )
         .expect("a literal kind:5 request can be pinned to the fixture relay"),
     );

@@ -345,7 +345,7 @@ impl CoreState {
         // public question and never for a protected one — the same
         // access-context rule the rest of this module keeps free by carrying
         // it in the session key.
-        if session.access != nmp_grammar::AccessContext::Public {
+        if session.access != None {
             return None;
         }
         let mut found = None;
@@ -676,7 +676,7 @@ mod tests {
     /// the way to an accepted wire request.
     fn covering_read(filter: Filter) -> Fixture {
         let relay = relay();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let handle = TransportRelayHandle {
             slot: 3,
             generation: 1,
@@ -686,7 +686,7 @@ mod tests {
         let demand = Demand::new(
             filter,
             ReadRouting::Explicit(vec![relay]),
-            AccessContext::Public,
+            None,
         )
         .expect("a relay-pinned read is nonempty");
         core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));
@@ -997,7 +997,7 @@ mod tests {
                 ..Filter::default()
             },
             ReadRouting::Explicit(vec![relay()]),
-            AccessContext::Public,
+            None,
         )
         .expect("a relay-pinned read is nonempty");
         fixture
@@ -1047,7 +1047,7 @@ mod tests {
         fixture.end_stored_events();
 
         let protected =
-            RelaySessionKey::new(relay(), AccessContext::Nip42(Keys::generate().public_key()));
+            RelaySessionKey::new(relay(), Some(Keys::generate().public_key()));
         assert_eq!(
             fixture
                 .core

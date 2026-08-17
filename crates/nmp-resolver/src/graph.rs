@@ -11,7 +11,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use nmp_grammar::{
-    AccessContext, CacheMode, ConcreteFilter, ContextualAtom, Freshness, ReadRouting,
+    CacheMode, ConcreteFilter, ContextualAtom, Freshness, ReadRouting,
 };
 
 use crate::engine::{ResolutionNodeKind, ResolutionNodeSnapshot, ResolvedValue};
@@ -76,7 +76,7 @@ pub(crate) struct FilterNodeData {
     /// source/access is never inherited across a `Binding::Derived`
     /// boundary -- see `nmp_grammar::Derived`'s doc).
     pub(crate) routing: ReadRouting,
-    pub(crate) access: AccessContext,
+    pub(crate) authenticate_as: Option<nostr::PublicKey>,
 }
 
 /// One graph node: a `BindingNode` variant or a `FilterNode`.
@@ -603,7 +603,7 @@ mod destination_tests {
                 bound: vec![(slot, binding_id)],
                 cached_atoms: BTreeSet::new(),
                 routing: ReadRouting::Auto,
-                access: AccessContext::Public,
+                authenticate_as: None,
             }),
             ParentLink::Root,
             0,
@@ -661,7 +661,7 @@ mod destination_tests {
                 bound: Vec::new(),
                 cached_atoms: BTreeSet::new(),
                 routing: ReadRouting::Auto,
-                access: AccessContext::Public,
+                authenticate_as: None,
             }),
             ParentLink::DerivedInner(live_derived),
             2,
@@ -703,7 +703,7 @@ mod destination_tests {
                 bound: vec![(FieldSlot::Authors, set_op)],
                 cached_atoms: BTreeSet::new(),
                 routing: ReadRouting::Auto,
-                access: AccessContext::Public,
+                authenticate_as: None,
             }),
             ParentLink::Root,
             0,

@@ -5,7 +5,7 @@
 //! never depends on mechanism-crate types or reconstructs causality from
 //! engine-global diagnostics.
 
-use nmp_grammar::{AccessContext, IdentityField};
+use nmp_grammar::{IdentityField};
 use nostr::JsonUtil;
 
 /// One ordered fact from a live observation's real execution.
@@ -54,8 +54,8 @@ fn identity_field_string(field: IdentityField) -> &'static str {
 
 fn access_string(access: AccessContext) -> String {
     match access {
-        AccessContext::Public => "public".to_owned(),
-        AccessContext::Nip42(public_key) => format!("nip42:{}", public_key.to_hex()),
+        None => "public".to_owned(),
+        Some(public_key) => format!("nip42:{}", public_key.to_hex()),
     }
 }
 

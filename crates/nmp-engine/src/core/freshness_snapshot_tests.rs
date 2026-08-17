@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use nmp_grammar::{
-    AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness, LiveQuery,
+    Binding, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness, LiveQuery,
     ReadRouting,
 };
 use nmp_store::{CoverageInterval, RedbStore};
@@ -27,7 +27,7 @@ fn fresh_max_age_reads_each_coverage_row_once() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let mut store = RedbStore::temporary().expect("temporary Redb store");
@@ -45,7 +45,7 @@ fn fresh_max_age_reads_each_coverage_row_once() {
     let mut demand = Demand::new(
         filter,
         ReadRouting::Explicit(vec![relay]),
-        AccessContext::Public,
+        None,
     )
     .unwrap();
     demand.freshness = Freshness::MaxAge { seconds: 3_600 };
@@ -83,7 +83,7 @@ fn pinned_profile_query(author: &str, relay: RelayUrl, freshness: Freshness) -> 
     let mut demand = Demand::new(
         filter,
         ReadRouting::Explicit(vec![relay]),
-        AccessContext::Public,
+        None,
     )
     .unwrap();
     demand.freshness = freshness;
@@ -102,7 +102,7 @@ fn max_age_opening_retains_only_its_scoped_candidate_plan() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![candidate_relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let mut store = RedbStore::temporary().expect("temporary Redb store");

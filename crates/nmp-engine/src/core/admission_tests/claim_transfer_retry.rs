@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure() {
     let relay = RelayUrl::parse("wss://post-eose-transfer-retry.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let incumbent = ContextualAtom {
         filter: ConcreteFilter {
             kinds: Some(BTreeSet::from([1, 2])),
@@ -13,7 +13,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let added = ContextualAtom {
@@ -23,7 +23,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let incumbent_claim = coverage_key(&incumbent);
@@ -151,7 +151,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
 #[test]
 fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
     let relay = RelayUrl::parse("wss://post-eose-transfer-superseded.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let incumbent = ContextualAtom {
         filter: ConcreteFilter {
             kinds: Some(BTreeSet::from([1, 2])),
@@ -159,7 +159,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let added = ContextualAtom {
@@ -169,7 +169,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let incumbent_claim = coverage_key(&incumbent);

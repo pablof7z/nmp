@@ -27,7 +27,7 @@ use nmp_engine::core::{ObservationFact, RowDelta};
 use nmp_engine::publish_queue::{RelayState, SigningState, WriteFact};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{
-    AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
+    Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
     IdentityField, IndexedTagName, ReadRouting, Selector,
 };
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
@@ -125,7 +125,7 @@ fn pinned_tag_value(relay: &RelayUrl, value: &str) -> LiveQuery {
                 ..Filter::default()
             },
             ReadRouting::Explicit(vec![relay.clone()]),
-            AccessContext::Public,
+            None,
         )
         .expect("a pinned demand over one relay is constructible"),
     )
@@ -162,7 +162,7 @@ fn subscribe_uses_current_wall_clock_for_the_one_time_max_age_decision() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Auto,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let now = Timestamp::now().as_secs();

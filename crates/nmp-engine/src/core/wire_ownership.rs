@@ -783,7 +783,7 @@ mod tests {
     use nmp_store::RedbStore;
     use nostr::{RelayUrl, Timestamp};
 
-    use super::super::{AccessContext, CoreState, Effect, EngineMsg, Freshness, ReadRouting};
+    use super::super::{CoreState, Effect, EngineMsg, Freshness, ReadRouting};
     use super::*;
 
     /// A minimal atom with no routing evidence, needing no production
@@ -798,7 +798,7 @@ mod tests {
                 "wss://wire-ownership-overflow.example",
             )
             .unwrap()]),
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         }
     }

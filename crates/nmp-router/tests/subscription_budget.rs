@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting, RelaySessionKey,
+    ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting, RelaySessionKey,
 };
 use nmp_router::{
     AdvertisedRelayLimits, CompileBudget, DemandKey, RelayUrl, Router, RuleRegistry, WireOp,
@@ -35,7 +35,7 @@ fn hub() -> RelayUrl {
 }
 
 fn session() -> RelaySessionKey {
-    RelaySessionKey::public(hub())
+    RelaySessionKey::unauthenticated(hub())
 }
 
 fn relays() -> BTreeSet<RelayUrl> {
@@ -61,7 +61,7 @@ fn atom(value: &str, limit: Option<usize>) -> ContextualAtom {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(relays().into_iter().collect()),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }

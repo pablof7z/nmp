@@ -147,7 +147,7 @@ impl CompletedAttribution {
 }
 
 /// All coverage-attribution bookkeeping `CoreState` owns. Keyed by `SubId`
-/// (which already embeds the relay — `SubId(RelayUrl, SkeletonHash, AccessContext)`), so a
+/// (which already embeds the relay — `SubId(RelayUrl, SkeletonHash)`), so a
 /// FIFO lookup is also implicitly relay-scoped.
 ///
 /// It holds state and the invariants over that state, and nothing else: no
@@ -658,7 +658,7 @@ pub(super) struct AttributionCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_grammar::{AccessContext, ConcreteFilter, ReadRouting};
+    use nmp_grammar::{ConcreteFilter, ReadRouting};
     use nmp_router::RelayUrl;
 
     fn relay() -> RelayUrl {
@@ -672,7 +672,7 @@ mod tests {
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Explicit(vec![relay()]),
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         }
     }
@@ -732,7 +732,7 @@ mod tests {
         let mut attribution = AttributionState::new();
         attribution.set_active_demand([&subscribed]);
         attribution.record_send(
-            &RelaySessionKey::public(relay()),
+            &RelaySessionKey::unauthenticated(relay()),
             &sub_id,
             &subscribed.filter,
             BTreeSet::from([coverage_key(&subscribed)]),
@@ -744,12 +744,12 @@ mod tests {
         let wire = wire_sub_id_string(&sub_id);
         attribution
             .sub_id_by_wire
-            .remove(&(RelaySessionKey::public(relay()), wire.clone()));
+            .remove(&(RelaySessionKey::unauthenticated(relay()), wire.clone()));
         attribution.sub_id_by_wire.insert(
             (
                 RelaySessionKey::new(
                     RelayUrl::parse("wss://somewhere-else.example").expect("valid relay url"),
-                    AccessContext::Public,
+                    None,
                 ),
                 wire,
             ),
@@ -778,7 +778,7 @@ mod tests {
     fn a_completed_send_leaves_no_empty_fifo_behind() {
         let subscribed = atom(1);
         let sub_id = sub_id_for(&subscribed);
-        let session = RelaySessionKey::public(relay());
+        let session = RelaySessionKey::unauthenticated(relay());
         let mut attribution = AttributionState::new();
         attribution.set_active_demand([&subscribed]);
         attribution.record_send(

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::{Rc, Weak};
 
 use nmp_grammar::{
-    AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, DemandDelta, DemandOp,
+    Binding, ConcreteFilter, ContextualAtom, Demand, DemandDelta, DemandOp,
     DescriptorHash, Filter, ReadRouting,
 };
 use nmp_store::{
@@ -203,7 +203,7 @@ use crate::types::{Element, FieldSlot, NodeId, ParentLink, ResolvedSet};
 struct AcquisitionKey {
     selection: Filter,
     routing: ReadRouting,
-    access: AccessContext,
+    authenticate_as: Option<nostr::PublicKey>,
 }
 
 impl From<&Demand> for AcquisitionKey {
@@ -1567,7 +1567,7 @@ impl Engine {
         store: &RedbStore,
         filter: &Filter,
         routing: ReadRouting,
-        access: AccessContext,
+        authenticate_as: Option<nostr::PublicKey>,
         parent: ParentLink,
         depth: u32,
     ) -> Result<NodeId, PersistenceError> {

@@ -661,14 +661,14 @@ mod semantic_successor_tests {
             public_key: author.public_key(),
             identifier: String::new(),
         };
-        let read_session = RelaySessionKey::public(destination.clone());
+        let read_session = RelaySessionKey::unauthenticated(destination.clone());
         let read_handle = TransportRelayHandle {
             slot: 40,
             generation: 1,
         };
         let write_session = RelaySessionKey::new(
             destination.clone(),
-            AccessContext::Nip42(author.public_key()),
+            Some(author.public_key()),
         );
         let write_handle = TransportRelayHandle {
             slot: 1,
@@ -806,14 +806,14 @@ mod semantic_successor_tests {
             materializer: Arc::new(AddPeople),
         });
 
-        let read_session = RelaySessionKey::public(destination.clone());
+        let read_session = RelaySessionKey::unauthenticated(destination.clone());
         let read_handle = TransportRelayHandle {
             slot: 40,
             generation: 1,
         };
         let write_session = RelaySessionKey::new(
             destination.clone(),
-            AccessContext::Nip42(author.public_key()),
+            Some(author.public_key()),
         );
         let write_handle = TransportRelayHandle {
             slot: 1,
@@ -1130,13 +1130,13 @@ mod semantic_successor_tests {
         for (slot, destination) in [&destination_a, &destination_b].into_iter().enumerate() {
             let session = RelaySessionKey::new(
                 destination.clone(),
-                AccessContext::Nip42(author.public_key()),
+                Some(author.public_key()),
             );
             let handle = TransportRelayHandle {
                 slot: u32::try_from(slot).unwrap(),
                 generation: 1,
             };
-            let read_session = RelaySessionKey::public(destination.clone());
+            let read_session = RelaySessionKey::unauthenticated(destination.clone());
             let read_handle = TransportRelayHandle {
                 slot: u32::try_from(slot).unwrap().saturating_add(32),
                 generation: 1,
@@ -1350,11 +1350,11 @@ mod semantic_successor_tests {
         let expected_first_successor_sessions = BTreeSet::from([
             RelaySessionKey::new(
                 destination_a.clone(),
-                AccessContext::Nip42(author.public_key()),
+                Some(author.public_key()),
             ),
             RelaySessionKey::new(
                 destination_b.clone(),
-                AccessContext::Nip42(author.public_key()),
+                Some(author.public_key()),
             ),
         ]);
         assert_eq!(
@@ -1739,7 +1739,7 @@ mod semantic_successor_tests {
         let sessions = destinations
             .iter()
             .cloned()
-            .map(|relay| RelaySessionKey::new(relay, AccessContext::Nip42(author.public_key())))
+            .map(|relay| RelaySessionKey::new(relay, Some(author.public_key())))
             .collect::<Vec<_>>();
         let handles = sessions
             .iter()
@@ -1751,7 +1751,7 @@ mod semantic_successor_tests {
             .collect::<Vec<_>>();
         let mut e1_correlations = BTreeMap::new();
         for ((handle, session), relay) in handles.iter().zip(&sessions).zip(&destinations) {
-            let read_session = RelaySessionKey::public(relay.clone());
+            let read_session = RelaySessionKey::unauthenticated(relay.clone());
             let read_handle = TransportRelayHandle {
                 slot: handle.slot.saturating_add(32),
                 generation: 1,
@@ -1867,7 +1867,7 @@ mod semantic_successor_tests {
                         slot: handle.slot.saturating_add(32),
                         generation: 1,
                     },
-                    RelaySessionKey::public(relay.clone()),
+                    RelaySessionKey::unauthenticated(relay.clone()),
                 )
             })
             .collect::<Vec<_>>();

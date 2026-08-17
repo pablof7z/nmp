@@ -7,7 +7,7 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
     let relay = RelayUrl::parse("wss://protected-request-retry.example").unwrap();
     let session = RelaySessionKey::new(
         relay.clone(),
-        AccessContext::Nip42(nostr::Keys::generate().public_key()),
+        Some(nostr::Keys::generate().public_key()),
     );
     let filter = ConcreteFilter {
         kinds: Some(BTreeSet::from([1u16])),

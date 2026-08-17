@@ -421,7 +421,7 @@ pub fn set_following(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp::{AccessContext, EngineConfig, RelayUrl, SigningState, SourceEvidence, WriteFact};
+    use nmp::{EngineConfig, RelayUrl, SigningState, SourceEvidence, WriteFact};
     use nostr::Keys;
 
     #[test]
@@ -510,7 +510,7 @@ mod tests {
         let evidence = AcquisitionEvidence {
             sources: vec![SourceEvidence {
                 relay: RelayUrl::parse("wss://relay.example").unwrap(),
-                access: AccessContext::Public,
+                authenticate_as: None,
                 reconciled_through: Some(nostr::Timestamp::from_secs(10)),
                 status: SourceStatus::Requesting,
             }],

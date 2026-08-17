@@ -918,7 +918,7 @@ fn configured_coverage_write_failure_targets_one_row_rolls_back_and_is_consumed_
             ..ConcreteFilter::default()
         },
         routing: nmp_grammar::ReadRouting::Auto,
-        access: nmp_grammar::AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let target = atom(1);
@@ -1262,7 +1262,7 @@ fn coverage_row_key_carries_the_full_256_bit_digest() {
     let atom = ContextualAtom {
         filter,
         routing: nmp_grammar::ReadRouting::Auto,
-        access: nmp_grammar::AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let key = compute_coverage_key(&atom);
@@ -3335,7 +3335,7 @@ fn a_persisted_coverage_row_carries_no_filter_derived_bytes() {
     let atom = ContextualAtom {
         filter,
         routing: nmp_grammar::ReadRouting::Auto,
-        access: nmp_grammar::AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let relay = RelayUrl::parse("wss://r1.example").expect("relay url");

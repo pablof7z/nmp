@@ -1277,7 +1277,7 @@ impl CoreState {
             };
             let session = RelaySessionKey::new(
                 lane.key.relay.clone(),
-                AccessContext::Nip42(pending.signing_pubkey),
+                Some(pending.signing_pubkey),
             );
             // Connectivity is process-local, so re-parking the lane records
             // NOTHING durable (#889): an `Eligible` lane WITHOUT this session
@@ -1368,7 +1368,7 @@ impl CoreState {
                 let read_session = if self.auth_ready_sessions.contains_key(&session) {
                     session.clone()
                 } else {
-                    RelaySessionKey::public(lane.key.relay.clone())
+                    RelaySessionKey::unauthenticated(lane.key.relay.clone())
                 };
                 if !self.coordinate_is_current_for_lane(
                     id,
@@ -1542,7 +1542,7 @@ impl CoreState {
             else {
                 continue;
             };
-            if RelaySessionKey::new(lane.key.relay.clone(), AccessContext::Nip42(signing_pubkey))
+            if RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey))
                 != *session
             {
                 continue;
@@ -2263,7 +2263,7 @@ impl CoreState {
             // signing identity was frozen at acceptance, never re-read from
             // the mutable current account.
             let session =
-                RelaySessionKey::new(lane.key.relay.clone(), AccessContext::Nip42(signing_pubkey));
+                RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey));
             match lane.state {
                 PublishQueueLaneState::InFlight {
                     ordinal,
@@ -2375,7 +2375,7 @@ impl CoreState {
         let connected: BTreeSet<RelaySessionKey> = lanes
             .iter()
             .map(|lane| {
-                RelaySessionKey::new(lane.key.relay.clone(), AccessContext::Nip42(signing_pubkey))
+                RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey))
             })
             .filter(|session| self.connected_relays.contains(session))
             .collect();
@@ -4098,7 +4098,7 @@ impl CoreState {
                     PublishQueueLaneState::Eligible { since } => {
                         let session = RelaySessionKey::new(
                             lane.key.relay.clone(),
-                            AccessContext::Nip42(signing_pubkey),
+                            Some(signing_pubkey),
                         );
                         if self.connected_relays.contains(&session) {
                             RelayState::Waiting(RelayWaiting::Eligible { since })
@@ -4644,7 +4644,7 @@ impl CoreState {
         lanes: Vec<PublishQueueLane>,
         effects: &mut Vec<Effect>,
     ) {
-        let write_access = AccessContext::Nip42(signing_pubkey);
+        let write_access = Some(signing_pubkey);
         for lane in lanes {
             if matches!(lane.state, PublishQueueLaneState::WaitingConnection) {
                 // The freshly-bootstrapped lane's connectivity check is
@@ -5512,7 +5512,7 @@ impl CoreState {
             // session — must never advance this write lane.
             let expected_session = RelaySessionKey::new(
                 session.relay.clone(),
-                AccessContext::Nip42(pending.signing_pubkey),
+                Some(pending.signing_pubkey),
             );
             if &expected_session != session {
                 continue;
@@ -5653,7 +5653,7 @@ impl CoreState {
             else {
                 continue;
             };
-            if RelaySessionKey::new(lane.key.relay.clone(), AccessContext::Nip42(signing_pubkey))
+            if RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey))
                 != *session
             {
                 continue;

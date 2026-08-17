@@ -106,7 +106,7 @@ impl ReplaceableMaterializer for TinyContactListMaterializer {
 }
 
 fn session_for(relay: &RelayUrl, author: &Keys) -> RelaySessionKey {
-    RelaySessionKey::new(relay.clone(), AccessContext::Nip42(author.public_key()))
+    RelaySessionKey::new(relay.clone(), Some(author.public_key()))
 }
 
 /// One capability install per `EngineCore`; `program` only needs to be
@@ -215,7 +215,7 @@ fn arm_generation_with_author(
     // The relay's ordinary public read session, which is what #1631's
     // publish gate asks for the coordinate: this relay never required AUTH,
     // so the view it will serve the EVENT is the view it serves any reader.
-    let read_session = RelaySessionKey::public(relay.clone());
+    let read_session = RelaySessionKey::unauthenticated(relay.clone());
     let read_handle = TransportRelayHandle {
         slot: read_slot,
         generation: 1,
@@ -490,7 +490,7 @@ fn a_stale_ack_for_a_superseded_generation_cannot_settle_its_successor() {
     );
     let complete2 = core.handle(EngineMsg::SignerCompleted(sign_id, generation, Ok(signed2)));
 
-    let read_session = RelaySessionKey::public(gen1.relay.clone());
+    let read_session = RelaySessionKey::unauthenticated(gen1.relay.clone());
     let read_handle = TransportRelayHandle {
         slot: 1,
         generation: 1,

@@ -22,7 +22,7 @@ use nmp_engine::publish_queue::{
     WriteFact, WriteOutcome,
 };
 use nmp_grammar::{
-    AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter, Identity, ReadRouting,
+    Binding, ConcreteFilter, ContextualAtom, Filter, Identity, ReadRouting,
     RelaySessionKey, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_grammar::{Demand, LiveQuery};
@@ -107,7 +107,7 @@ fn ctx_atom_with(filter: ConcreteFilter, routing: ReadRouting) -> ContextualAtom
     ContextualAtom {
         filter,
         routing,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -212,15 +212,15 @@ fn wire_closes(effects: &[Effect], relay: &RelayUrl) -> BTreeSet<SubId> {
 }
 
 fn public_session(relay: &RelayUrl) -> RelaySessionKey {
-    RelaySessionKey::public(relay.clone())
+    RelaySessionKey::unauthenticated(relay.clone())
 }
 
 // With the #8 AUTH reducer landed, the write plane rides the signing
 // identity's authenticated session again: every durable/ephemeral write
-// demands `AccessContext::Nip42(signing pubkey)`, so tests that expect
+// demands `Some(signing pubkey)`, so tests that expect
 // attempts must connect exactly this session.
 fn signer_session(relay: &RelayUrl, signer: nostr::PublicKey) -> RelaySessionKey {
-    RelaySessionKey::new(relay.clone(), AccessContext::Nip42(signer))
+    RelaySessionKey::new(relay.clone(), Some(signer))
 }
 
 fn protected_pinned_query(relay: &RelayUrl, signer: nostr::PublicKey, kind: u16) -> LiveQuery {
@@ -231,7 +231,7 @@ fn protected_pinned_query(relay: &RelayUrl, signer: nostr::PublicKey, kind: u16)
                 ..Filter::default()
             },
             ReadRouting::Explicit(vec![relay.clone()]),
-            AccessContext::Nip42(signer),
+            Some(signer),
         )
         .expect("protected pinned demand is valid"),
     )
@@ -449,7 +449,7 @@ fn mark_written(core: &mut EngineCore, effects: &[Effect], relay: &RelayUrl) -> 
         .find_map(|effect| match effect {
             Effect::PublishEvent(candidate, event, correlation)
                 if &candidate.relay == relay
-                    && candidate.access == AccessContext::Nip42(event.pubkey) =>
+                    && candidate.access == Some(event.pubkey) =>
             {
                 Some(*correlation)
             }

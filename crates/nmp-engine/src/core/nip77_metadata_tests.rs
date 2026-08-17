@@ -19,7 +19,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let relay = RelayUrl::parse("wss://nip77-plan-metadata.example").unwrap();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let incumbent = ContextualAtom {
             filter: ConcreteFilter {
                 kinds: Some(BTreeSet::from([1, 2])),
@@ -27,7 +27,7 @@ impl Fixture {
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Explicit(vec![relay.clone()]),
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let added = ContextualAtom {
@@ -37,7 +37,7 @@ impl Fixture {
                 ..ConcreteFilter::default()
             },
             routing: incumbent.routing.clone(),
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let plan_sub_id = SubId::for_wire(
@@ -376,7 +376,7 @@ fn assert_consistent_catches_a_cardinality_preserving_swap_between_plans() {
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Explicit(vec![relay.clone()]),
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let plan_sub_id = SubId::for_wire(relay.clone(), &atom.filter, &atom.routing, atom.access);

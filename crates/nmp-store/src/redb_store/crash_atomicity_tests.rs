@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use nmp_grammar::{AccessContext, ReadRouting};
+use nmp_grammar::{ReadRouting};
 use nostr::nips::nip01::Coordinate;
 use nostr::{EventBuilder, Filter, JsonUtil, Keys, Kind, UnsignedEvent};
 use redb::ReadableTableMetadata;
@@ -77,7 +77,7 @@ fn retention_atom() -> ContextualAtom {
             limit: None,
         },
         routing: ReadRouting::Auto,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }

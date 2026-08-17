@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use nmp_engine::core::RowDelta;
 use nmp_grammar::{
-    AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter as QueryFilter, ReadRouting,
+    Binding, ConcreteFilter, ContextualAtom, Filter as QueryFilter, ReadRouting,
 };
 use nmp_grammar::{Demand, LiveQuery};
 use nmp_runtime::{EngineThread, RowsReceiver};
@@ -79,7 +79,7 @@ fn bounded_runtime_working_sets_do_not_delete_default_durable_history() {
             limit: None,
         },
         routing: ReadRouting::Auto,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let coverage = CoverageInterval::new(Timestamp::from(100u64), Timestamp::from(227u64));

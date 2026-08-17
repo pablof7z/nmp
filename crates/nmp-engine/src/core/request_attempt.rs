@@ -734,7 +734,7 @@ impl CoreState {
 /// two drive the real `pub(super)` surface `CoreState` itself calls.
 #[cfg(test)]
 mod tests {
-    use nmp_grammar::{AccessContext, ReadRouting};
+    use nmp_grammar::{ReadRouting};
     use nostr::RelayUrl;
 
     use super::*;
@@ -750,14 +750,14 @@ mod tests {
     /// other by its filter's kind (so two calls with different `kind`s on the
     /// same relay mint distinct `SubId`s).
     fn attempt(relay: &RelayUrl, kind: u16) -> (RelaySessionKey, SubId, RequestAttemptState) {
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let filter = filter(kind);
         let filter_hash = filter.hash();
         let sub_id = SubId::for_wire(
             relay.clone(),
             &filter,
             &ReadRouting::Auto,
-            AccessContext::Public,
+            None,
         );
         let state = RequestAttemptState {
             session: session.clone(),

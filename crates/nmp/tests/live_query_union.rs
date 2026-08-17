@@ -36,7 +36,7 @@ use nmp_engine::core::{
     ObservationId, RowDelta, ShortfallFact,
 };
 use nmp_grammar::{
-    AccessContext, Binding, CacheMode, ContextualAtom, Demand, Filter, Freshness, IdentityField,
+    Binding, CacheMode, ContextualAtom, Demand, Filter, Freshness, IdentityField,
     LiveQuery, LiveQueryError, ReadRouting,
 };
 use nmp_router::WireOp;
@@ -98,7 +98,7 @@ fn host_branch_of_kind(host: &RelayUrl, kind: u16) -> Demand {
     let mut demand = Demand::new(
         selection_of(kind),
         ReadRouting::Explicit(vec![host.clone()]),
-        AccessContext::Public,
+        None,
     )
     .expect("a one-relay pinned set is nonempty");
     demand.cache = CacheMode::Strict;
@@ -400,7 +400,7 @@ fn an_unplannable_branch_reports_its_own_shortfall() {
             ..Filter::default()
         },
         ReadRouting::Auto,
-        AccessContext::Public,
+        None,
     )
     .expect("an author-bound outbox demand is constructible");
 
@@ -548,7 +548,7 @@ fn a_reactive_change_moves_every_branch_in_one_frame() {
                 ..Filter::default()
             },
             ReadRouting::Explicit(vec![host.clone()]),
-            AccessContext::Public,
+            None,
         )
         .expect("a reactive pinned demand is constructible")
     };
@@ -984,7 +984,7 @@ fn one_branchs_refresh_failure_retracts_no_sibling_row() {
             ..Filter::default()
         },
         ReadRouting::Explicit(vec![b.clone()]),
-        AccessContext::Public,
+        None,
     )
     .expect("a reactive pinned demand is constructible");
 
@@ -1060,7 +1060,7 @@ fn max_age_branch(host: &RelayUrl, keys: &Keys) -> Demand {
             ..Filter::default()
         },
         ReadRouting::Explicit(vec![host.clone()]),
-        AccessContext::Public,
+        None,
     )
     .expect("a one-relay pinned set is nonempty");
     demand.freshness = Freshness::MaxAge { seconds: 3_600 };
@@ -1075,7 +1075,7 @@ fn branch_atom(host: &RelayUrl, keys: &Keys) -> ContextualAtom {
             ..nmp_grammar::ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![host.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }

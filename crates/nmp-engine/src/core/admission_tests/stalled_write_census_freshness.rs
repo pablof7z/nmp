@@ -84,7 +84,7 @@ fn stalled_write_census_agrees_with_a_fresh_recompute_across_parking_and_clearin
     // exercises the `(Ok(index), Some(stage)) => ..` and removal arms of
     // `StalledWriteCensus::refresh` -- an existing census entry either
     // changes stage or is removed, not merely inserted fresh.
-    let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(author.public_key()));
+    let session = RelaySessionKey::new(relay.clone(), Some(author.public_key()));
     core.handle(EngineMsg::RelayConnected(
         TransportRelayHandle {
             slot: 0,

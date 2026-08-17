@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, ReadRouting};
 use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::RedbStore;
 use nmp_transport::{DisconnectReason, RelayFrame, RelayHandle};
@@ -25,7 +25,7 @@ impl Fixture {
     fn new() -> Self {
         let keys = Keys::generate();
         let relay = RelayUrl::parse("wss://auth-core.example.com").unwrap();
-        let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(keys.public_key()));
+        let session = RelaySessionKey::new(relay.clone(), Some(keys.public_key()));
         let filter = ConcreteFilter {
             kinds: Some(BTreeSet::from([1])),
             ..ConcreteFilter::default()
@@ -457,8 +457,8 @@ fn auth_denial_isolated_by_exact_identity_leaves_same_url_peer_live() {
     let bob = Keys::generate();
     let relay = RelayUrl::parse("wss://shared-auth.example.com").unwrap();
     let alice_session =
-        RelaySessionKey::new(relay.clone(), AccessContext::Nip42(alice.public_key()));
-    let bob_session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(bob.public_key()));
+        RelaySessionKey::new(relay.clone(), Some(alice.public_key()));
+    let bob_session = RelaySessionKey::new(relay.clone(), Some(bob.public_key()));
     let alice_handle = RelayHandle {
         slot: 20,
         generation: 1,
@@ -555,11 +555,11 @@ fn one_auth_denied_lane_does_not_stop_other_lanes_on_the_same_receipt() {
     let ordinary_relay = RelayUrl::parse("wss://ordinary-lane.example.com").unwrap();
     let denied_session = RelaySessionKey::new(
         denied_relay.clone(),
-        AccessContext::Nip42(keys.public_key()),
+        Some(keys.public_key()),
     );
     let ordinary_session = RelaySessionKey::new(
         ordinary_relay.clone(),
-        AccessContext::Nip42(keys.public_key()),
+        Some(keys.public_key()),
     );
     let denied_handle = RelayHandle {
         slot: 30,
@@ -1543,7 +1543,7 @@ fn slot_replacement_releases_the_displaced_session_without_waiting_for_disconnec
     let old_epoch = fixture.core.auth_sessions[&fixture.session].epoch.clone();
     let replacement = RelaySessionKey::new(
         fixture.session.relay.clone(),
-        AccessContext::Nip42(Keys::generate().public_key()),
+        Some(Keys::generate().public_key()),
     );
     let replacement_handle = RelayHandle {
         slot: fixture.handle.slot,

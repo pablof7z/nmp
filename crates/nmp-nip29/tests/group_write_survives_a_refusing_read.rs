@@ -58,7 +58,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use nmp::{
-    AccessContext, AcquisitionEvidence, Engine, EngineConfig, EventId, Filter, PublicKey,
+    AcquisitionEvidence, Engine, EngineConfig, EventId, Filter, PublicKey,
     RelayState, Row, RowDelta, SourceStatus, Subscription, WriteFact,
 };
 use nmp_nip29 as nip29;
@@ -366,7 +366,7 @@ async fn a_join_request_is_delivered_while_the_same_groups_read_reports_one_host
         .expect("host A still names a covering source for this query's subtree");
     assert_eq!(
         host_a_source.access,
-        AccessContext::Public,
+        None,
         "the refused read remains scoped to the connected Public session"
     );
     assert_eq!(

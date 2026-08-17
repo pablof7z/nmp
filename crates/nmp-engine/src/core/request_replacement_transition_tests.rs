@@ -17,7 +17,7 @@ struct Fixture {
 impl Fixture {
     fn new(name: &str) -> Self {
         let relay = RelayUrl::parse(&format!("wss://{name}.example")).unwrap();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let handle = TransportRelayHandle {
             slot: 93,
             generation: 1,
@@ -49,7 +49,7 @@ impl Fixture {
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Explicit(vec![self.relay.clone()]),
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         }
     }

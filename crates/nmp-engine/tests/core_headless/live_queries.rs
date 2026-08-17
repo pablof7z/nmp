@@ -728,7 +728,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     let agnostic_demand = nmp_grammar::Demand::new(
         filter,
         ReadRouting::Explicit(pinned_relays.into_iter().collect()),
-        AccessContext::Public,
+        None,
     )
     .expect("a nonempty pinned relay set is legal (#107)");
     let mut strict_demand = agnostic_demand.clone();
@@ -836,13 +836,13 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
     let demand1 = nmp_grammar::Demand::new(
         filter.clone(),
         ReadRouting::Explicit(vec![relay1.clone()]),
-        AccessContext::Public,
+        None,
     )
     .expect("nonempty pinned relay set is legal");
     let demand2 = nmp_grammar::Demand::new(
         filter,
         ReadRouting::Explicit(vec![relay2.clone()]),
-        AccessContext::Public,
+        None,
     )
     .expect("nonempty pinned relay set is legal");
 

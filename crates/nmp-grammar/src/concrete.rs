@@ -206,12 +206,15 @@ impl ConcreteFilter {
 pub struct ContextualAtom {
     pub filter: ConcreteFilter,
     pub routing: ReadRouting,
-    /// The identity this atom's reads authenticate as if challenged — the
-    /// demand's override, or the engine's current account resolved at compile
-    /// time. Part of atom identity because two demands that would
-    /// authenticate as different people are genuinely different acquisitions:
-    /// what a relay serves depends on who asked.
-    pub authenticated_as: Option<nostr::PublicKey>,
+    /// The identity this atom's reads authenticate as if a relay challenges
+    /// them — the demand's override, or the engine's current account,
+    /// resolved when the demand was compiled. Part of atom identity because
+    /// two demands that would authenticate as different people are genuinely
+    /// different acquisitions: what a relay serves depends on who asked.
+    ///
+    /// This is intent, not outcome. The identity a socket actually holds is
+    /// `RelaySessionKey::authenticated_as`, discovered from a challenge.
+    pub authenticate_as: Option<nostr::PublicKey>,
     /// Runtime routing facts projected with this atom. These facts are part
     /// of live atom identity so provenance growth produces an exact
     /// close/open delta, but `nmp-store::coverage_key` deliberately erases
@@ -226,7 +229,7 @@ impl ContextualAtom {
     /// Durable coverage deliberately erases routing evidence before calling
     /// this method; see `nmp_store::coverage_key`.
     pub fn hash(&self) -> DescriptorHash {
-        let contextual = fold_context(self.filter.hash(), &self.routing, self.authenticated_as);
+        let contextual = fold_context(self.filter.hash(), &self.routing, self.authenticate_as);
         if self.routing_evidence.is_empty() {
             return contextual;
         }

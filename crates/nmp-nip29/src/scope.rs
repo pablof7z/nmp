@@ -256,7 +256,7 @@ mod tests {
     use super::*;
     use crate::{member_list_includes, GroupObserveError};
     use nmp_grammar::{
-        AccessContext, Binding, CacheMode, Derived, IdentityField, IndexedTagName, ReadRouting,
+        Binding, CacheMode, Derived, IdentityField, IndexedTagName, ReadRouting,
     };
 
     fn host(n: u16) -> RelayUrl {
@@ -317,7 +317,7 @@ mod tests {
                 "depth 0 (the listing) must be pinned to {expected} alone"
             );
             assert_eq!(outer.cache, CacheMode::Strict);
-            assert_eq!(outer.access, AccessContext::Public);
+            assert_eq!(outer.access, None);
 
             let inner = &derived(
                 outer
@@ -339,7 +339,7 @@ mod tests {
                 "depth 1 must also refuse a cached row {expected} never served -- Explicit \
                  scopes the wire, CacheMode scopes the cache, and both must name this host"
             );
-            assert_eq!(inner.access, AccessContext::Public);
+            assert_eq!(inner.access, None);
             assert_eq!(
                 inner.selection.kinds,
                 Some(BTreeSet::from([39002u16])),

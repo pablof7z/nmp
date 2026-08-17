@@ -149,7 +149,7 @@ fn opening_freshness_refusal_leaves_no_candidate_request_target_index() {
             ..ConcreteFilter::default()
         },
         routing: demand.routing.clone(),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let coverage_key = nmp_store::coverage_key(&atom);

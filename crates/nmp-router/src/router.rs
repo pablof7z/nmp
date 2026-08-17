@@ -9,7 +9,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey, RoutingEvidence,
+    ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey, RoutingEvidence,
 };
 use nmp_store::{coverage_claim_atoms, coverage_key, CoverageKey};
 
@@ -45,7 +45,7 @@ struct RelayCapOutcome {
     refused_coverage_assignments: BTreeSet<(DemandKey, PublicKey)>,
 }
 
-/// Every `ReadRouting::Auto` atom sharing one `(Skeleton, AccessContext)`,
+/// Every `ReadRouting::Auto` atom sharing one `(Skeleton)`,
 /// accumulated so the single `Auto` path can run all of its lanes over the
 /// group at once.
 #[derive(Default)]
@@ -221,7 +221,7 @@ fn push_routes(
     bag: &mut SessionBag,
     filter: &ConcreteFilter,
     source: &ReadRouting,
-    access: AccessContext,
+    authenticate_as: Option<nostr::PublicKey>,
     routes: Vec<(RelayUrl, RouteProvenance)>,
     ownership: &EntryOwnership,
 ) {
@@ -229,7 +229,7 @@ fn push_routes(
         return;
     }
     for (relay, prov) in routes {
-        bag.entry(RelaySessionKey::new(relay, access))
+        bag.entry(RelaySessionKey::new(relay, authenticate_as))
             .or_default()
             .entry(source.clone())
             .or_default()
@@ -260,7 +260,7 @@ fn exact_atom_ownership(atom: ContextualAtom) -> EntryOwnership {
 /// the atom it reaches the wire as.
 fn auto_ownership(
     skeleton: &Skeleton,
-    access: AccessContext,
+    authenticate_as: Option<nostr::PublicKey>,
     group: &AutoAtomGroup,
     authors: &BTreeSet<PublicKey>,
     coverage_authors: &BTreeSet<PublicKey>,
@@ -275,7 +275,7 @@ fn auto_ownership(
             let atom = ContextualAtom {
                 filter: skeleton.with_authors(BTreeSet::from([*author])),
                 routing: routing.clone(),
-                access,
+                authenticate_as,
                 routing_evidence: evidence_by_author.get(author).cloned().unwrap_or_default(),
             };
             coverage_key(&atom)
@@ -291,7 +291,7 @@ fn auto_ownership(
         coverage_claims.insert(coverage_key(&ContextualAtom {
             filter: skeleton.with_authors(BTreeSet::new()),
             routing: routing.clone(),
-            access,
+            authenticate_as,
             routing_evidence: group.routing_evidence.clone(),
         }));
         owner_demands.extend(
@@ -418,11 +418,11 @@ impl Router {
         budget: impl Into<CompileBudget>,
     ) -> CompileOutcome {
         let budget = budget.into();
-        // Step 1: group demand by (Skeleton, AccessContext) / classify
+        // Step 1: group demand by (Skeleton) / classify
         // explicit. Classification is by DECLARED `ReadRouting` and nothing
         // else — never by filter shape. Grouping by `AccessContext`
         // alongside the skeleton keeps the seam ready for a future
-        // non-`Public` access variant (#8's NIP-42 AUTH) without needing a
+        // present authenticated identity (#8's NIP-42 AUTH) without needing a
         // second widening later; every atom reaching this branch shares
         // `routing: Auto` by construction (that's the `classify` arm that
         // produced it), so it isn't tracked per-group.
@@ -433,7 +433,7 @@ impl Router {
         // the group records the fact via `unbounded` so the additive lanes
         // widen back to the bare skeleton instead of narrowing the
         // unbounded atom to the group's authors.
-        let mut auto_groups: BTreeMap<(Skeleton, AccessContext), AutoAtomGroup> = BTreeMap::new();
+        let mut auto_groups: BTreeMap<(Skeleton, Option<PublicKey>), AutoAtomGroup> = BTreeMap::new();
         // Every `Auto` demand's resolved authors, flat across groups — the
         // shortfall reduction at the end of this function walks demands, not
         // groups.
@@ -448,7 +448,7 @@ impl Router {
                     let (skeleton, authors) = Skeleton::of(&atom.filter);
                     let demand = DemandKey::for_atom(atom);
                     auto_authors_by_demand.insert(demand, authors.clone());
-                    let group = auto_groups.entry((skeleton, atom.access)).or_default();
+                    let group = auto_groups.entry((skeleton, atom.authenticate_as)).or_default();
                     group.demands.insert(demand);
                     group.authors_by_demand.insert(demand, authors.clone());
                     group
@@ -495,8 +495,8 @@ impl Router {
         let mut uncovered_by_demand: BTreeMap<DemandKey, BTreeMap<PublicKey, Shortfall>> =
             BTreeMap::new();
 
-        for ((skeleton, access), group) in &auto_groups {
-            let access = *access;
+        for ((skeleton, authenticate_as), group) in &auto_groups {
+            let authenticate_as = *authenticate_as;
             let source = ReadRouting::Auto;
             let evidence_by_author = &group.evidence_by_author;
             let authors = &group.authors;
@@ -607,13 +607,13 @@ impl Router {
                 // lets one merged REQ absorb them all.
                 let ownership = auto_ownership(
                     skeleton,
-                    access,
+                    authenticate_as,
                     group,
                     &relay_authors,
                     &relay_authors,
                     false,
                 );
-                bag.entry(RelaySessionKey::new(relay, access))
+                bag.entry(RelaySessionKey::new(relay, authenticate_as))
                     .or_default()
                     .entry(source.clone())
                     .or_default()
@@ -622,7 +622,7 @@ impl Router {
 
             let lane_ownership = auto_ownership(
                 skeleton,
-                access,
+                authenticate_as,
                 group,
                 authors,
                 &BTreeSet::new(),
@@ -652,7 +652,7 @@ impl Router {
                     &mut bag,
                     &lane_filter,
                     &source,
-                    access,
+                    authenticate_as,
                     route::provenance_for_projected(&group.routing_evidence),
                     &lane_ownership,
                 );
@@ -666,7 +666,7 @@ impl Router {
                 &mut bag,
                 &lane_filter,
                 &source,
-                access,
+                authenticate_as,
                 additive,
                 &lane_ownership,
             );
@@ -680,7 +680,7 @@ impl Router {
             let fallback = route::operator_fallback_routes(facts, &shortfall_authors);
             let fallback_ownership = auto_ownership(
                 skeleton,
-                access,
+                authenticate_as,
                 group,
                 &shortfall_authors,
                 &BTreeSet::new(),
@@ -690,7 +690,7 @@ impl Router {
                 &mut bag,
                 &skeleton.with_authors(shortfall_authors),
                 &source,
-                access,
+                authenticate_as,
                 fallback,
                 &fallback_ownership,
             );
@@ -703,11 +703,11 @@ impl Router {
         // indexer relays").
         for (atom, relays) in &exact_atoms {
             let filter = &atom.filter;
-            let access = atom.access;
+            let authenticate_as = atom.authenticate_as;
             let source = ReadRouting::Explicit(relays.iter().cloned().collect());
             let ownership = exact_atom_ownership(atom.clone());
             for (relay, prov) in route::provenance_for_exact(relays) {
-                bag.entry(RelaySessionKey::new(relay, access))
+                bag.entry(RelaySessionKey::new(relay, authenticate_as))
                     .or_default()
                     .entry(source.clone())
                     .or_default()
@@ -754,7 +754,7 @@ impl Router {
         let mut budget_refused_requests: Vec<(RelaySessionKey, WireReq)> = Vec::new();
         for (session, by_source) in bag {
             let relay = session.relay.clone();
-            let access = session.access;
+            let authenticate_as = session.authenticated_as;
             let mut session_reqs: Vec<WireReq> = Vec::new();
             for (source, entries) in by_source {
                 let merged = self.rules.coalesce_with(entries);
@@ -777,7 +777,7 @@ impl Router {
 
                 let assigned = wire_id::assign(&priors, &filters, || {
                     let sub_id =
-                        SubId::allocate(relay.clone(), &source, access, mint_root, mint_counter);
+                        SubId::allocate(relay.clone(), &source, authenticate_as, mint_root, mint_counter);
                     mint_counter += 1;
                     sub_id
                 });

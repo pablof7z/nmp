@@ -40,7 +40,7 @@ fn author_outbox_queries_need_a_provider_until_a_positive_route_or_withdrawal() 
     let pinned = Demand::new(
         filter,
         ReadRouting::Explicit(vec![test_relay(65)]),
-        AccessContext::Public,
+        None,
     )
     .expect("exact provider query");
     let provider = core.handle(EngineMsg::Subscribe(LiveQuery::single(pinned)));
@@ -1538,7 +1538,7 @@ mod coverage_evidence_refresh_tests {
                     ..Filter::default()
                 },
                 ReadRouting::Explicit(vec![relay.clone()]),
-                AccessContext::Public,
+                None,
             )
             .unwrap(),
         )
@@ -1562,7 +1562,7 @@ mod coverage_evidence_refresh_tests {
                     ..Filter::default()
                 },
                 ReadRouting::Explicit(vec![relay.clone()]),
-                AccessContext::Public,
+                None,
             )
             .unwrap(),
         )
@@ -1581,7 +1581,7 @@ mod coverage_evidence_refresh_tests {
             slot: 7,
             generation: 1,
         };
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         core.handle(EngineMsg::RelayConnected(handle, session.clone()));
         core.handle(EngineMsg::RelayInformationResolved(relay.clone(), None));
         core.handle(EngineMsg::Tick(Timestamp::from(100u64)));

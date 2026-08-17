@@ -811,7 +811,7 @@ impl AuthTaskRegistry {
             .filter_map(|(session, task)| {
                 let same_pubkey = matches!(
                     task.token.epoch.session.access,
-                    nmp_grammar::AccessContext::Nip42(current) if current == pubkey
+                    Some(current) if current == pubkey
                 );
                 (same_pubkey && task.capability == capability && task.instance == instance)
                     .then(|| session.clone())
@@ -825,7 +825,7 @@ impl AuthTaskRegistry {
         self.pending.retain(|_, task| {
             let same_pubkey = matches!(
                 task.token.epoch.session.access,
-                nmp_grammar::AccessContext::Nip42(current) if current == pubkey
+                Some(current) if current == pubkey
             );
             !(same_pubkey && task.capability == capability && task.instance == instance)
         });
@@ -1199,7 +1199,7 @@ mod tests {
     use super::*;
     use crossbeam_channel as cb;
     use nmp_engine::core::{AuthEpoch, AuthOpToken};
-    use nmp_grammar::{AccessContext, RelaySessionKey};
+    use nmp_grammar::{RelaySessionKey};
     use nmp_transport::{PoolConfig, PoolEvent, RelayHandle};
     use nostr::{Keys, RelayUrl};
     use std::collections::VecDeque;
@@ -1240,7 +1240,7 @@ mod tests {
                     slot: 3,
                     generation: 7,
                 },
-                session: RelaySessionKey::new(relay, AccessContext::Nip42(keys.public_key())),
+                session: RelaySessionKey::new(relay, Some(keys.public_key())),
                 sequence: 11,
             },
             sequence: 12,
@@ -1358,8 +1358,8 @@ mod tests {
         let (completion, operation) = AuthPolicyOp::pending_channel();
         let request_token = token();
         let expected_pubkey = match request_token.epoch.session.access {
-            AccessContext::Nip42(pubkey) => pubkey,
-            AccessContext::Public => unreachable!(),
+            Some(pubkey) => pubkey,
+            None => unreachable!(),
         };
         let instance = AuthCapabilityInstance(17);
         policies.add(
@@ -1444,8 +1444,8 @@ mod tests {
         });
         let request_token = token();
         let expected_pubkey = match request_token.epoch.session.access {
-            AccessContext::Nip42(pubkey) => pubkey,
-            AccessContext::Public => unreachable!(),
+            Some(pubkey) => pubkey,
+            None => unreachable!(),
         };
         let old_instance = AuthCapabilityInstance(21);
         let (old_registration, _) = policies.add(
@@ -1650,8 +1650,8 @@ mod tests {
             AuthEffect::RequestPolicy {
                 token: policy_token.clone(),
                 expected_pubkey: match policy_token.epoch.session.access {
-                    AccessContext::Nip42(pubkey) => pubkey,
-                    AccessContext::Public => unreachable!(),
+                    Some(pubkey) => pubkey,
+                    None => unreachable!(),
                 },
                 challenge: "challenge".to_string(),
             },
@@ -1682,8 +1682,8 @@ mod tests {
         let unsigned =
             nostr::EventBuilder::auth("challenge", sign_token.epoch.session.relay.clone()).build(
                 match sign_token.epoch.session.access {
-                    AccessContext::Nip42(pubkey) => pubkey,
-                    AccessContext::Public => unreachable!(),
+                    Some(pubkey) => pubkey,
+                    None => unreachable!(),
                 },
             );
         dispatch(
@@ -1767,7 +1767,7 @@ mod tests {
 
         let relay = RelayUrl::parse(&format!("ws://{address}")).unwrap();
         let keys = Keys::generate();
-        let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(keys.public_key()));
+        let session = RelaySessionKey::new(relay.clone(), Some(keys.public_key()));
         let (pool_tx, pool_rx) = std::sync::mpsc::channel();
         let pool = Pool::new(PoolConfig::default(), test_verifier(), pool_tx).unwrap();
         let opened = pool.ensure_session(&session).unwrap();

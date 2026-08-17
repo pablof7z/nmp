@@ -44,7 +44,7 @@ use nmp_ffi::types::{
     FfiRowDelta, FfiShortfallFact, FfiSigningState, FfiSourceStatus, FfiStalledWriteStage,
     FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
-use nmp_grammar::{AccessContext, Demand, Derived, ReadRouting, Selector};
+use nmp_grammar::{Demand, Derived, ReadRouting, Selector};
 use nmp_nip02::{
     follow_capability, follow_writes, observe_following, set_following, FollowAvailability,
     FollowChange, FollowObservation, FollowRelationship, FollowSnapshot,
@@ -833,8 +833,8 @@ fn ffi_auth_diagnostics_phase_name(phase: FfiAuthPhase) -> &'static str {
 
 fn direct_access_name(access: AccessContext) -> String {
     match access {
-        AccessContext::Public => "public".to_string(),
-        AccessContext::Nip42(public_key) => format!("nip42:{}", public_key.to_hex()),
+        None => "public".to_string(),
+        Some(public_key) => format!("nip42:{}", public_key.to_hex()),
     }
 }
 
@@ -1457,7 +1457,7 @@ fn auth_diagnostics_phase_survives_the_ffi_boundary_intact() {
             .enumerate()
             .map(|(index, phase)| AuthDiagnosticsSnapshot {
                 relay: relay.clone(),
-                access: AccessContext::Nip42(public_key),
+                authenticate_as: Some(public_key),
                 transport_generation: 11 + index as u64,
                 epoch_sequence: Some(23 + index as u64),
                 challenge_hash: Some(format!("blake3:challenge-{index}")),
@@ -1655,7 +1655,7 @@ fn pinned_contact_list(author: PublicKey, relay: RelayUrl) -> Demand {
             ..Filter::default()
         },
         ReadRouting::Explicit(vec![relay]),
-        AccessContext::Public,
+        None,
     )
     .expect("the contact-list source is pinned to one relay")
 }
@@ -1673,7 +1673,7 @@ fn pinned_follow_feed(author: PublicKey, relay: RelayUrl) -> LiveQuery {
             ..Filter::default()
         },
         ReadRouting::Explicit(relays.into_iter().collect()),
-        AccessContext::Public,
+        None,
     )
     .expect("the derived feed is pinned to the same relay");
     LiveQuery::single(feed)

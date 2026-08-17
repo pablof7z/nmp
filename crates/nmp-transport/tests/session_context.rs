@@ -1,6 +1,6 @@
 use std::sync::mpsc;
 
-use nmp_grammar::{AccessContext, RelaySessionKey};
+use nmp_grammar::{RelaySessionKey};
 use nmp_transport::{Pool, PoolConfig, RelayOpenError};
 use nostr::{Keys, RelayUrl};
 
@@ -25,12 +25,12 @@ fn physical_session_cap_counts_contexts_not_urls() {
     )
     .unwrap();
     let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
-    let public = RelaySessionKey::public(relay.clone());
+    let public = RelaySessionKey::unauthenticated(relay.clone());
     let a = RelaySessionKey::new(
         relay.clone(),
-        AccessContext::Nip42(Keys::generate().public_key()),
+        Some(Keys::generate().public_key()),
     );
-    let b = RelaySessionKey::new(relay, AccessContext::Nip42(Keys::generate().public_key()));
+    let b = RelaySessionKey::new(relay, Some(Keys::generate().public_key()));
 
     let public_handle = pool.ensure_session(&public).unwrap();
     assert_eq!(pool.ensure_session(&public).unwrap(), public_handle);

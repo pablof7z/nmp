@@ -691,7 +691,7 @@ impl Pool {
     /// generation — the prior handle is now stale. Every refusal is returned
     /// as a typed error; this API never manufactures an invalid handle.
     pub fn ensure_open(&self, url: &RelayUrl) -> Result<RelayHandle, RelayOpenError> {
-        self.ensure_session(&RelaySessionKey::public(url.clone()))
+        self.ensure_session(&RelaySessionKey::unauthenticated(url.clone()))
     }
 
     #[doc(hidden)]
@@ -729,7 +729,7 @@ impl Pool {
     /// reopening a worker. Used for best-effort close-only wire deltas: a
     /// withdrawn read relay must never be re-created merely to send `CLOSE`.
     pub fn live_handle(&self, url: &RelayUrl) -> Option<RelayHandle> {
-        self.live_session_handle(&RelaySessionKey::public(url.clone()))
+        self.live_session_handle(&RelaySessionKey::unauthenticated(url.clone()))
     }
 
     /// Return the current generation for one exact session without opening
@@ -1142,11 +1142,11 @@ mod ephemeral_send_tests {
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
         let session = RelaySessionKey::new(
             relay.clone(),
-            AccessContext::Nip42(Keys::generate().public_key()),
+            Some(Keys::generate().public_key()),
         );
         let handle = pool.ensure_session(&session).unwrap();
         let wrong_session =
-            RelaySessionKey::new(relay, AccessContext::Nip42(Keys::generate().public_key()));
+            RelaySessionKey::new(relay, Some(Keys::generate().public_key()));
         let stale = RelayHandle {
             generation: handle.generation.wrapping_add(1),
             ..handle

@@ -49,7 +49,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, Binding, CacheMode, Demand, Derived, Filter, IndexedTagName, ReadRouting,
+    Binding, CacheMode, Demand, Derived, Filter, IndexedTagName, ReadRouting,
     Selector,
 };
 use nostr::RelayUrl;
@@ -166,7 +166,7 @@ pub(crate) fn explicit_at(host: &RelayUrl, selection: Filter) -> Demand {
     let mut demand = Demand::new(
         selection,
         ReadRouting::Explicit(vec![host.clone()]),
-        AccessContext::Public,
+        None,
     )
     .expect("a singleton explicit relay set is always constructible");
     demand.cache = CacheMode::Strict;
@@ -218,7 +218,7 @@ mod tests {
             Some(BTreeSet::from([39000u16, 39001, 39002]))
         );
         assert_eq!(demand.routing, pinned([host(1)]));
-        assert_eq!(demand.access, AccessContext::Public);
+        assert_eq!(demand.access, None);
         assert!(demand.selection.tags.contains_key(&join_key()));
     }
 
@@ -250,7 +250,7 @@ mod tests {
             Some(BTreeSet::from([39001u16]))
         );
         assert_eq!(derived.inner.routing, pinned([host(2)]));
-        assert_eq!(derived.inner.access, AccessContext::Public);
+        assert_eq!(derived.inner.access, None);
         assert_eq!(derived.inner.cache, CacheMode::Strict);
         assert_eq!(derived.inner.freshness, Freshness::Live);
     }

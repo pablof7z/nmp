@@ -268,7 +268,7 @@ mod history_mutation_tests {
             LiveQuery::single(nmp_grammar::Demand {
                 selection,
                 routing: ReadRouting::Explicit(vec![wanted]),
-                access: AccessContext::Public,
+                authenticate_as: None,
                 cache: CacheMode::Strict,
                 freshness: Freshness::Live,
             }),
@@ -336,7 +336,7 @@ mod history_mutation_tests {
             LiveQuery::single(nmp_grammar::Demand {
                 selection,
                 routing: ReadRouting::Explicit(vec![wanted.clone()]),
-                access: AccessContext::Public,
+                authenticate_as: None,
                 cache: CacheMode::Strict,
                 freshness: Freshness::Live,
             }),
