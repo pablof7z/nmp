@@ -149,8 +149,9 @@ pub(super) fn open_relay_socket(relay_url: &str) -> Result<RelaySocket, ConnectF
         Mode::Tls => 443,
     });
 
-    let stream = connect_with_timeout(host, port, CONNECT_TIMEOUT)
-        .map_err(|error| ConnectFailure::no_status(format!("tcp connect {host}:{port}: {error}")))?;
+    let stream = connect_with_timeout(host, port, CONNECT_TIMEOUT).map_err(|error| {
+        ConnectFailure::no_status(format!("tcp connect {host}:{port}: {error}"))
+    })?;
     stream
         .set_nodelay(true)
         .map_err(|error| ConnectFailure::no_status(format!("set_nodelay: {error}")))?;
@@ -161,10 +162,14 @@ pub(super) fn open_relay_socket(relay_url: &str) -> Result<RelaySocket, ConnectF
     // timeout does not leak into the steady state.
     stream
         .set_read_timeout(Some(CONNECT_TIMEOUT))
-        .map_err(|error| ConnectFailure::no_status(format!("set handshake read timeout: {error}")))?;
+        .map_err(|error| {
+            ConnectFailure::no_status(format!("set handshake read timeout: {error}"))
+        })?;
     stream
         .set_write_timeout(Some(CONNECT_TIMEOUT))
-        .map_err(|error| ConnectFailure::no_status(format!("set handshake write timeout: {error}")))?;
+        .map_err(|error| {
+            ConnectFailure::no_status(format!("set handshake write timeout: {error}"))
+        })?;
 
     let (socket, _response) =
         client_tls_with_config(request, stream, Some(relay_websocket_config()), None).map_err(
@@ -299,8 +304,7 @@ mod tests {
     fn plain_refusal_to_port_4031_is_not_a_permanent_denial() {
         // Nothing listens here: the OS refuses the connection immediately.
         let failure = open_relay_socket("ws://127.0.0.1:4031")
-            .err()
-            .expect("nothing should be listening on 127.0.0.1:4031");
+            .expect_err("nothing should be listening on 127.0.0.1:4031");
         assert!(
             failure.message.contains("403"),
             "test setup: expected the rendered message to embed the port's digits, got {:?}",

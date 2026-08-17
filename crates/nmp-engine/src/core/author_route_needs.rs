@@ -169,7 +169,7 @@ impl AuthorRouteNeeds {
     /// compare against once the caller has replayed every current
     /// contribution through [`Self::retain`].
     pub(super) fn reset_for_rebuild(&mut self) -> BTreeSet<PublicKey> {
-        std::mem::replace(self, Self::default()).needs
+        std::mem::take(self).needs
     }
 
     /// End a wholesale rebuild: set the pending-change flag from the exact

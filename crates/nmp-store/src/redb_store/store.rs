@@ -1289,60 +1289,59 @@ impl RedbStore {
         let prepared_filter = PreparedFilter::new(filter);
         let needs_event_value = prepared_filter.needs_event_value_after_index(plan.index.matched())
             || suppression_possible;
-        let mut project_if_visible = |event_key: EventKey,
-                                      event_id: EventId|
-         -> Result<Option<EventId>, PersistenceError> {
-            let canonical_key = event_ids
-                .get(event_id.as_bytes())
-                .map_err(persist_err)?
-                .map(|guard| guard.value());
-            if canonical_key != Some(event_key) {
-                return Err(PersistenceError::invariant(format!(
-                    "ordered index disagrees with canonical id map for {event_id}"
-                )));
-            }
-            if !needs_event_value {
-                return Ok(Some(event_id));
-            }
-            #[cfg(any(test, feature = "bench-instrumentation"))]
-            self.query_event_values.fetch_add(1, Ordering::Relaxed);
-            let Some(value) = events
-                .get(event_row_key(event_key).as_slice())
-                .map_err(persist_err)?
-            else {
-                return Err(PersistenceError::invariant(format!(
-                    "ordered index points at missing canonical event {event_key}"
-                )));
-            };
-            let view = StoredEventView::from_trusted(value.value()).map_err(|error| {
-                PersistenceError::invariant(format!(
-                    "decode canonical event view {event_key}: {error:?}"
-                ))
-            })?;
-            let matches = view
-                .matches_prepared_filter_after_index(&prepared_filter, plan.index.matched())
-                .map_err(|error| {
-                    PersistenceError::invariant(format!(
-                        "match canonical event against filter {event_key}: {error:?}"
-                    ))
-                })?;
-            if !matches {
-                return Ok(None);
-            }
-            if suppression_possible {
+        let mut project_if_visible =
+            |event_key: EventKey, event_id: EventId| -> Result<Option<EventId>, PersistenceError> {
+                let canonical_key = event_ids
+                    .get(event_id.as_bytes())
+                    .map_err(persist_err)?
+                    .map(|guard| guard.value());
+                if canonical_key != Some(event_key) {
+                    return Err(PersistenceError::invariant(format!(
+                        "ordered index disagrees with canonical id map for {event_id}"
+                    )));
+                }
+                if !needs_event_value {
+                    return Ok(Some(event_id));
+                }
                 #[cfg(any(test, feature = "bench-instrumentation"))]
-                self.examined_rows.fetch_add(1, Ordering::Relaxed);
-                let event = view.materialize_event().map_err(|error| {
+                self.query_event_values.fetch_add(1, Ordering::Relaxed);
+                let Some(value) = events
+                    .get(event_row_key(event_key).as_slice())
+                    .map_err(persist_err)?
+                else {
+                    return Err(PersistenceError::invariant(format!(
+                        "ordered index points at missing canonical event {event_key}"
+                    )));
+                };
+                let view = StoredEventView::from_trusted(value.value()).map_err(|error| {
                     PersistenceError::invariant(format!(
-                        "materialize canonical event {event_key}: {error:?}"
+                        "decode canonical event view {event_key}: {error:?}"
                     ))
                 })?;
-                if is_suppressed_in_txn(&publish_queue_suppress, &event)? {
+                let matches = view
+                    .matches_prepared_filter_after_index(&prepared_filter, plan.index.matched())
+                    .map_err(|error| {
+                        PersistenceError::invariant(format!(
+                            "match canonical event against filter {event_key}: {error:?}"
+                        ))
+                    })?;
+                if !matches {
                     return Ok(None);
                 }
-            }
-            Ok(Some(event_id))
-        };
+                if suppression_possible {
+                    #[cfg(any(test, feature = "bench-instrumentation"))]
+                    self.examined_rows.fetch_add(1, Ordering::Relaxed);
+                    let event = view.materialize_event().map_err(|error| {
+                        PersistenceError::invariant(format!(
+                            "materialize canonical event {event_key}: {error:?}"
+                        ))
+                    })?;
+                    if is_suppressed_in_txn(&publish_queue_suppress, &event)? {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(event_id))
+            };
 
         scan_packed(
             read_txn,

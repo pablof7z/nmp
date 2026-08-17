@@ -10,11 +10,12 @@ fn normal_dependency_tree_contains_no_engine_or_mechanism_crate() {
     // real), so canonicalizing this crate's own manifest is what recovers the
     // checkout. Under Cargo the path is already absolute and real, and
     // canonicalizing it changes nothing -- one spelling, both build systems.
-    let manifest_dir = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
-        .expect("nmp-content's own manifest must resolve")
-        .parent()
-        .expect("a manifest has a directory")
-        .to_owned();
+    let manifest_dir =
+        std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .expect("nmp-content's own manifest must resolve")
+            .parent()
+            .expect("a manifest has a directory")
+            .to_owned();
     let workspace = manifest_dir
         .parent()
         .and_then(Path::parent)
