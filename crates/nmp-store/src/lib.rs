@@ -66,6 +66,22 @@
 //! mutating anything. The engine's send-time attribution snapshots stay out
 //! of scope too (this crate only stores whatever interval it is told to
 //! record).
+//!
+//! Verification is a once-at-ingest act and nothing durable is ever
+//! re-verified (owner ruling on #1782). A row reaches a table by exactly two
+//! routes and each verifies before the write: [`RedbStore::insert`] takes
+//! relay-observed bytes the transport verify gate already checked, and
+//! [`RedbStore::accept_write`]/[`RedbStore::promote_signed`] take a
+//! [`VerifiedSignature`] that cannot exist without one successful check.
+//! Whatever a later read needs to know about that check it reads back as
+//! DATA — [`SigState`] on the row, [`IntentSigState`] on the intent — never
+//! by recomputing schnorr over bytes this crate wrote itself. Three sites
+//! used to recompute it (attempt-row decode on every boot, the attempt-start
+//! door, and semantic source qualification); #1782 deleted all three. The
+//! stored 64-byte signature is still load-bearing — the publish queue
+//! re-serves those exact bytes to relays, and the transport gate compares
+//! them byte-for-byte against redelivered frames to catch relay misbehavior
+//! without schnorr — it is simply never re-checked here.
 
 mod address_key;
 mod binary_event;
@@ -316,11 +332,31 @@ pub use nmp_grammar::sentinel_signature;
 ///
 /// Verification stays a caller-side act performed exactly once (#387): the
 /// engine's signer-result validation constructs this value and hands it
-/// down, and no store implementation runs a second Schnorr check.
+/// down, and no store implementation runs a second Schnorr check. This is
+/// the crate's ONLY schnorr entry point — after #1782 nothing in
+/// `nmp-store` calls it on a path a store read can reach, which is what
+/// makes [`schnorr_verifications`] a usable zero-assertion over a boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedSignature {
     event_id: EventId,
     signature: Signature,
+}
+
+/// Every schnorr check this crate has ever performed in this process.
+///
+/// Read through [`schnorr_verifications`]. Absent from production builds so
+/// the one verification an accepted signer result must pass does not pay an
+/// atomic increment to support a test.
+#[cfg(any(test, feature = "test-instrumentation"))]
+static SCHNORR_VERIFICATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many schnorr checks [`VerifiedSignature::verify`] has run in this
+/// process. The falsifier for #1782's ruling: a boot over an already-
+/// populated store must not move this number at all.
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[must_use]
+pub fn schnorr_verifications() -> u64 {
+    SCHNORR_VERIFICATIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl VerifiedSignature {
@@ -328,6 +364,8 @@ impl VerifiedSignature {
     /// signature checked against that id and `event.pubkey` — and keep the
     /// proof. `Err` is `nostr`'s own verification failure, unchanged.
     pub fn verify(event: &Event) -> Result<Self, nostr::event::Error> {
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        SCHNORR_VERIFICATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         event.verify()?;
         Ok(Self {
             event_id: event.id,

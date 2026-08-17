@@ -1029,6 +1029,13 @@ pub(crate) fn encode_attempt(
     Ok(encoder.finish())
 }
 
+/// Decode one attempt row. NO signature check: these bytes were written by
+/// `start_lane_attempt`, which refuses unless the intent's stored verdict is
+/// already `IntentSigState::Signed` AND the attempt body is byte-identical
+/// to the intent's own promoted event — so the only way a schnorr check here
+/// could fail is a store that has already corrupted its own tables, which a
+/// signature check is the wrong detector for. It used to run on every
+/// attempt row of every open intent on every boot (#1782).
 pub(super) fn decode_attempt(
     bytes: &[u8],
 ) -> Result<(Event, PublishQueueAttemptOutcome), PublishQueueCodecError> {
@@ -1036,9 +1043,6 @@ pub(super) fn decode_attempt(
     let event = decoder.event()?;
     let outcome = decode_attempt_outcome(&mut decoder)?;
     decoder.finish()?;
-    event
-        .verify()
-        .map_err(|_| PublishQueueCodecError::InvalidEvent)?;
     Ok((event, outcome))
 }
 

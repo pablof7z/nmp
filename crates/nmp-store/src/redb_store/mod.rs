@@ -561,8 +561,11 @@ impl RedbStore {
     /// equals the intent's own durable frozen id. A signature that is
     /// perfectly valid for a DIFFERENT event is therefore refused here, not
     /// promoted. No implementation re-verifies: verification happened once,
-    /// on the caller's side, to produce the evidence (#387). Fallible for
-    /// the same reason `accept_write` is.
+    /// on the caller's side, to produce the evidence (#387). What this door
+    /// writes IS the durable verdict — [`crate::SigState`]`::Signed` on the
+    /// row, [`crate::IntentSigState`]`::Signed` on the intent — and every
+    /// later reader consults that instead of recomputing schnorr, including
+    /// recovery (#1782). Fallible for the same reason `accept_write` is.
     pub fn promote_signed(
         &mut self,
         target: crate::PromotionTarget,
@@ -971,6 +974,9 @@ impl RedbStore {
         publish_queue_ops::close_unroutable_intent(self, intent_id)
     }
 }
+
+#[cfg(test)]
+mod boot_verification_tests;
 
 #[cfg(test)]
 mod corruption_tests;
