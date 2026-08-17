@@ -11,10 +11,14 @@ let demand = NMPDemand(selection: selection)
 
 That is the whole declaration. `routing` defaults to `.auto`, which authorizes
 NMP to discover and use the NIP-65 write relays of every author the selection
-resolves, to follow relay hints and prior provenance, and to fall back to the
-operator's app and fallback lanes. The app does not watch kind:10002, build
-author-to-relay maps, group authors by relay, or reopen requests as those maps
-change.
+resolves, and to follow relay hints and prior provenance. **The app relays the
+operator configured are read from as well, always** — they are not a fallback
+NMP reaches for when the other lanes come up thin. The app does not watch
+kind:10002, build author-to-relay maps, group authors by relay, or reopen
+requests as those maps change.
+
+The lanes add up; the app never picks between them. See
+`docs/internals/routing/outbox.md` for the ruling and its exact wording.
 
 `.auto` is total: it has no precondition a selection can fail. An authorless
 selection — "kind:1, wherever you find it" — is the same path with no authors
@@ -63,7 +67,10 @@ identity, safe wire sharing, diagnostics, and acquisition evidence.
 
 ## Writes carry typed routing context
 
-Ordinary author publication uses engine-owned outbox discovery:
+Ordinary author publication publishes per the author's outbox, to the
+operator's app relays, and — for kind:0, kind:3 and kind:1xxxx — to the
+configured indexers. Those lanes are additive and all of them apply; the app
+declares none of them:
 
 ```swift
 let receipt = try engine.publish(.init(

@@ -1223,12 +1223,7 @@ Marked open on purpose; do not infer answers.
    minting) with typed capability vocabulary in native packages, but nobody
    has designed it. Do not treat today's per-NIP FFI modules as the pattern
    to extend indefinitely.
-2. **Where NIP-51 list kinds live.** `nmp-nip29` ships the kind:10009
-   simple-groups list (NIP-51's schema) as a documented product-capability
-   decision. When a second NIP-51 family arrives (bookmarks), decide
-   whether an `nmp-nip51` crate owns the list schemas — do not decide it
-   by precedent-matching either way.
-3. **What constitutes the deterministic engine, and whether any owner
+2. **What constitutes the deterministic engine, and whether any owner
    inside it earns a package.**
    The engine/runtime boundary is settled. The internal package
    decomposition is not. Today's packaging is one crate because the measured

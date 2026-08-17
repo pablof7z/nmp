@@ -32,6 +32,16 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
 
 ## Routing & limits
 
+- **There is no indexer write lane, and the owner ruled there must be one.**
+  The 2026-08-17 routing ruling (`docs/internals/routing/outbox.md`) is that
+  indexers always receive kind:0, kind:3 and kind:1xxxx events. Nothing
+  publishes to an indexer today: the built-in `Auto` write resolver
+  deliberately does not choose indexers, and indexers appear in the shipped
+  lane vocabulary only as a read-side discovery input. The other two lanes in
+  that ruling — the author's outbox and the operator's app relays — are built
+  on both the read and write sides. This one is a ruling with no
+  implementation, and no design for one.
+
 - **Boundedness is only partial.** Swift newest-frame buffering, indexed
   queries, router caps, and the expandable observation window are bounded, but
   graph, derived-set, wire, relay, ordinary-result, receipt, ingestion, and
