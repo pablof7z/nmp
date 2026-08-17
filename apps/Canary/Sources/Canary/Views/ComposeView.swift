@@ -1,9 +1,10 @@
 // The app's first screen that ever calls `engine.publish` (C5/C7/C8/C9/C10/
 // C12). The only NMP calls here are `engine.publish(_:)`, iterating
-// `Receipt.status`, and `engine.reattachReceipt(correlation:)` (via
-// `AppModel`, at launch). Everything else -- the per-relay rendering, the
-// pending-correlation bookkeeping -- is this app's own, exactly like
-// `FeedView`/`DiagnosticsView`.
+// `Receipt.status`, and, via `AppModel` at launch, `engine.publishQueue`
+// and `engine.reattachReceipt(id:)`. Everything else -- the per-relay
+// rendering -- is this app's own, exactly like `FeedView`/`DiagnosticsView`.
+// There is no app-owned ledger of outstanding writes here: NMP's own
+// publish queue is that ledger (#1770).
 //
 // The one rule this screen exists to prove or disprove: it must never poll,
 // retry, or chase a relay itself. If truthfully rendering what happened to a
@@ -19,7 +20,6 @@ import NMP
 /// deliveries -- never a value this app invented.
 struct OutstandingWrite: Identifiable {
     let id: UInt64
-    let correlation: String
     let preview: String
     var signing: SigningState?
     var destinations: (relays: [String], complete: Bool, awaitingAuthorRoutes: [String])?
@@ -83,15 +83,11 @@ struct ComposeView: View {
             }
             .navigationTitle("Compose")
             .task {
-                // Crash-during-publication recovery (C9): whatever survived
-                // to this launch by correlation gets the same live
-                // observation a fresh publish gets, below.
+                // Crash-during-publication recovery (C9): whatever `AppModel`
+                // found still open in NMP's own publish queue gets the same
+                // live observation a fresh publish gets, below.
                 for reattached in model.takeReattachedWrites() {
-                    observe(
-                        reattached.receipt,
-                        correlation: reattached.correlation,
-                        preview: "(reattached after restart)"
-                    )
+                    observe(reattached.receipt, preview: "(reattached after restart)")
                 }
             }
         }
@@ -134,7 +130,6 @@ struct ComposeView: View {
     private func publish() {
         guard !content.isEmpty else { return }
 
-        let correlation = UUID().uuidString
         let identity: Identity = explicitIdentityID.map { .explicit(pubkey: hexString($0)) } ?? .active
         // `.auto` outbox routing is refused outright: `AppModel`'s engine has
         // no `NMPConfig.outboxRouting` indexer configured (that capability is
@@ -143,16 +138,16 @@ struct ComposeView: View {
         // is worth naming as an API finding rather than quietly working
         // around. `.explicit` to the same two operator relays the feed
         // already trusts is the honest choice available today.
+        //
+        // No correlation token: recovering an outstanding write after a
+        // restart goes through NMP's own `publishQueue` (see `AppModel`),
+        // not an app-remembered label, so nothing here needs to mint or
+        // persist one (#1770).
         let intent = WriteIntent(
             payload: .event(kind: 1, content: content),
             routing: .explicit(relays: AppModel.appRelays),
-            identity: identity,
-            correlation: correlation
+            identity: identity
         )
-
-        // Persist the correlation BEFORE `publish` returns -- a crash inside
-        // that call itself must still leave something to reattach to.
-        model.rememberPendingWrite(correlation: correlation)
 
         let preview = content
         content = ""
@@ -162,10 +157,9 @@ struct ComposeView: View {
             defer { isPublishing = false }
             do {
                 let receipt = try await model.engine.publish(intent)
-                observe(receipt, correlation: correlation, preview: preview)
+                observe(receipt, preview: preview)
             } catch {
                 model.lastError = "\(error)"
-                model.forgetPendingWrite(correlation: correlation)
             }
         }
     }
@@ -174,18 +168,12 @@ struct ComposeView: View {
     /// reattached one. It never asks for anything again -- it renders
     /// exactly what `receipt.status` delivers, in order, until the stream
     /// ends.
-    private func observe(_ receipt: Receipt, correlation: String, preview: String) {
-        writes.insert(
-            OutstandingWrite(id: receipt.id, correlation: correlation, preview: preview),
-            at: 0
-        )
+    private func observe(_ receipt: Receipt, preview: String) {
+        writes.insert(OutstandingWrite(id: receipt.id, preview: preview), at: 0)
         Task {
             do {
                 for try await fact in receipt.status {
                     apply(fact, toWriteID: receipt.id)
-                    if case .outcome = fact {
-                        model.forgetPendingWrite(correlation: correlation)
-                    }
                 }
             } catch {
                 model.lastError = "\(error)"

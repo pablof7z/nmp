@@ -9,17 +9,18 @@
 // persists a local-key account (so the SAME account exists again after a
 // restart -- crash recovery of a not-yet-signed write needs the same
 // local signer back, exactly like the app's own session persistence),
-// publishes one real signed event under a given correlation token to one
-// or more real relays, prints machine-readable markers to stdout as it
-// reaches each fact the parent needs to observe, then parks. It never
-// retries and never polls beyond the ordinary `receipt.status` iteration
-// `await-partial` mode does to learn when to print its own marker -- once
-// a marker is printed, this process touches NMP again for nothing. There
-// is no cleanup on purpose: the parent kills this process, not asks it to
-// exit.
+// publishes one real signed event -- with no correlation token; recovery
+// finds it by enumerating `publishQueue`, not by an app-remembered label
+// (#1770) -- to one or more real relays, prints machine-readable markers
+// to stdout as it reaches each fact the parent needs to observe, then
+// parks. It never retries and never polls beyond the ordinary
+// `receipt.status` iteration `await-partial` mode does to learn when to
+// print its own marker -- once a marker is printed, this process touches
+// NMP again for nothing. There is no cleanup on purpose: the parent kills
+// this process, not asks it to exit.
 //
 // Usage:
-//   canary-c9-publisher <storePath> <sessionPayloadPath> <correlationToken> <mode> <relay1> [<relay2>]
+//   canary-c9-publisher <storePath> <sessionPayloadPath> <mode> <relay1> [<relay2>]
 //   mode: "plain" | "await-partial" (await-partial requires exactly 2 relays)
 
 import Foundation
@@ -39,18 +40,17 @@ struct CanaryC9Publisher {
     static func run() async throws {
         setbuf(stdout, nil)
         let args = CommandLine.arguments
-        guard args.count >= 6 else {
+        guard args.count >= 5 else {
             print(
                 "usage: canary-c9-publisher <storePath> <sessionPayloadPath> "
-                    + "<correlationToken> <mode> <relay1> [<relay2>]"
+                    + "<mode> <relay1> [<relay2>]"
             )
             exit(2)
         }
         let storePath = args[1]
         let sessionPayloadPath = args[2]
-        let correlationToken = args[3]
-        let mode = args[4]
-        let relays = Array(args[5...])
+        let mode = args[3]
+        let relays = Array(args[4...])
 
         let engine = try NMPEngine(config: NMPConfig(storePath: storePath))
 
@@ -67,8 +67,7 @@ struct CanaryC9Publisher {
 
         let intent = WriteIntent(
             payload: .event(kind: 1, content: "C9 crash-during-publication"),
-            routing: .explicit(relays: relays),
-            correlation: correlationToken
+            routing: .explicit(relays: relays)
         )
         // Reaching the next line without a thrown error IS local
         // acceptance -- same contract as C7.
