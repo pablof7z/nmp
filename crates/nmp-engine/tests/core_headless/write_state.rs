@@ -341,7 +341,6 @@ fn switching_the_active_account_after_acceptance_never_retargets_the_pinned_sign
         payload: WritePayload::Event(draft(1, "accepted while a is current")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     assert!(matches!(accepted.first(), Some(Effect::WriteAccepted(..))));
     let (id, generation, template) = find_sign_request(&accepted);
