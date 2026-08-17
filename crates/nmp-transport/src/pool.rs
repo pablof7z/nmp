@@ -392,23 +392,37 @@ impl RelayFrame {
 
     /// Recover the exact ordinary EVENT path after an engine-side lease,
     /// session, or pending-intent revalidation rejects a preparse hit.
+    ///
+    /// Returns [`OrdinaryFallback`], not `Option<Self>`: this frame is a
+    /// relay-returned EVENT that named no subscription id even before
+    /// revalidation ran, so a caller that cannot recover it is not looking
+    /// at "nothing happened" — it has a frame it can hand to no request,
+    /// which is exactly the case every request still streaming on this
+    /// session must lose its exact returned-frame count over (see
+    /// `EngineCore::erase_returned_frame_counts` and the two existing
+    /// committed-observation doors that already erase for this same
+    /// reason). `Option::None` reads as the opposite of that and let a
+    /// caller discard the frame without erasing anything (#1830).
     #[doc(hidden)]
     #[must_use]
-    pub fn into_ordinary_fallback(self) -> Option<Self> {
+    pub fn into_ordinary_fallback(self) -> OrdinaryFallback {
         match self {
             Self::CommittedObservation(hit) => {
                 let (raw_text, candidate) = hit.into_raw_and_candidate();
                 match frame::classify_text_with_candidate(raw_text.as_str(), Some(candidate)) {
-                    frame::ClassifiedFrame::Frame(frame) => Some(frame),
+                    frame::ClassifiedFrame::Frame(frame) => OrdinaryFallback::Frame(frame),
                     // This text already decoded once, on the way into the
                     // cache, so a failure here is a local cache/lease fault
-                    // rather than relay behavior — and the engine already
-                    // erases every count on the session for any committed
-                    // observation hit, so nothing is left unreported.
-                    frame::ClassifiedFrame::Consumed | frame::ClassifiedFrame::Undecodable => None,
+                    // rather than relay behavior. It is still a returned
+                    // frame this reducer cannot hand to any request, so the
+                    // caller MUST erase the session's returned-frame count
+                    // — see `OrdinaryFallback::Unrecoverable`.
+                    frame::ClassifiedFrame::Consumed | frame::ClassifiedFrame::Undecodable => {
+                        OrdinaryFallback::Unrecoverable
+                    }
                 }
             }
-            frame => Some(frame),
+            frame => OrdinaryFallback::Frame(frame),
         }
     }
 
@@ -434,6 +448,26 @@ impl RelayFrame {
             Self::Message(message) => *message,
         }
     }
+}
+
+/// Outcome of [`RelayFrame::into_ordinary_fallback`].
+///
+/// Deliberately not `Option<RelayFrame>`. `None` reads as "nothing to do",
+/// but the failure case here is the opposite: a relay returned an EVENT
+/// frame this reducer cannot hand to any specific request. A caller that
+/// matches this exhaustively is forced to decide what happens to the
+/// session's returned-frame count on the [`Self::Unrecoverable`] arm,
+/// instead of a bare `None` silently discarding the frame and leaving that
+/// count wrongly exact (#1830).
+#[derive(Debug)]
+#[doc(hidden)]
+#[must_use]
+pub enum OrdinaryFallback {
+    /// The frame recovered cleanly; hand it to the ordinary EVENT path.
+    Frame(RelayFrame),
+    /// The frame could not be recovered. The caller MUST erase the
+    /// returned-frame count for the frame's session before discarding it.
+    Unrecoverable,
 }
 
 impl From<RelayMessage<'static>> for RelayFrame {

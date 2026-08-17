@@ -128,7 +128,8 @@ use nostr::{
 };
 
 use nmp_transport::{
-    DurableSendOutcome, HandoffResult, Pool, RelayFrame, RelaySessionKey, WireFrame,
+    DurableSendOutcome, HandoffResult, OrdinaryFallback, Pool, RelayFrame, RelaySessionKey,
+    WireFrame,
 };
 #[cfg(test)]
 use nmp_transport::{PoolConfig, PoolEvent};
@@ -476,6 +477,13 @@ mod route_provider_tests;
 /// empty and drop them.
 #[cfg(test)]
 mod dispatch_relay_auth_tests;
+
+/// #1830: drives `reduce_and_dispatch_committed_observations` directly, one
+/// of the two call sites that used to discard a `RelayFrame::
+/// into_ordinary_fallback` `None` (now `OrdinaryFallback::Unrecoverable`)
+/// without erasing the session's returned-frame count.
+#[cfg(test)]
+mod committed_observation_fallback_tests;
 
 #[cfg(test)]
 // The closed-surface falsifier scans this module's code lines for the token
@@ -2200,10 +2208,27 @@ fn engine_loop(
                                         dispatch_runtime,
                                     );
                                 }
-                                if let Some(frame) =
-                                    RelayFrame::CommittedObservation(hit).into_ordinary_fallback()
+                                match RelayFrame::CommittedObservation(hit)
+                                    .into_ordinary_fallback()
                                 {
-                                    ordinary.push((handle, session, frame));
+                                    OrdinaryFallback::Frame(frame) => {
+                                        ordinary.push((handle, session, frame));
+                                    }
+                                    OrdinaryFallback::Unrecoverable => {
+                                        let effects = core.handle(
+                                            EngineMsg::UnrecoverableCommittedObservation(session),
+                                        );
+                                        dispatch_core_effects(
+                                            &mut core,
+                                            effects,
+                                            &pool,
+                                            &mut row_channels,
+                                            &mut history_channels,
+                                            &mut diag_channels,
+                                            &registry,
+                                            dispatch_runtime,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -3200,14 +3225,30 @@ fn reduce_and_dispatch_committed_observations(
             runtime,
         );
     } else {
+        let mut unrecoverable_sessions = Vec::new();
         let frames = frames
             .into_iter()
-            .filter_map(|(handle, session, frame)| {
-                frame
-                    .into_ordinary_fallback()
-                    .map(|frame| (handle, session, frame))
+            .filter_map(|(handle, session, frame)| match frame.into_ordinary_fallback() {
+                OrdinaryFallback::Frame(frame) => Some((handle, session, frame)),
+                OrdinaryFallback::Unrecoverable => {
+                    unrecoverable_sessions.push(session);
+                    None
+                }
             })
             .collect();
+        for session in unrecoverable_sessions {
+            let effects = core.handle(EngineMsg::UnrecoverableCommittedObservation(session));
+            dispatch_core_effects(
+                core,
+                effects,
+                pool,
+                row_channels,
+                history_channels,
+                diag_channels,
+                registry,
+                runtime,
+            );
+        }
         reduce_and_dispatch_relay_frames(
             core,
             frames,

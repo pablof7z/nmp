@@ -112,6 +112,33 @@ impl CommittedObservationHit {
             CommittedObservationCandidate::new(self.digest),
         )
     }
+
+    /// Build a hit whose raw text will not reclassify into an ordinary
+    /// EVENT: `RelayFrame::into_ordinary_fallback` sees
+    /// `frame::ClassifiedFrame::Undecodable` and returns
+    /// `OrdinaryFallback::Unrecoverable`.
+    ///
+    /// Cross-crate test seam. The real "revalidation rejected this preparse
+    /// hit and reclassifying its raw text also failed" case can only be
+    /// produced by racing this cache's own consume-once/epoch bookkeeping
+    /// against a live relay connection, so a caller in another crate that
+    /// wants to drive `into_ordinary_fallback`'s unrecoverable arm
+    /// deterministically needs a direct door instead of a live relay (same
+    /// rationale as `EngineCore::seed_stale_relay_open_failure_for_test`)
+    /// (#1830).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn for_unrecoverable_fallback_test(event_id: EventId, event_kind: u16) -> Self {
+        Self {
+            raw_text: Utf8Bytes::from_static("not a relay message"),
+            relay: RelayScope([0; 32]),
+            digest: [0; 32],
+            slot: 0,
+            epoch: 0,
+            event_id,
+            event_kind,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

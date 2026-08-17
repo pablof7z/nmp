@@ -46,9 +46,10 @@ pub use pool::{configure_diagnostic_duplicate_ceiling, configure_diagnostic_prep
 pub use pool::{
     AttemptCorrelation, CommittedObservationCandidate, CommittedObservationHit,
     CommittedObservationPublication, DisconnectReason, DurableSendOutcome, EphemeralOperation,
-    EphemeralSendOutcome, EphemeralSendStart, HandoffResult, KnownSig, NullKnownSig, Pool,
-    PoolBuildError, PoolConfig, PoolEvent, PoolEventSink, ReconnectPreambleTransition, RelayFrame,
-    RelayOpenError, RelaySessionKey, ThreadRole, ThreadSpawnError, Verdict, Verifier, VerifyConfig,
+    EphemeralSendOutcome, EphemeralSendStart, HandoffResult, KnownSig, NullKnownSig,
+    OrdinaryFallback, Pool, PoolBuildError, PoolConfig, PoolEvent, PoolEventSink,
+    ReconnectPreambleTransition, RelayFrame, RelayOpenError, RelaySessionKey, ThreadRole,
+    ThreadSpawnError, Verdict, Verifier, VerifyConfig,
     WireFrame, DEFAULT_MAX_RELAYS, DEFAULT_VERIFIER_WORKERS, MAX_DEFAULT_VERIFIER_WORKERS,
     MAX_VERIFIER_WORKERS,
 };

@@ -951,6 +951,16 @@ pub enum EngineMsg {
     RelayOpenFailed(RelaySessionKey, String),
     RelayFrame(TransportRelayHandle, RelaySessionKey, RelayFrame),
     RelayFrames(Vec<(TransportRelayHandle, RelaySessionKey, RelayFrame)>),
+    /// A committed-observation preparse hit named no subscription id, and
+    /// the runtime could not recover it into an ordinary EVENT frame after
+    /// revalidation rejected it (`RelayFrame::into_ordinary_fallback`
+    /// returned `OrdinaryFallback::Unrecoverable`). Same shape as the two
+    /// other committed-observation doors that already erase on sight
+    /// (`on_revalidated_committed_observations`, `on_relay_frames`): a
+    /// returned EVENT frame this reducer can hand to no specific request
+    /// leaves no request on this session with an exact returned count
+    /// (#1630, #1830).
+    UnrecoverableCommittedObservation(RelaySessionKey),
     SignerCompleted(ReceiptId, u64, Result<SignedEvent, SignerError>),
     /// The runtime has no signer attached for this accepted author. This is
     /// non-terminal: the canonical pending row and durable obligation stay
@@ -3316,6 +3326,10 @@ impl EngineCore {
                 } else {
                     Vec::new()
                 }
+            }
+            EngineMsg::UnrecoverableCommittedObservation(session) => {
+                self.erase_returned_frame_counts(&session);
+                Vec::new()
             }
             EngineMsg::RelayFrame(handle, session, frame) => {
                 self.on_relay_frame(handle, session, frame)

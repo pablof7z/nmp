@@ -216,6 +216,29 @@ impl EngineCore {
         }
     }
 
+    /// Whether every request still streaming on `session` currently holds an
+    /// exact returned-frame count.
+    ///
+    /// The count itself is private reducer state (`ReturnedFrames`) with no
+    /// ordinary externally observable effect until a later coordinate check
+    /// silently stops proving absence. A caller outside this crate that
+    /// wants to drive a real erasure door end-to-end -- e.g. `nmp-runtime`'s
+    /// dispatch of `RelayFrame::into_ordinary_fallback`'s
+    /// `OrdinaryFallback::Unrecoverable` arm -- needs a direct door to assert
+    /// on it instead of reconstructing full coordinate-coverage machinery
+    /// that stays `pub(crate)` on purpose (#1830).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn returned_frame_count_is_exact_for_test(&self, session: &RelaySessionKey) -> bool {
+        self.live_wire_requests
+            .iter()
+            .filter(|((request_session, _), live)| {
+                request_session == session
+                    && matches!(live.stored_events, StoredEvents::Streaming { .. })
+            })
+            .all(|(_, live)| matches!(live.returns.stored_frames, ReturnedFrames::Counted(_)))
+    }
+
     /// Remember that one request delivered one replaceable/addressable
     /// coordinate. Only the newest delivered value per coordinate is kept.
     pub(super) fn record_coordinate_witness(
@@ -600,7 +623,9 @@ mod tests {
     use nmp_grammar::AccessContext;
     use nmp_router_testkit::test_relay;
     use nmp_store::RedbStore;
-    use nmp_transport::{RelayFrame, RelayHandle as TransportRelayHandle};
+    use nmp_transport::{
+        CommittedObservationHit, OrdinaryFallback, RelayFrame, RelayHandle as TransportRelayHandle,
+    };
     use nostr::{EventBuilder, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId};
 
     use super::super::attribution::wire_sub_id_string;
@@ -748,6 +773,28 @@ mod tests {
                     ..nmp_transport::RelayHealth::default()
                 },
             ))
+        }
+
+        /// Drive a committed-observation preparse hit that revalidation
+        /// rejected, and whose raw text then failed to reclassify, down the
+        /// exact path `nmp-runtime`'s dispatch takes for it (#1830): call
+        /// the real `RelayFrame::into_ordinary_fallback`, assert it refuses
+        /// to hand back a frame, then feed the session through the same
+        /// `EngineMsg` every caller of that `Unrecoverable` arm must use.
+        fn report_unrecoverable_committed_observation(&mut self) -> Vec<Effect> {
+            let hit = CommittedObservationHit::for_unrecoverable_fallback_test(
+                nostr::EventId::all_zeros(),
+                Kind::ContactList.as_u16(),
+            );
+            let fallback = RelayFrame::CommittedObservation(hit).into_ordinary_fallback();
+            assert!(
+                matches!(fallback, OrdinaryFallback::Unrecoverable),
+                "fixture precondition: the synthetic hit must fail to reclassify"
+            );
+            self.core
+                .handle(EngineMsg::UnrecoverableCommittedObservation(
+                    self.session.clone(),
+                ))
         }
 
         /// Run the coordinate check the way #1631 will, and report how many
@@ -971,6 +1018,39 @@ mod tests {
             coverage,
             CoordinateCoverage::Uncovered,
             "a session that dropped an undecodable frame can prove nothing absent"
+        );
+        assert_eq!(
+            (fixture.opened_coordinate_reqs(), placed),
+            (1, 1),
+            "the exact coordinate query is used instead, exactly once"
+        );
+    }
+
+    /// #1830's falsifier. A committed-observation preparse hit that
+    /// revalidation rejects, and whose raw text then fails to reclassify
+    /// (`RelayFrame::into_ordinary_fallback` returning
+    /// `OrdinaryFallback::Unrecoverable`), is exactly as unattributable as
+    /// the undecodable-text-frame case above: it is a returned EVENT frame
+    /// this reducer cannot hand to one request. The same covering request,
+    /// finished under the bound without the coordinate, must stop proving
+    /// absence the moment `nmp-runtime` reports this the way its two call
+    /// sites now do -- not silently keep its exact count the way discarding
+    /// `Option::None` used to let it.
+    #[test]
+    fn an_unrecoverable_committed_observation_fallback_forfeits_the_absence_proof() {
+        let alice = Keys::generate();
+        let other = Keys::generate();
+        let mut fixture = kind3_read();
+        fixture.deliver(contact_list(&other, 50));
+        fixture.report_unrecoverable_committed_observation();
+        fixture.end_stored_events();
+
+        let (coverage, placed) = fixture.check(&contact_list_coordinate(&alice));
+        assert_eq!(
+            coverage,
+            CoordinateCoverage::Uncovered,
+            "a session that dropped an unrecoverable committed-observation fallback can prove \
+             nothing absent"
         );
         assert_eq!(
             (fixture.opened_coordinate_reqs(), placed),

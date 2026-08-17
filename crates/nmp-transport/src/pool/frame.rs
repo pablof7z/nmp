@@ -474,6 +474,7 @@ fn skip_composite(bytes: &[u8], cursor: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::OrdinaryFallback;
     use nostr::RelayUrl;
 
     #[cfg(feature = "bench-instrumentation")]
@@ -570,14 +571,33 @@ mod tests {
         let hit = classify_message(Message::Text(second_raw.into()), relay_scope, &cache)
             .expect_frame("cached EVENT");
         assert!(matches!(hit, RelayFrame::CommittedObservation(_)));
-        let (fallback_subscription_id, fallback, fallback_candidate) = hit
-            .into_ordinary_fallback()
-            .expect("valid fallback frame")
+        let fallback = match hit.into_ordinary_fallback() {
+            OrdinaryFallback::Frame(frame) => frame,
+            OrdinaryFallback::Unrecoverable => panic!("valid fallback frame"),
+        };
+        let (fallback_subscription_id, fallback, fallback_candidate) = fallback
             .into_observed_event()
             .expect("exact fallback EVENT");
         assert_eq!(fallback_subscription_id.as_str(), "second");
         assert_eq!(fallback, event);
         assert_eq!(fallback_candidate, Some(candidate));
+    }
+
+    /// #1830: a committed-observation hit revalidation rejected, whose raw
+    /// text then fails to reclassify, is a returned EVENT frame this
+    /// reducer cannot hand to any request -- exactly the shape
+    /// `OrdinaryFallback::Unrecoverable` exists to keep a caller from
+    /// discarding as `Option::None`, which reads as "nothing happened".
+    #[test]
+    fn undecodable_committed_observation_fallback_is_unrecoverable_not_a_dropped_option() {
+        let hit = super::super::CommittedObservationHit::for_unrecoverable_fallback_test(
+            nostr::EventId::all_zeros(),
+            1,
+        );
+        assert!(matches!(
+            RelayFrame::CommittedObservation(hit).into_ordinary_fallback(),
+            OrdinaryFallback::Unrecoverable
+        ));
     }
 
     #[test]
