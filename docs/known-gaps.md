@@ -236,6 +236,22 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
 
 ## Store & persistence
 
+- **The engine ships no retention policy, and the owner ruled that it should
+  (#1787, #1843).** On 2026-08-17: *"whatever, just ship a default policy;
+  this is not a high priority."* Today canonical events are retained
+  unconditionally — `RedbStore::gc` exists but no crate outside `nmp-store`
+  ever calls it, and neither `GcRetentionSet` nor `GcReport` appears in `nmp`
+  or `nmp-ffi`, so the documented remedy names a host that has no way to act.
+  Terminal receipts meanwhile are evicted on a fixed, undocumented, unreachable
+  24h/100k/256MiB policy from six call sites including the write path itself
+  (#1843), on `SystemTime::now()`, so a device clock jump wipes terminal
+  history. The store simultaneously refuses to evict what an app might want
+  gone and silently evicts what an app might need kept. The ruling settles who
+  owns the decision; the policy's shape, and the 24-hour wall clock that
+  #1843 calls the part with no defence, are unbuilt. Tombstones are excluded
+  by the 2026-07-11 permanence ruling. Disk size is explicitly not the reason
+  to do this work — see `docs/builder/11-coverage.md`.
+
 - **Backend candidates are not semantically qualified (#698/#699).** The
   reference event/publishing trace checks redb against independent expected
   outcomes and attaches a stable recovery digest to every process-death

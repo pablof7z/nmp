@@ -163,15 +163,37 @@ NIP-40 expiration removes expired rows, and a rejected pre-signature local
 write may be compensated. Those governed mutations are distinct from
 retention policy.
 
-Durable storage is not promised to be literally infinite. An operator or user
-may choose a quota, disk-pressure, or time-based retention policy, but that
-choice must be inspectable and explicit. The current engine ships no automatic
-retention policy. Its store-level `RedbStore::gc` door is the explicit
-claim-based eviction operation: it reports what it evicted and lowers or
-removes every affected coverage interval in the same transaction as the row
-deletion. A future engine-facing policy must preserve that governed operation;
-it must never turn a RAM ceiling or an implicit maintenance pass into silent
-durable deletion.
+Durable storage is not promised to be literally infinite.
+
+**The engine ships a default retention policy — owner ruling, 2026-08-17.**
+Asked to choose between an app-facing retention door and the engine owning a
+default, he chose the engine, in those words: *"whatever, just ship a default
+policy; this is not a high priority."* Both halves of that sentence are the
+ruling. The engine owns the policy, so a host is no longer required to adopt
+one in order to be bounded — and it is not urgent work, so nothing else should
+be displaced for it.
+
+**Disk and database size are explicitly not a priority.** The owner's words,
+the same day, on finding an agent optimizing store size: *"is the whole thing
+you're pursuing is the fucking space on disk the stupid database takes???
+because if that's the case that's so far off from being a priority."* The
+default policy exists so the contract is honest and bounded, not to make the
+store small. Do not open work whose stated goal is fewer bytes on disk.
+
+**The default excludes tombstones.** They were ruled PERMANENT on 2026-07-11
+(`docs/design/retraction-and-negative-deltas.md` §7: *"tombstone retention is
+PERMANENT … the door refuses redelivered deleted events for the life of the
+replica"*), and that ruling stands — a default policy that quietly collected
+them would reopen the resurrection window it was written to close.
+
+**Not yet built.** The engine calls no eviction door for canonical events
+today, so the policy above is a decision without an implementation; see
+`docs/known-gaps.md`. Until it exists, the store-level `RedbStore::gc` door
+remains the only explicit claim-based eviction operation: it reports what it
+evicted and lowers or removes every affected coverage interval in the same
+transaction as the row deletion. Whatever policy lands must preserve that
+governed operation; it must never turn a RAM ceiling or an implicit
+maintenance pass into silent durable deletion.
 
 ## Access context matters
 
