@@ -1998,13 +1998,13 @@ mod coverage_evidence_refresh_tests {
             })
             .unwrap();
         let wire = wire_id(&core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64))));
-        let remembered = core.history.expect_live(id).last_rows.clone();
+        let remembered = core.history.projection(id);
         core.history_store_queries.set(0);
 
         eose(&mut core, transport, session, wire);
 
         assert_eq!(core.history_store_queries.get(), 0);
-        assert_eq!(core.history.expect_live(id).last_rows, remembered);
+        assert_eq!(core.history.projection(id), remembered);
     }
 
     #[test]
@@ -2037,8 +2037,8 @@ mod coverage_evidence_refresh_tests {
                 .unwrap()
                 .projection_complete = false
         });
-        core.white_box("history.get_mut", |s| {
-            s.history.get_mut(history_id).unwrap().projection_complete = false
+        core.white_box("history.force_projection_incomplete", |s| {
+            s.history.force_projection_incomplete(history_id)
         });
         core.projection_store_queries.set(0);
         core.history_store_queries.set(0);
@@ -2054,6 +2054,6 @@ mod coverage_evidence_refresh_tests {
         assert_eq!(core.projection_store_queries.get(), 1);
         assert_eq!(core.history_store_queries.get(), 1);
         assert!(core.observations[&live_id].projection_complete);
-        assert!(core.history.expect_live(history_id).projection_complete);
+        assert!(core.history.projection(history_id).projection_complete);
     }
 }

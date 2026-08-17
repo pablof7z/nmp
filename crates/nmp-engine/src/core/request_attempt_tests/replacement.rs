@@ -231,7 +231,7 @@ fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candida
             .count(),
         1
     );
-    assert!(!core.nip77.has_live(&first_plan_sub));
+    assert_eq!(core.nip77.live_for_plan(&first_plan_sub), None);
     assert_eq!(core.bench_ownership_census().request_replacement_jobs, 0);
 }
 

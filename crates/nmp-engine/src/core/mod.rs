@@ -458,6 +458,10 @@ pub use diagnostics::{
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
 use history_lifecycle::HistorySessions;
+#[cfg(test)]
+use history_lifecycle::WindowProjection;
+#[cfg(test)]
+use nip77_sessions::RepairPhase;
 use nip77_sessions::{Nip77Sessions, PlanRepairWithdrawal, PlanRole};
 use observation::{
     ActiveRequestEvidence, LiveWireRequest, ObservationExecutionState, PendingRequestEvidence,
