@@ -265,19 +265,22 @@ still runs).
 spawns a sibling executable, `canary-c9-publisher`, that constructs an engine
 over a store path handed to it, adds and persists a local-key account
 (needed so the SAME signer exists again after restart), publishes one real
-signed event under a caller-supplied correlation token, prints
-machine-readable stdout markers as it reaches each fact the parent needs,
-then parks doing nothing further. The parent waits for a marker with a
-bounded timeout, `kill -9`s the child for real, then opens a FRESH engine
-in-process over the SAME store path with the persisted session restored,
-reattaches the receipt by correlation, and proves recovery through the
-public API only:
+signed event with no correlation token at all, prints machine-readable
+stdout markers as it reaches each fact the parent needs, then parks doing
+nothing further. The parent waits for a marker with a bounded timeout,
+`kill -9`s the child for real, then opens a FRESH engine in-process over the
+SAME store path with the persisted session restored, finds the obligation by
+enumerating `publishQueue` — not by a correlation token remembered across
+the crash, which would just be an app-owned shadow ledger of NMP's own
+durable queue (#1770) — reattaches by the discovered receipt id, and proves
+recovery through the public API only:
 
 1. **After local acceptance, before delivery completes** (relay reachable,
    killed as fast as possible after the acceptance marker — a real race
    against real network timing, not a deterministic setup). Obligation
-   found by `reattachReceipt(correlation:)`; canonical row visible; delivery
-   resumes and settles with no further app action; no duplicate row.
+   found by enumerating `publishQueue` and reattached with
+   `reattachReceipt(id:)`; canonical row visible; delivery resumes and
+   settles with no further app action; no duplicate row.
 2. **While the relay is unreachable** (`RelayHandle.partition()` before the
    child ever starts, so nothing was ever sent — deterministic by
    construction, not a timing race). Same recovery proof, plus: healing the
@@ -291,10 +294,11 @@ public API only:
    back to `.waiting`/`.sent` — none observed, across every run — while the
    still-pending relay (healed after the crash) completes normally.
 
-All three passed on every run (4 consecutive full-suite runs, ~1s each).
-Falsified three ways, each restored afterward: pointing the restarted
-engine at a different store path made `reattachReceipt` correctly report
-`.notFound`; skipping the post-crash `heal()` in case 2 made recovery
+All three passed on every run (4 consecutive full-suite runs, ~1s each) as
+originally validated. Falsified three ways at that time, each restored
+afterward: pointing the restarted engine at a different store path made
+`reattachReceipt` correctly report `.notFound`; skipping the post-crash
+`heal()` in case 2 made recovery
 correctly fail to complete (the failure surfaced as "canonical state did
 not survive" rather than a more precise "delivery never resumed" — an
 honest imprecision in the test's own failure labeling, not a false
@@ -315,6 +319,20 @@ payload is not optional plumbing but a hard prerequisite for any of this to
 work — exactly the case the shipped `AppModel`/Compose session persistence
 already covers, but worth stating as a discovered fact here rather than an
 assumption.
+
+**Superseded (#1770):** the paragraphs above describe C9 as it was first
+proven, when the app minted its own correlation token and the parent test
+handed that same token to the recovery half by argv. That shape proved the
+engine recovers a *known* obligation, not that an app can *find* one after a
+crash — the actual half an app author has to build. `publishQueue` already
+answered "what have I got outstanding" without an app-side ledger
+(`Receipt.swift:184`), so both the shipped `AppModel` and this test's
+recovery half now enumerate it instead: no correlation token is minted by
+`canary-c9-publisher` at all, and `assertRecovery` finds the obligation via
+`publishQueue(limit:)` before reattaching by `reattachReceipt(id:)`. The
+Canary's own `UserDefaults` correlation ledger (`AppModel`/`ComposeView`,
+built twelve days after `publishQueue` shipped) is deleted for the same
+reason.
 
 Two facts about the starting position, established by survey:
 
