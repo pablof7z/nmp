@@ -2044,6 +2044,18 @@ pub struct EngineCore {
     /// positive outbound route. Keeping the prior value here makes provider
     /// synchronization an edge rather than a repeated side effect of every
     /// unrelated recompile.
+    ///
+    /// Deliberately stays here rather than moving into `AuthorRouteNeeds`:
+    /// it is the last-published snapshot of `author_route_needs()`'s UNION,
+    /// which mixes write-plane state (`pending`'s `route_needs`, refreshed
+    /// per intent by the route resolver in `write.rs`) with this owner's own
+    /// `needs`. `AuthorRouteNeeds` deliberately knows nothing about `pending`
+    /// or write intents -- giving it this field would mean giving it that
+    /// visibility too, trading one coordinator-level field for a real
+    /// boundary violation. The root composition/order state this field
+    /// represents (the last thing told to an outside consumer, unioning two
+    /// owners' contributions) belongs with the coordinator that computes the
+    /// union, not with either half of it.
     last_author_route_needs: BTreeSet<PublicKey>,
     /// Which open obligations are stuck and the bounded projection of them
     /// diagnostics snapshots carry (#1743). Its three fields are private to

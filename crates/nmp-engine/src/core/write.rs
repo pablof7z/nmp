@@ -5529,8 +5529,16 @@ impl EngineCore {
     ///
     /// A need is not a subscription. Optional protocol assembly reads this
     /// neutral set and owns any exact query it opens.
+    ///
+    /// This is the sole authority on whether `Effect::AuthorRouteNeedsChanged`
+    /// is published: an exact diff against `last_author_route_needs`, called
+    /// both directly (boot recovery, `rewrite_open_routes`) and gated by
+    /// [`AuthorRouteNeeds::take_pending_change`] via
+    /// `flush_author_outbox_route_need_changes`. It deliberately does not
+    /// also consult or clear that flag here -- `take_pending_change` exists
+    /// for exactly one caller to decide whether calling this function is
+    /// worth it, not for this function to re-derive its own answer from.
     pub(super) fn resync_route_needs(&mut self, effects: &mut Vec<Effect>) {
-        self.author_outbox_route_needs.take_pending_change();
         let current = self.author_route_needs();
         if current != self.last_author_route_needs {
             self.last_author_route_needs = current.clone();

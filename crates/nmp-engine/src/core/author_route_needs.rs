@@ -29,13 +29,27 @@
 //! from zero live owners to one). Once an author is recorded as needing a
 //! provider, the *incremental* path never reconsiders that record while the
 //! author keeps a live owner -- a route learned later does not erase the
-//! need mid-flight there. But a wholesale rebuild reconsiders every live
-//! author against the routing facts of the moment, because it replays
-//! `retain` from empty: an author who now has a positive route is not
-//! re-inserted, and so drops out of the rebuilt need set even though their
-//! wire ownership never lapsed. Both halves are existing behavior this owner
-//! preserves exactly, not a new invariant introduced here -- a route learned
-//! mid-flight is only ever noticed the next time something rebuilds.
+//! need mid-flight through `retain`/`release` alone. Only a wholesale
+//! rebuild reconsiders every live author against the routing facts of the
+//! moment, because it replays `retain` from empty: an author who now has a
+//! positive route is not re-inserted, and so drops out of the rebuilt need
+//! set even though their wire ownership never lapsed. This is existing
+//! behavior this owner preserves exactly, not a new invariant introduced
+//! here.
+//!
+//! This is not an open-ended staleness window in production today: the
+//! coordinator's sole production writer of routing facts,
+//! `EngineCore::replace_author_routes`, always calls `recompile` --
+//! and therefore this owner's rebuild -- synchronously in the same turn a
+//! route changes, so nothing outside `EngineCore` ever observes the
+//! incremental-only state. What the two-path split *does* make load-bearing
+//! is entirely inside that one turn: `recompile`'s own
+//! `flush_author_outbox_route_need_changes` is the only mechanism that can
+//! notice a route-driven retirement and publish `Effect::AuthorRouteNeedsChanged`
+//! when there is no open write intent for `rewrite_open_routes` to walk (that
+//! function returns early, and does not resync, when nothing is pending) --
+//! see [`AuthorRouteNeeds::finish_rebuild`] below for why that gate needs an
+//! exact answer.
 //!
 //! Likewise, which live-wire atoms even name an author for `AuthorOutboxes`
 //! demand is a `ContextualAtom` question the coordinator answers before
@@ -142,7 +156,10 @@ impl AuthorRouteNeeds {
     }
 
     /// Return whether the need set changed since the last check, and clear
-    /// the flag as one transition.
+    /// the flag as one transition. `#[must_use]`: a caller that clears this
+    /// without acting on the result has reintroduced the "maintained by
+    /// consensus" shape this owner exists to remove.
+    #[must_use]
     pub(super) fn take_pending_change(&mut self) -> bool {
         std::mem::take(&mut self.changed)
     }

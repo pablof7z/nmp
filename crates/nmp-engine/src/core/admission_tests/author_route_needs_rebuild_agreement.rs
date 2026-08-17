@@ -66,15 +66,26 @@ fn rebuilding_author_route_needs_reproduces_the_incremental_state_exactly() {
 /// coordinator's rebuild call actually reaches it end to end, not just at
 /// the owner's own unit-test level.
 ///
-/// This is a real, reachable divergence between the two paths, not a
-/// fabricated one: `release` only ever drops an author from `needs` when
-/// its wire-owner count reaches zero, and `retain` only ever reconsiders
-/// route status on the zero-to-one transition. Neither runs when a route is
-/// learned mid-flight with the owner count staying nonzero throughout, so
-/// the incremental-only state is genuinely stale -- wrong, not merely
-/// theoretically inconsistent -- until the next rebuild repairs it. The
-/// assertions below prove both halves: the staleness is real (first
-/// `assert!`), and the unified rebuild path corrects it (second `assert!`).
+/// `EngineCore::replace_author_routes` is the sole production writer of
+/// routing facts, and it always calls `recompile` -- which reaches this
+/// owner's rebuild -- synchronously in the same turn a route changes. So
+/// production never actually leaves the incremental-only state sitting
+/// around observable from outside `EngineCore`; there is no multi-turn
+/// staleness window to reach here. What this test does is decompose that
+/// one atomic turn into its two halves, using `routing_facts.writer()`
+/// directly instead of `replace_author_routes` so the intermediate,
+/// incremental-only state can be inspected and asserted on its own, the way
+/// `replace_author_routes` never lets a caller observe it. Doing that proves
+/// the mechanism `finish_rebuild`'s exact diff exists for: within that one
+/// turn, `recompile`'s `flush_author_outbox_route_need_changes` is the only
+/// thing that can notice this retirement and publish
+/// `Effect::AuthorRouteNeedsChanged` for a subscriber with no open write
+/// intent (`rewrite_open_routes` returns early, without resyncing, when
+/// nothing is pending) -- so an inexact flag there would silently drop the
+/// event on exactly this path. The assertions below prove both halves of
+/// the mechanism: the incremental-only half is genuinely wrong on its own
+/// (first `assert!`), and the unified rebuild path corrects it (second
+/// `assert!`).
 #[test]
 fn a_route_learned_between_rebuilds_is_reflected_by_the_next_rebuild_only() {
     let author = Keys::generate().public_key();
@@ -86,10 +97,12 @@ fn a_route_learned_between_rebuilds_is_reflected_by_the_next_rebuild_only() {
     assert!(core.author_outbox_route_needs.needs_set().contains(&author));
     assert_eq!(core.author_outbox_route_needs.wire_owner_count(&author), 1);
 
-    // Learn a positive route WITHOUT going through `replace_author_routes`
-    // (which would itself trigger `recompile`): write the fact directly, so
-    // the incremental wire-owner state is provably untouched by this step,
-    // and the author's wire-owner count never lapses to zero and back.
+    // Isolate the first half of `replace_author_routes`'s one atomic turn:
+    // write the fact directly, WITHOUT the `recompile` call
+    // `replace_author_routes` always makes in the same turn in production,
+    // so the incremental-only state below can be inspected on its own. The
+    // author's wire-owner count never lapses to zero and back -- this is a
+    // route learned mid-flight, not a departure/re-arrival.
     core.routing_facts.writer().replace(
         author,
         AuthorRouteReplacement::Present(AuthorRoutes::new([relay], [])),
