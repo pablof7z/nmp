@@ -1491,6 +1491,12 @@ struct EngineWiring<'a> {
     cmd_rx: &'a Receiver<Cmd>,
     self_inbox: &'a Sender<Cmd>,
     startup_ready: Sender<()>,
+    /// Test-only pass counter for the outer `loop {}` below -- see
+    /// [`EngineThread::engine_loop_iterations`] for why this exists and how
+    /// it is used to falsify a busy-spinning `recv_timeout` from OUTSIDE
+    /// this crate without depending on whole-process CPU time (#1796).
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    loop_iterations: &'a std::sync::atomic::AtomicU64,
 }
 
 /// Shutdown is finished when no lifecycle can still run FOREIGN code.
@@ -1538,6 +1544,8 @@ fn engine_loop(
         cmd_rx,
         self_inbox,
         startup_ready,
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        loop_iterations,
     } = wiring;
     let EnginePoolRuntime {
         pool,
@@ -1653,6 +1661,13 @@ fn engine_loop(
     let mut shutting_down = false;
     let mut store_recovery = StoreRecoveryDriver::default();
     loop {
+        // One pass = one arm-then-wait-then-handle cycle: at most one per
+        // external command or fired deadline when parked correctly (D8). A
+        // busy-spinning `recv_timeout(0)` would run this thousands of times
+        // over the same wall-clock window instead -- see
+        // [`EngineThread::engine_loop_iterations`].
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        loop_iterations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if core.take_store_recovery_request().is_some() {
             store_recovery.arm_now(Instant::now());
         }

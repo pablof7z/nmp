@@ -814,29 +814,16 @@ async fn accepted_requests_are_immutable_and_reconnect_replays_each_once() {
 // `recv_timeout` arming itself off `core::EngineCore::next_deadline()` and
 // firing `EngineMsg::Tick` on its own, exactly the property #39 asks for.
 
-/// Wall-clock CPU time consumed by THIS process so far (`getrusage`,
-/// user+sys). Used only by [`no_deadlines_blocks_indefinitely`] below --
-/// see that test's doc for why this is the one black-box way to falsify a
-/// busy-spinning `recv_timeout(0)` loop from outside `nmp`.
-fn process_cpu_time() -> Duration {
-    // SAFETY: `libc::getrusage` writes into a `libc::rusage` we own and
-    // fully overwrite before reading any field back out of it; `usage` is
-    // never read before `getrusage` populates it.
-    unsafe {
-        let mut usage: libc::rusage = std::mem::zeroed();
-        let rc = libc::getrusage(libc::RUSAGE_SELF, &mut usage);
-        assert_eq!(rc, 0, "getrusage(RUSAGE_SELF) must succeed");
-        let user = Duration::new(
-            usage.ru_utime.tv_sec as u64,
-            (usage.ru_utime.tv_usec as u32) * 1_000,
-        );
-        let sys = Duration::new(
-            usage.ru_stime.tv_sec as u64,
-            (usage.ru_stime.tv_usec as u32) * 1_000,
-        );
-        user + sys
-    }
-}
+/// Above this many passes through `engine_loop`'s outer `loop {}` in an idle
+/// window, treat the engine thread as busy-spinning rather than parked.
+///
+/// Generous headroom over the "a handful of legitimate wakeups" a correctly
+/// parked loop produces (each external command or fired deadline is at most
+/// one pass), while sitting far below what even a brief hot `recv_timeout(0)`
+/// spin produces: each pass is a handful of cheap, syscall-free comparisons,
+/// so a real spin racks up many thousands of passes within tens of
+/// milliseconds, let alone across the multi-second windows these tests use.
+const MAX_IDLE_LOOP_ITERATIONS: u64 = 50;
 
 /// #39 test obligation `no_deadlines_blocks_indefinitely`: an engine thread
 /// with zero subscriptions has no wire demand, hence no expiring content and
@@ -844,11 +831,21 @@ fn process_cpu_time() -> Duration {
 /// `None` from the moment it is built, so `engine_loop` must be blocking on
 /// a plain `cmd_rx.recv()`, never a hot `recv_timeout(0)` loop (D8). No
 /// `Effect` crosses the wire in this scenario (a spurious tick with nothing
-/// due produces an empty effect vec -- see `EngineCore::tick`), so the only
-/// way to falsify a busy-spin from OUTSIDE the crate is to measure real
-/// process CPU consumed across an idle window: blocking `recv()` costs
-/// (near) zero CPU no matter how long it waits, while a hot loop would burn
-/// roughly one core's worth of CPU time per unit of wall time.
+/// due produces an empty effect vec -- see `EngineCore::tick`), so this
+/// falsifies a busy-spin from OUTSIDE the crate by counting passes through
+/// `engine_loop`'s own outer loop (`EngineThread::engine_loop_iterations`,
+/// #1796) across an idle window: a parked `recv()` advances that count by at
+/// most one no matter how long it waits, while a hot loop advances it by
+/// many thousands.
+///
+/// This used to sample whole-process CPU time (`getrusage(RUSAGE_SELF)`)
+/// instead. That measurement is not scoped to the engine thread: under
+/// `cargo test --workspace` this binary runs its own tests as parallel
+/// THREADS in the same process, so any concurrent test's CPU landed in the
+/// same sample and could fail this assertion for a reason unrelated to its
+/// subject (#1796). The loop-pass counter is scoped to the engine thread by
+/// construction -- no other thread can ever touch it -- so concurrent tests
+/// are irrelevant to it.
 #[test]
 fn no_deadlines_blocks_indefinitely() {
     let (engine_thread, handle) = EngineThread::spawn(
@@ -860,15 +857,16 @@ fn no_deadlines_blocks_indefinitely() {
 
     // Let the engine thread settle onto its idle `recv()` before sampling.
     std::thread::sleep(Duration::from_millis(100));
-    let before = process_cpu_time();
+    let before = engine_thread.engine_loop_iterations();
     std::thread::sleep(Duration::from_millis(500));
-    let after = process_cpu_time();
+    let after = engine_thread.engine_loop_iterations();
 
     assert!(
-        after.saturating_sub(before) < Duration::from_millis(150),
+        after.saturating_sub(before) < MAX_IDLE_LOOP_ITERATIONS,
         "an engine thread with no deadlines must block on a plain recv() -- \
-         a busy-spinning recv_timeout(0) loop would consume CPU on the order \
-         of the whole 500ms idle window instead: consumed {:?}",
+         a busy-spinning recv_timeout(0) loop would run its outer loop many \
+         thousands of times over the same 500ms idle window instead: \
+         {} pass(es) observed",
         after.saturating_sub(before)
     );
 
@@ -1145,19 +1143,23 @@ fn neg_liveness_deadline_does_not_busy_spin() {
     wait_for_frame_containing(&frames_rx, Duration::from_secs(10), "\"NEG-OPEN\"");
 
     // The session is now open with `started_at` close to a fresh whole-
-    // second boundary (per the phase alignment above). Measure CPU across a
-    // window that comfortably straddles its `started_at + 30` liveness
-    // deadline either way: a pre-fix busy-spin burns roughly one core for
-    // close to a full second inside this window; blocking `recv`/
-    // `recv_timeout` costs (near) zero no matter how long any of it waits.
-    let before = process_cpu_time();
+    // second boundary (per the phase alignment above). Measure engine-loop
+    // passes (`EngineThread::engine_loop_iterations`, #1796) across a window
+    // that comfortably straddles its `started_at + 30` liveness deadline
+    // either way: a pre-fix busy-spin runs the outer loop many thousands of
+    // times inside this window; blocking `recv`/`recv_timeout` advances it
+    // by only a handful of passes no matter how long any of it waits. Scoped
+    // to the engine thread by construction, so unlike whole-process CPU time
+    // it stays load-immune under `cargo test --workspace`'s parallel threads.
+    let before = engine_thread.engine_loop_iterations();
     thread::sleep(Duration::from_secs(33));
-    let after = process_cpu_time();
+    let after = engine_thread.engine_loop_iterations();
     assert!(
-        after.saturating_sub(before) < Duration::from_millis(400),
+        after.saturating_sub(before) < MAX_IDLE_LOOP_ITERATIONS,
         "the neg-liveness deadline crossing must not busy-spin -- a \
-         recv_timeout(0) hot loop stuck on the pre-fix off-by-one would \
-         burn close to a full core-second inside this window: consumed {:?}",
+         recv_timeout(0) hot loop stuck on the pre-fix off-by-one would run \
+         the outer loop many thousands of times inside this window: \
+         {} pass(es) observed",
         after.saturating_sub(before)
     );
 

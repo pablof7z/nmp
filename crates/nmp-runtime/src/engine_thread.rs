@@ -56,6 +56,10 @@ pub struct EngineThread {
     clock: EngineClock,
     #[cfg(test)]
     runtime_threads: Arc<std::sync::atomic::AtomicUsize>,
+    /// Test-only: total passes through `engine_loop`'s outer `loop {}` so
+    /// far. See [`Self::engine_loop_iterations`].
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    loop_iterations: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg(test)]
@@ -380,6 +384,8 @@ impl EngineThread {
         let relay_information = RelayInformationService::new(runtime.handle().clone());
         #[cfg(test)]
         let runtime_threads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        let loop_iterations = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let max_engine_batch = pool_config.max_engine_batch.max(1);
         let max_engine_batch_bytes = pool_config.max_engine_batch_bytes.max(1);
         let max_engine_batch_wait = pool_config
@@ -461,6 +467,8 @@ impl EngineThread {
         let engine_relay_information = relay_information.clone();
         #[cfg(test)]
         let engine_runtime_threads = Arc::clone(&runtime_threads);
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        let engine_loop_iterations = Arc::clone(&loop_iterations);
         let engine_join =
             match thread::Builder::new()
                 .name("nmp-engine".to_string())
@@ -488,6 +496,8 @@ impl EngineThread {
                                 cmd_rx: &cmd_rx,
                                 self_inbox: &self_inbox,
                                 startup_ready: startup_ready_tx,
+                                #[cfg(any(test, feature = "test-instrumentation"))]
+                                loop_iterations: &engine_loop_iterations,
                             },
                         )
                     })
@@ -524,6 +534,8 @@ impl EngineThread {
                 clock,
                 #[cfg(test)]
                 runtime_threads,
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                loop_iterations,
             },
             Handle {
                 inbox: cmd_tx,
@@ -555,6 +567,34 @@ impl EngineThread {
     #[must_use]
     pub fn clock(&self) -> EngineClock {
         self.clock.clone()
+    }
+
+    /// Test-only proof seam (#1796): total passes so far through
+    /// `engine_loop`'s outer `loop {}` -- one arm-then-wait-then-handle
+    /// cycle per pass, at most one per external command or fired deadline
+    /// when the loop is parked correctly (D8).
+    ///
+    /// This exists because the black-box way `no_deadlines_blocks_
+    /// indefinitely`/`neg_liveness_deadline_does_not_busy_spin`
+    /// (`crates/nmp/tests/runtime_integration.rs`) used to falsify a
+    /// busy-spinning `recv_timeout` from OUTSIDE this crate was to sample
+    /// whole-PROCESS CPU time (`getrusage(RUSAGE_SELF)`) across an idle
+    /// window. Under `cargo test --workspace` that binary runs many tests
+    /// as parallel THREADS in the same process, so any concurrent test's
+    /// CPU landed in the same measurement -- the assertion could not tell
+    /// "the engine thread is busy-spinning" from "something else in this
+    /// process was busy" (#1796). Counting passes through this loop instead
+    /// is scoped to the engine thread by construction: no other thread can
+    /// ever touch this counter, so concurrent tests are irrelevant to it. A
+    /// parked loop advances it by at most a handful of counts across a
+    /// multi-second idle window; a hot `recv_timeout(0)` spin advances it by
+    /// many thousands, so a generous fixed bound stays load-immune in
+    /// either direction.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[must_use]
+    pub fn engine_loop_iterations(&self) -> u64 {
+        self.loop_iterations
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Block until the engine and pool-bridge threads have exited. Only
