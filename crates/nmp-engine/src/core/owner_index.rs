@@ -1,5 +1,5 @@
 //! The mirrored-index mechanism `nip77_sessions.rs` introduced, generalized
-//! over its owner key type (#1562).
+//! over its owner key type (#1606).
 //!
 //! `PlanIndexed` mirrored a map of children keyed by their own wire id against
 //! a reverse index from the router plan (a [`nmp_router::SubId`]) that owned

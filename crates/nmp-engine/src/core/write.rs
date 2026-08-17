@@ -361,7 +361,7 @@ impl EngineCore {
     /// used to spell the removal by hand and only two of them pruned: the
     /// successor rewrite in `write/replaceable_operation.rs` left an empty
     /// set under every retired generation's event id, once per rewrite, until
-    /// the next boot recovery (#1562). One door, so the two spellings cannot
+    /// the next boot recovery (#1606). One door, so the two spellings cannot
     /// diverge again.
     pub(super) fn unindex_receipt_from_event(&mut self, event_id: EventId, id: ReceiptId) {
         let Some(receipts) = self.event_to_receipts.get_mut(&event_id) else {
@@ -3351,7 +3351,7 @@ impl EngineCore {
             debug_assert!(generation.members.contains(&member));
             // Releases every relay this member's old generation had
             // persisted lanes on from `receipts_by_lane_relay`, through the
-            // one diff `replace_lane_projection` also uses (#1562). Run
+            // one diff `replace_lane_projection` also uses (#1606). Run
             // first, as its own `&mut self` call, because it cannot run
             // while `pending` below holds `self.pending`'s only mutable
             // borrow.
