@@ -1,13 +1,30 @@
 //! The falsifier the two wire-ownership algorithms never had.
 //!
-//! Live-wire ownership is reached two ways: incrementally, as each branch
-//! attaches and detaches, and wholesale, every time `recompile` rebuilds it
-//! from the current handle set. `recompile` is not a repair pass — nothing
-//! marks the incremental state suspect before it runs — so the two must
-//! already agree at every instant. Nothing checked that they did.
+//! Live-wire ownership itself is reached two ways: incrementally, as each
+//! branch attaches and detaches, and wholesale, every time `recompile`
+//! rebuilds it from the current handle set. For `WireOwnership` specifically,
+//! `recompile` is not a repair pass — nothing but handle attach/detach can
+//! move this owner's state, and nothing marks the incremental state suspect
+//! before a rebuild runs — so the two must already agree at every instant.
+//! Nothing checked that they did.
 //!
-//! These assert it directly: reach a state incrementally, rebuild, and demand
-//! the result be identical — both as an exact structure and as a census.
+//! That "not a repair pass" property does NOT hold for every owner
+//! `rebuild_wire_ownership` also rebuilds. `AuthorRouteNeeds`
+//! (`author_route_needs.rs`) is reached by a third input besides
+//! attach/detach: routing facts, read only at rebuild time. Its incremental
+//! path never reconsiders an author once recorded as needing a provider
+//! while their wire ownership persists, so a route learned mid-flight leaves
+//! it stale on purpose until the next rebuild repairs it — see that module's
+//! doc and `admission_tests/author_route_needs_rebuild_agreement.rs` for the
+//! falsifier proving exactly that repair. The census below did not cover
+//! `AuthorRouteNeeds` at all until that owner was extracted (#1758); it does
+//! now, but a rebuild that merely reaches the SAME quantities is a much
+//! weaker claim for this one owner than "agrees with the incremental path",
+//! precisely because a rebuild is allowed -- expected -- to correct it.
+//!
+//! These assert wire ownership's agreement directly: reach a state
+//! incrementally, rebuild, and demand the result be identical — both as an
+//! exact structure and as a census.
 //!
 //! The two checks answer different questions and neither replaces the other.
 //! `assert_owner_consistency` proves each owner's mirrors are internally exact

@@ -1109,6 +1109,9 @@ pub struct CoreOwnershipCensus {
     /// one of four, and a rebuild that double-counted was invisible.
     pub wire_owner_refs: usize,
     pub wire_reverse_owner_keys: usize,
+    pub author_outbox_wire_owner_keys: usize,
+    pub author_outbox_wire_owner_refs: usize,
+    pub author_outbox_route_needs: usize,
     pub wire_coverage_keys: usize,
     pub wire_coverage_edges: usize,
     pub wire_demand_keys: usize,
@@ -2659,6 +2662,7 @@ impl EngineCore {
         let attempts = self.attempts.counts();
         let history = self.history.counts();
         let wire = self.wire.counts();
+        let author_outbox = self.author_outbox_route_needs.counts();
         let targets = self.request_targets.counts();
         let nip77 = self.nip77.counts();
         let replacements = self.request_replacements.counts();
@@ -2696,6 +2700,9 @@ impl EngineCore {
             wire_owner_keys: wire.owner_keys,
             wire_owner_refs: wire.owner_refs,
             wire_reverse_owner_keys: wire.reverse_owner_keys,
+            author_outbox_wire_owner_keys: author_outbox.wire_owner_keys,
+            author_outbox_wire_owner_refs: author_outbox.wire_owner_refs,
+            author_outbox_route_needs: author_outbox.needs,
             wire_coverage_keys: wire.coverage_keys,
             wire_coverage_edges: wire.coverage_edges,
             wire_demand_keys: wire.demand_keys,

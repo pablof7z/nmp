@@ -72,6 +72,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nostr::PublicKey;
 
+/// The census contribution, so the root counts this owner's state without
+/// naming its maps. `wire_rebuild_agreement.rs` compares this census across
+/// a rebuild the same way it compares `WireOwnership`'s; without these
+/// fields that comparison is blind to everything this owner holds.
+#[cfg(any(test, feature = "bench-instrumentation"))]
+pub(super) struct AuthorRouteNeedsCounts {
+    pub(super) wire_owner_keys: usize,
+    pub(super) wire_owner_refs: usize,
+    pub(super) needs: usize,
+}
+
 /// Exact live-wire owner count per author contributed by `AuthorOutboxes`
 /// demand, and the subset of those authors still needing a neutral provider.
 #[derive(Default)]
@@ -177,6 +188,15 @@ impl AuthorRouteNeeds {
                 "{at}: {author} is recorded as needing a provider route with no live \
                  author-outbox wire owner"
             );
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) fn counts(&self) -> AuthorRouteNeedsCounts {
+        AuthorRouteNeedsCounts {
+            wire_owner_keys: self.wire_owner_counts.len(),
+            wire_owner_refs: self.wire_owner_counts.values().sum(),
+            needs: self.needs.len(),
         }
     }
 }
