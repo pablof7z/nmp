@@ -162,7 +162,7 @@ pub(super) struct PostingsBatch {
     deaths: BTreeSet<EventKey>,
 }
 
-struct PendingEvent {
+pub(super) struct PendingEvent {
     event: Arc<RunEvent>,
     author: [u8; 32],
     kind: [u8; 2],
@@ -170,7 +170,7 @@ struct PendingEvent {
 }
 
 impl PendingEvent {
-    fn prepare(event: &Event, event_key: EventKey) -> Self {
+    pub(super) fn prepare(event: &Event, event_key: EventKey) -> Self {
         let mut tags = BTreeSet::new();
         for tag in event.tags.iter() {
             let (Some(name), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
@@ -220,7 +220,7 @@ impl PostingsBatch {
     }
 }
 
-fn publish_pending(
+pub(super) fn publish_pending(
     write_txn: &redb::WriteTransaction,
     events: &BTreeMap<EventKey, PendingEvent>,
 ) -> Result<(), PersistenceError> {
@@ -656,7 +656,7 @@ fn decode_run_id(value: &[u8]) -> Result<u64, PersistenceError> {
 
 /// Every live [`RunMeta`], in run-id order, without the relational checks
 /// [`load_run_catalog`] adds.
-fn catalog_run_metas(
+pub(super) fn catalog_run_metas(
     catalog: &impl ReadableTable<&'static [u8], &'static [u8]>,
 ) -> Result<Vec<RunMeta>, PersistenceError> {
     let (lower, upper) = catalog_column_bounds(CATALOG_RUN_META);
@@ -802,7 +802,7 @@ fn apply_deaths(
     Ok(())
 }
 
-fn apply_run_deaths(
+pub(super) fn apply_run_deaths(
     write_txn: &redb::WriteTransaction,
     run_id: u64,
     keys: Vec<EventKey>,
@@ -816,6 +816,21 @@ fn apply_run_deaths(
         .ok_or_else(|| packed_err("death target has no run metadata"))?;
     let mut meta = RunMeta::decode(value.value()).map_err(packed_err)?;
     drop(value);
+
+    // Ground truth for how many events this run ever held. A run's
+    // dictionary is written once at publication and never mutated again, so
+    // its length -- not the stored, arithmetically-updated `live_events`
+    // counter -- is what `live_events` must be computed *from* below (#1817).
+    // `DictionaryView::parse` only reads the header; this costs nothing more
+    // than the catalog lookup already required.
+    let dictionary_bytes = catalog
+        .get(catalog_key(CATALOG_DICTIONARY, run_id).as_slice())
+        .map_err(persist_err)?
+        .ok_or_else(|| packed_err(format!("run {run_id} has no dictionary")))?;
+    let total_events = DictionaryView::parse(dictionary_bytes.value())
+        .map_err(packed_err)?
+        .len() as u64;
+    drop(dictionary_bytes);
 
     let mut existing = Vec::new();
     for level in 0..MAX_DEATH_BLOCKS {
@@ -839,10 +854,21 @@ fn apply_run_deaths(
         return Ok(());
     }
     let fresh_count = fresh.len() as u64;
-    if fresh_count > meta.live_events {
-        return Err(packed_err("death count exceeds run live count"));
-    }
-    meta.live_events -= fresh_count;
+    // Derived, not decremented: `live_events` is recomputed from the run's
+    // total event count and the full merged dead set every time a death is
+    // applied, so a previously stored value -- however it got there -- is
+    // never trusted, only overwritten. This is what makes the counter's
+    // drift unrepresentable rather than merely reconciled (#1817): there is
+    // no arithmetic step left that could compound an earlier mistake.
+    let existing_dead_count = existing_union.as_ref().map_or(0, |dead| dead.len() as u64);
+    let total_dead = existing_dead_count
+        .checked_add(fresh_count)
+        .ok_or_else(|| packed_err("run dead-key count overflow"))?;
+    meta.live_events = total_events.checked_sub(total_dead).ok_or_else(|| {
+        packed_err(format!(
+            "run {run_id} has {total_dead} dead events but only {total_events} in its dictionary"
+        ))
+    })?;
     if meta.live_events == 0 {
         drop(catalog);
         return delete_run(write_txn, meta);
@@ -1087,6 +1113,11 @@ fn compact_overfull_levels(write_txn: &redb::WriteTransaction) -> Result<(), Per
     }
 }
 
+/// A whole compaction cohort dying is legitimate here -- level-fan-in
+/// grouping says nothing about liveness, so every run it merges may turn out
+/// to have no survivors -- which is why, unlike [`rewrite_run_without_dead`],
+/// this deletes its inputs unconditionally once `stream_compaction_cohort`
+/// returns and treats `None` as "nothing to publish," not an error.
 fn compact_cohort(
     write_txn: &redb::WriteTransaction,
     level: u8,
@@ -1118,16 +1149,30 @@ fn compact_cohort(
     )
 }
 
-fn rewrite_run_without_dead(
+/// Unlike [`compact_cohort`], whose input cohort can legitimately be dead in
+/// full (every run it merges may have no survivors), this function's only
+/// caller ([`apply_run_deaths`]) reaches it with an `old_meta.live_events`
+/// already proven positive -- the zero case takes the `delete_run` branch
+/// above it and never gets here. A `None` result therefore means the death
+/// set handed to it does not agree with that proof, and the correct response
+/// is to refuse, not to delete `old_meta` and quietly replace it with
+/// nothing (#1817): sharing `compact_cohort`'s tolerance for `None` is
+/// exactly how that silent destruction became expressible. The check runs,
+/// and `old_meta` stays untouched, before `delete_run` is ever called.
+pub(super) fn rewrite_run_without_dead(
     write_txn: &redb::WriteTransaction,
     old_meta: RunMeta,
     dead: &DeadKeys,
 ) -> Result<(), PersistenceError> {
     let output = stream_compaction_cohort(write_txn, &[old_meta], &[Some(dead.clone())])?;
+    let (run_id, min_event_key, max_event_key, live_events) = output.ok_or_else(|| {
+        packed_err(format!(
+            "run {} has live_events={} but rewriting its death set produced no surviving \
+             events; refusing to delete it in favor of nothing",
+            old_meta.run_id, old_meta.live_events
+        ))
+    })?;
     delete_run(write_txn, old_meta)?;
-    let Some((run_id, min_event_key, max_event_key, live_events)) = output else {
-        return Ok(());
-    };
     insert_run_catalog(
         write_txn,
         RunMeta {

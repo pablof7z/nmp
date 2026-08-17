@@ -995,4 +995,7 @@ mod commit_structure_tests;
 mod durability_tests;
 
 #[cfg(test)]
+mod postings_store_tests;
+
+#[cfg(test)]
 mod tests;

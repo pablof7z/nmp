@@ -1085,7 +1085,6 @@ impl DeadKeys {
         self.keys.iter().copied()
     }
 
-    #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.keys.len()
     }
