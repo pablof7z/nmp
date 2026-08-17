@@ -347,16 +347,16 @@ fn removing_or_clearing_session_never_retargets_or_discards_accepted_writes() {
             .add_public_key_account(public_key, true)
             .expect("public-only current account");
         let query = || {
-            LiveQuery::single(
-                Demand::author_outboxes(nmp_grammar::Filter {
+            LiveQuery::single(Demand {
+                selection: nmp_grammar::Filter {
                     kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
                     authors: Some(nmp_grammar::Binding::Literal(BTreeSet::from([
                         public_key.to_hex()
                     ]))),
                     ..nmp_grammar::Filter::default()
-                })
-                .expect("the selection binds `authors`"),
-            )
+                },
+                ..Demand::default()
+            })
         };
         let before_observation = engine
             .observe(query(), None)
@@ -653,7 +653,7 @@ fn loopback_relay_reaches_the_facade_transport_pool_without_opt_in() {
                     .to_hex()]))),
                 ..crate::Filter::default()
             },
-            crate::SourceAuthority::Pinned(BTreeSet::from([relay])),
+            crate::ReadRouting::Explicit(vec![relay]),
             crate::AccessContext::Public,
         )
         .expect("build pinned local-relay demand"),
@@ -2245,10 +2245,13 @@ fn initial_materializer_failures_leave_no_acceptance_residue() {
         );
         let observation = engine
             .observe(
-                LiveQuery::single(Demand::public(nmp_grammar::Filter {
-                    kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
-                    ..nmp_grammar::Filter::default()
-                })),
+                LiveQuery::single(Demand {
+                    selection: nmp_grammar::Filter {
+                        kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
+                        ..nmp_grammar::Filter::default()
+                    },
+                    ..Demand::default()
+                }),
                 None,
             )
             .expect("post-refusal observation opens");
@@ -2415,10 +2418,13 @@ fn repeated_materializations_do_not_change_the_process_thread_count_inner() {
         .expect("first follow enters custody");
     let observation = engine
         .observe(
-            LiveQuery::single(Demand::public(nmp_grammar::Filter {
-                kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
-                ..nmp_grammar::Filter::default()
-            })),
+            LiveQuery::single(Demand {
+                selection: nmp_grammar::Filter {
+                    kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
+                    ..nmp_grammar::Filter::default()
+                },
+                ..Demand::default()
+            }),
             None,
         )
         .expect("contact-list observation opens");
@@ -2738,16 +2744,16 @@ fn history_advance_and_blocking_recv_have_safe_split_ownership() {
         ..EngineConfig::default()
     })
     .expect("engine must build");
-    let query = LiveQuery::single(
-        Demand::author_outboxes(nmp_grammar::Filter {
+    let query = LiveQuery::single(Demand {
+        selection: nmp_grammar::Filter {
             kinds: Some(std::collections::BTreeSet::from([7_777])),
             authors: Some(nmp_grammar::Binding::Literal(
                 std::collections::BTreeSet::from([keys.public_key().to_hex()]),
             )),
             ..nmp_grammar::Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-    );
+        },
+        ..Demand::default()
+    });
     let window = Window::Expandable {
         initial: std::num::NonZeroUsize::new(1).unwrap(),
         max: std::num::NonZeroUsize::new(3).unwrap(),
@@ -3006,12 +3012,15 @@ fn sixty_four_owned_facade_values_do_not_become_engine_retention() {
 }
 
 fn probe_query() -> LiveQuery {
-    LiveQuery::single(Demand::public(nmp_grammar::Filter {
-        // An arbitrary caller-owned kind, not any NIP-01 core schema --
-        // see this module's other fixtures for why.
-        kinds: Some(std::collections::BTreeSet::from([9999u16])),
-        ..nmp_grammar::Filter::default()
-    }))
+    LiveQuery::single(Demand {
+        selection: nmp_grammar::Filter {
+            // An arbitrary caller-owned kind, not any NIP-01 core schema --
+            // see this module's other fixtures for why.
+            kinds: Some(std::collections::BTreeSet::from([9999u16])),
+            ..nmp_grammar::Filter::default()
+        },
+        ..Demand::default()
+    })
 }
 
 fn window_probe() -> Window {

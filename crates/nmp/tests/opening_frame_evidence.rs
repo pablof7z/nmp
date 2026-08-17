@@ -47,7 +47,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use nmp_grammar::{AccessContext, Demand, Filter, Freshness, LiveQuery, SourceAuthority};
+use nmp_grammar::{AccessContext, Demand, Filter, Freshness, LiveQuery, ReadRouting};
 use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_runtime::EngineThread;
 use nmp_store::RedbStore;
@@ -63,9 +63,7 @@ fn branch(host: &str) -> LiveQuery {
             kinds: Some(BTreeSet::from([1u16])),
             ..Filter::default()
         },
-        SourceAuthority::Pinned(BTreeSet::from(
-            [RelayUrl::parse(host).expect("fixture url")],
-        )),
+        ReadRouting::Explicit(vec![RelayUrl::parse(host).expect("fixture url")]),
         AccessContext::Public,
     )
     .expect("a one-relay pinned set is nonempty");

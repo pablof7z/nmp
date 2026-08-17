@@ -33,14 +33,13 @@ final class LiveRelayTests: XCTestCase {
             kinds: [1],
             authors: .derived(
                 inner: NMPDemand(
-                    selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
-                    source: .authorOutboxes
+                    selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey))
                 ),
                 project: .tag("p")
             ),
             limit: 50
         )
-        let query = try engine.observe(.single(NMPDemand(selection: followFeed, source: .authorOutboxes)))
+        let query = try engine.observe(.single(NMPDemand(selection: followFeed)))
         let rows = await Self.firstNonEmptyBatch(from: query, timeoutSeconds: 30)
         query.cancel()
 
@@ -79,8 +78,7 @@ final class LiveRelayTests: XCTestCase {
             kinds: [1],
             authors: .derived(
                 inner: NMPDemand(
-                    selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
-                    source: .authorOutboxes
+                    selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey))
                 ),
                 project: .tag("p")
             ),
@@ -94,7 +92,7 @@ final class LiveRelayTests: XCTestCase {
         let diagnostics = try engine.observeDiagnostics()
         let outcome = try await Self.observeRowsAndCausalDiagnostics(
             diagnostics: diagnostics,
-            openQuery: { try engine.observe(.single(NMPDemand(selection: followFeed, source: .authorOutboxes))) },
+            openQuery: { try engine.observe(.single(NMPDemand(selection: followFeed))) },
             rowsTimeoutSeconds: 30,
             diagnosticsTimeoutSeconds: 10
         )
@@ -143,7 +141,7 @@ final class LiveRelayTests: XCTestCase {
                 try NMPQuery(
                     engine: failedStartEngine,
                     liveQuery: NMPLiveQuery.single(
-                        NMPDemand(selection: NMPFilter(kinds: [1]), source: .public)
+                        NMPDemand(selection: NMPFilter(kinds: [1]))
                     ).toFfi(),
                     window: nil
                 )
@@ -162,7 +160,7 @@ final class LiveRelayTests: XCTestCase {
         let retainedQuery = try NMPQuery(
             engine: oldEngine,
             liveQuery: NMPLiveQuery.single(
-                NMPDemand(selection: NMPFilter(kinds: [1]), source: .public)
+                NMPDemand(selection: NMPFilter(kinds: [1]))
             ).toFfi(),
             window: nil
         )
@@ -194,7 +192,7 @@ final class LiveRelayTests: XCTestCase {
                 try NMPQuery(
                     engine: correctedEngine,
                     liveQuery: NMPLiveQuery.single(
-                        NMPDemand(selection: NMPFilter(kinds: [1]), source: .public)
+                        NMPDemand(selection: NMPFilter(kinds: [1]))
                     ).toFfi(),
                     window: nil
                 )
@@ -223,7 +221,7 @@ final class LiveRelayTests: XCTestCase {
         defer { engine.shutdown() }
 
         let notesFilter = NMPFilter(kinds: [1], authors: .literal([Self.fiatjafHex]), limit: 20)
-        let query = try engine.observe(.single(NMPDemand(selection: notesFilter, source: .authorOutboxes)))
+        let query = try engine.observe(.single(NMPDemand(selection: notesFilter)))
         let rows = await Self.firstNonEmptyBatch(from: query, timeoutSeconds: 30)
         query.cancel()
 

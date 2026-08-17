@@ -12,7 +12,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
             since: Some(100),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
@@ -22,7 +22,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
             since: Some(100),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
@@ -45,7 +45,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
     let sub_id = SubId::for_wire(
         relay.clone(),
         &incumbent.filter,
-        &incumbent.source,
+        &incumbent.routing,
         incumbent.access,
     );
     core.white_box("attribution.retain_live_request_claims", |s| {
@@ -158,7 +158,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
             since: Some(100),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
@@ -168,7 +168,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
             since: Some(100),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
@@ -183,7 +183,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
     let sub_id = SubId::for_wire(
         relay.clone(),
         &incumbent.filter,
-        &incumbent.source,
+        &incumbent.routing,
         incumbent.access,
     );
     core.white_box("attribution.retain_live_request_claims", |s| {
@@ -197,6 +197,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
             filter: &incumbent.filter,
             coverage_claims: BTreeSet::from([incumbent_claim]),
             owner_demands: BTreeSet::from([DemandKey::for_atom(&incumbent)]),
+            lanes: BTreeSet::new(),
             replay: false,
             event_failure_target: EventFailureTarget::ThisSend,
         })
@@ -252,6 +253,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
                 DemandKey::for_atom(&incumbent),
                 DemandKey::for_atom(&added),
             ]),
+            lanes: BTreeSet::new(),
             replay: true,
             event_failure_target: EventFailureTarget::ThisSend,
         })

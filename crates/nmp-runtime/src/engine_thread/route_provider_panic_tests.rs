@@ -62,9 +62,10 @@ fn a_panicking_author_route_provider_does_not_kill_the_engine_thread() {
         ..Filter::default()
     };
     handle
-        .subscribe(LiveQuery::single(
-            Demand::author_outboxes(filter).expect("the selection binds `authors`"),
-        ))
+        .subscribe(LiveQuery::single(Demand {
+            selection: filter,
+            ..Demand::default()
+        }))
         .expect("the subscribe reply itself precedes effect dispatch");
 
     // The reducer processes `Cmd`s strictly in order off one inbox, so by
@@ -76,7 +77,10 @@ fn a_panicking_author_route_provider_does_not_kill_the_engine_thread() {
     let (probe_tx, probe_rx) = mpsc::channel();
     let probe_handle = handle.clone();
     thread::spawn(move || {
-        let result = probe_handle.subscribe(LiveQuery::single(Demand::public(Filter::default())));
+        let result = probe_handle.subscribe(LiveQuery::single(Demand {
+            selection: Filter::default(),
+            ..Demand::default()
+        }));
         let _ = probe_tx.send(result.is_ok());
     });
     assert_eq!(

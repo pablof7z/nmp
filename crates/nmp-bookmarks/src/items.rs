@@ -103,18 +103,20 @@ pub fn parse_bookmarks_tolerant(event: &Event) -> BookmarksList {
 /// for their own single-owned-list kinds.
 #[must_use]
 pub fn current_account_bookmarks_demand() -> Demand {
-    Demand::author_outboxes(Filter {
-        kinds: Some(BTreeSet::from([BOOKMARKS_KIND])),
-        authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-        ..Filter::default()
-    })
-    .expect("the selection binds `authors`")
+    Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([BOOKMARKS_KIND])),
+            authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_grammar::SourceAuthority;
+    use nmp_grammar::ReadRouting;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     #[test]
@@ -125,7 +127,7 @@ mod tests {
             demand.selection.authors,
             Some(Binding::Reactive(IdentityField::ActivePubkey))
         );
-        assert_eq!(demand.source, SourceAuthority::AuthorOutboxes);
+        assert_eq!(demand.routing, ReadRouting::Auto);
     }
 
     fn signed(tags: Vec<Tag>) -> Event {

@@ -1,6 +1,6 @@
 // A construction/round-trip test of the ergonomic Demand descriptor (#107).
 // No network -- this only proves the Swift-value <-> Ffi-value conversion
-// is lossless for every SourceAuthority/AccessContext/CacheMode/Freshness case.
+// is lossless for every ReadRouting/AccessContext/CacheMode/Freshness case.
 
 import XCTest
 @testable import NMP
@@ -9,11 +9,10 @@ import NMPFFI
 final class NMPDemandTests: XCTestCase {
     func testAuthorOutboxesSourceRoundTrips() {
         let demand = NMPDemand(
-            selection: NMPFilter(kinds: [1]),
-            source: .authorOutboxes
+            selection: NMPFilter(kinds: [1])
         )
         let ffi = demand.toFfi()
-        XCTAssertEqual(ffi.source, .authorOutboxes)
+        XCTAssertEqual(ffi.routing, .auto)
         XCTAssertEqual(ffi.access, .public)
         XCTAssertEqual(ffi.cache, .agnostic)
         XCTAssertEqual(ffi.freshness, .live)
@@ -23,11 +22,11 @@ final class NMPDemandTests: XCTestCase {
     func testPinnedSourceRoundTripsWithStrictCache() {
         let demand = NMPDemand(
             selection: NMPFilter(kinds: [1]),
-            source: .pinned(["wss://relay.example.com"]),
+            routing: .explicit(["wss://relay.example.com"]),
             cache: .strict
         )
         let ffi = demand.toFfi()
-        guard case .pinned(let relays) = ffi.source else {
+        guard case .explicit(let relays) = ffi.routing else {
             return XCTFail("expected a pinned source")
         }
         XCTAssertEqual(relays, ["wss://relay.example.com"])
@@ -36,7 +35,7 @@ final class NMPDemandTests: XCTestCase {
     }
 
     func testCacheModeDefaultsToAgnosticWhenUnspecified() {
-        let demand = NMPDemand(selection: NMPFilter(kinds: [1]), source: .public)
+        let demand = NMPDemand(selection: NMPFilter(kinds: [1]))
         XCTAssertEqual(demand.cache, .agnostic)
         XCTAssertEqual(demand.access, .public)
     }
@@ -45,7 +44,7 @@ final class NMPDemandTests: XCTestCase {
         let publicKey = String(repeating: "a", count: 64)
         let demand = NMPDemand(
             selection: NMPFilter(kinds: [1]),
-            source: .pinned(["wss://relay.example.com"]),
+            routing: .explicit(["wss://relay.example.com"]),
             access: .nip42(publicKey: publicKey)
         )
 
@@ -61,7 +60,6 @@ final class NMPDemandTests: XCTestCase {
         ] {
             let demand = NMPDemand(
                 selection: NMPFilter(kinds: [0]),
-                source: .authorOutboxes,
                 freshness: freshness
             )
             XCTAssertEqual(NMPDemand(demand.toFfi()), demand)

@@ -614,7 +614,7 @@ async fn a_signing_failure_leaves_no_event_frame_and_no_delivery_implying_receip
 /// outer listing AND every nested evidence lookup) leaving
 /// `nmp_grammar::Demand`'s default `CacheMode::Agnostic` -- "serve every
 /// matching cached row regardless of provenance".
-/// `SourceAuthority::Pinned` alone scopes only the WIRE request; which locally
+/// `ReadRouting::Explicit` alone scopes only the WIRE request; which locally
 /// cached rows may ANSWER is governed independently by `CacheMode`. So once
 /// host A's own kind:39002 event landed in the shared store, host B's
 /// structurally-identical inner evidence lookup (same kind, same `#p`,

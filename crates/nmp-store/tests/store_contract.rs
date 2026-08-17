@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting};
 use nmp_store::{
     coverage_key, sentinel_signature, AcceptWrite, AcceptWritePayload, CoverageInterval,
     EventCursor, GcRetentionSet, InsertOutcome, IntentSigState, Provenance, RedbStore,
@@ -92,7 +92,7 @@ fn shape(kinds: &[u16], authors: Option<&Keys>) -> ConcreteFilter {
 fn atom(filter: &ConcreteFilter) -> ContextualAtom {
     ContextualAtom {
         filter: filter.clone(),
-        source: SourceAuthority::AuthorOutboxes,
+        routing: ReadRouting::Auto,
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }

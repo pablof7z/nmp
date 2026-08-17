@@ -96,8 +96,7 @@ func profileDemand(for target: NostrReferenceTarget) throws -> NMPDemand {
             kinds: [0],
             authors: .literal([pubkey]),
             limit: 1
-        ),
-        source: .authorOutboxes
+        )
     )
 }
 ```
@@ -132,7 +131,7 @@ coalescing, and scoped acquisition evidence.
 
 This is why a relay-less `naddr` remains meaningful. An event loader can build
 the exact kind + author + `d` selection and deliberately choose
-`AuthorOutboxes`. NMP can discover the author's kind:10002 through configured
+`Auto`. NMP can discover the author's kind:10002 through configured
 indexers, route the demand to the resulting outboxes, and update the same
 ordinary observation when the current address winner changes. The component
 does not need to copy outbox discovery or replaceable-event arbitration.
@@ -160,7 +159,7 @@ cache-prompt event loader can begin with `CacheOnly` and open `Live` only after
 consent. Equal handles may share graph/cache state while retaining independent
 freshness contracts.
 
-`SourceAuthority::Pinned + CacheMode::Strict + CacheOnly` means cached rows
+`ReadRouting::Explicit + CacheMode::Strict + CacheOnly` means cached rows
 whose provenance intersects that pinned relay set, with no network. Recent
 empty coverage also satisfies `MaxAge`: freshness proves the question was
 checked, not that a row existed. Evidence remains scoped; none of these modes

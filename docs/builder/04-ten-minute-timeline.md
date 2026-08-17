@@ -60,7 +60,6 @@ let demand = NMPDemand(
         kinds: .literal([AppProtocol.recordKind]),
         authors: .literal([selectedAuthor])
     ),
-    source: .authorOutboxes,
     access: .public
 )
 ```

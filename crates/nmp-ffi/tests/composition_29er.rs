@@ -32,7 +32,7 @@ use nmp_ffi::nip02::NmpFollowStream;
 use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
     FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiIdentity,
-    FfiLiveQuery, FfiSourceAuthority, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiLiveQuery, FfiReadRouting, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
 
 const TEST_SECRET_KEY_HEX: &str =
@@ -56,7 +56,7 @@ fn kind_query(kind: u16) -> FfiLiveQuery {
             kinds: Some(vec![kind]),
             ..FfiFilter::default()
         },
-        FfiSourceAuthority::Public,
+        FfiReadRouting::Auto,
     )
 }
 
@@ -69,17 +69,17 @@ fn author_query(pubkey: &str) -> FfiLiveQuery {
             kinds: Some(vec![0]), // kind:0 = profile metadata
             ..FfiFilter::default()
         },
-        FfiSourceAuthority::AuthorOutboxes,
+        FfiReadRouting::Auto,
     )
 }
 
 /// One demand branch under the named wire authority, on an unauthenticated
 /// connection with the default cache and freshness policies.
-fn single(selection: FfiFilter, source: FfiSourceAuthority) -> FfiLiveQuery {
+fn single(selection: FfiFilter, routing: FfiReadRouting) -> FfiLiveQuery {
     FfiLiveQuery {
         branches: vec![FfiDemand {
             selection,
-            source,
+            routing,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,

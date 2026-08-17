@@ -298,7 +298,7 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
     let public_author = Keys::generate();
     let protected_author = Keys::generate();
     let relay = RelayUrl::parse("wss://access-isolation.example.com").unwrap();
-    let source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let source = ReadRouting::Explicit(vec![relay.clone()]);
     let selection = Filter {
         kinds: Some(BTreeSet::from([1u16])),
         ..Filter::default()
@@ -423,13 +423,13 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
     };
     let public_atom = ContextualAtom {
         filter: concrete.clone(),
-        source: source.clone(),
+        routing: source.clone(),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
     let protected_atom = ContextualAtom {
         filter: concrete,
-        source,
+        routing: source,
         access: AccessContext::Nip42(protected_author.public_key()),
         routing_evidence: BTreeSet::new(),
     };
@@ -607,17 +607,22 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
     derived_filter.tags.insert(
         nmp_grammar::IndexedTagName::new('p').expect("indexed p tag"),
         Binding::Derived(Box::new(nmp_grammar::Derived {
-            inner: Demand::author_outboxes(Filter {
-                kinds: Some(BTreeSet::from([1u16])),
-                authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
-                limit: Some(1),
-                ..Filter::default()
-            })
-            .expect("the selection binds `authors`"),
+            inner: Demand {
+                selection: Filter {
+                    kinds: Some(BTreeSet::from([1u16])),
+                    authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+                    limit: Some(1),
+                    ..Filter::default()
+                },
+                ..Demand::default()
+            },
             project: nmp_grammar::Selector::Authors,
         })),
     );
-    let derived_from_latest_note = LiveQuery::single(Demand::public(derived_filter));
+    let derived_from_latest_note = LiveQuery::single(Demand {
+        selection: derived_filter,
+        ..Demand::default()
+    });
     let initial = core.handle_and_flush(EngineMsg::Subscribe(derived_from_latest_note));
     assert!(
         initial.iter().all(|effect| !matches!(
@@ -632,7 +637,7 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
                 kinds: Some(BTreeSet::from([5u16])),
                 ..Filter::default()
             },
-            SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            ReadRouting::Explicit(vec![relay.clone()]),
             AccessContext::Public,
         )
         .expect("a literal kind:5 request can be pinned to the fixture relay"),
@@ -696,7 +701,7 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
             kinds: Some(BTreeSet::from([5u16])),
             ..ConcreteFilter::default()
         },
-        SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        ReadRouting::Explicit(vec![relay.clone()]),
     );
     assert!(core
         .get_coverage(&atom, &relay)
@@ -1840,14 +1845,14 @@ fn a_failing_coverage_peek_never_republishes_live_evidence_as_unproven() {
     let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
     let _ = connect(&mut core, 0, &relay);
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(account_a.public_key())));
-    let opened = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::single(
-        Demand::author_outboxes(Filter {
+    let opened = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::single(Demand {
+        selection: Filter {
             kinds: Some(BTreeSet::from([1u16])),
             authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
             ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-    )));
+        },
+        ..Demand::default()
+    })));
     assert!(
         opened.iter().all(
             |effect| !matches!(effect, Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.is_some())

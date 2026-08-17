@@ -38,7 +38,6 @@ class SigningTest {
                             NMPLiveQuery.single(
                                 NMPDemand(
                                     selection = NMPFilter(kinds = listOf(request.kind)),
-                                    source = NMPSourceAuthority.Public,
                                 )
                             )
                         ).first().rows,

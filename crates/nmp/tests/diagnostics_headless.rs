@@ -28,14 +28,14 @@ fn new_core(dir: FixtureRoutingFacts) -> EngineCore {
 }
 
 fn literal_query(kinds: &[u16], author_hex: &str) -> LiveQuery {
-    LiveQuery::single(
-        Demand::author_outboxes(Filter {
+    LiveQuery::single(Demand {
+        selection: Filter {
             kinds: Some(kinds.iter().copied().collect()),
             authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
             ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-    )
+        },
+        ..Demand::default()
+    })
 }
 
 fn connect(core: &mut EngineCore, slot: u32, url: &RelayUrl) -> Vec<Effect> {

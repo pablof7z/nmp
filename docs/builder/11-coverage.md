@@ -87,19 +87,17 @@ Freshness is a closed policy on the existing query handle:
 ```swift
 let feedAvatar = NMPDemand(
     selection: profileFilter,
-    source: .authorOutboxes,
     freshness: .maxAge(seconds: 4 * 60 * 60)
 )
 
 let profilePage = NMPDemand(
     selection: profileFilter,
-    source: .authorOutboxes,
     freshness: .live
 )
 
 let preview = NMPDemand(
     selection: eventFilter,
-    source: .pinned(explicitRelays),
+    routing: .explicit(explicitRelays),
     cache: .strict,
     freshness: .cacheOnly
 )
@@ -144,7 +142,7 @@ evidence boundary, not its row set:
   be superseded, expire, or be retracted because of other engine work.
 
 The retained evidence is a historical justification scoped to that descriptor,
-source authority, and access context. It is not a claim about global
+read routing, and access context. It is not a claim about global
 completeness or the routing plan NMP would choose now. To ask how the same
 demand would plan now, open a new `live` observation or a newly evaluated
 `maxAge` observation. Global diagnostics describe only the actually active

@@ -74,7 +74,6 @@ let indexDemand = NMPDemand(
         kinds: .literal([appIndexKind]),
         authors: .reactive(.currentPubkey)
     ),
-    source: .authorOutboxes,
     access: .public
 )
 
@@ -151,7 +150,6 @@ func recordsNamedByCurrentUser(
                 kinds: .literal([indexKind]),
                 authors: .reactive(.currentPubkey)
             ),
-            source: .authorOutboxes,
             access: .public
         ),
         project: .tag("e")
@@ -175,18 +173,17 @@ The same selection can be acquired under different source or access authority:
 ```swift
 let publicDemand = NMPDemand(
     selection: selection,
-    source: .authorOutboxes,
     access: .public
 )
 
 let authenticatedDemand = NMPDemand(
     selection: selection,
-    source: group.sourceAuthority,
+    routing: group.readRouting,
     access: .auth(groupIdentity)
 )
 ```
 
-`group.sourceAuthority` is an opaque value scoped by the NIP-29 module to one
+`group.readRouting` is an `.explicit` relay set scoped by the NIP-29 module to one
 typed group/host context. The app may supply that protocol-defined public host;
 it cannot turn the relay URL into generic authority for unrelated demand.
 

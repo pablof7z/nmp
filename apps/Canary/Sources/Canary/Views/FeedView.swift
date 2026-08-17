@@ -77,8 +77,7 @@ struct FeedView: View {
         rows = []
         evidence = []
         let feed = NMPDemand(
-            selection: FeedFilters.follows(kinds: model.kinds),
-            source: .authorOutboxes
+            selection: FeedFilters.follows(kinds: model.kinds)
         )
         guard let query = try? model.engine.observe(.single(feed)) else {
             return

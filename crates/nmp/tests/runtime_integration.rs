@@ -28,7 +28,7 @@ use nmp_engine::publish_queue::{RelayState, SigningState, WriteFact};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
-    IdentityField, IndexedTagName, Selector, SourceAuthority,
+    IdentityField, IndexedTagName, ReadRouting, Selector,
 };
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
@@ -103,14 +103,14 @@ fn mirror_keys(k: &Keys) -> RelayKeys {
 /// exercise the `Derived`/reactive-authors machinery the module's flagship
 /// test does.
 fn literal_kind1(author_hex: &str) -> LiveQuery {
-    LiveQuery::single(
-        Demand::author_outboxes(Filter {
+    LiveQuery::single(Demand {
+        selection: Filter {
             kinds: Some(BTreeSet::from([1])),
             authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
             ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-    )
+        },
+        ..Demand::default()
+    })
 }
 
 fn pinned_tag_value(relay: &RelayUrl, value: &str) -> LiveQuery {
@@ -124,7 +124,7 @@ fn pinned_tag_value(relay: &RelayUrl, value: &str) -> LiveQuery {
                 )]),
                 ..Filter::default()
             },
-            SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            ReadRouting::Explicit(vec![relay.clone()]),
             AccessContext::Public,
         )
         .expect("a pinned demand over one relay is constructible"),
@@ -161,7 +161,7 @@ fn subscribe_uses_current_wall_clock_for_the_one_time_max_age_decision() {
             authors: Some(BTreeSet::from([author.clone()])),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::AuthorOutboxes,
+        routing: ReadRouting::Auto,
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
@@ -188,7 +188,10 @@ fn subscribe_uses_current_wall_clock_for_the_one_time_max_age_decision() {
         },
     )
     .expect("spawn runtime");
-    let mut demand = Demand::author_outboxes(selection).expect("the selection binds `authors`");
+    let mut demand = Demand {
+        selection,
+        ..Demand::default()
+    };
     demand.freshness = Freshness::MaxAge { seconds: 1 };
     let (_query, _rows) = handle
         .subscribe(LiveQuery::single(demand))
@@ -415,22 +418,24 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
     // $myFollows shape: kind:1 authored by whoever `a`'s kind:3 contact
     // list (#p-projected) currently names -- identical shape to M1's own
     // contract-test query and `core_headless.rs`'s analog.
-    let my_follows = LiveQuery::single(
-        Demand::author_outboxes(Filter {
+    let my_follows = LiveQuery::single(Demand {
+        selection: Filter {
             kinds: Some(BTreeSet::from([1u16])),
             authors: Some(Binding::Derived(Box::new(Derived {
-                inner: Demand::author_outboxes(Filter {
-                    kinds: Some(BTreeSet::from([3u16])),
-                    authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-                    ..Filter::default()
-                })
-                .expect("the selection binds `authors`"),
+                inner: Demand {
+                    selection: Filter {
+                        kinds: Some(BTreeSet::from([3u16])),
+                        authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                        ..Filter::default()
+                    },
+                    ..Demand::default()
+                },
                 project: Selector::Tag("p".to_string()),
             }))),
             ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-    );
+        },
+        ..Demand::default()
+    });
 
     let (_query_handle, rows_rx) = handle
         .subscribe(my_follows)

@@ -26,7 +26,7 @@ class NMPLiveQueryTest {
         NMPLiveQuery.single(
             NMPDemand(
                 selection = NMPFilter(kinds = listOf(1u)),
-                source = NMPSourceAuthority.Pinned(setOf(relay)),
+                routing = NMPReadRouting.Explicit(listOf(relay)),
                 freshness = freshness,
             ),
         )

@@ -51,7 +51,6 @@ class LiveRelayTest {
                                         kinds = listOf(3u),
                                         authors = NMPBinding.Reactive(NMPIdentityField.ActivePubkey),
                                     ),
-                                source = NMPSourceAuthority.AuthorOutboxes,
                             ),
                         project = NMPSelector.Tag("p"),
                     ),
@@ -82,7 +81,6 @@ class LiveRelayTest {
                         NMPLiveQuery.single(
                             NMPDemand(
                                 selection = followFeed(),
-                                source = NMPSourceAuthority.AuthorOutboxes,
                             )
                         )
                     ), timeoutMs = 30_000)
@@ -116,7 +114,6 @@ class LiveRelayTest {
                         NMPLiveQuery.single(
                             NMPDemand(
                                 selection = followFeed(),
-                                source = NMPSourceAuthority.AuthorOutboxes,
                             )
                         )
                     )
@@ -187,7 +184,6 @@ class LiveRelayTest {
                         NMPLiveQuery.single(
                             NMPDemand(
                                 selection = notesFilter,
-                                source = NMPSourceAuthority.AuthorOutboxes,
                             )
                         )
                     ), timeoutMs = 30_000)

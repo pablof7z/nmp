@@ -15,8 +15,7 @@ use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
     FfiAccessContext, FfiCacheMode, FfiDemand, FfiFilter, FfiFrame, FfiFreshness, FfiIdentity,
-    FfiLiveQuery, FfiRowDelta, FfiSourceAuthority, FfiWriteIntent, FfiWritePayload,
-    FfiWriteRouting,
+    FfiLiveQuery, FfiReadRouting, FfiRowDelta, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
 
 const TEST_SECRET_KEY_HEX: &str =
@@ -30,7 +29,7 @@ fn note_query() -> FfiLiveQuery {
                 kinds: Some(vec![1]),
                 ..FfiFilter::default()
             },
-            source: FfiSourceAuthority::Public,
+            routing: FfiReadRouting::Auto,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,

@@ -100,7 +100,10 @@ fn needs_open_one_exact_query_noop_when_unchanged_and_close_when_empty() {
 
     let app_observation = core
         .handle(EngineMsg::Subscribe(LiveQuery::single(
-            nmp_grammar::Demand::public(Filter::default()),
+            nmp_grammar::Demand {
+                selection: Filter::default(),
+                ..nmp_grammar::Demand::default()
+            },
         )))
         .iter()
         .find_map(|effect| match effect {
@@ -154,15 +157,15 @@ fn someone_elses_local_relay_list_row_becomes_a_route_candidate() {
     let local = relay(19_872);
     let source = RelayUrl::parse("wss://indexer.example").unwrap();
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-    let query = LiveQuery::single(
-        nmp_grammar::Demand::author_outboxes(Filter {
+    let query = LiveQuery::single(nmp_grammar::Demand {
+        selection: Filter {
             authors: Some(Binding::Literal(BTreeSet::from([author
                 .public_key()
                 .to_hex()]))),
             ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-    );
+        },
+        ..nmp_grammar::Demand::default()
+    });
     core.handle(EngineMsg::Subscribe(query));
 
     let event = EventBuilder::new(Kind::RelayList, "")

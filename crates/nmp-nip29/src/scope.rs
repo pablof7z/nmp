@@ -256,7 +256,7 @@ mod tests {
     use super::*;
     use crate::{member_list_includes, GroupObserveError};
     use nmp_grammar::{
-        AccessContext, Binding, CacheMode, Derived, IdentityField, IndexedTagName, SourceAuthority,
+        AccessContext, Binding, CacheMode, Derived, IdentityField, IndexedTagName, ReadRouting,
     };
 
     fn host(n: u16) -> RelayUrl {
@@ -278,8 +278,8 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(a.hosts().len(), 2);
     }
-    fn pinned(host: RelayUrl) -> SourceAuthority {
-        SourceAuthority::Pinned(BTreeSet::from([host]))
+    fn pinned(host: RelayUrl) -> ReadRouting {
+        ReadRouting::Explicit(vec![host])
     }
 
     fn derived(binding: &Binding) -> &Derived {
@@ -312,7 +312,7 @@ mod tests {
         for (index, expected) in [host(1), host(2)].into_iter().enumerate() {
             let outer = &branches[index];
             assert_eq!(
-                outer.source,
+                outer.routing,
                 pinned(expected.clone()),
                 "depth 0 (the listing) must be pinned to {expected} alone"
             );
@@ -328,7 +328,7 @@ mod tests {
             )
             .inner;
             assert_eq!(
-                inner.source,
+                inner.routing,
                 pinned(expected.clone()),
                 "depth 1 (the member-list evidence) must be pinned to {expected} alone, \
                  not inherited and not cross-hosted"
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(branches.len(), 2);
         let h = IndexedTagName::new('h').expect("h is a single ASCII letter");
         for (branch, expected) in branches.iter().zip([host(1), host(2)]) {
-            assert_eq!(branch.source, pinned(expected));
+            assert_eq!(branch.routing, pinned(expected));
             assert_eq!(
                 branch.selection.tags.get(&h),
                 Some(&Binding::Literal(BTreeSet::from([
@@ -382,7 +382,7 @@ mod tests {
             .expect("a two-host group read declares two branches");
         assert_eq!(query.branches().len(), 2);
         for (branch, expected) in query.branches().iter().zip([host(1), host(2)]) {
-            assert_eq!(branch.source, pinned(expected));
+            assert_eq!(branch.routing, pinned(expected));
         }
         assert_eq!(query.aggregate_result_limit(), None);
     }
@@ -412,7 +412,7 @@ mod tests {
         assert_eq!(darkroom.len(), 1);
         let h = IndexedTagName::new('h').expect("h is a single ASCII letter");
 
-        assert_eq!(photographers[0].source, darkroom[0].source, "same host");
+        assert_eq!(photographers[0].routing, darkroom[0].routing, "same host");
         assert_eq!(
             photographers[0].selection.kinds, darkroom[0].selection.kinds,
             "same app-selected kinds"
@@ -464,7 +464,7 @@ mod tests {
 
         assert_eq!(branches.len(), 2, "one complete branch per host");
         for (branch, expected) in branches.iter().zip([host(1), host(2)]) {
-            assert_eq!(branch.source, pinned(expected));
+            assert_eq!(branch.routing, pinned(expected));
             assert_eq!(branch.cache, CacheMode::Strict);
             assert_eq!(branch.selection.kinds, Some(BTreeSet::from([39000u16])));
             assert_eq!(

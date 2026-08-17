@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 
-use nmp_grammar::{
-    AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey, SourceAuthority,
-};
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey};
 use nmp_store::coverage_key;
 use nostr::{Keys, RelayUrl};
 
@@ -18,7 +16,7 @@ fn pinned(relay: &RelayUrl, kinds: impl IntoIterator<Item = u16>) -> ContextualA
             kinds: Some(kinds.into_iter().collect()),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }
@@ -152,14 +150,14 @@ fn ten_thousand_local_owner_detaches_touch_only_the_departing_metadata() {
         atoms.push(atom);
     }
     let physical = pinned(&relay, kinds);
-    let sub_id = SubId::for_wire(relay, &physical.filter, &physical.source, physical.access);
+    let sub_id = SubId::for_wire(relay, &physical.filter, &physical.routing, physical.access);
     let mut router = Router::new(RuleRegistry::default_widen_only());
     router.prev_plan.reqs.insert(
         session,
         vec![WireReq {
             sub_id,
             filter: physical.filter,
-            source: physical.source,
+            routing: physical.routing,
             provenance: BTreeSet::new(),
             coverage_claims,
             owner_demands,
@@ -210,14 +208,14 @@ fn aliased_claim_stays_until_its_last_distinct_demand_owner_leaves() {
     let first_demand = DemandKey::for_atom(&first);
     let second_demand = DemandKey::for_atom(&second);
     assert_ne!(first_demand, second_demand);
-    let sub_id = SubId::for_wire(relay, &first.filter, &first.source, first.access);
+    let sub_id = SubId::for_wire(relay, &first.filter, &first.routing, first.access);
     let mut router = Router::new(RuleRegistry::default_widen_only());
     router.prev_plan.reqs.insert(
         session,
         vec![WireReq {
             sub_id,
             filter: first.filter.clone(),
-            source: first.source.clone(),
+            routing: first.routing.clone(),
             provenance: BTreeSet::new(),
             coverage_claims: BTreeSet::from([claim]),
             owner_demands: BTreeSet::from([first_demand, second_demand]),
@@ -264,7 +262,7 @@ fn full_compile_probes_only_the_one_surviving_request_out_of_ten_thousand_priors
         let sub_id = SubId::for_wire(
             stale_relay.clone(),
             &stale.filter,
-            &stale.source,
+            &stale.routing,
             stale.access,
         );
         let session = RelaySessionKey::public(stale_relay);
@@ -275,7 +273,7 @@ fn full_compile_probes_only_the_one_surviving_request_out_of_ten_thousand_priors
             vec![WireReq {
                 sub_id: sub_id.clone(),
                 filter: stale.filter.clone(),
-                source: stale.source.clone(),
+                routing: stale.routing.clone(),
                 provenance: BTreeSet::new(),
                 coverage_claims: physical_claims.clone(),
                 owner_demands: BTreeSet::from([DemandKey::for_atom(&stale)]),

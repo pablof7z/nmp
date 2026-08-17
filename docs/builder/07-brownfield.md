@@ -38,7 +38,6 @@ own an observation:
 func observeLibrary() async throws {
     let demand = NMPDemand(
         selection: .filter(kinds: [9999]),
-        source: .authorOutboxes,
         access: .public
     )
 

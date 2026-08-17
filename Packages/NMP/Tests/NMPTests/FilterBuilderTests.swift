@@ -60,8 +60,7 @@ final class FilterBuilderTests: XCTestCase {
     func testDerivedFollowsFilterRoundTrips() {
         let follows = NMPBinding.derived(
             inner: NMPDemand(
-                selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
-                source: .authorOutboxes
+                selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey))
             ),
             project: .tag("p")
         )
@@ -79,7 +78,7 @@ final class FilterBuilderTests: XCTestCase {
     func testDerivedInnerFullDemandRoundTripsEveryPolicyIndependently() {
         let inner = NMPDemand(
             selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
-            source: .pinned(["wss://inner.example.com"]),
+            routing: .explicit(["wss://inner.example.com"]),
             access: .nip42(publicKey: String(repeating: "a", count: 64)),
             cache: .strict,
             freshness: .maxAge(seconds: 600)
@@ -114,15 +113,13 @@ final class FilterBuilderTests: XCTestCase {
     func testSetOpDiffOfTwoDerivedBindingsRoundTrips() {
         let follows = NMPBinding.derived(
             inner: NMPDemand(
-                selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
-                source: .authorOutboxes
+                selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey))
             ),
             project: .tag("p")
         )
         let mutes = NMPBinding.derived(
             inner: NMPDemand(
-                selection: NMPFilter(kinds: [10_000], authors: .reactive(.activePubkey)),
-                source: .authorOutboxes
+                selection: NMPFilter(kinds: [10_000], authors: .reactive(.activePubkey))
             ),
             project: .tag("p")
         )

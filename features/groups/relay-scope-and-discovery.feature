@@ -78,7 +78,7 @@ Feature: A group can live on more than one relay at once
   # nmp:id=GROUPS-DISCOVERY-001
   # nmp:status=built
   # nmp:evidence=rust:nmp::scope_stamps_exact_hosts_on_every_nested_nip29_demand
-  # nmp:falsifier=Verified red-then-green in `nmp_nip29::discovery::list_evidence_at` by replacing one inner pin (`pinned_public_at`) with `Demand::from_filter`: `assertion left == right failed: depth 1 (the member-list evidence) must be pinned to wss://host-1.example.com alone, not inherited and not cross-hosted -- left: Public, right: Pinned({RelayUrl("wss://host-1.example.com")})`.
+  # nmp:falsifier=Verified red-then-green in `nmp_nip29::discovery::list_evidence_at` by replacing one inner pin (`pinned_public_at`) with a default `Demand`: `assertion left == right failed: depth 1 (the member-list evidence) must be routed to wss://host-1.example.com alone, not inherited and not cross-hosted -- left: Auto, right: Explicit([RelayUrl("wss://host-1.example.com")])`.
   @nip29
   Scenario: Every NIP-29-owned nesting level is pinned to its own branch host, never inherited
     Given a group-discovery predicate asking which groups name a subject as a member

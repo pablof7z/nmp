@@ -39,12 +39,12 @@ use nmp_ffi::session::{FfiPrivateKey, FfiPublicKey};
 use nmp_ffi::types::{
     FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthPhase, FfiBinding,
     FfiCacheMode, FfiCancelWriteOutcome, FfiDemand, FfiDiagnosticsSnapshot, FfiFilter,
-    FfiFreshness, FfiIdentity, FfiLiveQuery, FfiNotSentReason, FfiReceiptReattachment,
-    FfiRefuseReason, FfiRelayState, FfiRelayWaiting, FfiRetryCause, FfiRowDelta, FfiShortfallFact,
-    FfiSigningState, FfiSourceAuthority, FfiSourceStatus, FfiStalledWriteStage, FfiWriteFact,
-    FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
+    FfiFreshness, FfiIdentity, FfiLiveQuery, FfiNotSentReason, FfiReadRouting,
+    FfiReceiptReattachment, FfiRefuseReason, FfiRelayState, FfiRelayWaiting, FfiRetryCause,
+    FfiRowDelta, FfiShortfallFact, FfiSigningState, FfiSourceStatus, FfiStalledWriteStage,
+    FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
-use nmp_grammar::{AccessContext, Demand, Derived, Selector, SourceAuthority};
+use nmp_grammar::{AccessContext, Demand, Derived, ReadRouting, Selector};
 use nmp_nip02::{
     follow_capability, follow_writes, observe_following, set_following, FollowAvailability,
     FollowChange, FollowObservation, FollowRelationship, FollowSnapshot,
@@ -1533,7 +1533,7 @@ fn ffi_live_query(pubkey: &str, kind: u16) -> FfiLiveQuery {
                 limit: Some(10),
                 ..FfiFilter::default()
             },
-            source: FfiSourceAuthority::AuthorOutboxes,
+            routing: FfiReadRouting::Auto,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
@@ -1654,7 +1654,7 @@ fn pinned_contact_list(author: PublicKey, relay: RelayUrl) -> Demand {
             authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
             ..Filter::default()
         },
-        SourceAuthority::Pinned(BTreeSet::from([relay])),
+        ReadRouting::Explicit(vec![relay]),
         AccessContext::Public,
     )
     .expect("the contact-list source is pinned to one relay")
@@ -1672,7 +1672,7 @@ fn pinned_follow_feed(author: PublicKey, relay: RelayUrl) -> LiveQuery {
             }))),
             ..Filter::default()
         },
-        SourceAuthority::Pinned(relays),
+        ReadRouting::Explicit(relays.into_iter().collect()),
         AccessContext::Public,
     )
     .expect("the derived feed is pinned to the same relay");
@@ -2127,10 +2127,10 @@ fn stage_direct_source_anchor(
 ) -> Subscription {
     let subscription = engine
         .observe(
-            LiveQuery::single(
-                Demand::author_outboxes(direct_filter(pubkey, SOURCE_ANCHOR_KIND))
-                    .expect("the selection binds `authors`"),
-            ),
+            LiveQuery::single(Demand {
+                selection: direct_filter(pubkey, SOURCE_ANCHOR_KIND),
+                ..Demand::default()
+            }),
             None,
         )
         .expect("direct source-anchor query must open");
@@ -2831,10 +2831,10 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
 
     let subscription = engine
         .observe(
-            LiveQuery::single(
-                Demand::author_outboxes(direct_filter(&pubkey.to_hex(), QUERY_KIND))
-                    .expect("the selection binds `authors`"),
-            ),
+            LiveQuery::single(Demand {
+                selection: direct_filter(&pubkey.to_hex(), QUERY_KIND),
+                ..Demand::default()
+            }),
             None,
         )
         .expect("direct query must open");

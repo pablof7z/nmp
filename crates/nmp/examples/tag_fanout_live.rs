@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use nmp::{
     AccessContext, Binding, Demand, Engine, EngineConfig, Filter, IndexedTagName, LiveQuery,
-    RelayUrl, SourceAuthority, Subscription,
+    ReadRouting, RelayUrl, Subscription,
 };
 
 fn hex32(i: usize) -> String {
@@ -67,7 +67,7 @@ fn pinned(relay: &RelayUrl, filter: Filter) -> LiveQuery {
     LiveQuery::single(
         Demand::new(
             filter,
-            SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            ReadRouting::Explicit(vec![relay.clone()]),
             AccessContext::Public,
         )
         .expect("pinned demand with a nonempty relay set"),

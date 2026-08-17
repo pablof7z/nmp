@@ -475,8 +475,8 @@ mod relay_worker_reconciliation_tests {
     use std::collections::BTreeSet;
 
     use nmp_grammar::{
-        AccessContext, Binding, Demand, Filter, Identity, SourceAuthority, WriteIntent,
-        WritePayload, WriteRouting,
+        AccessContext, Binding, Demand, Filter, Identity, ReadRouting, WriteIntent, WritePayload,
+        WriteRouting,
     };
     use nmp_router_testkit::FixtureRoutingFacts;
     use nmp_store::RedbStore;
@@ -491,14 +491,14 @@ mod relay_worker_reconciliation_tests {
     }
 
     fn query(author: &str) -> LiveQuery {
-        LiveQuery::single(
-            Demand::author_outboxes(Filter {
+        LiveQuery::single(Demand {
+            selection: Filter {
                 kinds: Some(BTreeSet::from([1])),
                 authors: Some(Binding::Literal(BTreeSet::from([author.to_string()]))),
                 ..Filter::default()
-            })
-            .expect("the selection binds `authors`"),
-        )
+            },
+            ..Demand::default()
+        })
     }
 
     fn protected_query(relay: &RelayUrl, signer: PublicKey, kind: u16) -> LiveQuery {
@@ -508,7 +508,7 @@ mod relay_worker_reconciliation_tests {
                     kinds: Some(BTreeSet::from([kind])),
                     ..Filter::default()
                 },
-                SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+                ReadRouting::Explicit(vec![relay.clone()]),
                 AccessContext::Nip42(signer),
             )
             .expect("protected pinned query"),

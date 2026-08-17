@@ -15,7 +15,7 @@ fn local_owner_detach_prunes_the_current_attribution_generation_before_eose() {
     let sub_id = SubId::for_wire(
         relay,
         &incumbent.filter,
-        &incumbent.source,
+        &incumbent.routing,
         incumbent.access,
     );
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
@@ -31,6 +31,7 @@ fn local_owner_detach_prunes_the_current_attribution_generation_before_eose() {
             filter: &incumbent.filter,
             coverage_claims: BTreeSet::from([incumbent_claim]),
             owner_demands: BTreeSet::from([incumbent_demand]),
+            lanes: BTreeSet::new(),
             replay: false,
             event_failure_target: EventFailureTarget::ThisSend,
         })
@@ -120,7 +121,7 @@ fn aliased_current_claim_stays_until_its_last_owner_and_can_reattach_before_eose
     let sub_id = SubId::for_wire(
         relay,
         &incumbent.filter,
-        &incumbent.source,
+        &incumbent.routing,
         incumbent.access,
     );
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
@@ -140,6 +141,7 @@ fn aliased_current_claim_stays_until_its_last_owner_and_can_reattach_before_eose
             filter: &incumbent.filter,
             coverage_claims: BTreeSet::from([incumbent_claim]),
             owner_demands: BTreeSet::from([incumbent_demand]),
+            lanes: BTreeSet::new(),
             replay: false,
             event_failure_target: EventFailureTarget::ThisSend,
         })

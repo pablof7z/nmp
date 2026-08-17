@@ -1269,7 +1269,7 @@ fn healthy_atom(keys: &Keys) -> ContextualAtom {
             until: None,
             limit: None,
         },
-        source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+        routing: nmp_grammar::ReadRouting::Auto,
         access: nmp_grammar::AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }

@@ -27,7 +27,7 @@ use std::time::Duration;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::types::{
     FfiAccessContext, FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiLiveQuery,
-    FfiSourceAuthority,
+    FfiReadRouting,
 };
 
 fn text_note_query() -> FfiLiveQuery {
@@ -37,7 +37,7 @@ fn text_note_query() -> FfiLiveQuery {
                 kinds: Some(vec![1]),
                 ..FfiFilter::default()
             },
-            source: FfiSourceAuthority::Public,
+            routing: FfiReadRouting::Auto,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,

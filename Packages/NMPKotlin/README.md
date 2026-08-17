@@ -95,7 +95,6 @@ val demand = NMPDemand(
         authors = NMPBinding.Literal(setOf(target.pubkey)),
         limit = 1u,
     ),
-    source = NMPSourceAuthority.AuthorOutboxes,
 )
 val profile = nmp.observe(NMPLiveQuery.single(demand))
 ```

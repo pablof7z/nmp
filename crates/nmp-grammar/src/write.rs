@@ -2,7 +2,7 @@
 //! ruling): `EventBuilder`, `WritePayload`, `WriteIntent`, and
 //! `WriteRouting` live here rather than `nmp-engine::outbox`: protocol modules composing a
 //! `WriteIntent` must not gain an engine dependency to do so, and this crate
-//! is already the read noun's home (`Demand`/`SourceAuthority`).
+//! is already the read noun's home (`Demand`/`ReadRouting`).
 //! `WriteFact` and `Receipt` stay in `nmp` because they are runtime
 //! evidence rather than intent vocabulary; live delivery capabilities are
 //! runtime-private and never enter the reducer.

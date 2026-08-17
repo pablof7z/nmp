@@ -251,7 +251,7 @@ Core decoding preserves five different public values:
   hints;
 - `naddr` -> coordinate locator plus authored relay hints.
 
-It cannot produce a demand, kind:0 selection, source authority, freshness,
+It cannot produce a demand, kind:0 selection, read routing, freshness,
 cache choice, relay route, or observation. Optional `nevent` author/kind fields
 never constrain event-id identity. Relay hints remain exact authored strings;
 the optional acquisition owner that promotes them owns canonicalization,

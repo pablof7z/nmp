@@ -34,8 +34,8 @@ final class NIP29Tests: XCTestCase {
         let query = try group.read(NMPFilter())
         XCTAssertEqual(query.branches.count, 2)
         for (branch, expectedHost) in zip(query.branches, [host(1), host(2)]) {
-            guard case .pinned(let relays) = branch.source else {
-                return XCTFail("expected .pinned, got \(branch.source)")
+            guard case .explicit(let relays) = branch.routing else {
+                return XCTFail("expected .explicit, got \(branch.routing)")
             }
             XCTAssertEqual(relays, [expectedHost])
             XCTAssertEqual(branch.access, .public)

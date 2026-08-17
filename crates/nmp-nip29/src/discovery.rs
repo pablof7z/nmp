@@ -27,7 +27,7 @@
 //! groups with the same name. Membership evidence observed at relay A must
 //! constrain the listing at relay A and never at relay B. Every constructor
 //! in this module therefore takes exactly ONE host and stamps BOTH
-//! host-scoping axes -- `SourceAuthority::Pinned({host})` for the wire and
+//! host-scoping axes -- `ReadRouting::Explicit({host})` for the wire and
 //! `CacheMode::Strict` for the local cache -- explicitly on the demand it
 //! builds AND on every inner demand it nests, at depth 1, 2, or deeper.
 //!
@@ -49,8 +49,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, Binding, CacheMode, Demand, Derived, Filter, IndexedTagName, Selector,
-    SourceAuthority,
+    AccessContext, Binding, CacheMode, Demand, Derived, Filter, IndexedTagName, ReadRouting,
+    Selector,
 };
 use nostr::RelayUrl;
 
@@ -129,7 +129,7 @@ fn list_evidence_at(host: &RelayUrl, kind: u16, subjects: Binding) -> Binding {
 ///
 /// # Both axes, because one is not enough
 ///
-/// `SourceAuthority::Pinned` and `CacheMode` are ORTHOGONAL, and NIP-29 needs
+/// `ReadRouting::Explicit` and `CacheMode` are ORTHOGONAL, and NIP-29 needs
 /// both pointed at the same host. `Pinned` scopes only the WIRE request: which
 /// relays are asked. Which locally CACHED rows may answer is governed
 /// separately by `CacheMode`, and the grammar's default `Agnostic` means
@@ -165,7 +165,7 @@ fn list_evidence_at(host: &RelayUrl, kind: u16, subjects: Binding) -> Binding {
 pub(crate) fn pinned_public_at(host: &RelayUrl, selection: Filter) -> Demand {
     let mut demand = Demand::new(
         selection,
-        SourceAuthority::Pinned(BTreeSet::from([host.clone()])),
+        ReadRouting::Explicit(vec![host.clone()]),
         AccessContext::Public,
     )
     .expect("a singleton pinned relay set with a non-outbox source is always constructible");
@@ -190,8 +190,8 @@ mod tests {
         RelayUrl::parse(&format!("wss://host-{n}.example.com")).expect("a well-formed host")
     }
 
-    fn pinned(relays: [RelayUrl; 1]) -> SourceAuthority {
-        SourceAuthority::Pinned(BTreeSet::from(relays))
+    fn pinned(relays: [RelayUrl; 1]) -> ReadRouting {
+        ReadRouting::Explicit(BTreeSet::from(relays).into_iter().collect())
     }
 
     fn derived(binding: &Binding) -> &Derived {
@@ -217,7 +217,7 @@ mod tests {
             demand.selection.kinds,
             Some(BTreeSet::from([39000u16, 39001, 39002]))
         );
-        assert_eq!(demand.source, pinned([host(1)]));
+        assert_eq!(demand.routing, pinned([host(1)]));
         assert_eq!(demand.access, AccessContext::Public);
         assert!(demand.selection.tags.contains_key(&join_key()));
     }
@@ -237,7 +237,7 @@ mod tests {
             Some(&Binding::Reactive(IdentityField::ActivePubkey)),
             "identity stays REACTIVE -- never flattened to a literal"
         );
-        assert_eq!(derived.inner.source, pinned([host(1)]));
+        assert_eq!(derived.inner.routing, pinned([host(1)]));
     }
 
     #[test]
@@ -249,7 +249,7 @@ mod tests {
             derived.inner.selection.kinds,
             Some(BTreeSet::from([39001u16]))
         );
-        assert_eq!(derived.inner.source, pinned([host(2)]));
+        assert_eq!(derived.inner.routing, pinned([host(2)]));
         assert_eq!(derived.inner.access, AccessContext::Public);
         assert_eq!(derived.inner.cache, CacheMode::Strict);
         assert_eq!(derived.inner.freshness, Freshness::Live);
@@ -278,14 +278,14 @@ mod tests {
             )),
             None,
         );
-        assert_eq!(demand.source, pinned([host(3)]));
+        assert_eq!(demand.routing, pinned([host(3)]));
         assert_eq!(
             demand.cache,
             CacheMode::Strict,
             "the listing must not accept a cached row another host served"
         );
         let inner = &derived(demand.selection.tags.get(&join_key()).expect("d is bound")).inner;
-        assert_eq!(inner.source, pinned([host(3)]));
+        assert_eq!(inner.routing, pinned([host(3)]));
         assert_eq!(
             inner.cache,
             CacheMode::Strict,

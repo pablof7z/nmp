@@ -48,7 +48,7 @@ that the core abstraction is genuinely generic.
 
 ## 4. Show values in, code after
 
-Anything that changes engine demand, source authority, access, routing,
+Anything that changes engine demand, read routing, access,
 admission, signing identity, or persistence crosses the boundary as a closed,
 typed, printable value. Do not show app closures in those positions.
 

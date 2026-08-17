@@ -244,7 +244,7 @@ final class C6DeepWindowingTests: XCTestCase {
         // reopening it with a bigger window would prove the engine can serve
         // a big first page, not that an app can scroll.
         let query = try engine.observe(
-            filter, window: .expandable(initial: Self.initialRows, max: Self.maxRows)
+            .single(NMPDemand(selection: filter)), window: .expandable(initial: Self.initialRows, max: Self.maxRows)
         )
         let ledger = ObservationLedger(ceiling: Int(Self.initialRows))
         let consumer = Task {

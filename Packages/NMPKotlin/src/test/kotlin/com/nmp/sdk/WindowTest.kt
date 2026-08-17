@@ -163,7 +163,7 @@ class WindowTest {
     }
 
     private fun windowDemand(kind: UShort) =
-        NMPDemand(selection = NMPFilter(kinds = listOf(kind)), source = NMPSourceAuthority.Public)
+        NMPDemand(selection = NMPFilter(kinds = listOf(kind)))
 
     private fun windowedFrame(
         rows: List<FfiRow>,

@@ -37,7 +37,7 @@ fn pinned_strict(hosts: &[RelayUrl], kind: u16) -> LiveQuery {
             kinds: Some(BTreeSet::from([kind])),
             ..Filter::default()
         },
-        SourceAuthority::Pinned(hosts.iter().cloned().collect()),
+        ReadRouting::Explicit(hosts.to_vec()),
         AccessContext::Public,
     )
     .expect("a nonempty pinned set with a non-outbox source is constructible");
@@ -601,10 +601,13 @@ fn the_users_own_row_survives_a_carrier_outside_the_pin_and_reports_it_honestly(
     // source set the row honestly reports.
     let (_, agnostic, _) = open(
         &mut core,
-        LiveQuery::single(Demand::public(Filter {
-            kinds: Some(BTreeSet::from([OPTIMISTIC_KIND])),
-            ..Filter::default()
-        })),
+        LiveQuery::single(Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([OPTIMISTIC_KIND])),
+                ..Filter::default()
+            },
+            ..Demand::default()
+        }),
     );
     assert_eq!(
         agnostic.sources_of(&event.id),

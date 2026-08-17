@@ -196,7 +196,7 @@ struct CanaryC16Consumer {
         // configured for backpressure in any way -- an app has no such knob,
         // and C16's question is what NMP does when the app simply reads
         // slowly.
-        let query = try engine.observe(NMPFilter(kinds: [1], authors: .literal([authorHex])))
+        let query = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [1], authors: .literal([authorHex])))))
 
         // The subscription must be established ON THE WIRE before the parent
         // is told to flood. C17's first draft ended each cycle at the query's

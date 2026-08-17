@@ -133,20 +133,22 @@ final class C4ReactiveDerivedQueryTests: XCTestCase {
         //
         // The inner demand is a complete live query in its own right: my
         // kind:3 contact list. The outer filter's `authors` is that query's
-        // rows projected through their `p` tags. `.pinned` on both because
-        // the lab has one relay and no NIP-65 indexers -- `.authorOutboxes`
+        // rows projected through their `p` tags. `.explicit` on both because
+        // the lab has one relay and no NIP-65 indexers -- `.auto`
         // would need `NMPConfig.outboxRouting`, which is the Canary's
         // already-recorded read/write asymmetry finding and not C4's
         // subject.
         let contactListSelection = NMPFilter(kinds: [3], authors: .literal([me.pubkeyHex]))
         let follows = NMPBinding.derived(
-            inner: NMPDemand(selection: contactListSelection, source: .pinned([relay.url])),
+            inner: NMPDemand(selection: contactListSelection, routing: .explicit([relay.url])),
             project: .tag("p")
         )
         let feed = try engine.observe(
-            NMPDemand(
-                selection: NMPFilter(kinds: [1], authors: follows),
-                source: .pinned([relay.url])
+            .single(
+                NMPDemand(
+                    selection: NMPFilter(kinds: [1], authors: follows),
+                    routing: .explicit([relay.url])
+                )
             )
         )
 
@@ -154,7 +156,7 @@ final class C4ReactiveDerivedQueryTests: XCTestCase {
         // to make claim 2 above assertable: it is never used to drive the
         // feed, and closing it would change nothing about the feed.
         let contactList = try engine.observe(
-            NMPDemand(selection: contactListSelection, source: .pinned([relay.url]))
+            .single(NMPDemand(selection: contactListSelection, routing: .explicit([relay.url])))
         )
 
         // The CONTROL: a literal-author query for bob. Its job is to prove
@@ -162,9 +164,11 @@ final class C4ReactiveDerivedQueryTests: XCTestCase {
         // "the feed does not show bob" is a statement about the derived
         // binding and not about a note that never arrived at all.
         let bobControl = try engine.observe(
-            NMPDemand(
-                selection: NMPFilter(kinds: [1], authors: .literal([bob.pubkeyHex])),
-                source: .pinned([relay.url])
+            .single(
+                NMPDemand(
+                    selection: NMPFilter(kinds: [1], authors: .literal([bob.pubkeyHex])),
+                    routing: .explicit([relay.url])
+                )
             )
         )
 

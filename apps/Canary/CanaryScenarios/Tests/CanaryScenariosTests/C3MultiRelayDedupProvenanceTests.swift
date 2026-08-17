@@ -227,7 +227,7 @@ final class C3MultiRelayDedupProvenanceTests: XCTestCase {
         // ONE observation, open for the whole scenario. Never reopened: a
         // reopened query would read the settled store and prove nothing
         // about what happened to a live row as each delivery arrived.
-        let query = try engine.observe(filter)
+        let query = try engine.observe(.single(NMPDemand(selection: filter)))
         let ledger = ObservationLedger(sharedID: shared.id)
         let consumer = Task {
             do {

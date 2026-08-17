@@ -261,8 +261,8 @@ final class C13RelayDisconnectReconnectTests: XCTestCase {
         // whole outage; neither is reopened afterwards, because a reopened
         // query proves the engine can start a subscription, not that it
         // resumed one.
-        let sharerOne = try engine.observe(filter)
-        let sharerTwo = try engine.observe(filter)
+        let sharerOne = try engine.observe(.single(NMPDemand(selection: filter)))
+        let sharerTwo = try engine.observe(.single(NMPDemand(selection: filter)))
 
         let ledger = ObservationLedger()
         let consumers = Task {

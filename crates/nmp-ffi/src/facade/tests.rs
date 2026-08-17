@@ -1,8 +1,8 @@
 use super::*;
 use crate::types::{
     FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFrame, FfiFreshness,
-    FfiIdentity, FfiLiveQuery, FfiNotSentReason, FfiRowDelta, FfiSignEventRequest, FfiSigningState,
-    FfiSourceAuthority, FfiWindow, FfiWindowLoad, FfiWriteFact, FfiWriteOutcome, FfiWritePayload,
+    FfiIdentity, FfiLiveQuery, FfiNotSentReason, FfiReadRouting, FfiRowDelta, FfiSignEventRequest,
+    FfiSigningState, FfiWindow, FfiWindowLoad, FfiWriteFact, FfiWriteOutcome, FfiWritePayload,
     FfiWriteRouting,
 };
 use std::collections::BTreeSet;
@@ -15,7 +15,7 @@ fn public_query(selection: FfiFilter) -> FfiLiveQuery {
     FfiLiveQuery {
         branches: vec![FfiDemand {
             selection,
-            source: FfiSourceAuthority::Public,
+            routing: FfiReadRouting::Auto,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
@@ -385,7 +385,7 @@ fn ffi_windowed_query(author: String) -> FfiLiveQuery {
                 }),
                 ..FfiFilter::default()
             },
-            source: FfiSourceAuthority::AuthorOutboxes,
+            routing: FfiReadRouting::Auto,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
             freshness: crate::types::FfiFreshness::Live,

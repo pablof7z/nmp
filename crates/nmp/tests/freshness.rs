@@ -8,7 +8,7 @@ use nmp_grammar::Derived;
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{
     AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness,
-    RelaySessionKey, Selector, SourceAuthority,
+    ReadRouting, RelaySessionKey, Selector,
 };
 use nmp_router::WireOp;
 use nmp_router_testkit::FixtureRoutingFacts;
@@ -58,17 +58,20 @@ fn concrete(keys: &Keys) -> ConcreteFilter {
     }
 }
 
-fn atom(keys: &Keys, source: SourceAuthority) -> ContextualAtom {
+fn atom(keys: &Keys, routing: ReadRouting) -> ContextualAtom {
     ContextualAtom {
         filter: concrete(keys),
-        source,
+        routing,
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }
 }
 
 fn query(keys: &Keys, freshness: Freshness) -> LiveQuery {
-    let mut demand = Demand::author_outboxes(filter(keys)).expect("the selection binds `authors`");
+    let mut demand = Demand {
+        selection: filter(keys),
+        ..Demand::default()
+    };
     demand.freshness = freshness;
     LiveQuery::single(demand)
 }
@@ -82,7 +85,7 @@ fn nested_query(
 ) -> LiveQuery {
     let mut inner = Demand::new(
         filter(keys),
-        SourceAuthority::Pinned(BTreeSet::from([inner_relay.clone()])),
+        ReadRouting::Explicit(vec![inner_relay.clone()]),
         AccessContext::Public,
     )
     .unwrap();
@@ -97,7 +100,7 @@ fn nested_query(
     };
     let mut outer = Demand::new(
         outer_selection,
-        SourceAuthority::Pinned(BTreeSet::from([outer_relay.clone()])),
+        ReadRouting::Explicit(vec![outer_relay.clone()]),
         AccessContext::Public,
     )
     .unwrap();
@@ -108,7 +111,7 @@ fn nested_query(
 fn pinned_query(keys: &Keys, relay: &RelayUrl, freshness: Freshness) -> LiveQuery {
     let mut demand = Demand::new(
         filter(keys),
-        SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        ReadRouting::Explicit(vec![relay.clone()]),
         AccessContext::Public,
     )
     .unwrap();
@@ -264,12 +267,7 @@ fn fresh_cached_profile_uses_coverage_and_zero_wire() {
             RelayObserved::new(relay.clone(), Timestamp::from(96_400u64)),
         )
         .unwrap();
-    record(
-        &mut store,
-        &atom(&keys, SourceAuthority::AuthorOutboxes),
-        &relay,
-        96_400,
-    );
+    record(&mut store, &atom(&keys, ReadRouting::Auto), &relay, 96_400);
     let mut core = core(store, &keys, &relay);
     tick(&mut core, 100_000);
 
@@ -298,7 +296,7 @@ fn fresh_cached_profile_uses_coverage_and_zero_wire() {
 fn stale_max_age_is_live_but_recent_empty_coverage_is_fresh() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://age.example").unwrap();
-    let demand_atom = atom(&keys, SourceAuthority::AuthorOutboxes);
+    let demand_atom = atom(&keys, ReadRouting::Auto);
     let mut stale_store = RedbStore::temporary().expect("temporary Redb store");
     record(&mut stale_store, &demand_atom, &relay, 82_000);
     let mut stale = core(stale_store, &keys, &relay);
@@ -375,12 +373,7 @@ fn cache_only_never_opens_wire_with_populated_cache_and_coverage() {
             RelayObserved::new(relay.clone(), Timestamp::from(99_000u64)),
         )
         .unwrap();
-    record(
-        &mut store,
-        &atom(&keys, SourceAuthority::AuthorOutboxes),
-        &relay,
-        99_000,
-    );
+    record(&mut store, &atom(&keys, ReadRouting::Auto), &relay, 99_000);
     let mut core = core(store, &keys, &relay);
     tick(&mut core, 100_000);
     let effects = subscribe(&mut core, query(&keys, Freshness::CacheOnly), 100_000);
@@ -474,7 +467,7 @@ fn nested_strict_pins_do_not_contaminate_public_root_cache_projection() {
 
     let mut inner = Demand::new(
         filter(&inner_author),
-        SourceAuthority::Pinned(BTreeSet::from([inner_relay])),
+        ReadRouting::Explicit(vec![inner_relay]),
         AccessContext::Public,
     )
     .unwrap();
@@ -489,7 +482,7 @@ fn nested_strict_pins_do_not_contaminate_public_root_cache_projection() {
             }))),
             ..Filter::default()
         },
-        SourceAuthority::Public,
+        ReadRouting::Auto,
         AccessContext::Public,
     )
     .unwrap();
@@ -544,7 +537,7 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
     let keys = Keys::generate();
     let inner_relay = RelayUrl::parse("wss://nested-max-age.example").unwrap();
     let outer_relay = RelayUrl::parse("wss://outer-live-max-age.example").unwrap();
-    let inner_source = SourceAuthority::Pinned(BTreeSet::from([inner_relay.clone()]));
+    let inner_source = ReadRouting::Explicit(vec![inner_relay.clone()]);
     let mut fresh_store = seeded_nested_store(&keys, &inner_relay);
     record(
         &mut fresh_store,
@@ -680,10 +673,7 @@ fn nested_max_age_scoped_coverage_survives_redb_restart() {
     let keys = Keys::generate();
     let inner_relay = RelayUrl::parse("wss://nested-restart-inner.example").unwrap();
     let outer_relay = RelayUrl::parse("wss://nested-restart-outer.example").unwrap();
-    let inner_atom = atom(
-        &keys,
-        SourceAuthority::Pinned(BTreeSet::from([inner_relay.clone()])),
-    );
+    let inner_atom = atom(&keys, ReadRouting::Explicit(vec![inner_relay.clone()]));
 
     {
         let mut store = RedbStore::open(&path).expect("create durable store");
@@ -749,12 +739,7 @@ fn live_and_satisfied_max_age_drop_independently() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://siblings.example").unwrap();
     let mut store = RedbStore::temporary().expect("temporary Redb store");
-    record(
-        &mut store,
-        &atom(&keys, SourceAuthority::AuthorOutboxes),
-        &relay,
-        99_000,
-    );
+    record(&mut store, &atom(&keys, ReadRouting::Auto), &relay, 99_000);
     let mut forward = core(store, &keys, &relay);
     tick(&mut forward, 100_000);
     let live = subscribe(&mut forward, query(&keys, Freshness::Live), 100_000);
@@ -777,12 +762,7 @@ fn live_and_satisfied_max_age_drop_independently() {
     assert_eq!(closes(&forward.handle(EngineMsg::Unsubscribe(fresh_id))), 0);
 
     let mut store = RedbStore::temporary().expect("temporary Redb store");
-    record(
-        &mut store,
-        &atom(&keys, SourceAuthority::AuthorOutboxes),
-        &relay,
-        99_000,
-    );
+    record(&mut store, &atom(&keys, ReadRouting::Auto), &relay, 99_000);
     let mut reverse = core(store, &keys, &relay);
     tick(&mut reverse, 100_000);
     let live = subscribe(&mut reverse, query(&keys, Freshness::Live), 100_000);
@@ -802,7 +782,7 @@ fn max_age_requires_fresh_coverage_from_every_assigned_outbox() {
     let keys = Keys::generate();
     let first = RelayUrl::parse("wss://first-outbox.example").unwrap();
     let second = RelayUrl::parse("wss://second-outbox.example").unwrap();
-    let demand_atom = atom(&keys, SourceAuthority::AuthorOutboxes);
+    let demand_atom = atom(&keys, ReadRouting::Auto);
 
     let mut partial_store = RedbStore::temporary().expect("temporary Redb store");
     record(&mut partial_store, &demand_atom, &first, 99_000);
@@ -872,7 +852,7 @@ fn stale_max_age_refreshes_coverage_once_and_remains_live() {
         "EOSE does not suppress the live tail"
     );
     assert_eq!(
-        core.get_coverage(&atom(&keys, SourceAuthority::AuthorOutboxes), &relay)
+        core.get_coverage(&atom(&keys, ReadRouting::Auto), &relay)
             .expect("coverage peek")
             .expect("a proven row")
             .through,
@@ -888,7 +868,7 @@ fn pinned_strict_max_age_uses_pinned_scope_for_coverage_and_rows() {
     let keys = Keys::generate();
     let pinned = RelayUrl::parse("wss://pinned.example").unwrap();
     let other = RelayUrl::parse("wss://other.example").unwrap();
-    let source = SourceAuthority::Pinned(BTreeSet::from([pinned.clone()]));
+    let source = ReadRouting::Explicit(vec![pinned.clone()]);
     let demand_atom = atom(&keys, source.clone());
     let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
@@ -947,7 +927,7 @@ fn future_event_time_never_inflates_coverage_or_freshness() {
         ))),
     ));
     assert_eq!(
-        core.get_coverage(&atom(&keys, SourceAuthority::AuthorOutboxes), &relay)
+        core.get_coverage(&atom(&keys, ReadRouting::Auto), &relay)
             .expect("coverage peek")
             .expect("a proven row")
             .through,
@@ -978,12 +958,7 @@ fn satisfied_max_age_window_growth_stays_store_only() {
             RelayObserved::new(relay.clone(), Timestamp::from(99_000u64)),
         )
         .unwrap();
-    record(
-        &mut store,
-        &atom(&keys, SourceAuthority::AuthorOutboxes),
-        &relay,
-        99_000,
-    );
+    record(&mut store, &atom(&keys, ReadRouting::Auto), &relay, 99_000);
     let mut core = core(store, &keys, &relay);
     tick(&mut core, 100_000);
     let opened = core.handle(EngineMsg::SubscribeHistory(HistoryQuery::new(

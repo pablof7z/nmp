@@ -174,15 +174,13 @@ sealed class NMPError(message: String) : Exception(message) {
     object NostrEntitySecretKeyRejected :
         NMPError("refusing to decode a secret-key entity")
 
-    /** An `NMPDemand` declared `NMPSourceAuthority.AuthorOutboxes` over a
-     * selection whose `authors` field is unbound (#107). */
-    object AuthorOutboxesRequiresBoundAuthors :
-        NMPError("SourceAuthority.AuthorOutboxes requires a selection whose authors field is bound")
-
-    /** An `NMPDemand` declared `NMPSourceAuthority.Pinned` with an empty
-     * relay set (#107 Contract: "the pinned relay set must be nonempty"). */
-    object EmptyPinnedRelaySet :
-        NMPError("SourceAuthority.Pinned requires a nonempty relay set")
+    /** An `NMPDemand` declared `NMPReadRouting.Explicit` with an empty relay
+     * set (#107 Contract: "the explicit relay set must be nonempty").
+     *
+     * The only routing refusal there is: `Auto` is total, so an app that
+     * names no routing can never hit a routing error. */
+    object EmptyExplicitRelaySet :
+        NMPError("ReadRouting.Explicit requires a nonempty relay set")
 
     /** A windowed `observe` declared a zero `initial` or `max` row count
      * (#485) -- an empty window could never deliver a row. */
@@ -405,8 +403,7 @@ sealed class NMPError(message: String) : Exception(message) {
                 is FfiException.EngineClosed -> EngineClosed
                 is FfiException.InvalidNostrEntity -> InvalidNostrEntity(ffi.reason)
                 is FfiException.NostrEntitySecretKeyRejected -> NostrEntitySecretKeyRejected
-                is FfiException.AuthorOutboxesRequiresBoundAuthors -> AuthorOutboxesRequiresBoundAuthors
-                is FfiException.EmptyPinnedRelaySet -> EmptyPinnedRelaySet
+                is FfiException.EmptyExplicitRelaySet -> EmptyExplicitRelaySet
                 is FfiException.WindowZeroRows -> WindowZeroRows
                 is FfiException.WindowInitialExceedsMax ->
                     WindowInitialExceedsMax(ffi.initial, ffi.max)

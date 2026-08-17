@@ -301,7 +301,7 @@ fn named(group_ids: &BTreeSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_grammar::{AccessContext, SourceAuthority};
+    use nmp_grammar::{AccessContext, ReadRouting};
     use nostr::{EventId, Keys, Kind, Timestamp, UnsignedEvent};
 
     const GROUP: &str = "photographers";
@@ -697,10 +697,7 @@ mod tests {
         };
         let demand = group_demand_at(&host(), GROUP, selection).expect("a plain selection scopes");
         assert_eq!(demand.selection.kinds, Some(BTreeSet::from([9, 30315])));
-        assert_eq!(
-            demand.source,
-            SourceAuthority::Pinned(BTreeSet::from([host()]))
-        );
+        assert_eq!(demand.routing, ReadRouting::Explicit(vec![host()]));
         assert_eq!(demand.access, AccessContext::Public);
         assert_eq!(
             demand.selection.tags.get(&context_tag()),
@@ -807,8 +804,8 @@ mod tests {
                 "the app's exact kind set for {kinds:?} must survive untouched"
             );
             assert_eq!(
-                demand.source,
-                SourceAuthority::Pinned(BTreeSet::from([host()])),
+                demand.routing,
+                ReadRouting::Explicit(vec![host()]),
                 "kinds {kinds:?}: the branch stays pinned to the one host regardless of kind"
             );
             assert_eq!(

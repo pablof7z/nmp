@@ -498,7 +498,7 @@ pub(crate) fn merge_acquisition_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_grammar::{AccessContext, SourceAuthority};
+    use nmp_grammar::{AccessContext, ReadRouting};
     use nmp_router::{DemandKey, SubId, WireReq};
     use nmp_store::RedbStore;
     use nostr::Keys;
@@ -510,7 +510,7 @@ mod tests {
                 authors: Some(BTreeSet::from(["aa".repeat(32)])),
                 ..ConcreteFilter::default()
             },
-            source: SourceAuthority::AuthorOutboxes,
+            routing: ReadRouting::Auto,
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         }
@@ -522,9 +522,9 @@ mod tests {
         let key = coverage_key(&atom);
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
         let req = WireReq {
-            sub_id: SubId::for_wire(relay.clone(), &atom.filter, &atom.source, atom.access),
+            sub_id: SubId::for_wire(relay.clone(), &atom.filter, &atom.routing, atom.access),
             filter: atom.filter.clone(),
-            source: atom.source.clone(),
+            routing: atom.routing.clone(),
             provenance: BTreeSet::new(),
             coverage_claims: BTreeSet::from([key]),
             owner_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
@@ -608,9 +608,14 @@ mod tests {
             reqs: BTreeMap::from([(
                 session.clone(),
                 vec![WireReq {
-                    sub_id: SubId::for_wire(relay.clone(), &atom.filter, &atom.source, atom.access),
+                    sub_id: SubId::for_wire(
+                        relay.clone(),
+                        &atom.filter,
+                        &atom.routing,
+                        atom.access,
+                    ),
                     filter: atom.filter.clone(),
-                    source: atom.source.clone(),
+                    routing: atom.routing.clone(),
                     provenance: BTreeSet::new(),
                     coverage_claims: BTreeSet::from([coverage_key(&atom)]),
                     owner_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
@@ -653,9 +658,9 @@ mod tests {
             reqs: BTreeMap::from([(
                 session.clone(),
                 vec![WireReq {
-                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.source, atom.access),
+                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.routing, atom.access),
                     filter: atom.filter.clone(),
-                    source: atom.source.clone(),
+                    routing: atom.routing.clone(),
                     provenance: BTreeSet::new(),
                     coverage_claims: BTreeSet::from([key]),
                     owner_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
@@ -733,9 +738,9 @@ mod tests {
             reqs: BTreeMap::from([(
                 session,
                 vec![WireReq {
-                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.source, atom.access),
+                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.routing, atom.access),
                     filter: atom.filter.clone(),
-                    source: atom.source.clone(),
+                    routing: atom.routing.clone(),
                     provenance: BTreeSet::new(),
                     coverage_claims: BTreeSet::from([coverage_key(&atom)]),
                     owner_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),

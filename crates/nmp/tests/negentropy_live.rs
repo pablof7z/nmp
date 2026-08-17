@@ -106,16 +106,16 @@ fn wait_for_rows(
 }
 
 fn literal_kind1(author_hex: &str) -> LiveQuery {
-    LiveQuery::single(
-        Demand::author_outboxes(Filter {
+    LiveQuery::single(Demand {
+        selection: Filter {
             kinds: Some(std::collections::BTreeSet::from([1u16])),
             authors: Some(Binding::Literal(std::collections::BTreeSet::from([
                 author_hex.to_string(),
             ]))),
             ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-    )
+        },
+        ..Demand::default()
+    })
 }
 
 /// Test 10 (plan §5, negentropy half): a relay PROVEN to speak NIP-77

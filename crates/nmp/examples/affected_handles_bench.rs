@@ -27,14 +27,17 @@ fn database_path(handles: usize) -> PathBuf {
 }
 
 fn room_query(room: &str) -> LiveQuery {
-    LiveQuery::single(Demand::public(Filter {
-        tags: BTreeMap::from([(
-            IndexedTagName::new('h').unwrap(),
-            Binding::Literal(BTreeSet::from([room.to_owned()])),
-        )]),
-        limit: Some(200),
-        ..Filter::default()
-    }))
+    LiveQuery::single(Demand {
+        selection: Filter {
+            tags: BTreeMap::from([(
+                IndexedTagName::new('h').unwrap(),
+                Binding::Literal(BTreeSet::from([room.to_owned()])),
+            )]),
+            limit: Some(200),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    })
 }
 
 fn load_corpus(path: &Path) -> (Vec<Event>, Vec<String>, u64) {

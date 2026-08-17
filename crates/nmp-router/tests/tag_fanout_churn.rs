@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, SourceAuthority};
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting};
 use nmp_router::{RelayUrl, Router, RuleRegistry, WireOp};
 use nmp_router_testkit::FixtureRoutingFacts;
 
@@ -38,7 +38,7 @@ fn atom(groups: &[String]) -> ContextualAtom {
             )]),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(relays()),
+        routing: ReadRouting::Explicit(relays().into_iter().collect()),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }
@@ -217,7 +217,7 @@ fn the_authors_slot_achieves_one_live_sub_with_fresh_transitions() {
                     authors: Some(BTreeSet::from([format!("{n:064x}")])),
                     ..ConcreteFilter::default()
                 },
-                source: SourceAuthority::Pinned(relays()),
+                routing: ReadRouting::Explicit(relays().into_iter().collect()),
                 access: AccessContext::Public,
                 routing_evidence: BTreeSet::new(),
             })
@@ -277,7 +277,7 @@ fn limited_identical_except_authors_atoms_each_reach_the_wire() {
             limit: Some(10),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(relays()),
+        routing: ReadRouting::Explicit(relays().into_iter().collect()),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
@@ -356,7 +356,7 @@ fn unlimited_identical_except_authors_atoms_merge_instead_of_colliding() {
             authors: Some(BTreeSet::from([author.to_string()])),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(relays()),
+        routing: ReadRouting::Explicit(relays().into_iter().collect()),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };

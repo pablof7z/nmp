@@ -106,8 +106,7 @@ final class WindowTests: XCTestCase {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
         let demand = NMPDemand(
-            selection: NMPFilter(kinds: [7_779]),
-            source: .public
+            selection: NMPFilter(kinds: [7_779])
         )
 
         XCTAssertThrowsError(
@@ -124,8 +123,7 @@ final class WindowTests: XCTestCase {
             )
         }
         let limited = NMPDemand(
-            selection: NMPFilter(kinds: [7_779], limit: 1),
-            source: .public
+            selection: NMPFilter(kinds: [7_779], limit: 1)
         )
         XCTAssertThrowsError(
             try engine.observe(.single(limited), window: .expandable(initial: 1, max: 2))
@@ -149,7 +147,7 @@ final class WindowTests: XCTestCase {
     func testRequestRowsOnAnUnwindowedQueryThrowsUnwindowed() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
-        let query = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [7_781]), source: .public)))
+        let query = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [7_781]))))
 
         XCTAssertThrowsError(try query.requestRows(atLeast: 10)) { error in
             XCTAssertEqual(error as? NMPRequestRowsError, .unwindowed)
@@ -165,8 +163,7 @@ final class WindowTests: XCTestCase {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
         let demand = NMPDemand(
-            selection: NMPFilter(kinds: [7_782]),
-            source: .public
+            selection: NMPFilter(kinds: [7_782])
         )
         let query = try engine.observe(.single(demand), window: .expandable(initial: 1, max: 1))
 
@@ -198,8 +195,7 @@ final class WindowTests: XCTestCase {
     func testEngineShutdownClosesAWindowedIteratorWithinBound() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         let demand = NMPDemand(
-            selection: NMPFilter(kinds: [7_780]),
-            source: .public
+            selection: NMPFilter(kinds: [7_780])
         )
         let query = try engine.observe(.single(demand), window: .expandable(initial: 1, max: 2))
 

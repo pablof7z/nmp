@@ -115,16 +115,16 @@ fn alice_then_bob_keep_two_receipts_and_one_complete_pending_event() {
     let writes = follow_writes();
     let subscription = engine
         .observe(
-            LiveQuery::single(
-                Demand::author_outboxes(Filter {
+            LiveQuery::single(Demand {
+                selection: Filter {
                     kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
                     authors: Some(Binding::Literal(BTreeSet::from([author
                         .public_key()
                         .to_hex()]))),
                     ..Filter::default()
-                })
-                .expect("the selection binds `authors`"),
-            ),
+                },
+                ..Demand::default()
+            }),
             None,
         )
         .expect("query opens");
@@ -185,16 +185,16 @@ fn alice_then_bob_keep_two_receipts_and_one_complete_pending_event() {
     let _writes = follow_writes();
     let recovered_query = reopened
         .observe(
-            LiveQuery::single(
-                Demand::author_outboxes(Filter {
+            LiveQuery::single(Demand {
+                selection: Filter {
                     kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
                     authors: Some(Binding::Literal(BTreeSet::from([author
                         .public_key()
                         .to_hex()]))),
                     ..Filter::default()
-                })
-                .expect("the selection binds `authors`"),
-            ),
+                },
+                ..Demand::default()
+            }),
             None,
         )
         .expect("recovered query opens");
@@ -336,16 +336,16 @@ fn invalidated_registration_and_materializer_refusal_leave_no_custody() {
 
     let query = engine
         .observe(
-            LiveQuery::single(
-                Demand::author_outboxes(Filter {
+            LiveQuery::single(Demand {
+                selection: Filter {
                     kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
                     authors: Some(Binding::Literal(BTreeSet::from([author
                         .public_key()
                         .to_hex()]))),
                     ..Filter::default()
-                })
-                .expect("the selection binds `authors`"),
-            ),
+                },
+                ..Demand::default()
+            }),
             None,
         )
         .expect("query opens");

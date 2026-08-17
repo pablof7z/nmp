@@ -15,11 +15,11 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
     };
     let atom = ContextualAtom {
         filter: filter.clone(),
-        source: SourceAuthority::Pinned(BTreeSet::from([relay])),
+        routing: ReadRouting::Explicit(vec![relay]),
         access: session.access,
         routing_evidence: BTreeSet::new(),
     };
-    let sub_id = SubId::for_wire(session.relay.clone(), &filter, &atom.source, atom.access);
+    let sub_id = SubId::for_wire(session.relay.clone(), &filter, &atom.routing, atom.access);
     let claims = BTreeSet::from([nmp_store::coverage_key(&atom)]);
     let owners = BTreeSet::from([nmp_router::DemandKey::for_atom(&atom)]);
     let first_handle = TransportRelayHandle {
@@ -42,6 +42,7 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
             filter.clone(),
             claims.clone(),
             owners.clone(),
+            BTreeSet::new(),
         )
     });
     core.white_box("slot_to_relay.insert", |s| {
@@ -55,6 +56,7 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
             filter: &filter,
             coverage_claims: claims,
             owner_demands: owners,
+            lanes: BTreeSet::new(),
             replay: false,
             event_failure_target: EventFailureTarget::ThisSend,
         })

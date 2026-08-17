@@ -115,10 +115,13 @@ const SHUTDOWN_BOUND: Duration = Duration::from_secs(15);
 const PARK_CEILING: Duration = Duration::from_secs(60);
 
 fn note_query() -> LiveQuery {
-    LiveQuery::single(Demand::public(Filter {
-        kinds: Some(std::collections::BTreeSet::from([1u16])),
-        ..Filter::default()
-    }))
+    LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(std::collections::BTreeSet::from([1u16])),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    })
 }
 
 fn text_note_request(content: &str) -> SignEventRequest {

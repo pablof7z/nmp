@@ -129,12 +129,12 @@ public enum NMPError: Error, Sendable, Equatable {
     /// `decodeNostrEntity`'s input decoded to `nsec`/`ncryptsec` -- refused
     /// rather than decoded (#116).
     case nostrEntitySecretKeyRejected
-    /// An `NMPDemand` declared `.authorOutboxes` over a selection whose
-    /// `authors` field is unbound (#107).
-    case authorOutboxesRequiresBoundAuthors
-    /// An `NMPDemand` declared `.pinned([])` -- an empty relay set (#107
-    /// Contract: "the pinned relay set must be nonempty").
-    case emptyPinnedRelaySet
+    /// An `NMPDemand` declared `.explicit([])` -- an empty relay set (#107
+    /// Contract: "the explicit relay set must be nonempty").
+    ///
+    /// The only routing refusal there is: `.auto` is total, so an app that
+    /// names no routing can never hit a routing error.
+    case emptyExplicitRelaySet
     /// A windowed `observe` declared a zero `initial` or `max` row count
     /// (#485) -- an empty window can neither deliver nor grow.
     case windowZeroRows
@@ -294,8 +294,7 @@ public enum NMPError: Error, Sendable, Equatable {
         case .EngineClosed: self = .engineClosed
         case .InvalidNostrEntity(let reason): self = .invalidNostrEntity(reason)
         case .NostrEntitySecretKeyRejected: self = .nostrEntitySecretKeyRejected
-        case .AuthorOutboxesRequiresBoundAuthors: self = .authorOutboxesRequiresBoundAuthors
-        case .EmptyPinnedRelaySet: self = .emptyPinnedRelaySet
+        case .EmptyExplicitRelaySet: self = .emptyExplicitRelaySet
         case .WindowZeroRows: self = .windowZeroRows
         case .WindowInitialExceedsMax(let initial, let max):
             self = .windowInitialExceedsMax(initial: initial, max: max)
@@ -456,10 +455,8 @@ extension NMPError: LocalizedError {
             "Invalid Nostr entity: \(reason)"
         case .nostrEntitySecretKeyRejected:
             "Refusing to decode a secret-key entity"
-        case .authorOutboxesRequiresBoundAuthors:
-            "SourceAuthority.authorOutboxes requires a selection whose authors field is bound"
-        case .emptyPinnedRelaySet:
-            "SourceAuthority.pinned requires a nonempty relay set"
+        case .emptyExplicitRelaySet:
+            "ReadRouting.explicit requires a nonempty relay set"
         case .windowZeroRows:
             "Window initial/max must be representable nonzero row counts"
         case .windowInitialExceedsMax(let initial, let max):

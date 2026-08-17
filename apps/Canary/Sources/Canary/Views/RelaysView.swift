@@ -45,8 +45,7 @@ struct RelaysView: View {
 
     private func observe() async {
         let relayLists = NMPDemand(
-            selection: FeedFilters.followsRelayLists(),
-            source: .authorOutboxes
+            selection: FeedFilters.followsRelayLists()
         )
         guard let query = try? model.engine.observe(.single(relayLists)) else { return }
         // #680: an observation is a throwing AsyncSequence; a throw here is

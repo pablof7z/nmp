@@ -173,7 +173,6 @@ class RowPullCancellationTest {
                             NMPLiveQuery.single(
                                 NMPDemand(
                                     selection = NMPFilter(),
-                                    source = NMPSourceAuthority.Public,
                                 )
                             ),
                         ).collect { collected.add(it) }

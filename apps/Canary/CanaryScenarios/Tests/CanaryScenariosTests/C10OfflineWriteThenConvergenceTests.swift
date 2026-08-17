@@ -264,7 +264,7 @@ final class C10OfflineWriteThenConvergenceTests: XCTestCase {
         let account = try engine.session.add(privateKey: .generate(), makeCurrent: true)
         let authorHex = account.publicKey.bytes.map { String(format: "%02x", $0) }.joined()
 
-        let query = try engine.observe(NMPFilter(kinds: [1], authors: .literal([authorHex])))
+        let query = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [1], authors: .literal([authorHex])))))
         final class RowState: @unchecked Sendable {
             private let lock = NSLock()
             private var rows: [Row] = []

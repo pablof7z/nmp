@@ -42,7 +42,7 @@ renders them.
 A live query is a semantic demand:
 
 ```text
-Demand = Selection + SourceAuthority + AccessContext
+Demand = Selection + ReadRouting + AccessContext
 ```
 
 - **Selection** is a Nostr filter whose set-valued fields may contain closed

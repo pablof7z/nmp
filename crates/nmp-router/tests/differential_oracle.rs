@@ -28,12 +28,14 @@ fn my_follows_filter() -> Filter {
     Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Demand::author_outboxes(Filter {
-                kinds: Some(BTreeSet::from([3u16])),
-                authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-                ..Filter::default()
-            })
-            .expect("the selection binds `authors`"),
+            inner: Demand {
+                selection: Filter {
+                    kinds: Some(BTreeSet::from([3u16])),
+                    authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                    ..Filter::default()
+                },
+                ..Demand::default()
+            },
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
@@ -63,9 +65,10 @@ fn differential_oracle_identical_delivery() {
 
     let mut h = Harness::new();
     h.set_active(Some(me.public_key()));
-    let (_handle, _open_delta) = h.subscribe(
-        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`"),
-    );
+    let (_handle, _open_delta) = h.subscribe(Demand {
+        selection: my_follows_filter(),
+        ..Demand::default()
+    });
     let follow_pks: Vec<_> = follows.iter().map(|k| k.public_key()).collect();
     h.deliver(vec![kind3(&me, &follow_pks, 100)]);
 
@@ -84,8 +87,19 @@ fn differential_oracle_identical_delivery() {
     let pool = vec![test_relay(0), test_relay(1), test_relay(2)];
     let dir = FixtureRoutingFacts::shared_pool_mailboxes(&follow_pks, &pool);
 
+    // The universe covers the mailbox pool AND the relay the harness
+    // attributes its own ingest to. `ReadRouting::Auto` routes prior
+    // source provenance directly, so that relay is in the plan: the
+    // derived kind:1 atoms carry the kind:3's provenance, and "we already
+    // saw the source event there" is one of the things `Auto` means.
+    // Leaving it out of the universe would make this oracle panic on a
+    // relay it is supposed to be comparing delivery across.
+    let mut universe = pool.clone();
+    universe
+        .push(RelayUrl::parse("wss://resolver-ingest.fixture.invalid").expect("fixture relay url"));
+
     let mut relay_store: BTreeMap<RelayUrl, Vec<Event>> = BTreeMap::new();
-    for relay in &pool {
+    for relay in &universe {
         let mut events = Vec::new();
         // Each follow contributes a matching kind:1 note...
         for follow in &follows {

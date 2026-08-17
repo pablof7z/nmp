@@ -108,29 +108,42 @@ fn scenario_demand(scenario: Scenario, author: &Keys) -> Demand {
     // shapes chase outboxes because that is what they are measuring, not
     // because they happen to bind `authors`.
     match scenario {
-        Scenario::Global => Demand::public(Filter::default()),
-        Scenario::HotRoom => Demand::public(Filter {
-            tags: BTreeMap::from([(
-                IndexedTagName::new('h').unwrap(),
-                Binding::Literal(BTreeSet::from(["nmp-scale-hot-room".to_owned()])),
-            )]),
-            ..Filter::default()
-        }),
-        Scenario::Author => Demand::author_outboxes(Filter {
-            authors: authors(),
-            ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-        Scenario::Kind => Demand::public(Filter {
-            kinds: Some(BTreeSet::from([9u16])),
-            ..Filter::default()
-        }),
-        Scenario::AuthorKind => Demand::author_outboxes(Filter {
-            kinds: Some(BTreeSet::from([9u16])),
-            authors: authors(),
-            ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
+        Scenario::Global => Demand {
+            selection: Filter::default(),
+            ..Demand::default()
+        },
+        Scenario::HotRoom => Demand {
+            selection: Filter {
+                tags: BTreeMap::from([(
+                    IndexedTagName::new('h').unwrap(),
+                    Binding::Literal(BTreeSet::from(["nmp-scale-hot-room".to_owned()])),
+                )]),
+                ..Filter::default()
+            },
+            ..Demand::default()
+        },
+        Scenario::Author => Demand {
+            selection: Filter {
+                authors: authors(),
+                ..Filter::default()
+            },
+            ..Demand::default()
+        },
+        Scenario::Kind => Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([9u16])),
+                ..Filter::default()
+            },
+            ..Demand::default()
+        },
+        Scenario::AuthorKind => Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([9u16])),
+                authors: authors(),
+                ..Filter::default()
+            },
+            ..Demand::default()
+        },
     }
 }
 

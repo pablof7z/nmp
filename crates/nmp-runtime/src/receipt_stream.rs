@@ -9,9 +9,7 @@ use nmp_engine::core::{
 };
 use nmp_engine::publish_queue::{ReceiptResult, ReceiptResultError, WriteFact};
 
-use super::{
-    superseding_fifo_channel, Cmd, FifoReceiver, FifoRecvError, FifoSender, Handle,
-};
+use super::{superseding_fifo_channel, Cmd, FifoReceiver, FifoRecvError, FifoSender, Handle};
 
 /// Runtime-private identity for one exact live receipt mailbox.
 #[derive(Clone)]

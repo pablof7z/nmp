@@ -126,12 +126,12 @@ context independently of the app's selected account:
 ```swift
 let demand = NMPDemand(
     selection: selection,
-    source: group.sourceAuthority,
+    routing: group.readRouting,
     access: .auth(identityRef)
 )
 ```
 
-The protocol module mints `group.sourceAuthority` from typed NIP-29 group
+The protocol module mints `group.readRouting` from typed NIP-29 group
 context. The app may supply the public group host through that semantic
 constructor, but cannot convert a relay URL into generic authority for unrelated
 demand.

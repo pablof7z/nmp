@@ -78,14 +78,14 @@ fn delayed_signer_promotes_the_same_visible_row_from_pending_to_signed() {
 
     let subscription = engine
         .observe(
-            LiveQuery::single(
-                Demand::author_outboxes(Filter {
+            LiveQuery::single(Demand {
+                selection: Filter {
                     kinds: Some(BTreeSet::from([1])),
                     authors: Some(Binding::Literal(BTreeSet::from([pubkey.to_hex()]))),
                     ..Filter::default()
-                })
-                .expect("the selection binds `authors`"),
-            ),
+                },
+                ..Demand::default()
+            }),
             None,
         )
         .expect("the ordinary query opens before publication");

@@ -137,14 +137,14 @@ fn wait_for_status(
 }
 
 fn reactive_kind1() -> LiveQuery {
-    LiveQuery::single(
-        Demand::author_outboxes(Filter {
+    LiveQuery::single(Demand {
+        selection: Filter {
             kinds: Some(BTreeSet::from([1u16])),
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-    )
+        },
+        ..Demand::default()
+    })
 }
 
 #[test]
@@ -735,14 +735,14 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
 
     // The promoted row carries B's REAL signature -- fetch it and verify.
     let (_qh, rows_rx) = handle
-        .subscribe(LiveQuery::single(
-            Demand::author_outboxes(Filter {
+        .subscribe(LiveQuery::single(Demand {
+            selection: Filter {
                 kinds: Some(BTreeSet::from([1u16])),
                 authors: Some(Binding::Literal(BTreeSet::from([b.public_key().to_hex()]))),
                 ..Filter::default()
-            })
-            .expect("the selection binds `authors`"),
-        ))
+            },
+            ..Demand::default()
+        }))
         .expect("test subscription construction");
     let deadline = Instant::now() + Duration::from_secs(5);
     let verified = loop {

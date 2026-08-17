@@ -41,7 +41,7 @@ The route classes are `Coverage`, `Supplemental`, and `Exact`. There is no
 discovery-kind classification, indexer lane, protocol marker, pinned-directory
 lookup, or protocol-specific relay-list accessor in `nmp-router`.
 
-`SourceAuthority::Pinned` and `WriteRouting::Explicit` remain because exact
+`ReadRouting::Explicit` and `WriteRouting::Explicit` remain because exact
 destinations are ordinary query/write facts, not NIP-65 concepts.
 
 ## Mutation ownership

@@ -456,7 +456,7 @@ final class C14Nip77ReconciliationTests: XCTestCase {
             diagnosticsStream.cancel()
         }
 
-        let query = try engine.observe(NMPDemand(selection: filter, source: .pinned([relay.url])))
+        let query = try engine.observe(.single(NMPDemand(selection: filter, routing: .explicit([relay.url]))))
         let ledger = ObservationLedger()
         let consumer = Task {
             do {

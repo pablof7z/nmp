@@ -112,14 +112,14 @@ async fn cold_public_engine_observes_alices_notes(world: &mut AcceptanceWorld) {
         .expect("the scripted indexer URL parses")]))),
     )
     .expect("the public engine starts");
-    let query = LiveQuery::single(
-        Demand::author_outboxes(Filter {
+    let query = LiveQuery::single(Demand {
+        selection: Filter {
             kinds: Some(BTreeSet::from([1])),
             authors: Some(Binding::Literal(BTreeSet::from([alice_hex.clone()]))),
             ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-    );
+        },
+        ..Demand::default()
+    });
     let subscription = engine
         .observe(query, None)
         .expect("the public observation starts");

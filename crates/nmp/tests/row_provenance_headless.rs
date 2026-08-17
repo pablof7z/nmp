@@ -27,14 +27,14 @@ fn append_row_deltas(effects: &[Effect], delivered: &mut Vec<RowDelta>) {
 }
 
 fn literal_kind_query(kind: u16, author_hex: &str) -> LiveQuery {
-    LiveQuery::single(
-        Demand::author_outboxes(Filter {
+    LiveQuery::single(Demand {
+        selection: Filter {
             kinds: Some(BTreeSet::from([kind])),
             authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
             ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-    )
+        },
+        ..Demand::default()
+    })
 }
 
 fn connect(core: &mut EngineCore, slot: u32, url: &RelayUrl) {

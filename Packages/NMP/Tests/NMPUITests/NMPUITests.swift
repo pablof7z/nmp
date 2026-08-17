@@ -242,8 +242,7 @@ final class NMPUITests: XCTestCase {
                         kinds: [0],
                         authors: .literal([pubkey]),
                         limit: 1
-                    ),
-                    source: .authorOutboxes
+                    )
                 )
             }
         )

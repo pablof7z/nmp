@@ -10,14 +10,16 @@ use super::*;
 use nmp_engine::core::HistoryQuery;
 
 fn query(author: &Keys, freshness: Freshness) -> LiveQuery {
-    let mut demand = Demand::author_outboxes(Filter {
-        kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
-        authors: Some(Binding::Literal(BTreeSet::from([author
-            .public_key()
-            .to_hex()]))),
-        ..Filter::default()
-    })
-    .expect("the selection binds `authors`");
+    let mut demand = Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
+            authors: Some(Binding::Literal(BTreeSet::from([author
+                .public_key()
+                .to_hex()]))),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    };
     demand.freshness = freshness;
     LiveQuery::single(demand)
 }

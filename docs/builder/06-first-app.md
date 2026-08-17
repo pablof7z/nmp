@@ -25,7 +25,6 @@ let demand = NMPDemand(
         kinds: .literal([appKind]),
         authors: .literal(selectedAuthors)
     ),
-    source: .authorOutboxes,
     access: .public
 )
 
@@ -66,7 +65,6 @@ val demand = Demand(
         kinds = Binding.literal(setOf(appKind)),
         authors = Binding.literal(selectedAuthors)
     ),
-    source = SourceAuthority.AuthorOutboxes,
     access = AccessContext.Public
 )
 
@@ -100,14 +98,13 @@ Direct Rust uses the same canonical facade that FFI projects. Applications do
 not assemble store, router, resolver, signer, and transport crates themselves:
 
 ```rust
-use nmp::{Demand, Engine, EngineConfig, Filter, SourceAuthority};
+use nmp::{Demand, Engine, EngineConfig, Filter, ReadRouting};
 
 let engine = Engine::new(EngineConfig::persistent(path, bootstrap))?;
 engine.set_current_pubkey(Some(selected_pubkey))?;
 
 let demand = Demand {
     selection: Filter::literal_kinds_and_authors([app_kind], selected_authors),
-    source: SourceAuthority::AuthorOutboxes,
     access: Default::default(),
 };
 

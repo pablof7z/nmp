@@ -350,7 +350,7 @@ impl RuleRegistry {
     /// filter folded into a merge.
     ///
     /// Deliberately PURE selection-only (#106, Fable D "locus fixed"): this
-    /// engine never learns about `SourceAuthority`/`AccessContext` at all --
+    /// engine never learns about `ReadRouting`/`AccessContext` at all --
     /// equal-context-only coalescing is enforced one level up, by
     /// `Router::compile` partitioning its per-relay bag by `ContextKey`
     /// BEFORE calling this on each partition separately. Two atoms that
@@ -921,7 +921,7 @@ mod tests {
     /// own first operand, which matched every author alive. Reachable on
     /// master: a `Public`-sourced pinned atom carries no authors, and #106
     /// explicitly permits an author-bearing atom to declare `Public` too, so
-    /// both land in one relay's `SourceAuthority::Public` partition.
+    /// both land in one relay's `ReadRouting::Auto` partition.
     #[test]
     fn refuses_an_unconstrained_authors_operand() {
         let unconstrained = cf(&[1], &[]);

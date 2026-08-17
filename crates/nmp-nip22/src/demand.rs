@@ -40,13 +40,16 @@ pub fn comment_thread_demand(root: &CommentRoot) -> Demand {
         )]),
         ..Filter::default()
     };
-    Demand::public(filter)
+    Demand {
+        selection: filter,
+        ..Demand::default()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_grammar::SourceAuthority;
+    use nmp_grammar::ReadRouting;
     use nmp_nip73::Nip73;
 
     #[test]
@@ -86,6 +89,6 @@ mod tests {
     fn demand_defaults_to_public_source() {
         let root = CommentRoot::External(Nip73::podcast_episode("guid-1").unwrap());
         let demand = comment_thread_demand(&root);
-        assert_eq!(demand.source, SourceAuthority::Public);
+        assert_eq!(demand.routing, ReadRouting::Auto);
     }
 }

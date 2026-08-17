@@ -11,7 +11,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use nmp_grammar::{
-    AccessContext, CacheMode, ConcreteFilter, ContextualAtom, Freshness, SourceAuthority,
+    AccessContext, CacheMode, ConcreteFilter, ContextualAtom, Freshness, ReadRouting,
 };
 
 use crate::engine::{ResolutionNodeKind, ResolutionNodeSnapshot, ResolvedValue};
@@ -75,7 +75,7 @@ pub(crate) struct FilterNodeData {
     /// OWN (possibly different) context, never this one's (a Demand's
     /// source/access is never inherited across a `Binding::Derived`
     /// boundary -- see `nmp_grammar::Derived`'s doc).
-    pub(crate) source: SourceAuthority,
+    pub(crate) routing: ReadRouting,
     pub(crate) access: AccessContext,
 }
 
@@ -337,7 +337,7 @@ impl Graph {
 
     /// The exact eligible provenance set for a Strict interior projection.
     /// Strict is meaningful only for a pinned Demand; every other
-    /// cache/source combination returns `None` and uses the agnostic read.
+    /// cache/routing combination returns `None` and uses the agnostic read.
     pub(crate) fn strict_projection_relays(
         &self,
         filter_id: NodeId,
@@ -346,9 +346,9 @@ impl Graph {
         if cache != CacheMode::Strict {
             return None;
         }
-        match &self.filter_data(filter_id).source {
-            SourceAuthority::Pinned(relays) => Some(relays.clone()),
-            SourceAuthority::AuthorOutboxes | SourceAuthority::Public => None,
+        match &self.filter_data(filter_id).routing {
+            ReadRouting::Explicit(relays) => Some(relays.iter().cloned().collect()),
+            ReadRouting::Auto => None,
         }
     }
 
@@ -403,7 +403,7 @@ impl Graph {
         if f.bound.is_empty() {
             return BTreeSet::from([ContextualAtom {
                 filter: base,
-                source: f.source.clone(),
+                routing: f.routing.clone(),
                 access: f.access,
                 routing_evidence: BTreeSet::new(),
             }]);
@@ -435,7 +435,7 @@ impl Graph {
             .into_iter()
             .map(|(filter, routing_evidence)| ContextualAtom {
                 filter,
-                source: f.source.clone(),
+                routing: f.routing.clone(),
                 access: f.access,
                 routing_evidence,
             })
@@ -602,7 +602,7 @@ mod destination_tests {
                 limit: None,
                 bound: vec![(slot, binding_id)],
                 cached_atoms: BTreeSet::new(),
-                source: SourceAuthority::Public,
+                routing: ReadRouting::Auto,
                 access: AccessContext::Public,
             }),
             ParentLink::Root,
@@ -660,7 +660,7 @@ mod destination_tests {
                 limit: None,
                 bound: Vec::new(),
                 cached_atoms: BTreeSet::new(),
-                source: SourceAuthority::Public,
+                routing: ReadRouting::Auto,
                 access: AccessContext::Public,
             }),
             ParentLink::DerivedInner(live_derived),
@@ -702,7 +702,7 @@ mod destination_tests {
                 limit: None,
                 bound: vec![(FieldSlot::Authors, set_op)],
                 cached_atoms: BTreeSet::new(),
-                source: SourceAuthority::Public,
+                routing: ReadRouting::Auto,
                 access: AccessContext::Public,
             }),
             ParentLink::Root,

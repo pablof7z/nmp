@@ -9,7 +9,7 @@
   reserve the AUTH phase in the per-source evidence vocabulary (#8 evidence half).
 - **Issue disposition:** this cohesive wave closes #12 and advances the evidence
   half of #49. It does **not** close #49: full descriptor identity
-  (`selection + source authority + access context`) and context-isolated
+  (`selection + read routing + access context`) and context-isolated
   persistence/coalescing remain tracked there and in `docs/known-gaps.md`.
 - **Nature: this is a REWORK, not a greenfield add.** The coverage-watermark
   substrate (`nmp-store::coverage`, `attribution.rs`) already exists and is

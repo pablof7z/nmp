@@ -24,8 +24,7 @@ let followed = NMPBinding.derived(
         selection: NMPFilter(
             kinds: [3],
             authors: .reactive(.activePubkey)
-        ),
-        source: .authorOutboxes
+        )
     ),
     project: .tag("p")
 )
@@ -35,7 +34,7 @@ let homeAuthors = NMPBinding.setOp(
 )
 ```
 
-Use `homeAuthors` in the content filter with `.authorOutboxes`. The self-union is product semantics, not an NMP default.
+Use `homeAuthors` in the content filter with `.auto`. The self-union is product semantics, not an NMP default.
 
 ## Profile screen with live content
 

@@ -69,8 +69,7 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
                     selection: NMPFilter(
                         kinds: [10_002],
                         authors: .literal([testHex(routeAccount.publicKey)])
-                    ),
-                    source: .authorOutboxes
+                    )
                 )
             ),
             window: .expandable(initial: 1, max: 1)
@@ -105,8 +104,7 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
                     selection: NMPFilter(
                         kinds: [1],
                         authors: .literal([testHex(publishAccount.publicKey)])
-                    ),
-                    source: .authorOutboxes
+                    )
                 )
             ),
             window: .expandable(initial: 1, max: 1)

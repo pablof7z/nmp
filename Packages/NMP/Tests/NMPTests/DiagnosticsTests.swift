@@ -75,8 +75,7 @@ final class DiagnosticsTests: XCTestCase {
         let query = try engine.observe(
             .single(
                 NMPDemand(
-                    selection: NMPFilter(kinds: [1], authors: .literal([hexPubkey])),
-                    source: .authorOutboxes
+                    selection: NMPFilter(kinds: [1], authors: .literal([hexPubkey]))
                 )
             )
         )

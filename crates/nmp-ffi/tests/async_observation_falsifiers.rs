@@ -13,7 +13,7 @@ use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::FfiFrame;
 use nmp_ffi::types::{
     FfiAccessContext, FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiLiveQuery,
-    FfiSourceAuthority,
+    FfiReadRouting,
 };
 
 /// Consume every immediately-available frame (an observation delivers its
@@ -62,7 +62,7 @@ fn note_query() -> FfiLiveQuery {
                 kinds: Some(vec![1]),
                 ..FfiFilter::default()
             },
-            source: FfiSourceAuthority::Public,
+            routing: FfiReadRouting::Auto,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,

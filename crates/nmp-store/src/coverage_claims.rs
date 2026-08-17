@@ -1,14 +1,13 @@
 //! Canonical durable-coverage claim shapes.
 //!
 //! Relay routing may widen or synthesize a physical filter, but durable
-//! coverage is always credited to these exact logical shapes. In
-//! particular, one `AuthorOutboxes` atom spanning several authors owns one
-//! relay lifecycle while proving one independently reusable coverage row per
-//! author.
+//! coverage is always credited to these exact logical shapes. In particular,
+//! one `Auto` atom spanning several authors owns one relay lifecycle while
+//! proving one independently reusable coverage row per author.
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{ContextualAtom, SourceAuthority};
+use nmp_grammar::{ContextualAtom, ReadRouting};
 
 /// Project one logical atom to the exact shapes it may claim durably.
 ///
@@ -16,13 +15,23 @@ use nmp_grammar::{ContextualAtom, SourceAuthority};
 /// registry and the router's immutable request payload. Callers retain the
 /// original atom for demand ownership; only coverage claims are normalized.
 pub fn coverage_claim_atoms(atom: &ContextualAtom) -> BTreeSet<ContextualAtom> {
-    let SourceAuthority::AuthorOutboxes = atom.source else {
+    let ReadRouting::Auto = atom.routing else {
+        // `Explicit` asked exactly one relay set for exactly this selection.
+        // There is no per-author dimension to split along, so the atom is its
+        // own claim whatever its authors say.
         return BTreeSet::from([atom.clone()]);
     };
     let Some(authors) = &atom.filter.authors else {
-        return BTreeSet::new();
+        // An `Auto` selection that names no author has no outbox dimension to
+        // fan out over either: it is one exact claim over exactly what it
+        // selected. Returning nothing here would mean an authorless live
+        // query proves no durable coverage at all and re-fetches forever.
+        return BTreeSet::from([atom.clone()]);
     };
     if authors.is_empty() {
+        // Bound, but resolved to nobody. Nothing was asked of any author, so
+        // nothing was proven about one — distinct from the unbound case above,
+        // which asked about everyone.
         return BTreeSet::new();
     }
     if authors.len() == 1 {
@@ -46,7 +55,7 @@ mod tests {
     use nostr::RelayUrl;
 
     #[test]
-    fn multi_author_outbox_has_one_claim_shape_per_author() {
+    fn multi_author_auto_has_one_claim_shape_per_author() {
         let atom = ContextualAtom {
             filter: ConcreteFilter {
                 kinds: Some(BTreeSet::from([0])),
@@ -54,7 +63,7 @@ mod tests {
                 since: Some(10),
                 ..ConcreteFilter::default()
             },
-            source: SourceAuthority::AuthorOutboxes,
+            routing: ReadRouting::Auto,
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
@@ -69,55 +78,55 @@ mod tests {
         assert!(claims.iter().all(|claim| claim.filter.since == Some(10)));
     }
 
+    /// An `Auto` selection naming NO author still claims coverage — one
+    /// exact claim over what it selected. This is the case an authorless
+    /// live query is, and dropping it would mean such a query proves nothing
+    /// durable and re-fetches on every restart forever.
     #[test]
-    fn non_outbox_atom_remains_one_exact_claim_shape() {
+    fn an_authorless_auto_atom_remains_one_exact_claim_shape() {
         let atom = ContextualAtom {
             filter: ConcreteFilter::default(),
-            source: SourceAuthority::Public,
+            routing: ReadRouting::Auto,
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
         assert_eq!(coverage_claim_atoms(&atom), BTreeSet::from([atom]));
     }
 
+    /// The one shape that owns no durable claim: `authors` BOUND but resolved
+    /// to nobody. It is not the same as unbound — unbound asked about
+    /// everyone and got an answer, this asked about nobody and got nothing.
     #[test]
-    fn invalid_author_outbox_shapes_own_no_durable_claims() {
+    fn an_auto_atom_bound_to_no_author_owns_no_durable_claims() {
         let atom = ContextualAtom {
-            filter: ConcreteFilter::default(),
-            source: SourceAuthority::AuthorOutboxes,
+            filter: ConcreteFilter {
+                authors: Some(BTreeSet::new()),
+                ..ConcreteFilter::default()
+            },
+            routing: ReadRouting::Auto,
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
         assert!(coverage_claim_atoms(&atom).is_empty());
-
-        let mut empty = atom;
-        empty.filter.authors = Some(BTreeSet::new());
-        assert!(coverage_claim_atoms(&empty).is_empty());
     }
 
+    /// `Explicit` never fans out, however many authors it names: it asked one
+    /// exact relay set for one exact selection, and that is the only thing it
+    /// proved. Only `Auto` splits per author, because only `Auto` chases each
+    /// author's own outbox.
     #[test]
-    fn public_and_pinned_author_sets_are_not_normalized() {
-        let filter = ConcreteFilter {
-            authors: Some(BTreeSet::from(["aa".repeat(32), "bb".repeat(32)])),
-            ..ConcreteFilter::default()
-        };
-        let public = ContextualAtom {
-            filter: filter.clone(),
-            source: SourceAuthority::Public,
+    fn an_explicit_author_set_is_not_normalized() {
+        let explicit = ContextualAtom {
+            filter: ConcreteFilter {
+                authors: Some(BTreeSet::from(["aa".repeat(32), "bb".repeat(32)])),
+                ..ConcreteFilter::default()
+            },
+            routing: ReadRouting::Explicit(vec![
+                RelayUrl::parse("wss://coverage-claims.example").unwrap()
+            ]),
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
-        assert_eq!(coverage_claim_atoms(&public), BTreeSet::from([public]));
-
-        let pinned = ContextualAtom {
-            filter,
-            source: SourceAuthority::Pinned(BTreeSet::from([RelayUrl::parse(
-                "wss://coverage-claims.example",
-            )
-            .unwrap()])),
-            access: AccessContext::Public,
-            routing_evidence: BTreeSet::new(),
-        };
-        assert_eq!(coverage_claim_atoms(&pinned), BTreeSet::from([pinned]));
+        assert_eq!(coverage_claim_atoms(&explicit), BTreeSet::from([explicit]));
     }
 }

@@ -22,8 +22,8 @@ use nmp_engine::publish_queue::{
     WriteFact, WriteOutcome,
 };
 use nmp_grammar::{
-    AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter, Identity, RelaySessionKey,
-    SourceAuthority, WriteIntent, WritePayload, WriteRouting,
+    AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter, Identity, ReadRouting,
+    RelaySessionKey, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_grammar::{Demand, LiveQuery};
 use nmp_router::{SubId, WireOp};
@@ -100,27 +100,27 @@ fn cf(kinds: &[u16], authors: &[&str]) -> ConcreteFilter {
 /// actually acquired under -- `EngineCore::get_coverage` now takes the
 /// atom's real `ContextualAtom`, never a reconstruction.
 fn ctx_atom(filter: ConcreteFilter) -> ContextualAtom {
-    ctx_atom_with(filter, SourceAuthority::AuthorOutboxes)
+    ctx_atom_with(filter, ReadRouting::Auto)
 }
 
-fn ctx_atom_with(filter: ConcreteFilter, source: SourceAuthority) -> ContextualAtom {
+fn ctx_atom_with(filter: ConcreteFilter, routing: ReadRouting) -> ContextualAtom {
     ContextualAtom {
         filter,
-        source,
+        routing,
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }
 }
 
 fn literal_query(kinds: &[u16], author_hex: &str) -> LiveQuery {
-    LiveQuery::single(
-        Demand::author_outboxes(Filter {
+    LiveQuery::single(Demand {
+        selection: Filter {
             kinds: Some(kinds.iter().copied().collect()),
             authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
             ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-    )
+        },
+        ..Demand::default()
+    })
 }
 
 fn new_core(dir: FixtureRoutingFacts) -> EngineCore {
@@ -230,7 +230,7 @@ fn protected_pinned_query(relay: &RelayUrl, signer: nostr::PublicKey, kind: u16)
                 kinds: Some(BTreeSet::from([kind])),
                 ..Filter::default()
             },
-            SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            ReadRouting::Explicit(vec![relay.clone()]),
             AccessContext::Nip42(signer),
         )
         .expect("protected pinned demand is valid"),

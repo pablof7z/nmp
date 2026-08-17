@@ -1,56 +1,63 @@
 //! [`Demand`] — the full live-query identity (#106,
-//! `docs/design/query-demand-and-evidence.md`): `selection + source +
+//! `docs/design/query-demand-and-evidence.md`): `selection + routing +
 //! access`, not filter-only. Two queries with the same [`Filter`] but
-//! different intended authority must never collapse to the same atom/
+//! different intended routing must never collapse to the same atom/
 //! refcount/coverage/attribution identity — that collapse (bug-class ledger
-//! #18) is exactly what conflating "what rows match" with "where reads are
-//! authorized to come from" caused.
+//! #18) is exactly what conflating "what rows match" with "where reads come
+//! from" caused.
 //!
-//! [`SourceAuthority`]/[`AccessContext`] are CLOSED vocabularies (VISION
+//! [`ReadRouting`]/[`AccessContext`] are CLOSED vocabularies (VISION
 //! P4-style): extend the enum, never admit a free-form config string.
-
-use std::collections::BTreeSet;
 
 use crate::binding::Filter;
 
-/// Where reads are authorized to come from — the SOURCE axis of a
-/// [`Demand`]. Closed vocabulary.
+/// Where a [`Demand`]'s reads come from. A strategy, not a resolved relay
+/// set: re-executed against whatever the engine knows at each moment.
 ///
-/// No longer `Copy` (#107): `Pinned`'s relay set makes that impossible.
-/// Every call site that used to rely on an implicit copy now clones
-/// explicitly -- a one-time, mechanical cost of carrying a real relay set
-/// in the type, not a design smell.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum SourceAuthority {
-    /// Content is fetched from each author's own outbox (NIP-65 write
-    /// relays), discovered live — today's only real routing path for an
-    /// author-bearing filter, now an explicit, named authority rather than
-    /// an implicit consequence of "the filter happens to have an authors
-    /// binding."
-    AuthorOutboxes,
-    /// Routed via operator-configured lanes (indexer/app/fallback) or
-    /// protocol-fact pinned lookups (NIP-29 group host, DM inbox kind:10050)
-    /// — today's authorless-filter heuristic, now an explicit authority
-    /// rather than an emergent side effect of "no authors."
-    Public,
-    /// Explicit pinned wire authority (#107): ask ONLY these relays, on the
-    /// wire, full stop — never expand to outbox/directory/app/fallback/
-    /// indexer routing, regardless of whether the selection is author-
-    /// bearing. Validated nonempty at construction (`Demand::new`);
-    /// `BTreeSet<RelayUrl>` already gives canonical sort + dedup for free
-    /// once each `RelayUrl` came through `RelayUrl::parse` (the #107
-    /// Contract's "URL-canonicalized, sorted, and deduplicated" clause).
-    /// Cache-read behavior over this pinned set (Agnostic vs Strict) is a
+/// The whole app-facing routing vocabulary is these two words
+/// (`docs/internals/routing/auto-and-explicit.md`), matching
+/// [`crate::WriteRouting`] exactly. An app that says nothing gets
+/// [`ReadRouting::Auto`] — naming a routing value is what an app does to
+/// OVERRIDE NMP, never what it must do to use NMP.
+///
+/// Not `Copy`: `Explicit`'s relay set makes that impossible.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ReadRouting {
+    /// "Figure out where to read this from." NMP applies whatever routing
+    /// rule fits the demand: author outboxes (NIP-65 outbound) for a
+    /// selection that resolves authors, a group's host relays, a DM inbox,
+    /// relay hints and prior provenance, then the operator's app and
+    /// fallback lanes. Outbox is the typical case, not the definition.
+    ///
+    /// This is ONE total path, not a branch: a selection that resolves no
+    /// authors is the degenerate case of the same path (nothing for the
+    /// coverage solve to do, so the remaining rules carry the whole route),
+    /// never a separate routing class. That totality is what keeps `Auto`
+    /// from being the filter-shape inference it replaced.
+    #[default]
+    Auto,
+    /// "Ask these relays and that is that." Never widened to outbox,
+    /// directory, app, fallback or indexer relays, regardless of whether
+    /// the selection is author-bearing.
+    ///
+    /// Validated nonempty and normalized (sorted, deduplicated) at
+    /// construction by [`Demand::new`] — the derived `Ord`/`Hash` and the
+    /// context digest ([`crate::fold_context`]) both read this `Vec` in its
+    /// own order, so a caller who skipped normalization could otherwise
+    /// mint two representations of one routing intent.
+    ///
+    /// Cache-read behavior over this relay set (Agnostic vs Strict) is a
     /// SIBLING axis (`Demand::cache`), never nested here — see
     /// [`CacheMode`]'s doc.
-    Pinned(BTreeSet<nostr::RelayUrl>),
+    Explicit(Vec<nostr::RelayUrl>),
 }
 
 /// The connection-scoped access/AUTH context a [`Demand`] carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum AccessContext {
     /// An unauthenticated relay connection. It never shares a physical
     /// session or acquisition evidence with an authenticated context.
+    #[default]
     Public,
     /// Authenticate the exact relay session with this explicit identity.
     /// The value is fixed in the demand; changing the engine's active account
@@ -82,9 +89,9 @@ impl RelaySessionKey {
 }
 
 /// The cache-provenance mode a [`Demand`] carries -- meaningful ONLY under
-/// `SourceAuthority::Pinned` (#107's Contract: "pinned cache policy is part
-/// of source identity"); a no-op over any other source, since there is no
-/// pinned relay set to intersect against. Deliberately NOT part of
+/// [`ReadRouting::Explicit`] (#107's Contract: "pinned cache policy is part
+/// of source identity"); a no-op under [`ReadRouting::Auto`], since there is
+/// no explicit relay set to intersect against. Deliberately NOT part of
 /// `ContextualAtom`'s hashed identity (`Demand::hash`-equivalent) — it
 /// governs the LOCAL row-projection read (`nmp-engine`'s
 /// `rows_and_evidence_for`), never wire/coverage identity (atlas's
@@ -98,15 +105,15 @@ pub enum CacheMode {
     /// Serve every matching cached row regardless of provenance.
     #[default]
     Agnostic,
-    /// Serve only cached rows whose unioned provenance set intersects a
-    /// pinned relay set (meaningless/no-op under any `SourceAuthority`
-    /// other than `Pinned` — #107).
+    /// Serve only cached rows whose unioned provenance set intersects an
+    /// explicit relay set (meaningless/no-op under [`ReadRouting::Auto`]
+    /// — #107).
     Strict,
 }
 
 /// How one query handle uses existing coverage when deciding whether it
 /// contributes remote acquisition work. This is a third orthogonal axis on
-/// the existing live-query noun, beside [`SourceAuthority`] and
+/// the existing live-query noun, beside [`ReadRouting`] and
 /// [`CacheMode`]; it is not part of [`crate::ContextualAtom`] identity.
 /// Equal handles may therefore share their graph, rows, wire subscription,
 /// and coverage history while making independent freshness decisions.
@@ -128,17 +135,34 @@ pub enum Freshness {
 }
 
 /// The full live-query declaration. Its semantic identity is
-/// `selection + source + access` (#106); `cache` and `freshness` remain
+/// `selection + routing + access` (#106); `cache` and `freshness` remain
 /// per-handle policy axes.
 /// `selection` is pure `Filter` — no context field is ever added to `Filter`
-/// itself, keeping the grammar's own encoding/hashing untouched; `source`/
+/// itself, keeping the grammar's own encoding/hashing untouched; `routing`/
 /// `access` fold into identity one level up, at [`crate::ContextualAtom`].
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// Every field defaults, so the ordinary declaration is the selection and
+/// nothing else:
+///
+/// ```
+/// # use nmp_grammar::{Demand, Filter, ReadRouting};
+/// let demand = Demand {
+///     selection: Filter::default(),
+///     ..Demand::default()
+/// };
+/// assert_eq!(demand.routing, ReadRouting::Auto);
+/// ```
+///
+/// An [`ReadRouting::Explicit`] demand goes through [`Demand::new`] instead,
+/// which is what validates and normalizes the relay set.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Demand {
     pub selection: Filter,
-    pub source: SourceAuthority,
+    /// Where this demand's reads come from. Defaults to
+    /// [`ReadRouting::Auto`]: an app that says nothing gets NMP's routing.
+    pub routing: ReadRouting,
     pub access: AccessContext,
-    /// Orthogonal to `source`/`access` (see [`CacheMode`]'s doc) — a
+    /// Orthogonal to `routing`/`access` (see [`CacheMode`]'s doc) — a
     /// sibling field, deliberately excluded from `ContextualAtom`'s hashed
     /// identity.
     pub cache: CacheMode,
@@ -147,31 +171,26 @@ pub struct Demand {
     pub freshness: Freshness,
 }
 
-/// The unconstructible `Demand` combinations (#106/#107, Fable's ratified
-/// shape + the #107 Contract): `Demand::new` refuses these at construction
-/// rather than silently producing a `Demand` whose routing path resolves
-/// nothing forever.
+/// The unconstructible `Demand` combinations: `Demand::new` refuses these at
+/// construction rather than silently producing a `Demand` whose routing path
+/// resolves nothing forever.
+///
+/// There is exactly one, because [`ReadRouting::Auto`] is total — it has no
+/// precondition a selection can fail to meet, which is the whole point of it
+/// being the default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DemandError {
-    /// `SourceAuthority::AuthorOutboxes` declared over a selection whose
-    /// `authors` field is not bound at all -- there is no author whose
-    /// outbox could possibly be chased.
-    AuthorOutboxesRequiresBoundAuthors,
-    /// `SourceAuthority::Pinned` declared with an empty relay set (#107
-    /// Contract: "the pinned relay set must be nonempty") -- there is
+    /// [`ReadRouting::Explicit`] declared with an empty relay set (#107
+    /// Contract: "the explicit relay set must be nonempty") -- there is
     /// nothing for the wire to ask.
-    PinnedRequiresNonemptyRelaySet,
+    ExplicitRequiresNonemptyRelaySet,
 }
 
 impl std::fmt::Display for DemandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DemandError::AuthorOutboxesRequiresBoundAuthors => write!(
-                f,
-                "SourceAuthority::AuthorOutboxes requires a selection whose `authors` field is bound"
-            ),
-            DemandError::PinnedRequiresNonemptyRelaySet => {
-                write!(f, "SourceAuthority::Pinned requires a nonempty relay set")
+            DemandError::ExplicitRequiresNonemptyRelaySet => {
+                write!(f, "ReadRouting::Explicit requires a nonempty relay set")
             }
         }
     }
@@ -180,63 +199,38 @@ impl std::fmt::Display for DemandError {
 impl std::error::Error for DemandError {}
 
 impl Demand {
-    /// Read over operator/protocol-routed public lanes
-    /// ([`SourceAuthority::Public`]) on an unauthenticated connection
-    /// ([`AccessContext::Public`]). Legal over any selection, author-bearing
-    /// or not: "these authors, generic facts only, no outbox chase" is an
-    /// ordinary, expressible demand, which is exactly why no constructor may
-    /// pick this authority by inspecting whether `authors` happens to be
-    /// bound.
-    #[must_use]
-    pub fn public(selection: Filter) -> Self {
-        Self {
-            selection,
-            source: SourceAuthority::Public,
-            access: AccessContext::Public,
-            cache: CacheMode::Agnostic,
-            freshness: Freshness::Live,
-        }
-    }
-
-    /// Chase each selected author's own outbox (NIP-65 write relays) on an
-    /// unauthenticated connection. Requires a bound `authors` binding --
-    /// Literal, Reactive, Derived or SetOp, ALL of them -- because there is
-    /// otherwise no author whose outbox could be chased; an unbound
-    /// selection is [`DemandError::AuthorOutboxesRequiresBoundAuthors`].
-    /// The requirement is a shape check on the `Filter`, never a runtime
-    /// resolution: a `$myFollows`-shaped `Derived` authors binding that
-    /// happens to resolve empty on a given tick still declared the binding.
-    pub fn author_outboxes(selection: Filter) -> Result<Self, DemandError> {
-        Self::new(
-            selection,
-            SourceAuthority::AuthorOutboxes,
-            AccessContext::Public,
-        )
-    }
-
-    /// The general explicit constructor (#106, Fable's ratified shape), for
-    /// the `source`/`access` combinations the two named constructors above
-    /// do not cover -- [`SourceAuthority::Pinned`], and any authority under
-    /// a NIP-42 [`AccessContext`]. Validates the ONE unconstructible
-    /// combination per authority (see [`DemandError`]); every other
-    /// combination is legal.
+    /// The validating constructor, for the `routing`/`access` combinations
+    /// the plain `Demand { selection, ..Demand::default() }` declaration
+    /// does not cover -- [`ReadRouting::Explicit`], and any routing under a
+    /// NIP-42 [`AccessContext`].
+    ///
+    /// Normalizes an `Explicit` relay set on the way in: sorted and
+    /// deduplicated, so one routing intent has exactly ONE representation.
+    /// This matters beyond tidiness. `Demand`'s derived `Ord`/`Hash` and
+    /// [`crate::fold_context`]'s digest both read the `Vec` in its own
+    /// order, so they agree by construction for any order — but without
+    /// normalization `Explicit([b, a])` and `Explicit([a, b])` would be two
+    /// distinct atoms, two refcount entries and two wire subscriptions for
+    /// one demand.
     pub fn new(
         selection: Filter,
-        source: SourceAuthority,
+        routing: ReadRouting,
         access: AccessContext,
     ) -> Result<Self, DemandError> {
-        match &source {
-            SourceAuthority::AuthorOutboxes if selection.authors.is_none() => {
-                return Err(DemandError::AuthorOutboxesRequiresBoundAuthors);
+        let routing = match routing {
+            ReadRouting::Auto => ReadRouting::Auto,
+            ReadRouting::Explicit(relays) if relays.is_empty() => {
+                return Err(DemandError::ExplicitRequiresNonemptyRelaySet);
             }
-            SourceAuthority::Pinned(relays) if relays.is_empty() => {
-                return Err(DemandError::PinnedRequiresNonemptyRelaySet);
+            ReadRouting::Explicit(mut relays) => {
+                relays.sort();
+                relays.dedup();
+                ReadRouting::Explicit(relays)
             }
-            _ => {}
-        }
+        };
         Ok(Self {
             selection,
-            source,
+            routing,
             access,
             cache: CacheMode::Agnostic,
             freshness: Freshness::Live,
@@ -248,8 +242,8 @@ impl Demand {
     /// (`ContextualAtom`) -- `cache` is deliberately excluded (see
     /// [`CacheMode`]'s doc), which is what makes #107's addition of that
     /// field a one-line, identity-neutral change.
-    pub fn atom_context(&self) -> (SourceAuthority, AccessContext) {
-        (self.source.clone(), self.access)
+    pub fn atom_context(&self) -> (ReadRouting, AccessContext) {
+        (self.routing.clone(), self.access)
     }
 }
 
@@ -260,150 +254,197 @@ mod tests {
     use crate::selector::{IdentityField, Selector};
     use std::collections::BTreeSet;
 
-    /// #847's core property: ONE author-bearing selection reaches two
-    /// different authorities, and which one it gets is the caller's choice
-    /// of constructor -- never a consequence of `authors` being bound. The
-    /// two demands must not collapse to the same atom/wire/coverage
-    /// identity (bug-class ledger #18).
+    fn relay(host: &str) -> nostr::RelayUrl {
+        nostr::RelayUrl::parse(&format!("wss://{host}")).expect("a valid relay URL")
+    }
+
+    /// The property this whole axis exists for: an app that says NOTHING
+    /// about routing gets NMP's routing. A default `Demand` is `Auto`, and
+    /// declaring a selection is the entire declaration.
     #[test]
-    fn the_same_authors_selection_reaches_two_authorities_by_constructor_choice() {
+    fn a_demand_that_names_no_routing_is_auto() {
+        let demand = Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                ..Filter::default()
+            },
+            ..Demand::default()
+        };
+        assert_eq!(demand.routing, ReadRouting::Auto);
+        assert_eq!(demand.access, AccessContext::Public);
+        assert_eq!(demand.cache, CacheMode::Agnostic);
+        assert_eq!(demand.freshness, Freshness::Live);
+    }
+
+    /// `Auto` is TOTAL: it has no precondition, so the same routing value is
+    /// legal over an author-bearing and an authorless selection alike. The
+    /// deleted `AuthorOutboxesRequiresBoundAuthors` refusal existed only
+    /// because the old vocabulary let a caller name a routing that its
+    /// selection could not satisfy; there is no such combination left to
+    /// refuse.
+    #[test]
+    fn auto_is_legal_over_both_an_author_bearing_and_an_authorless_selection() {
+        let authorless = Demand::new(
+            Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                ..Filter::default()
+            },
+            ReadRouting::Auto,
+            AccessContext::Public,
+        )
+        .expect("Auto is total");
+        let author_bearing = Demand::new(
+            Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                authors: Some(Binding::Literal(BTreeSet::from(["a".repeat(64)]))),
+                ..Filter::default()
+            },
+            ReadRouting::Auto,
+            AccessContext::Public,
+        )
+        .expect("Auto is total");
+        assert_eq!(authorless.routing, ReadRouting::Auto);
+        assert_eq!(author_bearing.routing, ReadRouting::Auto);
+    }
+
+    /// A $myFollows-shaped DERIVED authors binding rides `Auto` like any
+    /// other selection — the reactive follow feed needs no routing word at
+    /// all. This is the shape #106's `author_outboxes` guardrail protected;
+    /// with `Auto` total there is nothing left to guard, and the query is
+    /// simply declared.
+    #[test]
+    fn a_derived_authors_binding_rides_auto_without_naming_a_routing() {
+        let my_follows = Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                authors: Some(Binding::Derived(Box::new(Derived {
+                    inner: Demand {
+                        selection: Filter {
+                            kinds: Some(BTreeSet::from([3u16])),
+                            authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                            ..Filter::default()
+                        },
+                        ..Demand::default()
+                    },
+                    project: Selector::Tag("p".to_string()),
+                }))),
+                ..Filter::default()
+            },
+            ..Demand::default()
+        };
+        assert_eq!(my_follows.routing, ReadRouting::Auto);
+    }
+
+    /// Bug-class ledger #18 survives the collapse: the source axis still
+    /// participates in identity, so one selection under `Auto` and under
+    /// `Explicit` remains TWO atoms. What the collapse removed is a choice
+    /// the app no longer makes, not the axis itself.
+    #[test]
+    fn auto_and_explicit_over_one_selection_are_distinct_identities() {
         let selection = Filter {
             kinds: Some(BTreeSet::from([1u16])),
             authors: Some(Binding::Literal(BTreeSet::from(["a".repeat(64)]))),
             ..Filter::default()
         };
-        let public = Demand::public(selection.clone());
-        let outboxes =
-            Demand::author_outboxes(selection.clone()).expect("the selection binds `authors`");
-
-        assert_eq!(public.selection, outboxes.selection);
-        assert_eq!(public.source, SourceAuthority::Public);
-        assert_eq!(outboxes.source, SourceAuthority::AuthorOutboxes);
-        assert_ne!(public.atom_context(), outboxes.atom_context());
-        assert_ne!(public, outboxes);
-    }
-
-    /// The guardrail #106 installed, now carried by the explicit
-    /// constructor: a $myFollows-shaped DERIVED authors binding IS a bound
-    /// `authors` binding, so `author_outboxes` accepts it. Regressing this
-    /// would refuse every reactive-follow-feed query in the workspace.
-    #[test]
-    fn author_outboxes_accepts_a_derived_authors_binding() {
-        let my_follows = Filter {
-            kinds: Some(BTreeSet::from([1u16])),
-            authors: Some(Binding::Derived(Box::new(Derived {
-                inner: Demand::author_outboxes(Filter {
-                    kinds: Some(BTreeSet::from([3u16])),
-                    authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-                    ..Filter::default()
-                })
-                .expect("the selection binds `authors`"),
-                project: Selector::Tag("p".to_string()),
-            }))),
-            ..Filter::default()
+        let auto = Demand {
+            selection: selection.clone(),
+            ..Demand::default()
         };
-        assert_eq!(
-            Demand::author_outboxes(my_follows)
-                .expect("a Derived authors binding is a bound authors binding")
-                .source,
-            SourceAuthority::AuthorOutboxes
-        );
+        let explicit = Demand::new(
+            selection.clone(),
+            ReadRouting::Explicit(vec![relay("relay.example")]),
+            AccessContext::Public,
+        )
+        .expect("a nonempty explicit relay set is legal");
+
+        assert_eq!(auto.selection, explicit.selection);
+        assert_ne!(auto.atom_context(), explicit.atom_context());
+        assert_ne!(auto, explicit);
     }
 
-    /// The refusal the deleted inference could never produce: an authorless
-    /// selection has no outbox to chase, so the named constructor fails
-    /// closed instead of silently deciding `Public` on the caller's behalf.
+    /// #107's Contract falsifier, renamed with the variant it guards:
+    /// `Explicit` with an empty relay set is unconstructible.
     #[test]
-    fn author_outboxes_refuses_an_authorless_selection() {
-        let err = Demand::author_outboxes(Filter {
-            kinds: Some(BTreeSet::from([1u16])),
-            ..Filter::default()
-        })
-        .unwrap_err();
-        assert_eq!(err, DemandError::AuthorOutboxesRequiresBoundAuthors);
-    }
-
-    /// #106's falsifier 7 (constructor validation): `AuthorOutboxes`
-    /// declared over an authorless selection is unconstructible.
-    #[test]
-    fn new_rejects_author_outboxes_over_an_authorless_selection() {
+    fn new_rejects_explicit_with_an_empty_relay_set() {
         let err = Demand::new(
             Filter {
                 kinds: Some(BTreeSet::from([1u16])),
                 ..Filter::default()
             },
-            SourceAuthority::AuthorOutboxes,
+            ReadRouting::Explicit(Vec::new()),
             AccessContext::Public,
         )
         .unwrap_err();
-        assert_eq!(err, DemandError::AuthorOutboxesRequiresBoundAuthors);
+        assert_eq!(err, DemandError::ExplicitRequiresNonemptyRelaySet);
     }
 
-    /// The new expressible behavior #106 adds (Fable's owner-flagged
-    /// landing-review nod): `Public` on an author-bearing selection is
-    /// LEGAL -- "these authors, generic facts only, no outbox chase."
     #[test]
-    fn new_allows_public_over_an_author_bearing_selection() {
+    fn new_allows_explicit_with_a_nonempty_relay_set() {
         let demand = Demand::new(
             Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                ..Filter::default()
+            },
+            ReadRouting::Explicit(vec![relay("relay.example")]),
+            AccessContext::Public,
+        )
+        .expect("a nonempty explicit relay set is legal");
+        assert_eq!(
+            demand.routing,
+            ReadRouting::Explicit(vec![relay("relay.example")])
+        );
+    }
+
+    /// The normalization that keeps ONE routing intent to ONE representation.
+    /// Without it, these two demands are unequal, hash differently, and
+    /// become two atoms, two refcount entries and two wire subscriptions for
+    /// what the caller said once.
+    #[test]
+    fn new_sorts_and_dedupes_an_explicit_relay_set() {
+        let selection = Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            ..Filter::default()
+        };
+        let scrambled = Demand::new(
+            selection.clone(),
+            ReadRouting::Explicit(vec![
+                relay("b.example"),
+                relay("a.example"),
+                relay("b.example"),
+            ]),
+            AccessContext::Public,
+        )
+        .expect("a nonempty explicit relay set is legal");
+        let canonical = Demand::new(
+            selection,
+            ReadRouting::Explicit(vec![relay("a.example"), relay("b.example")]),
+            AccessContext::Public,
+        )
+        .expect("a nonempty explicit relay set is legal");
+
+        assert_eq!(
+            scrambled.routing,
+            ReadRouting::Explicit(vec![relay("a.example"), relay("b.example")])
+        );
+        assert_eq!(scrambled, canonical);
+    }
+
+    #[test]
+    fn atom_context_projects_routing_and_access_only() {
+        let mut demand = Demand {
+            selection: Filter {
                 authors: Some(Binding::Literal(BTreeSet::from(["a".repeat(64)]))),
                 ..Filter::default()
             },
-            SourceAuthority::Public,
-            AccessContext::Public,
-        )
-        .expect("Public over an author-bearing selection is legal");
-        assert_eq!(demand.source, SourceAuthority::Public);
-    }
-
-    /// #107's Contract falsifier (Fable's empty-pinned-fails pattern):
-    /// `Pinned` with an empty relay set is unconstructible.
-    #[test]
-    fn new_rejects_pinned_with_an_empty_relay_set() {
-        let err = Demand::new(
-            Filter {
-                kinds: Some(BTreeSet::from([1u16])),
-                ..Filter::default()
-            },
-            SourceAuthority::Pinned(BTreeSet::new()),
-            AccessContext::Public,
-        )
-        .unwrap_err();
-        assert_eq!(err, DemandError::PinnedRequiresNonemptyRelaySet);
-    }
-
-    #[test]
-    fn new_allows_pinned_with_a_nonempty_relay_set() {
-        let relay = nostr::RelayUrl::parse("wss://relay.example").unwrap();
-        let demand = Demand::new(
-            Filter {
-                kinds: Some(BTreeSet::from([1u16])),
-                ..Filter::default()
-            },
-            SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
-            AccessContext::Public,
-        )
-        .expect("a nonempty pinned relay set is legal");
-        assert_eq!(
-            demand.source,
-            SourceAuthority::Pinned(BTreeSet::from([relay]))
-        );
-    }
-
-    #[test]
-    fn atom_context_projects_source_and_access_only() {
-        let mut demand = Demand::author_outboxes(Filter {
-            authors: Some(Binding::Literal(BTreeSet::from(["a".repeat(64)]))),
-            ..Filter::default()
-        })
-        .expect("the selection binds `authors`");
+            ..Demand::default()
+        };
         assert_eq!(demand.freshness, Freshness::Live);
         let context = demand.atom_context();
         demand.cache = CacheMode::Strict;
         demand.freshness = Freshness::MaxAge { seconds: 14_400 };
         assert_eq!(
             demand.atom_context(),
-            (SourceAuthority::AuthorOutboxes, AccessContext::Public)
+            (ReadRouting::Auto, AccessContext::Public)
         );
         assert_eq!(demand.atom_context(), context);
     }

@@ -1058,14 +1058,16 @@ mod semantic_successor_tests {
         let mut core = EngineCore::new(store, 10);
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
         core.handle(EngineMsg::Subscribe(LiveQuery::single(
-            nmp_grammar::Demand::author_outboxes(nmp_grammar::Filter {
-                kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
-                authors: Some(nmp_grammar::Binding::Literal(BTreeSet::from([author
-                    .public_key()
-                    .to_hex()]))),
-                ..nmp_grammar::Filter::default()
-            })
-            .expect("the selection binds `authors`"),
+            nmp_grammar::Demand {
+                selection: nmp_grammar::Filter {
+                    kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
+                    authors: Some(nmp_grammar::Binding::Literal(BTreeSet::from([author
+                        .public_key()
+                        .to_hex()]))),
+                    ..nmp_grammar::Filter::default()
+                },
+                ..nmp_grammar::Demand::default()
+            },
         )));
         core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
             program: [6; 16],
@@ -1531,14 +1533,16 @@ mod semantic_successor_tests {
         let mut core = EngineCore::new(store, 10);
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
         core.handle(EngineMsg::Subscribe(LiveQuery::single(
-            nmp_grammar::Demand::author_outboxes(nmp_grammar::Filter {
-                kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
-                authors: Some(nmp_grammar::Binding::Literal(BTreeSet::from([author
-                    .public_key()
-                    .to_hex()]))),
-                ..nmp_grammar::Filter::default()
-            })
-            .expect("the selection binds `authors`"),
+            nmp_grammar::Demand {
+                selection: nmp_grammar::Filter {
+                    kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
+                    authors: Some(nmp_grammar::Binding::Literal(BTreeSet::from([author
+                        .public_key()
+                        .to_hex()]))),
+                    ..nmp_grammar::Filter::default()
+                },
+                ..nmp_grammar::Demand::default()
+            },
         )));
         core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
             program: [9; 16],

@@ -665,8 +665,14 @@ mod supersede_tests {
             (&destinations, &a_lane),
             (&outcome, &a_lane),
         ] {
-            assert!(!left.supersedes(right), "{left:?} must not supersede {right:?}");
-            assert!(!right.supersedes(left), "{right:?} must not supersede {left:?}");
+            assert!(
+                !left.supersedes(right),
+                "{left:?} must not supersede {right:?}"
+            );
+            assert!(
+                !right.supersedes(left),
+                "{right:?} must not supersede {left:?}"
+            );
         }
     }
 }

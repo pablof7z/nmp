@@ -24,7 +24,7 @@ use nmp_ffi::nip29::{
     FfiGroupRecord, FfiRelayScope,
 };
 use nmp_ffi::types::{
-    FfiAccessContext, FfiBinding, FfiEventBuilder, FfiFilter, FfiIdentityField, FfiSourceAuthority,
+    FfiAccessContext, FfiBinding, FfiEventBuilder, FfiFilter, FfiIdentityField, FfiReadRouting,
 };
 
 fn host(n: u16) -> String {
@@ -53,8 +53,8 @@ fn a_multi_host_listing_is_one_live_query_with_one_branch_per_host() {
     assert_eq!(query.branches.len(), 2);
     for (branch, expected_host) in query.branches.iter().zip([host(1), host(2)]) {
         assert_eq!(
-            branch.source,
-            FfiSourceAuthority::Pinned {
+            branch.routing,
+            FfiReadRouting::Explicit {
                 relays: vec![expected_host]
             },
             "each listing branch is pinned to exactly one host"
@@ -150,8 +150,8 @@ fn a_group_read_is_one_branch_per_host_scoped_by_h() {
     assert_eq!(query.branches.len(), 2);
     for (branch, expected_host) in query.branches.iter().zip([host(1), host(2)]) {
         assert_eq!(
-            branch.source,
-            FfiSourceAuthority::Pinned {
+            branch.routing,
+            FfiReadRouting::Explicit {
                 relays: vec![expected_host]
             }
         );

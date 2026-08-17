@@ -1,48 +1,64 @@
-# Source authority and protocol routing context
+# Read routing and protocol routing context
 
-Apps declare semantic authority. NMP expands it into concrete relay work.
+Apps say where reads come from only when they want to override NMP. Otherwise
+they say nothing and NMP works it out.
 
-## Queries name source authority
+## Queries route themselves
+
+```swift
+let demand = NMPDemand(selection: selection)
+```
+
+That is the whole declaration. `routing` defaults to `.auto`, which authorizes
+NMP to discover and use the NIP-65 write relays of every author the selection
+resolves, to follow relay hints and prior provenance, and to fall back to the
+operator's app and fallback lanes. The app does not watch kind:10002, build
+author-to-relay maps, group authors by relay, or reopen requests as those maps
+change.
+
+`.auto` is total: it has no precondition a selection can fail. An authorless
+selection — "kind:1, wherever you find it" — is the same path with no authors
+to solve for, not a different one, so there is no second routing word to learn
+and no routing error to handle.
+
+## Overriding it
+
+The one override is an exact relay set:
 
 ```swift
 let demand = NMPDemand(
     selection: selection,
-    source: .authorOutboxes,
-    access: .public
+    routing: .explicit([hostRelay])
 )
 ```
 
-`authorOutboxes` authorizes NMP to discover and use authors' NIP-65 write
-relays. The app does not watch kind:10002, build author-to-relay maps, group
-authors by relay, or reopen requests as those maps change.
+`.explicit` asks those relays and nothing else — never widened to outbox,
+directory, app, fallback or indexer relays, whatever NMP later learns. It must
+be nonempty; an empty set is refused at the door rather than accepted and
+silently unroutable.
 
-Other typed authorities may include:
-
-- a protocol host relay that is part of the semantic object;
-- recipient inboxes defined by a private-message protocol;
-- operator-configured indexers for discovery; or
-- a narrow relay set already validated by a protocol operation.
-
-These are illustrative categories, not a generic `relays: [URL]` escape hatch.
+These two words are the entire app-facing routing vocabulary, and they are the
+same two `NMPWriteRouting` uses. There is no third one, and no generic
+`relays: [URL]` escape hatch anywhere else on the surface.
 
 ## Access context is separate
 
-The same source may answer differently under different AUTH identities or
-visibility grants:
+The same relays may answer differently under different AUTH identities or
+visibility grants, so access is its own axis:
 
 ```swift
 let demand = NMPDemand(
     selection: groupSelection,
-    source: group.sourceAuthority,
-    access: .auth(groupIdentity)
+    routing: .explicit([groupHost]),
+    access: .nip42(publicKey: groupIdentity)
 )
 ```
 
-`group.sourceAuthority` is minted by the NIP-29 module after validating the
-group reference and host. A plain relay URL cannot be promoted into protocol
-authority by app code.
+A protocol module composes these for you rather than handing you a relay to
+pass around: `NMPGroup.read` returns a live query already carrying one branch
+per host, each `.explicit` to that host alone.
 
-Selection, source authority, and access context all participate in descriptor
+Selection, read routing, and access context all participate in descriptor
 identity, safe wire sharing, diagnostics, and acquisition evidence.
 
 ## Writes carry typed routing context

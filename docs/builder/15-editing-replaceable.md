@@ -105,7 +105,7 @@ apps reach it through a typed protocol action that owns the schema and policy.
 
 Another replaceable protocol helper must still define and falsify:
 
-- its source authority and source requirement;
+- its read routing and source requirement;
 - exact preservation rules for fields it does not own;
 - first-value policy when the source-scoped base is `None`;
 - operation ordering and successor-settlement policy;

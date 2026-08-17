@@ -25,16 +25,16 @@ fn signed(keys: &Keys, created_at: u64, content: &str) -> Event {
 
 fn query(keys: &Keys, page_size: usize, max_rows: usize) -> HistoryQuery {
     HistoryQuery::new(
-        LiveQuery::single(
-            Demand::author_outboxes(Filter {
+        LiveQuery::single(Demand {
+            selection: Filter {
                 kinds: Some(BTreeSet::from([1])),
                 authors: Some(Binding::Literal(BTreeSet::from([keys
                     .public_key()
                     .to_hex()]))),
                 ..Filter::default()
-            })
-            .expect("the selection binds `authors`"),
-        ),
+            },
+            ..Demand::default()
+        }),
         page_size,
         max_rows,
     )

@@ -161,10 +161,10 @@ to end.
 
 ### #18: source/access contexts cannot borrow evidence incorrectly
 
-**Excludes:** equal filters under different AUTH or source authority sharing a
+**Excludes:** equal filters under different AUTH or read routing sharing a
 watermark as though they were the same request.
 
-Descriptor identity is `Selection + SourceAuthority + AccessContext`.
+Descriptor identity is `Selection + ReadRouting + AccessContext`.
 Selection work may share; wire demand and evidence share only after a
 compatibility proof. Every nested `Derived` demand carries its own explicit
 source/access context; it cannot inherit or borrow the outer demand's evidence.

@@ -35,7 +35,7 @@ pub use concrete::{
 };
 pub use demand::{DemandDelta, DemandOp};
 pub use descriptor::{
-    AccessContext, CacheMode, Demand, DemandError, Freshness, RelaySessionKey, SourceAuthority,
+    AccessContext, CacheMode, Demand, DemandError, Freshness, ReadRouting, RelaySessionKey,
 };
 pub use indexed_tag_name::IndexedTagName;
 pub use live_query::{LiveQuery, LiveQueryError};

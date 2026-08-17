@@ -85,15 +85,17 @@ fn nip77_attempt_id(effects: &[Effect], frame: Nip77Frame, sub_id: &SubId) -> Re
 }
 
 fn pinned_profile_query(relay: &RelayUrl, author: &Keys) -> LiveQuery {
-    let mut demand = Demand::author_outboxes(Filter {
-        kinds: Some(BTreeSet::from([0u16])),
-        authors: Some(Binding::Literal(BTreeSet::from([author
-            .public_key()
-            .to_hex()]))),
-        ..Filter::default()
-    })
-    .expect("the selection binds `authors`");
-    demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let mut demand = Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([0u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([author
+                .public_key()
+                .to_hex()]))),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    };
+    demand.routing = ReadRouting::Explicit(vec![relay.clone()]);
     demand.freshness = Freshness::Live;
     LiveQuery::single(demand)
 }
@@ -103,26 +105,30 @@ fn nested_same_profile_query(
     author: &Keys,
     outer_freshness: Freshness,
 ) -> LiveQuery {
-    let mut inner = Demand::author_outboxes(Filter {
-        kinds: Some(BTreeSet::from([0u16])),
-        authors: Some(Binding::Literal(BTreeSet::from([author
-            .public_key()
-            .to_hex()]))),
-        ..Filter::default()
-    })
-    .expect("the selection binds `authors`");
-    inner.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let mut inner = Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([0u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([author
+                .public_key()
+                .to_hex()]))),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    };
+    inner.routing = ReadRouting::Explicit(vec![relay.clone()]);
     inner.freshness = Freshness::Live;
-    let mut outer = Demand::author_outboxes(Filter {
-        kinds: Some(BTreeSet::from([0u16])),
-        authors: Some(Binding::Derived(Box::new(Derived {
-            inner,
-            project: Selector::Authors,
-        }))),
-        ..Filter::default()
-    })
-    .expect("the selection binds `authors`");
-    outer.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let mut outer = Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([0u16])),
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner,
+                project: Selector::Authors,
+            }))),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    };
+    outer.routing = ReadRouting::Explicit(vec![relay.clone()]);
     outer.freshness = outer_freshness;
     LiveQuery::single(outer)
 }
@@ -134,7 +140,7 @@ fn profile_atom(relay: &RelayUrl, author: &Keys) -> ContextualAtom {
             authors: Some(BTreeSet::from([author.public_key().to_hex()])),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }
@@ -1070,15 +1076,15 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     // REQ even though the relay is Supported -- ledger #8's REQ-fallback
     // selection rule (a different skeleton -- kind:7 -- so it is a brand
     // new, independent sub-id, unaffected by kind:1's negentropy routing).
-    let limited = LiveQuery::single(
-        Demand::author_outboxes(Filter {
+    let limited = LiveQuery::single(Demand {
+        selection: Filter {
             kinds: Some(BTreeSet::from([7u16])),
             authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
             limit: Some(1),
             ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-    );
+        },
+        ..Demand::default()
+    });
     let effects = core.handle_and_flush(EngineMsg::Subscribe(limited));
     req_for(&effects, &relay0); // must still be a plain REQ.
     assert!(

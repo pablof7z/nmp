@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    ConcreteFilter, DescriptorHash, RoutingEvidence, RoutingEvidenceKind, SourceAuthority,
+    ConcreteFilter, DescriptorHash, ReadRouting, RoutingEvidence, RoutingEvidenceKind,
 };
 
 use crate::facts::{AuthorRouteState, Lane, LanedRelay, PublicKey, RelayUrl, RoutingFacts};
@@ -63,29 +63,40 @@ impl Skeleton {
     }
 }
 
+/// Which routing path an atom takes through `compile`. There are exactly
+/// two, and they are exactly [`ReadRouting`]'s two values — the class is
+/// read off the atom's declared routing and nothing else.
+///
+/// In particular there is no longer a class that depends on the SHAPE of the
+/// selection. `Auto` is one total path: the outbox solve, the projected
+/// hint/provenance facts and the operator lanes all run for every `Auto`
+/// atom, and a selection resolving no authors is that path's degenerate case
+/// (empty candidates, empty solve, operator lanes carrying the whole route)
+/// rather than a second class. A shape-derived class is precisely what the
+/// deleted filter-only inference was; reintroducing one here would move that
+/// inference rather than remove it.
 #[derive(Debug)]
 pub(crate) enum AtomClass {
-    Coverage {
-        skeleton: Skeleton,
-        authors: BTreeSet<PublicKey>,
-    },
-    Supplemental {
-        authors: BTreeSet<PublicKey>,
-    },
+    Auto,
     Exact(BTreeSet<RelayUrl>),
 }
 
-pub(crate) fn classify(atom: &ConcreteFilter, source: &SourceAuthority) -> AtomClass {
-    match source {
-        SourceAuthority::AuthorOutboxes => {
-            let (skeleton, authors) = Skeleton::of(atom);
-            AtomClass::Coverage { skeleton, authors }
-        }
-        SourceAuthority::Public => {
-            let (_, authors) = Skeleton::of(atom);
-            AtomClass::Supplemental { authors }
-        }
-        SourceAuthority::Pinned(relays) => AtomClass::Exact(relays.clone()),
+pub(crate) fn classify(routing: &ReadRouting) -> AtomClass {
+    match routing {
+        ReadRouting::Auto => AtomClass::Auto,
+        ReadRouting::Explicit(relays) => AtomClass::Exact(relays.iter().cloned().collect()),
+    }
+}
+
+/// The authors an atom's outbox lane will solve for: its resolved author
+/// set under [`ReadRouting::Auto`], and empty under `Explicit`, which never
+/// consults an outbox at all. Empty is also the honest answer for an `Auto`
+/// atom whose selection names no author — it has no outbox work, only
+/// operator lanes.
+pub(crate) fn outbox_authors(atom: &ConcreteFilter, routing: &ReadRouting) -> BTreeSet<PublicKey> {
+    match routing {
+        ReadRouting::Auto => Skeleton::of(atom).1,
+        ReadRouting::Explicit(_) => BTreeSet::new(),
     }
 }
 
@@ -282,15 +293,40 @@ mod tests {
     }
 
     #[test]
-    fn exact_source_bypasses_fact_lookup() {
+    fn explicit_routing_bypasses_fact_lookup() {
         let relay = test_relay(4);
         assert!(matches!(
-            classify(
-                &ConcreteFilter::default(),
-                &SourceAuthority::Pinned(BTreeSet::from([relay]))
-            ),
+            classify(&ReadRouting::Explicit(vec![relay])),
             AtomClass::Exact(_)
         ));
+    }
+
+    /// The classification is a function of the DECLARED routing alone. An
+    /// author-bearing and an authorless selection classify identically under
+    /// `Auto`, which is what makes `Auto` one path rather than a shape
+    /// inference wearing a routing value's name.
+    #[test]
+    fn auto_classifies_the_same_whatever_the_selection_names() {
+        let author = Keys::generate().public_key();
+        assert!(matches!(classify(&ReadRouting::Auto), AtomClass::Auto));
+        assert!(matches!(classify(&ReadRouting::Auto), AtomClass::Auto));
+        // And the outbox author projection, which is a fact about the
+        // selection rather than a class, still tells the two apart.
+        assert_eq!(
+            outbox_authors(&filter(author), &ReadRouting::Auto),
+            BTreeSet::from([author])
+        );
+        assert!(outbox_authors(&ConcreteFilter::default(), &ReadRouting::Auto).is_empty());
+    }
+
+    /// `Explicit` never consults an outbox, so it contributes no outbox
+    /// authors even over an author-bearing selection.
+    #[test]
+    fn explicit_routing_contributes_no_outbox_authors() {
+        let author = Keys::generate().public_key();
+        assert!(
+            outbox_authors(&filter(author), &ReadRouting::Explicit(vec![test_relay(4)])).is_empty()
+        );
     }
 
     #[test]

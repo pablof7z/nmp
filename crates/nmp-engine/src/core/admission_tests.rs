@@ -11,15 +11,18 @@ use nostr::{EventBuilder, Keys, Kind};
 use std::borrow::Cow;
 
 fn query(relay: &RelayUrl, value: &str, freshness: Freshness) -> LiveQuery {
-    let mut demand = Demand::public(Filter {
-        kinds: Some(BTreeSet::from([0u16])),
-        tags: BTreeMap::from([(
-            IndexedTagName::new('p').unwrap(),
-            Binding::Literal(BTreeSet::from([value.to_owned()])),
-        )]),
-        ..Filter::default()
-    });
-    demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let mut demand = Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([0u16])),
+            tags: BTreeMap::from([(
+                IndexedTagName::new('p').unwrap(),
+                Binding::Literal(BTreeSet::from([value.to_owned()])),
+            )]),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    };
+    demand.routing = ReadRouting::Explicit(vec![relay.clone()]);
     demand.freshness = freshness;
     LiveQuery::single(demand)
 }
@@ -29,16 +32,19 @@ fn bounded_query(relay: &RelayUrl, value: &str) -> LiveQuery {
 }
 
 fn limited_query(relay: &RelayUrl, value: &str, limit: usize) -> LiveQuery {
-    let mut demand = Demand::public(Filter {
-        kinds: Some(BTreeSet::from([0u16])),
-        tags: BTreeMap::from([(
-            IndexedTagName::new('p').unwrap(),
-            Binding::Literal(BTreeSet::from([value.to_owned()])),
-        )]),
-        limit: Some(limit),
-        ..Filter::default()
-    });
-    demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let mut demand = Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([0u16])),
+            tags: BTreeMap::from([(
+                IndexedTagName::new('p').unwrap(),
+                Binding::Literal(BTreeSet::from([value.to_owned()])),
+            )]),
+            limit: Some(limit),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    };
+    demand.routing = ReadRouting::Explicit(vec![relay.clone()]);
     demand.freshness = Freshness::Live;
     LiveQuery::single(demand)
 }
@@ -54,7 +60,7 @@ fn bounded_atom(relay: &RelayUrl, value: &str) -> ContextualAtom {
             limit: Some(25),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }
@@ -70,34 +76,39 @@ fn query_atom(relay: &RelayUrl, value: &str) -> ContextualAtom {
             )]),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }
 }
 
 fn unbounded_incompatible_query(relay: &RelayUrl, index: u16) -> LiveQuery {
-    let mut demand = Demand::public(Filter {
-        kinds: Some(BTreeSet::from([1_000 + index])),
-        tags: BTreeMap::from([(
-            IndexedTagName::new('p').unwrap(),
-            Binding::Literal(BTreeSet::from([format!("owner-{index:04}")])),
-        )]),
-        ..Filter::default()
-    });
-    demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let mut demand = Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1_000 + index])),
+            tags: BTreeMap::from([(
+                IndexedTagName::new('p').unwrap(),
+                Binding::Literal(BTreeSet::from([format!("owner-{index:04}")])),
+            )]),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    };
+    demand.routing = ReadRouting::Explicit(vec![relay.clone()]);
     demand.freshness = Freshness::Live;
     LiveQuery::single(demand)
 }
 
 fn profile_query(relay: &RelayUrl, author: PublicKey) -> LiveQuery {
-    let mut demand = Demand::author_outboxes(Filter {
-        kinds: Some(BTreeSet::from([0u16])),
-        authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
-        ..Filter::default()
-    })
-    .expect("the selection binds `authors`");
-    demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let mut demand = Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([0u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    };
+    demand.routing = ReadRouting::Explicit(vec![relay.clone()]);
     demand.freshness = Freshness::Live;
     LiveQuery::single(demand)
 }
@@ -107,25 +118,29 @@ fn nested_same_profile_query(
     inner_authors: Binding,
     outer_freshness: Freshness,
 ) -> LiveQuery {
-    let mut inner = Demand::author_outboxes(Filter {
-        kinds: Some(BTreeSet::from([0u16])),
-        authors: Some(inner_authors),
-        ..Filter::default()
-    })
-    .expect("the selection binds `authors`");
-    inner.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let mut inner = Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([0u16])),
+            authors: Some(inner_authors),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    };
+    inner.routing = ReadRouting::Explicit(vec![relay.clone()]);
     inner.freshness = Freshness::Live;
 
-    let mut outer = Demand::author_outboxes(Filter {
-        kinds: Some(BTreeSet::from([0u16])),
-        authors: Some(Binding::Derived(Box::new(Derived {
-            inner,
-            project: Selector::Authors,
-        }))),
-        ..Filter::default()
-    })
-    .expect("the selection binds `authors`");
-    outer.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let mut outer = Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([0u16])),
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner,
+                project: Selector::Authors,
+            }))),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    };
+    outer.routing = ReadRouting::Explicit(vec![relay.clone()]);
     outer.freshness = outer_freshness;
     LiveQuery::single(outer)
 }
@@ -137,7 +152,7 @@ fn profile_atom(relay: &RelayUrl, author: PublicKey) -> ContextualAtom {
             authors: Some(BTreeSet::from([author.to_hex()])),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }
@@ -168,7 +183,7 @@ fn routeless_outbox_query(author: PublicKey) -> LiveQuery {
                 authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
                 ..Filter::default()
             },
-            SourceAuthority::AuthorOutboxes,
+            ReadRouting::Auto,
             AccessContext::Public,
         )
         .unwrap(),
@@ -182,7 +197,7 @@ fn routeless_outbox_atom(author: PublicKey) -> ContextualAtom {
             authors: Some(BTreeSet::from([author.to_hex()])),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::AuthorOutboxes,
+        routing: ReadRouting::Auto,
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }

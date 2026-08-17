@@ -253,14 +253,14 @@ final class C11CommentCapabilityEndToEndTests: XCTestCase {
         // anything is written -- a query opened afterwards would prove the
         // engine can start a subscription and find history, not that a live
         // thread delivers.
-        let authorThreadQuery = try authorEngine.observe(commentThreadDemand(root: threadRoot))
-        let readerThreadQuery = try readerEngine.observe(commentThreadDemand(root: threadRoot))
+        let authorThreadQuery = try authorEngine.observe(.single(commentThreadDemand(root: threadRoot)))
+        let readerThreadQuery = try readerEngine.observe(.single(commentThreadDemand(root: threadRoot)))
         // ...and one ORDINARY query that knows nothing about NIP-22: a bare
         // kind + authors filter, the same `observe(_ filter:)` every other
         // scenario uses. A capability's writes must be ordinary events in
         // the ordinary store, readable without the capability.
         let readerPlainQuery = try readerEngine.observe(
-            NMPFilter(kinds: [1111], authors: .literal([authorHex, readerHex]))
+            .single(NMPDemand(selection: NMPFilter(kinds: [1111], authors: .literal([authorHex, readerHex]))))
         )
 
         let authorThread = RowLedger()
@@ -607,7 +607,7 @@ final class C11CommentCapabilityEndToEndTests: XCTestCase {
         // Read the note back the ordinary way, so the comment is composed
         // off a row NMP delivered rather than off a hand-made value.
         let noteQuery = try engine.observe(
-            NMPFilter(kinds: [1], authors: .literal([noteKeys.pubkeyHex]))
+            .single(NMPDemand(selection: NMPFilter(kinds: [1], authors: .literal([noteKeys.pubkeyHex]))))
         )
         let noteLedger = RowLedger()
         let noteConsumer = Task {
@@ -640,11 +640,11 @@ final class C11CommentCapabilityEndToEndTests: XCTestCase {
         note("event-root demand selection: kinds=\(threadDemand.selection.kinds ?? []) tags=\(demandTags)")
         note("root note id: \(rootNote.id)")
 
-        let threadQuery = try engine.observe(threadDemand)
+        let threadQuery = try engine.observe(.single(threadDemand))
         // The workaround an app is forced into today: the same read, with
         // NIP-22's uppercase-root tag shape hand-written by the app.
         let handBuiltQuery = try engine.observe(
-            NMPFilter(kinds: [1111], tags: ["E": .literal([rootNote.id])])
+            .single(NMPDemand(selection: NMPFilter(kinds: [1111], tags: ["E": .literal([rootNote.id])])))
         )
         let threadLedger = RowLedger()
         let handBuiltLedger = RowLedger()

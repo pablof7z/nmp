@@ -256,7 +256,7 @@ final class C2CacheThenOfflineRestartTests: XCTestCase {
         }
         let readState = ReadState()
 
-        let query = try engine.observe(NMPFilter(kinds: [1], authors: .literal([keyPair.pubkeyHex])))
+        let query = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [1], authors: .literal([keyPair.pubkeyHex])))))
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
                 do {

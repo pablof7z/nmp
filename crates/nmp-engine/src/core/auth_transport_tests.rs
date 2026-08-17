@@ -37,7 +37,7 @@ fn protected_pinned_query(relay: &RelayUrl, signer: PublicKey, authors: Binding)
                 authors: Some(authors),
                 ..Filter::default()
             },
-            SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            ReadRouting::Explicit(vec![relay.clone()]),
             AccessContext::Nip42(signer),
         )
         .expect("protected pinned demand is valid"),

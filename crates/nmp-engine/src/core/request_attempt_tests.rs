@@ -9,15 +9,18 @@ use super::query::PlanDeltaMode;
 use super::*;
 
 fn live_query(relay: &RelayUrl) -> LiveQuery {
-    let mut demand = Demand::public(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        tags: BTreeMap::from([(
-            IndexedTagName::new('p').expect("valid fixture tag"),
-            Binding::Literal(BTreeSet::from(["owner".to_string()])),
-        )]),
-        ..Filter::default()
-    });
-    demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let mut demand = Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            tags: BTreeMap::from([(
+                IndexedTagName::new('p').expect("valid fixture tag"),
+                Binding::Literal(BTreeSet::from(["owner".to_string()])),
+            )]),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    };
+    demand.routing = ReadRouting::Explicit(vec![relay.clone()]);
     demand.freshness = Freshness::Live;
     LiveQuery::single(demand)
 }
@@ -76,7 +79,7 @@ fn atom(relay: &RelayUrl, author: &str) -> ContextualAtom {
             authors: Some(BTreeSet::from([author.to_string()])),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }

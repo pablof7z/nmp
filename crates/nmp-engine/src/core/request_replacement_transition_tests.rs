@@ -48,7 +48,7 @@ impl Fixture {
                 authors: Some(BTreeSet::from([format!("{author_byte:02x}").repeat(32)])),
                 ..ConcreteFilter::default()
             },
-            source: SourceAuthority::Pinned(BTreeSet::from([self.relay.clone()])),
+            routing: ReadRouting::Explicit(vec![self.relay.clone()]),
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         }

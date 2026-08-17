@@ -14,7 +14,7 @@ use crate::ownership::{
     reduce_outbox_shortfall, refresh_refusal_diagnostics, refused_session_class,
 };
 use crate::plan::{BudgetShortfall, DemandKey, WireDelta, WireOp};
-use crate::route::{self, AtomClass};
+use crate::route;
 use crate::{AdmissionOutcome, Router};
 
 mod metadata;
@@ -40,10 +40,8 @@ impl Router {
             *active = atom;
             return;
         }
-        if let AtomClass::Coverage { authors, .. } = route::classify(&atom.filter, &atom.source) {
-            for author in authors {
-                *self.active_outbox_authors.entry(author).or_insert(0) += 1;
-            }
+        for author in route::outbox_authors(&atom.filter, &atom.routing) {
+            *self.active_outbox_authors.entry(author).or_insert(0) += 1;
         }
         self.active_demands.insert(key, atom);
         for request in self.requests_by_demand.get(&key).into_iter().flatten() {
@@ -333,9 +331,8 @@ impl Router {
                 .get(&demand)
                 .cloned()
                 .unwrap_or_default();
-            if let AtomClass::Coverage { authors, .. } = route::classify(&atom.filter, &atom.source)
             {
-                for author in authors {
+                for author in route::outbox_authors(&atom.filter, &atom.routing) {
                     let assignment = (demand, author);
                     let achieved = self
                         .coverage_assignment_requests

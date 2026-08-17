@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting};
 use nostr::secp256k1::rand::{rngs::StdRng, SeedableRng};
 use nostr::secp256k1::SECP256K1;
 use nostr::{Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -433,7 +433,7 @@ fn coverage_atom(keys: &Keys) -> ContextualAtom {
             until: None,
             limit: None,
         },
-        source: SourceAuthority::AuthorOutboxes,
+        routing: ReadRouting::Auto,
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }

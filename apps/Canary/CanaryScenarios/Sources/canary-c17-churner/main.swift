@@ -263,7 +263,7 @@ struct CanaryC17Churner {
 
         for cycle in 0..<cycles {
             let query = try engine.observe(
-                .single(NMPDemand(selection: filterFor(), source: .authorOutboxes))
+                .single(NMPDemand(selection: filterFor()))
             )
             // Sampled WHILE the observation is still open and established on
             // the wire. Without this the post-teardown zero would be
@@ -330,7 +330,7 @@ struct CanaryC17Churner {
                 } catch {}
             }
             let query = try engine.observe(
-                .single(NMPDemand(selection: filter, source: .authorOutboxes))
+                .single(NMPDemand(selection: filter))
             )
             let openWireSubs = await awaitWireSubs(diagnostics, timeout: 10) { $0 >= 1 }
             let openWireFilters = diagnostics.current().relays.reduce(0) { $0 + $1.filters.count }

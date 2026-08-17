@@ -7,7 +7,7 @@ use nmp_grammar::ContextualAtom;
 
 use crate::plan::DemandKey;
 #[cfg(test)]
-use crate::route::{self, AtomClass};
+use crate::route;
 use crate::{PublicKey, Router, Shortfall};
 
 use super::strongest_shortfall;
@@ -176,7 +176,7 @@ impl Router {
                 self.request_by_exact_filter.insert(
                     (
                         session.clone(),
-                        request.source.clone(),
+                        request.routing.clone(),
                         request.filter.clone(),
                     ),
                     (session.clone(), request.sub_id.clone()),
@@ -224,11 +224,8 @@ impl Router {
         }
         self.active_outbox_authors.clear();
         for atom in self.active_demands.values() {
-            if let AtomClass::Coverage { authors, .. } = route::classify(&atom.filter, &atom.source)
-            {
-                for author in authors {
-                    *self.active_outbox_authors.entry(author).or_insert(0) += 1;
-                }
+            for author in route::outbox_authors(&atom.filter, &atom.routing) {
+                *self.active_outbox_authors.entry(author).or_insert(0) += 1;
             }
         }
     }

@@ -7,7 +7,7 @@ quick ownership check to use while designing an app or protocol module.
 
 | Work | Input | Output |
 |---|---|---|
-| Live query | closed `Demand = Selection + SourceAuthority + AccessContext` | native stream of rows, cache evidence, acquisition facts, and shortfall |
+| Live query | closed `Demand = Selection + ReadRouting + AccessContext` | native stream of rows, cache evidence, acquisition facts, and shortfall |
 | Write intent | immutable draft, durability, typed context, optional signer override | receipt facts; durable intents also own a crash-safe pending row and delivery obligation |
 
 Identity inputs, capabilities, diagnostics, and modules configure or explain

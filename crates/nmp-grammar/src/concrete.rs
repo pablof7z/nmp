@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::descriptor::{AccessContext, SourceAuthority};
+use crate::descriptor::{AccessContext, ReadRouting};
 use crate::indexed_tag_name::IndexedTagName;
 
 /// A relay fact carried by a projected value through a `Derived` graph.
@@ -189,7 +189,7 @@ impl ConcreteFilter {
 
 /// A resolved demand atom paired with its full identity context (#106):
 /// the same [`ConcreteFilter`] requested under two different
-/// [`SourceAuthority`]/[`AccessContext`] pairs is TWO distinct atoms —
+/// [`ReadRouting`]/[`AccessContext`] pairs is TWO distinct atoms —
 /// distinct refcount entries, distinct [`DescriptorHash`]es, distinct
 /// coverage/attribution identity. This is the anti-alias fix bug-class
 /// ledger #18 names: `ConcreteFilter::hash()` alone can never distinguish
@@ -205,7 +205,7 @@ impl ConcreteFilter {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContextualAtom {
     pub filter: ConcreteFilter,
-    pub source: SourceAuthority,
+    pub routing: ReadRouting,
     pub access: AccessContext,
     /// Runtime routing facts projected with this atom. These facts are part
     /// of live atom identity so provenance growth produces an exact
@@ -221,7 +221,7 @@ impl ContextualAtom {
     /// Durable coverage deliberately erases routing evidence before calling
     /// this method; see `nmp_store::coverage_key`.
     pub fn hash(&self) -> DescriptorHash {
-        let contextual = fold_context(self.filter.hash(), &self.source, self.access);
+        let contextual = fold_context(self.filter.hash(), &self.routing, self.access);
         if self.routing_evidence.is_empty() {
             return contextual;
         }
@@ -250,28 +250,32 @@ impl ContextualAtom {
 /// derive a context-aware hash without duplicating the tagging scheme or
 /// reconstructing a `ContextualAtom` it doesn't otherwise need.
 ///
-/// `source` is a reference (#107): `SourceAuthority` is no longer `Copy`
-/// once `Pinned`'s relay set exists, and a caller with only a borrowed
-/// atom (the common case) shouldn't need to clone a whole relay set just
-/// to hash it.
+/// `routing` is a reference: [`ReadRouting`] is not `Copy` once `Explicit`'s
+/// relay set exists, and a caller with only a borrowed atom (the common
+/// case) shouldn't need to clone a whole relay set just to hash it.
 pub fn fold_context(
     base: DescriptorHash,
-    source: &SourceAuthority,
+    routing: &ReadRouting,
     access: AccessContext,
 ) -> DescriptorHash {
-    let tagged = match source {
-        SourceAuthority::AuthorOutboxes => fold_byte(base, 0),
-        SourceAuthority::Public => fold_byte(base, 1),
-        // #107: two `Pinned` atoms with DIFFERENT relay sets must hash
-        // differently (equal filters pinned to R1 vs R2 are genuinely
+    let tagged = match routing {
+        ReadRouting::Auto => fold_byte(base, 0),
+        // Two `Explicit` atoms with DIFFERENT relay sets must hash
+        // differently (equal filters routed to R1 vs R2 are genuinely
         // distinct coverage/wire identities) -- fold every relay's own
-        // length-prefixed bytes in, not just a fixed discriminant. Members
-        // are already canonically ordered (`BTreeSet`), so insertion order
-        // never affects the digest.
-        SourceAuthority::Pinned(relays) => {
+        // length-prefixed bytes in, not just a fixed discriminant.
+        //
+        // The `Vec` is folded in ITS OWN order, which is what makes this
+        // digest agree with the derived `Ord`/`Hash` on `ReadRouting` for
+        // every possible value, normalized or not: both read the same
+        // sequence. `Demand::new` separately normalizes on the way in so
+        // one routing intent has one representation, but the two mechanisms
+        // are independent — the digest cannot disagree with identity even
+        // for a `Vec` that never passed through `Demand::new`.
+        ReadRouting::Explicit(relays) => {
             let mut bytes = Vec::with_capacity(33);
             bytes.extend_from_slice(base.as_bytes());
-            bytes.push(2);
+            bytes.push(1);
             for relay in relays {
                 let s = relay.as_str().as_bytes();
                 bytes.extend_from_slice(&(s.len() as u32).to_be_bytes());
@@ -392,29 +396,32 @@ mod tests {
     }
 
     /// #106's anti-alias core: the identical `ConcreteFilter` under two
-    /// distinct `SourceAuthority`s must hash to two distinct
+    /// distinct `ReadRouting`s must hash to two distinct
     /// `ContextualAtom` identities -- this is precisely the bug-class #18
     /// collapse (same selection, different intended authority, same atom)
     /// the whole `Demand`/`ContextualAtom` widening exists to close.
     #[test]
-    fn contextual_atom_hash_distinguishes_identical_filters_under_different_source_authority() {
+    fn contextual_atom_hash_distinguishes_identical_filters_under_different_read_routing() {
         let filter = cf(vec!["aa"], vec![]);
-        let outbox = ContextualAtom {
+        let auto = ContextualAtom {
             filter: filter.clone(),
-            source: crate::descriptor::SourceAuthority::AuthorOutboxes,
+            routing: crate::descriptor::ReadRouting::Auto,
             access: crate::descriptor::AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
-        let public = ContextualAtom {
+        let explicit = ContextualAtom {
             filter,
-            source: crate::descriptor::SourceAuthority::Public,
+            routing: crate::descriptor::ReadRouting::Explicit(vec![nostr::RelayUrl::parse(
+                "wss://r1.example",
+            )
+            .unwrap()]),
             access: crate::descriptor::AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
         assert_ne!(
-            outbox.hash(),
-            public.hash(),
-            "same selection under different SourceAuthority must never alias"
+            auto.hash(),
+            explicit.hash(),
+            "same selection under different ReadRouting must never alias"
         );
     }
 
@@ -429,13 +436,13 @@ mod tests {
         let r2 = nostr::RelayUrl::parse("wss://r2.example").unwrap();
         let pinned_r1 = ContextualAtom {
             filter: filter.clone(),
-            source: crate::descriptor::SourceAuthority::Pinned(BTreeSet::from([r1])),
+            routing: crate::descriptor::ReadRouting::Explicit(vec![r1]),
             access: crate::descriptor::AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
         let pinned_r2 = ContextualAtom {
             filter,
-            source: crate::descriptor::SourceAuthority::Pinned(BTreeSet::from([r2])),
+            routing: crate::descriptor::ReadRouting::Explicit(vec![r2]),
             access: crate::descriptor::AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
@@ -446,38 +453,76 @@ mod tests {
         );
     }
 
-    /// Stability companion: the SAME pinned relay set, inserted in a
-    /// different order, hashes identically (`BTreeSet` already normalizes
-    /// member order; this pins that the fold doesn't accidentally
-    /// reintroduce insertion-order sensitivity).
+    /// The digest and the DERIVED identity must never be able to disagree.
+    ///
+    /// `Explicit` carries a `Vec`, which — unlike the `BTreeSet` it replaced
+    /// — has no intrinsic order normalization. So the fold reads the `Vec`
+    /// in its own order, exactly as the derived `Ord`/`Hash` do. That makes
+    /// the two agree for EVERY value, normalized or not: unequal values
+    /// hash differently, equal values hash identically. The alternative —
+    /// an order-insensitive digest over an order-sensitive `Eq` — is the
+    /// disagreement this pins shut, and it would make two atoms that
+    /// compare unequal share a coverage key.
     #[test]
-    fn contextual_atom_hash_is_stable_regardless_of_pinned_set_insertion_order() {
+    fn the_context_digest_agrees_with_derived_identity_for_any_relay_order() {
         let filter = cf(vec!["aa"], vec![]);
         let r1 = nostr::RelayUrl::parse("wss://r1.example").unwrap();
         let r2 = nostr::RelayUrl::parse("wss://r2.example").unwrap();
-        let a = ContextualAtom {
+        let atom = |relays: Vec<nostr::RelayUrl>| ContextualAtom {
             filter: filter.clone(),
-            source: crate::descriptor::SourceAuthority::Pinned(BTreeSet::from([
-                r1.clone(),
-                r2.clone(),
-            ])),
+            routing: crate::descriptor::ReadRouting::Explicit(relays),
             access: crate::descriptor::AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
-        let b = ContextualAtom {
-            filter,
-            source: crate::descriptor::SourceAuthority::Pinned(BTreeSet::from([r2, r1])),
-            access: crate::descriptor::AccessContext::Public,
+        let ascending = atom(vec![r1.clone(), r2.clone()]);
+        let descending = atom(vec![r2.clone(), r1.clone()]);
+        let ascending_again = atom(vec![r1, r2]);
+
+        assert_eq!(ascending, ascending_again);
+        assert_eq!(ascending.hash(), ascending_again.hash());
+        assert_ne!(ascending, descending);
+        assert_ne!(
+            ascending.hash(),
+            descending.hash(),
+            "an order the derived Eq treats as distinct must not share a digest"
+        );
+    }
+
+    /// And the reason the above is safe rather than a fragmentation bug:
+    /// `Demand::new` normalizes, so ONE routing intent declared two ways
+    /// reaches this layer as one value with one digest. Order sensitivity
+    /// below plus normalization above is what gives both properties at once.
+    #[test]
+    fn one_routing_intent_declared_in_two_orders_is_one_atom() {
+        use crate::binding::Filter;
+        use crate::descriptor::{AccessContext, Demand, ReadRouting};
+        let r1 = nostr::RelayUrl::parse("wss://r1.example").unwrap();
+        let r2 = nostr::RelayUrl::parse("wss://r2.example").unwrap();
+        let declare = |relays: Vec<nostr::RelayUrl>| {
+            Demand::new(
+                Filter::default(),
+                ReadRouting::Explicit(relays),
+                AccessContext::Public,
+            )
+            .expect("a nonempty explicit relay set is legal")
+        };
+        let atom = |demand: Demand| ContextualAtom {
+            filter: cf(vec!["aa"], vec![]),
+            routing: demand.routing,
+            access: demand.access,
             routing_evidence: BTreeSet::new(),
         };
-        assert_eq!(a.hash(), b.hash());
+        assert_eq!(
+            atom(declare(vec![r2.clone(), r1.clone()])).hash(),
+            atom(declare(vec![r1, r2])).hash()
+        );
     }
 
     #[test]
     fn routing_evidence_changes_live_atom_hash() {
         let mut hinted = ContextualAtom {
             filter: cf(vec!["aa"], vec![]),
-            source: crate::descriptor::SourceAuthority::Public,
+            routing: crate::descriptor::ReadRouting::Auto,
             access: crate::descriptor::AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };

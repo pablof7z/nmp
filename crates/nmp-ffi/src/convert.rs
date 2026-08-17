@@ -19,11 +19,11 @@ use nmp::{
     EventBuilder as GEventBuilder, Filter as GFilter, FilterCoverageEntry, Frame,
     Freshness as GFreshness, Identity as GIdentity, IdentityField as GIdentityField,
     IndexedTagName, Lane, NotSentReason as GNotSentReason, PublishQueueEntry as GPublishQueueEntry,
-    PublishQueueReadError as GPublishQueueReadError, RefuseReason as GRefuseReason,
-    RelayDiagnosticsSnapshot, RelayState as GRelayState, RelayWaiting as GRelayWaiting,
-    RemoveQueueEntryError as GRemoveQueueEntryError, RequestRowsError, RetryCause as GRetryCause,
-    Row, RowDelta, Selector as GSelector, SetAlgebra as GSetAlgebra, SetOp as GSetOp,
-    ShortfallFact, SigningState as GSigningState, SourceAuthority as GSourceAuthority,
+    PublishQueueReadError as GPublishQueueReadError, ReadRouting as GReadRouting,
+    RefuseReason as GRefuseReason, RelayDiagnosticsSnapshot, RelayState as GRelayState,
+    RelayWaiting as GRelayWaiting, RemoveQueueEntryError as GRemoveQueueEntryError,
+    RequestRowsError, RetryCause as GRetryCause, Row, RowDelta, Selector as GSelector,
+    SetAlgebra as GSetAlgebra, SetOp as GSetOp, ShortfallFact, SigningState as GSigningState,
     SourceEvidence, SourceStatus, StalledWrite, StalledWriteStage, StalledWriteTotals, Window,
     WindowLoad, WriteFact as GWriteStatus, WriteIntent as GWriteIntent,
     WriteOutcome as GWriteOutcome, WritePayload as GWritePayload, WriteRouting as GWriteRouting,
@@ -37,13 +37,13 @@ use crate::types::{
     FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiEventBuilder, FfiFilter,
     FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentity, FfiIdentityField, FfiKindCount,
     FfiLaneCount, FfiLiveQuery, FfiNotSentReason, FfiPublishQueueEntry, FfiPublishQueueError,
-    FfiQueueRelayState, FfiReceiptRelayResult, FfiReceiptResult, FfiRefuseReason,
+    FfiQueueRelayState, FfiReadRouting, FfiReceiptRelayResult, FfiReceiptResult, FfiRefuseReason,
     FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRelayState, FfiRelayWaiting,
     FfiRemoveQueueEntryError, FfiRetryCause, FfiRow, FfiRowDelta, FfiRowSignature, FfiSelector,
     FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest,
-    FfiSignedEvent, FfiSigningState, FfiSourceAuthority, FfiSourceEvidence, FfiSourceStatus,
-    FfiStalledWrite, FfiStalledWriteStage, FfiStalledWriteTotals, FfiWindow, FfiWindowContents,
-    FfiWindowLoad, FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
+    FfiSignedEvent, FfiSigningState, FfiSourceEvidence, FfiSourceStatus, FfiStalledWrite,
+    FfiStalledWriteStage, FfiStalledWriteTotals, FfiWindow, FfiWindowContents, FfiWindowLoad,
+    FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -260,15 +260,15 @@ pub enum FfiError {
     /// rather than decoded, since a secret-key entity is never a valid
     /// target for a display/mention codec (#116).
     NostrEntitySecretKeyRejected,
-    /// An `FfiDemand` declared `source: AuthorOutboxes` over a selection
-    /// whose `authors` field is unbound (`nmp_grammar::DemandError::
-    /// AuthorOutboxesRequiresBoundAuthors` mirror, #107's `demand_from_ffi`
-    /// boundary).
-    AuthorOutboxesRequiresBoundAuthors,
-    /// An `FfiDemand` declared `source: Pinned` with an empty relay set
-    /// (`nmp_grammar::DemandError::PinnedRequiresNonemptyRelaySet` mirror,
-    /// #107 Contract: "the pinned relay set must be nonempty").
-    EmptyPinnedRelaySet,
+    /// An `FfiDemand` declared `routing: Explicit` with an empty relay set
+    /// (`nmp_grammar::DemandError::ExplicitRequiresNonemptyRelaySet` mirror,
+    /// #107 Contract: "the explicit relay set must be nonempty").
+    ///
+    /// This is the ONLY `Demand` refusal that crosses FFI, because
+    /// `ReadRouting::Auto` is total — there is no selection shape it can
+    /// fail against, which is what lets an app declare a demand without
+    /// handling a routing error at all.
+    EmptyExplicitRelaySet,
     /// A windowed observe declared `initial == 0` or `max == 0` in its
     /// [`FfiWindow::Expandable`] -- a window must hold at least one row.
     /// (On sub-64-bit targets this also covers a bound too large to be a
@@ -752,9 +752,7 @@ impl std::fmt::Display for FfiError {
                 write!(f, "unsupported {provider} provider version {found}")
             }
             Self::SessionDuplicateAccount => f.write_str("duplicate session account"),
-            Self::SessionCurrentAccountMissing => {
-                f.write_str("current session account is missing")
-            }
+            Self::SessionCurrentAccountMissing => f.write_str("current session account is missing"),
             Self::SessionProviderPayloadInvalid { provider } => {
                 write!(f, "invalid {provider} provider payload")
             }
@@ -856,25 +854,23 @@ impl std::fmt::Display for FfiError {
                 f,
                 "retained evidence for receipt {receipt_id} became unavailable during replay"
             ),
-            Self::ReceiptClosedWithoutOutcome { receipt_id } => write!(
-                f,
-                "receipt {receipt_id} closed before its terminal outcome"
-            ),
+            Self::ReceiptClosedWithoutOutcome { receipt_id } => {
+                write!(f, "receipt {receipt_id} closed before its terminal outcome")
+            }
             Self::InvalidSignature { got } => write!(f, "invalid signature hex: {got:?}"),
             Self::EngineClosed => write!(f, "engine already shut down"),
             Self::InvalidNostrEntity { reason } => write!(f, "invalid nostr entity: {reason}"),
             Self::NostrEntitySecretKeyRejected => {
                 write!(f, "refusing to decode a secret-key entity")
             }
-            Self::AuthorOutboxesRequiresBoundAuthors => write!(
-                f,
-                "SourceAuthority::AuthorOutboxes requires a selection whose `authors` field is bound"
-            ),
-            Self::EmptyPinnedRelaySet => {
-                write!(f, "SourceAuthority::Pinned requires a nonempty relay set")
+            Self::EmptyExplicitRelaySet => {
+                write!(f, "ReadRouting::Explicit requires a nonempty relay set")
             }
             Self::WindowZeroRows => {
-                write!(f, "window initial/max must be representable non-zero row counts")
+                write!(
+                    f,
+                    "window initial/max must be representable non-zero row counts"
+                )
             }
             Self::WindowInitialExceedsMax { initial, max } => {
                 write!(f, "window initial {initial} exceeds max {max}")
@@ -890,7 +886,10 @@ impl std::fmt::Display for FfiError {
                 write!(f, "a live query must declare at least one demand branch")
             }
             Self::AggregateResultLimitZero => {
-                write!(f, "an aggregate result limit of zero can never contain a row")
+                write!(
+                    f,
+                    "an aggregate result limit of zero can never contain a row"
+                )
             }
             Self::NestedAggregateResultLimit => write!(
                 f,
@@ -904,7 +903,9 @@ impl std::fmt::Display for FfiError {
                 write!(f, "relay information unavailable: {kind:?}")
             }
             #[cfg(feature = "nip22")]
-            Self::InvalidNip73 { reason } => write!(f, "invalid NIP-73 external content id: {reason}"),
+            Self::InvalidNip73 { reason } => {
+                write!(f, "invalid NIP-73 external content id: {reason}")
+            }
             #[cfg(feature = "nip25")]
             Self::InvalidReaction { reason } => write!(f, "invalid reaction: {reason}"),
             #[cfg(feature = "nip29")]
@@ -912,10 +913,9 @@ impl std::fmt::Display for FfiError {
                 write!(f, "a NIP-29 relay scope must name at least one host relay")
             }
             #[cfg(feature = "nip29")]
-            Self::GroupCallerSuppliedContext => write!(
-                f,
-                "the 'h' tag belongs to the group, not to the caller"
-            ),
+            Self::GroupCallerSuppliedContext => {
+                write!(f, "the 'h' tag belongs to the group, not to the caller")
+            }
             #[cfg(feature = "nip29")]
             Self::GroupCallerSuppliedContextConstraint => write!(
                 f,
@@ -929,7 +929,10 @@ impl std::fmt::Display for FfiError {
             ),
             #[cfg(feature = "nip29")]
             Self::GroupContextMissing { expected } => {
-                write!(f, "pre-signed event carries no 'h' row (expected {expected:?})")
+                write!(
+                    f,
+                    "pre-signed event carries no 'h' row (expected {expected:?})"
+                )
             }
             #[cfg(feature = "nip29")]
             Self::GroupContextMismatched { found, expected } => write!(
@@ -1119,10 +1122,7 @@ impl std::error::Error for FfiRequestRowsError {}
 impl From<GDemandError> for FfiError {
     fn from(err: GDemandError) -> Self {
         match err {
-            GDemandError::AuthorOutboxesRequiresBoundAuthors => {
-                Self::AuthorOutboxesRequiresBoundAuthors
-            }
-            GDemandError::PinnedRequiresNonemptyRelaySet => Self::EmptyPinnedRelaySet,
+            GDemandError::ExplicitRequiresNonemptyRelaySet => Self::EmptyExplicitRelaySet,
         }
     }
 }
@@ -1571,15 +1571,15 @@ pub fn filter_to_ffi(f: GFilter) -> FfiFilter {
     }
 }
 
-/// Parse+canonicalize a `FfiSourceAuthority::Pinned`'s raw URL strings --
+/// Parse+canonicalize a `FfiReadRouting::Explicit`'s raw URL strings --
 /// `nostr::RelayUrl::parse` gives the canonicalization (#107 Contract:
-/// "URL-canonicalized"), and collecting into a `BTreeSet` gives sort +
-/// dedup for free (the rest of the Contract's clause).
-fn source_authority_from_ffi(s: FfiSourceAuthority) -> Result<GSourceAuthority, FfiError> {
+/// "URL-canonicalized"); `Demand::new` sorts and dedupes on the way in
+/// (the rest of the Contract's clause), so this boundary parses and nothing
+/// more.
+fn read_routing_from_ffi(s: FfiReadRouting) -> Result<GReadRouting, FfiError> {
     Ok(match s {
-        FfiSourceAuthority::AuthorOutboxes => GSourceAuthority::AuthorOutboxes,
-        FfiSourceAuthority::Public => GSourceAuthority::Public,
-        FfiSourceAuthority::Pinned { relays } => GSourceAuthority::Pinned(
+        FfiReadRouting::Auto => GReadRouting::Auto,
+        FfiReadRouting::Explicit { relays } => GReadRouting::Explicit(
             relays
                 .into_iter()
                 .map(|url| {
@@ -1590,11 +1590,10 @@ fn source_authority_from_ffi(s: FfiSourceAuthority) -> Result<GSourceAuthority, 
     })
 }
 
-fn source_authority_to_ffi(s: GSourceAuthority) -> FfiSourceAuthority {
+fn read_routing_to_ffi(s: GReadRouting) -> FfiReadRouting {
     match s {
-        GSourceAuthority::AuthorOutboxes => FfiSourceAuthority::AuthorOutboxes,
-        GSourceAuthority::Public => FfiSourceAuthority::Public,
-        GSourceAuthority::Pinned(relays) => FfiSourceAuthority::Pinned {
+        GReadRouting::Auto => FfiReadRouting::Auto,
+        GReadRouting::Explicit(relays) => FfiReadRouting::Explicit {
             relays: relays.into_iter().map(|r| r.to_string()).collect(),
         },
     }
@@ -1654,7 +1653,7 @@ fn freshness_to_ffi(freshness: GFreshness) -> FfiFreshness {
 pub fn demand_from_ffi(d: FfiDemand) -> Result<GDemand, FfiError> {
     let mut demand = GDemand::new(
         filter_from_ffi(d.selection)?,
-        source_authority_from_ffi(d.source)?,
+        read_routing_from_ffi(d.routing)?,
         access_context_from_ffi(d.access)?,
     )?;
     demand.cache = cache_mode_from_ffi(d.cache);
@@ -1665,7 +1664,7 @@ pub fn demand_from_ffi(d: FfiDemand) -> Result<GDemand, FfiError> {
 pub fn demand_to_ffi(d: GDemand) -> FfiDemand {
     FfiDemand {
         selection: filter_to_ffi(d.selection),
-        source: source_authority_to_ffi(d.source),
+        routing: read_routing_to_ffi(d.routing),
         access: access_context_to_ffi(d.access),
         cache: cache_mode_to_ffi(d.cache),
         freshness: freshness_to_ffi(d.freshness),
@@ -3337,7 +3336,7 @@ mod tests {
                         }),
                         ..FfiFilter::default()
                     },
-                    source: FfiSourceAuthority::AuthorOutboxes,
+                    routing: FfiReadRouting::Auto,
                     access: FfiAccessContext::Public,
                     cache: FfiCacheMode::Agnostic,
                     freshness: FfiFreshness::Live,
@@ -3357,7 +3356,7 @@ mod tests {
                         }),
                         ..FfiFilter::default()
                     },
-                    source: FfiSourceAuthority::AuthorOutboxes,
+                    routing: FfiReadRouting::Auto,
                     access: FfiAccessContext::Public,
                     cache: FfiCacheMode::Agnostic,
                     freshness: FfiFreshness::Live,
@@ -3396,7 +3395,7 @@ mod tests {
                 }),
                 ..FfiFilter::default()
             },
-            source: FfiSourceAuthority::Pinned {
+            routing: FfiReadRouting::Explicit {
                 relays: vec!["wss://inner.example.com".to_string()],
             },
             access: FfiAccessContext::Nip42 {
@@ -3424,7 +3423,7 @@ mod tests {
                 }),
                 ..FfiFilter::default()
             },
-            source: FfiSourceAuthority::Public,
+            routing: FfiReadRouting::Auto,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
@@ -3439,7 +3438,7 @@ mod tests {
         let GBinding::Derived(derived) = binding else {
             panic!("expected derived authors binding");
         };
-        assert!(matches!(derived.inner.source, GSourceAuthority::Pinned(_)));
+        assert!(matches!(derived.inner.routing, GReadRouting::Explicit(_)));
         assert!(matches!(derived.inner.access, GAccessContext::Nip42(_)));
         assert_eq!(derived.inner.cache, GCacheMode::Strict);
         assert_eq!(derived.inner.freshness, GFreshness::MaxAge { seconds: 600 });
@@ -3459,7 +3458,7 @@ mod tests {
                 }),
                 ..FfiFilter::default()
             },
-            source: FfiSourceAuthority::Public,
+            routing: FfiReadRouting::Auto,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
@@ -4085,7 +4084,7 @@ mod tests {
     fn demand_round_trips_pinned_source_and_strict_cache() {
         let demand = FfiDemand {
             selection: ffi_filter_kind1_author(&pk_hex()),
-            source: FfiSourceAuthority::Pinned {
+            routing: FfiReadRouting::Explicit {
                 relays: vec![
                     "wss://b.example.com".to_string(),
                     "wss://a.example.com".to_string(),
@@ -4099,57 +4098,57 @@ mod tests {
         let g = demand_from_ffi(demand).expect("nonempty pinned relay set is legal");
         assert_eq!(g.cache, GCacheMode::Strict);
         assert_eq!(g.freshness, GFreshness::MaxAge { seconds: 14_400 });
-        match &g.source {
-            GSourceAuthority::Pinned(relays) => {
+        match &g.routing {
+            GReadRouting::Explicit(relays) => {
                 // BTreeSet<RelayUrl> is canonically sorted regardless of the
                 // FFI caller's own insertion order.
                 let urls: Vec<String> = relays.iter().map(|r| r.to_string()).collect();
                 assert_eq!(urls, vec!["wss://a.example.com", "wss://b.example.com"]);
             }
-            other => panic!("expected SourceAuthority::Pinned, got {other:?}"),
+            other => panic!("expected ReadRouting::Explicit, got {other:?}"),
         }
 
         let back = demand_to_ffi(g);
         assert_eq!(back.cache, FfiCacheMode::Strict);
         assert_eq!(back.freshness, FfiFreshness::MaxAge { seconds: 14_400 });
-        match back.source {
-            FfiSourceAuthority::Pinned { relays } => {
+        match back.routing {
+            FfiReadRouting::Explicit { relays } => {
                 assert_eq!(relays, vec!["wss://a.example.com", "wss://b.example.com"]);
             }
-            other => panic!("expected FfiSourceAuthority::Pinned, got {other:?}"),
+            other => panic!("expected FfiReadRouting::Explicit, got {other:?}"),
         }
     }
 
-    /// #107 Contract: an empty pinned relay set fails closed with a typed
+    /// #107 Contract: an empty explicit relay set fails closed with a typed
     /// `FfiError`, never a panic -- mirroring `Demand::new`'s own
-    /// `DemandError::PinnedRequiresNonemptyRelaySet` exactly.
+    /// `DemandError::ExplicitRequiresNonemptyRelaySet` exactly.
     #[test]
-    fn demand_from_ffi_rejects_an_empty_pinned_relay_set() {
+    fn demand_from_ffi_rejects_an_empty_explicit_relay_set() {
         let demand = FfiDemand {
             selection: ffi_filter_kind1_author(&pk_hex()),
-            source: FfiSourceAuthority::Pinned { relays: vec![] },
+            routing: FfiReadRouting::Explicit { relays: vec![] },
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         };
 
         match demand_from_ffi(demand) {
-            Err(FfiError::EmptyPinnedRelaySet) => {}
+            Err(FfiError::EmptyExplicitRelaySet) => {}
             Err(other) => {
-                panic!("expected EmptyPinnedRelaySet, got a different FfiError: {other:?}")
+                panic!("expected EmptyExplicitRelaySet, got a different FfiError: {other:?}")
             }
-            Ok(_) => panic!("an empty pinned relay set must fail closed, not construct"),
+            Ok(_) => panic!("an empty explicit relay set must fail closed, not construct"),
         }
     }
 
-    /// An unparseable relay URL inside `FfiSourceAuthority::Pinned` is a
+    /// An unparseable relay URL inside `FfiReadRouting::Explicit` is a
     /// distinct, earlier failure mode from the empty-set case -- same typed
     /// error every other relay-URL boundary in this file uses.
     #[test]
-    fn demand_from_ffi_rejects_an_unparseable_pinned_relay_url() {
+    fn demand_from_ffi_rejects_an_unparseable_explicit_relay_url() {
         let demand = FfiDemand {
             selection: ffi_filter_kind1_author(&pk_hex()),
-            source: FfiSourceAuthority::Pinned {
+            routing: FfiReadRouting::Explicit {
                 relays: vec!["not-a-url".to_string()],
             },
             access: FfiAccessContext::Public,
@@ -4164,30 +4163,27 @@ mod tests {
         }
     }
 
-    /// #107: `SourceAuthority::AuthorOutboxes` declared over an unbound-
-    /// author selection is the OTHER unconstructible `Demand` combination
-    /// (#106) -- must also fail closed through the FFI boundary, not just
-    /// the Pinned one.
+    /// The inverse of the refusal this replaces: `Auto` over an
+    /// authorless selection CONSTRUCTS. A Swift or Kotlin app declaring
+    /// "kind:1, wherever you find it" is the ordinary case, and it must not
+    /// have to name a routing value or handle a routing error to express
+    /// it. If `Auto` ever regrows a precondition, this reddens.
     #[test]
-    fn demand_from_ffi_rejects_author_outboxes_over_an_unbound_selection() {
+    fn demand_from_ffi_accepts_auto_over_an_authorless_selection() {
         let demand = FfiDemand {
             selection: FfiFilter {
                 kinds: Some(vec![1]),
                 ..FfiFilter::default()
             },
-            source: FfiSourceAuthority::AuthorOutboxes,
+            routing: FfiReadRouting::Auto,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         };
 
-        match demand_from_ffi(demand) {
-            Err(FfiError::AuthorOutboxesRequiresBoundAuthors) => {}
-            Err(other) => panic!(
-                "expected AuthorOutboxesRequiresBoundAuthors, got a different FfiError: {other:?}"
-            ),
-            Ok(_) => panic!("must fail closed, not construct"),
-        }
+        let built = demand_from_ffi(demand).expect("Auto is total: no selection can refuse it");
+        assert_eq!(built.routing, GReadRouting::Auto);
+        assert!(built.selection.authors.is_none());
     }
 
     #[test]
@@ -4199,7 +4195,7 @@ mod tests {
         ] {
             let demand = FfiDemand {
                 selection: ffi_filter_kind1_author(&pk_hex()),
-                source: FfiSourceAuthority::AuthorOutboxes,
+                routing: FfiReadRouting::Auto,
                 access: FfiAccessContext::Public,
                 cache: FfiCacheMode::Agnostic,
                 freshness,

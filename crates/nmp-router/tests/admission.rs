@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, RelaySessionKey,
-    RoutingEvidence, RoutingEvidenceKind, SourceAuthority,
+    AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting, RelaySessionKey,
+    RoutingEvidence, RoutingEvidenceKind,
 };
 use nmp_router::{
     AdvertisedRelayLimits, CompileBudget, DemandKey, Router, RuleRegistry, Shortfall,
@@ -27,7 +27,7 @@ fn atom_on(relays: BTreeSet<RelayUrl>, value: &str) -> ContextualAtom {
             )]),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(relays),
+        routing: ReadRouting::Explicit(relays.into_iter().collect()),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }
@@ -40,7 +40,7 @@ fn routeless_outbox_atom(author: PublicKey) -> ContextualAtom {
             authors: Some(BTreeSet::from([author.to_hex()])),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::AuthorOutboxes,
+        routing: ReadRouting::Auto,
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }
@@ -56,7 +56,7 @@ fn projected_outbox_atom(
             authors: Some(authors.iter().map(PublicKey::to_hex).collect()),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::AuthorOutboxes,
+        routing: ReadRouting::Auto,
         access: AccessContext::Public,
         routing_evidence: relays
             .into_iter()
@@ -80,7 +80,7 @@ fn pinned_kind_atom(relay: &RelayUrl, kinds: impl IntoIterator<Item = u16>) -> C
             kinds: Some(kinds.into_iter().collect()),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }
@@ -97,7 +97,7 @@ fn pinned_author_kind_atom(
             authors: Some(authors.into_iter().map(|author| author.to_hex()).collect()),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }

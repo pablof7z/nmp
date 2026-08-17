@@ -9,8 +9,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey, RoutingEvidence,
-    SourceAuthority,
+    AccessContext, ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey, RoutingEvidence,
 };
 use nmp_store::{coverage_claim_atoms, coverage_key, CoverageKey};
 
@@ -37,7 +36,7 @@ use crate::wire_id;
 /// triple -- selection-only, exactly what `coalesce.rs::coalesce_with`
 /// (unchanged, context-free) has always taken.
 type BagEntry = (ConcreteFilter, Vec<RouteProvenance>, EntryOwnership);
-type SessionBag = BTreeMap<RelaySessionKey, BTreeMap<SourceAuthority, Vec<BagEntry>>>;
+type SessionBag = BTreeMap<RelaySessionKey, BTreeMap<ReadRouting, Vec<BagEntry>>>;
 
 struct RelayCapOutcome {
     limited_demands: BTreeSet<DemandKey>,
@@ -46,11 +45,29 @@ struct RelayCapOutcome {
     refused_coverage_assignments: BTreeSet<(DemandKey, PublicKey)>,
 }
 
+/// Every `ReadRouting::Auto` atom sharing one `(Skeleton, AccessContext)`,
+/// accumulated so the single `Auto` path can run all of its lanes over the
+/// group at once.
 #[derive(Default)]
-struct SupplementalAtomGroup {
-    known_authors: BTreeSet<PublicKey>,
+struct AutoAtomGroup {
+    /// Routing facts keyed by the author they were projected for — the
+    /// coverage solve's extra candidates.
+    evidence_by_author: BTreeMap<PublicKey, BTreeSet<RoutingEvidence>>,
+    /// Every member atom's routing facts, unioned. Routed DIRECTLY, whether
+    /// or not the atom that carried them named an author: an `nevent` hint
+    /// names a relay for one event, and an event has no author dimension to
+    /// solve over.
     routing_evidence: BTreeSet<RoutingEvidence>,
-    owner_demands: BTreeSet<DemandKey>,
+    /// Union of the resolved authors across the group.
+    authors: BTreeSet<PublicKey>,
+    /// True iff some atom here resolved NO authors. Such an atom is only
+    /// covered by the author-erased skeleton, so when it is present the
+    /// additive lanes must carry that bare skeleton rather than the group's
+    /// author union — the union would silently narrow an unbounded demand
+    /// into one that names other people's authors.
+    unbounded: bool,
+    demands: BTreeSet<DemandKey>,
+    authors_by_demand: BTreeMap<DemandKey, BTreeSet<PublicKey>>,
 }
 
 /// Apply the ONE whole-demand relay ceiling after every routing lane has
@@ -199,7 +216,7 @@ fn refuse_over_budget(
 fn push_routes(
     bag: &mut SessionBag,
     filter: &ConcreteFilter,
-    source: &SourceAuthority,
+    source: &ReadRouting,
     access: AccessContext,
     routes: Vec<(RelayUrl, RouteProvenance)>,
     ownership: &EntryOwnership,
@@ -227,33 +244,60 @@ fn exact_atom_ownership(atom: ContextualAtom) -> EntryOwnership {
     }
 }
 
-fn outbox_ownership(
+/// Ownership for one entry on the `Auto` path.
+///
+/// `authors` are the authors this entry serves; `coverage_authors` are the
+/// ones it is a solved coverage assignment for. `unbounded` says the entry
+/// also serves an atom that named no authors at all, which is a claim and an
+/// owner the per-author walk below cannot produce: with an empty author set
+/// there is nothing to iterate, and `is_disjoint` against it is vacuously
+/// true, so an unbounded demand would own nothing and prove no coverage.
+/// It gets the author-erased skeleton's own claim instead, which is exactly
+/// the atom it reaches the wire as.
+fn auto_ownership(
     skeleton: &Skeleton,
     access: AccessContext,
+    group: &AutoAtomGroup,
     authors: &BTreeSet<PublicKey>,
     coverage_authors: &BTreeSet<PublicKey>,
-    evidence_by_author: &BTreeMap<PublicKey, BTreeSet<RoutingEvidence>>,
-    authors_by_demand: &BTreeMap<DemandKey, BTreeSet<PublicKey>>,
+    unbounded: bool,
 ) -> EntryOwnership {
-    let source = SourceAuthority::AuthorOutboxes;
-    let coverage_claims = authors
+    let routing = ReadRouting::Auto;
+    let evidence_by_author = &group.evidence_by_author;
+    let authors_by_demand = &group.authors_by_demand;
+    let mut coverage_claims: BTreeSet<_> = authors
         .iter()
         .map(|author| {
             let atom = ContextualAtom {
                 filter: skeleton.with_authors(BTreeSet::from([*author])),
-                source: source.clone(),
+                routing: routing.clone(),
                 access,
                 routing_evidence: evidence_by_author.get(author).cloned().unwrap_or_default(),
             };
             coverage_key(&atom)
         })
         .collect();
-    let owner_demands = authors_by_demand
+    let mut owner_demands: BTreeSet<_> = authors_by_demand
         .iter()
         .filter_map(|(demand, demand_authors)| {
             (!authors.is_disjoint(demand_authors)).then_some(*demand)
         })
         .collect();
+    if unbounded {
+        coverage_claims.insert(coverage_key(&ContextualAtom {
+            filter: skeleton.with_authors(BTreeSet::new()),
+            routing: routing.clone(),
+            access,
+            routing_evidence: group.routing_evidence.clone(),
+        }));
+        owner_demands.extend(
+            authors_by_demand
+                .iter()
+                .filter_map(|(demand, demand_authors)| {
+                    demand_authors.is_empty().then_some(*demand)
+                }),
+        );
+    }
     let coverage_assignments = authors_by_demand
         .iter()
         .flat_map(|(demand, demand_authors)| {
@@ -370,58 +414,53 @@ impl Router {
         budget: impl Into<CompileBudget>,
     ) -> CompileOutcome {
         let budget = budget.into();
-        // Step 1: group demand by (Skeleton, AccessContext) (outbox) /
-        // classify pinned -- classification is now by DECLARED
-        // `SourceAuthority` (#106), never by filter shape alone. Grouping by
-        // `AccessContext` alongside the skeleton keeps the seam ready for a
-        // future non-`Public` access variant (#8's NIP-42 AUTH) without
-        // needing a second widening later; every atom reaching this branch
-        // shares `source: AuthorOutboxes` by construction (that's the
-        // `classify` arm that produced it), so it isn't tracked per-group.
-        let mut outbox_groups: BTreeMap<
-            (Skeleton, AccessContext),
-            BTreeMap<PublicKey, BTreeSet<RoutingEvidence>>,
-        > = BTreeMap::new();
-        let mut outbox_demands_by_group: BTreeMap<(Skeleton, AccessContext), BTreeSet<DemandKey>> =
-            BTreeMap::new();
-        let mut outbox_authors_by_demand: BTreeMap<DemandKey, BTreeSet<PublicKey>> =
-            BTreeMap::new();
-        let mut supplemental_atoms: BTreeMap<
-            (ConcreteFilter, AccessContext),
-            SupplementalAtomGroup,
-        > = BTreeMap::new();
-        // #107: query-declared `SourceAuthority::Pinned(relays)` atoms — kept
-        // in their OWN collection, never merged into `pinned_atoms` (the
-        // directory-fact `Public`-sourced kind), since these must skip every
-        // additive lane (indexer/app/fallback) below, not just the solve.
+        // Step 1: group demand by (Skeleton, AccessContext) / classify
+        // explicit. Classification is by DECLARED `ReadRouting` and nothing
+        // else — never by filter shape. Grouping by `AccessContext`
+        // alongside the skeleton keeps the seam ready for a future
+        // non-`Public` access variant (#8's NIP-42 AUTH) without needing a
+        // second widening later; every atom reaching this branch shares
+        // `routing: Auto` by construction (that's the `classify` arm that
+        // produced it), so it isn't tracked per-group.
+        //
+        // An atom whose selection resolves NO authors joins the SAME group
+        // as its author-bearing siblings, because the skeleton it hashes to
+        // is the same one. That is deliberate — it is one `Auto` path, and
+        // the group records the fact via `unbounded` so the additive lanes
+        // widen back to the bare skeleton instead of narrowing the
+        // unbounded atom to the group's authors.
+        let mut auto_groups: BTreeMap<(Skeleton, AccessContext), AutoAtomGroup> = BTreeMap::new();
+        // Every `Auto` demand's resolved authors, flat across groups — the
+        // shortfall reduction at the end of this function walks demands, not
+        // groups.
+        let mut auto_authors_by_demand: BTreeMap<DemandKey, BTreeSet<PublicKey>> = BTreeMap::new();
+        // #107: query-declared `ReadRouting::Explicit(relays)` atoms — kept
+        // in their OWN collection, since these must skip every additive lane
+        // (indexer/app/fallback) below, not just the solve.
         let mut exact_atoms: Vec<(ContextualAtom, BTreeSet<RelayUrl>)> = Vec::new();
         for atom in demand {
-            match route::classify(&atom.filter, &atom.source) {
-                AtomClass::Coverage { skeleton, authors } => {
-                    let group_key = (skeleton, atom.access);
+            match route::classify(&atom.routing) {
+                AtomClass::Auto => {
+                    let (skeleton, authors) = Skeleton::of(&atom.filter);
                     let demand = DemandKey::for_atom(atom);
-                    outbox_demands_by_group
-                        .entry(group_key.clone())
-                        .or_default()
-                        .insert(demand);
-                    outbox_authors_by_demand.insert(demand, authors.clone());
-                    let group = outbox_groups.entry(group_key).or_default();
+                    auto_authors_by_demand.insert(demand, authors.clone());
+                    let group = auto_groups.entry((skeleton, atom.access)).or_default();
+                    group.demands.insert(demand);
+                    group.authors_by_demand.insert(demand, authors.clone());
+                    group
+                        .routing_evidence
+                        .extend(atom.routing_evidence.iter().cloned());
+                    if authors.is_empty() {
+                        group.unbounded = true;
+                    }
                     for author in authors {
+                        group.authors.insert(author);
                         group
+                            .evidence_by_author
                             .entry(author)
                             .or_default()
                             .extend(atom.routing_evidence.iter().cloned());
                     }
-                }
-                AtomClass::Supplemental { authors } => {
-                    let supplemental = supplemental_atoms
-                        .entry((atom.filter.clone(), atom.access))
-                        .or_default();
-                    supplemental.known_authors.extend(authors);
-                    supplemental
-                        .routing_evidence
-                        .extend(atom.routing_evidence.iter().cloned());
-                    supplemental.owner_demands.insert(DemandKey::for_atom(atom));
                 }
                 AtomClass::Exact(relays) => {
                     exact_atoms.push((atom.clone(), relays));
@@ -445,19 +484,23 @@ impl Router {
         let mut uncovered_by_demand: BTreeMap<DemandKey, BTreeMap<PublicKey, Shortfall>> =
             BTreeMap::new();
 
-        for ((skeleton, access), evidence_by_author) in &outbox_groups {
+        for ((skeleton, access), group) in &auto_groups {
             let access = *access;
-            let source = SourceAuthority::AuthorOutboxes;
-            let authors: BTreeSet<PublicKey> = evidence_by_author.keys().copied().collect();
-            let group_demands = outbox_demands_by_group
-                .get(&(skeleton.clone(), access))
-                .cloned()
-                .unwrap_or_default();
-            let authors_by_group_demand: BTreeMap<_, _> = group_demands
-                .iter()
-                .map(|demand| (*demand, outbox_authors_by_demand[demand].clone()))
-                .collect();
-            let candidates = route::build_candidates(&authors, facts);
+            let source = ReadRouting::Auto;
+            let evidence_by_author = &group.evidence_by_author;
+            let authors = &group.authors;
+            let authors_by_group_demand = &group.authors_by_demand;
+            // The filter the additive lanes carry. The group's author union
+            // normally, but the author-erased skeleton whenever some atom
+            // here named no authors: only the bare skeleton covers such an
+            // atom, and it also supersets every author-bearing sibling, so
+            // widening is both necessary and sufficient.
+            let lane_filter = if group.unbounded {
+                skeleton.with_authors(BTreeSet::new())
+            } else {
+                skeleton.with_authors(authors.clone())
+            };
+            let candidates = route::build_candidates(authors, facts);
             let mut candidates = candidates;
             route::add_projected_candidates(&mut candidates, evidence_by_author);
             let coverage = solver::solve(&CoverageInput {
@@ -495,21 +538,19 @@ impl Router {
                 // incremental instead of touching `cap`; out of scope here.
                 cap: usize::MAX,
             });
-            if let Some(demands) = outbox_demands_by_group.get(&(skeleton.clone(), access)) {
-                for demand in demands {
-                    let exact: BTreeMap<_, _> = outbox_authors_by_demand[demand]
-                        .iter()
-                        .filter_map(|author| {
-                            coverage
-                                .shortfall
-                                .get(author)
-                                .copied()
-                                .map(|fact| (*author, fact))
-                        })
-                        .collect();
-                    if !exact.is_empty() {
-                        uncovered_by_demand.insert(*demand, exact);
-                    }
+            for demand in &group.demands {
+                let exact: BTreeMap<_, _> = authors_by_group_demand[demand]
+                    .iter()
+                    .filter_map(|author| {
+                        coverage
+                            .shortfall
+                            .get(author)
+                            .copied()
+                            .map(|fact| (*author, fact))
+                    })
+                    .collect();
+                if !exact.is_empty() {
+                    uncovered_by_demand.insert(*demand, exact);
                 }
             }
 
@@ -553,13 +594,13 @@ impl Router {
                 // `routing_evidence`, so each key is exactly the key the
                 // resolver's own per-author atom hashes to -- which is what
                 // lets one merged REQ absorb them all.
-                let ownership = outbox_ownership(
+                let ownership = auto_ownership(
                     skeleton,
                     access,
+                    group,
                     &relay_authors,
                     &relay_authors,
-                    evidence_by_author,
-                    &authors_by_group_demand,
+                    false,
                 );
                 bag.entry(RelaySessionKey::new(relay, access))
                     .or_default()
@@ -568,23 +609,40 @@ impl Router {
                     .push((filter, provenance, ownership));
             }
 
-            // Operator app policy supplements the group's full author set.
-            let additive = route::operator_app_routes(facts, &authors);
-            let additive_ownership = outbox_ownership(
+            // The group's own routing facts, routed DIRECTLY. This runs for
+            // every `Auto` group, not only for one whose selection happened
+            // to name no authors: an `nevent`'s relay hint says where THAT
+            // event lives, which is an answer the per-author coverage solve
+            // above cannot express and, for a hinted event by an author
+            // whose outbox is already covered, would otherwise discard.
+            let lane_ownership = auto_ownership(
                 skeleton,
                 access,
-                &authors,
+                group,
+                authors,
                 &BTreeSet::new(),
-                evidence_by_author,
-                &authors_by_group_demand,
+                group.unbounded,
             );
             push_routes(
                 &mut bag,
-                &skeleton.with_authors(authors.clone()),
+                &lane_filter,
+                &source,
+                access,
+                route::provenance_for_projected(&group.routing_evidence),
+                &lane_ownership,
+            );
+
+            // Operator app policy supplements the group's full author set,
+            // and routes every atom including the unbounded ones (closes #7
+            // — the authorless-routing-lane gap).
+            let additive = route::operator_app_routes(facts, authors);
+            push_routes(
+                &mut bag,
+                &lane_filter,
                 &source,
                 access,
                 additive,
-                &additive_ownership,
+                &lane_ownership,
             );
 
             // Additive fallback lane: routes exactly the shortfall authors,
@@ -594,13 +652,13 @@ impl Router {
             let shortfall_authors: BTreeSet<PublicKey> =
                 coverage.shortfall.keys().copied().collect();
             let fallback = route::operator_fallback_routes(facts, &shortfall_authors);
-            let fallback_ownership = outbox_ownership(
+            let fallback_ownership = auto_ownership(
                 skeleton,
                 access,
+                group,
                 &shortfall_authors,
                 &BTreeSet::new(),
-                evidence_by_author,
-                &authors_by_group_demand,
+                false,
             );
             push_routes(
                 &mut bag,
@@ -612,32 +670,6 @@ impl Router {
             );
         }
 
-        for ((atom, access), supplemental) in &supplemental_atoms {
-            let source = SourceAuthority::Public;
-            let access = *access;
-            let effective_atom = ContextualAtom {
-                filter: atom.clone(),
-                source: source.clone(),
-                access,
-                routing_evidence: supplemental.routing_evidence.clone(),
-            };
-            let mut ownership = exact_atom_ownership(effective_atom);
-            ownership.owner_demands = supplemental.owner_demands.clone();
-            let routes = route::provenance_for_projected(&supplemental.routing_evidence);
-            for (relay, prov) in routes {
-                bag.entry(RelaySessionKey::new(relay, access))
-                    .or_default()
-                    .entry(source.clone())
-                    .or_default()
-                    .push((atom.clone(), vec![prov], ownership.clone()));
-            }
-
-            // App lane routes every atom, including authorless/pinned ones
-            // (closes #7 — the authorless-routing-lane gap).
-            let app = route::operator_app_routes(facts, &supplemental.known_authors);
-            push_routes(&mut bag, atom, &source, access, app, &ownership);
-        }
-
         // #107: explicit, query-declared pinned wire authority — route
         // DIRECTLY to the Demand's own relay set. NO additive lane
         // (indexer/app/fallback) is ever applied here: that's the #107
@@ -646,7 +678,7 @@ impl Router {
         for (atom, relays) in &exact_atoms {
             let filter = &atom.filter;
             let access = atom.access;
-            let source = SourceAuthority::Pinned(relays.clone());
+            let source = ReadRouting::Explicit(relays.iter().cloned().collect());
             let ownership = exact_atom_ownership(atom.clone());
             for (relay, prov) in route::provenance_for_exact(relays) {
                 bag.entry(RelaySessionKey::new(relay, access))
@@ -713,7 +745,7 @@ impl Router {
                     .get(&session)
                     .into_iter()
                     .flatten()
-                    .filter(|req| req.source == source)
+                    .filter(|req| req.routing == source)
                     .map(|req| (req.filter.clone(), req.sub_id.clone()))
                     .collect();
 
@@ -737,7 +769,7 @@ impl Router {
                         WireReq {
                             sub_id: assignment.sub_id,
                             filter,
-                            source: source.clone(),
+                            routing: source.clone(),
                             provenance,
                             coverage_claims: ownership.coverage_claims,
                             owner_demands: ownership.owner_demands,
@@ -826,7 +858,7 @@ impl Router {
                     .flat_map(|(_, request)| request.coverage_assignments.iter().copied()),
             )
             .collect();
-        for (demand, authors) in &outbox_authors_by_demand {
+        for (demand, authors) in &auto_authors_by_demand {
             let intrinsic = uncovered_by_demand.remove(demand).unwrap_or_default();
             let exact: BTreeMap<_, _> = authors
                 .iter()
@@ -945,7 +977,7 @@ impl Router {
             for (previous_position, next_position) in positions {
                 let previous = previous_requests.swap_remove(previous_position);
                 let request = &mut next_requests[next_position];
-                if previous.source != request.source || previous.filter != request.filter {
+                if previous.routing != request.routing || previous.filter != request.filter {
                     retired_requests.push((session.clone(), previous));
                     continue;
                 }

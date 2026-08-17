@@ -111,9 +111,9 @@ use nostr::{
 use nmp_grammar::RoutingEvidence;
 use nmp_grammar::{
     fold_byte, AccessContext, CacheMode, ConcreteFilter, ContextualAtom, DemandDelta, DemandOp,
-    DescriptorHash, Freshness, Identity, LiveQuery, RelaySessionKey,
-    ReplaceableMaterializerOperation, ReplaceableMaterializerRegistration, SourceAuthority,
-    WriteIntent, WritePayload, WriteRouting,
+    DescriptorHash, Freshness, Identity, LiveQuery, ReadRouting, RelaySessionKey,
+    ReplaceableMaterializerOperation, ReplaceableMaterializerRegistration, WriteIntent,
+    WritePayload, WriteRouting,
 };
 use nmp_resolver::{
     CommittedCurrentRow, CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine,
@@ -1826,6 +1826,10 @@ struct PlanExecutionMetadata {
     filter: ConcreteFilter,
     coverage_claims: BTreeSet<CoverageKey>,
     owner_demands: BTreeSet<nmp_router::DemandKey>,
+    /// Which routing lanes put this plan request on the wire. Retained so
+    /// every REQ derived from it — retries, and the NIP-77 roles — reports
+    /// the same reason the original did.
+    lanes: BTreeSet<nmp_router::Lane>,
 }
 
 enum TemporaryReq {
@@ -2641,7 +2645,7 @@ impl CoreState {
     /// `ContextualAtom` set (#118, fixed ahead of #107): #106 kept this
     /// surface `ConcreteFilter`-only, reconstructing context via a static
     /// default -- exact ONLY as long as nothing in production constructs a
-    /// non-default `Demand`. #107's `SourceAuthority::Pinned` is the first
+    /// non-default `Demand`. #107's `ReadRouting::Explicit` is the first
     /// production path that does, so a reconstruction would silently
     /// collapse two genuinely-distinct atoms (same selection, different
     /// context) that the resolver correctly tracks as two independent
@@ -2893,7 +2897,7 @@ impl CoreState {
     /// `ConcreteFilter`-only signature reconstructed `source`/`access` by
     /// inspecting whether the filter bound `authors`, which was exact only
     /// as long as every production atom took that one path; #107's
-    /// `SourceAuthority::Pinned` breaks that assumption; the reconstruction
+    /// `ReadRouting::Explicit` breaks that assumption; the reconstruction
     /// would then compute the WRONG `CoverageKey` and silently report
     /// "not covered" for coverage that IS actually proven.
     pub(in crate::core) fn get_coverage(

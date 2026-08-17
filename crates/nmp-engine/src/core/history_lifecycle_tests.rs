@@ -24,14 +24,17 @@ mod history_mutation_tests {
 
     fn history_query(room: usize, kinds: BTreeSet<u16>) -> HistoryQuery {
         HistoryQuery::new(
-            LiveQuery::single(nmp_grammar::Demand::public(Filter {
-                kinds: Some(kinds),
-                tags: BTreeMap::from([(
-                    IndexedTagName::new('h').unwrap(),
-                    Binding::Literal(BTreeSet::from([format!("room-{room}")])),
-                )]),
-                ..Filter::default()
-            })),
+            LiveQuery::single(nmp_grammar::Demand {
+                selection: Filter {
+                    kinds: Some(kinds),
+                    tags: BTreeMap::from([(
+                        IndexedTagName::new('h').unwrap(),
+                        Binding::Literal(BTreeSet::from([format!("room-{room}")])),
+                    )]),
+                    ..Filter::default()
+                },
+                ..nmp_grammar::Demand::default()
+            }),
             3,
             6,
         )
@@ -264,7 +267,7 @@ mod history_mutation_tests {
         let query = HistoryQuery::new(
             LiveQuery::single(nmp_grammar::Demand {
                 selection,
-                source: SourceAuthority::Pinned(BTreeSet::from([wanted])),
+                routing: ReadRouting::Explicit(vec![wanted]),
                 access: AccessContext::Public,
                 cache: CacheMode::Strict,
                 freshness: Freshness::Live,
@@ -332,7 +335,7 @@ mod history_mutation_tests {
         let strict_query = HistoryQuery::new(
             LiveQuery::single(nmp_grammar::Demand {
                 selection,
-                source: SourceAuthority::Pinned(BTreeSet::from([wanted.clone()])),
+                routing: ReadRouting::Explicit(vec![wanted.clone()]),
                 access: AccessContext::Public,
                 cache: CacheMode::Strict,
                 freshness: Freshness::Live,
@@ -677,21 +680,23 @@ mod history_mutation_tests {
             .unwrap();
         let selection = nmp_grammar::Filter {
             authors: Some(Binding::Derived(Box::new(Derived {
-                inner: nmp_grammar::Demand::author_outboxes(nmp_grammar::Filter {
-                    kinds: Some(BTreeSet::from([30_003u16])),
-                    authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-                    ..nmp_grammar::Filter::default()
-                })
-                .expect("the selection binds `authors`"),
+                inner: nmp_grammar::Demand {
+                    selection: nmp_grammar::Filter {
+                        kinds: Some(BTreeSet::from([30_003u16])),
+                        authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                        ..nmp_grammar::Filter::default()
+                    },
+                    ..nmp_grammar::Demand::default()
+                },
                 project: Selector::AddressCoord,
             }))),
             ..nmp_grammar::Filter::default()
         };
         let query = HistoryQuery::new(
-            LiveQuery::single(
-                nmp_grammar::Demand::author_outboxes(selection)
-                    .expect("the selection binds `authors`"),
-            ),
+            LiveQuery::single(nmp_grammar::Demand {
+                selection,
+                ..nmp_grammar::Demand::default()
+            }),
             3,
             6,
         );

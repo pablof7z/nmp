@@ -33,18 +33,19 @@ class NIP29Test {
     }
 
     /** A multi-host group read is ONE live query with one complete branch
-     * per host, each pinned to that host alone and scoped by `#h`. */
+     * per host, each routed explicitly to that host alone and scoped by
+     * `#h`. */
     @Test
-    fun groupReadIsOneBranchPerHostPinnedToThatHost() {
+    fun groupReadIsOneBranchPerHostRoutedToThatHost() {
         val scope = NMPRelayScope.on(listOf(host(1), host(2)))
         val group = scope.group("photographers")
 
         val query = group.read(NMPFilter())
         assertEquals(2, query.branches.size)
         query.branches.zip(listOf(host(1), host(2))).forEach { (branch, expectedHost) ->
-            val source = branch.source
-            check(source is NMPSourceAuthority.Pinned) { "expected Pinned, got $source" }
-            assertEquals(setOf(expectedHost), source.relays)
+            val routing = branch.routing
+            check(routing is NMPReadRouting.Explicit) { "expected Explicit, got $routing" }
+            assertEquals(listOf(expectedHost), routing.relays)
             assertEquals(NMPAccessContext.Public, branch.access)
             val hBinding = branch.selection.tags['h']
             check(hBinding is NMPBinding.Literal) { "expected an h tag literal binding" }

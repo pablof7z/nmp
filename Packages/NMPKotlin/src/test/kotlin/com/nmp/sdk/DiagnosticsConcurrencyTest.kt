@@ -51,7 +51,6 @@ class DiagnosticsConcurrencyTest {
                 val demand =
                     NMPDemand(
                         selection = NMPFilter(kinds = listOf(8_811u)),
-                        source = NMPSourceAuthority.Public,
                     )
                 val query = engine.observe(NMPLiveQuery.single(demand), Window.Expandable(initial = 1uL, max = 2uL))
 
@@ -125,7 +124,6 @@ class DiagnosticsConcurrencyTest {
                             NMPLiveQuery.single(
                                 NMPDemand(
                                     selection = NMPFilter(kinds = listOf(8_812u)),
-                                    source = NMPSourceAuthority.Public,
                                 )
                             )
                         ).collect {
@@ -181,7 +179,6 @@ class DiagnosticsConcurrencyTest {
                         NMPLiveQuery.single(
                             NMPDemand(
                                 selection = NMPFilter(kinds = listOf(8_821u)),
-                                source = NMPSourceAuthority.Public,
                             )
                         )
                     )

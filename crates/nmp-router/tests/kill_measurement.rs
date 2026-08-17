@@ -16,7 +16,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting};
 use nmp_router::{PublicKey, RelayUrl, Router, RuleRegistry};
 use nmp_router_testkit::{test_relay, FixtureRoutingFacts};
 use nostr::{Keys, SecretKey};
@@ -67,7 +67,7 @@ fn falsifier_demand() -> BTreeSet<ContextualAtom> {
                 authors: Some(BTreeSet::from([author(i).to_hex()])),
                 ..ConcreteFilter::default()
             },
-            source: SourceAuthority::AuthorOutboxes,
+            routing: ReadRouting::Auto,
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         })

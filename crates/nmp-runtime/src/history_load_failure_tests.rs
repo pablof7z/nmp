@@ -63,10 +63,13 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
         ObservationOwnershipCensus::default()
     );
 
-    let ordinary = LiveQuery::single(Demand::public(Filter {
-        kinds: Some(BTreeSet::from([1])),
-        ..Filter::default()
-    }));
+    let ordinary = LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1])),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    });
     assert!(matches!(
         handle.subscribe(ordinary),
         Err(EngineThreadError::ObservationUnavailable { reason })
@@ -77,10 +80,13 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
         ObservationOwnershipCensus::default(),
         "post-handle ordinary projection refusal must roll back every owner"
     );
-    let healthy = LiveQuery::single(Demand::public(Filter {
-        kinds: Some(BTreeSet::from([2])),
-        ..Filter::default()
-    }));
+    let healthy = LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([2])),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    });
     let (ordinary_handle, ordinary_rows) = handle.subscribe(healthy.clone()).expect(
         "a disjoint healthy ordinary filter proves corruption is targeted and runtime survived",
     );
@@ -94,10 +100,13 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
     );
 
     let history = HistoryQuery::new(
-        LiveQuery::single(Demand::public(Filter {
-            kinds: Some(BTreeSet::from([1])),
-            ..Filter::default()
-        })),
+        LiveQuery::single(Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([1])),
+                ..Filter::default()
+            },
+            ..Demand::default()
+        }),
         1,
         2,
     );
@@ -123,20 +132,23 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
         ObservationOwnershipCensus::default()
     );
 
-    let derived = LiveQuery::single(
-        Demand::author_outboxes(Filter {
+    let derived = LiveQuery::single(Demand {
+        selection: Filter {
             authors: Some(Binding::Derived(Box::new(Derived {
-                inner: Demand::public(Filter {
-                    kinds: Some(BTreeSet::from([1])),
-                    ..Filter::default()
-                }),
+                inner: Demand {
+                    selection: Filter {
+                        kinds: Some(BTreeSet::from([1])),
+                        ..Filter::default()
+                    },
+                    ..Demand::default()
+                },
                 project: Selector::Tag("p".to_owned()),
             }))),
             kinds: Some(BTreeSet::from([4])),
             ..Filter::default()
-        })
-        .expect("the selection binds `authors`"),
-    );
+        },
+        ..Demand::default()
+    });
     assert!(matches!(
         handle.subscribe(derived.clone()),
         Err(EngineThreadError::ObservationUnavailable { reason })
@@ -173,10 +185,13 @@ fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() 
             EngineThread::spawn(store, 4, nmp_transport::PoolConfig::default()).unwrap();
         let caller_handle = handle.clone();
         let caller = std::thread::spawn(move || {
-            caller_handle.subscribe(LiveQuery::single(Demand::public(Filter {
-                kinds: Some(BTreeSet::from([1])),
-                ..Filter::default()
-            })))
+            caller_handle.subscribe(LiveQuery::single(Demand {
+                selection: Filter {
+                    kinds: Some(BTreeSet::from([1])),
+                    ..Filter::default()
+                },
+                ..Demand::default()
+            }))
         });
         blocked.wait_until_entered();
         handle.shutdown();
@@ -198,10 +213,13 @@ fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() 
         let caller_handle = handle.clone();
         let caller = std::thread::spawn(move || {
             caller_handle.subscribe_history(HistoryQuery::new(
-                LiveQuery::single(Demand::public(Filter {
-                    kinds: Some(BTreeSet::from([2])),
-                    ..Filter::default()
-                })),
+                LiveQuery::single(Demand {
+                    selection: Filter {
+                        kinds: Some(BTreeSet::from([2])),
+                        ..Filter::default()
+                    },
+                    ..Demand::default()
+                }),
                 1,
                 2,
             ))

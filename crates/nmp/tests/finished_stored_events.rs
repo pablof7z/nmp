@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     AccessContext, AcquisitionEvidence, Demand, Engine, EngineConfig, Filter, LiveQuery,
-    SourceAuthority, SourceStatus, Subscription,
+    ReadRouting, SourceStatus, Subscription,
 };
 use nmp_test_support::relays::{free_port, RelayConfig, ScriptedRelay};
 use nostr::RelayUrl;
@@ -69,7 +69,7 @@ fn query(relays: &[&RelayUrl], limit: Option<usize>) -> LiveQuery {
                     limit,
                     ..Filter::default()
                 },
-                SourceAuthority::Pinned(BTreeSet::from([(*relay).clone()])),
+                ReadRouting::Explicit(vec![(*relay).clone()]),
                 AccessContext::Public,
             )
             .expect("a one-relay pinned set is nonempty")

@@ -502,6 +502,7 @@ impl CoreState {
         filter: ConcreteFilter,
         coverage_claims: BTreeSet<CoverageKey>,
         owner_demands: BTreeSet<nmp_router::DemandKey>,
+        lanes: BTreeSet<nmp_router::Lane>,
     ) {
         self.plan_execution_metadata.insert(
             sub_id,
@@ -509,6 +510,7 @@ impl CoreState {
                 filter,
                 coverage_claims,
                 owner_demands,
+                lanes,
             },
         );
     }
@@ -967,6 +969,9 @@ impl CoreState {
                             filter.clone(),
                             claims.clone(),
                             owner_demands,
+                            self.router
+                                .request_lanes(session, sub_id)
+                                .unwrap_or_default(),
                         );
                         self.attribution.retain_live_request_claims(sub_id, claims);
                     }
@@ -1008,6 +1013,10 @@ impl CoreState {
                             .request_demands(session, sub_id)
                             .cloned()
                             .unwrap_or_default();
+                        let lanes = self
+                            .router
+                            .request_lanes(session, sub_id)
+                            .unwrap_or_default();
 
                         // "Small exact result" (a `limit`) always stays REQ
                         // -- a bounded, terminating fetch is not what
@@ -1046,6 +1055,7 @@ impl CoreState {
                                         filter,
                                         coverage_claims,
                                         owner_demands,
+                                        lanes,
                                         replay: false,
                                         event_failure_target: EventFailureTarget::ThisSend,
                                     },
@@ -1712,6 +1722,7 @@ impl CoreState {
                 filter: &live_filter,
                 coverage_claims: metadata.coverage_claims,
                 owner_demands: metadata.owner_demands,
+                lanes: metadata.lanes,
                 replay: false,
                 event_failure_target: EventFailureTarget::ThisSend,
             },
@@ -2030,6 +2041,7 @@ impl CoreState {
                 filter: &neg_filter,
                 coverage_claims: metadata.coverage_claims,
                 owner_demands: metadata.owner_demands,
+                lanes: metadata.lanes,
                 replay: false,
                 event_failure_target: EventFailureTarget::ThisSend,
             },
@@ -2188,6 +2200,9 @@ impl CoreState {
                     filter,
                     coverage_claims: BTreeSet::new(),
                     owner_demands: BTreeSet::new(),
+                    // A reconciliation step carries no REQ of its own, so
+                    // no lane asked for it.
+                    lanes: BTreeSet::new(),
                     replay: false,
                     event_failure_target: EventFailureTarget::ThisSend,
                     request_revision: None,
@@ -2305,6 +2320,7 @@ impl CoreState {
                     filter: &backfill,
                     coverage_claims: BTreeSet::new(),
                     owner_demands: BTreeSet::new(),
+                    lanes: BTreeSet::new(),
                     replay: false,
                     event_failure_target: EventFailureTarget::Correlated(attribution_send),
                 },
@@ -2502,6 +2518,7 @@ impl CoreState {
                 filter: &filter,
                 coverage_claims: metadata.coverage_claims,
                 owner_demands: metadata.owner_demands,
+                lanes: metadata.lanes,
                 replay: false,
                 event_failure_target: EventFailureTarget::ThisSend,
             },
@@ -3394,7 +3411,7 @@ impl CoreState {
     /// `Derived.inner` Demand owns an independent source and cache policy,
     /// so consulting a descendant here would let its pins contaminate the
     /// caller-owned root projection.
-    /// `CacheMode::Strict` is only meaningful over a `SourceAuthority::
+    /// `CacheMode::Strict` is only meaningful over a `ReadRouting::
     /// Pinned` selection (the Contract: "pinned cache policy is part of
     /// source identity") -- over any other source there is no pinned relay
     /// set to intersect against, so Strict is a no-op there, identical to
@@ -3414,8 +3431,8 @@ impl CoreState {
                     .first()
                     .into_iter()
                     .flat_map(|(atoms, _)| atoms)
-                    .find_map(|atom| match &atom.source {
-                        SourceAuthority::Pinned(relays) => Some(relays.clone()),
+                    .find_map(|atom| match &atom.routing {
+                        ReadRouting::Explicit(relays) => Some(relays.iter().cloned().collect()),
                         _ => None,
                     })
             });

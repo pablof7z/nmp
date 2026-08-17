@@ -49,10 +49,10 @@ command API.
 A live query describes more than a local filter:
 
 ```text
-Demand = Selection + SourceAuthority + AccessContext
+Demand = Selection + ReadRouting + AccessContext
 ```
 
-`Selection` says which events match. `SourceAuthority` says which relay facts
+`Selection` says which events match. `ReadRouting` says which relay facts
 may acquire them. `AccessContext` carries protocol context such as AUTH that can
 change what a source returns. Keeping those parts together prevents equal
 filters under incompatible authority or access contexts from borrowing each
@@ -72,7 +72,6 @@ kinds: [9999]
 authors: Derived(
   inner: Demand(
     selection: Filter(kinds: [3], authors: Reactive(CurrentPubkey)),
-    source: AuthorOutboxes,
     access: Public
   ),
   project: Tag(p)

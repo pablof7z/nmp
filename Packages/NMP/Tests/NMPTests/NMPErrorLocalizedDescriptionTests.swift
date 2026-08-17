@@ -79,11 +79,7 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
             (.engineClosed, "Engine already shut down"),
             (.invalidNostrEntity("sentinel-entity"), "Invalid Nostr entity: sentinel-entity"),
             (.nostrEntitySecretKeyRejected, "Refusing to decode a secret-key entity"),
-            (
-                .authorOutboxesRequiresBoundAuthors,
-                "SourceAuthority.authorOutboxes requires a selection whose authors field is bound"
-            ),
-            (.emptyPinnedRelaySet, "SourceAuthority.pinned requires a nonempty relay set"),
+            (.emptyExplicitRelaySet, "ReadRouting.explicit requires a nonempty relay set"),
             (.windowZeroRows, "Window initial/max must be representable nonzero row counts"),
             (.windowInitialExceedsMax(initial: 31, max: 7), "Window initial 31 exceeds max 7"),
             (.windowSelectionHasLimit, "A windowed selection must not also declare a limit"),

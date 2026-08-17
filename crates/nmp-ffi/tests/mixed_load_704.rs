@@ -38,7 +38,7 @@ use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
     FfiAccessContext, FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiIdentity, FfiLiveQuery,
-    FfiRelayInformationCachePolicy, FfiSignEventRequest, FfiSourceAuthority, FfiWriteIntent,
+    FfiReadRouting, FfiRelayInformationCachePolicy, FfiSignEventRequest, FfiWriteIntent,
     FfiWritePayload, FfiWriteRouting,
 };
 
@@ -64,7 +64,7 @@ fn note_query() -> FfiLiveQuery {
                 kinds: Some(vec![1]),
                 ..FfiFilter::default()
             },
-            source: FfiSourceAuthority::Public,
+            routing: FfiReadRouting::Auto,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,

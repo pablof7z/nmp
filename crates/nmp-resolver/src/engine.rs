@@ -9,7 +9,7 @@ use std::rc::{Rc, Weak};
 
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, DemandDelta, DemandOp,
-    DescriptorHash, Filter, SourceAuthority,
+    DescriptorHash, Filter, ReadRouting,
 };
 use nmp_store::{
     AcceptOutcome, AcceptWrite, CompensateOutcome, InsertOutcome, PersistenceError, RedbStore,
@@ -202,7 +202,7 @@ use crate::types::{Element, FieldSlot, NodeId, ParentLink, ResolvedSet};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct AcquisitionKey {
     selection: Filter,
-    source: SourceAuthority,
+    routing: ReadRouting,
     access: AccessContext,
 }
 
@@ -210,7 +210,7 @@ impl From<&Demand> for AcquisitionKey {
     fn from(d: &Demand) -> Self {
         Self {
             selection: d.selection.clone(),
-            source: d.source.clone(),
+            routing: d.routing.clone(),
             access: d.access,
         }
     }
@@ -1566,7 +1566,7 @@ impl Engine {
         &mut self,
         store: &RedbStore,
         filter: &Filter,
-        source: SourceAuthority,
+        routing: ReadRouting,
         access: AccessContext,
         parent: ParentLink,
         depth: u32,
@@ -1594,7 +1594,7 @@ impl Engine {
             limit: filter.limit,
             bound,
             cached_atoms: BTreeSet::new(),
-            source,
+            routing,
             access,
         };
         self.graph.insert(id, Node::Filter(data), parent, depth);

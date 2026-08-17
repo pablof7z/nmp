@@ -192,8 +192,8 @@ pub use subscription::{
 // infers one from the selection's shape (#847).
 pub use nmp_grammar::{
     AccessContext, Binding, CacheMode, Demand, DemandError, Derived, Filter, Freshness,
-    IdentityField, IndexedTagName, LiveQuery, LiveQueryError, Selector, SetAlgebra, SetOp,
-    SourceAuthority,
+    IdentityField, IndexedTagName, LiveQuery, LiveQueryError, ReadRouting, Selector, SetAlgebra,
+    SetOp,
 };
 
 // Bech32 nostr-entity DECODE (#116) -- npub/nprofile/note/nevent/naddr ->

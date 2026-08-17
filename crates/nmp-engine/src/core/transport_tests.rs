@@ -24,12 +24,12 @@ mod relay_session_key_tests {
         };
         let atom = ContextualAtom {
             filter: filter.clone(),
-            source: SourceAuthority::Public,
+            routing: ReadRouting::Auto,
             access: access_a,
             routing_evidence: BTreeSet::new(),
         };
         let key = coverage_key(&atom);
-        let sub_id = SubId::for_wire(relay.clone(), &filter, &SourceAuthority::Public, access_a);
+        let sub_id = SubId::for_wire(relay.clone(), &filter, &ReadRouting::Auto, access_a);
         let session_a = RelaySessionKey::new(relay.clone(), access_a);
         let session_b = RelaySessionKey::new(relay, AccessContext::Nip42(b));
         let mut attribution = AttributionState::new();
@@ -65,17 +65,12 @@ mod relay_session_key_tests {
         };
         let atom = ContextualAtom {
             filter: filter.clone(),
-            source: SourceAuthority::Public,
+            routing: ReadRouting::Auto,
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
         let key = coverage_key(&atom);
-        let sub_id = SubId::for_wire(
-            relay,
-            &filter,
-            &SourceAuthority::Public,
-            AccessContext::Public,
-        );
+        let sub_id = SubId::for_wire(relay, &filter, &ReadRouting::Auto, AccessContext::Public);
         let mut attribution = AttributionState::new();
         attribution.observe_atom(&atom);
         let completed_send = attribution.record_send(
@@ -92,7 +87,7 @@ mod relay_session_key_tests {
         let replay_sub_id = SubId::for_wire(
             session.relay.clone(),
             &replay_filter,
-            &SourceAuthority::Public,
+            &ReadRouting::Auto,
             AccessContext::Public,
         );
         assert_ne!(sub_id, replay_sub_id, "changed bytes require a fresh id");
@@ -152,13 +147,13 @@ mod relay_session_key_tests {
         };
         let atom_a = ContextualAtom {
             filter: filter_a.clone(),
-            source: SourceAuthority::Public,
+            routing: ReadRouting::Auto,
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
         let atom_b = ContextualAtom {
             filter: filter_b.clone(),
-            source: SourceAuthority::Public,
+            routing: ReadRouting::Auto,
             access: protected_session.access,
             routing_evidence: BTreeSet::new(),
         };
@@ -167,13 +162,13 @@ mod relay_session_key_tests {
         let sub_a = SubId::for_wire(
             relay.clone(),
             &filter_a,
-            &SourceAuthority::Public,
+            &ReadRouting::Auto,
             AccessContext::Public,
         );
         let sub_b = SubId::for_wire(
             relay,
             &filter_b,
-            &SourceAuthority::Public,
+            &ReadRouting::Auto,
             protected_session.access,
         );
         let wire_a = wire_sub_id_string(&sub_a);
@@ -275,7 +270,7 @@ mod relay_session_key_tests {
         };
         let atom = ContextualAtom {
             filter: filter.clone(),
-            source: SourceAuthority::Public,
+            routing: ReadRouting::Auto,
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
@@ -283,7 +278,7 @@ mod relay_session_key_tests {
         let neg_sub = SubId::for_wire(
             relay.clone(),
             &filter,
-            &SourceAuthority::Public,
+            &ReadRouting::Auto,
             AccessContext::Public,
         );
         let backfill_filter = ConcreteFilter {
@@ -293,7 +288,7 @@ mod relay_session_key_tests {
         let backfill_sub = SubId::for_wire(
             relay,
             &backfill_filter,
-            &SourceAuthority::Public,
+            &ReadRouting::Auto,
             AccessContext::Public,
         );
         let mut attribution = AttributionState::new();
@@ -379,13 +374,13 @@ mod relay_session_key_tests {
         let atoms = BTreeSet::from([
             ContextualAtom {
                 filter: filter.clone(),
-                source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+                routing: ReadRouting::Explicit(vec![relay.clone()]),
                 access: AccessContext::Public,
                 routing_evidence: BTreeSet::new(),
             },
             ContextualAtom {
                 filter,
-                source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+                routing: ReadRouting::Explicit(vec![relay.clone()]),
                 access: protected.access,
                 routing_evidence: BTreeSet::new(),
             },
@@ -492,7 +487,7 @@ mod relay_session_key_tests {
                 kinds: Some(BTreeSet::from([1])),
                 ..ConcreteFilter::default()
             },
-            source: SourceAuthority::Pinned(BTreeSet::from([relay])),
+            routing: ReadRouting::Explicit(vec![relay]),
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
