@@ -265,13 +265,12 @@ still runs).
 spawns a sibling executable, `canary-c9-publisher`, that constructs an engine
 over a store path handed to it, adds and persists a local-key account
 (needed so the SAME signer exists again after restart), publishes one real
-signed event with no correlation token at all, prints machine-readable
+signed event, prints machine-readable
 stdout markers as it reaches each fact the parent needs, then parks doing
 nothing further. The parent waits for a marker with a bounded timeout,
 `kill -9`s the child for real, then opens a FRESH engine in-process over the
 SAME store path with the persisted session restored, finds the obligation by
-enumerating `publishQueue` — not by a correlation token remembered across
-the crash, which would just be an app-owned shadow ledger of NMP's own
+enumerating `publishQueue` — never an app-owned shadow ledger of NMP's own
 durable queue (#1770) — reattaches by the discovered receipt id, and proves
 recovery through the public API only:
 
@@ -318,8 +317,7 @@ hand-rolled one: `RelayLabKit` gained a small shared `ChildProcess.killAndWaitFo
 publisher child and available to `RelayHandle` itself.
 
 No API finding — every step was expressible through `NMPEngine`,
-`NMPSessionPayload`, `WriteIntent`'s `correlation`, and `reattachReceipt(correlation:)`
-exactly as documented. The one thing worth naming precisely: a restarted
+`NMPSessionPayload`, and the write/reattach doors exactly as documented. The one thing worth naming precisely: a restarted
 app that lost the account's session payload cannot resume a still-unsigned
 write at all (there is no signer), which is why persisting the session
 payload is not optional plumbing but a hard prerequisite for any of this to
@@ -327,26 +325,33 @@ work — exactly the case the shipped `AppModel`/Compose session persistence
 already covers, but worth stating as a discovered fact here rather than an
 assumption.
 
-**Superseded (#1770):** the paragraphs above describe C9 as it was first
-proven, when the app minted its own correlation token and the parent test
-handed that same token to the recovery half by argv. That shape proved the
+**Superseded (#1770), and the door is now deleted outright:** the paragraphs
+above describe C9 as it was first proven, when the app minted its own
+correlation token and the parent test handed that same token to the recovery
+half by argv. That shape proved the
 engine recovers a *known* obligation, not that an app can *find* one after a
 crash — the actual half an app author has to build. `publishQueue` already
 answered "what have I got outstanding" without an app-side ledger
 (`Receipt.swift:184`), so both the shipped `AppModel` and this test's
-recovery half now enumerate it instead: no correlation token is minted by
-`canary-c9-publisher` at all, and `assertRecovery` finds the obligation via
-`publishQueue(limit:)` before reattaching by `reattachReceipt(id:)`. The
-Canary's own `UserDefaults` correlation ledger (`AppModel`/`ComposeView`,
-built twelve days after `publishQueue` shipped) is deleted for the same
+recovery half now enumerate it instead: `assertRecovery` finds the obligation
+via `publishQueue(limit:)` before reattaching by `reattachReceipt(id:)`, and
+the Canary's own `UserDefaults` correlation ledger (`AppModel`/`ComposeView`,
+built twelve days after `publishQueue` shipped) was deleted for the same
 reason.
+
+With no consumer left, `WriteIntent.correlation`, `CorrelationToken` and
+`reattachByCorrelation` have since been removed from NMP entirely. An event's
+id IS the hash of its contents, so the "legitimately re-composed draft (fresh
+`created_at`)" the token's own doc named as its reason to exist is a DIFFERENT
+event, not a modified one — and silently resolving it to the earlier obligation
+discarded exactly what the app asked to publish.
 
 Two facts about the starting position, established by survey:
 
 - **The app has never called `publish`.** Six scenarios (C5, C7, C8, C9, C10,
   C12) have no product surface at all — not because the SDK lacks anything
-  (`WriteIntent`, `Receipt`, the correlation token and `reattachReceipt` are
-  complete and well specified) but because no screen uses them.
+  (`WriteIntent`, `Receipt` and `reattachReceipt` are complete and well
+  specified) but because no screen uses them.
 - **Session identity did not survive restart**, which silently blocked C2, C9
   and C12: there was no identity for a resumed write to remain frozen to.
 
@@ -527,9 +532,8 @@ here.
 
 **What compiling does not prove.** Nothing here has been *run*. The
 identity-override picker's behaviour, the Keychain round-trip, the
-pending-correlation `UserDefaults` round-trip, and whether reattachment actually
-fires after a real kill and relaunch all require a running app against the relay
-lab. Type-checking says the call sites match the real signatures; it says
+`UserDefaults` round-trip, and whether reattachment actually fires after a
+real kill and relaunch all require a running app against the relay lab. Type-checking says the call sites match the real signatures; it says
 nothing about whether the flows work.
 
 The xcframework is a gitignored build artifact. A fresh checkout has no

@@ -37,7 +37,6 @@ async fn receipt_result_recovers_from_live_fifo_lag_without_exposing_replay() {
             )
             .unwrap()]),
             identity: nmp::Identity::Explicit(keys.public_key()),
-            correlation: None,
         })
         .unwrap();
     let receipt_id = receipt.id;
@@ -201,7 +200,6 @@ fn providerless_auto_refuses_before_acceptance_and_leaves_no_residue() {
         },
         routing: FfiWriteRouting::Auto,
         identity: FfiIdentity::Active,
-        correlation: None,
     });
     assert!(matches!(result, Err(FfiError::AutomaticRoutingUnavailable)));
     assert!(engine.publish_queue(None, u8::MAX).unwrap().is_empty());
@@ -264,7 +262,6 @@ async fn selected_outbox_routing_discovers_and_publishes_to_the_cold_outbox() {
             },
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
-            correlation: None,
         })
         .expect("the automatic native write is accepted");
 
@@ -887,7 +884,6 @@ async fn ffi_tampered_signed_publish_is_refused_by_publish_itself() {
             relays: vec!["wss://write.example".to_string()],
         },
         identity: FfiIdentity::Active,
-        correlation: None,
     };
 
     let error = engine
@@ -940,7 +936,6 @@ async fn ffi_explicit_identity_for_unregistered_pubkey_parks_awaiting_capability
         identity: FfiIdentity::Explicit {
             pubkey: overridden.public_key().to_hex(),
         },
-        correlation: None,
     };
 
     let receipt = engine
@@ -993,7 +988,6 @@ async fn ffi_cancel_returns_and_observes_the_same_typed_durable_fact() {
             relays: vec!["wss://write.example".to_string()],
         },
         identity: FfiIdentity::Active,
-        correlation: None,
     };
     // `publish` returning Ok IS acceptance -- no stream item to await.
     let receipt = engine.publish(intent).unwrap();
@@ -1088,7 +1082,6 @@ async fn ffi_reattach_replays_real_receipt_facts_through_a_fresh_stream() {
             relays: vec!["wss://write.example".to_string()],
         },
         identity: FfiIdentity::Active,
-        correlation: None,
     };
 
     let receipt = engine
@@ -1172,7 +1165,6 @@ async fn ffi_reattach_of_corrupt_retained_receipt_is_unreadable() {
                 relays: vec!["wss://write.example".to_string()],
             },
             identity: FfiIdentity::Active,
-            correlation: None,
         };
         let receipt = engine
             .publish(intent)
@@ -1312,7 +1304,6 @@ async fn ffi_slow_consumer_receives_one_exact_rebased_frame_then_closes() {
                 }),
                 routing: nmp::WriteRouting::Auto,
                 identity: nmp::Identity::Active,
-                correlation: None,
             })
             .expect("local durable acceptance must succeed");
         if index % 2 == 0 {
@@ -1384,7 +1375,6 @@ async fn ffi_receipt_stream_ends_with_none_when_sender_dropped() {
             relays: vec!["wss://write.example".to_string()],
         },
         identity: FfiIdentity::Active,
-        correlation: None,
     };
 
     let receipt = engine

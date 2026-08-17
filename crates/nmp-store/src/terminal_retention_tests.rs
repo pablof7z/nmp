@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use nmp_grammar::CorrelationToken;
 use nostr::{Event, EventBuilder, Keys, Kind, Timestamp};
 
 use crate::terminal_retention::TerminalRetentionLimits;
@@ -39,7 +38,6 @@ fn accept(
     keys: &Keys,
     content: &str,
     created_at: u64,
-    correlation: Option<&str>,
 ) -> AcceptOutcome {
     store
         .accept_write(AcceptWrite {
@@ -51,7 +49,6 @@ fn accept(
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "terminal-retention-test".to_owned(),
             accepted_at: Timestamp::from(created_at),
-            correlation: correlation.map(|value| CorrelationToken::try_from(value).unwrap()),
         })
         .unwrap()
 }
@@ -73,7 +70,7 @@ fn assert_event_receipt_state(receipt: PublishQueueReceipt, expected: ReceiptSta
 
 fn exercise_global_fifo(store: &mut RedbStore) {
     let keys = Keys::generate();
-    let cancelled = accept(store, &keys, "cancelled", 1, None);
+    let cancelled = accept(store, &keys, "cancelled", 1);
     let cancelled_id = cancelled.journaled_receipt_id().unwrap();
 
     let refused = store
@@ -87,13 +84,13 @@ fn exercise_global_fifo(store: &mut RedbStore) {
         .cancel_write(cancelled.journaled_intent_id().unwrap())
         .unwrap();
 
-    let unroutable = accept(store, &keys, "unroutable", 3, None);
+    let unroutable = accept(store, &keys, "unroutable", 3);
     let unroutable_id = unroutable.journaled_receipt_id().unwrap();
     store
         .close_unroutable_intent(unroutable.journaled_intent_id().unwrap())
         .unwrap();
 
-    let open = accept(store, &keys, "still open", 4, None);
+    let open = accept(store, &keys, "still open", 4);
     let open_id = open.journaled_receipt_id().unwrap();
 
     let removed = maintain_at(
@@ -140,7 +137,6 @@ fn terminal_receipt_fifo_survives_redb_reopen() {
             &keys,
             "cancel after reopen",
             10,
-            Some("reopen-token"),
         );
         let receipt_id = accepted.journaled_receipt_id().unwrap();
         store
@@ -150,10 +146,6 @@ fn terminal_receipt_fifo_survives_redb_reopen() {
     };
 
     let mut reopened = RedbStore::open(Path::new(&path)).unwrap();
-    assert_eq!(
-        reopened.lookup_correlation("reopen-token").unwrap(),
-        Some(receipt_id)
-    );
     assert_eq!(
         maintain_at(
             &mut reopened,
@@ -168,7 +160,6 @@ fn terminal_receipt_fifo_survives_redb_reopen() {
         vec![receipt_id]
     );
     assert!(reopened.reattach_receipt(receipt_id).unwrap().is_none());
-    assert_eq!(reopened.lookup_correlation("reopen-token").unwrap(), None);
 }
 
 #[test]

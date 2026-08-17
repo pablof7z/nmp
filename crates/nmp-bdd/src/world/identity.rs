@@ -208,7 +208,6 @@ impl NmpWorld {
             ),
             routing: WriteRouting::Auto,
             identity,
-            correlation: None,
         });
         self.last_publish_was_auto = true;
         self.last_publish_label = self.label_of(identity);

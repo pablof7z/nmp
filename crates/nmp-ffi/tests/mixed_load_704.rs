@@ -173,7 +173,6 @@ async fn mixed_engine_load_makes_progress_without_capacity_refusal() {
                 relays: vec!["wss://write.example".to_string()],
             },
             identity: FfiIdentity::Active,
-            correlation: None,
         })
         .expect("publish opens a receipt stream without capacity refusal");
 

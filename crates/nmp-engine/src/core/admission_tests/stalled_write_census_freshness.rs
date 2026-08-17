@@ -50,7 +50,6 @@ fn stalled_write_census_agrees_with_a_fresh_recompute_across_parking_and_clearin
         }),
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity: Identity::Active,
-        correlation: None,
     }));
     let (receipt, generation, unsigned) = accepted
         .iter()

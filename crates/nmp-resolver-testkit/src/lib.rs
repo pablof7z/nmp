@@ -274,6 +274,5 @@ pub fn accept_write_of(signed: nostr::Event, accepted_at: u64) -> AcceptWrite {
         expected_pubkey: signed.pubkey,
         signing_identity_ref: "local".to_string(),
         accepted_at: Timestamp::from(accepted_at),
-        correlation: None,
     }
 }

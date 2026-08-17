@@ -110,7 +110,6 @@ async fn dense_composition_never_refuses_and_delivers_current_state() {
                 relays: vec!["wss://write.example".to_string()],
             },
             identity: nmp_ffi::types::FfiIdentity::Active,
-            correlation: None,
         })
         .expect("publish opens a receipt stream");
 

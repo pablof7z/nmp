@@ -43,7 +43,6 @@ fn populate(path: &std::path::Path, keys: &Keys, relay: &RelayUrl, count: usize)
             )),
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }));
     }
 }
@@ -233,7 +232,6 @@ fn presence_renewals_leave_exactly_one_open_obligation() {
                 payload: WritePayload::Signed(event),
                 routing: WriteRouting::Explicit(vec![relay.clone()]),
                 identity: Identity::Active,
-                correlation: None,
             }));
         }
     }

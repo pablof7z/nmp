@@ -18,7 +18,6 @@ fn durable_pending_row_is_visible_before_signer_and_tamper_compensates() {
         payload: WritePayload::Event(draft(10, "accepted body")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, accepted_template) = find_sign_request(&effects);
     let accepted_id = accepted_template.clone().sign_with_keys(&a).unwrap().id;
@@ -89,7 +88,6 @@ fn cancellation_never_restores_an_unpublished_replaceable_predecessor() {
         payload: WritePayload::Signed(older.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
 
     let newer_unsigned = nmp_grammar::EventBuilder::new(Kind::Metadata)
@@ -100,7 +98,6 @@ fn cancellation_never_restores_an_unpublished_replaceable_predecessor() {
         payload: WritePayload::Event(newer_unsigned.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (newer_receipt, _, _) = find_sign_request(&effects);
     assert!(all_row_deltas(&effects)
@@ -148,7 +145,6 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
         payload: WritePayload::Event(draft(10, "cancel typed")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (receipt, generation, template) = find_sign_request(&published);
     let signed = template.sign_with_keys(&a).unwrap();
@@ -183,7 +179,6 @@ fn cancellation_outcomes_are_typed_idempotent_and_late_signers_are_inert() {
         payload: WritePayload::Signed(signed_event.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let signed_receipt = signed_publish
         .iter()
@@ -216,7 +211,6 @@ fn signer_unavailable_keeps_accepted_row_visible() {
         payload: WritePayload::Event(draft(1, "awaiting signer")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, template) = find_sign_request(&effects);
     let expected_id = template.clone().sign_with_keys(&a).unwrap().id;
@@ -296,7 +290,6 @@ fn an_explicit_identity_selects_a_secondary_author_and_pins_it_through_signing()
         payload: WritePayload::Event(as_b),
         routing: WriteRouting::Auto,
         identity: Identity::Explicit(b.public_key()),
-        correlation: None,
     }));
     assert!(matches!(effects.first(), Some(Effect::WriteAccepted(..))));
     let (id, generation, template) = find_sign_request(&effects);
@@ -324,7 +317,6 @@ fn an_explicit_identity_selects_a_secondary_author_and_pins_it_through_signing()
         payload: WritePayload::Event(draft(48, "default path still roots on a")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     assert!(matches!(effects.first(), Some(Effect::WriteAccepted(..))));
 }
@@ -345,7 +337,6 @@ fn a_builder_publishes_as_the_current_account_and_refuses_when_there_is_none() {
         payload: WritePayload::Event(draft(1, "as whoever is current")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     assert!(
         matches!(effects.first(), Some(Effect::WriteAccepted(..))),
@@ -363,7 +354,6 @@ fn a_builder_publishes_as_the_current_account_and_refuses_when_there_is_none() {
         payload: WritePayload::Event(draft(2, "logged out, no identity named")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     assert!(
         matches!(
@@ -394,7 +384,6 @@ fn identity_selects_on_a_builder_and_may_only_restate_on_a_signed_event() {
         payload: WritePayload::Event(draft(1, "as b, while a is current")),
         routing: WriteRouting::Auto,
         identity: Identity::Explicit(b.public_key()),
-        correlation: None,
     }));
     assert!(matches!(effects.first(), Some(Effect::WriteAccepted(..))));
     let (_, _, template) = find_sign_request(&effects);
@@ -410,7 +399,6 @@ fn identity_selects_on_a_builder_and_may_only_restate_on_a_signed_event() {
         payload: WritePayload::Signed(signed),
         routing: WriteRouting::Auto,
         identity: Identity::Explicit(b.public_key()),
-        correlation: None,
     }));
     assert!(
         matches!(
@@ -444,7 +432,6 @@ fn relay_rejection_after_promotion_does_not_retract_the_signed_row() {
         payload: WritePayload::Signed(signed.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let rejected = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -490,7 +477,6 @@ fn cancelling_newest_never_restores_a_destroyed_local_predecessor_chain() {
         payload: WritePayload::Signed(base.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
 
     let middle = nmp_grammar::EventBuilder::new(Kind::Metadata)
@@ -501,7 +487,6 @@ fn cancelling_newest_never_restores_a_destroyed_local_predecessor_chain() {
         payload: WritePayload::Event(middle.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (middle_receipt, _, _) = find_sign_request(&middle_effects);
 
@@ -513,7 +498,6 @@ fn cancelling_newest_never_restores_a_destroyed_local_predecessor_chain() {
         payload: WritePayload::Event(newest.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (newest_receipt, _, _) = find_sign_request(&newest_effects);
 
@@ -561,7 +545,6 @@ fn expired_local_acceptance_is_refused_before_custody_and_retains_nothing() {
         payload: WritePayload::Signed(expired),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     assert!(
         matches!(
@@ -591,14 +574,12 @@ fn exact_duplicate_intents_get_distinct_store_ids_and_one_promotion_advances_bot
         payload: WritePayload::Event(template.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (first_id, first_generation, first_template) = find_sign_request(&first);
     let second = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(template.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (second_id, second_generation, second_template) = find_sign_request(&second);
     assert_ne!(
@@ -654,14 +635,12 @@ fn duplicate_coowners_keep_independent_routes_and_terminal_receipts() {
         payload: WritePayload::Event(template.clone()),
         routing: WriteRouting::Explicit(vec![ack.clone(), drop_relay.clone()]),
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id_a, generation_a, to_sign) = find_sign_request(&first);
     let second = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(template.clone()),
         routing: WriteRouting::Explicit(vec![nack.clone()]),
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id_b, _, _) = find_sign_request(&second);
     let signed = to_sign.sign_with_keys(&a).unwrap();
@@ -752,14 +731,12 @@ fn relay_signature_satisfies_all_pending_coowners_and_late_signers_are_ignored()
         payload: WritePayload::Event(template.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id_a, generation_a, signer_a) = find_sign_request(&first);
     let second = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(template.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id_b, generation_b, signer_b) = find_sign_request(&second);
     let signed = signer_a.clone().sign_with_keys(&a).unwrap();
@@ -834,7 +811,6 @@ fn repeated_signer_notifications_never_start_concurrent_operations() {
         payload: WritePayload::Event(draft(1, "one operation")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, template) = find_sign_request(&published);
     assert!(core
@@ -887,7 +863,6 @@ fn retryable_signer_errors_retain_and_rearm_the_exact_write() {
             payload: WritePayload::Event(draft(1, "survives signer loss")),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         let (id, generation, frozen) = find_sign_request(&published);
 
@@ -938,7 +913,6 @@ fn terminal_signer_errors_compensate_the_write() {
             payload: WritePayload::Event(draft(1, "terminal signer answer")),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         let (id, generation, _) = find_sign_request(&published);
 
@@ -977,7 +951,6 @@ fn compensation_persistence_failure_is_nonterminal_and_retryable() {
         payload: WritePayload::Event(draft(1, "must remain pending")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, template) = find_sign_request(&published);
     let event_id = template.sign_with_keys(&a).unwrap().id;
@@ -1030,7 +1003,6 @@ fn explicit_cancellation_persistence_failure_keeps_the_obligation_live_until_ret
         payload: WritePayload::Event(draft(2, "cancel must commit first")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, _, template) = find_sign_request(&published);
     let event_id = template.sign_with_keys(&a).unwrap().id;
@@ -1119,7 +1091,6 @@ fn direct_publish_of_forged_signed_event_is_rejected_before_acceptance() {
         payload: WritePayload::Signed(forged),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
 
     assert!(
@@ -1160,7 +1131,6 @@ fn direct_publish_of_valid_signed_event_still_publishes() {
         payload: WritePayload::Signed(genuine.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
 
     assert!(

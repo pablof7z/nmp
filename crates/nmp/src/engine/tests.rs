@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
 use super::*;
-use crate::{Row, RowDelta, RowSignature};
+use crate::{Row, RowSignature};
 use nmp_engine::core::{Effect, EngineCore, EngineMsg};
 use nmp_engine::publish_queue::{NotSentReason, SigningState, WriteFact, WriteOutcome};
 use nmp_store::RelayObserved;
@@ -160,7 +160,6 @@ fn replaceable_contact_intent(
             .expect("the signed base mints one operation"),
         routing: WriteRouting::Explicit(vec![destination]),
         identity: Identity::Explicit(base.pubkey()),
-        correlation: None,
     }
 }
 
@@ -240,7 +239,6 @@ fn restored_session_is_installed_before_parked_write_recovery() {
                 )
                 .unwrap()]),
                 identity: Identity::Active,
-                correlation: None,
             })
             .expect("accepted parked write");
         let parked = engine
@@ -372,7 +370,6 @@ fn removing_or_clearing_session_never_retargets_or_discards_accepted_writes() {
                 )
                 .unwrap()]),
                 identity: Identity::Active,
-                correlation: None,
             })
             .expect("write accepted while signer is absent");
         let receipt_id = receipt.id;
@@ -454,211 +451,6 @@ fn engine_with_store(store: RedbStore) -> Engine {
 }
 
 #[test]
-fn persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once() {
-    use std::time::Duration;
-
-    use nmp_grammar::{Identity, WritePayload, WriteRouting};
-    use nostr::EventBuilder;
-
-    let persistent_fixture = tempfile::tempdir().expect("persistent store fixture");
-    let store = RedbStore::open_with_accept_write_commit_then_io(
-        persistent_fixture.path().join("ambiguous-acceptance.redb"),
-    )
-    .expect("persistent commit-then-I/O store must open");
-    let engine = engine_with_store(store);
-
-    let author = Keys::generate();
-    engine
-        .select_test_account(Some(author.public_key()))
-        .expect("set facade-owned identity");
-    let subscription = engine
-        .observe(
-            LiveQuery::from_filter(nmp_grammar::Filter {
-                kinds: Some(std::collections::BTreeSet::from([1])),
-                ..nmp_grammar::Filter::default()
-            }),
-            None,
-        )
-        .expect("open a query handle before the storage generation fails");
-    let opening = subscription
-        .recv_timeout(Duration::from_secs(5))
-        .expect("a new observation receives its opening frame");
-    assert!(opening.deltas.iter().all(|delta| delta.row().is_none()));
-    let relay = RelayUrl::parse("wss://recovery.example").unwrap();
-    let event = EventBuilder::text_note("ambiguous acceptance")
-        .sign_with_keys(&author)
-        .unwrap();
-    let intent = || WriteIntent {
-        payload: WritePayload::Signed(event.clone()),
-        routing: WriteRouting::Explicit(vec![relay.clone()]),
-        identity: Identity::Active,
-        correlation: Some(nmp_grammar::CorrelationToken::try_from("recovery-correlation").unwrap()),
-    };
-
-    let first = engine.publish(intent());
-    assert!(
-        matches!(&first, Err(EngineError::PublishRefused { reason }) if reason.contains("injected acceptance committed before I/O failure")),
-        "the uncertain boundary must not report acceptance: {}",
-        first
-            .err()
-            .map(|error| error.to_string())
-            .unwrap_or_default()
-    );
-
-    let recovered_frame = subscription
-        .recv_timeout(Duration::from_secs(5))
-        .expect("the pre-failure query handle receives reconstructed rows");
-    let recovered_pending = recovered_frame
-        .deltas
-        .iter()
-        .filter_map(RowDelta::row)
-        .find(|row| row.id() == event.id)
-        .expect("the existing query handle receives the committed boundary row");
-    assert_eq!(recovered_pending.signature(), RowSignature::Pending);
-    assert!(
-        recovered_pending.signed_event().is_none(),
-        "the ambiguous boundary committed the frozen body, not signature promotion"
-    );
-
-    assert_eq!(
-        engine.test_current_public_key().unwrap(),
-        Some(author.public_key()),
-        "facade identity survives the internal store generation change"
-    );
-    let divergent = EventBuilder::text_note("different signed body")
-        .sign_with_keys(&author)
-        .unwrap();
-    let invalid_signature = divergent.sig;
-    let divergent_retry = engine
-        .publish(WriteIntent {
-            payload: WritePayload::Signed(divergent),
-            routing: WriteRouting::Explicit(vec![relay.clone()]),
-            identity: Identity::Active,
-            correlation: Some(
-                nmp_grammar::CorrelationToken::try_from("recovery-correlation").unwrap(),
-            ),
-        })
-        .expect("a divergent retry only reattaches the retained receipt");
-
-    let mut invalid = event.clone();
-    invalid.sig = invalid_signature;
-    let invalid_retry = engine
-        .publish(WriteIntent {
-            payload: WritePayload::Signed(invalid),
-            routing: WriteRouting::Explicit(vec![relay.clone()]),
-            identity: Identity::Active,
-            correlation: Some(
-                nmp_grammar::CorrelationToken::try_from("recovery-correlation").unwrap(),
-            ),
-        })
-        .expect("an invalid retry only reattaches the retained receipt");
-    assert_eq!(invalid_retry.id, divergent_retry.id);
-    assert!(
-        subscription
-            .recv_timeout(Duration::from_millis(50))
-            .is_err(),
-        "divergent and invalid retries must not promote or replace the pending row"
-    );
-
-    let exact_retry = engine
-        .publish(intent())
-        .expect("the exact signed retry reuses and promotes the recovered receipt");
-    assert_eq!(exact_retry.id, divergent_retry.id);
-    let promoted_frame = subscription
-        .recv_timeout(Duration::from_secs(5))
-        .expect("the exact signed retry promotes the recovered row");
-    assert!(
-        promoted_frame
-            .deltas
-            .iter()
-            .filter_map(RowDelta::row)
-            .filter_map(Row::signed_event)
-            .any(|promoted| promoted.id == event.id && promoted.sig == event.sig),
-        "the same recovered row is promoted with the exact supplied signature"
-    );
-    let repeated = engine
-        .publish(intent())
-        .expect("repeating the exact correlation remains idempotent");
-    assert_eq!(exact_retry.id, repeated.id);
-    assert_eq!(exact_retry.event_id, repeated.event_id);
-    assert_eq!(
-        engine.publish_queue(None, u8::MAX).unwrap().len(),
-        1,
-        "ambiguous acceptance and every same-correlation retry retain exactly one receipt"
-    );
-
-    let later_event = EventBuilder::text_note("accepted after reconstruction")
-        .sign_with_keys(&author)
-        .unwrap();
-    engine
-        .publish(WriteIntent {
-            payload: WritePayload::Signed(later_event),
-            routing: WriteRouting::Explicit(vec![relay.clone()]),
-            identity: Identity::Active,
-            correlation: Some(
-                nmp_grammar::CorrelationToken::try_from("post-recovery-correlation").unwrap(),
-            ),
-        })
-        .expect("later independent work is accepted by the reconstructed Engine");
-
-    engine.shutdown();
-}
-
-#[test]
-fn persistent_engine_recovers_after_precommit_acceptance_io_once() {
-    use nmp_grammar::{Identity, WritePayload, WriteRouting};
-    use nostr::EventBuilder;
-
-    let persistent_fixture = tempfile::tempdir().expect("persistent store fixture");
-    let store = RedbStore::open_with_accept_write_precommit_io(
-        persistent_fixture.path().join("precommit-acceptance.redb"),
-    )
-    .expect("persistent precommit-I/O store must open");
-    let engine = engine_with_store(store);
-    let author = Keys::generate();
-    engine
-        .select_test_account(Some(author.public_key()))
-        .expect("set facade-owned identity");
-    let relay = RelayUrl::parse("wss://precommit-io.example").unwrap();
-    let event = EventBuilder::text_note("absent boundary acceptance")
-        .sign_with_keys(&author)
-        .unwrap();
-    let intent = || WriteIntent {
-        payload: WritePayload::Signed(event.clone()),
-        routing: WriteRouting::Explicit(vec![relay.clone()]),
-        identity: Identity::Active,
-        correlation: Some(
-            nmp_grammar::CorrelationToken::try_from("precommit-recovery-correlation").unwrap(),
-        ),
-    };
-
-    let first = engine.publish(intent());
-    assert!(
-        matches!(&first, Err(EngineError::PublishRefused { reason }) if reason.contains("failed before commit")),
-        "a precommit I/O boundary must not report acceptance: {}",
-        first
-            .err()
-            .map(|error| error.to_string())
-            .unwrap_or_default()
-    );
-
-    assert!(
-        engine
-            .publish_queue(None, u8::MAX)
-            .expect("the armed real reopen precedes the first later command")
-            .is_empty(),
-        "the absent transaction leaves no receipt after reconstruction"
-    );
-    let recovered = engine
-        .publish(intent())
-        .expect("the absent transaction can be accepted once after reconstruction");
-    assert_eq!(recovered.event_id, event.id);
-    assert_eq!(engine.publish_queue(None, u8::MAX).unwrap().len(), 1);
-
-    engine.shutdown();
-}
-
-#[test]
 fn persistent_engine_keeps_healthy_store_usable_after_invariant_fault() {
     use nmp_grammar::{Identity, WritePayload, WriteRouting};
     use nostr::EventBuilder;
@@ -692,7 +484,6 @@ fn persistent_engine_keeps_healthy_store_usable_after_invariant_fault() {
         payload: WritePayload::Signed(event),
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity: Identity::Active,
-        correlation: None,
     };
 
     let refused = engine.publish(intent(corrupt));
@@ -1175,7 +966,6 @@ fn facade_cancellation_is_typed_idempotent_and_reattachable() {
             }),
             routing: nmp_grammar::WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("accept write");
     // `publish` returning `Ok` IS acceptance -- there is no
@@ -1234,7 +1024,6 @@ fn dropping_a_receipt_observer_does_not_cancel_the_write() {
             }),
             routing: nmp_grammar::WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("accept write");
     let receipt_id = receipt.id;
@@ -1457,7 +1246,6 @@ fn every_current_account_reader_sees_the_same_selection_through_a_full_lifecycle
             )
             .unwrap()]),
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("the active identity resolves and the write is accepted");
     let parked = engine
@@ -1715,7 +1503,6 @@ fn cancelling_a_write_cancels_its_pending_signer() {
                 }),
                 routing: nmp_grammar::WriteRouting::Auto,
                 identity: Identity::Active,
-                correlation: None,
             })
             .expect("write must be accepted")
     };
@@ -1771,7 +1558,6 @@ fn superseding_a_replaceable_write_cancels_its_pending_signer() {
                 ),
                 routing: nmp_grammar::WriteRouting::Auto,
                 identity: Identity::Active,
-                correlation: None,
             })
             .expect("write must be accepted")
     };
@@ -2256,7 +2042,6 @@ fn tampered_signed_publish_fails_closed_with_no_accepted() {
         payload: WritePayload::Signed(event),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     });
     assert!(
         matches!(
@@ -2316,7 +2101,6 @@ fn an_explicit_identity_publishes_as_a_secondary_without_moving_the_current_acco
             }),
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(pk_b),
-            correlation: None,
         })
         .expect("engine is open")
         .statuses;
@@ -2407,7 +2191,6 @@ fn every_verb_fails_closed_after_shutdown() {
         }),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     });
     assert_eq!(publish_result.err(), Some(EngineError::EngineClosed));
 }
@@ -2435,16 +2218,11 @@ fn initial_materializer_failures_leave_no_acceptance_residue() {
             .sign_with_keys(&author)
             .expect("base is signed");
         let base = Row::from_relay_event(base_event, BTreeSet::new());
-        let token = format!("initial-materializer-failure-{slot}");
-        let mut intent = replaceable_contact_intent(
+        let intent = replaceable_contact_intent(
             &registration,
             &base,
             Keys::generate().public_key(),
             RelayUrl::parse("wss://initial-refusal.example").unwrap(),
-        );
-        intent.correlation = Some(
-            nmp_grammar::CorrelationToken::try_from(token.as_str())
-                .expect("the failure fixture token is valid"),
         );
         let error = engine
             .publish(intent)
@@ -2459,7 +2237,7 @@ fn initial_materializer_failures_leave_no_acceptance_residue() {
                 .publish_queue(None, u8::MAX)
                 .expect("queue remains readable")
                 .is_empty(),
-            "{failure:?} must create no receipt, signing, routing, delivery, or correlation state"
+            "{failure:?} must create no receipt, signing, routing, or delivery state"
         );
         let observation = engine
             .observe(
@@ -2477,12 +2255,6 @@ fn initial_materializer_failures_leave_no_acceptance_residue() {
             opening.deltas.iter().all(|delta| delta.row().is_none()),
             "{failure:?} must create no optimistic row"
         );
-        assert!(matches!(
-            engine
-                .reattach_by_correlation(token)
-                .expect("the correlation lookup remains readable"),
-            ReceiptReattachment::NotFound
-        ));
         engine.shutdown();
     }
 }
@@ -2519,7 +2291,6 @@ fn missing_compiled_capability_refuses_open_and_leaves_the_store_unchanged() {
                 )
                 .unwrap()]),
                 identity: Identity::Explicit(author.public_key()),
-                correlation: None,
             })
             .expect("the follow enters custody");
         assert_eq!(
@@ -2636,7 +2407,6 @@ fn repeated_materializations_do_not_change_the_process_thread_count_inner() {
                 .expect("the first-value follow is complete"),
             routing: WriteRouting::Explicit(vec![destination.clone()]),
             identity: Identity::Explicit(author.public_key()),
-            correlation: None,
         })
         .expect("first follow enters custody");
     let observation = engine
@@ -2693,7 +2463,6 @@ fn repeated_materializations_do_not_change_the_process_thread_count_inner() {
             payload: WritePayload::ReplaceableOperation(operation),
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }))
         .iter()
         .any(|effect| matches!(effect, Effect::WriteAccepted(..))));

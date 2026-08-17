@@ -61,7 +61,6 @@ fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) ->
         expected_pubkey,
         signing_identity_ref: "local".to_string(),
         accepted_at: Timestamp::from(accepted_at),
-        correlation: None,
     }
 }
 

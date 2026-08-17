@@ -139,8 +139,8 @@ impl Engine {
     /// onward, post-restamp in every case, and the same value
     /// [`Self::publish_queue`] later reports for that receipt. One
     /// transaction decided both, so acceptance never hands back less than the
-    /// whole receipt (#1314). Pre-acceptance correlation-id exhaustion
-    /// returns a typed error without creating a receipt at all.
+    /// whole receipt (#1314). Pre-acceptance receipt-id exhaustion returns a
+    /// typed error without creating a receipt at all.
     ///
     /// Identity (#47): with [`crate::Identity::Active`] — the default — a builder
     /// payload signs as the current account, and fails closed pre-acceptance
@@ -196,17 +196,6 @@ impl Engine {
         self.with_handle(|handle| handle.reattach_receipt_from(id, cursor))
     }
 
-    /// #591: recover a receipt after a crash that happened BEFORE the app
-    /// could durably persist the `ReceiptId` `publish` returned --
-    /// looked up by the caller's own crash-safe correlation token instead.
-    /// Otherwise identical to [`Self::reattach_receipt`].
-    pub fn reattach_by_correlation(
-        &self,
-        token: String,
-    ) -> Result<ReceiptReattachment, EngineError> {
-        self.with_handle(|handle| handle.reattach_by_correlation(token))
-    }
-
     /// Read one bounded page of the app's own publish queue (#903/#1039).
     ///
     /// Every write NMP still holds a receipt for, with what it knows about
@@ -257,7 +246,7 @@ impl Engine {
     /// cancelling ends the obligation and compensates the optimistic row the
     /// write promised, and removal forgets the receipt.
     ///
-    /// This does NOT close #46. Retained receipts and correlation tokens
+    /// This does NOT close #46. Retained receipts
     /// still regrow without bound; enumerating them is what makes the growth
     /// visible.
     pub fn remove_publish_queue_entry(&self, id: ReceiptId) -> Result<(), RemoveQueueEntryError> {

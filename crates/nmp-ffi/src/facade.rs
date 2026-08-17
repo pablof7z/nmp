@@ -35,7 +35,7 @@ use crate::session::{
     FfiPrivateKey, FfiPublicKey, FfiSessionAccount, FfiSessionPayload, FfiSessionSnapshot,
 };
 use crate::types::{
-    FfiCancelWriteError, FfiCancelWriteOutcome, FfiCorrelationReattachment, FfiPublishQueueEntry,
+    FfiCancelWriteError, FfiCancelWriteOutcome, FfiPublishQueueEntry,
     FfiPublishQueueError, FfiReceiptReattachment, FfiRelayInformation,
     FfiRelayInformationCachePolicy, FfiRelayInformationDocument, FfiRelayInformationFreshness,
     FfiRelayInformationLimitations, FfiRemoveQueueEntryError, FfiSignEventRequest, FfiWriteIntent,
@@ -443,7 +443,7 @@ impl NmpEngine {
     /// acceptance boundary, Unit A0/#56, so it holds for every entry point) --
     /// it refuses THIS CALL as `FfiError::PublishRefused`, taking nothing
     /// into custody, so no receipt, no stream and no queue entry exist for
-    /// it. Exhaustion of the pre-acceptance correlation namespace is the
+    /// it. Exhaustion of the pre-acceptance receipt-id namespace is the
     /// same shape: a typed `FfiError` and no receipt id.
     pub fn publish(&self, intent: FfiWriteIntent) -> Result<Arc<NmpReceiptStream>, FfiError> {
         let write_intent = write_intent_from_ffi(intent)?;
@@ -481,46 +481,6 @@ impl NmpEngine {
             ReceiptReattachment::RetainedButUnreadable => {
                 FfiReceiptReattachment::RetainedButUnreadable
             }
-        })
-    }
-
-    /// #591: recover a receipt after a crash that happened BEFORE the app
-    /// could durably persist the receipt id `publish`
-    /// returned -- looked up by the caller's own crash-safe correlation
-    /// token instead. Otherwise identical to [`Self::reattach_receipt`],
-    /// except the caller cannot already know the receipt id (that is
-    /// exactly what a token recovers) -- `FfiCorrelationReattachment.
-    /// receipt_id` carries it back, `Some` iff `outcome == Attached`.
-    pub fn reattach_by_correlation(
-        &self,
-        correlation: String,
-    ) -> Result<FfiCorrelationReattachment, FfiError> {
-        let result = self.engine.reattach_by_correlation(correlation)?;
-        let receipt_id = match &result {
-            ReceiptReattachment::Attached { id, .. } => Some(id.0),
-            ReceiptReattachment::NotFound | ReceiptReattachment::RetainedButUnreadable => None,
-        };
-        let outcome = match result {
-            ReceiptReattachment::Attached {
-                id,
-                statuses,
-                next_cursor,
-            } => FfiReceiptReattachment::Attached {
-                stream: NmpReceiptStream::from_reattachment(
-                    self.engine.clone(),
-                    id,
-                    statuses,
-                    next_cursor,
-                ),
-            },
-            ReceiptReattachment::NotFound => FfiReceiptReattachment::NotFound,
-            ReceiptReattachment::RetainedButUnreadable => {
-                FfiReceiptReattachment::RetainedButUnreadable
-            }
-        };
-        Ok(FfiCorrelationReattachment {
-            outcome,
-            receipt_id,
         })
     }
 

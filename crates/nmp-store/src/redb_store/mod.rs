@@ -477,7 +477,7 @@ impl RedbStore {
     /// Fallible (architecture review correction): a realistic persistence
     /// failure (disk full, I/O error) returns `Err` rather than panicking the
     /// embedding app. That result carries no `Accepted` answer, but I/O has
-    /// unknown durability: reconstruction and correlation lookup may reveal
+    /// unknown durability: reconstruction and queue enumeration may reveal
     /// that the transaction committed one fully journaled pending row. As of
     /// issue #122 the ingest/read doors above
     /// (`insert`/`query`/`remove`/`expire_due`/`record_coverage`/`gc`) are
@@ -715,19 +715,6 @@ impl RedbStore {
         receipt_id: u64,
     ) -> Result<Option<PublishQueueReceipt>, PersistenceError> {
         publish_queue_ops::reattach_receipt(self, receipt_id)
-    }
-
-    /// #591: resolve a caller's [`AcceptWrite::correlation`] token to the
-    /// receipt id it was journaled under, if any. `Ok(None)` means the
-    /// token has never been accepted (or this store never received it) --
-    /// distinct from a persistence failure. `accept_write` uses this same
-    /// mapping internally (checked inside its own transaction) to decide
-    /// whether a token is a first sighting; the engine's
-    /// `reattach_by_correlation` lookup door uses it directly to translate
-    /// a token into an ordinary [`Self::reattach_receipt`] call. Retained
-    /// forever, exactly like `PUBLISH_QUEUE_RECEIPTS` -- there is no removal door.
-    pub fn lookup_correlation(&self, token: &str) -> Result<Option<u64>, PersistenceError> {
-        publish_queue_ops::lookup_correlation(self, token)
     }
 
     /// Take custody of a write the acceptance door REFUSED, as one

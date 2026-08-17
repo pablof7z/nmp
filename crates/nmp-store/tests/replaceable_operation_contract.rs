@@ -95,7 +95,6 @@ fn accept_body_complete(
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "test-key".into(),
             accepted_at: Timestamp::from(accepted_at),
-            correlation: None,
         })
         .unwrap()
     {
@@ -136,7 +135,6 @@ fn accept_operation(
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "test-key".into(),
             accepted_at: Timestamp::from(accepted_at),
-            correlation: None,
         })
         .unwrap();
     match outcome {

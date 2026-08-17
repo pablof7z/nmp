@@ -15,7 +15,6 @@ fn parked_note(author: nostr::PublicKey, created_at: u64, content: String) -> Wr
         ),
         routing: WriteRouting::Auto,
         identity: Identity::Explicit(author),
-        correlation: None,
     }
 }
 

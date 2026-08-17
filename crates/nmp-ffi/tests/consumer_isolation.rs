@@ -82,7 +82,6 @@ async fn stalled_consumer_is_bounded_and_does_not_delay_active_consumer_or_engin
                     relays: vec!["wss://write.example".to_string()],
                 },
                 identity: FfiIdentity::Active,
-                correlation: None,
             })
             .expect("publish accepted");
 

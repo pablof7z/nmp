@@ -97,7 +97,6 @@ impl NmpWorld {
             }),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         });
         self.receipts.push(ReceiptState::from_publish(result));
     }
@@ -114,7 +113,6 @@ impl NmpWorld {
             payload: WritePayload::Event(EventBuilder::new(nostr::Kind::TextNote).content(text)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         });
     }
 
@@ -167,7 +165,6 @@ impl NmpWorld {
             payload: WritePayload::Event(builder),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         });
     }
 
@@ -192,7 +189,6 @@ impl NmpWorld {
             payload: WritePayload::Event(builder),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         });
     }
 
@@ -257,7 +253,6 @@ impl NmpWorld {
             payload: WritePayload::Event(EventBuilder::new(nostr::Kind::TextNote).content(text)),
             routing,
             identity: Identity::Active,
-            correlation: None,
         });
     }
 
@@ -284,7 +279,6 @@ impl NmpWorld {
             payload: WritePayload::Signed(event),
             routing,
             identity: Identity::Active,
-            correlation: None,
         });
     }
 

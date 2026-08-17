@@ -238,14 +238,3 @@ internal fun mapReceiptReattachment(
 fun reattachReceipt(engine: NmpEngineInterface, id: ULong): ReceiptReattachment =
     mapReceiptReattachment(nmpRethrowing { engine.reattachReceipt(id) }, ::receiptFrom)
 
-/** #591: recover a receipt after a crash that happened BEFORE the app could
- * durably persist the receipt id `publish` returned --
- * looked up by the caller's own crash-safe correlation token instead.
- * Otherwise identical to [reattachReceipt] (the by-id overload). The resolved
- * receipt id (#591) rides along on the attached stream handle itself
- * ([Receipt.id]); a token-only caller learns it there. */
-fun reattachReceiptByCorrelation(engine: NmpEngineInterface, correlation: String): ReceiptReattachment =
-    mapReceiptReattachment(
-        nmpRethrowing { engine.reattachByCorrelation(correlation).outcome },
-        ::receiptFrom,
-    )

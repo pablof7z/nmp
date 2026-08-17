@@ -269,23 +269,4 @@ extension NMPEngine {
         }
     }
 
-    /// #591: recover a receipt after a crash that happened BEFORE the app
-    /// could durably persist the receipt id `publish`
-    /// returned -- looked up by the caller's own crash-safe correlation
-    /// token instead. Otherwise identical to `reattachReceipt(id:)`.
-    public func reattachReceipt(correlation: String) throws -> ReceiptReattachment {
-        let result = try nmpRethrowing {
-            try ffi.reattachByCorrelation(correlation: correlation)
-        }
-        // The resolved receipt id (#591) rides along on the attached stream
-        // handle itself (`Receipt.id`); a token-only caller learns it there.
-        switch result.outcome {
-        case .attached(let stream):
-            return .attached(Receipt(handle: stream))
-        case .notFound:
-            return .notFound
-        case .retainedButUnreadable:
-            return .retainedButUnreadable
-        }
-    }
 }

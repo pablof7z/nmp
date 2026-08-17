@@ -377,7 +377,6 @@ impl NmpWorld {
             payload: WritePayload::Event(builder),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         });
     }
 }

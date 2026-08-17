@@ -882,7 +882,6 @@ fn schedule_ready_skips_lane_less_obligations() {
             payload: WritePayload::Event(draft(10_000 + i as u64, "parked")),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         assert!(effects
             .iter()
@@ -893,7 +892,6 @@ fn schedule_ready_skips_lane_less_obligations() {
         payload: WritePayload::Event(draft(20_000, "healthy")),
         routing: WriteRouting::Explicit(vec![relay]),
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, unsigned) = find_sign_request(&accepted);
     core.reset_publish_queue_lane_recovery_reads();
@@ -932,7 +930,6 @@ fn wake_relay_lanes_only_rereads_the_woken_relays_own_intent() {
             payload: WritePayload::Event(draft(100 + i as u64, &format!("falsifier {i}"))),
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }));
         let (id, generation, u) = find_sign_request(&accepted);
         let signed = u.sign_with_keys(&author).unwrap();
@@ -1002,7 +999,6 @@ fn unchanged_worker_demand_reads_zero_publish_queue_lanes() {
             payload: WritePayload::Event(draft(300 + i as u64, &format!("worker projection {i}"))),
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
@@ -1072,7 +1068,6 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
         payload: WritePayload::Event(draft(400, "parked control")),
         routing: WriteRouting::Explicit(vec![routed_relay.clone()]),
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, unsigned_event) = find_sign_request(&accepted);
     let signed = unsigned_event.sign_with_keys(&author).unwrap();
@@ -1091,7 +1086,6 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
             payload: WritePayload::Event(draft(500 + i as u64, &format!("parked {i}"))),
             routing: WriteRouting::Explicit(vec![parked_relay.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }));
         assert!(
             accepted
@@ -1173,7 +1167,6 @@ fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
         payload: WritePayload::Event(draft(600, "unproven lane creation")),
         routing: WriteRouting::Explicit(relays.to_vec()),
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, unsigned_event) = find_sign_request(&accepted);
     let signed = unsigned_event.sign_with_keys(&author).unwrap();
@@ -1245,7 +1238,6 @@ fn relay_worker_projection_redb_benchmark() {
             )),
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
@@ -1306,7 +1298,6 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
         payload: WritePayload::Event(draft(200, "degraded 1")),
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id1, gen1, u1) = find_sign_request(&accepted1);
     let signed1 = u1.sign_with_keys(&author).unwrap();
@@ -1328,7 +1319,6 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
         payload: WritePayload::Event(draft(201, "degraded 2")),
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id2, gen2, u2) = find_sign_request(&accepted2);
     let signed2 = u2.sign_with_keys(&author).unwrap();
@@ -1652,7 +1642,6 @@ fn a_failing_publish_queue_deadline_read_is_a_typed_error_not_a_false_none() {
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "delivery-deadline-proof".into(),
                 accepted_at: Timestamp::from(1_000u64),
-                correlation: None,
             })
             .expect("accept fixture intent");
         let intent = accepted.journaled_intent_id().expect("journaled intent");

@@ -32,7 +32,6 @@ fn enqueue_is_not_converged() {
         payload: WritePayload::Event(draft(1, "durable write")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     assert!(
         matches!(effects.first(), Some(Effect::WriteAccepted(..))),

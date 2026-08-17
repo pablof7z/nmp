@@ -341,16 +341,11 @@ impl Group {
     /// the hosts are not derivable from the event and no resolver could ever
     /// compute them.
     ///
-    /// `correlation: None` is the only value this door can honestly write. A
-    /// correlation token is minted and persisted by the app BEFORE it writes
-    /// -- that is the entire point of it (#591) -- and no surface hands an
-    /// unpublished group intent back for an app to stamp one on.
     fn mint(&self, payload: WritePayload, identity: Identity) -> WriteIntent {
         WriteIntent {
             payload,
             routing: WriteRouting::Explicit(self.hosts.iter().cloned().collect()),
             identity,
-            correlation: None,
         }
     }
 }

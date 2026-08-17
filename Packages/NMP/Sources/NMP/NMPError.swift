@@ -18,9 +18,6 @@ import NMPFFI
 /// instruction can never resolve, it surfaces as `.publishRefused` from
 /// `publish` itself rather than as a fact on a receipt stream nothing will
 /// ever add to.
-/// Receipt-correlation exhaustion is synchronous because no truthful
-/// `Receipt` or status stream can be created without an identity.
-///
 public enum NMPError: Error, Sendable, Equatable {
     case nonIndexableFilterTag(String)
     case invalidPublicKey(String)
@@ -81,7 +78,7 @@ public enum NMPError: Error, Sendable, Equatable {
     /// delete the store, and create a fresh one -- your call, through the
     /// separate destructive reset. The relay-backed read cache is
     /// reacquirable; the publish queue is not, so accepted but unpublished
-    /// writes and their receipts, correlation tokens, route revisions, and
+    /// writes and their receipts, route revisions, and
     /// attempt evidence go with it.
     ///
     /// `found` is `nil` when the store carries no marker this build can
@@ -166,10 +163,6 @@ public enum NMPError: Error, Sendable, Equatable {
     case tooManyQueryBranches(requested: UInt64, maximum: UInt64)
     /// No last-good NIP-11 document exists and acquisition failed.
     case relayInformationUnavailable(RelayInformationErrorKind)
-    /// #591: `WriteIntent.correlation`/`reattachReceipt(correlation:)` was
-    /// given a token that failed `CorrelationToken`'s bounded/non-empty
-    /// validation.
-    case invalidCorrelationToken(got: String, reason: String)
     // nmp-native:if nip22
     /// #572/#1258: an `Nip73` failed its constructor validation (an empty
     /// `I`/`K` cell).
@@ -315,8 +308,6 @@ public enum NMPError: Error, Sendable, Equatable {
             self = .tooManyQueryBranches(requested: requested, maximum: maximum)
         case .RelayInformationUnavailable(let kind):
             self = .relayInformationUnavailable(RelayInformationErrorKind(kind))
-        case .InvalidCorrelationToken(let got, let reason):
-            self = .invalidCorrelationToken(got: got, reason: reason)
         // nmp-native:if nip22
         case .InvalidNip73(let reason):
             self = .invalidNip73(reason: reason)
@@ -433,7 +424,7 @@ extension NMPError: LocalizedError {
             } ?? "Persistent store \(path) carries no readable schema marker and is not the one supported epoch \(expected)")
                 + "; it was not migrated, adopted, drained, or reset; discard and recreate this store to continue;"
                 + " NMP can reacquire the relay-backed read cache, but the publish queue state (accepted but"
-                + " unpublished writes, receipts, correlation tokens, route revisions, and attempt evidence) will be"
+                + " unpublished writes, receipts, route revisions, and attempt evidence) will be"
                 + " permanently lost"
         case .storeResetFailed(let reason):
             "Could not reset store: \(reason)"
@@ -487,8 +478,6 @@ extension NMPError: LocalizedError {
             "A live query supports at most \(maximum) demand branches; \(requested) were declared"
         case .relayInformationUnavailable(let kind):
             "Relay information unavailable: \(kind)"
-        case .invalidCorrelationToken(let got, let reason):
-            "Invalid correlation token \(got.debugDescription): \(reason)"
         // nmp-native:if nip22
         case .invalidNip73(let reason):
             "Invalid NIP-73 external content id: \(reason)"

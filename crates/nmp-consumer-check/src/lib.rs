@@ -130,7 +130,6 @@ pub fn build_event_intent(content: &str) -> WriteIntent {
         ),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }
 }
 
@@ -145,7 +144,6 @@ pub fn build_event_intent_as(identity: PublicKey, content: &str) -> WriteIntent 
         ),
         routing: WriteRouting::Auto,
         identity: Identity::Explicit(identity),
-        correlation: None,
     }
 }
 
@@ -163,7 +161,6 @@ pub fn build_dated_event_intent(created_at: Timestamp, tag: Tag, content: &str) 
         ),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }
 }
 
@@ -210,7 +207,7 @@ pub fn build_comment_intent(
     content: &str,
 ) -> Result<WriteIntent, nmp_nip22::Nip73Error> {
     let root = nmp_nip22::CommentRoot::External(nmp_nip22::Nip73::podcast_episode(guid)?);
-    Ok(nmp_nip22::comment_intent(&root, content.to_string(), None))
+    Ok(nmp_nip22::comment_intent(&root, content.to_string()))
 }
 
 /// Names every protocol/content family #1239 once retrofitted onto the

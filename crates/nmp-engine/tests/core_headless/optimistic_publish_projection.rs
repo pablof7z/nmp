@@ -69,7 +69,6 @@ fn publish_signed_explicit(
         payload: WritePayload::Signed(event),
         routing: WriteRouting::Explicit(Vec::from_iter(relays)),
         identity: Identity::Active,
-        correlation: None,
     }));
     let id = effects
         .iter()
@@ -444,7 +443,6 @@ fn an_unsigned_write_is_still_explicitly_pending_after_a_restart() {
             payload: WritePayload::Event(draft(904, "accepted before its signer answers")),
             routing: WriteRouting::Explicit(pin.to_vec()),
             identity: Identity::Active,
-            correlation: None,
         }));
         let (_, _, frozen) = find_sign_request(&accepted);
         expected_id = frozen.sign_with_keys(&me).unwrap().id;

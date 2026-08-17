@@ -15,14 +15,14 @@ use super::publish_queue::{
 };
 use super::publish_queue_codec::{
     attempt_range, codec_error, deadline_intent_range, deadline_key, decode_attempt_handoff,
-    decode_claims, decode_deadline, decode_displaced, decode_intent, decode_receipt, encode_claims,
+    decode_claims, decode_deadline, decode_displaced, decode_intent, encode_claims,
     encode_displaced, encode_intent, encode_receipt, id_claim_key, intent_key, lane_range,
     parse_deadline_by_intent_key, parse_lane_key, receipt_key, route_revision_range,
 };
 use super::query::expiration_key;
 use super::schema::{
     persist_err, EventKey, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
-    PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT,
+    PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT,
     PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
 #[cfg(test)]
@@ -43,7 +43,6 @@ use redb::ReadableTable;
 fn retire_superseded_owners_in_txn(
     ingest: &mut RedbIngestTxn<'_, '_>,
     write_txn: &redb::WriteTransaction,
-    correlations: &mut redb::Table<'_, &[u8], &[u8; 8]>,
     mut replaced: StoredEvent,
 ) -> Result<(Option<StoredEvent>, Vec<RetiredIntent>), PersistenceError> {
     let mut attempts = write_txn
@@ -226,28 +225,18 @@ fn retire_superseded_owners_in_txn(
             )?;
             continue;
         }
-        let removed_receipt = ingest
+        // The receipt row itself is what retirement reclaims. It was
+        // additionally DECODED here only to reach its correlation token; with
+        // that field gone nothing reads the decoded value, so the decode goes
+        // too rather than lingering as an incidental corruption check nobody
+        // named or tested.
+        ingest
             .publish_queue_receipts
             .remove(&receipt_key(*receipt_id))
             .map_err(persist_err)?
-            .map(|guard| guard.value().to_vec())
             .ok_or_else(|| {
                 PersistenceError::invariant("open delivery intent must retain its receipt")
             })?;
-        let removed_record = decode_receipt(&removed_receipt)
-            .map_err(|error| codec_error("retired receipt", error))?;
-        if let Some(token) = removed_record.correlation {
-            let mapped = correlations
-                .get(token.as_bytes())
-                .map_err(persist_err)?
-                .map(|guard| u64::from_be_bytes(*guard.value()));
-            if mapped != Some(*receipt_id) {
-                return Err(PersistenceError::invariant(
-                    "receipt correlation reverse ownership disagrees",
-                ));
-            }
-            correlations.remove(token.as_bytes()).map_err(persist_err)?;
-        }
     }
 
     let retired = eligible
@@ -273,7 +262,6 @@ pub(super) fn accept_write(
         expected_pubkey,
         signing_identity_ref,
         accepted_at,
-        correlation,
     } = accept;
     if let crate::AcceptWritePayload::ReplaceableOperation(operation) = payload {
         return super::semantic_edit_ops::accept(
@@ -281,7 +269,6 @@ pub(super) fn accept_write(
             expected_pubkey,
             signing_identity_ref,
             accepted_at,
-            correlation,
             *operation,
         );
     }
@@ -310,10 +297,6 @@ pub(super) fn accept_write(
 
     let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|ingest, write_txn| {
-        let mut publish_queue_correlations = write_txn
-            .open_table(PUBLISH_QUEUE_CORRELATIONS)
-            .map_err(persist_err)?;
-
         let existing = ingest.canonical.load_by_id(&frozen.id)?;
         let is_deletion = frozen.kind == Kind::EventDeletion;
 
@@ -598,7 +581,6 @@ pub(super) fn accept_write(
                                 let (displaced, retired) = retire_superseded_owners_in_txn(
                                     ingest,
                                     write_txn,
-                                    &mut publish_queue_correlations,
                                     replaced.clone(),
                                 )?;
                                 (
@@ -679,7 +661,6 @@ pub(super) fn accept_write(
                     event_id: frozen.id,
                     state: receipt_state,
                 },
-                correlation: correlation.as_ref().map(|token| token.as_ref().to_owned()),
                 terminal_sequence: None,
                 terminal_at: None,
                 terminal_bytes: None,
@@ -689,19 +670,6 @@ pub(super) fn accept_write(
                 .publish_queue_receipts
                 .insert(&receipt_key(receipt_id), encoded_receipt.as_slice())
                 .map_err(persist_err)?;
-
-            // #591: journal the caller's correlation token, in this
-            // SAME transaction, alongside the receipt id it now names.
-            // Overwrite-safe even on a (contract-violating) reused
-            // token: the door that would ever observe a stale mapping
-            // is `lookup_correlation`, and the caller's own reuse is
-            // documented as their contract violation, not a case this
-            // store detects or refuses.
-            if let Some(token) = &correlation {
-                publish_queue_correlations
-                    .insert(token.as_ref().as_bytes(), &receipt_key(receipt_id))
-                    .map_err(persist_err)?;
-            }
         }
 
         Ok(result)

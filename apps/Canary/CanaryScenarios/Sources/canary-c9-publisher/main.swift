@@ -9,9 +9,9 @@
 // persists a local-key account (so the SAME account exists again after a
 // restart -- crash recovery of a not-yet-signed write needs the same
 // local signer back, exactly like the app's own session persistence),
-// publishes one real signed event -- with no correlation token; recovery
-// finds it by enumerating `publishQueue`, not by an app-remembered label
-// (#1770) -- to one or more real relays, prints machine-readable markers
+// publishes one real signed event -- recovery finds it by enumerating
+// `publishQueue`, never by an app-remembered label (#1770) -- to one or
+// more real relays, prints machine-readable markers
 // to stdout as it reaches each fact the parent needs to observe, then
 // parks. It never retries and never polls beyond the ordinary
 // `receipt.status` iteration `await-partial` mode does to learn when to

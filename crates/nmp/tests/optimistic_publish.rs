@@ -287,7 +287,6 @@ async fn a_publish_to_two_unreachable_hosts_appears_at_once_reporting_zero_relay
             payload: WritePayload::Signed(event),
             routing: WriteRouting::Explicit(vec![host_a, host_b]),
             identity: Identity::Explicit(me.public_key()),
-            correlation: None,
         })
         .expect("an already-signed event is accepted by the one publish door");
 
@@ -360,7 +359,6 @@ async fn an_accepting_host_enters_provenance_a_rejecting_one_never_does_and_the_
             payload: WritePayload::Signed(event),
             routing: WriteRouting::Explicit(vec![accepting_url.clone(), rejecting_url.clone()]),
             identity: Identity::Explicit(me.public_key()),
-            correlation: None,
         })
         .expect("an already-signed event is accepted by the one publish door")
         .statuses;
@@ -504,7 +502,6 @@ async fn optimistic_publication_is_general_and_owes_nothing_to_nip29() {
                 payload: WritePayload::Signed(event),
                 routing: WriteRouting::Explicit(hosts.to_vec()),
                 identity: Identity::Explicit(me.public_key()),
-                correlation: None,
             })
             .unwrap_or_else(|error| {
                 panic!("kind:{kind} -- an ordinary publish is accepted: {error}")

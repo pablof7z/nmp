@@ -14,7 +14,7 @@ use std::num::NonZeroUsize;
 use nmp::{
     AccessContext as GAccessContext, AcquisitionEvidence, AuthDenialSource as GAuthDenialSource,
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, AuthPhase, Binding as GBinding,
-    CacheMode as GCacheMode, CancelWriteError, CancelWriteOutcome, CorrelationToken,
+    CacheMode as GCacheMode, CancelWriteError, CancelWriteOutcome,
     CoverageInterval, Demand as GDemand, DemandError as GDemandError, Derived as GDerived,
     DiagnosticsSnapshot, EventBuilder as GEventBuilder, Filter as GFilter, FilterCoverageEntry,
     Frame, Freshness as GFreshness, Identity as GIdentity, IdentityField as GIdentityField,
@@ -165,8 +165,8 @@ pub enum FfiError {
     /// discard the store, and create a fresh one — the app's call, through
     /// the separate destructive reset door. The relay-backed read cache is
     /// reacquirable; the publish queue is not, so accepted but unpublished
-    /// writes and their receipts, correlation tokens, route revisions, and
-    /// attempt evidence go with it.
+    /// writes and their receipts, route revisions, and attempt evidence go
+    /// with it.
     ///
     /// `found` is `None` when the store carries no marker this build can
     /// read, which includes a marker written at an address a superseded
@@ -319,11 +319,6 @@ pub enum FfiError {
     RelayInformationUnavailable {
         kind: FfiRelayInformationErrorKind,
     },
-    /// #591: `FfiWriteIntent.correlation` was `Some` but failed
-    /// `nmp_grammar::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty
-    /// validation (empty, or over `CorrelationToken::MAX_LEN` bytes). Synchronous,
-    /// before any engine call -- same discipline as `InvalidPublicKey`/
-    /// `InvalidTag` above.
     /// A composer returned a registered replaceable operation, which has no
     /// wire form on purpose: replay authority crosses this boundary only
     /// inside a fused semantic method that owns its evidence policy
@@ -332,10 +327,6 @@ pub enum FfiError {
     /// class: a projection door refuses as a VALUE instead of panicking on
     /// an exported path.
     ReplaceableOperationHasNoWireForm,
-    InvalidCorrelationToken {
-        got: String,
-        reason: String,
-    },
     /// #572/#1258: an `FfiNip73` failed `nmp_nip73::Nip73`'s constructor
     /// validation (an empty `I`/`K` cell, or a `Url` that is not an
     /// absolute URL and therefore cannot be normalised).
@@ -826,8 +817,8 @@ impl std::fmt::Display for FfiError {
                     f,
                     "; it was not migrated, adopted, drained, or reset; discard and recreate this \
                      store to continue; NMP can reacquire the relay-backed read cache, but the \
-                     publish queue state (accepted but unpublished writes, receipts, correlation \
-                     tokens, route revisions, and attempt evidence) will be permanently lost"
+                     publish queue state (accepted but unpublished writes, receipts, route \
+                     revisions, and attempt evidence) will be permanently lost"
                 )
             }
             Self::StoreResetFailed { reason } => write!(f, "could not reset store: {reason}"),
@@ -911,9 +902,6 @@ impl std::fmt::Display for FfiError {
             ),
             Self::RelayInformationUnavailable { kind } => {
                 write!(f, "relay information unavailable: {kind:?}")
-            }
-            Self::InvalidCorrelationToken { got, reason } => {
-                write!(f, "invalid correlation token {got:?}: {reason}")
             }
             #[cfg(feature = "nip22")]
             Self::InvalidNip73 { reason } => write!(f, "invalid NIP-73 external content id: {reason}"),
@@ -2776,19 +2764,6 @@ pub(crate) fn identity_to_ffi(identity: GIdentity) -> FfiIdentity {
     }
 }
 
-/// #591: `FfiWriteIntent.correlation`'s dedicated parse (also used by the
-/// engine-free NIP-22 composer, hence `pub(crate)`). Delegates entirely
-/// to `nmp::CorrelationToken`'s `TryFrom<&str>` bounded/non-empty
-/// validation; a rejection becomes a typed, synchronous
-/// [`FfiError::InvalidCorrelationToken`] naming both the offending input and
-/// the reason, BEFORE any engine call.
-pub(crate) fn parse_correlation_token(input: &str) -> Result<CorrelationToken, FfiError> {
-    CorrelationToken::try_from(input).map_err(|err| FfiError::InvalidCorrelationToken {
-        got: input.to_string(),
-        reason: err.to_string(),
-    })
-}
-
 pub fn parse_relay_url(url: &str) -> Result<RelayUrl, FfiError> {
     RelayUrl::parse(url).map_err(|_| FfiError::InvalidRelayUrl {
         got: url.to_string(),
@@ -2928,11 +2903,6 @@ pub(crate) fn signed_event_from_ffi(
 /// `identity_from_ffi`'s doc for the parse/restatement boundary split.
 pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, FfiError> {
     let identity = identity_from_ffi(intent.identity)?;
-    let correlation = intent
-        .correlation
-        .as_deref()
-        .map(parse_correlation_token)
-        .transpose()?;
 
     let payload = match intent.payload {
         FfiWritePayload::Event { builder } => {
@@ -2974,7 +2944,6 @@ pub fn write_intent_from_ffi(intent: FfiWriteIntent) -> Result<GWriteIntent, Ffi
         payload,
         routing,
         identity,
-        correlation,
     })
 }
 
@@ -3656,7 +3625,6 @@ mod tests {
                 relays: vec!["wss://write.example".to_string()],
             },
             identity: FfiIdentity::Active,
-            correlation: None,
         }
     }
 
@@ -4000,7 +3968,6 @@ mod tests {
                 relays: vec!["wss://write.example".to_string()],
             },
             identity: FfiIdentity::Active,
-            correlation: None,
         };
         (event, intent)
     }

@@ -71,7 +71,6 @@ mod receipt_allocator_tests {
                 RelayUrl::parse("wss://acceptance-io.example").unwrap()
             ]),
             identity: Identity::Active,
-            correlation: None,
         }));
 
         assert!(effects.iter().any(|effect| matches!(
@@ -167,7 +166,6 @@ mod receipt_allocator_tests {
             }),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         let (receipt, generation, unsigned) = accepted
             .iter()
@@ -444,7 +442,6 @@ mod receipt_allocator_tests {
                 }),
                 routing: WriteRouting::Auto,
                 identity: Identity::Active,
-                correlation: None,
             }));
             let (receipt, generation, unsigned) = accepted
                 .iter()
@@ -631,7 +628,6 @@ mod semantic_successor_tests {
             payload: WritePayload::ReplaceableOperation(operation),
             routing: WriteRouting::Explicit(vec![destination.clone()]),
             identity: Identity::Active,
-            correlation: None,
         });
         let accepted = loop {
             match preparation {
@@ -843,7 +839,6 @@ mod semantic_successor_tests {
             payload: WritePayload::ReplaceableOperation(operation),
             routing: WriteRouting::Explicit(vec![destination.clone()]),
             identity: Identity::Active,
-            correlation: None,
         });
         let accepted = loop {
             match preparation {
@@ -1000,7 +995,6 @@ mod semantic_successor_tests {
             payload: WritePayload::ReplaceableOperation(operation),
             routing: WriteRouting::Explicit(vec![destination]),
             identity: Identity::Active,
-            correlation: None,
         });
         let effects = loop {
             match preparation {
@@ -1096,7 +1090,6 @@ mod semantic_successor_tests {
                 payload: WritePayload::ReplaceableOperation(payload),
                 routing: WriteRouting::Explicit(vec![destination]),
                 identity: Identity::Active,
-                correlation: None,
             }));
             let (receipt, event_id) = effects
                 .iter()
@@ -1391,7 +1384,6 @@ mod semantic_successor_tests {
             payload: WritePayload::ReplaceableOperation(later_operation),
             routing: WriteRouting::Explicit(vec![destination_a.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }));
         receipts.push(
             accepted_later
@@ -1570,7 +1562,6 @@ mod semantic_successor_tests {
                 payload: WritePayload::ReplaceableOperation(payload),
                 routing: WriteRouting::Explicit(vec![destination]),
                 identity: Identity::Active,
-                correlation: None,
             }));
             let (receipt, event_id) = effects
                 .iter()
@@ -1723,7 +1714,6 @@ mod semantic_successor_tests {
             payload: WritePayload::ReplaceableOperation(operation),
             routing: WriteRouting::Explicit(destinations.to_vec()),
             identity: Identity::Active,
-            correlation: None,
         }));
         let (receipt, e1_generation, e1_unsigned) = accepted
             .iter()
@@ -2032,7 +2022,6 @@ mod persistence_stall_replay_tests {
             }),
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }));
         let id = accepted
             .iter()
@@ -2106,7 +2095,6 @@ mod persistence_stall_replay_tests {
             }),
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }));
         let id = accepted
             .iter()
@@ -2199,7 +2187,6 @@ mod checked_shell_tests {
             }),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         let receipt = accepted
             .iter()

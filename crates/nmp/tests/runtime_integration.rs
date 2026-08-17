@@ -30,7 +30,7 @@ use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
     IdentityField, IndexedTagName, Selector, SourceAuthority,
 };
-use nmp_grammar::{CorrelationToken, Identity, WriteIntent, WritePayload, WriteRouting};
+use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_runtime::{
@@ -453,7 +453,6 @@ async fn subscribe_publish_and_reconnect_replay_over_a_real_relay() {
             payload: WritePayload::Event(body_of(&contact_list)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -1439,7 +1438,6 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
             }),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation");
     assert!(
@@ -1501,89 +1499,6 @@ fn runtime_exposes_stable_receipt_id_and_supports_multiple_reattach_observers() 
 }
 
 #[test]
-fn correlation_retry_replays_only_to_its_new_observer_then_joins_live_delivery() {
-    let keys = Keys::generate();
-    let correlation =
-        CorrelationToken::try_from("runtime-retry-isolation").expect("bounded fixture token");
-    let (thread, handle) = EngineThread::spawn(
-        RedbStore::temporary().expect("temporary Redb store"),
-        10,
-        PoolConfig::default(),
-    )
-    .expect("test engine thread construction");
-    handle.set_current_account(Some(keys.public_key()));
-
-    let original = handle
-        .publish(WriteIntent {
-            payload: WritePayload::Event(nmp_grammar::EventBuilder {
-                kind: Kind::TextNote,
-                tags: (vec![]).into_iter().collect(),
-                content: ("original correlation body").into(),
-                created_at: Some(Timestamp::from(100)),
-            }),
-            routing: WriteRouting::Auto,
-            identity: Identity::Active,
-            correlation: Some(correlation.clone()),
-        })
-        .expect("original receipt");
-    assert_eq!(
-        original.statuses.recv().unwrap(),
-        WriteFact::Signing(SigningState::AwaitingSigner {
-            pubkey: keys.public_key()
-        })
-    );
-
-    let retry = handle
-        .publish(WriteIntent {
-            payload: WritePayload::Event(nmp_grammar::EventBuilder {
-                kind: Kind::TextNote,
-                tags: (vec![]).into_iter().collect(),
-                content: ("different retry body must not be accepted").into(),
-                created_at: Some(Timestamp::from(101)),
-            }),
-            routing: WriteRouting::Auto,
-            identity: Identity::Active,
-            correlation: Some(correlation),
-        })
-        .expect("correlation retry");
-    assert_eq!(retry.id, original.id);
-    assert_eq!(
-        retry.statuses.recv().unwrap(),
-        WriteFact::Signing(SigningState::AwaitingSigner {
-            pubkey: keys.public_key()
-        })
-    );
-    assert_eq!(
-        original.statuses.try_recv(),
-        Err(FifoTryRecvError::Empty),
-        "retained retry facts belong only to the newly attached observer"
-    );
-
-    handle
-        .add_signer(local_signer(&keys))
-        .expect("local signer has a public key");
-    assert!(wait_for_status(
-        &original.statuses,
-        Duration::from_secs(2),
-        |status| matches!(
-            status,
-            WriteFact::Signing(SigningState::Signed { event_id: _ })
-        )
-    ));
-    assert!(wait_for_status(
-        &retry.statuses,
-        Duration::from_secs(2),
-        |status| matches!(
-            status,
-            WriteFact::Signing(SigningState::Signed { event_id: _ })
-        )
-    ));
-
-    handle.shutdown();
-    thread.join();
-}
-
-#[test]
 fn runtime_boot_recovery_precedes_first_reattach_command() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("boot-before-command.redb");
@@ -1622,7 +1537,6 @@ fn runtime_boot_recovery_precedes_first_reattach_command() {
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
                 accepted_at: Timestamp::now(),
-                correlation: None,
             })
             .unwrap();
         nmp_engine::core::ReceiptId(outcome.journaled_receipt_id().unwrap())

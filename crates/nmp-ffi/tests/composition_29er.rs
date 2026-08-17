@@ -218,7 +218,6 @@ async fn the_29er_observer_composition_never_saturates_across_room_switching_and
                 relays: vec!["wss://write.example".to_string()],
             },
             identity: FfiIdentity::Active,
-            correlation: None,
         })
         .expect("publish opens a receipt stream alongside the composition");
     let _ = receipt.id();

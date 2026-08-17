@@ -49,7 +49,6 @@ fn accept(frozen: Event, keys: &Keys, accepted_at: u64) -> AcceptWrite {
         expected_pubkey: keys.public_key(),
         signing_identity_ref: "lane-contract".into(),
         accepted_at: Timestamp::from(accepted_at),
-        correlation: None,
     }
 }
 

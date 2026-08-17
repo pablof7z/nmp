@@ -166,7 +166,6 @@ fn durable_started_attempt_replays_exact_bytes_and_same_receipt_without_acceptin
             payload: WritePayload::Signed(event.clone()),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         assert!(effects.iter().any(|effect| matches!(effect,
             Effect::PublishEvent(r, e, _) if r == &relay_session && e == &event
@@ -329,7 +328,6 @@ fn pending_row_and_frozen_signer_resume_after_reopen_then_cancel_compensates() {
             payload: WritePayload::Event(body_of(&unsigned)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         receipt_id(&effects)
     };
@@ -422,7 +420,6 @@ fn overridden_unsigned_intent_replays_and_resumes_pinned_to_override_after_reope
             payload: WritePayload::Event(body_of(&unsigned)),
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(override_keys.public_key()),
-            correlation: None,
         }));
         receipt_id(&effects)
     };
@@ -553,7 +550,6 @@ fn exact_duplicate_coowners_recover_distinct_receipts_and_lossless_routes() {
                 payload: WritePayload::Signed(event.clone()),
                 routing: WriteRouting::Auto,
                 identity: Identity::Active,
-                correlation: None,
             }))
         };
         let a = receipt_id(&publish(&mut core));
@@ -638,7 +634,6 @@ fn assert_persisted_routing_fails_closed_without_dropping(
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
                 accepted_at: Timestamp::from(104u64),
-                correlation: None,
             })
             .unwrap();
         let intent_id = outcome.journaled_intent_id().unwrap();
@@ -748,7 +743,6 @@ fn recovered_reserved_auth_write_is_quarantined_from_attempt_and_ok_correlation(
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: keys.public_key().to_hex(),
                 accepted_at: Timestamp::from(777),
-                correlation: None,
             })
             .unwrap();
         ReceiptId(outcome.journaled_receipt_id().unwrap())
@@ -856,7 +850,6 @@ fn signed_receipt_replays_signed_and_refuses_cancellation_after_reopen() {
             payload: WritePayload::Signed(event.clone()),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         assert!(effects.iter().any(
             |effect| matches!(effect, Effect::EmitReceipt(_, WriteFact::Signing(SigningState::Signed { event_id: id })) if *id == event.id)
@@ -922,7 +915,6 @@ fn corrupt_attempt_evidence_keeps_parent_obligation_and_boot_fails_closed() {
             payload: WritePayload::Signed(event),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         let receipt_id = receipt_id(&effects);
         drop(core);
@@ -973,7 +965,6 @@ fn retained_terminal_receipt_is_attached_and_replays_terminal_fact() {
         }),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let receipt = receipt_id(&effects);
     core.handle(EngineMsg::CancelWrite(receipt));
@@ -1011,7 +1002,6 @@ fn corrupt_retained_receipt_is_not_misreported_absent_and_keeps_obligation() {
             }),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         let receipt_id = receipt_id(&effects);
         drop(core);
@@ -1089,7 +1079,6 @@ fn relay_list_bootstrap_routing_round_trips_across_a_restart() {
             payload: WritePayload::Signed(event),
             routing: WriteRouting::Explicit(vec![relay_b.clone(), relay_a.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }));
         let ensured = effects
             .iter()
@@ -1142,7 +1131,6 @@ fn corrupt_route_lane_evidence_is_unreadable_not_absent() {
             payload: WritePayload::Signed(event),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         let receipt_id = receipt_id(&effects);
         drop(core);
@@ -1215,7 +1203,6 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "local".to_string(),
                 accepted_at: Timestamp::from(991),
-                correlation: None,
             })
             .expect("accept_write");
     }

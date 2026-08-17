@@ -1905,7 +1905,6 @@ fn coverage_remains_exact_across_all_retractions_and_only_gc_lowers_it() {
                 expected_pubkey: k.public_key(),
                 signing_identity_ref: "coverage-proof".into(),
                 accepted_at: Timestamp::from(220u64),
-                correlation: None,
             })
             .expect("accept pending row");
         store
@@ -2081,7 +2080,6 @@ fn a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_b
                 expected_pubkey: k.public_key(),
                 signing_identity_ref: "optimistic-1182".into(),
                 accepted_at: Timestamp::from(500u64),
-                correlation: None,
             })
             .expect("a locally accepted write enters the store");
 

@@ -171,7 +171,6 @@ impl Groups {
             payload,
             routing: WriteRouting::Explicit(self.hosts.iter().cloned().collect()),
             identity,
-            correlation: None,
         }
     }
 }

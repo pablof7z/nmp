@@ -16,7 +16,7 @@ use super::publish_queue_codec::{
     PublishQueueRelayId, NEXT_RELAY_ID_KEY, TERMINAL_RECEIPT_BYTES_KEY, TERMINAL_RECEIPT_COUNT_KEY,
 };
 use super::schema::{
-    persist_err, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS, PUBLISH_QUEUE_CORRELATIONS,
+    persist_err, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
     PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT, PUBLISH_QUEUE_DISPLACED,
     PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META,
     PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_RELAYS, PUBLISH_QUEUE_RELAY_IDS,
@@ -141,32 +141,6 @@ pub(super) fn reattach_receipt(
         accepted_at: record.accepted_at,
         payload: record.payload,
     }))
-}
-
-pub(super) fn lookup_correlation(
-    store: &RedbStore,
-    token: &str,
-) -> Result<Option<u64>, PersistenceError> {
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
-    // A store that has never accepted ANY correlated write never
-    // created this table at all -- `ReadTransaction::open_table`
-    // returns `TableDoesNotExist` in that case (unlike a write
-    // transaction, a read transaction never creates tables). That is
-    // exactly "no token has ever been journaled here", not a
-    // persistence failure.
-    let table = match read_txn.open_table(PUBLISH_QUEUE_CORRELATIONS) {
-        Ok(table) => table,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-        Err(err) => return Err(persist_err(err)),
-    };
-    let Some(encoded) = table
-        .get(token.as_bytes())
-        .map_err(persist_err)?
-        .map(|guard| *guard.value())
-    else {
-        return Ok(None);
-    };
-    Ok(Some(u64::from_be_bytes(encoded)))
 }
 
 fn intern_relay_in_txn(
@@ -1914,7 +1888,6 @@ pub(super) fn accept_refused(
                 event_id: frozen_id,
                 state: ReceiptState::Refused(reason),
             },
-            correlation: None,
             terminal_sequence: None,
             terminal_at: None,
             terminal_bytes: None,
@@ -2213,23 +2186,6 @@ fn remove_publish_queue_entry_in_txn(
             .map_err(persist_err)?;
         remove_terminal_receipt_index(&mut meta, receipt_id, &record)?;
         receipts.remove(&key).map_err(persist_err)?;
-        // #591 tokens name this receipt id and nothing else; leaving one
-        // behind would reattach a caller to a receipt that no longer exists.
-        let mut correlations = write_txn
-            .open_table(PUBLISH_QUEUE_CORRELATIONS)
-            .map_err(persist_err)?;
-        if let Some(token) = &record.correlation {
-            let mapped = correlations
-                .get(token.as_bytes())
-                .map_err(persist_err)?
-                .map(|guard| u64::from_be_bytes(*guard.value()));
-            if mapped != Some(receipt_id) {
-                return Err(PersistenceError::invariant(
-                    "receipt correlation reverse ownership disagrees",
-                ));
-            }
-            correlations.remove(token.as_bytes()).map_err(persist_err)?;
-        }
         // The intent row itself is already gone (checked above); its retained
         // per-relay evidence is what this door reclaims. Two passes (collect
         // then remove) — `redb` does not allow mutating a table while

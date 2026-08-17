@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use nmp_grammar::{
-    AccessContext, ConcreteFilter, ContextualAtom, CorrelationToken, SourceAuthority,
+    AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority,
 };
 use nostr::secp256k1::rand::{rngs::StdRng, SeedableRng};
 use nostr::secp256k1::SECP256K1;
@@ -48,177 +48,53 @@ struct Checkpoint {
 }
 
 const EXPECTED_SEMANTIC_TRACE: &[(&str, &str)] = &[
-    (
-        "insert",
-        "fd241c1baae2aea9b17741437ace8950a54b8ce0b652a4d380fae6f108256eb8",
-    ),
-    (
-        "duplicate provenance",
-        "99b45d4b3a2f261ba52c57747fb2bf73cadecf6eac57e3bd0250ea0e20a158ef",
-    ),
-    (
-        "replaceable first winner",
-        "92559cce2e47f3084556520eb178929e2da4004d830ad36d6a7742c759fd0898",
-    ),
-    (
-        "replaceable conflict",
-        "ec4308ac1e7a7ac8089c917c1d9136b6fc1e205778eaa8ecca87d67f5af689d1",
-    ),
-    (
-        "addressable first winner",
-        "184bad00039a92a167e98966e94527f65b138a7bcc2ea9aed0a7738440028673",
-    ),
-    (
-        "addressable conflict",
-        "e626e169ed4688c42584c6ffd615762a95d0a9c6efd871c7a4400a145f92e8fe",
-    ),
-    (
-        "deletion target",
-        "0cffd48a9735b399175d63d87cdc3ecb589435e02534cd365722988d220167bc",
-    ),
-    (
-        "deletion",
-        "938b2c4f81e5a705b3f72819d513621fce3aeb4c6f00cb3165c3a4eca9c395bf",
-    ),
-    (
-        "deletion before target",
-        "8c1e60610701b9154c770bdfdcac636a2dbd476afaa508b86feb4ecfa77be803",
-    ),
-    (
-        "tombstoned target refused",
-        "8c1e60610701b9154c770bdfdcac636a2dbd476afaa508b86feb4ecfa77be803",
-    ),
-    (
-        "expiry indexed",
-        "6896f26942cd0ccf4f32d92c91d335817ee14ecd6bc9906f99c903a1f29cdbbf",
-    ),
-    (
-        "expiry applied",
-        "8c1e60610701b9154c770bdfdcac636a2dbd476afaa508b86feb4ecfa77be803",
-    ),
-    (
-        "coverage fact persisted",
-        "2227110dbaaa94204bfb012fee25cc195cfd71bee7ff7ee6d34465e6324c1ea1",
-    ),
-    (
-        "coverage recorded after facts",
-        "c27cc51971097f4e22f0aa9885d5af6227642ccf2da373229fd023df8e4cd435",
-    ),
-    (
-        "coverage-safe gc",
-        "735f8a01db9cf0bebd6ef1c39aaa0bde2d9b5369808b92dd38b0236ee346e3f2",
-    ),
-    (
-        "maximum coverage fact and claim persisted",
-        "fd71bf955a74aad0e955f17fa9fde3fc24cb931842e28149284de0f32efe2c28",
-    ),
-    (
-        "maximum coverage removed with fact",
-        "735f8a01db9cf0bebd6ef1c39aaa0bde2d9b5369808b92dd38b0236ee346e3f2",
-    ),
-    (
-        "pending write accepted",
-        "7a024f5fadd783b8297ed70138e2fcb804f7049b4f4b191c96800b336c82b10c",
-    ),
-    (
-        "pending write signed",
-        "3f140f194dce4cc4441b0562f16e587e1c24b7a9f1a1c87989dfac60bef1b334",
-    ),
-    (
-        "cancellable write accepted",
-        "1f5ed67fba8eecc286a5d915208a64c2e6d9e5a644f5d0df44599793dd6bc648",
-    ),
-    (
-        "write cancelled",
-        "81cde1baf671e8ec1d5d533affc1de0645548bb8b1b9bac9e6c075a545b4629b",
-    ),
-    (
-        "replaceable delivery accepted",
-        "66fb86e9eb23f5f1c999382438354167cabe991c6ee2f2c2fba445c6e096c96f",
-    ),
-    (
-        "replaceable delivery superseded",
-        "c2712ae7bd641ef189c0d15faca7d42e34d6ba7474ffea1ef74889721af3f008",
-    ),
-    (
-        "superseding delivery compensated",
-        "3fdb3a8574e529666cc20d757093622d696cd23781bee9c8c994569258a9eddb",
-    ),
-    (
-        "correlated multi-relay delivery accepted",
-        "20fd05a6452e7626335755f2d81f58a6dd749b68149c187dfdaae084fa279852",
-    ),
-    (
-        "correlated multi-relay lanes durable",
-        "41e0ba90e928654d5a1daaf8e4d3d0184125e88d72e3a53db07b4dd90afc4ffb",
-    ),
-    (
-        "ambiguous handoff became outcome unknown",
-        "40a5e5e6e7b04bd68af5e03fba8a42aa64ca8f71a28d1de21aac2c723f6a0c81",
-    ),
-    (
-        "delivery attempt gave up",
-        "a791b7ccab0ad9393b2386b0db37aeff71b015077b243c4136ed2821fe52f4fb",
-    ),
-    (
-        "in-flight delivery interrupted",
-        "50796991c8187ebf3a9eb4c773bcda6dcb790ddda4d32eb8c5d3d9b4ee8a9e59",
-    ),
-    (
-        "retry ended in relay rejection",
-        "be19911b9bab0dafef409364625b11f2388e96018b6b5d9636262e3d392ad336",
-    ),
-    (
-        "multi-relay terminal obligation closed",
-        "be19911b9bab0dafef409364625b11f2388e96018b6b5d9636262e3d392ad336",
-    ),
-    (
-        "publication route durable",
-        "3fcc15ce7650f4bbe8393a4ce5320e0ab801b4cfeb8e39b7330e6fa990541736",
-    ),
-    (
-        "publication lanes bootstrapped",
-        "4134eab65d527bbd96373fc4a8e473be4991a8c2286ff656ba6cc04f8cbf2b74",
-    ),
-    (
-        "publication lane eligible",
-        "3f090fe947aeb0de7aae879371058dc85129a6bd1afd7746bdfe32a79ba89fb7",
-    ),
-    (
-        "publication attempt started",
-        "075ea5a19a888aa2bccc18c402a0520e7d202299cb9ed9d8e17945282e2a7d2a",
-    ),
-    (
-        "publication retry scheduled",
-        "843e6e73ebe9f4f6d5cc9ff1e43eb8a1a7dc5c588f30b87d6dd2e5a5d8a2b4f5",
-    ),
-    (
-        "publication retry eligible",
-        "3c37a00e3224263d7927ea34313b635c4e049289e9ab400bb993ae783b4aceab",
-    ),
-    (
-        "publication retry started",
-        "29db6ae8fa8230968b15d58c6c046f0de5a33c7f3b438c929c64a86643aaa988",
-    ),
-    (
-        "publication handed off",
-        "2232df354b8ea71ab7f3eac3cdcae68c8807e0583e15d611abb0e0cd4a36d7d7",
-    ),
-    (
-        "publication receipt acked",
-        "3b4d7e8baf33d629b17887b2629d3e1dbd6902771b852d4d0cf631a0a0055223",
-    ),
-    (
-        "publication obligation closed",
-        "3b4d7e8baf33d629b17887b2629d3e1dbd6902771b852d4d0cf631a0a0055223",
-    ),
+    ("insert", "438cd8b97ec0e2be28042aa5ace9bd7fc75bd8a583e3f0c9787b893132608fe2"),
+    ("duplicate provenance", "3e7ec1339084ef345d59b35677fb3fe242525892540fd209e14523b1d533a13c"),
+    ("replaceable first winner", "a68348d2f5d27925b89105f0151b5145cb4af95405b09af3e8fc2ac634b0a4c0"),
+    ("replaceable conflict", "1df9d7308e5241259493eb3256c27555af8f108bab4baf841872cd9b4da73e82"),
+    ("addressable first winner", "d85cf593a1c4e8489b78ced897c9c33a08daf26495d620c8f43a5ec6cee52aa2"),
+    ("addressable conflict", "eca8a0d61721f735e4d4e9e7045c212c3a966abc4fe4b4e633801caf882d725f"),
+    ("deletion target", "8e9a22dedef5dcf718ddbe4d0bc5c80fe43ef26f566992e9836852f05caa2d7d"),
+    ("deletion", "3bae52aa6e311be89264014232bc6b823ac8fa830f41d45bbf5a48b0bde35e37"),
+    ("deletion before target", "f802b018266aa1490f9e365b5dfad5a3675a7b361ca7aa421444d70c8fc290fc"),
+    ("tombstoned target refused", "f802b018266aa1490f9e365b5dfad5a3675a7b361ca7aa421444d70c8fc290fc"),
+    ("expiry indexed", "7168d16aa531fcb41e3233915c78fdf9edd4b8510542fdccaffd4e4956424b48"),
+    ("expiry applied", "f802b018266aa1490f9e365b5dfad5a3675a7b361ca7aa421444d70c8fc290fc"),
+    ("coverage fact persisted", "582aad6704ef47e5604c53e00f75080c3512faa51f8497bacd22285c3857f7e5"),
+    ("coverage recorded after facts", "67c3444fc94484ab6e1a88ed79c4f21032fd8dbe4a93a1f636549dd2b4107952"),
+    ("coverage-safe gc", "2a253ec599c7a2159d0477855a75974ed29fbe040c4f4d3be540220c5051b8b2"),
+    ("maximum coverage fact and claim persisted", "d2303426800c988d08fe682b24ca948766d9723be54dd294089d0b890877d25b"),
+    ("maximum coverage removed with fact", "2a253ec599c7a2159d0477855a75974ed29fbe040c4f4d3be540220c5051b8b2"),
+    ("pending write accepted", "89d7ad04daf5d3371b54da60839cec7bdf4d295f48451acd9de2839a20bd2965"),
+    ("pending write signed", "7796710791a29258fec0f7c85fdc08eaa12e3dbada5724a37767a40a8a1001e0"),
+    ("cancellable write accepted", "0d94ee7c4827c3f1d5641032294e82ee5cf4279caa647efe1879a8d801d2c200"),
+    ("write cancelled", "2d36c0fdced730f1c5bc8c6600ec74ecd39368aed48135d3881905b8e0e1f3e0"),
+    ("replaceable delivery accepted", "193c10569dd7bb80a2aa58289fb80cb18bebfad50893219a8d80ae559fba5210"),
+    ("replaceable delivery superseded", "d058ec28f482f0bf276ff2cea24b459901535a2bddd8a6a173e80fa4fd02f776"),
+    ("superseding delivery compensated", "a9dd593aed8abfcb3d4682046732ae4bc548604b1d36ae24ab729fa7d8146447"),
+    ("multi-relay delivery accepted", "e4f65711422f464d12a58cc1ad31c366658ef75ee64849366528b6bf4d5d11be"),
+    ("multi-relay lanes durable", "5c2e495734ac08203cd09e06254b8b3e7d6ee46acb650e4c9b1ab5d7c66fcea8"),
+    ("ambiguous handoff became outcome unknown", "8a9c9dbc07d719764f053a6e8ab63de430d8e5311989c9b80625fe799adfbe67"),
+    ("delivery attempt gave up", "1587bc3a213e7b313afb99ea8f65c67d88f2f5784a7e55fd042d761a7b7f767e"),
+    ("in-flight delivery interrupted", "9cbeb8678476e4bfdf3d2b738848c7ed422682ccb42260c9590b282d52416f1d"),
+    ("retry ended in relay rejection", "05e93aae6eac089b08e742a9f8d93687f7635f741ed20dd8a74bfd8084753523"),
+    ("multi-relay terminal obligation closed", "05e93aae6eac089b08e742a9f8d93687f7635f741ed20dd8a74bfd8084753523"),
+    ("publication route durable", "4a417b275884f33462148d18b0b60888a225b71fd3c31ce418896bd198eecadb"),
+    ("publication lanes bootstrapped", "b2fc2d23ab28f651fc3fdcfd1c23bbf78956d8146769c43b64fce956845f9d7b"),
+    ("publication lane eligible", "3ab760f8ec669a0d6c62287e909151040da97f3dc2dfac5e8913292079ba2272"),
+    ("publication attempt started", "83533bff9f96cc04625678dd0b01c566be1b0a2787dea289d8791c7d838143d5"),
+    ("publication retry scheduled", "1d49dae0a31b25373882d9a7e0478a2e3ca0db41229174f009da1d67c6d78a0c"),
+    ("publication retry eligible", "73d21ec206155ac4e17dd821ebe8a62807536aa77ee0d25fa205130d3616f534"),
+    ("publication retry started", "df903b8d6211415b286f6f33d3bdca27f67a0550e9fccfa62be777cf9020c007"),
+    ("publication handed off", "484053ad90512913ba8b75d1a27e6af926bf1502d67f030f7f851a206d0cd998"),
+    ("publication receipt acked", "e581d3ba1ae85d141e9e52fc154d5a4f8ef05b1fa2d5b512d79aa4975572bf39"),
+    ("publication obligation closed", "e581d3ba1ae85d141e9e52fc154d5a4f8ef05b1fa2d5b512d79aa4975572bf39"),
 ];
 
 #[derive(Default)]
 struct OracleContext {
     receipt_ids: Vec<u64>,
     intent_ids: Vec<IntentId>,
-    correlations: Vec<String>,
     coverage: Vec<(ContextualAtom, RelayUrl)>,
 }
 
@@ -413,15 +289,6 @@ fn frozen_from(signed: Event) -> Event {
 }
 
 fn accept(frozen: Event, keys: &Keys, accepted_at: u64) -> AcceptWrite {
-    accept_correlated(frozen, keys, accepted_at, None)
-}
-
-fn accept_correlated(
-    frozen: Event,
-    keys: &Keys,
-    accepted_at: u64,
-    correlation: Option<&str>,
-) -> AcceptWrite {
     AcceptWrite {
         payload: crate::AcceptWritePayload::Event {
             frozen: Box::new(frozen),
@@ -431,7 +298,6 @@ fn accept_correlated(
         expected_pubkey: keys.public_key(),
         signing_identity_ref: "semantic-oracle-key".into(),
         accepted_at: Timestamp::from(accepted_at),
-        correlation: correlation.map(|token| CorrelationToken::try_from(token).unwrap()),
     }
 }
 
@@ -566,17 +432,6 @@ fn normalized_state(
             })
         })
         .collect::<Vec<_>>();
-    let correlations = context
-        .correlations
-        .iter()
-        .map(|token| {
-            json!({
-                "token": token,
-                "receipt_id": store.lookup_correlation(token).expect("correlation lookup"),
-            })
-        })
-        .collect::<Vec<_>>();
-
     let state = json!({
         "events": canonical_rows(store.query(&all_filter).expect("all rows")),
         "ordered_queries": {
@@ -589,7 +444,6 @@ fn normalized_state(
         },
         "coverage": coverage,
         "receipts": receipts,
-        "correlations": correlations,
         "delivery": delivery,
         "deadlines": format!("{:?}", store.due_publish_queue_deadlines(Timestamp::from(u64::MAX), 1_000).expect("deadlines")),
         "next_expiration": store
@@ -628,20 +482,9 @@ fn normalized_recovery_state(store: &RedbStore, context: &OracleContext) -> Stri
             )
         })
         .collect::<Vec<_>>();
-    let correlations = context
-        .correlations
-        .iter()
-        .map(|token| {
-            json!({
-                "token": token,
-                "receipt_id": store.lookup_correlation(token).expect("recovery correlation lookup"),
-            })
-        })
-        .collect::<Vec<_>>();
     serde_json::to_string(&json!({
         "open_intents": intents,
         "receipts": receipts,
-        "correlations": correlations,
     }))
     .expect("serialize recovery state")
 }
@@ -1130,26 +973,19 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         &primary,
     );
 
-    let edge_correlation = "semantic-oracle-terminal-edges";
     let edge = harness
         .store()
-        .accept_write(accept_correlated(
-            fixture.edge_frozen.clone(),
-            &bob,
-            290,
-            Some(edge_correlation),
-        ))
+        .accept_write(accept(fixture.edge_frozen.clone(), &bob, 290))
         .unwrap();
     let edge_intent = edge.journaled_intent_id().expect("edge intent");
     let edge_receipt = edge.journaled_receipt_id().expect("edge receipt");
     context.intent_ids.push(edge_intent);
     context.receipt_ids.push(edge_receipt);
-    context.correlations.push(edge_correlation.to_owned());
     record(
         &mut harness,
         &context,
         &mut checkpoints,
-        "correlated multi-relay delivery accepted",
+        "multi-relay delivery accepted",
         &alice,
         &primary,
     );
@@ -1179,7 +1015,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         &mut harness,
         &context,
         &mut checkpoints,
-        "correlated multi-relay lanes durable",
+        "multi-relay lanes durable",
         &alice,
         &primary,
     );

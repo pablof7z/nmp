@@ -26,7 +26,6 @@ fn an_explicit_route_with_no_relays_is_refused_before_acceptance() {
         payload: WritePayload::Event(draft(1, "nowhere")),
         routing: WriteRouting::Explicit(Vec::new()),
         identity: Identity::Active,
-        correlation: None,
     }));
 
     assert!(
@@ -65,7 +64,6 @@ fn an_unreachable_explicit_relay_is_accepted_because_the_door_cannot_know() {
         payload: WritePayload::Event(draft(1, "hello")),
         routing: WriteRouting::Explicit(vec![nowhere.clone()]),
         identity: Identity::Active,
-        correlation: None,
     }));
     assert!(
         effects
@@ -483,14 +481,12 @@ fn a_shared_events_ack_reaches_every_co_owner_after_a_restart() {
             payload: WritePayload::Event(template.clone()),
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }));
         let (id_a, generation_a, to_sign) = find_sign_request(&first);
         let second = core.handle(EngineMsg::Publish(WriteIntent {
             payload: WritePayload::Event(template.clone()),
             routing: WriteRouting::Explicit(vec![other.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }));
         let (id_b, _, _) = find_sign_request(&second);
         assert_ne!(
@@ -612,7 +608,6 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
             payload: WritePayload::Event(draft(86, "dynamic author route")),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
@@ -681,7 +676,6 @@ fn accepted_explicit_route_ignores_later_directory_fact_across_restart() {
             payload: WritePayload::Event(draft(94, "for the archive")),
             routing: WriteRouting::Explicit(vec![chosen.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
@@ -864,7 +858,6 @@ fn an_explicit_route_over_a_live_directory_is_verbatim_and_claims_no_privacy() {
         payload: WritePayload::Event(draft(61, "narrow")),
         routing: WriteRouting::Explicit(vec![chosen.clone()]),
         identity: Identity::Active,
-        correlation: None,
     }));
     let (receipt, generation, unsigned) = find_sign_request(&accepted);
     let signed = unsigned.sign_with_keys(&author).unwrap();
@@ -985,7 +978,6 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
             payload: WritePayload::Event(draft(87, "dynamic author route")),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
@@ -1119,7 +1111,6 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
             payload: WritePayload::Event(draft(88, "volatile route")),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
@@ -1184,7 +1175,6 @@ fn write_ack_per_relay() {
         payload: WritePayload::Event(draft(1, "durable ack test")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, u) = find_sign_request(&effects);
     let signed = u.sign_with_keys(&a).unwrap();
@@ -1271,7 +1261,6 @@ fn a_relay_two_outbox_sources_name_is_offered_the_event_exactly_once() {
         ),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, unsigned) = find_sign_request(&accepted);
     let signed = unsigned.sign_with_keys(&author).unwrap();
@@ -1372,7 +1361,6 @@ fn uncommitted_attempt_terminal_emits_no_receipt_and_keeps_lane_live() {
         payload: WritePayload::Event(draft(2, "finish persistence")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, unsigned) = find_sign_request(&effects);
     let signed = unsigned.sign_with_keys(&a).unwrap();
@@ -1426,7 +1414,6 @@ fn a_refused_publish_mints_no_receipt_and_no_fact() {
             payload: WritePayload::Event(draft(seq, "unaccepted")),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }))
     };
     for seq in [200, 201] {

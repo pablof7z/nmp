@@ -15,7 +15,7 @@
 //! wants "a NIP-22 comment on this specifically" calls this.
 
 use nmp_grammar::{
-    CorrelationToken, EventBuilder, Identity, Modifiers, RootScope, WriteIntent, WritePayload,
+    EventBuilder, Identity, Modifiers, RootScope, WriteIntent, WritePayload,
     WriteRouting, COMMENT_KIND,
 };
 use nostr::Kind;
@@ -34,20 +34,13 @@ pub fn compose_comment(target: &impl RootScope, content: String) -> EventBuilder
         .content(content)
 }
 
-/// Compose a `WriteIntent` for a NIP-22 comment on `target`. `correlation` is
-/// passed straight through to [`WriteIntent::correlation`] (#591) -- this
-/// crate adds no comment-specific correlation machinery of its own, and no
-/// routing or identity policy beyond the ordinary defaults every write has.
-pub fn comment_intent(
-    target: &impl RootScope,
-    content: String,
-    correlation: Option<CorrelationToken>,
-) -> WriteIntent {
+/// Compose a `WriteIntent` for a NIP-22 comment on `target`. This crate adds
+/// no routing or identity policy beyond the ordinary defaults every write has.
+pub fn comment_intent(target: &impl RootScope, content: String) -> WriteIntent {
     WriteIntent {
         payload: WritePayload::Event(compose_comment(target, content)),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation,
     }
 }
 
@@ -80,14 +73,13 @@ mod tests {
 
     #[test]
     fn comment_intent_is_a_builder_on_the_auto_route() {
-        let intent = comment_intent(&podcast_root(), "hi".to_string(), None);
+        let intent = comment_intent(&podcast_root(), "hi".to_string());
         assert!(matches!(
             &intent.payload,
             WritePayload::Event(builder) if builder.created_at.is_none()
         ));
         assert!(matches!(intent.routing, WriteRouting::Auto));
         assert_eq!(intent.identity, Identity::Active);
-        assert!(intent.correlation.is_none());
     }
 
     /// #572's exact required tag shape survives the fold: a top-level comment

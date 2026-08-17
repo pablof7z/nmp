@@ -36,7 +36,7 @@ const PUBLISH_QUEUE_META: TableDefinition<&[u8], &[u8]> =
 /// What is left is: does this need a DIFFERENT LEADING SORT DIMENSION than its
 /// neighbour, or is it a GENUINELY DISTINCT KEY SPACE? If neither, it is a
 /// column, and it belongs in its neighbour's key space.
-const PRODUCTION_TABLES: [&str; 29] = [
+const PRODUCTION_TABLES: [&str; 28] = [
     "addr_index",
     "coverage",
     "event_ids",
@@ -46,7 +46,6 @@ const PRODUCTION_TABLES: [&str; 29] = [
     "postings_segments",
     "publish_queue_attempt_details",
     "publish_queue_attempts",
-    "publish_queue_correlations",
     "publish_queue_deadlines",
     "publish_queue_deadlines_by_intent",
     "publish_queue_displaced",

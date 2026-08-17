@@ -143,7 +143,6 @@ async fn verified_parent_provenance_becomes_a_real_lane_while_raw_hint_text_does
             payload: WritePayload::Event(reply),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("the reply enters NMP custody");
 

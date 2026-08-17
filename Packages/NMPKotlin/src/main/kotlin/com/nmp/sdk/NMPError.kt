@@ -21,9 +21,6 @@ import uniffi.nmp_ffi.FfiException
  * only this one). Because that instruction can never resolve, it surfaces as
  * [NMPError.PublishRefused] from `publish` itself rather than as a fact on a
  * receipt stream nothing will ever add to.
- * Receipt-correlation exhaustion is synchronous because no truthful
- * `Receipt` or status flow can be created without an identity.
- *
  */
 sealed class NMPError(message: String) : Exception(message) {
     data class NonIndexableFilterTag(val got: String) :
@@ -96,7 +93,7 @@ sealed class NMPError(message: String) : Exception(message) {
      * delete the store, and create a fresh one -- your call, through the
      * separate destructive reset. The relay-backed read cache is reacquirable;
      * the publish queue is not, so accepted but unpublished writes and their
-     * receipts, correlation tokens, route revisions, and attempt evidence go
+     * receipts, route revisions, and attempt evidence go
      * with it.
      *
      * [found] is `null` when the store carries no marker this build can read,
@@ -116,7 +113,7 @@ sealed class NMPError(message: String) : Exception(message) {
             ) +
             "; it was not migrated, adopted, drained, or reset; discard and recreate this store " +
             "to continue; NMP can reacquire the relay-backed read cache, but the publish queue " +
-            "state (accepted but unpublished writes, receipts, correlation tokens, route " +
+            "state (accepted but unpublished writes, receipts, route " +
             "revisions, and attempt evidence) will be permanently lost",
     )
     data class StoreResetFailed(val reason: String) : NMPError("store reset failed: $reason")
@@ -230,12 +227,6 @@ sealed class NMPError(message: String) : Exception(message) {
 
     data class RelayInformationUnavailable(val kind: RelayInformationErrorKind) :
         NMPError("relay information unavailable: ${kind.describe()}")
-
-    /** #591: [WriteIntent.correlation]/`reattachReceipt`'s correlation
-     * overload was given a token that failed the bounded/non-empty
-     * validation. */
-    data class InvalidCorrelationToken(val got: String, val reason: String) :
-        NMPError("invalid correlation token $got: $reason")
 
     // nmp-native:if nip22
     /** #572/#1258: an `Nip73` failed its constructor validation (an empty
@@ -428,8 +419,6 @@ sealed class NMPError(message: String) : Exception(message) {
                     TooManyQueryBranches(ffi.requested, ffi.maximum)
                 is FfiException.RelayInformationUnavailable ->
                     RelayInformationUnavailable(RelayInformationErrorKind.from(ffi.kind))
-                is FfiException.InvalidCorrelationToken ->
-                    InvalidCorrelationToken(ffi.got, ffi.reason)
                 // nmp-native:if nip22
                 is FfiException.InvalidNip73 -> InvalidNip73(ffi.reason)
                 // nmp-native:endif

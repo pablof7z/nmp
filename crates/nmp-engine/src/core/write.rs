@@ -2993,45 +2993,6 @@ impl CoreState {
                 })
     }
 
-    /// #591: recover a receipt id from a caller-generated correlation token
-    /// -- the door a client uses after a crash that happened BEFORE it
-    /// could durably record the `Receipt.id` `publish` returned.
-    /// A resolved token is translated to its receipt id and handed straight
-    /// to [`Self::reattach_receipt`], reusing its exact finite replay
-    /// behavior unchanged: no new outcome enum, no separate machinery. The
-    /// resolved [`ReceiptId`] is returned alongside the outcome (`Some` iff
-    /// `Attached`) purely so the caller -- who by construction does NOT
-    /// already know it, unlike a plain [`Self::reattach_receipt`] caller --
-    /// can learn it.
-    pub(in crate::core) fn reattach_by_correlation(
-        &mut self,
-        token: String,
-    ) -> (ReceiptReplayPage, Option<ReceiptId>) {
-        self.reattach_by_correlation_page(token, None, usize::MAX)
-    }
-
-    pub(in crate::core) fn reattach_by_correlation_page(
-        &mut self,
-        token: String,
-        cursor: Option<ReceiptReplayCursor>,
-        limit: usize,
-    ) -> (ReceiptReplayPage, Option<ReceiptId>) {
-        match self.store.lookup_correlation(&token) {
-            Ok(Some(receipt_id)) => {
-                let id = ReceiptId(receipt_id);
-                (self.reattach_receipt_page(id, cursor, limit), Some(id))
-            }
-            Ok(None) => (
-                ReceiptReplayPage::unavailable(ReattachOutcome::NotFound),
-                None,
-            ),
-            Err(_) => (
-                ReceiptReplayPage::unavailable(ReattachOutcome::RetainedButUnreadable),
-                None,
-            ),
-        }
-    }
-
     // ---- publish queue (D: intent -> signed -> routed -> sent -> acked) --
 
     /// Prepare a complete successor from one verified relay source, then ask
@@ -3471,82 +3432,17 @@ impl CoreState {
         }
     }
 
-    // A repeated durable correlation is a finite replay of the existing
-    // obligation, not a second write. Keep that replay distinct from a new
-    // live fact so runtime can prime only this publisher's fresh mailbox
-    // before it joins live delivery. An `Accepted` receipt has no replay fact
-    // by design: the successful return is its acceptance fact, so an empty
-    // attached page is valid at the ambiguous commit boundary (#1362).
-    //
-    // Only an exact pre-signed retry may finish an interrupted promotion.
-    // Divergent, recomposed, invalid, and capability-produced payloads retain
-    // correlation's normal discard semantics.
-    fn replay_correlated_publish(
-        &mut self,
-        token: &nmp_grammar::CorrelationToken,
-        signed: Option<&SignedEvent>,
-    ) -> Result<Option<Vec<Effect>>, PublishError> {
-        let Some(existing_receipt_id) =
-            self.store
-                .lookup_correlation(token.as_ref())
-                .map_err(|error| PublishError::PersistenceFailed {
-                    reason: error.to_string(),
-                })?
-        else {
-            return Ok(None);
-        };
-
-        let receipt_id = ReceiptId(existing_receipt_id);
-        let page = self.reattach_receipt(receipt_id);
-        if page.outcome == ReattachOutcome::Attached {
-            let mut effects = Vec::new();
-            // An ambiguous failure can commit acceptance before a pre-signed
-            // payload reaches `on_signed`. Recovery keeps that row honestly
-            // Pending, but an exact retry carrying the same verified bytes
-            // can finish the interrupted promotion on this same receipt.
-            if let Some(event) = signed {
-                let resumes_interrupted_promotion =
-                    self.pending.get(&receipt_id).is_some_and(|pending| {
-                        !pending.already_signed
-                            && Self::validate_signed_template(&pending.frozen, event).is_ok()
-                    });
-                if resumes_interrupted_promotion {
-                    self.on_signed(receipt_id, event.clone(), &mut effects);
-                }
-            }
-            effects.push(Effect::ReplayReceipt(receipt_id, page));
-            return Ok(Some(effects));
-        }
-
-        // Never mask a corrupt retained identity behind fabricated
-        // acceptance.
-        let status = match page.outcome {
-            ReattachOutcome::Attached => unreachable!("handled above"),
-            ReattachOutcome::NotFound => PublishError::PersistenceFailed {
-                reason: "correlation token resolved to a receipt id the store can no longer find"
-                    .to_string(),
-            },
-            ReattachOutcome::RetainedButUnreadable => PublishError::PersistenceFailed {
-                reason: "correlation token resolved to a retained but unreadable receipt"
-                    .to_string(),
-            },
-        };
-        debug_assert!(page.facts.is_empty());
-        Err(status)
-    }
-
     pub(in crate::core) fn prepare_publish(&mut self, intent: WriteIntent) -> PublishPreparation {
         let WriteIntent {
             payload,
             routing,
             identity,
-            correlation,
         } = intent;
 
         // The empty explicit route is refused FIRST, ahead of every other
         // door check: "reject it immediately". Nothing durable may exist for
         // it — no intent, no journal row, no receipt lifecycle, no signer
-        // request, no correlation lookup — and it never degrades into `Auto`,
+        // request — and it never degrades into `Auto`,
         // because sending a write to relays the caller did not choose is the
         // failure this refusal exists to prevent.
         if matches!(&routing, WriteRouting::Explicit(relays) if relays.is_empty()) {
@@ -3555,37 +3451,12 @@ impl CoreState {
             );
         }
 
-        // #591: a token that already resolves to a previously-accepted
-        // receipt REATTACHES that existing obligation -- this call enqueues
-        // no second write, and `payload`/`durability`/`routing`/
-        // `identity` above are discarded entirely without so much
-        // as a body comparison (a legitimately re-composed draft with a
-        // fresh `created_at` is the exact scenario the token exists for).
-        // The lookup runs inside this single-threaded reducer step, before
-        // any store mutation for THIS call. A body-complete operation repeats
-        // this same door after its detached capability call because other
-        // reducer commands can advance while that call is in flight.
-        if let Some(token) = &correlation {
-            let signed = match &payload {
-                WritePayload::Signed(event) => Some(event),
-                _ => None,
-            };
-            match self.replay_correlated_publish(token, signed) {
-                Ok(Some(effects)) => return PublishPreparation::Complete(effects),
-                Ok(None) => {}
-                Err(error) => {
-                    return PublishPreparation::Complete(self.refuse_publish(error));
-                }
-            }
-        }
-
         let payload = match payload {
             WritePayload::ReplaceableOperation(operation) => {
                 return self.prepare_body_complete_replaceable_operation(
                     operation,
                     routing,
                     identity,
-                    correlation,
                 )
             }
             payload => payload,
@@ -3672,7 +3543,6 @@ impl CoreState {
                 expected_pubkey: signing_pubkey,
                 signing_identity_ref: signing_pubkey.to_hex(),
                 accepted_at: self.clock,
-                correlation,
             };
             let LocalAcceptResult { outcome, committed } =
                 match self.resolver.accept_local(&mut self.store, accept) {

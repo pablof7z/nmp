@@ -18,7 +18,6 @@ fn already_expired_publish_is_refused_before_receipt_custody() {
         payload: WritePayload::Signed(event),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     });
     match refused {
         Err(error) => assert_eq!(

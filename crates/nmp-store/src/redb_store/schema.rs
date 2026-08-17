@@ -318,8 +318,6 @@ pub(super) const PUBLISH_QUEUE_META: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("publish_queue_meta");
 pub(super) const PUBLISH_QUEUE_RECEIPTS: TableDefinition<&[u8; 8], &[u8]> =
     TableDefinition::new("publish_queue_receipts");
-pub(super) const PUBLISH_QUEUE_CORRELATIONS: TableDefinition<&[u8], &[u8; 8]> =
-    TableDefinition::new("publish_queue_correlations");
 pub(super) const PUBLISH_QUEUE_RELAYS: TableDefinition<&[u8; 4], &[u8]> =
     TableDefinition::new("publish_queue_relays");
 pub(super) const PUBLISH_QUEUE_RELAY_IDS: TableDefinition<&[u8], &[u8; 4]> =

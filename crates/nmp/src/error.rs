@@ -50,7 +50,7 @@ pub enum EngineError {
     /// [`Engine::reset_persistent_store`](crate::Engine::reset_persistent_store)
     /// stays a separate deliberate act. The relay-backed read cache can be
     /// reacquired; the publish queue cannot, so accepted but unpublished
-    /// writes and their receipts, correlation tokens, route revisions, and
+    /// writes and their receipts, route revisions, and
     /// attempt evidence are lost with it.
     ///
     /// `expected` is this build's epoch. `found` is the marker actually

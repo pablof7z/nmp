@@ -242,7 +242,6 @@ fn current_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             payload: WritePayload::Event(body_of(&unsigned_as_b)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -272,7 +271,6 @@ fn current_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             payload: WritePayload::Event(body_of(&unsigned_as_a_while_b_active)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -299,7 +297,6 @@ fn current_account_reroots_reads_but_each_write_uses_its_frozen_author() {
             payload: WritePayload::Event(body_of(&unsigned_as_a)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -344,7 +341,6 @@ fn no_current_account_cannot_select_an_arbitrary_registered_signer() {
         payload: WritePayload::Event(body_of(&unsigned)),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     });
     assert!(
         matches!(refused.err(), Some(PublishError::NoCurrentAccount)),
@@ -393,7 +389,6 @@ fn an_auto_write_on_a_cold_directory_parks_instead_of_failing() {
             }),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -467,7 +462,6 @@ fn a_builder_composed_before_a_switch_publishes_as_the_account_active_at_accepta
             payload: WritePayload::Event(composed_while_a_was_active),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("the engine is open")
         .statuses;
@@ -513,7 +507,6 @@ fn attaching_matching_signer_rearms_awaiting_intent() {
             }),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -570,7 +563,6 @@ fn accepted_b_intent_stays_pinned_after_switch_to_a_and_b_attach() {
             }),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -638,7 +630,6 @@ fn stale_registration_cannot_detach_replacement_for_same_pubkey() {
             }),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -729,7 +720,6 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
             payload: WritePayload::Event(body_of(&draft)),
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(b.public_key()),
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -789,7 +779,6 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
             payload: WritePayload::Event(body_of(&a_draft)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -841,7 +830,6 @@ fn unregistered_override_parks_durably_and_never_retargets_on_account_switch() {
             payload: WritePayload::Event(body_of(&draft)),
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(b.public_key()),
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -915,7 +903,6 @@ fn an_explicit_identity_signs_while_logged_out() {
             payload: WritePayload::Event(body_of(&draft)),
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(b.public_key()),
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;

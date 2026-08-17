@@ -168,9 +168,9 @@ final class NIP22Tests: XCTestCase {
     /// signer, publish -- whose returning receipt IS the durable acceptance --
     /// observe the parked `SigningState.awaitingSigner` (the canonical
     /// "locally pending" state an app renders without interpreting
-    /// `sources`/the all-zero sig sentinel itself), and prove the SAME token
+    /// `sources`/the all-zero sig sentinel itself), and prove the receipt
     /// reattaches the identical obligation.
-    func testOfflineSignerDurableAcceptanceAndCorrelationReattachment() async throws {
+    func testOfflineSignerDurableAcceptanceAndReattachment() async throws {
         let engine = try NMPEngine(
             config: NMPConfig(
                 outboxRouting: OutboxRoutingConfig(indexers: ["wss://indexer.example"])
@@ -179,11 +179,9 @@ final class NIP22Tests: XCTestCase {
         defer { engine.shutdown() }
         _ = try engine.session.add(publicKey: testPublicKey(author), makeCurrent: true)
 
-        let token = "nip22-offline-signer-token"
         let intent = try NMP.commentIntent(
             on: .root(.external(target: .podcastEpisode(guid: "guid-offline"))),
-            content: "great show",
-            correlation: token
+            content: "great show"
         )
         let receipt = try await engine.publish(intent)
         let statuses = try await Self.withTimeout {
@@ -191,10 +189,10 @@ final class NIP22Tests: XCTestCase {
         }
         XCTAssertEqual(statuses, [.signing(.awaitingSigner(pubkey: author))])
 
-        // The app never learned the numeric receipt id (it only minted the
-        // token) -- reattach using only the token, mirroring a restart.
-        guard case .attached(let replay) = try engine.reattachReceipt(correlation: token) else {
-            return XCTFail("a token that resolved during publish must remain reattachable")
+        // Mirror a restart: reattach by the stable receipt id the publish
+        // door already answered with.
+        guard case .attached(let replay) = try engine.reattachReceipt(id: receipt.id) else {
+            return XCTFail("an accepted obligation must remain reattachable")
         }
         let replayStatuses = try await Self.withTimeout {
             await Self.collect(replay.status, count: 1)
@@ -233,7 +231,6 @@ final class NIP22Tests: XCTestCase {
         )
         XCTAssertEqual(intent.routing, .auto)
         XCTAssertEqual(intent.identity, .active)
-        XCTAssertNil(intent.correlation)
     }
 
     func testDurableAcceptanceMakesOneCanonicalPendingCommentVisibleThroughTheQueryPath() async throws {

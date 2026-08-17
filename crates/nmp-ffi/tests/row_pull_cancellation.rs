@@ -67,7 +67,6 @@ async fn publish_note(engine: &NmpEngine, sequence: u64) {
                 relays: vec!["wss://write.example".to_string()],
             },
             identity: FfiIdentity::Active,
-            correlation: None,
         })
         .expect("local acceptance succeeds");
 }

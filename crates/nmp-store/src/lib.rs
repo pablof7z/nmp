@@ -546,10 +546,6 @@ pub struct AcceptWrite {
     /// (Fable checkpoint Q5).
     pub signing_identity_ref: String,
     pub accepted_at: Timestamp,
-    /// #591 crash-safe correlation token. When `Some`, checked (and, on a
-    /// first sighting, journaled) inside this SAME acceptance transaction
-    /// -- see [`RedbStore::accept_write`]'s doc for the exact protocol.
-    pub correlation: Option<nmp_grammar::CorrelationToken>,
 }
 
 /// The closed work shape accepted through [`RedbStore::accept_write`].

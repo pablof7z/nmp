@@ -185,7 +185,6 @@ fn arm_generation_with_author(
             payload,
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Explicit(author.public_key()),
-            correlation: None,
         }));
         let receipt = accepted
             .iter()
@@ -452,7 +451,6 @@ fn a_stale_ack_for_a_superseded_generation_cannot_settle_its_successor() {
         payload: payload2,
         routing: WriteRouting::Explicit(vec![gen1.relay.clone()]),
         identity: Identity::Explicit(gen1.coordinate.public_key),
-        correlation: None,
     }));
     let gen2_receipt = accepted2
         .iter()

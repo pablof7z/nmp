@@ -294,19 +294,6 @@ enum Cmd {
         registration: ReceiptDeliveryRegistration,
         reply: Sender<(ReattachOutcome, Option<ReceiptReplayCursor>)>,
     },
-    /// #591: reattach by caller correlation token instead of a `ReceiptId`
-    /// -- the door a client uses after a crash that happened before it
-    /// could durably record the id `publish` returned.
-    ReattachByCorrelation {
-        token: String,
-        sender: FifoSender<WriteFact>,
-        registration: ReceiptDeliveryRegistration,
-        reply: Sender<(
-            ReattachOutcome,
-            Option<ReceiptId>,
-            Option<ReceiptReplayCursor>,
-        )>,
-    },
     DetachReceiptDelivery {
         id: ReceiptId,
         registration: ReceiptDeliveryRegistration,
@@ -1027,7 +1014,6 @@ mod relay_worker_reconciliation_tests {
             ),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         let (receipt_id, generation, unsigned) = accepted
             .into_iter()
@@ -2046,29 +2032,6 @@ fn engine_loop(
                     );
                     let _ = reply.send(found);
                 }
-                Cmd::ReattachByCorrelation {
-                    token,
-                    sender,
-                    registration,
-                    reply,
-                } => {
-                    let (page, id) =
-                        core.reattach_by_correlation_page(token, None, FACT_CHANNEL_CAPACITY);
-                    let found = if let Some(id) = id {
-                        let (outcome, cursor) = deliver_receipt_replay_page(
-                            &core,
-                            &mut receipt_deliveries.borrow_mut(),
-                            id,
-                            sender,
-                            registration,
-                            page,
-                        );
-                        (outcome, Some(id), cursor)
-                    } else {
-                        (page.outcome, None, None)
-                    };
-                    let _ = reply.send(found);
-                }
                 Cmd::DetachReceiptDelivery { id, registration } => {
                     receipt_deliveries.borrow_mut().detach(id, &registration);
                 }
@@ -2685,29 +2648,6 @@ fn engine_loop(
                     registration,
                     page,
                 );
-                let _ = reply.send(found);
-            }
-            Cmd::ReattachByCorrelation {
-                token,
-                sender,
-                registration,
-                reply,
-            } => {
-                let (page, id) =
-                    core.reattach_by_correlation_page(token, None, FACT_CHANNEL_CAPACITY);
-                let found = if let Some(id) = id {
-                    let (outcome, cursor) = deliver_receipt_replay_page(
-                        &core,
-                        &mut receipt_deliveries.borrow_mut(),
-                        id,
-                        sender,
-                        registration,
-                        page,
-                    );
-                    (outcome, Some(id), cursor)
-                } else {
-                    (page.outcome, None, None)
-                };
                 let _ = reply.send(found);
             }
             Cmd::DetachReceiptDelivery { id, registration } => {

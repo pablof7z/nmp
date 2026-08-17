@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, Binding, CorrelationToken, Demand, EventBuilder, Filter, Identity,
+    AccessContext, Binding, Demand, EventBuilder, Filter, Identity,
     SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
 use nostr::nips::nip65::RelayMetadata;
@@ -92,7 +92,6 @@ pub struct BootstrapRelayList {
     author: PublicKey,
     bootstrap_relays: BTreeSet<RelayUrl>,
     relay_list: Vec<RelayListEntry>,
-    correlation: Option<CorrelationToken>,
 }
 
 impl BootstrapRelayList {
@@ -145,15 +144,7 @@ impl BootstrapRelayList {
             author,
             bootstrap_relays: exact_bootstrap_relays,
             relay_list,
-            correlation: None,
         })
-    }
-
-    /// Attach a caller-persisted correlation token for crash-safe receipt
-    /// recovery. Token uniqueness remains the ordinary NMP caller contract.
-    pub fn with_correlation(mut self, correlation: CorrelationToken) -> Self {
-        self.correlation = Some(correlation);
-        self
     }
 
     pub fn author(&self) -> PublicKey {
@@ -228,7 +219,6 @@ fn compose_relay_list_bootstrap(request: BootstrapRelayList) -> WriteIntent {
         author,
         bootstrap_relays,
         relay_list,
-        correlation,
     } = request;
     let tags: Vec<Tag> = relay_list
         .into_iter()
@@ -247,7 +237,6 @@ fn compose_relay_list_bootstrap(request: BootstrapRelayList) -> WriteIntent {
         // selects the signing identity rather than something the engine
         // has to compare a stamped author against.
         identity: Identity::Explicit(author),
-        correlation,
     }
 }
 

@@ -28,7 +28,7 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
                 "Persistent store /sentinel/store is schema epoch 10, not the one supported epoch 13;"
                     + " it was not migrated, adopted, drained, or reset; discard and recreate this store to continue;"
                     + " NMP can reacquire the relay-backed read cache, but the publish queue state (accepted but"
-                    + " unpublished writes, receipts, correlation tokens, route revisions, and attempt evidence) will be"
+                    + " unpublished writes, receipts, route revisions, and attempt evidence) will be"
                     + " permanently lost"
             ),
             (
@@ -37,7 +37,7 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
                     + " epoch 13;"
                     + " it was not migrated, adopted, drained, or reset; discard and recreate this store to continue;"
                     + " NMP can reacquire the relay-backed read cache, but the publish queue state (accepted but"
-                    + " unpublished writes, receipts, correlation tokens, route revisions, and attempt evidence) will be"
+                    + " unpublished writes, receipts, route revisions, and attempt evidence) will be"
                     + " permanently lost"
             ),
             (.storeResetFailed("sentinel-reset"), "Could not reset store: sentinel-reset"),
@@ -90,10 +90,6 @@ final class NMPErrorLocalizedDescriptionTests: XCTestCase {
             (
                 .relayInformationUnavailable(.http(reason: "sentinel-http")),
                 "Relay information unavailable: NIP-11 HTTP request failed: sentinel-http"
-            ),
-            (
-                .invalidCorrelationToken(got: "sentinel-token", reason: "sentinel-correlation"),
-                #"Invalid correlation token "sentinel-token": sentinel-correlation"#
             ),
             (.invalidNip73(reason: "sentinel-id"), "Invalid NIP-73 external content id: sentinel-id"),
             (

@@ -170,22 +170,19 @@ class NIP22Test {
      * falsifier: compose a comment intent while the active identity has no
      * signer, publish (acceptance IS the return), observe the park at
      * `Signing(AwaitingSigner)` -- the canonical "locally pending" state
-     * -- and prove the SAME token
-     * reattaches the identical obligation. */
+     * -- and prove the receipt reattaches the identical obligation. */
     @Test
-    fun offlineSignerDurableAcceptanceAndCorrelationReattachment() =
+    fun offlineSignerDurableAcceptanceAndReattachment() =
         runBlocking {
             NMPEngine(
                 NMPConfig(outboxRouting = OutboxRoutingConfig(indexers = listOf("wss://indexer.example"))),
             ).use { engine ->
                 engine.session.add(author.testPublicKey(), makeCurrent = true)
 
-                val token = "kotlin-nip22-offline-signer-token"
                 val intent =
                     commentIntent(
                         target = CommentTarget.Root(CommentRoot.External(Nip73.PodcastEpisode("guid-offline"))),
                         content = "great show",
-                        correlation = token,
                     )
                 val receipt = engine.publish(intent)
                 val facts = withTimeout(5_000) { receipt.status.take(1).toList() }
@@ -194,10 +191,9 @@ class NIP22Test {
                     facts,
                 )
 
-                // The app never learned the numeric receipt id (it only minted
-                // the token) -- reattach using only the token, mirroring a
-                // restart.
-                val reattachment = engine.reattachReceipt(token)
+                // Mirror a restart: reattach by the stable receipt id the
+                // publish door already answered with.
+                val reattachment = engine.reattachReceipt(receipt.id)
                 assertTrue(reattachment is ReceiptReattachment.Attached)
                 val replay = (reattachment as ReceiptReattachment.Attached).receipt
                 // A reattachment REPLAYS the retained obligation: both parks,
@@ -247,7 +243,6 @@ class NIP22Test {
         )
         assertEquals(WriteRouting.Auto, intent.routing)
         assertEquals(Identity.Active, intent.identity)
-        assertEquals(null, intent.correlation)
     }
 
     /** #572 review finding 4: "durable acceptance makes one canonical

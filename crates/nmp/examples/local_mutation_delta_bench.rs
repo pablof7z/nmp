@@ -193,7 +193,6 @@ fn accept_write(signed: &Event, accepted_at: u64) -> AcceptWrite {
         expected_pubkey: signed.pubkey,
         signing_identity_ref: "local-mutation-benchmark".to_owned(),
         accepted_at: Timestamp::from(accepted_at),
-        correlation: None,
     }
 }
 

@@ -69,7 +69,6 @@ class WriteIntentTest {
                         ),
                     routing = FfiWriteRouting.Auto,
                     identity = FfiIdentity.Explicit("a".repeat(64)),
-                    correlation = "correlation-42",
                 ),
             )
         assertEquals(
@@ -83,7 +82,6 @@ class WriteIntentTest {
         )
         assertEquals(WriteRouting.Auto, unsigned.routing)
         assertEquals(Identity.Explicit("a".repeat(64)), unsigned.identity)
-        assertEquals("correlation-42", unsigned.correlation)
 
         val signed =
             WriteIntent.from(
@@ -100,7 +98,6 @@ class WriteIntentTest {
                         ),
                     routing = FfiWriteRouting.Auto,
                     identity = FfiIdentity.Active,
-                    correlation = null,
                 ),
             )
         assertEquals(
@@ -117,7 +114,6 @@ class WriteIntentTest {
         )
         assertEquals(WriteRouting.Auto, signed.routing)
         assertEquals(Identity.Active, signed.identity)
-        assertNull(signed.correlation)
     }
 
     /** #972: a Kotlin app can name the exact relays a write goes to -- the
@@ -147,7 +143,6 @@ class WriteIntentTest {
                         ),
                     routing = FfiWriteRouting.Explicit(typed),
                     identity = FfiIdentity.Active,
-                    correlation = null,
                 ),
             )
         assertEquals(WriteRouting.Explicit(typed), back.routing)

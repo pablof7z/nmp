@@ -1216,7 +1216,6 @@ fn write_ack_per_relay_over_real_relays() {
             payload: WritePayload::Event(body_of(&unsigned)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -1416,7 +1415,6 @@ fn reconnect_requires_a_fresh_real_relay_challenge() {
             }),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -1583,7 +1581,6 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
             payload: WritePayload::Event(body_of(&contact_list)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -1608,7 +1605,6 @@ fn follows_minus_mutes_resolves_over_a_real_relay() {
             payload: WritePayload::Event(body_of(&mute_list)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;

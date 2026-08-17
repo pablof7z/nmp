@@ -169,7 +169,6 @@ mod affected_handle_invalidation_tests {
             payload: WritePayload::Signed(event),
             routing: WriteRouting::Explicit(vec![relay.clone()]),
             identity: Identity::Active,
-            correlation: None,
         }
     }
 
@@ -322,7 +321,6 @@ mod affected_handle_invalidation_tests {
                 }),
                 routing: WriteRouting::Explicit(vec![relay]),
                 identity: Identity::Active,
-                correlation: None,
             })
         });
         let receipt = accepted
@@ -399,7 +397,6 @@ mod affected_handle_invalidation_tests {
                 }),
                 routing: WriteRouting::Explicit(vec![relay.clone()]),
                 identity: Identity::Active,
-                correlation: None,
             })
         });
         let receipt = accepted
@@ -480,7 +477,6 @@ mod affected_handle_invalidation_tests {
                 }),
                 routing: WriteRouting::Explicit(vec![relay]),
                 identity: Identity::Active,
-                correlation: None,
             })
         });
         let receipt = accepted
@@ -554,7 +550,6 @@ mod affected_handle_invalidation_tests {
                 }),
                 routing: WriteRouting::Explicit(vec![relay]),
                 identity: Identity::Active,
-                correlation: None,
             })
         });
         let receipt = accepted

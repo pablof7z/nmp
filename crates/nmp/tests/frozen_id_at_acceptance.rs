@@ -44,7 +44,6 @@ fn durable(event: Event) -> WriteIntent {
         payload: WritePayload::Signed(event),
         routing: WriteRouting::Explicit(vec![unreachable_relay()]),
         identity: Identity::Active,
-        correlation: None,
     }
 }
 
@@ -94,7 +93,6 @@ fn the_frozen_id_is_the_id_the_signature_lands_on() {
             ),
             routing: WriteRouting::Explicit(vec![unreachable_relay()]),
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("accepted");
 
@@ -113,44 +111,6 @@ fn the_frozen_id_is_the_id_the_signature_lands_on() {
     assert_eq!(
         signed, receipt.event_id,
         "signing may not move an id acceptance already answered with"
-    );
-    engine.shutdown();
-}
-
-/// #591's correlation token makes a repeated publish resolve to the OBLIGATION
-/// it already accepted, discarding the re-composed draft entirely. The
-/// acceptance answer must follow the obligation, so the id reported is the
-/// retained one and never the discarded draft's.
-#[test]
-fn a_correlation_replay_answers_with_the_retained_obligation_id() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("correlation.redb");
-    let keys = Keys::generate();
-    let engine = engine_over(&path, &keys);
-
-    let first = note(&keys, "the write that was accepted");
-    let second = note(&keys, "a differently composed retry of the same intent");
-    assert_ne!(first.id, second.id, "the fixture needs two distinct bodies");
-
-    let token = nmp_grammar::CorrelationToken::try_from("frozen-id-at-acceptance")
-        .expect("a non-empty bounded token");
-    let accepted = engine
-        .publish(WriteIntent {
-            correlation: Some(token.clone()),
-            ..durable(first.clone())
-        })
-        .expect("accepted");
-    let replayed = engine
-        .publish(WriteIntent {
-            correlation: Some(token),
-            ..durable(second)
-        })
-        .expect("the token resolves to the existing obligation");
-
-    assert_eq!(replayed.id, accepted.id, "one token, one receipt");
-    assert_eq!(
-        replayed.event_id, first.id,
-        "the replay must report the obligation's identity, not the draft it threw away"
     );
     engine.shutdown();
 }

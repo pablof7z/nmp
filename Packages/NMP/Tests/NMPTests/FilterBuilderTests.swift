@@ -230,8 +230,7 @@ final class FilterBuilderTests: XCTestCase {
                     )
                 ),
                 routing: .auto,
-                identity: .explicit(pubkey: String(repeating: "a", count: 64)),
-                correlation: "correlation-42"
+                identity: .explicit(pubkey: String(repeating: "a", count: 64))
             )
         )
         XCTAssertEqual(
@@ -245,7 +244,6 @@ final class FilterBuilderTests: XCTestCase {
         )
         XCTAssertEqual(composed.routing, .auto)
         XCTAssertEqual(composed.identity, .explicit(pubkey: String(repeating: "a", count: 64)))
-        XCTAssertEqual(composed.correlation, "correlation-42")
 
         let signed = WriteIntent(
             FfiWriteIntent(
@@ -259,8 +257,7 @@ final class FilterBuilderTests: XCTestCase {
                     sig: String(repeating: "e", count: 128)
                 ),
                 routing: .auto,
-                identity: .active,
-                correlation: nil
+                identity: .active
             )
         )
         XCTAssertEqual(
@@ -277,7 +274,6 @@ final class FilterBuilderTests: XCTestCase {
         )
         XCTAssertEqual(signed.routing, .auto)
         XCTAssertEqual(signed.identity, .active)
-        XCTAssertNil(signed.correlation)
     }
 
     /// #972: a Swift app can name the exact relays a write goes to -- the
@@ -298,8 +294,7 @@ final class FilterBuilderTests: XCTestCase {
                         kind: 1, tags: [], content: "for the archive", createdAt: 42)
                 ),
                     routing: .explicit(relays: typed),
-                identity: .active,
-                correlation: nil
+                identity: .active
             )
         )
         XCTAssertEqual(back.routing, .explicit(relays: typed))
