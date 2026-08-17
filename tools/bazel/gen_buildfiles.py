@@ -396,6 +396,21 @@ _CARGO_EXE_RE = re.compile(r'env!\("CARGO"\)')
 _GIT_CMD_RE = re.compile(r'Command\s*::\s*new\s*\(\s*"git"')
 
 
+# A test that spawns the host `cargo` or `git` to introspect the workspace runs
+# UNDER `bazel test //...`, exactly as it ran under `cargo test`. It is not
+# hermetic and is not pretended to be: `no-sandbox` lets it reach the real
+# checkout its runfiles symlinks point back at, and `env_inherit` gives it the
+# PATH those tools live on plus the Cargo home holding the registry cache.
+#
+# The alternative, tagging it `manual`, silently drops it from the default run
+# -- which reads as green while covering less than Cargo did. A test skipped by
+# default is not a passing test.
+HOST_TOOL_LINES = [
+    '    tags = ["no-sandbox"],',
+    '    env_inherit = ["PATH", "HOME", "CARGO_HOME"],',
+]
+
+
 def cargo_env_refs(src_paths, mdir):
     """(bin_exe_names, needs_cargo, uses_git) from scanning the given sources."""
     names = set()
@@ -699,7 +714,7 @@ def gen_for(pkg, prod_feats, prod_opt, test_feats, test_opt_all, bin_label_by_na
         unit_env, unit_labels, unit_host = bin_exe_env(lib_src_files)
         emit_env_data(L, unit_env, unit_labels)
         if unit_host:
-            L.append('    tags = ["manual"],')
+            L.extend(HOST_TOOL_LINES)
         L.append(PUBLIC)
         L.append(")")
         L.append("")
@@ -725,7 +740,7 @@ def gen_for(pkg, prod_feats, prod_opt, test_feats, test_opt_all, bin_label_by_na
         integ_env, integ_labels, integ_host = bin_exe_env(srcs)
         emit_env_data(L, integ_env, integ_labels)
         if integ_host:
-            L.append('    tags = ["manual"],')
+            L.extend(HOST_TOOL_LINES)
         L.append(PUBLIC)
         L.append(")")
         L.append("")

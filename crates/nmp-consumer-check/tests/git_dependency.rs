@@ -5,11 +5,21 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// The real source checkout -- `git ls-files` and a `file://` clone both need
+/// it, and neither works against a copy.
+///
+/// Under `bazel test` the process starts in a runfiles tree, not the checkout,
+/// so CARGO_MANIFEST_DIR is a relative path into that tree and has no `.git`
+/// above it. Bazel stages source FILES as symlinks back to the checkout (the
+/// directories are real), so canonicalizing this crate's own manifest is what
+/// recovers it. Under Cargo the path is already absolute and real and this
+/// resolves to the same place.
 fn repository_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+        .expect("nmp-consumer-check's own manifest must resolve")
         .ancestors()
-        .nth(2)
-        .expect("consumer-check lives two levels below the repository root")
+        .nth(3)
+        .expect("consumer-check's manifest lives three levels below the repository root")
         .to_owned()
 }
 
