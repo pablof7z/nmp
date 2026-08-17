@@ -531,7 +531,7 @@
           "FILE:@@//crates/nmp-ffi/Cargo.toml 54e790a784f758fe7837929e6023c3ff7324dfa122e6e8d8b89507ce245ee47c",
           "FILE:@@//crates/nmp-media/Cargo.toml de120f8f96fe7c91c5525b490cd26cf987ec493996296a7bd5e2d995033e1036",
           "FILE:@@//crates/nmp-nip68/Cargo.toml 37e754d2c83b3744b582e627b3c24f62439cbca1afd4264feb336f12f7bcd93c",
-          "FILE:@@//crates/nmp-bdd/Cargo.toml a5bfd6ec4fe851fb1d35382d9896336c780373602220912d794d34058d9268b6",
+          "FILE:@@//crates/nmp-bdd/Cargo.toml bb4ae3b45ee9545c1c72cdf0ee351359a24ccdb8acbb59a248000f3c88c212ac",
           "FILE:@@//crates/nmp-parity/Cargo.toml 963cc5f7942f9632feb100ef5d8897278d986d005369afcd41c0d0f48b31ebab",
           "FILE:@@//crates/nmp-nip65-consumer-check/Cargo.toml c6edc2a9637d7c3f602e034dfa9aa20357994ad5b41e2d7fd0cdf11b93f44e8d",
           "FILE:@@//crates/nmp-bookmarks/Cargo.toml b5e6764ba199574e16f70e8591159a0683a18379b8dd0083c7a34528b6d8fbb4"
