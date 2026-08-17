@@ -211,3 +211,31 @@ tempfile = "3"
 thiserror = "2"
 toml = "0.8"
 walkdir = "2"
+
+# Measured, not guessed (#1808). On a live 21 GB `target/debug` built with Rust
+# dev defaults, **over 80% was incremental-compilation byproduct rather than
+# linkable output**: 12.36 GB across 80,449 loose `.rcgu.o` files, against only
+# 2.6 GB of actual `.rlib`s and ~1 GB of final binaries. The default 256
+# codegen-units in dev is what multiplies the object count.
+#
+# That mattered because parallel worktrees each carried their own 10-21 GB
+# `target/`, and six of them filled a 926 GB disk to 100% — which halted every
+# agent outright, since the harness writes a per-call output file.
+#
+# `incremental = false` is the direct fix: this workspace is built far more
+# often from clean or near-clean state (fresh worktrees, CI-less full runs)
+# than in single-crate edit loops, so the incremental cache was paying for a
+# case we rarely hit while costing disk in the case we always hit. `debug = 1`
+# keeps line tables for panic backtraces and drops full type debuginfo.
+#
+# Trade-off, stated plainly: a tight edit-recompile loop on one crate gets
+# slower. Full builds should be similar or faster.
+[profile.dev]
+incremental = false
+debug = 1
+codegen-units = 16
+
+[profile.test]
+incremental = false
+debug = 1
+codegen-units = 16
