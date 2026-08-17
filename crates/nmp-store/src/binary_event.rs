@@ -433,8 +433,38 @@ pub(crate) fn encode_local(local: &LocalOrigin) -> Result<Vec<u8>, DecodeError> 
     Ok(out)
 }
 
+/// Decode a `LocalOrigin` owner set: `count` big-endian `u64` ids, which must
+/// already be in canonical set form (the form both `encode_local` and
+/// `encode_provenance` produce from a `BTreeSet`) — strictly ascending, no
+/// repeats. This is the only decoder for that invariant; every envelope that
+/// embeds an owner set, standalone or displaced, calls this rather than
+/// re-checking order on its own.
+fn decode_owners(
+    bytes: &[u8],
+    cursor: &mut usize,
+    count: usize,
+) -> Result<BTreeSet<IntentId>, DecodeError> {
+    let mut owners = BTreeSet::new();
+    let mut previous_owner = None;
+    for _ in 0..count {
+        let owner = IntentId(take_u64(bytes, cursor)?);
+        if let Some(previous) = previous_owner {
+            if owner.0 == previous {
+                return Err(DecodeError::DuplicateOwner);
+            }
+            if owner.0 < previous {
+                return Err(DecodeError::InvalidOwnerOrder);
+            }
+        }
+        owners.insert(owner);
+        previous_owner = Some(owner.0);
+    }
+    Ok(owners)
+}
+
 /// Decode one canonical local-state envelope. Owner ids must already be in
-/// canonical set form: repeated ids are rejected rather than silently folded.
+/// canonical set form: repeated or out-of-order ids are rejected rather than
+/// silently folded or reordered.
 pub(crate) fn decode_local(bytes: &[u8]) -> Result<LocalOrigin, DecodeError> {
     if bytes.len() < LOCAL_HEADER_LEN {
         return Err(DecodeError::Truncated);
@@ -458,23 +488,7 @@ pub(crate) fn decode_local(bytes: &[u8]) -> Result<LocalOrigin, DecodeError> {
     }
 
     let mut cursor = LOCAL_HEADER_LEN;
-    let mut owners = BTreeSet::new();
-    let mut previous_owner = None;
-    for _ in 0..owner_count {
-        let owner = IntentId(take_u64(bytes, &mut cursor)?);
-        if let Some(previous) = previous_owner {
-            if owner.0 == previous {
-                return Err(DecodeError::DuplicateOwner);
-            }
-            if owner.0 < previous {
-                return Err(DecodeError::InvalidOwnerOrder);
-            }
-        }
-        if !owners.insert(owner) {
-            return Err(DecodeError::DuplicateOwner);
-        }
-        previous_owner = Some(owner.0);
-    }
+    let owners = decode_owners(bytes, &mut cursor, owner_count)?;
     debug_assert_eq!(cursor, expected_len);
     Ok(LocalOrigin { owners, sig_state })
 }
@@ -554,13 +568,7 @@ pub(crate) fn decode_provenance(bytes: &[u8]) -> Result<Provenance, DecodeError>
             1 => SigState::Signed,
             other => return Err(DecodeError::InvalidLocalState(other)),
         };
-        let mut owners = BTreeSet::new();
-        for _ in 0..owner_count {
-            let owner = IntentId(take_u64(bytes, &mut cursor)?);
-            if !owners.insert(owner) {
-                return Err(DecodeError::DuplicateOwner);
-            }
-        }
+        let owners = decode_owners(bytes, &mut cursor, owner_count as usize)?;
         Some(LocalOrigin { owners, sig_state })
     } else {
         None
@@ -1569,6 +1577,39 @@ mod tests {
         assert_eq!(
             decode_provenance(&empty_pending_local_bytes).unwrap(),
             empty_pending_local
+        );
+    }
+
+    #[test]
+    fn provenance_local_owners_reject_the_same_orderings_as_standalone_local() {
+        // #1819: bytes a canonical standalone local row rejects must be
+        // rejected the same way when the same owner set is embedded in a
+        // displaced provenance row. Before the fix, `decode_provenance`
+        // accepted any owner order and only checked for duplicates.
+        let expected = Provenance {
+            seen: BTreeMap::new(),
+            local: Some(LocalOrigin {
+                owners: BTreeSet::from([IntentId(3), IntentId(8)]),
+                sig_state: SigState::Signed,
+            }),
+        };
+        let owners_offset = PROVENANCE_HEADER_LEN + 1;
+
+        let mut descending = encode_provenance(&expected).unwrap();
+        descending[owners_offset..owners_offset + 8].copy_from_slice(&8u64.to_be_bytes());
+        descending[owners_offset + 8..owners_offset + 16].copy_from_slice(&3u64.to_be_bytes());
+        assert_eq!(
+            decode_provenance(&descending).unwrap_err(),
+            DecodeError::InvalidOwnerOrder
+        );
+
+        // Owners are encoded in ascending order (3, 8); overwrite the second
+        // slot, not the first, or the "duplicate" rewrite is a no-op.
+        let mut duplicate = encode_provenance(&expected).unwrap();
+        duplicate[owners_offset + 8..owners_offset + 16].copy_from_slice(&3u64.to_be_bytes());
+        assert_eq!(
+            decode_provenance(&duplicate).unwrap_err(),
+            DecodeError::DuplicateOwner
         );
     }
 
