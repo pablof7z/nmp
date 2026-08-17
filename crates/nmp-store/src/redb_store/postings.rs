@@ -128,6 +128,7 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
     }
     let dictionary_started = std::time::Instant::now();
     let mut ids_by_key = BTreeMap::new();
+    let mut created_at_by_key = BTreeMap::new();
     let mut ids = HashSet::with_capacity(memberships.len());
     for membership in &memberships {
         if membership.shard != shard_for(membership.family, membership.prefix.as_bytes()) {
@@ -143,6 +144,25 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
             Some(id) if id != &membership.event.id => {
                 return Err(format!(
                     "event key {} maps to multiple ids",
+                    membership.event.event_key
+                ));
+            }
+            Some(_) => {}
+        }
+        // Not reachable through `memberships_for_pending`, which builds every
+        // membership of one event from the same shared `Arc<RunEvent>` — but
+        // the id<->key checks above prove only identity, not timestamp. Two
+        // memberships for one key with different `created_at` values sort
+        // apart (the sort orders by `created_at`), survive the adjacent-only
+        // dedup below, and would land twice in one posting list even though
+        // both orderings are individually canonical (#1819).
+        match created_at_by_key.get(&membership.event.event_key) {
+            None => {
+                created_at_by_key.insert(membership.event.event_key, membership.event.created_at);
+            }
+            Some(created_at) if created_at != &membership.event.created_at => {
+                return Err(format!(
+                    "event key {} carries more than one created_at",
                     membership.event.event_key
                 ));
             }
@@ -1108,9 +1128,6 @@ impl DeadKeys {
             return Err("invalid dead-key block magic".to_owned());
         }
         let count = read_varint(value, &mut cursor)?;
-        if count == 0 {
-            return Err("empty dead-key block".to_owned());
-        }
         let mut keys = Vec::with_capacity(count.min(usize::MAX as u64) as usize);
         let mut previous = 0u64;
         for index in 0..count {
@@ -1122,16 +1139,16 @@ impl DeadKeys {
                     .checked_add(encoded)
                     .ok_or_else(|| "dead-key delta overflow".to_owned())?
             };
-            if index > 0 && key <= previous {
-                return Err("dead keys are not strictly ordered".to_owned());
-            }
             keys.push(key);
             previous = key;
         }
         if cursor != value.len() {
             return Err("trailing bytes in dead-key block".to_owned());
         }
-        Ok(Self { keys })
+        // `new` owns both the non-empty and strict-ordering checks; decoding
+        // must not re-implement them inline, or the two can silently diverge
+        // (#1819) the way `LocalOrigin`'s two envelope decoders did.
+        Self::new(keys)
     }
 }
 
@@ -1300,6 +1317,48 @@ mod tests {
     }
 
     #[test]
+    fn encode_run_rejects_one_key_carrying_two_created_at_values() {
+        // #1819: `encode_run` already rejected one event id mapping to two
+        // event keys and one event key mapping to two ids, but never checked
+        // that one key carries one `created_at`. Not reachable through
+        // `memberships_for_pending` today (every membership of one event
+        // shares an `Arc<RunEvent>`), but two hand-built memberships for the
+        // same key/id with different timestamps sort apart — the sort
+        // includes `created_at` — survive the adjacent-only dedup below, and
+        // would land twice in the same posting list even though both
+        // orderings are individually canonical `SegmentView`s.
+        let event_id = id(1);
+        let memberships = vec![
+            Membership {
+                family: Family::Global,
+                shard: 0,
+                prefix: Prefix::global(),
+                event: RunEvent {
+                    created_at: 10,
+                    id: event_id,
+                    event_key: 1,
+                }
+                .into(),
+            },
+            Membership {
+                family: Family::Global,
+                shard: 0,
+                prefix: Prefix::global(),
+                event: RunEvent {
+                    created_at: 20,
+                    id: event_id,
+                    event_key: 1,
+                }
+                .into(),
+            },
+        ];
+        assert_eq!(
+            encode_run(memberships).unwrap_err(),
+            "event key 1 carries more than one created_at"
+        );
+    }
+
+    #[test]
     fn exact_cursor_seeks_without_visiting_equal_timestamp_predecessors() {
         let encoded = encode_run(global_memberships(300, 10)).unwrap();
         let dictionary = DictionaryView::parse(&encoded.dictionary).unwrap();
@@ -1462,6 +1521,32 @@ mod tests {
             },
         ])
         .is_err());
+    }
+
+    #[test]
+    fn dead_keys_decode_rejects_through_new_not_a_parallel_check() {
+        // #1819: `decode` used to re-implement `new`'s non-empty and
+        // strict-ordering checks inline and build `Self { keys }` directly,
+        // bypassing `new`. Two independent copies of one invariant is
+        // exactly the parallel-durable-representation problem this repo is
+        // removing (see the `LocalOrigin` fix in the same issue): confirm
+        // `decode` now fails with the identical error `new` produces,
+        // because it ends in `Self::new(keys)`.
+        let mut empty_block = DEAD_KEYS_MAGIC.to_vec();
+        put_varint(&mut empty_block, 0);
+        assert_eq!(
+            DeadKeys::decode(&empty_block).unwrap_err(),
+            DeadKeys::new(Vec::new()).unwrap_err()
+        );
+
+        let mut duplicate_block = DEAD_KEYS_MAGIC.to_vec();
+        put_varint(&mut duplicate_block, 2);
+        put_varint(&mut duplicate_block, 8);
+        put_varint(&mut duplicate_block, 0); // delta 0: second key repeats 8
+        assert_eq!(
+            DeadKeys::decode(&duplicate_block).unwrap_err(),
+            DeadKeys::new(vec![8, 8]).unwrap_err()
+        );
     }
 
     #[test]
