@@ -63,21 +63,19 @@ public struct FilterCoverage: Sendable, Hashable {
 /// actually received per kind, and per-filter coverage state. Every field is
 /// a REAL number read off the running engine -- never fabricated/estimated.
 public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
-    // One relay URL can now host distinct sessions (#8: `.public` vs a
-    // authenticated identity), so identity must include that key or two
-    // rows on the same URL would collide.
+    // One relay URL can host distinct sessions (#8: unauthenticated versus
+    // bound to an identity), so identity must include that key or two rows
+    // on the same URL would collide.
     public var id: String {
-        switch access {
-        case .public: return relay
-        case let .nip42(publicKey): return "\(relay)#nip42:\(publicKey)"
-        }
+        guard let authenticateAs else { return relay }
+        return "\(relay)#nip42:\(authenticateAs)"
     }
 
     public let relay: String
-    /// The frozen access identity of the physical session these diagnostics
-    /// describe (#8): the same relay under `.public` versus a `.nip42`
-    /// identity is a distinct session with its own row.
     /// The identity this session is bound to, hex; `nil` if bound to none.
+    /// The frozen identity of the physical session these diagnostics describe
+    /// (#8): the same relay unauthenticated versus bound to a key is a
+    /// distinct session with its own row.
     public let authenticateAs: String?
     public let wireSubCount: UInt32
     /// This relay's own advertised concurrent-subscription budget (NIP-11
