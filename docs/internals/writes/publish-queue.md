@@ -87,8 +87,8 @@ offline destructive operator action. Opening an old file cannot look like an
 empty publish-queue journal, and opening it does not automatically wipe anything.
 
 This is one schema epoch rather than independently migratable publish-queue tables:
-canonical events, coverage, accepted obligations, receipts, correlations,
-routes, lanes, attempts, details, and deadlines share transactions. Carrying a
+canonical events, coverage, accepted obligations, receipts, routes, lanes,
+attempts, details, and deadlines share transactions. Carrying a
 partial compatibility decoder would make that atomic model dishonest.
 
 Schema 16 replaces the superseded-only cleanup mechanism with one store-owned
@@ -102,15 +102,14 @@ bytes. These values cover roughly one day of the observed 27-session renewal
 load (77,760 completions/day) while bounding both cardinality and unusually
 large attempt histories. They are implementation policy, not app configuration.
 
-Retained receipts are not compacted. Receipt, correlation, route revisions,
-lanes, attempts, and attempt details remain available for normal reattachment
+Retained receipts are not compacted. Receipt, route revisions, lanes,
+attempts, and attempt details remain available for normal reattachment
 until eviction removes all receipt-owned evidence atomically. Open intents
 never enter the FIFO. Maintenance runs inside `nmp-store` after acceptance,
 terminalization, and terminal-producing ingest, and on Redb open/reopen; the
 engine has no retention deadline, scan, timer, or policy door. After whole-closure
-eviction, queue inspection omits the receipt, reattachment returns not found,
-and its correlation token resolves to nothing; there is no separate public
-retired or compacted state.
+eviction, queue inspection omits the receipt and reattachment returns not
+found; there is no separate public retired or compacted state.
 
 ## Physical model
 
@@ -126,14 +125,13 @@ Every ordering-sensitive key is fixed width and big-endian:
 | ordered deadline | `at:u64 \| intent:u64 \| relay_id:u32` |
 | terminal receipt FIFO | `meta-prefix \| completion_sequence:u64 \| receipt_id:u64` |
 | deadline cleanup index | `intent:u64 \| at:u64 \| relay_id:u32` |
-| correlation and address suppression | bounded bytes, with binary values |
+| address suppression | bounded bytes, with binary values |
 | id suppression | raw `event_id:[u8;32] \| pubkey:[u8;32]` |
 
 The namespace consists of:
 
 `publish_queue_intents`, `publish_queue_displaced`,
-`publish_queue_receipts`, `publish_queue_correlations`,
-`publish_queue_route_revisions`, `publish_queue_lanes`,
+`publish_queue_receipts`, `publish_queue_route_revisions`, `publish_queue_lanes`,
 `publish_queue_attempts`, `publish_queue_attempt_details`,
 `publish_queue_deadlines`, `publish_queue_deadlines_by_intent`,
 `publish_queue_relays`, `publish_queue_relay_ids`,
@@ -183,7 +181,7 @@ The concrete store remains the only policy-independent durable door. The engine 
 routes, retry causes, eligibility, and terminal outcomes; the store atomically
 records the selected fact. In particular:
 
-- acceptance commits the canonical pending row, intent, receipt, correlation,
+- acceptance commits the canonical pending row, intent, receipt,
   displacement/suppression effects, and allocators together;
 - signature promotion or pre-signature compensation updates the canonical row,
   intent, receipt, and suppression/displacement state together;
@@ -207,16 +205,15 @@ The semantic trace checks independently spelled outcomes after every operation.
 Redb is closed and reopened at each checkpoint, and both normalized state and
 its BLAKE3 digest must remain exact. The trace covers acceptance,
 signing, cancellation, failure compensation, replaceable supersession,
-correlation lookup, a three-relay route, retry, interruption and resume,
+a three-relay route, retry, interruption and resume,
 `OutcomeUnknown`, `GaveUp`, relay rejection, ACK, and terminal close. It
 compares events, ordered queries, routes, ordinals, attempt details, lanes,
-deadlines, receipts, correlations, and open-work recovery rather than row
-counts.
+deadlines, receipts, and open-work recovery rather than row counts.
 
 Process-death tests also hash the recovered semantic projection. Existing
 transaction failpoints now exercise binary publish-queue rows, including acceptance,
 promotion/compensation, route revision, lane/detail/deadline transitions,
-receipt/correlation changes, and close. Each crash has only the door’s exact
+receipt changes, and close. Each crash has only the door’s exact
 pre-state or exact post-state as an allowed result. Corrupt, missing,
 contradictory, truncated, unknown-version, noncanonical, and overlong records
 fail closed without a partial lane set or fabricated receipt.

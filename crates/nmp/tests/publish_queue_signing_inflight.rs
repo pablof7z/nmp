@@ -137,7 +137,6 @@ fn a_signature_in_flight_is_not_reported_as_a_write_parked_on_a_missing_signer()
             payload: WritePayload::Event(note(held_pubkey, "signature in flight")),
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(held_pubkey),
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;
@@ -151,7 +150,6 @@ fn a_signature_in_flight_is_not_reported_as_a_write_parked_on_a_missing_signer()
             payload: WritePayload::Event(note(parked_pubkey, "no signer has this key")),
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(parked_pubkey),
-            correlation: None,
         })
         .expect("receipt id allocation")
         .statuses;

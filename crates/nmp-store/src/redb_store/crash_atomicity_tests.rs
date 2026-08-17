@@ -109,19 +109,6 @@ fn accept(frozen: Event) -> AcceptWrite {
         expected_pubkey: keys().public_key(),
         signing_identity_ref: "u5-fixed-key".into(),
         accepted_at: Timestamp::from(1_000),
-        correlation: None,
-    }
-}
-
-/// #591: same fixture as [`accept`], but carrying a correlation token --
-/// used to prove `PUBLISH_QUEUE_CORRELATIONS`' row commits or rolls back in the
-/// SAME transaction as the receipt it names, not a separate one.
-fn accept_with_correlation(frozen: Event, token: &str) -> AcceptWrite {
-    AcceptWrite {
-        correlation: Some(
-            nmp_grammar::CorrelationToken::try_from(token).expect("fixture token is well-formed"),
-        ),
-        ..accept(frozen)
     }
 }
 
@@ -174,7 +161,6 @@ fn semantic_accept_write() -> AcceptWrite {
         expected_pubkey: keys().public_key(),
         signing_identity_ref: "semantic-u5-key".into(),
         accepted_at: Timestamp::from(1_000),
-        correlation: None,
     }
 }
 
@@ -271,7 +257,6 @@ fn seed_qualified_semantic_generation(store: &mut RedbStore) -> (u64, EventId, E
             expected_pubkey: keys().public_key(),
             signing_identity_ref: "semantic-source-key".into(),
             accepted_at: Timestamp::from(0),
-            correlation: None,
         })
         .unwrap();
     let AcceptOutcome::ReplaceableOperation {
@@ -395,15 +380,6 @@ fn publish_queue_table_len(
         .expect("count raw rows")
 }
 
-fn correlation_table_len(path: &Path) -> u64 {
-    let db = Database::open(path).expect("open raw database after crash");
-    let txn = db.begin_read().expect("begin raw read");
-    txn.open_table(PUBLISH_QUEUE_CORRELATIONS)
-        .expect("open correlation table")
-        .len()
-        .expect("count correlation rows")
-}
-
 fn event_table_len(path: &Path) -> u64 {
     let db = Database::open(path).expect("open raw database after crash");
     let txn = db.begin_read().expect("begin raw read");
@@ -491,13 +467,6 @@ fn redb_crash_worker() {
                     .expect("open worker store");
             let (frozen, _) = event_pair();
             let _ = store.accept_write(accept(frozen));
-        }
-        "accept-before-commit-with-correlation" => {
-            let mut store =
-                RedbStore::open_with_crash_point(path, RedbCrashPoint::AcceptBeforeCommit)
-                    .expect("open worker store");
-            let (frozen, _) = event_pair();
-            let _ = store.accept_write(accept_with_correlation(frozen, "u5-correlation-token"));
         }
         "semantic-accept-before-commit" => {
             let mut store =
@@ -751,7 +720,7 @@ fn terminal_retention_whole_closure_eviction_is_atomic_across_process_death() {
         let mut store = RedbStore::open(&path).expect("initialize retention fixture");
         let (frozen, _) = event_pair();
         let accepted = store
-            .accept_write(accept_with_correlation(frozen, "retention-crash-token"))
+            .accept_write(accept(frozen))
             .expect("accept retention fixture");
         store
             .cancel_write(accepted.journaled_intent_id().expect("intent id"))
@@ -762,10 +731,6 @@ fn terminal_retention_whole_closure_eviction_is_atomic_across_process_death() {
     crash(&path, "terminal-retention-before-commit");
 
     let store = RedbStore::open(&path).expect("reopen rolled-back retention fixture");
-    assert_eq!(
-        store.lookup_correlation("retention-crash-token").unwrap(),
-        Some(receipt_id)
-    );
     let receipt = store.reattach_receipt(receipt_id).unwrap().unwrap();
     match receipt.payload {
         PublishQueueReceiptPayload::Event { event_id, state } => {
@@ -1451,7 +1416,6 @@ fn qualified_source_mismatch_still_refuses_after_settlement() {
             expected_pubkey: keys().public_key(),
             signing_identity_ref: "semantic-source-key".into(),
             accepted_at: Timestamp::from(1_000),
-            correlation: None,
         })
         .unwrap();
     assert!(
@@ -1641,51 +1605,6 @@ fn packed_compaction_output_is_never_partially_published() {
             .expect("query compaction trigger")
             .is_empty());
     }
-}
-
-#[test]
-fn correlation_row_is_all_or_nothing_with_its_receipt() {
-    let (_dir, path) = fixture();
-    RedbStore::open(&path).expect("initialize store");
-    crash(&path, "accept-before-commit-with-correlation");
-
-    assert_eq!(event_table_len(&path), 0, "no orphan event");
-    assert_eq!(
-        publish_queue_table_len(&path, PUBLISH_QUEUE_RECEIPTS),
-        0,
-        "no orphan receipt"
-    );
-    assert_eq!(
-        correlation_table_len(&path),
-        0,
-        "no orphan correlation mapping"
-    );
-
-    let mut reopened = RedbStore::open(&path).expect("reopen after crash");
-    assert_eq!(
-        reopened
-            .lookup_correlation("u5-correlation-token")
-            .expect("lookup after rollback"),
-        None,
-        "the rolled-back token must not resolve to anything"
-    );
-
-    let (frozen, _) = event_pair();
-    let outcome = reopened
-        .accept_write(accept_with_correlation(frozen, "u5-correlation-token"))
-        .expect("accept after rollback");
-    let receipt_id = outcome.journaled_receipt_id().expect("receipt id");
-    assert_eq!(
-        reopened
-            .lookup_correlation("u5-correlation-token")
-            .expect("lookup after successful accept"),
-        Some(receipt_id)
-    );
-    drop(reopened);
-
-    assert_eq!(publish_queue_table_len(&path, PUBLISH_QUEUE_RECEIPTS), 1);
-    assert_eq!(correlation_table_len(&path), 1);
-    assert_path_canonical_integrity(&path);
 }
 
 #[test]

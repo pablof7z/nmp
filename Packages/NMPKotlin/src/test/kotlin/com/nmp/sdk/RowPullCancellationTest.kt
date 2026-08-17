@@ -21,7 +21,6 @@ import uniffi.nmp_ffi.FfiBlobDescriptor
 import uniffi.nmp_ffi.FfiAuthPolicyCallback
 import uniffi.nmp_ffi.FfiAuthPolicyRegistration
 import uniffi.nmp_ffi.FfiCancelWriteOutcome
-import uniffi.nmp_ffi.FfiCorrelationReattachment
 import uniffi.nmp_ffi.FfiFilter
 import uniffi.nmp_ffi.FfiFrame
 import uniffi.nmp_ffi.FfiLiveQuery
@@ -308,9 +307,6 @@ class RowPullCancellationTest {
         ): List<FfiPublishQueueEntry> = unusedByThisFalsifier()
 
         override fun `removePublishQueueEntry`(`receiptId`: ULong): Unit = unusedByThisFalsifier()
-
-        override fun `reattachByCorrelation`(`correlation`: String): FfiCorrelationReattachment =
-            unusedByThisFalsifier()
 
         override fun `reattachReceipt`(`receiptId`: ULong): FfiReceiptReattachment = unusedByThisFalsifier()
 

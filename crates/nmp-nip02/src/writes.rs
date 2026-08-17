@@ -86,7 +86,6 @@ impl FollowWrites {
             payload,
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(author),
-            correlation: None,
         }
     }
 }

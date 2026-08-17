@@ -139,7 +139,7 @@ struct ComposeView: View {
         // around. `.explicit` to the same two operator relays the feed
         // already trusts is the honest choice available today.
         //
-        // No correlation token: recovering an outstanding write after a
+        // No app-owned label: recovering an outstanding write after a
         // restart goes through NMP's own `publishQueue` (see `AppModel`),
         // not an app-remembered label, so nothing here needs to mint or
         // persist one (#1770).

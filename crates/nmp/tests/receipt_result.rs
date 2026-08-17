@@ -12,7 +12,6 @@ fn parked_write() -> (Keys, WriteIntent) {
             RelayUrl::parse("wss://receipt-result.invalid").unwrap()
         ]),
         identity: Identity::Explicit(keys.public_key()),
-        correlation: None,
     };
     (keys, intent)
 }

@@ -146,10 +146,10 @@ final class C9CrashDuringPublicationTests: XCTestCase {
 
     /// Opens a FRESH engine over the SAME store path + restored session,
     /// finds the crashed write by enumerating `publishQueue` -- NOT by a
-    /// correlation token handed down from the test, since NMP's own publish
-    /// queue is the durable ledger of open obligations, and an app finding
-    /// its own writes after a restart by re-scanning a token it minted
-    /// itself is exactly the pattern #1770 removed -- reattaches to it, and
+    /// label handed down from the test, since NMP's own publish queue is the
+    /// durable ledger of open obligations, and an app finding its own writes
+    /// after a restart by re-scanning a label it minted itself is exactly
+    /// the pattern #1770 removed -- reattaches to it, and
     /// races the row query against the reattached receipt stream until both
     /// a settled outcome and full row visibility are observed -- exactly the
     /// C7 shape, plus tracking whether `watchForResend` (when given) ever

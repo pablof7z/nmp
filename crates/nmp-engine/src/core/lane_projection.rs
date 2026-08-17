@@ -470,7 +470,6 @@ mod tests {
             ),
             routing: WriteRouting::Explicit(relays.to_vec()),
             identity: Identity::Active,
-            correlation: None,
         }));
         let (id, generation, unsigned) = accepted
             .iter()

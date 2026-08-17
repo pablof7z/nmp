@@ -268,14 +268,11 @@ fn collect_receipt_result(
     }
 }
 
-/// Result of looking up retained receipt facts by stable id (or, #591, by a
-/// caller correlation token translated to one).
+/// Result of looking up retained receipt facts by stable id.
 pub enum ReceiptReattachment {
     /// The observer is attached and this channel is already primed with all
     /// readable retained facts. Carries the resolved [`ReceiptId`] -- for
     /// [`Handle::reattach_receipt`] this is simply the caller's own input
-    /// echoed back; for [`Handle::reattach_by_correlation`] (#591) it is the
-    /// id the token resolved to, which the caller could not otherwise learn.
     Attached {
         id: ReceiptId,
         statuses: FifoReceiver<WriteFact>,
@@ -398,49 +395,6 @@ impl Handle {
         }
     }
 
-    /// #591: recover a receipt after a crash that happened BEFORE the app
-    /// could durably record the `ReceiptId` `publish` returned --
-    /// looked up by the caller's own correlation token instead. Otherwise
-    /// identical to [`Self::reattach_receipt`] (same replay/attach
-    /// behavior, same `ReceiptReattachment` outcome vocabulary) -- the
-    /// resolved id the caller could not otherwise learn rides along on
-    /// `Attached`.
-    pub fn reattach_by_correlation(&self, token: String) -> ReceiptReattachment {
-        let (tx, rx) = fifo_channel();
-        let registration = ReceiptDeliveryRegistration::new();
-        let (reply_tx, reply_rx) = mpsc::channel();
-        self.inbox
-            .send(Cmd::ReattachByCorrelation {
-                token,
-                sender: tx,
-                registration: registration.clone(),
-                reply: reply_tx,
-            })
-            .expect("nmp-engine: reattach called after shutdown");
-        match reply_rx
-            .recv()
-            .expect("nmp-engine: engine dropped reattach reply")
-        {
-            (ReattachOutcome::Attached, Some(id), next_cursor) => {
-                arm_receipt_delivery_close(&rx, self.inbox.clone(), id, registration);
-                ReceiptReattachment::Attached {
-                    id,
-                    statuses: rx,
-                    next_cursor,
-                }
-            }
-            (ReattachOutcome::Attached, None, _) => {
-                unreachable!(
-                    "EngineCore::reattach_by_correlation always resolves an id when Attached"
-                )
-            }
-            (ReattachOutcome::NotFound, _, _) => ReceiptReattachment::NotFound,
-            (ReattachOutcome::RetainedButUnreadable, _, _) => {
-                ReceiptReattachment::RetainedButUnreadable
-            }
-        }
-    }
-
     #[cfg(test)]
     pub(super) fn receipt_delivery_count(&self, id: ReceiptId) -> usize {
         let (reply_tx, reply_rx) = mpsc::channel();
@@ -496,7 +450,6 @@ mod receipt_delivery_lifecycle_tests {
                 }),
                 routing: WriteRouting::Auto,
                 identity: Identity::Active,
-                correlation: None,
             })
             .expect("parked write is accepted")
     }

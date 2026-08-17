@@ -41,7 +41,6 @@ pub struct ReplaceableMaterializationContinuation {
     signing_pubkey: PublicKey,
     coordinate: Coordinate,
     routing: WriteRouting,
-    correlation: Option<nmp_grammar::CorrelationToken>,
     fence: ReplaceableMaterializationFence,
     canonical_source_id: Option<EventId>,
 }
@@ -124,7 +123,6 @@ impl CoreState {
         operation: nmp_grammar::ReplaceableOperation,
         routing: WriteRouting,
         identity: Identity,
-        correlation: Option<nmp_grammar::CorrelationToken>,
     ) -> PublishPreparation {
         let (program, format, start, operation_bytes) = operation.into_registered_parts();
         let Some(registration) = self.replaceable_materializers.get(&(program, format)) else {
@@ -295,7 +293,6 @@ impl CoreState {
                 signing_pubkey,
                 coordinate,
                 routing,
-                correlation,
                 fence,
                 canonical_source_id,
             },
@@ -313,7 +310,6 @@ impl CoreState {
         signing_pubkey: PublicKey,
         coordinate: Coordinate,
         routing: WriteRouting,
-        correlation: Option<nmp_grammar::CorrelationToken>,
         snapshot: Option<nmp_store::RecoveredSemanticResource>,
     ) -> PublishPreparation {
         if snapshot.as_ref().is_some_and(|snapshot| {
@@ -375,7 +371,6 @@ impl CoreState {
                 signing_pubkey,
                 coordinate,
                 routing,
-                correlation,
                 fence,
                 canonical_source_id,
             },
@@ -532,23 +527,9 @@ impl CoreState {
             signing_pubkey,
             coordinate,
             routing,
-            correlation,
             fence,
             canonical_source_id,
         } = continuation;
-        // The first correlation lookup happened before this capability call
-        // left the reducer. Another publish can enter custody while the call
-        // is blocked, so repeat the exact replay door before consulting stale
-        // callback output or accepting a second obligation.
-        if let Some(token) = correlation.as_ref() {
-            match self.replay_correlated_publish(token, None) {
-                Ok(Some(effects)) => return PublishPreparation::Complete(effects),
-                Ok(None) => {}
-                Err(error) => {
-                    return PublishPreparation::Complete(self.refuse_publish(error));
-                }
-            }
-        }
         let Some(registration) = self.replaceable_materializers.get(&(program.0, format.0)) else {
             return PublishPreparation::Complete(self.refuse_publish(
                 PublishError::ReplaceableOperationRefused {
@@ -595,7 +576,6 @@ impl CoreState {
                 signing_pubkey,
                 coordinate,
                 routing,
-                correlation,
                 snapshot,
             );
         }
@@ -789,7 +769,6 @@ impl CoreState {
             expected_pubkey: signing_pubkey,
             signing_identity_ref: signing_pubkey.to_hex(),
             accepted_at: self.clock,
-            correlation,
         };
         let LocalAcceptResult { outcome, committed } =
             match self.resolver.accept_local(&mut self.store, accept) {

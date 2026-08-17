@@ -16,7 +16,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use nmp_grammar::CorrelationToken;
 use nmp_store::{
     sentinel_signature, AcceptWrite, AcceptWritePayload, HandoffEvidence, IntentSigState,
     PromotionTarget, PublishQueueAttemptHandoff, PublishQueuePostHandoffState,
@@ -186,15 +185,6 @@ fn semantic_snapshot(store: &RedbStore) -> (usize, usize, String) {
             receipt.receipt_id, receipt.intent_id, state, event_id
         )
         .unwrap();
-        let token = format!("delivery-bench-{:08}", intent.intent_id.0 - 1);
-        writeln!(
-            normalized,
-            "correlation:{token}:{:?}",
-            store
-                .lookup_correlation(&token)
-                .expect("correlation lookup")
-        )
-        .unwrap();
         for revision in store
             .recover_route_revisions(intent.intent_id)
             .expect("route revisions")
@@ -296,12 +286,6 @@ fn populate(path: &Path, intents: usize, relays_per_intent: usize) -> BenchResul
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "delivery-benchmark".into(),
                 accepted_at: Timestamp::from(2_000_000 + intent_index as u64),
-                correlation: Some(
-                    CorrelationToken::try_from(
-                        format!("delivery-bench-{intent_index:08}").as_str(),
-                    )
-                    .expect("bounded correlation"),
-                ),
             })
             .expect("accept benchmark write");
         let intent_id = accepted.journaled_intent_id().expect("accepted intent");

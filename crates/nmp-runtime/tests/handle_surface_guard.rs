@@ -115,7 +115,6 @@ fn handle_surface_is_closed_and_receipt_reattachment_is_explicit() {
         "publish",
         "publish_queue_entries",
         "publish_queue_entries_for_event",
-        "reattach_by_correlation",
         "reattach_receipt",
         "reattach_receipt_from",
         "receipt_result",

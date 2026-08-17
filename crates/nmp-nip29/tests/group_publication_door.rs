@@ -359,7 +359,6 @@ async fn a_group_write_routes_explicitly_to_the_whole_scope_and_never_to_the_aut
             ),
             routing: nmp::WriteRouting::Auto,
             identity: nmp::Identity::Active,
-            correlation: None,
         })
         .expect("an Auto publish is accepted")
         .statuses;

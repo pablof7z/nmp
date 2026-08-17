@@ -92,7 +92,6 @@ fn accept_of(frozen: Event) -> AcceptWrite {
         expected_pubkey,
         signing_identity_ref: "local".to_owned(),
         accepted_at: Timestamp::from(1_000),
-        correlation: None,
     }
 }
 
@@ -362,12 +361,9 @@ fn replaceable_retirement_refuses_a_truncated_not_handed_off_attempt_record() {
     let older = replaceable_note(&keys, "older", 1_000);
     let (intent_id, receipt_id) = {
         let mut store = fixture.open();
-        let mut accept = accept_of(frozen_from(&older));
-        accept.correlation = Some(
-            nmp_grammar::CorrelationToken::try_from("corrupt-attempt-correlation")
-                .expect("bounded correlation"),
-        );
-        let accepted = store.accept_write(accept).expect("accept older write");
+        let accepted = store
+            .accept_write(accept_of(frozen_from(&older)))
+            .expect("accept older write");
         let intent_id = accepted.journaled_intent_id().expect("durable intent");
         let receipt_id = accepted.journaled_receipt_id().expect("durable receipt");
         store
@@ -440,13 +436,6 @@ fn replaceable_retirement_refuses_a_truncated_not_handed_off_attempt_record() {
             .expect("receipt read remains healthy")
             .is_some(),
         "failed replacement must not destroy the predecessor receipt"
-    );
-    assert_eq!(
-        store
-            .lookup_correlation("corrupt-attempt-correlation")
-            .expect("correlation read remains healthy"),
-        Some(receipt_id),
-        "failed replacement must not destroy the predecessor correlation"
     );
     assert_eq!(
         store

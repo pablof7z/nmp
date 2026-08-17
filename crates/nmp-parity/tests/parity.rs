@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     AcquisitionEvidence, AuthDenialSource, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot,
-    AuthPhase, Binding, CancelWriteOutcome, CorrelationToken, DiagnosticsSnapshot, Engine,
+    AuthPhase, Binding, CancelWriteOutcome, DiagnosticsSnapshot, Engine,
     EngineConfig, EngineError, FifoReceiver, FifoRecvTimeoutError, Filter, Identity, Lane,
     LiveQuery, NotSentReason, ReceiptId, ReceiptReattachment, ReceiptStream, RefuseReason,
     RelayState, RelayWaiting, RetryCause, Row, RowDelta, ShortfallFact, SigningState, SourceStatus,
@@ -115,7 +115,6 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
     let root_event_id = nostr::EventId::from_slice(&[0x11; 32]).unwrap();
     let parent_keys = Keys::generate();
     let content = "closed NIP-22 parity".to_string();
-    let correlation = "nip22-parity-correlation";
     let relay = nostr::RelayUrl::parse("wss://parity.example").unwrap();
 
     // The parent is a real comment event on an addressable root, so BOTH
@@ -147,17 +146,12 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
         std::collections::BTreeSet::from([relay.clone()]),
     );
 
-    let direct = nmp_nip22::comment_intent(
-        &row,
-        content.clone(),
-        Some(CorrelationToken::try_from(correlation).unwrap()),
-    );
+    let direct = nmp_nip22::comment_intent(&row, content.clone());
     let ffi = nmp_ffi::nip22::comment_intent(
         nmp_ffi::nip22::FfiCommentTarget::Row {
             row: nmp_ffi::convert::row_to_ffi_row(&row),
         },
         content,
-        Some(correlation.to_string()),
     )
     .expect("the public FFI composer must accept the same closed inputs");
 
@@ -230,11 +224,6 @@ fn direct_and_public_ffi_nip22_comment_intents_are_exactly_identical() {
     assert_eq!(ffi.routing, FfiWriteRouting::Auto);
     assert_eq!(direct.identity, Identity::Active);
     assert_eq!(ffi.identity, FfiIdentity::Active);
-    assert_eq!(
-        direct.correlation.as_ref().map(ToString::to_string),
-        Some(correlation.to_string())
-    );
-    assert_eq!(ffi.correlation.as_deref(), Some(correlation));
 }
 
 #[test]
@@ -2844,7 +2833,6 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
             payload: WritePayload::Event(body_of(&unsigned)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("direct publish must enqueue")
         .statuses;
@@ -2972,7 +2960,6 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
             },
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
-            correlation: None,
         })
         .expect("FFI publish must enqueue");
     let receipt_rx = bridge_receipts(&receipt);
@@ -3040,7 +3027,6 @@ async fn run_direct_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<
             payload: WritePayload::Event(body_of(&unsigned)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("direct auth-parked publish must enqueue")
         .statuses;
@@ -3099,7 +3085,6 @@ async fn run_ffi_auth_parked(keys: &Keys, query_event: &nostr::Event) -> Vec<Nor
             },
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
-            correlation: None,
         })
         .expect("FFI auth-parked publish must enqueue");
     let receipt_rx = bridge_receipts(&receipt);
@@ -3158,7 +3143,6 @@ async fn run_direct_override_publish(active: &Keys, override_keys: &Keys) -> Vec
             payload: WritePayload::Event(body_of(&unsigned)),
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(override_pubkey),
-            correlation: None,
         })
         .expect("direct override publish must enqueue")
         .statuses;
@@ -3213,7 +3197,6 @@ async fn run_ffi_override_publish(active: &Keys, override_keys: &Keys) -> Vec<No
             identity: FfiIdentity::Explicit {
                 pubkey: override_pubkey,
             },
-            correlation: None,
         })
         .expect("FFI override publish must enqueue");
     let receipt_rx = bridge_receipts(&receipt);
@@ -3242,7 +3225,6 @@ async fn run_direct_tampered(keys: &Keys) -> TamperedOutcome {
         payload: WritePayload::Signed(event),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }) {
         Ok(_) => panic!("a tampered Signed payload must refuse the direct call itself"),
         Err(EngineError::PublishRefused { reason }) => reason,
@@ -3288,7 +3270,6 @@ async fn run_ffi_tampered(keys: &Keys) -> TamperedOutcome {
         },
         routing: FfiWriteRouting::Auto,
         identity: FfiIdentity::Active,
-        correlation: None,
     }) {
         Ok(_) => panic!("a tampered Signed payload must refuse the FFI call itself"),
         Err(FfiError::PublishRefused { reason }) => reason,
@@ -3386,7 +3367,6 @@ async fn run_direct_reattach_live() -> ReattachProof {
             payload: WritePayload::Event(body_of(&unsigned)),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("direct publish must enqueue");
 
@@ -3455,7 +3435,6 @@ async fn run_ffi_reattach_live() -> ReattachProof {
             },
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
-            correlation: None,
         })
         .expect("FFI publish must enqueue");
     let receipt_id = receipt.id();
@@ -3505,161 +3484,6 @@ async fn run_ffi_reattach_live() -> ReattachProof {
     }
 }
 
-// #591: crash-safe correlation parity. Publishing twice with the SAME
-// token (a re-composed draft, different body/timestamp the second time)
-// must resolve to the SAME receipt id on both surfaces -- never a second
-// enqueued write, never a body comparison. `reattach_by_correlation` must
-// then behave identically to the existing by-id door for both a known and
-// an unknown token.
-const CORRELATION_KIND: u16 = 9_994;
-const CORRELATION_TOKEN: &str = "parity-crash-safe-correlation-token";
-
-#[derive(Debug, PartialEq, Eq)]
-struct CorrelationProof {
-    same_receipt_id: bool,
-    reattach_outcome: NormReattach,
-    unknown_token_outcome: NormReattach,
-}
-
-fn run_direct_correlation() -> CorrelationProof {
-    let keys = fixed_keys();
-    let engine =
-        new_direct_outbox_engine(EngineConfig::default()).expect("direct engine must construct");
-    engine
-        .add_public_key_account(keys.public_key(), true)
-        .expect("direct public-key-only account must become current");
-
-    let token = || {
-        Some(
-            CorrelationToken::try_from(CORRELATION_TOKEN)
-                .expect("token is within the bounded range"),
-        )
-    };
-
-    let first = engine
-        .publish(WriteIntent {
-            payload: WritePayload::Event(nmp_grammar::EventBuilder {
-                kind: Kind::Custom(CORRELATION_KIND),
-                tags: (vec![]).into_iter().collect(),
-                content: ("correlation-first").into(),
-                created_at: Some(Timestamp::from(WRITE_CREATED_AT)),
-            }),
-            routing: WriteRouting::Auto,
-            identity: Identity::Active,
-            correlation: token(),
-        })
-        .expect("direct publish must enqueue");
-
-    // A re-composed draft with a DIFFERENT body and timestamp, same token:
-    // must reattach the existing obligation, never enqueue a second write.
-    let second = engine
-        .publish(WriteIntent {
-            payload: WritePayload::Event(nmp_grammar::EventBuilder {
-                kind: Kind::Custom(CORRELATION_KIND),
-                tags: (vec![]).into_iter().collect(),
-                content: ("correlation-second-different-body").into(),
-                created_at: Some(Timestamp::from(WRITE_CREATED_AT + 1)),
-            }),
-            routing: WriteRouting::Auto,
-            identity: Identity::Active,
-            correlation: token(),
-        })
-        .expect("direct re-publish with the same token must reattach, not fail");
-    let same_receipt_id = first.id == second.id;
-
-    let reattach_outcome = direct_reattach_outcome(
-        &engine
-            .reattach_by_correlation(CORRELATION_TOKEN.to_string())
-            .expect("direct reattach-by-correlation must succeed while the engine is open"),
-    );
-    let unknown_token_outcome = direct_reattach_outcome(
-        &engine
-            .reattach_by_correlation("never-seen-correlation-token".to_string())
-            .expect("direct reattach-by-correlation must succeed while the engine is open"),
-    );
-
-    engine.shutdown();
-    CorrelationProof {
-        same_receipt_id,
-        reattach_outcome,
-        unknown_token_outcome,
-    }
-}
-
-fn run_ffi_correlation() -> CorrelationProof {
-    let keys = fixed_keys();
-    let engine = new_ffi_engine(ffi_outbox_routing_config()).expect("FFI engine must construct");
-    engine
-        .add_public_key_account(ffi_public_key(keys.public_key()), true)
-        .expect("FFI public-key-only account must become current");
-
-    let intent = |content: &str, created_at: u64| FfiWriteIntent {
-        payload: FfiWritePayload::Event {
-            builder: nmp_ffi::types::FfiEventBuilder {
-                kind: CORRELATION_KIND,
-                tags: vec![],
-                content: content.to_string(),
-                created_at: Some(created_at),
-            },
-        },
-        routing: FfiWriteRouting::Auto,
-        identity: FfiIdentity::Active,
-        correlation: Some(CORRELATION_TOKEN.to_string()),
-    };
-
-    let first_id = engine
-        .publish(intent("correlation-first", WRITE_CREATED_AT))
-        .expect("FFI publish must enqueue")
-        .id();
-
-    let second_id = engine
-        .publish(intent(
-            "correlation-second-different-body",
-            WRITE_CREATED_AT + 1,
-        ))
-        .expect("FFI re-publish with the same token must reattach, not fail")
-        .id();
-    let same_receipt_id = first_id == second_id;
-
-    let reattach_result = engine
-        .reattach_by_correlation(CORRELATION_TOKEN.to_string())
-        .expect("FFI reattach-by-correlation must succeed while the engine is open");
-    assert_eq!(
-        reattach_result.receipt_id,
-        Some(first_id),
-        "the token must resolve to the SAME receipt id the original publish returned"
-    );
-    let reattach_outcome = ffi_reattach_outcome(&reattach_result.outcome);
-    let unknown_result = engine
-        .reattach_by_correlation("never-seen-correlation-token".to_string())
-        .expect("FFI reattach-by-correlation must succeed while the engine is open");
-    assert_eq!(unknown_result.receipt_id, None);
-    let unknown_token_outcome = ffi_reattach_outcome(&unknown_result.outcome);
-
-    engine.shutdown();
-    CorrelationProof {
-        same_receipt_id,
-        reattach_outcome,
-        unknown_token_outcome,
-    }
-}
-
-#[test]
-fn direct_and_ffi_correlation_reattach_the_same_obligation_on_token_reuse() {
-    let direct = run_direct_correlation();
-    let ffi = run_ffi_correlation();
-    assert_eq!(
-        direct, ffi,
-        "direct and FFI correlation reattachment must expose identical outcomes"
-    );
-    assert!(
-        direct.same_receipt_id,
-        "a reused token must resolve to the SAME receipt id, never a second enqueued write"
-    );
-    assert_eq!(direct.reattach_outcome, NormReattach::Attached);
-    assert_eq!(direct.unknown_token_outcome, NormReattach::NotFound);
-}
-
 #[derive(Debug, PartialEq, Eq)]
 struct CancellationProof {
     returned_cancelled: bool,
@@ -3683,7 +3507,6 @@ fn run_direct_cancellation() -> CancellationProof {
             }),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("direct publish must enqueue");
     let deadline = Instant::now() + WAIT;
@@ -3737,7 +3560,6 @@ async fn run_ffi_cancellation() -> CancellationProof {
             },
             routing: FfiWriteRouting::Auto,
             identity: FfiIdentity::Active,
-            correlation: None,
         })
         .expect("FFI publish must enqueue");
     let receipt_id = receipt.id();
@@ -3825,7 +3647,6 @@ async fn run_direct_reattach_terminal(path: &std::path::Path) -> ReattachProof {
             }),
             routing: WriteRouting::Explicit(vec![relay.url.clone()]),
             identity: Identity::Active,
-            correlation: None,
         };
         let first = engine
             .publish(write("reattach-terminal-first", WRITE_CREATED_AT))
@@ -3908,7 +3729,6 @@ async fn run_ffi_reattach_terminal(path: &std::path::Path) -> ReattachProof {
                 relays: vec![relay_url.clone()],
             },
             identity: FfiIdentity::Active,
-            correlation: None,
         };
         let first = engine
             .publish(write("reattach-terminal-first", WRITE_CREATED_AT))
@@ -5119,7 +4939,6 @@ async fn run_direct_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<No
             payload: WritePayload::Event(body_of(&unsigned)),
             routing: WriteRouting::Explicit(vec![relay.url.clone()]),
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("direct explicit publish must enqueue")
         .statuses;
@@ -5154,7 +4973,6 @@ async fn run_ffi_explicit_route(keys: &Keys, relay: &ScriptedRelay) -> Vec<NormS
                 relays: vec![relay_url.clone()],
             },
             identity: FfiIdentity::Active,
-            correlation: None,
         })
         .expect("FFI explicit publish must enqueue");
     let receipt_rx = bridge_receipts(&receipt);
@@ -5211,7 +5029,6 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
         }),
         routing: WriteRouting::Explicit(vec![]),
         identity: Identity::Active,
-        correlation: None,
     }) {
         Ok(_) => panic!("an empty explicit route must refuse the direct call itself"),
         Err(EngineError::PublishRefused { reason }) => reason,
@@ -5244,7 +5061,6 @@ async fn direct_and_ffi_refuse_an_empty_explicit_route_at_the_door() {
         },
         routing: FfiWriteRouting::Explicit { relays: vec![] },
         identity: FfiIdentity::Active,
-        correlation: None,
     }) {
         Ok(_) => panic!("an empty explicit route must refuse the FFI call itself"),
         Err(FfiError::PublishRefused { reason }) => reason,

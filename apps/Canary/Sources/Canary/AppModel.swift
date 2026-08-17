@@ -85,7 +85,7 @@ final class AppModel {
 
         // Crash-during-publication recovery (C9): NMP's own publish queue
         // already knows every open obligation durably -- enumerate it and
-        // reattach to each, rather than an app-owned correlation ledger
+        // reattach to each, rather than an app-owned shadow ledger
         // (#1770). `publishQueue` is exactly the door for "what have I got
         // outstanding, and what went wrong with it"; no app-side durable
         // state is needed to find one after a restart.

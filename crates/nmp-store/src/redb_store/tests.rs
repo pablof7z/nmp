@@ -126,7 +126,6 @@ fn unsupported_schema_refusal_states_reacquirable_cache_and_permanent_publish_qu
         "publish queue state",
         "accepted but unpublished writes",
         "receipts",
-        "correlation tokens",
         "route revisions",
         "attempt evidence",
         "will be permanently lost",
@@ -469,7 +468,6 @@ fn accepted_signed(
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "range-proof".into(),
             accepted_at: Timestamp::from(created_at),
-            correlation: None,
         })
         .expect("accept fixture intent");
     let intent = outcome.journaled_intent_id().expect("intent id");
@@ -510,7 +508,6 @@ fn accepted_pending(
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "compensation-proof".into(),
             accepted_at: Timestamp::from(created_at),
-            correlation: None,
         })
         .expect("accept fixture intent");
     (outcome.journaled_intent_id().expect("intent id"), signed)
@@ -1966,7 +1963,6 @@ fn canonical_integrity_survives_every_governed_event_mutation_class() {
             expected_pubkey: keys.public_key(),
             signing_identity_ref: "integrity".into(),
             accepted_at: Timestamp::from(80u64),
-            correlation: None,
         })
         .unwrap();
     assert_canonical_integrity(store.raw_database());
@@ -3157,7 +3153,6 @@ fn ingest_supersession_no_longer_evicts_terminal_receipts() {
                     event_id: EventId::all_zeros(),
                     state: ReceiptState::Cancelled,
                 },
-                correlation: None,
                 terminal_sequence: None,
                 terminal_at: None,
                 terminal_bytes: None,

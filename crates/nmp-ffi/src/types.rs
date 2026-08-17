@@ -849,18 +849,6 @@ pub struct FfiWriteIntent {
     /// default it to `.active` in their own language, which is where app
     /// code actually writes it.
     pub identity: FfiIdentity,
-    /// `nmp_grammar::WriteIntent::correlation` mirror (#591): a caller-
-    /// generated crash-safe correlation/idempotency token. `None` -- the
-    /// default -- opts this write out of correlation entirely. `Some`
-    /// crosses the boundary as a plain string and is validated by
-    /// `nmp_grammar::CorrelationToken`'s `TryFrom<&str>` on the way in
-    /// (non-empty, length-capped): a malformed token is a typed synchronous
-    /// [`crate::convert::FfiError::InvalidCorrelationToken`] before any
-    /// engine call. A token that already resolves to a previously-accepted
-    /// receipt reattaches that existing obligation instead of enqueuing a
-    /// second write -- see that type's doc for the full contract.
-    #[uniffi(default = None)]
-    pub correlation: Option<String>,
 }
 
 /// One (relay, kind) event count -- `nmp::DiagnosticsSnapshot`'s
@@ -1463,18 +1451,6 @@ pub enum FfiReceiptReattachment {
     },
     NotFound,
     RetainedButUnreadable,
-}
-
-/// #591: `NmpEngine::reattachByCorrelation`'s result. Reuses
-/// [`FfiReceiptReattachment`]'s exact three-way outcome vocabulary
-/// unchanged -- this is not a new outcome enum, only a pairing with the
-/// resolved receipt id a correlation-token caller cannot otherwise learn
-/// (the by-id door needs no such pairing: the caller already supplied the
-/// id). `receipt_id` is `Some` iff `outcome == Attached`, `None` otherwise.
-#[derive(Record)]
-pub struct FfiCorrelationReattachment {
-    pub outcome: FfiReceiptReattachment,
-    pub receipt_id: Option<u64>,
 }
 
 /// A decoded public NIP-19 nostr entity (#116, `nmp::NostrEntity` mirror).

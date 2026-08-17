@@ -182,7 +182,6 @@ fn publish_waiting_auth(fixture: &mut Fixture, content: &str) -> (ReceiptId, nos
         payload: WritePayload::Signed(event.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     assert!(effects.iter().any(|effect| matches!(
         effect,
@@ -260,7 +259,6 @@ fn challenge_parks_an_inflight_event_before_fast_policy_denial_can_win_the_ok_ra
         payload: WritePayload::Signed(event.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let receipt = published_receipt(&published);
     let correlation = published
@@ -491,7 +489,6 @@ fn auth_denial_isolated_by_exact_identity_leaves_same_url_peer_live() {
         ),
         routing: WriteRouting::Explicit(vec![relay.clone()]),
         identity: Identity::Explicit(keys.public_key()),
-        correlation: None,
     };
     let alice_effects = core.handle(EngineMsg::Publish(publish(&alice)));
     let alice_receipt = published_receipt(&alice_effects);
@@ -589,7 +586,6 @@ fn one_auth_denied_lane_does_not_stop_other_lanes_on_the_same_receipt() {
         payload: WritePayload::Signed(event.clone()),
         routing: WriteRouting::Explicit(vec![denied_relay.clone(), ordinary_relay.clone()]),
         identity: Identity::Explicit(keys.public_key()),
-        correlation: None,
     }));
     let receipt = published_receipt(&accepted);
 
@@ -960,7 +956,6 @@ fn auth_state_stays_one_entry_per_session_under_churn_and_kind_is_reserved() {
         ),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     assert!(
         matches!(
@@ -993,7 +988,6 @@ fn only_exact_ready_wakes_the_current_waiting_auth_write_once() {
         payload: WritePayload::Signed(event.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     assert!(parked.iter().any(|effect| matches!(
         effect,
@@ -1043,7 +1037,6 @@ fn unchallenged_protected_write_parks_only_for_the_bounded_probe_then_proceeds()
         payload: WritePayload::Signed(event.clone()),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     assert!(!parked
         .iter()

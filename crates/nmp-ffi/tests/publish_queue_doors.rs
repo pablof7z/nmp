@@ -154,7 +154,6 @@ async fn removing_an_entry_with_open_delivery_work_is_still_active() {
                 relays: vec!["ws://127.0.0.1:1/".to_string()],
             },
             identity: FfiIdentity::Active,
-            correlation: None,
         })
         .expect("publish takes custody");
     let receipt_id = receipt.id();

@@ -396,7 +396,6 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
             .expect("capability default operation is complete"),
         routing: WriteRouting::Explicit(vec![destination.url.clone()]),
         identity: Identity::Active,
-        correlation: None,
     };
     let (custody_tx, custody_rx) = mpsc::channel();
     let custody_engine = Arc::clone(&engine);
@@ -447,7 +446,6 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
                 .expect("a later operation composes over the local generation"),
             routing: WriteRouting::Explicit(vec![destination.url.clone()]),
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("the second operation enters the same durable program");
     assert_ne!(receipt.id, second_receipt.id);
@@ -572,7 +570,6 @@ async fn capability_default_survives_restart_and_replays_over_later_source() {
                 .expect("parameterized default operation is complete"),
             routing: WriteRouting::Explicit(vec![destination.url.clone()]),
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("parameterized first value enters the same custody path");
     let mut parameterized_rows = BTreeMap::new();
@@ -635,7 +632,6 @@ async fn a_delivered_semantic_write_settles_its_receipt() {
                 .expect("the operation is complete"),
             routing: WriteRouting::Explicit(vec![relay.url.clone()]),
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("the operation enters custody");
     let generation = wait_for_row(&subscription, &mut rows, |row| row.id() == receipt.event_id);
@@ -705,7 +701,6 @@ async fn shared_second_generation_is_once_per_relay_and_replays_while_a_destinat
                 .expect("first operation is complete"),
             routing: WriteRouting::Explicit(vec![relay_one.url.clone(), offline.clone()]),
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("first operation enters custody");
     let first_current = wait_for_row(&subscription, &mut rows, |row| row.id() == first.event_id);
@@ -730,7 +725,6 @@ async fn shared_second_generation_is_once_per_relay_and_replays_while_a_destinat
                 offline.clone(),
             ]),
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("second operation enters custody");
     let e2 = wait_for_row(&subscription, &mut rows, |row| row.id() == second.event_id);
@@ -902,7 +896,6 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
                 .expect("first operation is complete"),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("first operation enters custody");
     let first_current = wait_for_row(&subscription, &mut rows, |row| row.id() == first.event_id);
@@ -913,7 +906,6 @@ async fn route_only_addition_preserves_signed_e2_and_sends_only_the_new_destinat
                 .expect("second operation composes over current"),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("second operation enters custody");
     let e2 = wait_for_row(&subscription, &mut rows, |row| {
@@ -1047,7 +1039,6 @@ async fn source_session_replacement_wakes_every_signed_successor_destination() {
                     .collect(),
             ),
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("the operation enters custody");
     let e1 = wait_for_row(&subscription, &mut rows, |row| row.id() == receipt.event_id);
@@ -1175,7 +1166,6 @@ async fn relay_source_successors_resume_current_delivery_and_stay_open_after_res
                     .collect(),
             ),
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("operation enters custody");
     let (e1_unsigned, e1_completion) = first_signer_rx

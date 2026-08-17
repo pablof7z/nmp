@@ -34,8 +34,7 @@ let intent = try commentIntent(
     parent: parent,
     authorPubkey: author,
     createdAt: timestamp,
-    content: text,
-    correlation: correlation
+    content: text
 )
 let receipt = try await nmp.publish(intent)
 ```

@@ -38,7 +38,6 @@ fn publish_auto(
         }),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (receipt, generation, unsigned) = accepted
         .iter()

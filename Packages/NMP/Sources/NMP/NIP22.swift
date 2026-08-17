@@ -210,8 +210,8 @@ public enum CommentTarget: Sendable, Hashable {
 /// Compose a NIP-22 comment on `target` as NMP's ordinary `WriteIntent`
 /// (#822). It names no author and reads no clock -- the engine resolves the
 /// identity and stamps the time at acceptance -- so composition still owns no
-/// engine state or lifecycle. `correlation` passes through unchanged; publish
-/// the result through `NMPEngine.publish(_:)`.
+/// engine state or lifecycle. Publish the result through
+/// `NMPEngine.publish(_:)`.
 ///
 /// This always composes a kind:1111 comment, including on a text note, where
 /// `replyTo(_:)` would compose a NIP-10 reply instead. An app that wants "the
@@ -219,15 +219,13 @@ public enum CommentTarget: Sendable, Hashable {
 /// NIP-22 comment on this specifically" calls this.
 public func commentIntent(
     on target: CommentTarget,
-    content: String,
-    correlation: String? = nil
+    content: String
 ) throws -> WriteIntent {
     try WriteIntent(
         nmpRethrowing {
             try NMPFFI.commentIntent(
                 target: target.toFfi(),
-                content: content,
-                correlation: correlation
+                content: content
             )
         }
     )

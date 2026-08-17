@@ -117,7 +117,6 @@ fn publish_operation(
             payload,
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(author),
-            correlation: None,
         })
         .map_err(|error| match error {
             EngineError::EngineClosed => BookmarkActionError::EngineClosed,

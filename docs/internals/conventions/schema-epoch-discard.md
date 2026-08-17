@@ -36,9 +36,8 @@ open. To run the current NMP build, the consumer must close every owner,
 discard the non-current store, and create a fresh one.
 
 The whole database is one epoch. Stored events, provenance, coverage,
-tombstones, accepted write obligations, pending rows, receipts, correlation
-tokens, route revisions, attempts, and retry state share one transaction
-boundary. A schema bump therefore discards the whole store; none of those
+tombstones, accepted write obligations, pending rows, receipts, route
+revisions, attempts, and retry state share one transaction boundary. A schema bump therefore discards the whole store; none of those
 domains is independently carried across it.
 
 The refusal never:
@@ -59,8 +58,7 @@ The durable write outbox cannot:
 
 - accepted but unpublished writes are deleted;
 - their pending rows and receipts are deleted;
-- their correlation tokens, route revisions, attempt evidence, and retry
-  state are deleted.
+- their route revisions, attempt evidence, and retry state are deleted.
 
 That loss is permanent. An operator must not be told merely to "wipe the
 cache," because the file contains publication obligations as well as cached

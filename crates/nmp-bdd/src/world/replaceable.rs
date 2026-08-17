@@ -59,7 +59,6 @@ impl NmpWorld {
             }),
             routing,
             identity: Identity::Explicit(pubkey),
-            correlation: None,
         });
         // A fixture winner is still a publish, so it takes its place in the
         // world's one ordered receipt list (#995) rather than opening a

@@ -240,7 +240,6 @@ pub(crate) struct PublishQueueReceiptRecord {
     pub(crate) expected_pubkey: PublicKey,
     pub(crate) accepted_at: Option<Timestamp>,
     pub(crate) payload: crate::PublishQueueReceiptPayload,
-    pub(crate) correlation: Option<String>,
     pub(crate) terminal_sequence: Option<u64>,
     pub(crate) terminal_at: Option<Timestamp>,
     pub(crate) terminal_bytes: Option<u64>,
@@ -325,17 +324,9 @@ pub(super) fn mark_terminal_receipt(
     let index_key = terminal_receipt_key(sequence, receipt_id);
     let index_bytes = u64::try_from(index_key.len())
         .map_err(|_| PersistenceError::invariant("terminal receipt index size exceeds u64"))?;
-    let correlation_bytes = record
-        .correlation
-        .as_ref()
-        .map(|token| u64::try_from(token.len() + 8))
-        .transpose()
-        .map_err(|_| PersistenceError::invariant("correlation size exceeds u64"))?
-        .unwrap_or(0);
     let terminal_bytes = exclusive_evidence_bytes
         .checked_add(receipt_bytes)
         .and_then(|bytes| bytes.checked_add(index_bytes))
-        .and_then(|bytes| bytes.checked_add(correlation_bytes))
         .ok_or_else(|| PersistenceError::invariant("terminal receipt bytes overflow"))?;
     record.terminal_bytes = Some(terminal_bytes);
     let encoded = encode_receipt(&record);

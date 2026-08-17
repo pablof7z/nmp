@@ -243,7 +243,7 @@ pub use nmp_runtime::{fifo_channel, FifoSender};
 // app sees exactly one `EventBuilder` and never writes a disambiguating
 // path. `core` aliases the upstream import where it needs it.
 pub use nmp_grammar::{
-    CorrelationToken, CorrelationTokenError, EventBuilder, Identity, WriteIntent, WritePayload,
+    EventBuilder, Identity, WriteIntent, WritePayload,
     WriteRouting,
 };
 

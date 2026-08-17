@@ -40,7 +40,6 @@ fn publish_narrow(
         }),
         routing: WriteRouting::Explicit(Vec::from([relay.clone()])),
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, unsigned) = accepted
         .iter()

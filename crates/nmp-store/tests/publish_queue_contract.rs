@@ -129,7 +129,6 @@ fn accept(frozen: Event, expected_pubkey: nostr::PublicKey, accepted_at: u64) ->
         expected_pubkey,
         signing_identity_ref: "local".to_string(),
         accepted_at: Timestamp::from(accepted_at),
-        correlation: None,
     }
 }
 
@@ -850,17 +849,12 @@ fn a_newer_replaceable_stops_an_older_started_obligation_but_keeps_bounded_safet
 }
 
 #[test]
-fn explicit_not_handed_off_evidence_destroys_the_obsolete_receipt_and_correlation() {
+fn explicit_not_handed_off_evidence_destroys_the_obsolete_receipt() {
     with_store(|store| {
         let k = keys();
         let relay = RelayUrl::parse("wss://not-handed-off.example").unwrap();
         let (older_frozen, older_signed) = compose(&k, Kind::ContactList, "older contacts", 100);
-        let mut older_accept = accept(older_frozen, k.public_key(), 100);
-        older_accept.correlation = Some(
-            nmp_grammar::CorrelationToken::try_from("obsolete-correlation")
-                .expect("bounded fixture token"),
-        );
-        let older = do_accept(store, older_accept);
+        let older = do_accept(store, accept(older_frozen, k.public_key(), 100));
         let older_intent = older.journaled_intent_id().unwrap();
         let older_receipt = older.journaled_receipt_id().unwrap();
         store
@@ -913,10 +907,6 @@ fn explicit_not_handed_off_evidence_destroys_the_obsolete_receipt_and_correlatio
             other => panic!("expected supersession, got {other:?}"),
         }
         assert!(store.reattach_receipt(older_receipt).unwrap().is_none());
-        assert!(store
-            .lookup_correlation("obsolete-correlation")
-            .unwrap()
-            .is_none());
         assert!(store.recover_attempts(older_intent).unwrap().is_empty());
     });
 }

@@ -8,7 +8,7 @@
 use nostr::{EventId, PublicKey};
 
 use crate::convert::{
-    demand_to_ffi, identity_to_ffi, parse_correlation_token, parse_pubkey, write_payload_to_ffi,
+    demand_to_ffi, identity_to_ffi, parse_pubkey, write_payload_to_ffi,
     write_routing_to_ffi, FfiError,
 };
 use crate::types::{FfiDemand, FfiRow, FfiWriteIntent};
@@ -316,31 +316,25 @@ pub fn decode_comment(row: FfiRow) -> Result<FfiDecodedComment, FfiCommentDecode
 /// the engine resolves the identity and stamps the time at acceptance.
 /// Publish the returned value through
 /// [`crate::facade::NmpEngine::publish`], the same generic write lifecycle as
-/// every other ordinary intent. `correlation` (#591) passes straight through
-/// to `WriteIntent.correlation`; NIP-22 owns no separate correlation,
-/// take-once, signing, routing, receipt, or retry machinery.
+/// every other ordinary intent. NIP-22 owns no separate take-once, signing,
+/// routing, receipt, or retry machinery.
 #[uniffi::export]
 pub fn comment_intent(
     target: FfiCommentTarget,
     content: String,
-    correlation: Option<String>,
 ) -> Result<FfiWriteIntent, FfiError> {
-    let correlation = correlation
-        .as_deref()
-        .map(parse_correlation_token)
-        .transpose()?;
     let intent = match target {
         FfiCommentTarget::Root { root } => {
-            nmp_nip22::comment_intent(&root_from_ffi(root)?, content, correlation)
+            nmp_nip22::comment_intent(&root_from_ffi(root)?, content)
         }
         FfiCommentTarget::Row { row } => {
-            nmp_nip22::comment_intent(&crate::tagging::row_from_ffi(row)?, content, correlation)
+            nmp_nip22::comment_intent(&crate::tagging::row_from_ffi(row)?, content)
         }
     };
 
     // NIP-22 owns this complete shape, and the FFI layer projects the
     // returned ordinary intent rather than independently re-stating its
-    // payload, routing, identity, or correlation policy.
+    // payload, routing, or identity policy.
     //
     // #951's bug class is now closed on BOTH axes: every field is projected
     // TOTALLY, so a protocol module that changes which payload it composes
@@ -353,14 +347,12 @@ pub fn comment_intent(
         payload,
         routing,
         identity,
-        correlation,
     } = intent;
 
     Ok(FfiWriteIntent {
         payload: write_payload_to_ffi(payload)?,
         routing: write_routing_to_ffi(routing),
         identity: identity_to_ffi(identity),
-        correlation: correlation.map(|token| token.to_string()),
     })
 }
 
@@ -442,7 +434,6 @@ mod tests {
                 root: podcast_root(),
             },
             "hi".to_string(),
-            Some("comment-correlation".to_string()),
         )
         .unwrap();
 
@@ -464,18 +455,15 @@ mod tests {
         );
         assert_eq!(intent.routing, FfiWriteRouting::Auto);
         assert_eq!(intent.identity, FfiIdentity::Active);
-        assert_eq!(intent.correlation.as_deref(), Some("comment-correlation"));
     }
 
     #[test]
     fn composed_comment_uses_the_generic_publish_door() {
-        let correlation = "comment-generic-publish".to_string();
         let intent = comment_intent(
             FfiCommentTarget::Root {
                 root: podcast_root(),
             },
             "hi".to_string(),
-            Some(correlation.clone()),
         )
         .unwrap();
         let engine = crate::facade::NmpEngine::new(
@@ -500,16 +488,15 @@ mod tests {
             .publish(intent)
             .expect("the ordinary generic publish door must accept the comment");
         let receipt_id = receipt.id();
-        let reattached = engine
-            .reattach_by_correlation(correlation)
-            .expect("the generic door must preserve the comment correlation token");
-        assert_eq!(reattached.receipt_id, Some(receipt_id));
-        match reattached.outcome {
+        match engine
+            .reattach_receipt(receipt_id)
+            .expect("the generic door must retain the comment receipt")
+        {
             crate::types::FfiReceiptReattachment::Attached { stream } => {
                 assert_eq!(stream.id(), receipt_id);
             }
             crate::types::FfiReceiptReattachment::NotFound => {
-                panic!("the accepted comment correlation must be retained")
+                panic!("the accepted comment receipt must be retained")
             }
             crate::types::FfiReceiptReattachment::RetainedButUnreadable => {
                 panic!("the accepted comment receipt must remain readable")

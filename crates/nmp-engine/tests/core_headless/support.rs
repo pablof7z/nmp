@@ -467,7 +467,6 @@ fn publish_explicit(
         payload: WritePayload::Event(draft(85, "attempt-start failure")),
         routing: WriteRouting::Explicit(Vec::from_iter(relays)),
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, unsigned) = find_sign_request(&accepted);
     let signed = unsigned.sign_with_keys(author).expect("sign fixture event");

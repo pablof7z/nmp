@@ -24,8 +24,8 @@ boundary records:
 - initial route/retry state that is already known.
 
 If the call returns an error, the caller receives no `Accepted` answer. An I/O
-error has unknown durability: reconstruction and correlation lookup may reveal
-that the transaction committed one pending row. `Accepted` never means merely
+error has unknown durability: reconstruction and publish-queue enumeration may
+reveal that the transaction committed one pending row. `Accepted` never means merely
 queued in memory.
 
 ### Replaceable delivery coalescing

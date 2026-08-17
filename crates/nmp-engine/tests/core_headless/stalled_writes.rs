@@ -38,7 +38,6 @@ fn publish_signed(
         payload: WritePayload::Event(builder),
         routing,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, unsigned) = find_sign_request(&accepted);
     let signed = unsigned.sign_with_keys(author).unwrap();
@@ -65,7 +64,6 @@ fn an_unroutable_write_parks_on_an_open_empty_destination_set_and_is_listed() {
         payload: WritePayload::Event(draft(1, "cold start")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, unsigned) = find_sign_request(&accepted);
     let signed = unsigned.sign_with_keys(&author).unwrap();
@@ -132,7 +130,6 @@ fn an_unsignable_write_names_the_frozen_author_across_an_account_switch() {
         payload: WritePayload::Event(draft(2, "nobody can sign this")),
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, _unsigned) = find_sign_request(&accepted);
     core.handle(EngineMsg::SignerUnavailable(id, generation));
@@ -297,7 +294,6 @@ fn two_receipts_for_the_same_bytes_get_distinct_descriptors() {
             payload: WritePayload::Event(draft(7, "the same bytes twice")),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         }));
         // The SECOND acceptance joins an already-signed row's owner set, so
         // it asks no signer -- it is a distinct obligation over identical

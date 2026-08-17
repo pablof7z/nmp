@@ -318,7 +318,6 @@ fn invalidated_registration_and_materializer_refusal_leave_no_custody() {
         payload,
         routing: WriteRouting::Auto,
         identity: Identity::Active,
-        correlation: None,
     }) {
         Ok(_) => panic!("materializer refusal must remain pre-custody"),
         Err(error) => error,

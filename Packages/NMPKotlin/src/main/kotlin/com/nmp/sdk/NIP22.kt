@@ -253,7 +253,7 @@ sealed class CommentTarget {
 /** Compose a NIP-22 comment on [target] as NMP's ordinary [WriteIntent]
  * (#822). It names no author and reads no clock -- the engine resolves the
  * identity and stamps the time at acceptance -- so composition still owns no
- * engine state or lifecycle. [correlation] passes through unchanged; publish
+ * engine state or lifecycle. Publish
  * the result through [NMPEngine.publish].
  *
  * This always composes a kind:1111 comment, including on a text note, where
@@ -263,14 +263,12 @@ sealed class CommentTarget {
 fun commentIntent(
     target: CommentTarget,
     content: String,
-    correlation: String? = null,
 ): WriteIntent =
     WriteIntent.from(
         nmpRethrowing {
             ffiCommentIntent(
                 target.toFfi(),
                 content,
-                correlation,
             )
         },
     )

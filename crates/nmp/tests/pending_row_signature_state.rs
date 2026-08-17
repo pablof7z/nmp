@@ -97,7 +97,6 @@ fn delayed_signer_promotes_the_same_visible_row_from_pending_to_signed() {
             }),
             routing: WriteRouting::Auto,
             identity: Identity::Explicit(pubkey),
-            correlation: None,
         })
         .expect("the unsigned write is durably accepted");
 

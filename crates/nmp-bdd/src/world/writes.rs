@@ -81,7 +81,6 @@ impl NmpWorld {
             payload: WritePayload::Event(builder.clone()),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         });
         self.last_publish_was_auto = true;
         // Not keyed by the text it says: `event-builder.feature` publishes the
@@ -284,7 +283,6 @@ impl NmpWorld {
             payload: WritePayload::Signed(event),
             routing,
             identity,
-            correlation: None,
         });
         self.last_publish_was_auto = false;
         self.last_receipt_text = None;

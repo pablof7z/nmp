@@ -183,29 +183,15 @@ public struct WriteIntent: Sendable, Hashable {
     public var payload: WritePayload
     public var routing: WriteRouting
     public var identity: Identity
-    /// Crash-safe client correlation token (#591). `nil` -- the default --
-    /// opts this write out of correlation entirely. A non-`nil` token is
-    /// validated by `nmp_grammar::CorrelationToken`'s `TryFrom<&str>` on the way across
-    /// the boundary (non-empty, length-capped); a malformed token throws
-    /// `NMPError.invalidCorrelationToken` synchronously from `publish`,
-    /// before any engine call. A token that already resolves to a
-    /// previously-accepted receipt reattaches that existing obligation
-    /// instead of enqueuing a second write -- no body comparison against
-    /// `payload`. See `NMPEngine.reattachReceipt(correlation:)` for the
-    /// door that recovers a receipt after a crash that happened BEFORE the
-    /// app could durably persist the id `publish` returned.
-    public var correlation: String?
 
     public init(
         payload: WritePayload,
         routing: WriteRouting,
-        identity: Identity = .active,
-        correlation: String? = nil
+        identity: Identity = .active
     ) {
         self.payload = payload
         self.routing = routing
         self.identity = identity
-        self.correlation = correlation
     }
 
     /// Reverse projection for protocol-owned FFI composers that return the
@@ -215,15 +201,13 @@ public struct WriteIntent: Sendable, Hashable {
         payload = WritePayload(ffi.payload)
         routing = WriteRouting(ffi.routing)
         identity = Identity(ffi.identity)
-        correlation = ffi.correlation
     }
 
     func toFfi() -> FfiWriteIntent {
         FfiWriteIntent(
             payload: payload.toFfi(),
             routing: routing.toFfi(),
-            identity: identity.toFfi(),
-            correlation: correlation
+            identity: identity.toFfi()
         )
     }
 }

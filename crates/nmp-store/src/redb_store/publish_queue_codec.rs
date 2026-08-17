@@ -823,13 +823,6 @@ pub(crate) fn encode_receipt(record: &PublishQueueReceiptRecord) -> Vec<u8> {
             }
         }
     }
-    encoder
-        .optional_text(
-            record.correlation.as_deref(),
-            MAX_TEXT_BYTES,
-            "correlation token",
-        )
-        .expect("validated correlation token");
     match (
         record.terminal_sequence,
         record.terminal_at,
@@ -930,7 +923,6 @@ pub(crate) fn decode_receipt(
         }
         other => return Err(PublishQueueCodecError::InvalidTag("receipt payload", other)),
     };
-    let correlation = decoder.optional_text(MAX_TEXT_BYTES, "correlation token")?;
     let (terminal_sequence, terminal_at, terminal_bytes) = match decoder.u8()? {
         0 => (None, None, None),
         1 => (
@@ -951,7 +943,6 @@ pub(crate) fn decode_receipt(
         expected_pubkey,
         accepted_at,
         payload,
-        correlation,
         terminal_sequence,
         terminal_at,
         terminal_bytes,

@@ -70,7 +70,6 @@ async fn an_app_declared_loopback_relay_is_reached_without_opt_in() {
             payload: note("reaching the relay this app declared"),
             routing: WriteRouting::Auto,
             identity: Identity::Active,
-            correlation: None,
         })
         .expect("the write is accepted");
 

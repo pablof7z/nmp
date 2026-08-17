@@ -584,26 +584,6 @@ impl EngineCore {
         self.state.receipt_is_live(id)
     }
 
-    pub fn reattach_by_correlation(
-        &mut self,
-        token: String,
-    ) -> (ReceiptReplayPage, Option<ReceiptId>) {
-        self.checked("reattach_by_correlation", |s| {
-            s.reattach_by_correlation(token)
-        })
-    }
-
-    pub fn reattach_by_correlation_page(
-        &mut self,
-        token: String,
-        cursor: Option<ReceiptReplayCursor>,
-        limit: usize,
-    ) -> (ReceiptReplayPage, Option<ReceiptId>) {
-        self.checked("reattach_by_correlation_page", |s| {
-            s.reattach_by_correlation_page(token, cursor, limit)
-        })
-    }
-
     pub fn prepare_publish(&mut self, intent: WriteIntent) -> PublishPreparation {
         self.checked("prepare_publish", |s| s.prepare_publish(intent))
     }

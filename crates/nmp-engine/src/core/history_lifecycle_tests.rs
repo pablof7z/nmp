@@ -540,7 +540,6 @@ mod history_mutation_tests {
                 }),
                 routing: WriteRouting::Explicit(vec![relay]),
                 identity: Identity::Active,
-                correlation: None,
             })
         });
         let receipt = accepted

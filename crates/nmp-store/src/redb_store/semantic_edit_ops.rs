@@ -33,7 +33,7 @@ use super::publish_queue_codec::{
 use super::publish_queue_ops::terminal_intent_evidence_bytes;
 use super::query::expiration_key;
 use super::schema::{
-    persist_err, PUBLISH_QUEUE_CORRELATIONS, PUBLISH_QUEUE_DEADLINES,
+    persist_err, PUBLISH_QUEUE_DEADLINES,
     PUBLISH_QUEUE_DEADLINES_BY_INTENT, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_ROUTE_REVISIONS,
     SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS, SEMANTIC_RESOURCES,
 };
@@ -326,7 +326,6 @@ fn apply_plan(
         PublicKey,
         String,
         Timestamp,
-        Option<nmp_grammar::CorrelationToken>,
     )>,
     plan: SemanticTransitionPlan,
 ) -> Result<SemanticInstallOutcome, PersistenceError> {
@@ -338,9 +337,6 @@ fn apply_plan(
         .map_err(persist_err)?;
     let mut high_water = write_txn
         .open_table(SEMANTIC_MATERIALIZATION_HIGH_WATER)
-        .map_err(persist_err)?;
-    let mut correlations = write_txn
-        .open_table(PUBLISH_QUEUE_CORRELATIONS)
         .map_err(persist_err)?;
 
     let new_intent_id = new_intent.as_ref().map(|value| value.0);
@@ -606,7 +602,6 @@ fn apply_plan(
         expected_pubkey,
         signing_identity_ref,
         accepted_at,
-        correlation,
     )) = new_intent
     {
         let update = plan
@@ -647,7 +642,6 @@ fn apply_plan(
                     .unwrap_or(crate::ReplaceableOperationAcceptance::Bodyless),
                 state: receipt_state(update, materialization.as_ref()),
             },
-            correlation: correlation.as_ref().map(|token| token.as_ref().to_owned()),
             terminal_sequence: None,
             terminal_at: None,
             terminal_bytes: None,
@@ -657,11 +651,6 @@ fn apply_plan(
             .publish_queue_receipts
             .insert(&receipt_key(receipt_id), encoded.as_slice())
             .map_err(persist_err)?;
-        if let Some(correlation) = correlation {
-            correlations
-                .insert(correlation.as_ref().as_bytes(), &receipt_key(receipt_id))
-                .map_err(persist_err)?;
-        }
     }
 
     Ok(match plan.next {
@@ -687,7 +676,6 @@ pub(super) fn accept(
     expected_pubkey: PublicKey,
     signing_identity_ref: String,
     accepted_at: Timestamp,
-    correlation: Option<nmp_grammar::CorrelationToken>,
     accept: SemanticAccept,
 ) -> Result<AcceptOutcome, PersistenceError> {
     if expected_pubkey != accept.coordinate.public_key {
@@ -747,7 +735,6 @@ pub(super) fn accept(
                 expected_pubkey,
                 signing_identity_ref,
                 accepted_at,
-                correlation,
             )),
             plan,
         )?;

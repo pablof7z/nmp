@@ -43,7 +43,6 @@ val intent =
         authorPubkey = author,
         createdAt = timestamp,
         content = text,
-        correlation = correlation,
     )
 val receipt = nmp.publish(intent)
 ```

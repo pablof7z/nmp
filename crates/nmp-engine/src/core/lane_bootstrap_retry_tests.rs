@@ -42,7 +42,6 @@ fn publish_narrow(
         }),
         routing: WriteRouting::Explicit(Vec::from_iter(relays.to_vec())),
         identity: Identity::Active,
-        correlation: None,
     }));
     let (id, generation, unsigned) = accepted
         .iter()

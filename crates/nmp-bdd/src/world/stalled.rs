@@ -82,7 +82,6 @@ impl NmpWorld {
             payload: WritePayload::Event(EventBuilder::new(nostr::Kind::TextNote).content(text)),
             routing: WriteRouting::Explicit(self.told_route.clone()),
             identity: Identity::Active,
-            correlation: None,
         });
         self.receipts.push(ReceiptState::from_publish(result));
     }

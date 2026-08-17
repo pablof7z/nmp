@@ -120,7 +120,6 @@ async fn a_lane_retired_before_its_first_attempt_never_reaches_the_wire() {
             ),
             routing: WriteRouting::Explicit(vec![relay_url.clone()]),
             identity: Identity::Explicit(author.public_key()),
-            correlation: None,
         })
         .expect("the first write at a fresh coordinate is accepted");
     let older_id = older.event_id;
@@ -138,7 +137,6 @@ async fn a_lane_retired_before_its_first_attempt_never_reaches_the_wire() {
             ),
             routing: WriteRouting::Explicit(vec![relay_url.clone()]),
             identity: Identity::Explicit(author.public_key()),
-            correlation: None,
         })
         .expect("the second write at the same coordinate is accepted");
     let newer_id = newer.event_id;

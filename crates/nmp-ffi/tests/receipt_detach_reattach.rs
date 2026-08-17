@@ -69,7 +69,6 @@ async fn receipt_detached_before_terminal_reattaches_full_durable_prefix_from_th
                 relays: vec!["wss://write.example".to_string()],
             },
             identity: FfiIdentity::Active,
-            correlation: None,
         })
         .expect("publish enqueues");
     let receipt_id = receipt.id();
@@ -180,7 +179,6 @@ async fn ffi_reattachment_transparently_traverses_more_than_one_durable_page() {
                 expected_pubkey: keys.public_key(),
                 signing_identity_ref: "ffi-paged-replay".into(),
                 accepted_at: nostr::Timestamp::from(1_000u64),
-                correlation: None,
             })
             .expect("accept durable fixture");
         let intent_id = accepted.journaled_intent_id().expect("intent id");
