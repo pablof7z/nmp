@@ -2890,9 +2890,9 @@ impl CoreState {
     /// `atom` is the atom's TRUE `ContextualAtom` (#118, fixed ahead of
     /// #107) -- the caller supplies the actual context an atom was
     /// acquired under, never a reconstruction. Before this fix, a
-    /// `ConcreteFilter`-only signature reconstructed `source`/`access` via
-    /// `Demand::from_filter`'s static default, which was exact only as
-    /// long as every production atom took that default path; #107's
+    /// `ConcreteFilter`-only signature reconstructed `source`/`access` by
+    /// inspecting whether the filter bound `authors`, which was exact only
+    /// as long as every production atom took that one path; #107's
     /// `SourceAuthority::Pinned` breaks that assumption; the reconstruction
     /// would then compute the WRONG `CoverageKey` and silently report
     /// "not covered" for coverage that IS actually proven.

@@ -103,11 +103,12 @@ pub fn parse_bookmarks_tolerant(event: &Event) -> BookmarksList {
 /// for their own single-owned-list kinds.
 #[must_use]
 pub fn current_account_bookmarks_demand() -> Demand {
-    Demand::from_filter(Filter {
+    Demand::author_outboxes(Filter {
         kinds: Some(BTreeSet::from([BOOKMARKS_KIND])),
         authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
         ..Filter::default()
     })
+    .expect("the selection binds `authors`")
 }
 
 #[cfg(test)]

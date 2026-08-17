@@ -24,14 +24,14 @@ mod history_mutation_tests {
 
     fn history_query(room: usize, kinds: BTreeSet<u16>) -> HistoryQuery {
         HistoryQuery::new(
-            LiveQuery::from_filter(Filter {
+            LiveQuery::single(nmp_grammar::Demand::public(Filter {
                 kinds: Some(kinds),
                 tags: BTreeMap::from([(
                     IndexedTagName::new('h').unwrap(),
                     Binding::Literal(BTreeSet::from([format!("room-{room}")])),
                 )]),
                 ..Filter::default()
-            }),
+            })),
             3,
             6,
         )
@@ -677,16 +677,24 @@ mod history_mutation_tests {
             .unwrap();
         let selection = nmp_grammar::Filter {
             authors: Some(Binding::Derived(Box::new(Derived {
-                inner: nmp_grammar::Demand::from_filter(nmp_grammar::Filter {
+                inner: nmp_grammar::Demand::author_outboxes(nmp_grammar::Filter {
                     kinds: Some(BTreeSet::from([30_003u16])),
                     authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                     ..nmp_grammar::Filter::default()
-                }),
+                })
+                .expect("the selection binds `authors`"),
                 project: Selector::AddressCoord,
             }))),
             ..nmp_grammar::Filter::default()
         };
-        let query = HistoryQuery::new(LiveQuery::from_filter(selection), 3, 6);
+        let query = HistoryQuery::new(
+            LiveQuery::single(
+                nmp_grammar::Demand::author_outboxes(selection)
+                    .expect("the selection binds `authors`"),
+            ),
+            3,
+            6,
+        );
         let mut core = EngineCore::new(store, 20);
         core.handle(EngineMsg::SetActivePubkey(Some(keys.public_key())));
         let opened = core.handle(EngineMsg::SubscribeHistory(query));

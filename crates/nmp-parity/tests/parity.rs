@@ -11,12 +11,12 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     AcquisitionEvidence, AuthDenialSource, AuthDiagnosticsPhase, AuthDiagnosticsSnapshot,
-    AuthPhase, Binding, CancelWriteOutcome, DiagnosticsSnapshot, Engine,
-    EngineConfig, EngineError, FifoReceiver, FifoRecvTimeoutError, Filter, Identity, Lane,
-    LiveQuery, NotSentReason, ReceiptId, ReceiptReattachment, ReceiptStream, RefuseReason,
-    RelayState, RelayWaiting, RetryCause, Row, RowDelta, ShortfallFact, SigningState, SourceStatus,
-    StalledWriteStage, StalledWriteTotals, Subscription, Timestamp, UnsignedEvent, WriteFact,
-    WriteIntent, WriteOutcome, WritePayload, WriteRouting,
+    AuthPhase, Binding, CancelWriteOutcome, DiagnosticsSnapshot, Engine, EngineConfig, EngineError,
+    FifoReceiver, FifoRecvTimeoutError, Filter, Identity, Lane, LiveQuery, NotSentReason,
+    ReceiptId, ReceiptReattachment, ReceiptStream, RefuseReason, RelayState, RelayWaiting,
+    RetryCause, Row, RowDelta, ShortfallFact, SigningState, SourceStatus, StalledWriteStage,
+    StalledWriteTotals, Subscription, Timestamp, UnsignedEvent, WriteFact, WriteIntent,
+    WriteOutcome, WritePayload, WriteRouting,
 };
 use nmp_ffi::convert::{
     diagnostics_snapshot_to_ffi, write_status_to_ffi, FfiError, WriteStatusRef,
@@ -38,11 +38,11 @@ use nmp_ffi::nip02::{
 use nmp_ffi::session::{FfiPrivateKey, FfiPublicKey};
 use nmp_ffi::types::{
     FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthPhase, FfiBinding,
-    FfiCancelWriteOutcome, FfiDiagnosticsSnapshot, FfiFilter, FfiIdentity, FfiLiveQuery,
-    FfiNotSentReason, FfiReceiptReattachment, FfiRefuseReason, FfiRelayState, FfiRelayWaiting,
-    FfiRetryCause, FfiRowDelta, FfiShortfallFact, FfiSigningState, FfiSourceStatus,
-    FfiStalledWriteStage, FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload,
-    FfiWriteRouting,
+    FfiCacheMode, FfiCancelWriteOutcome, FfiDemand, FfiDiagnosticsSnapshot, FfiFilter,
+    FfiFreshness, FfiIdentity, FfiLiveQuery, FfiNotSentReason, FfiReceiptReattachment,
+    FfiRefuseReason, FfiRelayState, FfiRelayWaiting, FfiRetryCause, FfiRowDelta, FfiShortfallFact,
+    FfiSigningState, FfiSourceAuthority, FfiSourceStatus, FfiStalledWriteStage, FfiWriteFact,
+    FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
 use nmp_grammar::{AccessContext, Demand, Derived, Selector, SourceAuthority};
 use nmp_nip02::{
@@ -1519,14 +1519,26 @@ fn direct_filter(pubkey: &str, kind: u16) -> Filter {
     }
 }
 
-fn ffi_filter(pubkey: &str, kind: u16) -> FfiFilter {
-    FfiFilter {
-        kinds: Some(vec![kind]),
-        authors: Some(FfiBinding::Literal {
-            values: vec![pubkey.to_string()],
-        }),
-        limit: Some(10),
-        ..FfiFilter::default()
+/// The FFI mirror of `direct_filter`, carried as the complete live query the
+/// FFI door takes: one branch that names `AuthorOutboxes` explicitly, exactly
+/// as the direct-Rust side does.
+fn ffi_live_query(pubkey: &str, kind: u16) -> FfiLiveQuery {
+    FfiLiveQuery {
+        branches: vec![FfiDemand {
+            selection: FfiFilter {
+                kinds: Some(vec![kind]),
+                authors: Some(FfiBinding::Literal {
+                    values: vec![pubkey.to_string()],
+                }),
+                limit: Some(10),
+                ..FfiFilter::default()
+            },
+            source: FfiSourceAuthority::AuthorOutboxes,
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
+            freshness: FfiFreshness::Live,
+        }],
+        aggregate_result_limit: None,
     }
 }
 
@@ -2115,7 +2127,10 @@ fn stage_direct_source_anchor(
 ) -> Subscription {
     let subscription = engine
         .observe(
-            LiveQuery::from_filter(direct_filter(pubkey, SOURCE_ANCHOR_KIND)),
+            LiveQuery::single(
+                Demand::author_outboxes(direct_filter(pubkey, SOURCE_ANCHOR_KIND))
+                    .expect("the selection binds `authors`"),
+            ),
             None,
         )
         .expect("direct source-anchor query must open");
@@ -2150,7 +2165,7 @@ fn stage_ffi_source_anchor(
     relay: &ScriptedRelay,
 ) -> Arc<NmpRowStream> {
     let handle = engine
-        .observe(ffi_filter(pubkey, SOURCE_ANCHOR_KIND), None)
+        .observe(ffi_live_query(pubkey, SOURCE_ANCHOR_KIND), None)
         .expect("FFI source-anchor query must open");
     let rx = bridge_rows(&handle);
 
@@ -2816,7 +2831,10 @@ async fn run_direct_success(keys: &Keys, query_event: &nostr::Event) -> Scenario
 
     let subscription = engine
         .observe(
-            LiveQuery::from_filter(direct_filter(&pubkey.to_hex(), QUERY_KIND)),
+            LiveQuery::single(
+                Demand::author_outboxes(direct_filter(&pubkey.to_hex(), QUERY_KIND))
+                    .expect("the selection binds `authors`"),
+            ),
             None,
         )
         .expect("direct query must open");
@@ -2960,7 +2978,7 @@ async fn run_ffi_success(keys: &Keys, query_event: &nostr::Event) -> ScenarioOut
     let diag_rx = bridge_diagnostics(&diagnostics_handle);
     let anchor_handle = stage_ffi_source_anchor(&engine, &pubkey, &relay);
     let query_handle = engine
-        .observe(ffi_filter(&pubkey, QUERY_KIND), None)
+        .observe(ffi_live_query(&pubkey, QUERY_KIND), None)
         .expect("FFI query must open");
     let rows_rx = bridge_rows(&query_handle);
     let mut rows = BTreeMap::new();
@@ -4393,7 +4411,7 @@ async fn offline_follow_recomputes_derived_feed_before_later_source_rebase() {
         .add_public_key_account(ffi_public_key(author.public_key()), true)
         .expect("NIP-02 author registers without a signer");
     let contact_list = engine
-        .observe_query(
+        .observe(
             nmp_ffi::convert::live_query_to_ffi(LiveQuery::single(pinned_contact_list(
                 author.public_key(),
                 relay_url.clone(),
@@ -4410,7 +4428,7 @@ async fn offline_follow_recomputes_derived_feed_before_later_source_rebase() {
         "the relay never received the held contact-list request"
     );
     let feed = engine
-        .observe_query(
+        .observe(
             nmp_ffi::convert::live_query_to_ffi(pinned_follow_feed(
                 author.public_key(),
                 relay_url.clone(),
@@ -4505,7 +4523,7 @@ async fn offline_follow_recomputes_derived_feed_before_later_source_rebase() {
     .await;
     assert_eq!(relay.url, relay_url);
     let contact_list = engine
-        .observe_query(
+        .observe(
             nmp_ffi::convert::live_query_to_ffi(LiveQuery::single(pinned_contact_list(
                 author.public_key(),
                 relay_url.clone(),
@@ -4516,7 +4534,7 @@ async fn offline_follow_recomputes_derived_feed_before_later_source_rebase() {
     let contact_rx = bridge_rows(&contact_list);
     let mut contact_rows = BTreeMap::new();
     let feed = engine
-        .observe_query(
+        .observe(
             nmp_ffi::convert::live_query_to_ffi(pinned_follow_feed(
                 author.public_key(),
                 relay_url.clone(),
@@ -4855,7 +4873,7 @@ async fn first_group_list_action_survives_restart_and_replays_over_later_truth()
         .add_private_key_account(ffi_private_key(&author), true)
         .expect("NIP-29 author registers");
     let observation = engine
-        .observe_query(
+        .observe(
             FfiLiveQuery {
                 branches: vec![nmp_ffi::convert::demand_to_ffi(
                     nmp_nip29::current_account_group_list_demand(),
@@ -4894,7 +4912,7 @@ async fn first_group_list_action_survives_restart_and_replays_over_later_truth()
         .add_private_key_account(ffi_private_key(&author), true)
         .expect("NIP-29 author reattaches");
     let reopened_observation = reopened
-        .observe_query(
+        .observe(
             FfiLiveQuery {
                 branches: vec![nmp_ffi::convert::demand_to_ffi(
                     nmp_nip29::current_account_group_list_demand(),

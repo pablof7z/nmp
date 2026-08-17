@@ -2014,10 +2014,10 @@ mod tests {
         let mut core = CoreState::new(store, 20);
         let query_for = |kind: u16| {
             HistoryQuery::new(
-                LiveQuery::from_filter(Filter {
+                LiveQuery::single(nmp_grammar::Demand::public(Filter {
                     kinds: Some(BTreeSet::from([kind])),
                     ..Filter::default()
-                }),
+                })),
                 3,
                 6,
             )
@@ -2143,10 +2143,10 @@ mod tests {
         // A minimal second window, deliberately reusing a handle id already
         // live under `first`.
         let query = HistoryQuery::new(
-            LiveQuery::from_filter(Filter {
+            LiveQuery::single(nmp_grammar::Demand::public(Filter {
                 kinds: Some(BTreeSet::from([3u16])),
                 ..Filter::default()
-            }),
+            })),
             3,
             6,
         );

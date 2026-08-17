@@ -491,11 +491,14 @@ mod relay_worker_reconciliation_tests {
     }
 
     fn query(author: &str) -> LiveQuery {
-        LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([1])),
-            authors: Some(Binding::Literal(BTreeSet::from([author.to_string()]))),
-            ..Filter::default()
-        })
+        LiveQuery::single(
+            Demand::author_outboxes(Filter {
+                kinds: Some(BTreeSet::from([1])),
+                authors: Some(Binding::Literal(BTreeSet::from([author.to_string()]))),
+                ..Filter::default()
+            })
+            .expect("the selection binds `authors`"),
+        )
     }
 
     fn protected_query(relay: &RelayUrl, signer: PublicKey, kind: u16) -> LiveQuery {

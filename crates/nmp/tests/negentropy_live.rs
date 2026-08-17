@@ -19,8 +19,8 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::RowDelta;
-use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter};
+use nmp_grammar::{Demand, LiveQuery};
 use nmp_local_signer::LocalKeySigner;
 use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_runtime::{EngineThread, RowsReceiver};
@@ -106,13 +106,16 @@ fn wait_for_rows(
 }
 
 fn literal_kind1(author_hex: &str) -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        kinds: Some(std::collections::BTreeSet::from([1u16])),
-        authors: Some(Binding::Literal(std::collections::BTreeSet::from([
-            author_hex.to_string(),
-        ]))),
-        ..Filter::default()
-    })
+    LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(std::collections::BTreeSet::from([1u16])),
+            authors: Some(Binding::Literal(std::collections::BTreeSet::from([
+                author_hex.to_string(),
+            ]))),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    )
 }
 
 /// Test 10 (plan §5, negentropy half): a relay PROVEN to speak NIP-77

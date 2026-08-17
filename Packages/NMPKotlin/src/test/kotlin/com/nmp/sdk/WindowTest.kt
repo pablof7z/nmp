@@ -114,22 +114,22 @@ class WindowTest {
         try {
             val demand = windowDemand(7_779u)
             assertFailsWith<NMPError.WindowZeroRows> {
-                engine.observe(demand, Window.Expandable(initial = 0uL, max = 2uL))
+                engine.observe(NMPLiveQuery.single(demand), Window.Expandable(initial = 0uL, max = 2uL))
             }
             assertFailsWith<NMPError.WindowZeroRows> {
-                engine.observe(demand, Window.Expandable(initial = 1uL, max = 0uL))
+                engine.observe(NMPLiveQuery.single(demand), Window.Expandable(initial = 1uL, max = 0uL))
             }
             assertFailsWith<NMPError.WindowInitialExceedsMax> {
-                engine.observe(demand, Window.Expandable(initial = 3uL, max = 2uL))
+                engine.observe(NMPLiveQuery.single(demand), Window.Expandable(initial = 3uL, max = 2uL))
             }
             assertFailsWith<NMPError.WindowSelectionHasLimit> {
                 engine.observe(
-                    demand.copy(selection = demand.selection.copy(limit = 1u)),
+                    NMPLiveQuery.single(demand.copy(selection = demand.selection.copy(limit = 1u))),
                     Window.Expandable(initial = 1uL, max = 2uL),
                 )
             }
 
-            val query = engine.observe(demand, Window.Expandable(initial = 1uL, max = 2uL))
+            val query = engine.observe(NMPLiveQuery.single(demand), Window.Expandable(initial = 1uL, max = 2uL))
             val first = CompletableDeferred<RowBatch>()
             val collection = launch {
                 query.frames.collect { batch -> first.complete(batch) }
@@ -151,7 +151,7 @@ class WindowTest {
     fun engineShutdownClosesWindowedCollectionWithinBound() = runBlocking {
         val engine = NMPEngine(NMPConfig())
         val query =
-            engine.observe(windowDemand(7_780u), Window.Expandable(initial = 1uL, max = 2uL))
+            engine.observe(NMPLiveQuery.single(windowDemand(7_780u)), Window.Expandable(initial = 1uL, max = 2uL))
         val first = CompletableDeferred<Unit>()
         val collection = launch {
             query.frames.collect { first.complete(Unit) }

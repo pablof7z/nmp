@@ -34,7 +34,14 @@ class SigningTest {
                 assertEquals(128, signed.signature.length)
                 assertEquals(
                     emptyList<Row>(),
-                    engine.observe(NMPFilter(kinds = listOf(request.kind))).first().rows,
+                    engine.observe(
+                            NMPLiveQuery.single(
+                                NMPDemand(
+                                    selection = NMPFilter(kinds = listOf(request.kind)),
+                                    source = NMPSourceAuthority.Public,
+                                )
+                            )
+                        ).first().rows,
                     "sign-only must not publish or store the event",
                 )
             }

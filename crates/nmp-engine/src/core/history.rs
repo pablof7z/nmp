@@ -219,10 +219,13 @@ mod tests {
     use super::*;
 
     fn query() -> LiveQuery {
-        LiveQuery::from_filter(Filter {
-            authors: Some(Binding::Literal(BTreeSet::from(["11".repeat(32)]))),
-            ..Filter::default()
-        })
+        LiveQuery::single(
+            Demand::author_outboxes(Filter {
+                authors: Some(Binding::Literal(BTreeSet::from(["11".repeat(32)]))),
+                ..Filter::default()
+            })
+            .expect("the selection binds `authors`"),
+        )
     }
 
     #[test]
@@ -246,11 +249,11 @@ mod tests {
 
     #[test]
     fn every_branch_gets_its_own_bounded_acquisition_in_canonical_order() {
-        let a = Demand::from_filter(Filter {
+        let a = Demand::public(Filter {
             kinds: Some(BTreeSet::from([1])),
             ..Filter::default()
         });
-        let b = Demand::from_filter(Filter {
+        let b = Demand::public(Filter {
             kinds: Some(BTreeSet::from([7])),
             ..Filter::default()
         });

@@ -21,11 +21,11 @@ use nmp_engine::publish_queue::{
     NotSentReason, PublishQueueEntry, RelayState, RelayWaiting, RetryCause, SigningState,
     WriteFact, WriteOutcome,
 };
-use nmp_grammar::LiveQuery;
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter, Identity, RelaySessionKey,
     SourceAuthority, WriteIntent, WritePayload, WriteRouting,
 };
+use nmp_grammar::{Demand, LiveQuery};
 use nmp_router::{SubId, WireOp};
 use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::{
@@ -113,11 +113,14 @@ fn ctx_atom_with(filter: ConcreteFilter, source: SourceAuthority) -> ContextualA
 }
 
 fn literal_query(kinds: &[u16], author_hex: &str) -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        kinds: Some(kinds.iter().copied().collect()),
-        authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
-        ..Filter::default()
-    })
+    LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(kinds.iter().copied().collect()),
+            authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    )
 }
 
 fn new_core(dir: FixtureRoutingFacts) -> EngineCore {

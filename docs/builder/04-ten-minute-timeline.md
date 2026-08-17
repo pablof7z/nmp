@@ -77,7 +77,7 @@ The three descriptor dimensions matter:
 ## 4. Observe native snapshots
 
 ```swift
-for await snapshot in try engine.observe(demand) {
+for await snapshot in try engine.observe(.single(demand)) {
     rows = snapshot.rows
 
     for source in snapshot.acquisition {
@@ -101,7 +101,7 @@ In SwiftUI, the loop belongs in the view/model task you already use:
 
 ```swift
 .task(id: demand) {
-    for await snapshot in try engine.observe(demand) {
+    for await snapshot in try engine.observe(.single(demand)) {
         model.apply(snapshot)
     }
 }

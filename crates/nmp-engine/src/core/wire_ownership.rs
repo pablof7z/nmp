@@ -809,7 +809,7 @@ mod tests {
     /// called with in production.
     fn subscribed_handle() -> (CoreState, HandleId) {
         let relay = RelayUrl::parse("wss://wire-ownership-double-index.example").unwrap();
-        let mut demand = Demand::from_filter(Filter::default());
+        let mut demand = Demand::public(Filter::default());
         demand.source = SourceAuthority::Pinned(BTreeSet::from([relay]));
         demand.freshness = Freshness::Live;
         let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 20);

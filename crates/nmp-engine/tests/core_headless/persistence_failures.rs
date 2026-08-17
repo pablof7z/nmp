@@ -607,16 +607,17 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
     derived_filter.tags.insert(
         nmp_grammar::IndexedTagName::new('p').expect("indexed p tag"),
         Binding::Derived(Box::new(nmp_grammar::Derived {
-            inner: nmp_grammar::Demand::from_filter(Filter {
+            inner: Demand::author_outboxes(Filter {
                 kinds: Some(BTreeSet::from([1u16])),
                 authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
                 limit: Some(1),
                 ..Filter::default()
-            }),
+            })
+            .expect("the selection binds `authors`"),
             project: nmp_grammar::Selector::Authors,
         })),
     );
-    let derived_from_latest_note = LiveQuery::from_filter(derived_filter);
+    let derived_from_latest_note = LiveQuery::single(Demand::public(derived_filter));
     let initial = core.handle_and_flush(EngineMsg::Subscribe(derived_from_latest_note));
     assert!(
         initial.iter().all(|effect| !matches!(
@@ -1839,11 +1840,14 @@ fn a_failing_coverage_peek_never_republishes_live_evidence_as_unproven() {
     let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
     let _ = connect(&mut core, 0, &relay);
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(account_a.public_key())));
-    let opened = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
-        ..Filter::default()
-    })));
+    let opened = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    )));
     assert!(
         opened.iter().all(
             |effect| !matches!(effect, Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.is_some())

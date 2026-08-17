@@ -37,7 +37,8 @@ use std::time::Duration;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
-    FfiFilter, FfiIdentity, FfiRelayInformationCachePolicy, FfiSignEventRequest, FfiWriteIntent,
+    FfiAccessContext, FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiIdentity, FfiLiveQuery,
+    FfiRelayInformationCachePolicy, FfiSignEventRequest, FfiSourceAuthority, FfiWriteIntent,
     FfiWritePayload, FfiWriteRouting,
 };
 
@@ -56,10 +57,19 @@ const CONCURRENT_OBSERVATIONS: usize = 1_000;
 /// admission would blow past it. Expected actual growth is ~0.
 const THREAD_GROWTH_BOUND: u64 = 16;
 
-fn note_query() -> FfiFilter {
-    FfiFilter {
-        kinds: Some(vec![1]),
-        ..FfiFilter::default()
+fn note_query() -> FfiLiveQuery {
+    FfiLiveQuery {
+        branches: vec![FfiDemand {
+            selection: FfiFilter {
+                kinds: Some(vec![1]),
+                ..FfiFilter::default()
+            },
+            source: FfiSourceAuthority::Public,
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
+            freshness: FfiFreshness::Live,
+        }],
+        aggregate_result_limit: None,
     }
 }
 

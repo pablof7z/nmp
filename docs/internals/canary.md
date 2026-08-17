@@ -246,7 +246,7 @@ feature keys, "NIP-22 comments" is the protocol's name and the name of
 `apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C1ColdStartLiveFeedTests.swift` seeds
 one event over a real `EVENT` frame before the engine exists (empty store,
 already-seeded relay), constructs `NMPEngine` normally, opens one
-`engine.observe(NMPFilter(kinds:authors:))`, waits (bounded, no sleep-as-oracle)
+`engine.observe(.single(NMPDemand(selection:source:)))`, waits (bounded, no sleep-as-oracle)
 for the historical row, then — from inside that SAME still-open subscription —
 seeds a second event through the relay and waits for it to arrive live with no
 duplicate canonical row (`Set(rows.map(\.id)).count == rows.count == 2`).

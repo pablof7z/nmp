@@ -33,12 +33,7 @@ fn frozen(keys: &Keys, content: &str, created_at: u64) -> Event {
     )
 }
 
-fn accept(
-    store: &mut RedbStore,
-    keys: &Keys,
-    content: &str,
-    created_at: u64,
-) -> AcceptOutcome {
+fn accept(store: &mut RedbStore, keys: &Keys, content: &str, created_at: u64) -> AcceptOutcome {
     store
         .accept_write(AcceptWrite {
             payload: AcceptWritePayload::Event {
@@ -132,12 +127,7 @@ fn terminal_receipt_fifo_survives_redb_reopen() {
     let keys = Keys::generate();
     let receipt_id = {
         let mut store = RedbStore::open(&path).unwrap();
-        let accepted = accept(
-            &mut store,
-            &keys,
-            "cancel after reopen",
-            10,
-        );
+        let accepted = accept(&mut store, &keys, "cancel after reopen", 10);
         let receipt_id = accepted.journaled_receipt_id().unwrap();
         store
             .cancel_write(accepted.journaled_intent_id().unwrap())

@@ -6,11 +6,12 @@ use nmp_grammar::{Binding, Demand, Filter, IdentityField};
 /// live-query path. Logged out resolves to zero atoms; account changes
 /// reroot this same demand without a component-managed subscription graph.
 pub fn current_account_demand() -> Demand {
-    Demand::from_filter(Filter {
+    Demand::author_outboxes(Filter {
         kinds: Some(BTreeSet::from([3u16])),
         authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
         ..Filter::default()
     })
+    .expect("the selection binds `authors`")
 }
 
 #[cfg(test)]

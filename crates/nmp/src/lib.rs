@@ -186,9 +186,10 @@ pub use subscription::{
 };
 
 // The grammar an app builds a `LiveQuery`'s `Demand` out of. `Demand`'s
-// `selection` is the `Filter`; `source`/`access`/`cache` are the #106 axes
-// -- `LiveQuery::from_filter` applies `Demand`'s static default so existing
-// `Filter`-only call sites need no source/access reasoning of their own.
+// `selection` is the `Filter`; `source`/`access`/`cache` are the #106 axes.
+// Every branch names its own authority through `Demand::public`,
+// `Demand::author_outboxes`, `Demand::pinned` or `Demand::new` -- nothing
+// infers one from the selection's shape (#847).
 pub use nmp_grammar::{
     AccessContext, Binding, CacheMode, Demand, DemandError, Derived, Filter, Freshness,
     IdentityField, IndexedTagName, LiveQuery, LiveQueryError, Selector, SetAlgebra, SetOp,
@@ -242,10 +243,7 @@ pub use nmp_runtime::{fifo_channel, FifoSender};
 // crate: the re-export below never carried nostr's, and never will, so an
 // app sees exactly one `EventBuilder` and never writes a disambiguating
 // path. `core` aliases the upstream import where it needs it.
-pub use nmp_grammar::{
-    EventBuilder, Identity, WriteIntent, WritePayload,
-    WriteRouting,
-};
+pub use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 
 // #1243: the one tagging door, as an APP uses it. `reply_to` is the general
 // reply verb, `text!` writes content whose inline references and rows come

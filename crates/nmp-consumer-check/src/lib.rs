@@ -93,24 +93,29 @@ const CALLER_CONTENT_KIND: u16 = 9999;
 /// by `IndexedTagName` (the wire/local indexed-filter alphabet, #64) --
 /// deliberately exercising both halves of that split from this crate alone.
 pub fn build_derived_index_query() -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        kinds: Some(std::collections::BTreeSet::from([CALLER_CONTENT_KIND])),
-        authors: Some(nmp::Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(Filter {
-                kinds: Some(std::collections::BTreeSet::from([CALLER_INDEX_KIND])),
-                authors: Some(nmp::Binding::Reactive(IdentityField::ActivePubkey)),
-                tags: std::collections::BTreeMap::from([(
-                    IndexedTagName::new('d').expect("'d' is a valid ASCII-letter indexed tag key"),
-                    nmp::Binding::Literal(std::collections::BTreeSet::from([
-                        "arbitrary-caller-group".to_string(),
-                    ])),
-                )]),
-                ..Filter::default()
-            }),
-            project: Selector::Tag("p".to_string()),
-        }))),
-        ..Filter::default()
-    })
+    LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(std::collections::BTreeSet::from([CALLER_CONTENT_KIND])),
+            authors: Some(nmp::Binding::Derived(Box::new(Derived {
+                inner: Demand::author_outboxes(Filter {
+                    kinds: Some(std::collections::BTreeSet::from([CALLER_INDEX_KIND])),
+                    authors: Some(nmp::Binding::Reactive(IdentityField::ActivePubkey)),
+                    tags: std::collections::BTreeMap::from([(
+                        IndexedTagName::new('d')
+                            .expect("'d' is a valid ASCII-letter indexed tag key"),
+                        nmp::Binding::Literal(std::collections::BTreeSet::from([
+                            "arbitrary-caller-group".to_string(),
+                        ])),
+                    )]),
+                    ..Filter::default()
+                })
+                .expect("the selection binds `authors`"),
+                project: Selector::Tag("p".to_string()),
+            }))),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    )
 }
 
 /// Proves a builder `WriteIntent` is fully constructible from `nmp` alone

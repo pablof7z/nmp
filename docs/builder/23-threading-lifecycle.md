@@ -15,7 +15,7 @@ A SwiftUI consumer still follows normal main-actor rules:
 
 ```swift
 .task {
-    for await snapshot in try engine.observe(demand) {
+    for await snapshot in try engine.observe(.single(demand)) {
         rows = snapshot.rows
     }
 }

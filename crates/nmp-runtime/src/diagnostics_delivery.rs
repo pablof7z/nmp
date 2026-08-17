@@ -262,10 +262,13 @@ mod tests {
         );
 
         let author = Keys::generate().public_key().to_hex();
-        let query = LiveQuery::from_filter(Filter {
-            authors: Some(Binding::Literal(BTreeSet::from([author]))),
-            ..Filter::default()
-        });
+        let query = LiveQuery::single(
+            nmp_grammar::Demand::author_outboxes(Filter {
+                authors: Some(Binding::Literal(BTreeSet::from([author]))),
+                ..Filter::default()
+            })
+            .expect("the selection binds `authors`"),
+        );
         let (query, _rows) = handle.subscribe(query).expect("open observation");
         assert_eq!(
             snapshots

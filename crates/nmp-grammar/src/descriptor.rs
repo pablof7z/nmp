@@ -180,38 +180,45 @@ impl std::fmt::Display for DemandError {
 impl std::error::Error for DemandError {}
 
 impl Demand {
-    /// The default-preservation constructor (#106 acceptance criterion): a
-    /// bare `Filter` lowers to `AuthorOutboxes` iff its `selection`
-    /// STATICALLY names an `authors` binding — Literal, Reactive, Derived,
-    /// or SetOp, ALL of them, not literal-authors-only. This is a shape
-    /// check on the `Filter`, never a runtime resolution: a `$myFollows`-
-    /// shaped `Derived` authors binding that happens to resolve empty on a
-    /// given tick still declared an authors binding, so it still lowers to
-    /// `AuthorOutboxes` — total and stable, and byte-identical to today's
-    /// `route::classify` behavior (which keys on the LOWERED, post-
-    /// resolution atom's authors presence, unaffected by this static
-    /// pre-classification).
-    pub fn from_filter(selection: Filter) -> Self {
-        let source = if selection.authors.is_some() {
-            SourceAuthority::AuthorOutboxes
-        } else {
-            SourceAuthority::Public
-        };
+    /// Read over operator/protocol-routed public lanes
+    /// ([`SourceAuthority::Public`]) on an unauthenticated connection
+    /// ([`AccessContext::Public`]). Legal over any selection, author-bearing
+    /// or not: "these authors, generic facts only, no outbox chase" is an
+    /// ordinary, expressible demand, which is exactly why no constructor may
+    /// pick this authority by inspecting whether `authors` happens to be
+    /// bound.
+    #[must_use]
+    pub fn public(selection: Filter) -> Self {
         Self {
             selection,
-            source,
+            source: SourceAuthority::Public,
             access: AccessContext::Public,
             cache: CacheMode::Agnostic,
             freshness: Freshness::Live,
         }
     }
 
-    /// Explicit constructor (#106, Fable's ratified shape) for a caller who
-    /// wants a NON-default `source`/`access` combination -- e.g. `Public`
-    /// on an author-bearing selection ("these authors, generic facts only,
-    /// no outbox chase"; the one new expressible behavior #106 adds,
-    /// Fable's falsifier 1 / landing-review owner nod). Validates the ONE
-    /// unconstructible combination (see [`DemandError`]); every other
+    /// Chase each selected author's own outbox (NIP-65 write relays) on an
+    /// unauthenticated connection. Requires a bound `authors` binding --
+    /// Literal, Reactive, Derived or SetOp, ALL of them -- because there is
+    /// otherwise no author whose outbox could be chased; an unbound
+    /// selection is [`DemandError::AuthorOutboxesRequiresBoundAuthors`].
+    /// The requirement is a shape check on the `Filter`, never a runtime
+    /// resolution: a `$myFollows`-shaped `Derived` authors binding that
+    /// happens to resolve empty on a given tick still declared the binding.
+    pub fn author_outboxes(selection: Filter) -> Result<Self, DemandError> {
+        Self::new(
+            selection,
+            SourceAuthority::AuthorOutboxes,
+            AccessContext::Public,
+        )
+    }
+
+    /// The general explicit constructor (#106, Fable's ratified shape), for
+    /// the `source`/`access` combinations the two named constructors above
+    /// do not cover -- [`SourceAuthority::Pinned`], and any authority under
+    /// a NIP-42 [`AccessContext`]. Validates the ONE unconstructible
+    /// combination per authority (see [`DemandError`]); every other
     /// combination is legal.
     pub fn new(
         selection: Filter,
@@ -253,45 +260,67 @@ mod tests {
     use crate::selector::{IdentityField, Selector};
     use std::collections::BTreeSet;
 
+    /// #847's core property: ONE author-bearing selection reaches two
+    /// different authorities, and which one it gets is the caller's choice
+    /// of constructor -- never a consequence of `authors` being bound. The
+    /// two demands must not collapse to the same atom/wire/coverage
+    /// identity (bug-class ledger #18).
     #[test]
-    fn a_filter_with_no_authors_binding_defaults_to_public() {
-        let demand = Demand::from_filter(Filter {
+    fn the_same_authors_selection_reaches_two_authorities_by_constructor_choice() {
+        let selection = Filter {
             kinds: Some(BTreeSet::from([1u16])),
-            ..Filter::default()
-        });
-        assert_eq!(demand.source, SourceAuthority::Public);
-    }
-
-    #[test]
-    fn a_literal_authors_binding_defaults_to_author_outboxes() {
-        let demand = Demand::from_filter(Filter {
             authors: Some(Binding::Literal(BTreeSet::from(["a".repeat(64)]))),
             ..Filter::default()
-        });
-        assert_eq!(demand.source, SourceAuthority::AuthorOutboxes);
+        };
+        let public = Demand::public(selection.clone());
+        let outboxes =
+            Demand::author_outboxes(selection.clone()).expect("the selection binds `authors`");
+
+        assert_eq!(public.selection, outboxes.selection);
+        assert_eq!(public.source, SourceAuthority::Public);
+        assert_eq!(outboxes.source, SourceAuthority::AuthorOutboxes);
+        assert_ne!(public.atom_context(), outboxes.atom_context());
+        assert_ne!(public, outboxes);
     }
 
-    /// The hard guardrail: a $myFollows-shaped DERIVED authors binding must
-    /// ALSO default to AuthorOutboxes, never Public -- regressing this would
-    /// silently misroute every reactive-follow-feed query in the workspace.
+    /// The guardrail #106 installed, now carried by the explicit
+    /// constructor: a $myFollows-shaped DERIVED authors binding IS a bound
+    /// `authors` binding, so `author_outboxes` accepts it. Regressing this
+    /// would refuse every reactive-follow-feed query in the workspace.
     #[test]
-    fn a_derived_authors_binding_also_defaults_to_author_outboxes() {
+    fn author_outboxes_accepts_a_derived_authors_binding() {
         let my_follows = Filter {
             kinds: Some(BTreeSet::from([1u16])),
             authors: Some(Binding::Derived(Box::new(Derived {
-                inner: Demand::from_filter(Filter {
+                inner: Demand::author_outboxes(Filter {
                     kinds: Some(BTreeSet::from([3u16])),
                     authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                     ..Filter::default()
-                }),
+                })
+                .expect("the selection binds `authors`"),
                 project: Selector::Tag("p".to_string()),
             }))),
             ..Filter::default()
         };
         assert_eq!(
-            Demand::from_filter(my_follows).source,
+            Demand::author_outboxes(my_follows)
+                .expect("a Derived authors binding is a bound authors binding")
+                .source,
             SourceAuthority::AuthorOutboxes
         );
+    }
+
+    /// The refusal the deleted inference could never produce: an authorless
+    /// selection has no outbox to chase, so the named constructor fails
+    /// closed instead of silently deciding `Public` on the caller's behalf.
+    #[test]
+    fn author_outboxes_refuses_an_authorless_selection() {
+        let err = Demand::author_outboxes(Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            ..Filter::default()
+        })
+        .unwrap_err();
+        assert_eq!(err, DemandError::AuthorOutboxesRequiresBoundAuthors);
     }
 
     /// #106's falsifier 7 (constructor validation): `AuthorOutboxes`
@@ -363,10 +392,11 @@ mod tests {
 
     #[test]
     fn atom_context_projects_source_and_access_only() {
-        let mut demand = Demand::from_filter(Filter {
+        let mut demand = Demand::author_outboxes(Filter {
             authors: Some(Binding::Literal(BTreeSet::from(["a".repeat(64)]))),
             ..Filter::default()
-        });
+        })
+        .expect("the selection binds `authors`");
         assert_eq!(demand.freshness, Freshness::Live);
         let context = demand.atom_context();
         demand.cache = CacheMode::Strict;

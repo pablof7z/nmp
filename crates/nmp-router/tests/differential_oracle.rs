@@ -28,11 +28,12 @@ fn my_follows_filter() -> Filter {
     Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(Filter {
+            inner: Demand::author_outboxes(Filter {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            }),
+            })
+            .expect("the selection binds `authors`"),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
@@ -62,7 +63,9 @@ fn differential_oracle_identical_delivery() {
 
     let mut h = Harness::new();
     h.set_active(Some(me.public_key()));
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(
+        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`"),
+    );
     let follow_pks: Vec<_> = follows.iter().map(|k| k.public_key()).collect();
     h.deliver(vec![kind3(&me, &follow_pks, 100)]);
 

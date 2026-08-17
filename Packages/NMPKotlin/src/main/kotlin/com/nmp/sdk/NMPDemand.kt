@@ -1,9 +1,9 @@
 // The explicit live-query identity, in ergonomic Kotlin shape (#107) --
-// mirrors NMPDemand.swift field-for-field. `NMPEngine.observe(NMPFilter)`
-// still applies the static AuthorOutboxes/Public default
-// (`nmp_grammar::Demand::from_filter`); a dev reaches for `NMPDemand` once
-// that default isn't enough -- declaring `Pinned` wire authority or a
-// non-`Agnostic` cache mode.
+// mirrors NMPDemand.swift field-for-field. Every read declares one:
+// `NMPEngine.observe` takes an `NMPLiveQuery` whose branches are
+// `NMPDemand`s, each naming its own source authority, access context, cache
+// mode and freshness. No door infers an authority from the selection's
+// shape (#847).
 
 package com.nmp.sdk
 
@@ -26,7 +26,7 @@ sealed class NMPSourceAuthority {
     /** Ask ONLY this relay set, on the wire, full stop -- never neutral
      * author facts, hints, provenance, or operator policy, regardless of
      * whether the selection is author-bearing. Must be nonempty:
-     * `NMPEngine.observe(NMPDemand)` throws
+     * `NMPEngine.observe` throws
      * `NMPError.EmptyPinnedRelaySet` if it is not. */
     data class Pinned(val relays: Set<String>) : NMPSourceAuthority()
 

@@ -23,15 +23,16 @@ fn profile_query(room: &str, limit: usize) -> Demand {
         limit: Some(limit),
         ..Filter::default()
     };
-    Demand::from_filter(Filter {
+    Demand::author_outboxes(Filter {
         kinds: Some(BTreeSet::from([0u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(inner),
+            inner: Demand::public(inner),
             project: Selector::Authors,
         }))),
         limit: Some(500),
         ..Filter::default()
     })
+    .expect("the selection binds `authors`")
 }
 
 fn percentile(samples: &mut [Duration], numerator: usize, denominator: usize) -> Duration {

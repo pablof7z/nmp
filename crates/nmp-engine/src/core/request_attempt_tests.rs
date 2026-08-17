@@ -9,7 +9,7 @@ use super::query::PlanDeltaMode;
 use super::*;
 
 fn live_query(relay: &RelayUrl) -> LiveQuery {
-    let mut demand = Demand::from_filter(Filter {
+    let mut demand = Demand::public(Filter {
         kinds: Some(BTreeSet::from([1u16])),
         tags: BTreeMap::from([(
             IndexedTagName::new('p').expect("valid fixture tag"),

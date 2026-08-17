@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use nmp::{Binding, Engine, EngineConfig, Filter, LiveQuery, Window};
+use nmp::{Binding, Demand, Engine, EngineConfig, Filter, LiveQuery, Window};
 
 const DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
@@ -144,11 +144,14 @@ fn main() {
     // The realistic shape: notes from everyone I follow. A literal author set
     // still fans out one atom per element in the resolver — collapsing it is
     // the router's job, which is exactly what is under test.
-    let feed = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Literal(authors.clone())),
-        ..Filter::default()
-    });
+    let feed = LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Literal(authors.clone())),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    );
 
     // `NMP_LIVE_WINDOW=<n>` bounds the feed, which lowers to a wire `limit`.
     // Default is unbounded.

@@ -14,10 +14,10 @@ use std::num::NonZeroUsize;
 use nmp::{
     AccessContext as GAccessContext, AcquisitionEvidence, AuthDenialSource as GAuthDenialSource,
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, AuthPhase, Binding as GBinding,
-    CacheMode as GCacheMode, CancelWriteError, CancelWriteOutcome,
-    CoverageInterval, Demand as GDemand, DemandError as GDemandError, Derived as GDerived,
-    DiagnosticsSnapshot, EventBuilder as GEventBuilder, Filter as GFilter, FilterCoverageEntry,
-    Frame, Freshness as GFreshness, Identity as GIdentity, IdentityField as GIdentityField,
+    CacheMode as GCacheMode, CancelWriteError, CancelWriteOutcome, CoverageInterval,
+    Demand as GDemand, DemandError as GDemandError, Derived as GDerived, DiagnosticsSnapshot,
+    EventBuilder as GEventBuilder, Filter as GFilter, FilterCoverageEntry, Frame,
+    Freshness as GFreshness, Identity as GIdentity, IdentityField as GIdentityField,
     IndexedTagName, Lane, NotSentReason as GNotSentReason, PublishQueueEntry as GPublishQueueEntry,
     PublishQueueReadError as GPublishQueueReadError, RefuseReason as GRefuseReason,
     RelayDiagnosticsSnapshot, RelayState as GRelayState, RelayWaiting as GRelayWaiting,
@@ -1468,9 +1468,9 @@ fn binding_from_ffi(b: FfiBinding, field: LiteralField) -> Result<GBinding, FfiE
         }
         FfiBinding::Derived { derived } => GBinding::Derived(Box::new(GDerived {
             // #714: nested policy is app-visible and lossless. Never
-            // reconstruct it through `Demand::from_filter`: the inner query
-            // owns source/access/cache/freshness independently from its
-            // outer demand.
+            // reconstruct it from the inner selection's shape: the inner
+            // query owns source/access/cache/freshness independently from
+            // its outer demand.
             inner: demand_from_ffi(derived.inner.clone())?,
             project: selector_from_ffi(derived.project.clone())?,
         })),
@@ -1647,10 +1647,10 @@ fn freshness_to_ffi(freshness: GFreshness) -> FfiFreshness {
 }
 
 /// `FfiDemand -> nmp_grammar::Demand` -- the explicit, validating
-/// constructor (#107). Unlike `Demand::from_filter`'s total static default,
-/// this can fail: an unbound-author `AuthorOutboxes` selection or an empty
-/// `Pinned` relay set is rejected here with a typed [`FfiError`], never a
-/// panic, mirroring `Demand::new`'s own `DemandError` exactly.
+/// constructor (#107). It can fail: an unbound-author `AuthorOutboxes`
+/// selection or an empty `Pinned` relay set is rejected here with a typed
+/// [`FfiError`], never a panic, mirroring `Demand::new`'s own `DemandError`
+/// exactly.
 pub fn demand_from_ffi(d: FfiDemand) -> Result<GDemand, FfiError> {
     let mut demand = GDemand::new(
         filter_from_ffi(d.selection)?,

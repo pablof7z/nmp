@@ -42,7 +42,7 @@ func observeLibrary() async throws {
         access: .public
     )
 
-    for await snapshot in try nmp.observe(demand) {
+    for await snapshot in try nmp.observe(.single(demand)) {
         rows = snapshot.rows
         sourceEvidence = snapshot.acquisition
     }

@@ -218,13 +218,16 @@ fn runtime_reply_drop_rolls_back_and_idle_cancel_and_shutdown_wake_receivers() {
             .unwrap();
     }
     let query = HistoryQuery::new(
-        LiveQuery::from_filter(Filter {
-            authors: Some(Binding::Literal(BTreeSet::from([keys
-                .public_key()
-                .to_hex()]))),
-            kinds: Some(BTreeSet::from([1])),
-            ..Filter::default()
-        }),
+        LiveQuery::single(
+            nmp_grammar::Demand::author_outboxes(Filter {
+                authors: Some(Binding::Literal(BTreeSet::from([keys
+                    .public_key()
+                    .to_hex()]))),
+                kinds: Some(BTreeSet::from([1])),
+                ..Filter::default()
+            })
+            .expect("the selection binds `authors`"),
+        ),
         1,
         3,
     );

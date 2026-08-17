@@ -44,23 +44,11 @@ import uniffi.nmp_ffi.NmpRowStream
  * single-consumer stream on each collection and withdraws it (via
  * `handle.cancel()`) the moment collection ends -- see this file's header
  * for why that, not UniFFI's generated `Cleaner`, is the correct mapping. */
-fun observeQuery(engine: NmpEngineInterface, filter: NMPFilter): Flow<RowBatch> =
-    rowFlow { nmpRethrowing { engine.observe(filter.toFfi(), null) } }
-
-/** #1108: the explicit-`NMPLiveQuery` entry point -- the constructor to
- * reach for once [observeQuery]'s implicit `AuthorOutboxes`/`Public` default
- * isn't enough: declaring `NMPSourceAuthority.Pinned` wire authority, a
- * non-default `NMPAccessContext`, a non-`Agnostic` `NMPCacheMode`, SEVERAL
- * independent demand branches, or a bound on their merged row union. Every
- * branch is observed through this ONE stream. Same pull-loop/accumulation/
- * teardown shape as the `NMPFilter` overload above. */
 fun observeQuery(engine: NmpEngineInterface, query: NMPLiveQuery): Flow<RowBatch> =
-    rowFlow { nmpRethrowing { engine.observeQuery(query.toFfi(), null) } }
+    rowFlow { nmpRethrowing { engine.observe(query.toFfi(), null) } }
 
 /** Shared pull loop for the unbounded (delta-folding) row observations.
- * `open` is the ONE difference between the `NMPFilter` and `NMPDemand` entry
- * points (which `NmpEngineInterface` verb actually opens the subscription),
- * run lazily per collection so the `Flow` stays cold. */
+ * `open` is run lazily per collection so the `Flow` stays cold. */
 private fun rowFlow(open: () -> NmpRowStream): Flow<RowBatch> =
     flow {
         val handle = open()

@@ -40,7 +40,7 @@ pub fn comment_thread_demand(root: &CommentRoot) -> Demand {
         )]),
         ..Filter::default()
     };
-    Demand::from_filter(filter)
+    Demand::public(filter)
 }
 
 #[cfg(test)]

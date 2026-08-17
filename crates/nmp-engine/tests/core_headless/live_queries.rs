@@ -32,18 +32,22 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
 
     // $myFollows shape: kinds:[1], authors := Derived(inner=kind:3 by me,
     // project=#p) -- exactly nmp-resolver's M1 contract-test shape.
-    let my_follows = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
-            inner: nmp_grammar::Demand::from_filter(Filter {
-                kinds: Some(BTreeSet::from([3u16])),
-                authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
-                ..Filter::default()
-            }),
-            project: nmp_grammar::Selector::Tag("p".to_string()),
-        }))),
-        ..Filter::default()
-    });
+    let my_follows = LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
+                inner: Demand::author_outboxes(Filter {
+                    kinds: Some(BTreeSet::from([3u16])),
+                    authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+                    ..Filter::default()
+                })
+                .expect("the selection binds `authors`"),
+                project: nmp_grammar::Selector::Tag("p".to_string()),
+            }))),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    );
 
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
     let _ = core.handle_and_flush(EngineMsg::Subscribe(my_follows));
@@ -194,12 +198,15 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
 
 /// A literal-author query carrying an explicit NIP-01 `limit:N`.
 fn limited_literal_query(kinds: &[u16], author_hex: &str, limit: usize) -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        kinds: Some(kinds.iter().copied().collect()),
-        authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
-        limit: Some(limit),
-        ..Filter::default()
-    })
+    LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(kinds.iter().copied().collect()),
+            authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
+            limit: Some(limit),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    )
 }
 
 /// Fold one delivered `RowDelta` batch into a running "current row set" of
@@ -294,15 +301,18 @@ fn limited_multi_atom_handle_merges_then_applies_the_global_top_n() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let _ = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Literal(BTreeSet::from([
-            a.public_key().to_hex(),
-            b.public_key().to_hex(),
-        ]))),
-        limit: Some(2),
-        ..Filter::default()
-    })));
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([
+                a.public_key().to_hex(),
+                b.public_key().to_hex(),
+            ]))),
+            limit: Some(2),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    )));
 
     let a_100 = nmp_resolver_testkit::kind1(&a, "a-100", 100);
     let a_90 = nmp_resolver_testkit::kind1(&a, "a-90", 90);
@@ -1008,12 +1018,15 @@ fn limited_fetch_never_records_coverage() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let limited_query = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
-        limit: Some(500),
-        ..Filter::default()
-    });
+    let limited_query = LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
+            limit: Some(500),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    );
     let effects = core.handle_and_flush(EngineMsg::Subscribe(limited_query));
     let (sub_id, filter) = req_for(&effects, &relay0);
     assert_eq!(filter.limit, Some(500));
@@ -1138,11 +1151,14 @@ fn evidence_from(effects: &[Effect], id: ObservationId) -> Option<&[AcquisitionE
 #[test]
 fn zero_atom_query_reports_no_resolved_demand_instead_of_vacuous_evidence() {
     let mut core = new_core(FixtureRoutingFacts::new());
-    let unresolved = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([9999u16])),
-        authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
-        ..Filter::default()
-    });
+    let unresolved = LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(BTreeSet::from([9999u16])),
+            authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    );
 
     let effects = core.handle_and_flush(EngineMsg::Subscribe(unresolved));
     let evidence = effects
@@ -1392,18 +1408,22 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
     connect(&mut core, 0, &relay0);
     connect(&mut core, 1, &relay1);
 
-    let my_follows = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
-            inner: nmp_grammar::Demand::from_filter(Filter {
-                kinds: Some(BTreeSet::from([3u16])),
-                authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
-                ..Filter::default()
-            }),
-            project: nmp_grammar::Selector::Tag("p".to_string()),
-        }))),
-        ..Filter::default()
-    });
+    let my_follows = LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
+                inner: Demand::author_outboxes(Filter {
+                    kinds: Some(BTreeSet::from([3u16])),
+                    authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+                    ..Filter::default()
+                })
+                .expect("the selection binds `authors`"),
+                project: nmp_grammar::Selector::Tag("p".to_string()),
+            }))),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    );
 
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
     let effects = core.handle_and_flush(EngineMsg::Subscribe(my_follows));
@@ -1747,11 +1767,14 @@ fn set_active_pubkey_reroots_and_recompiles() {
         .with_outbound_routes(b.public_key(), [relay_b.clone()]);
     let mut core = new_core(dir);
 
-    let whoami = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([0u16])),
-        authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
-        ..Filter::default()
-    });
+    let whoami = LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(BTreeSet::from([0u16])),
+            authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    );
 
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
     let effects = core.handle_and_flush(EngineMsg::Subscribe(whoami));

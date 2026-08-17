@@ -71,11 +71,14 @@ fn mirror_keys(k: &Keys) -> RelayKeys {
 }
 
 fn literal_kind1(author_hex: &str) -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
-        ..Filter::default()
-    })
+    LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    )
 }
 
 /// Accumulates the channel's `Added`/`Removed` deltas into the row set they

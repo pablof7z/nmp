@@ -162,7 +162,7 @@ impl FfiGroup {
     /// constrains `#h` is refused with
     /// [`FfiError::GroupCallerSuppliedContextConstraint`] -- the retained
     /// group id is the sole semantic source of that row. Hand the result to
-    /// `NmpEngine::observe_query`.
+    /// `NmpEngine::observe`.
     pub fn read(&self, selection: FfiFilter) -> Result<FfiLiveQuery, FfiError> {
         let selection = filter_from_ffi(selection)?;
         let query = self.inner.read(selection)?;

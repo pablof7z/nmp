@@ -1,5 +1,5 @@
 // Windowing as a POLICY on the read noun (#485) -- not a parallel noun.
-// `NMPEngine.observe(filter)` / `observe(demand)` stay the unbounded delta
+// `NMPEngine.observe(query)` stays the unbounded delta
 // observations; passing a [Window] to the SAME verb opens a bounded
 // newest-first observation instead, delivered as full snapshots through
 // [NMPQuery.frames] and grown declaratively via [NMPQuery.requestRows].

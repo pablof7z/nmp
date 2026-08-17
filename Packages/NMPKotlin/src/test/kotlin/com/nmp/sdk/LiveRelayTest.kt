@@ -78,7 +78,14 @@ class LiveRelayTest {
             NMPEngine(NMPConfig(appRelays = OPERATOR_RELAYS)).use { engine ->
                 engine.session.add(FIATJAF_HEX.testPublicKey(), makeCurrent = true)
 
-                val rows = firstNonEmptyBatch(engine.observe(followFeed()), timeoutMs = 30_000)
+                val rows = firstNonEmptyBatch(engine.observe(
+                        NMPLiveQuery.single(
+                            NMPDemand(
+                                selection = followFeed(),
+                                source = NMPSourceAuthority.AuthorOutboxes,
+                            )
+                        )
+                    ), timeoutMs = 30_000)
                 assumeTrue(
                     rows != null,
                     "Observed no follow-feed rows within 30s from $OPERATOR_RELAYS -- the " +
@@ -105,7 +112,14 @@ class LiveRelayTest {
             NMPEngine(NMPConfig(appRelays = OPERATOR_RELAYS)).use { engine ->
                 engine.session.add(FIATJAF_HEX.testPublicKey(), makeCurrent = true)
 
-                val queryFlow = engine.observe(followFeed())
+                val queryFlow = engine.observe(
+                        NMPLiveQuery.single(
+                            NMPDemand(
+                                selection = followFeed(),
+                                source = NMPSourceAuthority.AuthorOutboxes,
+                            )
+                        )
+                    )
                 val rowsReady = CompletableDeferred<List<Row>>()
                 val queryJob =
                     launch {
@@ -169,7 +183,14 @@ class LiveRelayTest {
                 val notesFilter =
                     NMPFilter(kinds = listOf(1u), authors = NMPBinding.Literal(setOf(FIATJAF_HEX)), limit = 20u)
 
-                val rows = firstNonEmptyBatch(engine.observe(notesFilter), timeoutMs = 30_000)
+                val rows = firstNonEmptyBatch(engine.observe(
+                        NMPLiveQuery.single(
+                            NMPDemand(
+                                selection = notesFilter,
+                                source = NMPSourceAuthority.AuthorOutboxes,
+                            )
+                        )
+                    ), timeoutMs = 30_000)
                 assumeTrue(
                     rows != null,
                     "Observed no kind:1 notes for fiatjaf within 30s from $OPERATOR_RELAYS -- " +

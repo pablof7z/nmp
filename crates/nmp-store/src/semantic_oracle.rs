@@ -12,9 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use nmp_grammar::{
-    AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority,
-};
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
 use nostr::secp256k1::rand::{rngs::StdRng, SeedableRng};
 use nostr::secp256k1::SECP256K1;
 use nostr::{Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -48,47 +46,170 @@ struct Checkpoint {
 }
 
 const EXPECTED_SEMANTIC_TRACE: &[(&str, &str)] = &[
-    ("insert", "438cd8b97ec0e2be28042aa5ace9bd7fc75bd8a583e3f0c9787b893132608fe2"),
-    ("duplicate provenance", "3e7ec1339084ef345d59b35677fb3fe242525892540fd209e14523b1d533a13c"),
-    ("replaceable first winner", "a68348d2f5d27925b89105f0151b5145cb4af95405b09af3e8fc2ac634b0a4c0"),
-    ("replaceable conflict", "1df9d7308e5241259493eb3256c27555af8f108bab4baf841872cd9b4da73e82"),
-    ("addressable first winner", "d85cf593a1c4e8489b78ced897c9c33a08daf26495d620c8f43a5ec6cee52aa2"),
-    ("addressable conflict", "eca8a0d61721f735e4d4e9e7045c212c3a966abc4fe4b4e633801caf882d725f"),
-    ("deletion target", "8e9a22dedef5dcf718ddbe4d0bc5c80fe43ef26f566992e9836852f05caa2d7d"),
-    ("deletion", "3bae52aa6e311be89264014232bc6b823ac8fa830f41d45bbf5a48b0bde35e37"),
-    ("deletion before target", "f802b018266aa1490f9e365b5dfad5a3675a7b361ca7aa421444d70c8fc290fc"),
-    ("tombstoned target refused", "f802b018266aa1490f9e365b5dfad5a3675a7b361ca7aa421444d70c8fc290fc"),
-    ("expiry indexed", "7168d16aa531fcb41e3233915c78fdf9edd4b8510542fdccaffd4e4956424b48"),
-    ("expiry applied", "f802b018266aa1490f9e365b5dfad5a3675a7b361ca7aa421444d70c8fc290fc"),
-    ("coverage fact persisted", "582aad6704ef47e5604c53e00f75080c3512faa51f8497bacd22285c3857f7e5"),
-    ("coverage recorded after facts", "67c3444fc94484ab6e1a88ed79c4f21032fd8dbe4a93a1f636549dd2b4107952"),
-    ("coverage-safe gc", "2a253ec599c7a2159d0477855a75974ed29fbe040c4f4d3be540220c5051b8b2"),
-    ("maximum coverage fact and claim persisted", "d2303426800c988d08fe682b24ca948766d9723be54dd294089d0b890877d25b"),
-    ("maximum coverage removed with fact", "2a253ec599c7a2159d0477855a75974ed29fbe040c4f4d3be540220c5051b8b2"),
-    ("pending write accepted", "89d7ad04daf5d3371b54da60839cec7bdf4d295f48451acd9de2839a20bd2965"),
-    ("pending write signed", "7796710791a29258fec0f7c85fdc08eaa12e3dbada5724a37767a40a8a1001e0"),
-    ("cancellable write accepted", "0d94ee7c4827c3f1d5641032294e82ee5cf4279caa647efe1879a8d801d2c200"),
-    ("write cancelled", "2d36c0fdced730f1c5bc8c6600ec74ecd39368aed48135d3881905b8e0e1f3e0"),
-    ("replaceable delivery accepted", "193c10569dd7bb80a2aa58289fb80cb18bebfad50893219a8d80ae559fba5210"),
-    ("replaceable delivery superseded", "d058ec28f482f0bf276ff2cea24b459901535a2bddd8a6a173e80fa4fd02f776"),
-    ("superseding delivery compensated", "a9dd593aed8abfcb3d4682046732ae4bc548604b1d36ae24ab729fa7d8146447"),
-    ("multi-relay delivery accepted", "e4f65711422f464d12a58cc1ad31c366658ef75ee64849366528b6bf4d5d11be"),
-    ("multi-relay lanes durable", "5c2e495734ac08203cd09e06254b8b3e7d6ee46acb650e4c9b1ab5d7c66fcea8"),
-    ("ambiguous handoff became outcome unknown", "8a9c9dbc07d719764f053a6e8ab63de430d8e5311989c9b80625fe799adfbe67"),
-    ("delivery attempt gave up", "1587bc3a213e7b313afb99ea8f65c67d88f2f5784a7e55fd042d761a7b7f767e"),
-    ("in-flight delivery interrupted", "9cbeb8678476e4bfdf3d2b738848c7ed422682ccb42260c9590b282d52416f1d"),
-    ("retry ended in relay rejection", "05e93aae6eac089b08e742a9f8d93687f7635f741ed20dd8a74bfd8084753523"),
-    ("multi-relay terminal obligation closed", "05e93aae6eac089b08e742a9f8d93687f7635f741ed20dd8a74bfd8084753523"),
-    ("publication route durable", "4a417b275884f33462148d18b0b60888a225b71fd3c31ce418896bd198eecadb"),
-    ("publication lanes bootstrapped", "b2fc2d23ab28f651fc3fdcfd1c23bbf78956d8146769c43b64fce956845f9d7b"),
-    ("publication lane eligible", "3ab760f8ec669a0d6c62287e909151040da97f3dc2dfac5e8913292079ba2272"),
-    ("publication attempt started", "83533bff9f96cc04625678dd0b01c566be1b0a2787dea289d8791c7d838143d5"),
-    ("publication retry scheduled", "1d49dae0a31b25373882d9a7e0478a2e3ca0db41229174f009da1d67c6d78a0c"),
-    ("publication retry eligible", "73d21ec206155ac4e17dd821ebe8a62807536aa77ee0d25fa205130d3616f534"),
-    ("publication retry started", "df903b8d6211415b286f6f33d3bdca27f67a0550e9fccfa62be777cf9020c007"),
-    ("publication handed off", "484053ad90512913ba8b75d1a27e6af926bf1502d67f030f7f851a206d0cd998"),
-    ("publication receipt acked", "e581d3ba1ae85d141e9e52fc154d5a4f8ef05b1fa2d5b512d79aa4975572bf39"),
-    ("publication obligation closed", "e581d3ba1ae85d141e9e52fc154d5a4f8ef05b1fa2d5b512d79aa4975572bf39"),
+    (
+        "insert",
+        "438cd8b97ec0e2be28042aa5ace9bd7fc75bd8a583e3f0c9787b893132608fe2",
+    ),
+    (
+        "duplicate provenance",
+        "3e7ec1339084ef345d59b35677fb3fe242525892540fd209e14523b1d533a13c",
+    ),
+    (
+        "replaceable first winner",
+        "a68348d2f5d27925b89105f0151b5145cb4af95405b09af3e8fc2ac634b0a4c0",
+    ),
+    (
+        "replaceable conflict",
+        "1df9d7308e5241259493eb3256c27555af8f108bab4baf841872cd9b4da73e82",
+    ),
+    (
+        "addressable first winner",
+        "d85cf593a1c4e8489b78ced897c9c33a08daf26495d620c8f43a5ec6cee52aa2",
+    ),
+    (
+        "addressable conflict",
+        "eca8a0d61721f735e4d4e9e7045c212c3a966abc4fe4b4e633801caf882d725f",
+    ),
+    (
+        "deletion target",
+        "8e9a22dedef5dcf718ddbe4d0bc5c80fe43ef26f566992e9836852f05caa2d7d",
+    ),
+    (
+        "deletion",
+        "3bae52aa6e311be89264014232bc6b823ac8fa830f41d45bbf5a48b0bde35e37",
+    ),
+    (
+        "deletion before target",
+        "f802b018266aa1490f9e365b5dfad5a3675a7b361ca7aa421444d70c8fc290fc",
+    ),
+    (
+        "tombstoned target refused",
+        "f802b018266aa1490f9e365b5dfad5a3675a7b361ca7aa421444d70c8fc290fc",
+    ),
+    (
+        "expiry indexed",
+        "7168d16aa531fcb41e3233915c78fdf9edd4b8510542fdccaffd4e4956424b48",
+    ),
+    (
+        "expiry applied",
+        "f802b018266aa1490f9e365b5dfad5a3675a7b361ca7aa421444d70c8fc290fc",
+    ),
+    (
+        "coverage fact persisted",
+        "582aad6704ef47e5604c53e00f75080c3512faa51f8497bacd22285c3857f7e5",
+    ),
+    (
+        "coverage recorded after facts",
+        "67c3444fc94484ab6e1a88ed79c4f21032fd8dbe4a93a1f636549dd2b4107952",
+    ),
+    (
+        "coverage-safe gc",
+        "2a253ec599c7a2159d0477855a75974ed29fbe040c4f4d3be540220c5051b8b2",
+    ),
+    (
+        "maximum coverage fact and claim persisted",
+        "d2303426800c988d08fe682b24ca948766d9723be54dd294089d0b890877d25b",
+    ),
+    (
+        "maximum coverage removed with fact",
+        "2a253ec599c7a2159d0477855a75974ed29fbe040c4f4d3be540220c5051b8b2",
+    ),
+    (
+        "pending write accepted",
+        "89d7ad04daf5d3371b54da60839cec7bdf4d295f48451acd9de2839a20bd2965",
+    ),
+    (
+        "pending write signed",
+        "7796710791a29258fec0f7c85fdc08eaa12e3dbada5724a37767a40a8a1001e0",
+    ),
+    (
+        "cancellable write accepted",
+        "0d94ee7c4827c3f1d5641032294e82ee5cf4279caa647efe1879a8d801d2c200",
+    ),
+    (
+        "write cancelled",
+        "2d36c0fdced730f1c5bc8c6600ec74ecd39368aed48135d3881905b8e0e1f3e0",
+    ),
+    (
+        "replaceable delivery accepted",
+        "193c10569dd7bb80a2aa58289fb80cb18bebfad50893219a8d80ae559fba5210",
+    ),
+    (
+        "replaceable delivery superseded",
+        "d058ec28f482f0bf276ff2cea24b459901535a2bddd8a6a173e80fa4fd02f776",
+    ),
+    (
+        "superseding delivery compensated",
+        "a9dd593aed8abfcb3d4682046732ae4bc548604b1d36ae24ab729fa7d8146447",
+    ),
+    (
+        "multi-relay delivery accepted",
+        "e4f65711422f464d12a58cc1ad31c366658ef75ee64849366528b6bf4d5d11be",
+    ),
+    (
+        "multi-relay lanes durable",
+        "5c2e495734ac08203cd09e06254b8b3e7d6ee46acb650e4c9b1ab5d7c66fcea8",
+    ),
+    (
+        "ambiguous handoff became outcome unknown",
+        "8a9c9dbc07d719764f053a6e8ab63de430d8e5311989c9b80625fe799adfbe67",
+    ),
+    (
+        "delivery attempt gave up",
+        "1587bc3a213e7b313afb99ea8f65c67d88f2f5784a7e55fd042d761a7b7f767e",
+    ),
+    (
+        "in-flight delivery interrupted",
+        "9cbeb8678476e4bfdf3d2b738848c7ed422682ccb42260c9590b282d52416f1d",
+    ),
+    (
+        "retry ended in relay rejection",
+        "05e93aae6eac089b08e742a9f8d93687f7635f741ed20dd8a74bfd8084753523",
+    ),
+    (
+        "multi-relay terminal obligation closed",
+        "05e93aae6eac089b08e742a9f8d93687f7635f741ed20dd8a74bfd8084753523",
+    ),
+    (
+        "publication route durable",
+        "4a417b275884f33462148d18b0b60888a225b71fd3c31ce418896bd198eecadb",
+    ),
+    (
+        "publication lanes bootstrapped",
+        "b2fc2d23ab28f651fc3fdcfd1c23bbf78956d8146769c43b64fce956845f9d7b",
+    ),
+    (
+        "publication lane eligible",
+        "3ab760f8ec669a0d6c62287e909151040da97f3dc2dfac5e8913292079ba2272",
+    ),
+    (
+        "publication attempt started",
+        "83533bff9f96cc04625678dd0b01c566be1b0a2787dea289d8791c7d838143d5",
+    ),
+    (
+        "publication retry scheduled",
+        "1d49dae0a31b25373882d9a7e0478a2e3ca0db41229174f009da1d67c6d78a0c",
+    ),
+    (
+        "publication retry eligible",
+        "73d21ec206155ac4e17dd821ebe8a62807536aa77ee0d25fa205130d3616f534",
+    ),
+    (
+        "publication retry started",
+        "df903b8d6211415b286f6f33d3bdca27f67a0550e9fccfa62be777cf9020c007",
+    ),
+    (
+        "publication handed off",
+        "484053ad90512913ba8b75d1a27e6af926bf1502d67f030f7f851a206d0cd998",
+    ),
+    (
+        "publication receipt acked",
+        "e581d3ba1ae85d141e9e52fc154d5a4f8ef05b1fa2d5b512d79aa4975572bf39",
+    ),
+    (
+        "publication obligation closed",
+        "e581d3ba1ae85d141e9e52fc154d5a4f8ef05b1fa2d5b512d79aa4975572bf39",
+    ),
 ];
 
 #[derive(Default)]

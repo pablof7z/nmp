@@ -642,7 +642,7 @@ fn cancelling_a_union_keeps_work_a_sibling_observation_still_owns() {
 fn an_over_cap_union_refuses_the_whole_declaration() {
     let branches: Vec<LiveQuery> = (0..=LiveQuery::MAX_BRANCHES)
         .map(|index| {
-            LiveQuery::single(Demand::from_filter(Filter {
+            LiveQuery::single(Demand::public(Filter {
                 kinds: Some(BTreeSet::from([index as u16])),
                 ..Filter::default()
             }))
@@ -664,12 +664,15 @@ fn an_over_cap_union_refuses_the_whole_declaration() {
         Err(LiveQueryError::EmptyUnion)
     );
     assert_eq!(
-        LiveQuery::union([LiveQuery::from_filter(selection())], Some(0)),
+        LiveQuery::union([LiveQuery::single(Demand::public(selection()))], Some(0)),
         Err(LiveQueryError::AggregateResultLimitZero)
     );
     assert_eq!(
         LiveQuery::union(
-            [LiveQuery::union([LiveQuery::from_filter(selection())], Some(4)).unwrap()],
+            [
+                LiveQuery::union([LiveQuery::single(Demand::public(selection()))], Some(4))
+                    .unwrap()
+            ],
             None
         ),
         Err(LiveQueryError::NestedAggregateResultLimit),

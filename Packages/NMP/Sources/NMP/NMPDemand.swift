@@ -1,8 +1,8 @@
 // The explicit live-query identity, in ergonomic Swift shape (M4 plan §9,
-// #107). `NMPEngine.observe(_ filter: NMPFilter)` still applies the static
-// AuthorOutboxes/Public default (`nmp_grammar::Demand::from_filter`); a dev
-// reaches for `NMPDemand` once that default isn't enough -- declaring
-// `.pinned` wire authority or a non-`.agnostic` cache mode.
+// #107). Every read declares one: `NMPEngine.observe(_:)` takes an
+// `NMPLiveQuery` whose branches are `NMPDemand`s, each naming its own source
+// authority, access context, cache mode and freshness. No door infers an
+// authority from the selection's shape (#847).
 
 import NMPFFI
 
@@ -14,8 +14,8 @@ public enum NMPSourceAuthority: Sendable, Hashable {
     /// Ask ONLY this relay set, on the wire, full stop -- never neutral
     /// author facts, hints, provenance, or operator policy, regardless of
     /// whether the selection is author-bearing. Must be nonempty:
-    /// `NMPEngine.observe(_ demand:)` throws `NMPError.emptyPinnedRelaySet`
-    /// if it is not.
+    /// `NMPEngine.observe(_:)` throws `NMPError.emptyPinnedRelaySet` if it
+    /// is not.
     case pinned(Set<String>)
 }
 

@@ -68,7 +68,7 @@ fn atom(keys: &Keys, source: SourceAuthority) -> ContextualAtom {
 }
 
 fn query(keys: &Keys, freshness: Freshness) -> LiveQuery {
-    let mut demand = Demand::from_filter(filter(keys));
+    let mut demand = Demand::author_outboxes(filter(keys)).expect("the selection binds `authors`");
     demand.freshness = freshness;
     LiveQuery::single(demand)
 }

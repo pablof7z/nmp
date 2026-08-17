@@ -25,18 +25,22 @@ const GROUP_STATE_KINDS: [u16; 3] = [39_000, 39_001, 39_002];
 /// starter catalog names (approach doc §2.4). Identical in structure to
 /// `nmp`'s runtime-integration fixture query.
 pub fn my_follows_query() -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        kinds: Some(std::collections::BTreeSet::from([1u16])),
-        authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(Filter {
-                kinds: Some(std::collections::BTreeSet::from([3u16])),
-                authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-                ..Filter::default()
-            }),
-            project: Selector::Tag("p".to_string()),
-        }))),
-        ..Filter::default()
-    })
+    LiveQuery::single(
+        Demand::author_outboxes(Filter {
+            kinds: Some(std::collections::BTreeSet::from([1u16])),
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner: Demand::author_outboxes(Filter {
+                    kinds: Some(std::collections::BTreeSet::from([3u16])),
+                    authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                    ..Filter::default()
+                })
+                .expect("the selection binds `authors`"),
+                project: Selector::Tag("p".to_string()),
+            }))),
+            ..Filter::default()
+        })
+        .expect("the selection binds `authors`"),
+    )
 }
 
 /// What makes one tag watch different from another beyond its value -- the

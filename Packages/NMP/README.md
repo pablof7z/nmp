@@ -2,7 +2,7 @@
 
 The Swift SDK boundary. `NMP` is the raw two-noun engine target:
 `import NMP; let nmp = try NMPEngine(config: .init(...))`, then
-`for await batch in nmp.observe(filter)`. `NMPContent` is an optional product
+`for await batch in nmp.observe(query)`. `NMPContent` is an optional product
 for source-ranged mixed-content parsing, typed kind:0/NIP-23 resources, and
 bounded live reference sessions over that same engine. Importing or linking
 `NMPContent` is never required to use `NMP`. `NMPUI` is the optional SwiftUI

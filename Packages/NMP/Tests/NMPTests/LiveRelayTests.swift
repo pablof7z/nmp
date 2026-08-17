@@ -40,7 +40,7 @@ final class LiveRelayTests: XCTestCase {
             ),
             limit: 50
         )
-        let query = try engine.observe(followFeed)
+        let query = try engine.observe(.single(NMPDemand(selection: followFeed, source: .authorOutboxes)))
         let rows = await Self.firstNonEmptyBatch(from: query, timeoutSeconds: 30)
         query.cancel()
 
@@ -94,7 +94,7 @@ final class LiveRelayTests: XCTestCase {
         let diagnostics = try engine.observeDiagnostics()
         let outcome = try await Self.observeRowsAndCausalDiagnostics(
             diagnostics: diagnostics,
-            openQuery: { try engine.observe(followFeed) },
+            openQuery: { try engine.observe(.single(NMPDemand(selection: followFeed, source: .authorOutboxes))) },
             rowsTimeoutSeconds: 30,
             diagnosticsTimeoutSeconds: 10
         )
@@ -217,7 +217,7 @@ final class LiveRelayTests: XCTestCase {
         defer { engine.shutdown() }
 
         let notesFilter = NMPFilter(kinds: [1], authors: .literal([Self.fiatjafHex]), limit: 20)
-        let query = try engine.observe(notesFilter)
+        let query = try engine.observe(.single(NMPDemand(selection: notesFilter, source: .authorOutboxes)))
         let rows = await Self.firstNonEmptyBatch(from: query, timeoutSeconds: 30)
         query.cancel()
 
@@ -862,7 +862,7 @@ private final class DiagnosticsRaceEngine: NmpEngine, @unchecked Sendable {
         super.init(unsafeFromRawPointer: pointer)
     }
 
-    override func observe(query: FfiFilter, window: FfiWindow?) throws -> NmpRowStream {
+    override func observe(query: FfiLiveQuery, window: FfiWindow?) throws -> NmpRowStream {
         state.openQuery()
         return DiagnosticsRaceRowStream(state: state)
     }

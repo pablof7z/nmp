@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nmp_engine::core::{EngineCore, EngineMsg};
-use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, IndexedTagName, RelaySessionKey};
+use nmp_grammar::{Demand, LiveQuery};
 use nmp_store::{RedbStore, RelayObserved};
 use nmp_transport::{RelayFrame, RelayHandle};
 use nostr::{
@@ -27,14 +27,14 @@ fn database_path(handles: usize) -> PathBuf {
 }
 
 fn room_query(room: &str) -> LiveQuery {
-    LiveQuery::from_filter(Filter {
+    LiveQuery::single(Demand::public(Filter {
         tags: BTreeMap::from([(
             IndexedTagName::new('h').unwrap(),
             Binding::Literal(BTreeSet::from([room.to_owned()])),
         )]),
         limit: Some(200),
         ..Filter::default()
-    })
+    }))
 }
 
 fn load_corpus(path: &Path) -> (Vec<Event>, Vec<String>, u64) {

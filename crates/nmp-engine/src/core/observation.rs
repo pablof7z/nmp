@@ -1051,42 +1051,48 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     fn articles_by_follows() -> LiveQuery {
-        LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([30_023])),
-            authors: Some(Binding::Derived(Box::new(Derived {
-                inner: Demand::from_filter(Filter {
-                    kinds: Some(BTreeSet::from([3])),
-                    authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-                    ..Filter::default()
-                }),
-                project: Selector::Tag("p".to_string()),
-            }))),
-            ..Filter::default()
-        })
+        LiveQuery::single(
+            Demand::author_outboxes(Filter {
+                kinds: Some(BTreeSet::from([30_023])),
+                authors: Some(Binding::Derived(Box::new(Derived {
+                    inner: Demand::author_outboxes(Filter {
+                        kinds: Some(BTreeSet::from([3])),
+                        authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                        ..Filter::default()
+                    })
+                    .expect("the selection binds `authors`"),
+                    project: Selector::Tag("p".to_string()),
+                }))),
+                ..Filter::default()
+            })
+            .expect("the selection binds `authors`"),
+        )
     }
 
     fn pinned_articles_by_follows(relay: &RelayUrl, freshness: Freshness) -> LiveQuery {
-        let mut inner = Demand::from_filter(Filter {
+        let mut inner = Demand::author_outboxes(Filter {
             kinds: Some(BTreeSet::from([3])),
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
-        });
+        })
+        .expect("the selection binds `authors`");
         inner.freshness = freshness;
-        let mut demand = Demand::from_filter(Filter {
+        let mut demand = Demand::author_outboxes(Filter {
             kinds: Some(BTreeSet::from([30_023])),
             authors: Some(Binding::Derived(Box::new(Derived {
                 inner,
                 project: Selector::Tag("p".to_string()),
             }))),
             ..Filter::default()
-        });
+        })
+        .expect("the selection binds `authors`");
         demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
         demand.freshness = freshness;
         LiveQuery::single(demand)
     }
 
     fn pinned_kind_one(relay: &RelayUrl) -> LiveQuery {
-        let mut demand = Demand::from_filter(Filter {
+        let mut demand = Demand::public(Filter {
             kinds: Some(BTreeSet::from([1])),
             ..Filter::default()
         });

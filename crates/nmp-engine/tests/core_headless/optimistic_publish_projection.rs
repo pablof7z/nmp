@@ -601,10 +601,10 @@ fn the_users_own_row_survives_a_carrier_outside_the_pin_and_reports_it_honestly(
     // source set the row honestly reports.
     let (_, agnostic, _) = open(
         &mut core,
-        LiveQuery::from_filter(Filter {
+        LiveQuery::single(Demand::public(Filter {
             kinds: Some(BTreeSet::from([OPTIMISTIC_KIND])),
             ..Filter::default()
-        }),
+        })),
     );
     assert_eq!(
         agnostic.sources_of(&event.id),

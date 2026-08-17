@@ -33,19 +33,11 @@ public struct NMPQuery: AsyncSequence, Sendable {
     private let handle: NmpRowStream
     private let iteratorGate = NMPPullIteratorGate()
 
-    init(engine: NmpEngineProtocol, filter: FfiFilter, window: FfiWindow?) throws {
-        self.handle = try nmpRethrowing {
-            try engine.observe(query: filter, window: window)
-        }
-    }
-
-    /// #1108: the explicit-`FfiLiveQuery` entry point -- same handle and
-    /// coalescing shape as the `FfiFilter` initializer above, just a
-    /// different `NmpEngineProtocol` verb underneath. Every branch of the
+    /// The ONE entry point: a complete `FfiLiveQuery`. Every branch of the
     /// live query is observed through this ONE handle.
     init(engine: NmpEngineProtocol, liveQuery: FfiLiveQuery, window: FfiWindow?) throws {
         self.handle = try nmpRethrowing {
-            try engine.observeQuery(query: liveQuery, window: window)
+            try engine.observe(query: liveQuery, window: window)
         }
     }
 

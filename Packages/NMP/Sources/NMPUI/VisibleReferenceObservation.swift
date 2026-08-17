@@ -67,7 +67,7 @@ public struct NMPReferenceObservationFactory: @unchecked Sendable {
     ) -> NMPReferenceObservationFactory {
         NMPReferenceObservationFactory { target, receive in
             let demand = try resolve(target)
-            let query = try engine.observe(demand)
+            let query = try engine.observe(.single(demand))
             let task = Task { @MainActor in
                 // #680: an observation is a throwing `AsyncSequence` (its
                 // `next()` surfaces the single-consumer misuse error). This is

@@ -98,34 +98,39 @@ fn deterministic_keys(index: usize) -> Keys {
     Keys::parse(&format!("{:064x}", index + 1)).expect("small nonzero scalar")
 }
 
-fn scenario_filter(scenario: Scenario, author: &Keys) -> Filter {
+fn scenario_demand(scenario: Scenario, author: &Keys) -> Demand {
     let authors = || {
         Some(Binding::Literal(BTreeSet::from([author
             .public_key()
             .to_hex()])))
     };
+    // Each scenario names its own source authority. The two author-bearing
+    // shapes chase outboxes because that is what they are measuring, not
+    // because they happen to bind `authors`.
     match scenario {
-        Scenario::Global => Filter::default(),
-        Scenario::HotRoom => Filter {
+        Scenario::Global => Demand::public(Filter::default()),
+        Scenario::HotRoom => Demand::public(Filter {
             tags: BTreeMap::from([(
                 IndexedTagName::new('h').unwrap(),
                 Binding::Literal(BTreeSet::from(["nmp-scale-hot-room".to_owned()])),
             )]),
             ..Filter::default()
-        },
-        Scenario::Author => Filter {
+        }),
+        Scenario::Author => Demand::author_outboxes(Filter {
             authors: authors(),
             ..Filter::default()
-        },
-        Scenario::Kind => Filter {
+        })
+        .expect("the selection binds `authors`"),
+        Scenario::Kind => Demand::public(Filter {
             kinds: Some(BTreeSet::from([9u16])),
             ..Filter::default()
-        },
-        Scenario::AuthorKind => Filter {
+        }),
+        Scenario::AuthorKind => Demand::author_outboxes(Filter {
             kinds: Some(BTreeSet::from([9u16])),
             authors: authors(),
             ..Filter::default()
-        },
+        })
+        .expect("the selection binds `authors`"),
     }
 }
 
@@ -236,7 +241,7 @@ fn main() {
         let store = RedbStore::open(&path).expect("open benchmark store");
         let mut core = EngineCore::new(store, 20);
         let (_handle, initial_rows) = initial_snapshot(core.handle(EngineMsg::Subscribe(
-            LiveQuery::from_filter(scenario_filter(scenario, &author)),
+            LiveQuery::single(scenario_demand(scenario, &author)),
         )));
         let mut direct = Samples::default();
         let mut forced = Samples::default();

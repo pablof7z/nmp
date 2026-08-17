@@ -3456,11 +3456,8 @@ impl CoreState {
 
         let payload = match payload {
             WritePayload::ReplaceableOperation(operation) => {
-                return self.prepare_body_complete_replaceable_operation(
-                    operation,
-                    routing,
-                    identity,
-                )
+                return self
+                    .prepare_body_complete_replaceable_operation(operation, routing, identity)
             }
             payload => payload,
         };

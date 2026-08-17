@@ -4,8 +4,8 @@ use nmp_engine::core::{
     Effect, EngineCore, EngineMsg, HistoryBatch, HistoryQuery, HistorySessionId, RowDelta,
     WindowLoad,
 };
-use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter};
+use nmp_grammar::{Demand, LiveQuery};
 use nmp_router::{SubId, WireOp};
 use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::{RedbStore, RelayObserved};
@@ -25,13 +25,16 @@ fn signed(keys: &Keys, created_at: u64, content: &str) -> Event {
 
 fn query(keys: &Keys, page_size: usize, max_rows: usize) -> HistoryQuery {
     HistoryQuery::new(
-        LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([1])),
-            authors: Some(Binding::Literal(BTreeSet::from([keys
-                .public_key()
-                .to_hex()]))),
-            ..Filter::default()
-        }),
+        LiveQuery::single(
+            Demand::author_outboxes(Filter {
+                kinds: Some(BTreeSet::from([1])),
+                authors: Some(Binding::Literal(BTreeSet::from([keys
+                    .public_key()
+                    .to_hex()]))),
+                ..Filter::default()
+            })
+            .expect("the selection binds `authors`"),
+        ),
         page_size,
         max_rows,
     )

@@ -21,7 +21,6 @@ import uniffi.nmp_ffi.FfiBlobDescriptor
 import uniffi.nmp_ffi.FfiAuthPolicyCallback
 import uniffi.nmp_ffi.FfiAuthPolicyRegistration
 import uniffi.nmp_ffi.FfiCancelWriteOutcome
-import uniffi.nmp_ffi.FfiFilter
 import uniffi.nmp_ffi.FfiFrame
 import uniffi.nmp_ffi.FfiLiveQuery
 import uniffi.nmp_ffi.FfiPublishQueueEntry
@@ -169,7 +168,15 @@ class RowPullCancellationTest {
                         // reason. Driving through `observeQuery` exercises
                         // the exact same commit-then-fold-then-emit loop
                         // through the one door an app actually uses.
-                        observeQuery(engine, NMPFilter()).collect { collected.add(it) }
+                        observeQuery(
+                            engine,
+                            NMPLiveQuery.single(
+                                NMPDemand(
+                                    selection = NMPFilter(),
+                                    source = NMPSourceAuthority.Public,
+                                )
+                            ),
+                        ).collect { collected.add(it) }
                     } catch (_: CancellationException) {
                         // Expected: cancellation lands after acknowledgement,
                         // before this collector ever sees the row.
@@ -284,14 +291,11 @@ class RowPullCancellationTest {
         override fun `makeCurrentAccount`(`account`: FfiSessionAccount): Unit =
             unusedByThisFalsifier()
 
-        override fun `observe`(`query`: FfiFilter, `window`: FfiWindow?): NmpRowStream = stream
+        override fun `observe`(`query`: FfiLiveQuery, `window`: FfiWindow?): NmpRowStream = stream
 
         override fun `observeDiagnostics`(): NmpDiagnosticsStream = unusedByThisFalsifier()
 
         override fun `observeFollowing`(`target`: String): NmpFollowStream = unusedByThisFalsifier()
-
-        override fun `observeQuery`(`query`: FfiLiveQuery, `window`: FfiWindow?): NmpRowStream =
-            unusedByThisFalsifier()
 
         override fun `publish`(`intent`: FfiWriteIntent): NmpReceiptStream = unusedByThisFalsifier()
 

@@ -2271,9 +2271,8 @@ impl CoreState {
                 ..ConcreteFilter::default()
             };
             // An id-targeted one-shot backfill fetch, not itself tied to
-            // any live Demand (#106): no `authors` binding at all, so
-            // `Public`/`Public` is the exact context `Demand::from_filter`'s
-            // static default would assign an authorless filter -- and this
+            // any live Demand (#106): ids name their own rows, so
+            // `Public`/`Public` is the honest context for it -- and this
             // sub carries no coverage credit of its own anyway (`coverage_claims`
             // is empty below; its typed `TemporaryReq::MissingIds` owner
             // unlocks `sub_id`'s credit at EOSE).

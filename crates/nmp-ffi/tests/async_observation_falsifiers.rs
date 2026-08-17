@@ -9,9 +9,12 @@ use nmp_ffi::convert::FfiRowPullError;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
 #[cfg(feature = "nip02")]
 use nmp_ffi::session::FfiPrivateKey;
-use nmp_ffi::types::FfiFilter;
 #[cfg(feature = "nip02")]
 use nmp_ffi::types::FfiFrame;
+use nmp_ffi::types::{
+    FfiAccessContext, FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiLiveQuery,
+    FfiSourceAuthority,
+};
 
 /// Consume every immediately-available frame (an observation delivers its
 /// initial current-state frame on open) so a subsequent ticket genuinely parks
@@ -52,10 +55,19 @@ fn engine() -> Arc<NmpEngine> {
     NmpEngine::new(NmpEngineConfig::default(), None).expect("temporary Redb engine must build")
 }
 
-fn note_query() -> FfiFilter {
-    FfiFilter {
-        kinds: Some(vec![1]),
-        ..FfiFilter::default()
+fn note_query() -> FfiLiveQuery {
+    FfiLiveQuery {
+        branches: vec![FfiDemand {
+            selection: FfiFilter {
+                kinds: Some(vec![1]),
+                ..FfiFilter::default()
+            },
+            source: FfiSourceAuthority::Public,
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
+            freshness: FfiFreshness::Live,
+        }],
+        aggregate_result_limit: None,
     }
 }
 

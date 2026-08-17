@@ -252,8 +252,8 @@ fn redb_accept_precommit_io_reopens_with_no_durable_receipt() {
     );
     assert!(store.recover_publish_queue().unwrap().is_empty());
 
-    let accepted = attempt_write(&mut store, 901)
-        .expect("the reopened store accepts the exact retry once");
+    let accepted =
+        attempt_write(&mut store, 901).expect("the reopened store accepts the exact retry once");
     assert_eq!(
         store.enumerate_publish_queue_receipts().unwrap().len(),
         1,

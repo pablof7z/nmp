@@ -8,8 +8,8 @@
 use nostr::{EventId, PublicKey};
 
 use crate::convert::{
-    demand_to_ffi, identity_to_ffi, parse_pubkey, write_payload_to_ffi,
-    write_routing_to_ffi, FfiError,
+    demand_to_ffi, identity_to_ffi, parse_pubkey, write_payload_to_ffi, write_routing_to_ffi,
+    FfiError,
 };
 use crate::types::{FfiDemand, FfiRow, FfiWriteIntent};
 

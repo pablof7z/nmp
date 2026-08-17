@@ -259,11 +259,10 @@ pub enum FfiFreshness {
 }
 
 /// The full live-query declaration an app supplies -- `selection + source +
-/// access + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565). `NmpEngine::
-/// observe` still accepts a bare [`FfiFilter`] for the common case (the
-/// static `AuthorOutboxes`/`Public` default, #106's `Demand::from_filter`);
-/// this is the explicit constructor an app reaches for once it needs to
-/// declare `Pinned` wire authority or a non-`Agnostic` cache mode.
+/// access + cache + freshness` (`nmp_grammar::Demand` mirror,
+/// #106/#107/#565). Every branch of every `NmpEngine::observe` call is one
+/// of these: there is no bare-[`FfiFilter`] door, so wire authority is
+/// always declared and never inferred from the selection's shape (#847).
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiDemand {
     pub selection: FfiFilter,

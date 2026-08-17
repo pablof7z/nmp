@@ -29,7 +29,7 @@ let demand = NMPDemand(
     access: .public
 )
 
-for await snapshot in try engine.observe(demand) {
+for await snapshot in try engine.observe(.single(demand)) {
     model.rows = snapshot.rows
     model.acquisition = snapshot.acquisition
     model.shortfall = snapshot.shortfall
@@ -70,7 +70,7 @@ val demand = Demand(
     access = AccessContext.Public
 )
 
-engine.observe(demand).collect { snapshot ->
+engine.observe(NMPLiveQuery.single(demand)).collect { snapshot ->
     state.update {
         it.copy(
             rows = snapshot.rows,
@@ -111,7 +111,7 @@ let demand = Demand {
     access: Default::default(),
 };
 
-let mut snapshots = engine.observe(demand)?;
+let mut snapshots = engine.observe(LiveQuery::single(demand), None)?;
 while let Some(snapshot) = snapshots.recv() {
     app_state.apply(snapshot);
 }

@@ -79,16 +79,16 @@ fn atom(filter: ConcreteFilter, source: SourceAuthority) -> ContextualAtom {
     }
 }
 
-/// `Demand::from_filter`'s static default for any filter whose root FilterNode
-/// binds `authors` at all (my_follows/follows_minus_mutes/address_coord's
-/// root atoms) -- `AuthorOutboxes`.
+/// The `AuthorOutboxes` context these fixtures declare for any filter whose
+/// root FilterNode binds `authors`
+/// (my_follows/follows_minus_mutes/address_coord's root atoms).
 fn outbox_atom(filter: ConcreteFilter) -> ContextualAtom {
     atom(filter, SourceAuthority::AuthorOutboxes)
 }
 
-/// `Demand::from_filter`'s static default for a filter whose root FilterNode
-/// does NOT bind `authors` at all (nip29_groups/bookmarks' root and outer
-/// atoms, which bind only tags) -- `Public`.
+/// The `Public` context these fixtures declare for a filter whose root
+/// FilterNode binds only tags (nip29_groups/bookmarks' root and outer
+/// atoms).
 fn public_atom(filter: ConcreteFilter) -> ContextualAtom {
     atom(filter, SourceAuthority::Public)
 }
@@ -109,11 +109,12 @@ fn my_follows_filter() -> Filter {
     Filter {
         kinds: Some(BTreeSet::from([1u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(Filter {
+            inner: Demand::author_outboxes(Filter {
                 kinds: Some(BTreeSet::from([3u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            }),
+            })
+            .expect("the selection binds `authors`"),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
@@ -127,7 +128,7 @@ fn nip29_groups_filter() -> Filter {
     tags.insert(
         IndexedTagName::new('d').unwrap(),
         Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(Filter {
+            inner: Demand::public(Filter {
                 kinds: Some(BTreeSet::from([39_002u16])),
                 tags: {
                     let mut inner_tags = BTreeMap::new();
@@ -153,19 +154,21 @@ fn nip29_groups_filter() -> Filter {
 /// — "follows minus mutes" (test 9, amendment #1).
 fn follows_minus_mutes_filter() -> Filter {
     let follows = Binding::Derived(Box::new(Derived {
-        inner: Demand::from_filter(Filter {
+        inner: Demand::author_outboxes(Filter {
             kinds: Some(BTreeSet::from([3u16])),
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
-        }),
+        })
+        .expect("the selection binds `authors`"),
         project: Selector::Tag("p".to_string()),
     }));
     let mutes = Binding::Derived(Box::new(Derived {
-        inner: Demand::from_filter(Filter {
+        inner: Demand::author_outboxes(Filter {
             kinds: Some(BTreeSet::from([10_000u16])),
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
-        }),
+        })
+        .expect("the selection binds `authors`"),
         project: Selector::Tag("p".to_string()),
     }));
     Filter {
@@ -187,11 +190,12 @@ fn follows_minus_mutes_filter() -> Filter {
 fn address_coord_filter() -> Filter {
     Filter {
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(Filter {
+            inner: Demand::author_outboxes(Filter {
                 kinds: Some(BTreeSet::from([30_003u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            }),
+            })
+            .expect("the selection binds `authors`"),
             project: Selector::AddressCoord,
         }))),
         ..Filter::default()
@@ -207,11 +211,12 @@ fn bookmarks_filter() -> Filter {
     tags.insert(
         IndexedTagName::new('e').unwrap(),
         Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(Filter {
+            inner: Demand::author_outboxes(Filter {
                 kinds: Some(BTreeSet::from([10_003u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            }),
+            })
+            .expect("the selection binds `authors`"),
             project: Selector::Tag("e".to_string()),
         })),
     );
@@ -227,11 +232,12 @@ fn projected_tag_filter(inner_kind: u16, projected: &str, outer_tag: char) -> Fi
     tags.insert(
         IndexedTagName::new(outer_tag).unwrap(),
         Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(Filter {
+            inner: Demand::author_outboxes(Filter {
                 kinds: Some(BTreeSet::from([inner_kind])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            }),
+            })
+            .expect("the selection binds `authors`"),
             project: Selector::Tag(projected.to_string()),
         })),
     );
@@ -249,7 +255,7 @@ fn bounded_recent_authors_filter(limit: usize) -> Filter {
     Filter {
         kinds: Some(BTreeSet::from([7u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(Filter {
+            inner: Demand::public(Filter {
                 kinds: Some(BTreeSet::from([1u16])),
                 limit: Some(limit),
                 ..Filter::default()
@@ -273,18 +279,20 @@ fn nested_article_authors_filter() -> Filter {
     Filter {
         kinds: Some(BTreeSet::from([30_023u16])),
         authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(Filter {
+            inner: Demand::author_outboxes(Filter {
                 kinds: Some(BTreeSet::from([10_000u16])),
                 authors: Some(Binding::Derived(Box::new(Derived {
-                    inner: Demand::from_filter(Filter {
+                    inner: Demand::author_outboxes(Filter {
                         kinds: Some(BTreeSet::from([3u16])),
                         authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                         ..Filter::default()
-                    }),
+                    })
+                    .expect("the selection binds `authors`"),
                     project: Selector::Tag("p".to_string()),
                 }))),
                 ..Filter::default()
-            }),
+            })
+            .expect("the selection binds `authors`"),
             project: Selector::Tag("p".to_string()),
         }))),
         ..Filter::default()
@@ -326,7 +334,10 @@ fn nested_derived_author_values_are_validated_at_the_destination_slot() {
     let valid_article_author = Keys::generate();
 
     h.set_active(Some(active.public_key()));
-    let (_handle, _open) = h.subscribe(Demand::from_filter(nested_article_authors_filter()));
+    let (_handle, _open) = h.subscribe(
+        Demand::author_outboxes(nested_article_authors_filter())
+            .expect("the selection binds `authors`"),
+    );
     h.deliver(vec![kind3(&active, &[mute_list_author.public_key()], 100)]);
 
     let inner = cf_kinds_authors(&[3], &[&active.public_key().to_hex()]);
@@ -379,18 +390,19 @@ fn derived_id_values_are_validated_and_canonicalized_at_the_destination_slot() {
     let filter = Filter {
         kinds: Some(BTreeSet::from([1u16])),
         ids: Some(Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(Filter {
+            inner: Demand::author_outboxes(Filter {
                 kinds: Some(BTreeSet::from([10_003u16])),
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
-            }),
+            })
+            .expect("the selection binds `authors`"),
             project: Selector::Tag("e".to_string()),
         }))),
         ..Filter::default()
     };
 
     h.set_active(Some(active.public_key()));
-    let (_handle, _open) = h.subscribe(Demand::from_filter(filter));
+    let (_handle, _open) = h.subscribe(Demand::public(filter));
     h.deliver(vec![event_with_raw_tags(
         &active,
         10_003,
@@ -420,7 +432,10 @@ fn derived_inner_limit_selects_newest_events_and_refills_after_retraction() {
     let b = Keys::generate();
     let c = Keys::generate();
     let d = Keys::generate();
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(bounded_recent_authors_filter(2)));
+    let (_handle, _open_delta) = h.subscribe(
+        Demand::author_outboxes(bounded_recent_authors_filter(2))
+            .expect("the selection binds `authors`"),
+    );
 
     let event_a = kind1(&a, "oldest", 100);
     let event_b = kind1(&b, "middle", 200);
@@ -533,7 +548,10 @@ fn derived_inner_strict_cache_filters_provenance_before_limit() {
     };
 
     let mut engine = Engine::new();
-    let (_handle, _opened) = opened(engine.subscribe(&store, Demand::from_filter(outer)));
+    let (_handle, _opened) = opened(engine.subscribe(
+        &store,
+        Demand::author_outboxes(outer).expect("the selection binds `authors`"),
+    ));
     let demand = engine.active_demand();
     let outer_authors: BTreeSet<String> = demand
         .iter()
@@ -595,7 +613,10 @@ fn derived_inner_agnostic_cache_accepts_rows_from_any_provenance_before_limit() 
     };
 
     let mut engine = Engine::new();
-    let (_handle, _opened) = opened(engine.subscribe(&store, Demand::from_filter(outer)));
+    let (_handle, _opened) = opened(engine.subscribe(
+        &store,
+        Demand::author_outboxes(outer).expect("the selection binds `authors`"),
+    ));
     let authors: BTreeSet<String> = engine
         .active_demand()
         .into_iter()
@@ -663,7 +684,7 @@ fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
         )
         .unwrap();
         inner.cache = cache;
-        Demand::from_filter(Filter {
+        Demand::author_outboxes(Filter {
             kinds: Some(BTreeSet::from([7u16])),
             authors: Some(Binding::Derived(Box::new(Derived {
                 inner,
@@ -671,6 +692,7 @@ fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
             }))),
             ..Filter::default()
         })
+        .expect("the selection binds `authors`")
     };
     let (strict, _) = opened(engine.subscribe(&store, query(CacheMode::Strict)));
     let (agnostic, _) = opened(engine.subscribe(&store, query(CacheMode::Agnostic)));
@@ -824,7 +846,9 @@ fn depth1_myfollows_surgical_delta() {
     let d = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(
+        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`"),
+    );
     h.deliver(vec![kind3(
         &a,
         &[a.public_key(), b.public_key(), c.public_key()],
@@ -882,7 +906,7 @@ fn depth2_nip29_groups_cascade_one_level() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(nip29_groups_filter()));
+    let (_handle, _open_delta) = h.subscribe(Demand::public(nip29_groups_filter()));
     h.deliver(vec![
         kind39002(&a, "g1", &[a.public_key()], 100),
         kind39002(&a, "g2", &[a.public_key()], 100),
@@ -942,7 +966,9 @@ fn identity_reroot_closes_old_before_new() {
     let f = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(
+        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`"),
+    );
     h.deliver(vec![kind3(&a, &[a.public_key(), b.public_key()], 100)]);
 
     let old_inner = cf_kinds_authors(&[3], &[&a.public_key().to_hex()]);
@@ -1019,7 +1045,9 @@ fn stale_older_kind3_rejected_without_firing() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(
+        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`"),
+    );
     h.deliver(vec![kind3(
         &a,
         &[
@@ -1052,7 +1080,9 @@ fn duplicate_delivery_no_fire() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(
+        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`"),
+    );
     let ev = kind3(&a, &[a.public_key()], 100);
     h.deliver(vec![ev.clone()]);
 
@@ -1073,7 +1103,9 @@ fn unchanged_set_ingest_empty_delta() {
     let c = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    let (_handle, _open_delta) = h.subscribe(
+        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`"),
+    );
     h.deliver(vec![kind3(
         &a,
         &[a.public_key(), b.public_key(), c.public_key()],
@@ -1103,7 +1135,7 @@ fn concurrent_depth2_changes_batch_one_delta() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(nip29_groups_filter()));
+    let (_handle, _open_delta) = h.subscribe(Demand::public(nip29_groups_filter()));
     h.deliver(vec![kind39002(&a, "g1", &[a.public_key()], 100)]);
 
     let before = h.metrics();
@@ -1141,8 +1173,12 @@ fn identical_descriptors_share_graph() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (handle1, _delta1) = h.subscribe(Demand::from_filter(my_follows_filter()));
-    let (handle2, delta2) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    let (handle1, _delta1) = h.subscribe(
+        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`"),
+    );
+    let (handle2, delta2) = h.subscribe(
+        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`"),
+    );
     assert!(
         delta2.is_empty(),
         "second subscribe to an identical descriptor shares the graph"
@@ -1170,7 +1206,8 @@ fn freshness_is_per_handle_and_does_not_split_the_shared_graph() {
     let a = Keys::generate();
     h.set_active(Some(a.public_key()));
 
-    let mut live = Demand::from_filter(my_follows_filter());
+    let mut live =
+        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`");
     live.freshness = Freshness::Live;
     let mut cached = live.clone();
     cached.freshness = Freshness::MaxAge { seconds: 14_400 };
@@ -1216,7 +1253,9 @@ fn shared_graph_closes_an_atom_a_recompute_dropped() {
     let d = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle1, _delta1) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    let (_handle1, _delta1) = h.subscribe(
+        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`"),
+    );
 
     // The atom must already be in the graph when the second handle joins:
     // that is the moment the per-handle claim was added on top of the
@@ -1226,7 +1265,9 @@ fn shared_graph_closes_an_atom_a_recompute_dropped() {
     let atom_c = cf_kinds_authors(&[1], &[&c.public_key().to_hex()]);
     assert!(h.demand().contains(&atom_c), "C is demanded to begin with");
 
-    let (_handle2, delta2) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    let (_handle2, delta2) = h.subscribe(
+        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`"),
+    );
     assert!(
         delta2.is_empty(),
         "second handle shares the graph and opens nothing"
@@ -1269,8 +1310,12 @@ fn shared_graph_keeps_a_recompute_added_atom_when_one_handle_leaves() {
     let d = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (handle1, _delta1) = h.subscribe(Demand::from_filter(my_follows_filter()));
-    let (_handle2, delta2) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    let (handle1, _delta1) = h.subscribe(
+        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`"),
+    );
+    let (_handle2, delta2) = h.subscribe(
+        Demand::author_outboxes(my_follows_filter()).expect("the selection binds `authors`"),
+    );
     assert!(delta2.is_empty(), "second handle shares the graph");
 
     h.deliver(vec![kind3(&a, &[b.public_key()], 100)]);
@@ -1303,7 +1348,10 @@ fn follows_minus_mutes_surgical() {
     let c = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(follows_minus_mutes_filter()));
+    let (_handle, _open_delta) = h.subscribe(
+        Demand::author_outboxes(follows_minus_mutes_filter())
+            .expect("the selection binds `authors`"),
+    );
     h.deliver(vec![kind3(
         &a,
         &[a.public_key(), b.public_key(), c.public_key()],
@@ -1349,7 +1397,9 @@ fn address_coord_fans_out_per_coordinate() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(address_coord_filter()));
+    let (_handle, _open_delta) = h.subscribe(
+        Demand::author_outboxes(address_coord_filter()).expect("the selection binds `authors`"),
+    );
     h.deliver(vec![
         addressable(&a, 30_003, "g1", 100),
         addressable(&a, 30_003, "g2", 100),
@@ -1403,7 +1453,7 @@ fn arbitrary_depth1_shape_needs_no_engine_change() {
     let e2 = dummy_event_id("bookmark-2");
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(bookmarks_filter()));
+    let (_handle, _open_delta) = h.subscribe(Demand::public(bookmarks_filter()));
     let delta = h.deliver(vec![kind10003_bookmarks(&a, &[e1, e2], 100)]);
 
     let atom_e1 = cf_kinds_tag(&[1], 'e', &[&e1.to_hex()]);
@@ -1427,7 +1477,7 @@ fn tag_e_explicit_hint_reaches_the_projected_atom() {
     let target = dummy_event_id("hinted-bookmark");
     let hint = nostr::RelayUrl::parse("wss://hint.example").unwrap();
     h.set_active(Some(author.public_key()));
-    let (_handle, _open) = h.subscribe(Demand::from_filter(bookmarks_filter()));
+    let (_handle, _open) = h.subscribe(Demand::public(bookmarks_filter()));
     let event = EventBuilder::new(Kind::from(10_003u16), "")
         .tags([Tag::parse(["e", &target.to_hex(), hint.as_str()]).unwrap()])
         .custom_created_at(Timestamp::from(100))
@@ -1451,10 +1501,8 @@ fn different_selectors_share_identical_inner_wire_atom() {
     let mut h = Harness::new();
     let author = Keys::generate();
     h.set_active(Some(author.public_key()));
-    let (_e_handle, first) =
-        h.subscribe(Demand::from_filter(projected_tag_filter(10_003, "e", 'e')));
-    let (_a_handle, second) =
-        h.subscribe(Demand::from_filter(projected_tag_filter(10_003, "a", 'a')));
+    let (_e_handle, first) = h.subscribe(Demand::public(projected_tag_filter(10_003, "e", 'e')));
+    let (_a_handle, second) = h.subscribe(Demand::public(projected_tag_filter(10_003, "a", 'a')));
     let inner = cf_kinds_authors(&[10_003], &[&author.public_key().to_hex()]);
 
     assert!(first.opened().iter().any(|atom| atom.filter == inner));
@@ -1478,8 +1526,7 @@ fn duplicate_source_observation_grows_projected_routing_evidence() {
     engine
         .set_active_pubkey(&store, Some(author.public_key()))
         .unwrap();
-    let (_handle, _open) =
-        opened(engine.subscribe(&store, Demand::from_filter(bookmarks_filter())));
+    let (_handle, _open) = opened(engine.subscribe(&store, Demand::public(bookmarks_filter())));
     let event = kind10003_bookmarks(&author, &[target], 100);
     let first = nostr::RelayUrl::parse("wss://first.example").unwrap();
     let second = nostr::RelayUrl::parse("wss://second.example").unwrap();
@@ -1535,7 +1582,7 @@ fn derived_set_retracts_deleted_member_that_new_winner_does_not_match() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(nip29_groups_filter()));
+    let (_handle, _open_delta) = h.subscribe(Demand::public(nip29_groups_filter()));
     let g1_event = kind39002(&a, "g1", &[a.public_key()], 100);
     let g1_id = g1_event.id;
     h.deliver(vec![g1_event, kind39002(&a, "g2", &[a.public_key()], 100)]);
@@ -1575,7 +1622,7 @@ fn metrics_witness_only_retracted_member_atoms_churn() {
     let a = Keys::generate();
 
     h.set_active(Some(a.public_key()));
-    let (_handle, _open_delta) = h.subscribe(Demand::from_filter(nip29_groups_filter()));
+    let (_handle, _open_delta) = h.subscribe(Demand::public(nip29_groups_filter()));
     let g1_event = kind39002(&a, "g1", &[a.public_key()], 100);
     let g1_id = g1_event.id;
     h.deliver(vec![

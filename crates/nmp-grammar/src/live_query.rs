@@ -19,7 +19,6 @@
 
 use std::collections::BTreeSet;
 
-use crate::binding::Filter;
 use crate::descriptor::Demand;
 
 /// The app-facing read declaration: a nonempty, canonical set of complete
@@ -116,13 +115,6 @@ impl LiveQuery {
         }
     }
 
-    /// Convenience constructor applying [`Demand::from_filter`]'s static
-    /// default to a bare `Filter` — the common single-branch case.
-    #[must_use]
-    pub fn from_filter(selection: Filter) -> Self {
-        Self::single(Demand::from_filter(selection))
-    }
-
     /// Compose independent live queries into ONE canonical declaration.
     ///
     /// Inputs flatten: a nested union contributes its branches, never a
@@ -179,10 +171,11 @@ mod tests {
     use std::hash::{DefaultHasher, Hash, Hasher};
 
     use super::*;
+    use crate::binding::Filter;
     use crate::descriptor::{AccessContext, SourceAuthority};
 
     fn demand(kind: u16) -> Demand {
-        Demand::from_filter(Filter {
+        Demand::public(Filter {
             kinds: Some(BTreeSet::from([kind])),
             ..Filter::default()
         })

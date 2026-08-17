@@ -18,8 +18,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, Binding, Demand, EventBuilder, Filter, Identity,
-    SourceAuthority, WriteIntent, WritePayload, WriteRouting,
+    AccessContext, Binding, Demand, EventBuilder, Filter, Identity, SourceAuthority, WriteIntent,
+    WritePayload, WriteRouting,
 };
 use nostr::nips::nip65::RelayMetadata;
 use nostr::{Event, EventId, Kind, PublicKey, RelayUrl, Tag};

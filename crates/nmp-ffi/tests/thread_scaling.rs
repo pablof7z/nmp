@@ -25,12 +25,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
-use nmp_ffi::types::FfiFilter;
+use nmp_ffi::types::{
+    FfiAccessContext, FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiLiveQuery,
+    FfiSourceAuthority,
+};
 
-fn text_note_query() -> FfiFilter {
-    FfiFilter {
-        kinds: Some(vec![1]),
-        ..FfiFilter::default()
+fn text_note_query() -> FfiLiveQuery {
+    FfiLiveQuery {
+        branches: vec![FfiDemand {
+            selection: FfiFilter {
+                kinds: Some(vec![1]),
+                ..FfiFilter::default()
+            },
+            source: FfiSourceAuthority::Public,
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
+            freshness: FfiFreshness::Live,
+        }],
+        aggregate_result_limit: None,
     }
 }
 
