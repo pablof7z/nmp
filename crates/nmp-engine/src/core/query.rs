@@ -1348,9 +1348,6 @@ impl EngineCore {
             ));
         }
         self.wire = WireOwnership::default();
-        self.author_outbox_wire_owner_counts.clear();
-        let previous_author_outbox_route_needs =
-            std::mem::take(&mut self.author_outbox_route_needs);
         self.request_targets.forget_activations();
         for (id, atoms) in contributions {
             self.wire.index_handle(id, atoms.clone());
@@ -1361,9 +1358,12 @@ impl EngineCore {
         for id in self.request_targets.declared_handles() {
             self.activate_request_targets_for_handle(id);
         }
+        // The author-outbox owner resets and replays itself from the
+        // rebuilt wire ownership above -- no map here for this function to
+        // clear first, and no separate diff to maintain: the owner's own
+        // pending-change flag already reflects the replay (see
+        // `AuthorRouteNeeds`'s module doc).
         self.rebuild_author_outbox_route_needs();
-        self.author_outbox_route_needs_changed |=
-            previous_author_outbox_route_needs != self.author_outbox_route_needs;
         self.refresh_pending_wire_atoms();
     }
 
