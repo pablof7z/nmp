@@ -1217,13 +1217,20 @@ fn shared_graph_closes_an_atom_a_recompute_dropped() {
 
     h.set_active(Some(a.public_key()));
     let (_handle1, _delta1) = h.subscribe(Demand::from_filter(my_follows_filter()));
-    let (_handle2, delta2) = h.subscribe(Demand::from_filter(my_follows_filter()));
-    assert!(delta2.is_empty(), "second handle shares the graph");
 
+    // The atom must already be in the graph when the second handle joins:
+    // that is the moment the per-handle claim was added on top of the
+    // FilterNode's own, inflating the count past what a recompute can undo.
     h.deliver(vec![kind3(&a, &[b.public_key(), c.public_key()], 100)]);
     let atom_b = cf_kinds_authors(&[1], &[&b.public_key().to_hex()]);
     let atom_c = cf_kinds_authors(&[1], &[&c.public_key().to_hex()]);
     assert!(h.demand().contains(&atom_c), "C is demanded to begin with");
+
+    let (_handle2, delta2) = h.subscribe(Demand::from_filter(my_follows_filter()));
+    assert!(
+        delta2.is_empty(),
+        "second handle shares the graph and opens nothing"
+    );
 
     // C leaves the root FilterNode's atom set; D joins it.
     let before = h.metrics();
