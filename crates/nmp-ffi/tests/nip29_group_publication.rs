@@ -24,7 +24,7 @@ use nmp_ffi::nip29::{
     FfiGroupRecord, FfiRelayScope,
 };
 use nmp_ffi::types::{
-    FfiAccessContext, FfiBinding, FfiEventBuilder, FfiFilter, FfiIdentityField, FfiReadRouting,
+    FfiBinding, FfiEventBuilder, FfiFilter, FfiIdentityField, FfiReadRouting,
 };
 
 fn host(n: u16) -> String {
@@ -59,7 +59,7 @@ fn a_multi_host_listing_is_one_live_query_with_one_branch_per_host() {
             },
             "each listing branch is pinned to exactly one host"
         );
-        assert_eq!(branch.access, FfiAccessContext::Public);
+        assert_eq!(branch.authenticate_as, None);
     }
     assert_eq!(query.aggregate_result_limit, None);
 }

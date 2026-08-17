@@ -79,7 +79,7 @@ fn coverage_assignments_outrank_wider_supplemental_claims_under_the_relay_cap() 
 #[test]
 fn identical_incumbent_filter_attaches_new_exact_metadata_without_wire_or_budget_slot() {
     let relay = RelayUrl::parse("wss://router-identical-incumbent.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let wide = pinned_kind_atom(&relay, [1, 2]);
     let one = pinned_kind_atom(&relay, [1]);
     let two = pinned_kind_atom(&relay, [2]);
@@ -216,7 +216,7 @@ fn exact_request_removal_keeps_plan_and_diagnostics_position_aligned_without_res
         incompatible_atom(&relay, "second"),
         incompatible_atom(&relay, "third"),
     ];
-    let session = RelaySessionKey::public(relay);
+    let session = RelaySessionKey::unauthenticated(relay);
     let mut router = Router::new(RuleRegistry::default_widen_only());
     router.admit(&demands.iter().cloned().collect(), &facts, 20);
     let initial_ids: Vec<_> = router.plan().reqs[&session]

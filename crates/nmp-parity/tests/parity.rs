@@ -37,7 +37,7 @@ use nmp_ffi::nip02::{
 };
 use nmp_ffi::session::{FfiPrivateKey, FfiPublicKey};
 use nmp_ffi::types::{
-    FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthPhase, FfiBinding,
+    FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthPhase, FfiBinding,
     FfiCacheMode, FfiCancelWriteOutcome, FfiDemand, FfiDiagnosticsSnapshot, FfiFilter,
     FfiFreshness, FfiIdentity, FfiLiveQuery, FfiNotSentReason, FfiReadRouting,
     FfiReceiptReattachment, FfiRefuseReason, FfiRelayState, FfiRelayWaiting, FfiRetryCause,
@@ -583,7 +583,7 @@ struct NormRelayDiagnostics {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct NormAuthSession {
     relay: String,
-    access: String,
+    authenticate_as: String,
     transport_generation: u64,
     epoch_sequence: Option<u64>,
     challenge_descriptor: Option<String>,
@@ -831,17 +831,17 @@ fn ffi_auth_diagnostics_phase_name(phase: FfiAuthPhase) -> &'static str {
     }
 }
 
-fn direct_access_name(access: AccessContext) -> String {
+fn direct_access_name(authenticate_as: AccessContext) -> String {
     match access {
         None => "public".to_string(),
         Some(public_key) => format!("nip42:{}", public_key.to_hex()),
     }
 }
 
-fn ffi_access_name(access: FfiAccessContext) -> String {
+fn ffi_access_name(authenticate_as: FfiAccessContext) -> String {
     match access {
-        FfiAccessContext::Public => "public".to_string(),
-        FfiAccessContext::Nip42 { public_key } => format!("nip42:{public_key}"),
+        None => "public".to_string(),
+        Some(public_key) => format!("nip42:{public_key}"),
     }
 }
 
@@ -1286,7 +1286,7 @@ fn normalize_direct_diagnostics(snapshot: DiagnosticsSnapshot, relay: &str) -> N
         .into_iter()
         .map(|session| NormAuthSession {
             relay: normalize_url(session.relay.as_str(), relay),
-            access: direct_access_name(session.access),
+            authenticate_as: direct_access_name(session.authenticated_as),
             transport_generation: session.transport_generation,
             epoch_sequence: session.epoch_sequence,
             challenge_descriptor: session.challenge_hash,
@@ -1378,7 +1378,7 @@ fn normalize_ffi_diagnostics(snapshot: FfiDiagnosticsSnapshot, relay: &str) -> N
         .into_iter()
         .map(|session| NormAuthSession {
             relay: normalize_url(&session.relay, relay),
-            access: ffi_access_name(session.access),
+            authenticate_as: ffi_access_name(session.authenticated_as),
             transport_generation: session.transport_generation,
             epoch_sequence: session.epoch_sequence,
             challenge_descriptor: session.challenge_descriptor,
@@ -1534,7 +1534,7 @@ fn ffi_live_query(pubkey: &str, kind: u16) -> FfiLiveQuery {
                 ..FfiFilter::default()
             },
             routing: FfiReadRouting::Auto,
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         }],

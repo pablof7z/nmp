@@ -91,7 +91,7 @@ fn lifting_a_partial_source_limit_adds_only_the_missing_session() {
 #[test]
 fn withdrawing_one_exact_refused_owner_updates_only_its_session_shortfall() {
     let relay = RelayUrl::parse("wss://router-refused-withdraw.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let budget = subscription_budget(&relay, 2);
     let facts = FixtureRoutingFacts::new();
     let mut router = Router::new(RuleRegistry::default_widen_only());
@@ -150,7 +150,7 @@ fn withdrawing_one_exact_refused_owner_updates_only_its_session_shortfall() {
 #[test]
 fn zero_budget_refusal_lives_until_its_final_exact_owner_withdraws() {
     let relay = RelayUrl::parse("wss://router-zero-budget-withdraw.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let budget = subscription_budget(&relay, 0);
     let facts = FixtureRoutingFacts::new();
     let mut router = Router::new(RuleRegistry::default_widen_only());

@@ -300,7 +300,7 @@ fn equal_branches_keep_independent_evidence_entries() {
     let host = relay("shared");
     let mut core = core();
 
-    // Same selection, same routing, same access: only the per-handle
+    // Same selection, same routing, same authenticate_as: only the per-handle
     // freshness policy differs. These two branches may share every atom, wire
     // request and coverage row underneath -- and must STILL be two branches,
     // because collapsing them would silently discard one branch's own policy.

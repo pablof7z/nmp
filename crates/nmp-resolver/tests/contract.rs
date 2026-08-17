@@ -819,7 +819,7 @@ fn derived_inner_and_outer_demands_keep_independent_source_and_access_contexts()
         panic!("only the unresolved Derived inner atom should open first");
     };
     assert_eq!(inner_atom.routing, ReadRouting::Auto);
-    assert_eq!(inner_atom.access, None);
+    assert_eq!(inner_atom.authenticate_as, None);
     assert_eq!(
         inner_atom.filter,
         cf_kinds_authors(&[10_009], &[&a.public_key().to_hex()])
@@ -840,14 +840,14 @@ fn derived_inner_and_outer_demands_keep_independent_source_and_access_contexts()
         })
         .expect("projecting the contact list must open the outer content atom");
     assert_eq!(outer_atom.routing, ReadRouting::Explicit(vec![pinned]));
-    assert_eq!(outer_atom.access, Some(a.public_key()));
+    assert_eq!(outer_atom.authenticate_as, Some(a.public_key()));
 
     let reroot = h.set_active(Some(b.public_key()));
     assert!(
         reroot.closed().iter().any(|atom| {
             atom.filter.kinds == Some(BTreeSet::from([9u16]))
                 && matches!(atom.routing, ReadRouting::Explicit(_))
-                && atom.access == Some(a.public_key())
+                && atom.authenticate_as == Some(a.public_key())
         }),
         "reroot must withdraw the dependent host/AUTH group atom"
     );

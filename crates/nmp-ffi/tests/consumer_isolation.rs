@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
-    FfiAccessContext, FfiCacheMode, FfiDemand, FfiFilter, FfiFrame, FfiFreshness, FfiIdentity,
+    FfiCacheMode, FfiDemand, FfiFilter, FfiFrame, FfiFreshness, FfiIdentity,
     FfiLiveQuery, FfiReadRouting, FfiRowDelta, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
 
@@ -30,7 +30,7 @@ fn note_query() -> FfiLiveQuery {
                 ..FfiFilter::default()
             },
             routing: FfiReadRouting::Auto,
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         }],

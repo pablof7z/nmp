@@ -25,7 +25,7 @@ fn authorless_public_a_b_are_three_exact_session_plans() {
         .map(|access| ContextualAtom {
             filter: filter.clone(),
             routing: source.clone(),
-            access,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         })
         .collect();

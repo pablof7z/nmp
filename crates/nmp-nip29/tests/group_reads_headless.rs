@@ -87,7 +87,7 @@ fn wire_sub_string(sub_id: &SubId) -> String {
 }
 
 fn public_session(relay: &RelayUrl) -> RelaySessionKey {
-    RelaySessionKey::public(relay.clone())
+    RelaySessionKey::unauthenticated(relay.clone())
 }
 
 fn subscribed_handle(effects: &[Effect]) -> ObservationId {
