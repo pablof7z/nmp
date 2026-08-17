@@ -279,7 +279,7 @@ impl CoreState {
         handle: TransportRelayHandle,
         session: RelaySessionKey,
     ) -> Vec<Effect> {
-        if session.authenticate_as == None {
+        if session.authenticate_as.is_none() {
             return Vec::new();
         }
         self.auth_probe_sessions.remove(&session);
@@ -754,7 +754,7 @@ impl CoreState {
         // that socket. Sessions bound to no identity own no AUTH epoch; invalidating one
         // here would erase an initial REQ already accepted by this exact
         // still-dialing handle, then manufacture a duplicate replay (#1075).
-        if session.authenticate_as != None {
+        if session.authenticate_as.is_some() {
             self.invalidate_auth_epoch(&session, false, &mut effects);
         }
         self.slot_to_relay
@@ -774,7 +774,7 @@ impl CoreState {
         // then dropped" fact).
         self.connected_relays.insert(session.clone());
         self.ever_connected_relays.insert(session.clone());
-        if !same_physical_session && session.authenticate_as != None {
+        if !same_physical_session && session.authenticate_as.is_some() {
             if self.auth_required_sessions.contains(&session) {
                 self.auth_probe_sessions.remove(&session);
             } else {
@@ -799,7 +799,7 @@ impl CoreState {
         // AUTH (#8) — sending them earlier would leak the protected demand
         // onto an unauthenticated socket and record attribution snapshots no
         // honest EOSE can ever discharge.
-        if session.authenticate_as == None {
+        if session.authenticate_as.is_none() {
             if let Some(reqs) = planned_read_reqs.as_ref() {
                 // A new websocket generation has no live subscriptions even
                 // if the previous generation's accepted-wire owner map still
@@ -1067,7 +1067,7 @@ impl CoreState {
             // when the session bound to no identity itself dropped -- a protected
             // session's disconnect must not kill a reconciliation still
             // healthy on the URL's live Public socket.
-            if session.authenticate_as == None {
+            if session.authenticate_as.is_none() {
                 self.nip77.drop_live_for_relay(&session.relay);
                 // Any reconciliation open against this relay dies with the
                 // connection -- there is nothing left to `NEG-CLOSE` (the
@@ -1925,7 +1925,7 @@ impl CoreState {
                 // session, so a NEG frame arriving on a protected session
                 // could only be a foreign/confused reply — it must not
                 // resolve the Public probe or step a Public reconciliation.
-                if session.authenticate_as != None {
+                if session.authenticate_as.is_some() {
                     return effects;
                 }
                 let wire_id = subscription_id.as_str();
@@ -1954,7 +1954,7 @@ impl CoreState {
                 // Same PUBLIC-session-only gate as `NegMsg` above (#8): a
                 // protected session's NEG-ERR must not classify the URL as
                 // Unsupported or tear a Public reconciliation down to REQ.
-                if session.authenticate_as != None {
+                if session.authenticate_as.is_some() {
                     return effects;
                 }
                 let wire_id = subscription_id.as_str();

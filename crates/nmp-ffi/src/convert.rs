@@ -1856,7 +1856,7 @@ pub fn window_load_to_ffi(load: WindowLoad) -> FfiWindowLoad {
 /// `nmp::Frame -> FfiFrame` -- the ONE wire shape both observation modes
 /// share, with delivery derived from boundedness (#485):
 ///
-/// - Unbounded (`frame.window == None`): map the engine-composed exact rebased
+/// - Unbounded (`frame.window.is_none()`): map the engine-composed exact rebased
 ///   deltas; the full set is never redelivered (full-set redelivery is the
 ///   O(rows squared) P0).
 /// - Windowed: ship the complete bounded row set + growth fact and DROP the

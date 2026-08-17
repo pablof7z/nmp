@@ -1,6 +1,6 @@
 // A construction/round-trip test of the ergonomic Demand descriptor (#107).
 // No network -- this only proves the Swift-value <-> Ffi-value conversion
-// is lossless for every ReadRouting/AccessContext/CacheMode/Freshness case.
+// is lossless for every ReadRouting/authenticateAs/CacheMode/Freshness case.
 
 import XCTest
 @testable import NMP
@@ -13,7 +13,7 @@ final class NMPDemandTests: XCTestCase {
         )
         let ffi = demand.toFfi()
         XCTAssertEqual(ffi.routing, .auto)
-        XCTAssertEqual(ffi.access, .public)
+        XCTAssertNil(ffi.authenticateAs)
         XCTAssertEqual(ffi.cache, .agnostic)
         XCTAssertEqual(ffi.freshness, .live)
         XCTAssertEqual(NMPDemand(ffi), demand)
@@ -37,18 +37,18 @@ final class NMPDemandTests: XCTestCase {
     func testCacheModeDefaultsToAgnosticWhenUnspecified() {
         let demand = NMPDemand(selection: NMPFilter(kinds: [1]))
         XCTAssertEqual(demand.cache, .agnostic)
-        XCTAssertEqual(demand.access, .public)
+        XCTAssertNil(demand.authenticateAs)
     }
 
-    func testNip42AccessContextRoundTripsWithFrozenExpectedKey() {
+    func testAuthenticateAsRoundTripsWithFrozenExpectedKey() {
         let publicKey = String(repeating: "a", count: 64)
         let demand = NMPDemand(
             selection: NMPFilter(kinds: [1]),
             routing: .explicit(["wss://relay.example.com"]),
-            access: .nip42(publicKey: publicKey)
+            authenticateAs: publicKey
         )
 
-        XCTAssertEqual(demand.toFfi().access, .nip42(publicKey: publicKey))
+        XCTAssertEqual(demand.toFfi().authenticateAs, publicKey)
         XCTAssertEqual(NMPDemand(demand.toFfi()), demand)
     }
 

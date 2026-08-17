@@ -46,7 +46,7 @@ class NIP29Test {
             val routing = branch.routing
             check(routing is NMPReadRouting.Explicit) { "expected Explicit, got $routing" }
             assertEquals(listOf(expectedHost), routing.relays)
-            assertEquals(NMPAccessContext.Public, branch.access)
+            assertNull(branch.authenticateAs)
             val hBinding = branch.selection.tags['h']
             check(hBinding is NMPBinding.Literal) { "expected an h tag literal binding" }
             assertEquals(setOf("photographers"), hBinding.values)

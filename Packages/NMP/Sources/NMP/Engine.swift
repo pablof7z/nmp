@@ -125,7 +125,7 @@ public final class NMPEngine: Sendable {
     ///
     /// There is ONE observation door and it takes a complete `NMPLiveQuery`:
     /// one or more independent `NMPDemand` branches, each naming its own
-    /// routing, access context, cache mode and freshness. Selection
+    /// routing, authenticated identity, cache mode and freshness. Selection
     /// syntax never decides routing (#847), so a single-branch read is
     /// spelled `observe(.single(demand))`. The branches are observed through
     /// ONE handle: rows are unioned by event id with provenance merged, every

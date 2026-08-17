@@ -439,7 +439,7 @@ mod relay_session_key_tests {
         let public_diagnostics = probing
             .relays
             .iter()
-            .find(|entry| entry.authenticate_as == None)
+            .find(|entry| entry.authenticate_as.is_none())
             .unwrap();
         let protected_diagnostics = probing
             .relays
@@ -463,7 +463,7 @@ mod relay_session_key_tests {
             resolved
                 .relays
                 .iter()
-                .find(|entry| entry.authenticate_as == None)
+                .find(|entry| entry.authenticate_as.is_none())
                 .unwrap()
                 .nip77_behavior,
             "behaviorally_proven"

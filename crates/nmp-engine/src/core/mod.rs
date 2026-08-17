@@ -2953,7 +2953,7 @@ impl CoreState {
             .or_else(|| self.transport_degraded.clone());
         let mut auth_sessions = BTreeMap::new();
         for (handle, session) in self.slot_to_relay.values() {
-            if session.authenticate_as == None || !self.connected_relays.contains(session) {
+            if session.authenticate_as.is_none() || !self.connected_relays.contains(session) {
                 continue;
             }
             auth_sessions.insert(

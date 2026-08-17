@@ -724,7 +724,7 @@ private final class DiagnosticsRaceState: @unchecked Sendable {
             relays = [
                 FfiRelayDiagnostics(
                     relay: "wss://deterministic.example",
-                    access: .public,
+                    authenticateAs: nil,
                     wireSubCount: 1,
                     subscriptionBudget: nil,
                     subscriptionsRefused: 0,

@@ -955,7 +955,7 @@ fn apply_worker_event_with_verdict(
                 // would never be reclaimed. Taking the worker and retiring it
                 // -- exactly the same door `close`/`shutdown` use -- frees
                 // both the OS thread and the cap slot immediately, and
-                // leaves `state.worker == None` so a subsequent
+                // leaves `state.worker.is_none()` so a subsequent
                 // `ensure_open` reopens a FRESH generation instead of
                 // handing back a stale one. This is reported on BOTH
                 // branches below (was-connected and never-connected) --

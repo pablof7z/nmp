@@ -316,38 +316,38 @@ final class EvidenceMappingTests: XCTestCase {
     func testEveryAcquisitionEvidenceVariantMapsWithoutARollup() {
         let raw = FfiAcquisitionEvidence(
             sources: [
-                .init(relay: "wss://requesting.example", access: .public, reconciledThrough: 10, status: .requesting),
-                .init(relay: "wss://finished.example", access: .public, reconciledThrough: 11, status: .finishedStoredEvents),
-                .init(relay: "wss://awaiting.example", access: .public, reconciledThrough: nil, status: .awaitingRequest),
-                .init(relay: "wss://satisfied.example", access: .public, reconciledThrough: 12, status: .coverageSatisfied),
-                .init(relay: "wss://connecting.example", access: .public, reconciledThrough: nil, status: .connecting),
-                .init(relay: "wss://disconnected.example", access: .public, reconciledThrough: 20, status: .disconnected),
+                .init(relay: "wss://requesting.example", authenticateAs: nil, reconciledThrough: 10, status: .requesting),
+                .init(relay: "wss://finished.example", authenticateAs: nil, reconciledThrough: 11, status: .finishedStoredEvents),
+                .init(relay: "wss://awaiting.example", authenticateAs: nil, reconciledThrough: nil, status: .awaitingRequest),
+                .init(relay: "wss://satisfied.example", authenticateAs: nil, reconciledThrough: 12, status: .coverageSatisfied),
+                .init(relay: "wss://connecting.example", authenticateAs: nil, reconciledThrough: nil, status: .connecting),
+                .init(relay: "wss://disconnected.example", authenticateAs: nil, reconciledThrough: 20, status: .disconnected),
                 .init(
                     relay: "wss://challenge.example",
-                    access: .nip42(publicKey: String(repeating: "a", count: 64)),
+                    authenticateAs: String(repeating: "a", count: 64),
                     reconciledThrough: nil,
                     status: .awaitingAuth(phase: .awaitingChallenge)
                 ),
                 .init(
                     relay: "wss://policy.example",
-                    access: .public,
+                    authenticateAs: nil,
                     reconciledThrough: nil,
                     status: .awaitingAuth(phase: .awaitingPolicy)
                 ),
                 .init(
                     relay: "wss://signature.example",
-                    access: .public,
+                    authenticateAs: nil,
                     reconciledThrough: nil,
                     status: .awaitingAuth(phase: .awaitingSignature)
                 ),
                 .init(
                     relay: "wss://ack.example",
-                    access: .public,
+                    authenticateAs: nil,
                     reconciledThrough: nil,
                     status: .awaitingAuth(phase: .awaitingRelayAck)
                 ),
-                .init(relay: "wss://denied.example", access: .public, reconciledThrough: nil, status: .authDenied),
-                .init(relay: "wss://error.example", access: .public, reconciledThrough: nil, status: .error),
+                .init(relay: "wss://denied.example", authenticateAs: nil, reconciledThrough: nil, status: .authDenied),
+                .init(relay: "wss://error.example", authenticateAs: nil, reconciledThrough: nil, status: .error),
             ],
             shortfall: [
                 .noPlannedSource(atom: "no-source-filter"),
@@ -368,8 +368,8 @@ final class EvidenceMappingTests: XCTestCase {
         XCTAssertEqual(evidence.sources[5].status, .disconnected)
         XCTAssertEqual(evidence.sources[6].status, .awaitingAuth(phase: .awaitingChallenge))
         XCTAssertEqual(
-            evidence.sources[6].access,
-            .nip42(publicKey: String(repeating: "a", count: 64))
+            evidence.sources[6].authenticateAs,
+            String(repeating: "a", count: 64)
         )
         XCTAssertEqual(evidence.sources[7].status, .awaitingAuth(phase: .awaitingPolicy))
         XCTAssertEqual(evidence.sources[8].status, .awaitingAuth(phase: .awaitingSignature))
@@ -466,7 +466,7 @@ final class EvidenceMappingTests: XCTestCase {
                 sources: [
                     .init(
                         relay: "wss://source.example",
-                        access: .public,
+                        authenticateAs: nil,
                         reconciledThrough: 9,
                         status: .disconnected
                     )

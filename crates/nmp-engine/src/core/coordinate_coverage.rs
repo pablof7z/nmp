@@ -345,7 +345,7 @@ impl CoreState {
         // public question and never for a protected one — the same
         // access-context rule the rest of this module keeps free by carrying
         // it in the session key.
-        if session.authenticate_as != None {
+        if session.authenticate_as.is_some() {
             return None;
         }
         let mut found = None;

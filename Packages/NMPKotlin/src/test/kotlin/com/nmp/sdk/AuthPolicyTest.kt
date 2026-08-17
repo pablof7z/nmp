@@ -5,7 +5,6 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import uniffi.nmp_ffi.FfiAccessContext
 import uniffi.nmp_ffi.FfiAuthDiagnostics
 import uniffi.nmp_ffi.FfiAuthPhase
 import uniffi.nmp_ffi.FfiAuthPolicyCompletionException
@@ -168,7 +167,7 @@ class AuthPolicyTest {
                 AuthDiagnostics.from(
                     FfiAuthDiagnostics(
                         relay = "wss://auth.example",
-                        access = FfiAccessContext.Nip42(publicKey),
+                        authenticateAs = publicKey,
                         transportGeneration = 17uL,
                         epochSequence = 23uL,
                         challengeDescriptor = "blake3:challenge",
@@ -180,7 +179,7 @@ class AuthPolicyTest {
                 )
 
             assertEquals("wss://auth.example", projected.relay)
-            assertEquals(NMPAccessContext.Nip42(publicKey), projected.access)
+            assertEquals(publicKey, projected.authenticateAs)
             assertEquals(17uL, projected.transportGeneration)
             assertEquals(23uL, projected.epochSequence)
             assertEquals("blake3:challenge", projected.challengeDescriptor)

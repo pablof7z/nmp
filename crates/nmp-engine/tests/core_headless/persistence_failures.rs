@@ -1712,7 +1712,7 @@ fn a_failing_publish_queue_deadline_read_is_a_typed_error_not_a_false_none() {
 /// relay plan exists. If the post-admission coverage projection fails, the
 /// engine degrades without replacing that seed with fabricated relay proof.
 ///
-/// `AcquisitionEvidence::sources[..].reconciled_through == None` is a claim
+/// `AcquisitionEvidence::sources[..].reconciled_through.is_none()` is a claim
 /// about what a relay has proven. A store that could not be read has
 /// established no such thing, so it must not be able to render as one.
 #[test]

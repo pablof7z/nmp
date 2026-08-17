@@ -367,7 +367,7 @@ pub(crate) fn acquisition_evidence(
                 let status = if acquisition == EvidenceAcquisition::CoverageSatisfied {
                     SourceStatus::CoverageSatisfied
                 } else if connected.contains(&session) {
-                    if session.authenticate_as == None {
+                    if session.authenticate_as.is_none() {
                         request_placement_status(all_placed, any_awaiting)
                     } else {
                         match auth_status.get(&session).copied().unwrap_or(

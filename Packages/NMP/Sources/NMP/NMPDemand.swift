@@ -28,15 +28,6 @@ public enum NMPReadRouting: Sendable, Hashable {
     case explicit([String])
 }
 
-/// `nmp_grammar::AccessContext` mirror. Closed vocabulary: an unauthenticated
-/// `public` connection, or NIP-42 authentication against one stable expected
-/// public key (hex). The `nip42` identity is frozen in the demand; changing
-/// the current account never redirects it (#8).
-public enum NMPAccessContext: Sendable, Hashable {
-    case `public`
-    case nip42(publicKey: String)
-}
-
 /// `nmp_grammar::CacheMode` mirror (#107). Meaningful only alongside
 /// `NMPReadRouting.explicit` -- a no-op under `.auto`, since there is no
 /// explicit relay set to intersect a cached row's provenance against.
@@ -57,7 +48,8 @@ public enum NMPFreshness: Sendable, Hashable {
 }
 
 /// The full live-query declaration a dev supplies -- `selection + routing +
-/// access + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565).
+/// authenticateAs + cache + freshness` (`nmp_grammar::Demand` mirror,
+/// #106/#107/#565).
 ///
 /// Every parameter but `selection` defaults, so the ordinary declaration is
 /// the selection and nothing else:
@@ -70,20 +62,26 @@ public struct NMPDemand: Sendable, Hashable {
     /// Where this demand's reads come from. Defaults to `.auto`: an app that
     /// says nothing gets NMP's routing.
     public var routing: NMPReadRouting
-    public var access: NMPAccessContext
+    /// The identity these reads authenticate as, as a 32-byte hex public
+    /// key. `nil` -- the default and the ordinary case -- reads on the
+    /// connection bound to no identity, which today never authenticates: a
+    /// relay's NIP-42 challenge on such a connection is currently dropped
+    /// rather than routed to the installed `NMPAuthPolicy` (issue #1889).
+    /// A non-nil key pins these reads to a session that authenticates as it.
+    public var authenticateAs: String?
     public var cache: NMPCacheMode
     public var freshness: NMPFreshness
 
     public init(
         selection: NMPFilter,
         routing: NMPReadRouting = .auto,
-        access: NMPAccessContext = .public,
+        authenticateAs: String? = nil,
         cache: NMPCacheMode = .agnostic,
         freshness: NMPFreshness = .live
     ) {
         self.selection = selection
         self.routing = routing
-        self.access = access
+        self.authenticateAs = authenticateAs
         self.cache = cache
         self.freshness = freshness
     }
@@ -103,22 +101,6 @@ extension NMPReadRouting {
         switch ffi {
         case .auto: self = .auto
         case .explicit(let relays): self = .explicit(relays)
-        }
-    }
-}
-
-extension NMPAccessContext {
-    func toFfi() -> FfiAccessContext {
-        switch self {
-        case .public: return .public
-        case let .nip42(publicKey): return .nip42(publicKey: publicKey)
-        }
-    }
-
-    init(_ ffi: FfiAccessContext) {
-        switch ffi {
-        case .public: self = .public
-        case let .nip42(publicKey): self = .nip42(publicKey: publicKey)
         }
     }
 }
@@ -162,7 +144,7 @@ extension NMPDemand {
         FfiDemand(
             selection: selection.toFfi(),
             routing: routing.toFfi(),
-            access: access.toFfi(),
+            authenticateAs: authenticateAs,
             cache: cache.toFfi(),
             freshness: freshness.toFfi()
         )
@@ -172,7 +154,7 @@ extension NMPDemand {
         self.init(
             selection: NMPFilter(ffi.selection),
             routing: NMPReadRouting(ffi.routing),
-            access: NMPAccessContext(ffi.access),
+            authenticateAs: ffi.authenticateAs,
             cache: NMPCacheMode(ffi.cache),
             freshness: NMPFreshness(ffi.freshness)
         )

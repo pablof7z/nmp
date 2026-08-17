@@ -3379,7 +3379,7 @@ fn ensure_write_effect_session(
     match pool.ensure_session(session) {
         Ok(handle) => Ok(handle),
         Err(nmp_transport::RelayOpenError::AtCapacity { .. })
-            if session.authenticate_as != None =>
+            if session.authenticate_as.is_some() =>
         {
             let public = RelaySessionKey::unauthenticated(session.relay.clone());
             let Some(public_handle) = pool.live_session_handle(&public) else {
