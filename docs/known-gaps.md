@@ -6,6 +6,17 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
 
 ## Capability & signing
 
+- **Three capability crates resolve the author themselves, which the owner
+  ruled against on 2026-08-17.** `nmp-nip02`'s `set_following`,
+  `nmp-bookmarks`' write doors and `nmp-nip29`'s group-list doors each carry
+  their own copy of "read the session, take `current_pubkey`, refuse when
+  signed out, stamp `Identity::Explicit`" — the universal resolution the write
+  plane already owns, re-implemented per crate. `nmp-nip29`'s `Group` doors
+  break the same rule from the other side by requiring `author: PublicKey` on
+  every operation. The ruled shape is an optional account defaulted to the
+  current one, resolved by the write plane; see
+  `docs/internals/writes/identity.md` §7.
+
 - **No FFI-crossing door for an app-implemented signing capability.** A Secure
   Enclave or hardware-backed key reachable only from Swift/Kotlin has no way in.
   Whatever closes it must keep NMP the owner of when/what to sign, with the app's

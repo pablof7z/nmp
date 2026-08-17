@@ -5,6 +5,8 @@ slug: identity
 status: designed
 date: 2026-07-29
 owns:
+  - **who may choose the `Identity` value — one mechanism, never a capability
+    crate (owner ruling, 2026-08-17), and the three crates violating it today**
   - the `Identity` enum replacing `WriteIntent.identity_override`
   - the ergonomics ruling — a defaulted field, not a constructor argument or a `.with()` chain
   - per-payload identity semantics, and why they differ by payload
@@ -13,7 +15,7 @@ owns:
   - the bech32 boundary rule as it lands on identity, and its concrete FFI casualty
 related:
   - docs/internals/writes/event-builder.md
-  - docs/internals/writes/payload-and-replaceable-edits.md
+  - docs/internals/writes/durable-replaceable-operations.md
   - docs/internals/routing/auto-and-explicit.md
   - docs/internals/routing/resolution-lifecycle.md
   - docs/internals/routing/knowledge-and-settlement.md
@@ -212,3 +214,61 @@ hex vs invalid bech32 vs valid-bech32-wrong-variant — the `nsec` refusal in
 "what does NMP accept here" stops having one answer. One decode door
 (`decode_nostr_entity`), one internal representation (`PublicKey`), zero
 bech32 below the app boundary.
+
+## 7. A capability crate never resolves the author — OWNER RULING, 2026-08-17
+
+`Identity` says which account a write publishes under. This section says who
+is allowed to *choose that value*, which every earlier section left open, and
+the answer is: one mechanism, never a capability crate.
+
+Owner ruling, verbatim:
+
+> capabilities (if by that you mean nip29, nip02) shouldn't be determining the
+> author themselves, that's not DRY, nor SRP, it should be the underlying
+> mechanism (event builder I guess?) that does that; not redoing the same
+> fucking code in a million places. like on swift it could be
+> `nmp.follow(bob, as: alice)` or `nmp.follow(bob)` (follow with the current
+> account)
+
+Two rules follow.
+
+**A capability crate does not read the session.** Resolving "who is the
+current account" is universal — every kind, every NIP — so it belongs to the
+write plane, which already owns it: `Identity::Active` is a resolution
+instruction the engine executes and pins at acceptance (§5). A capability that
+reads `current_pubkey` itself and hands back `Identity::Explicit` has
+re-implemented that resolution one layer above the boundary that owns it, and
+has done so in every capability crate separately.
+
+**The app-facing shape is an optional account, defaulted.** `nmp.follow(bob)`
+follows as the current account; `nmp.follow(bob, as: alice)` names one. The
+capability names the operation; it never names an account unless the caller
+did.
+
+This is the same rule §1 of `writes/event-builder.md` already states for the
+old author-bearing draft — *"The failure is universal — every kind, every NIP
+— which is why it must not be solved inside any protocol crate"* — applied to
+the form it came back in. #838 removed NIP-29's `groupMessageIntent` for
+deriving author and time internally; reading the session inside a capability
+is that defect wearing different clothes.
+
+### The standing violation
+
+Three capability crates do exactly what this ruling forbids today, each with
+its own copy of the same four lines — read `engine.session()`, take
+`current_pubkey`, refuse when signed out, stamp `Identity::Explicit(author)`:
+
+- `crates/nmp-nip02/src/observe.rs` — `set_following`
+- `crates/nmp-bookmarks/src/writes.rs` — `publish_operation`, behind the
+  bookmark add/remove doors
+- `crates/nmp-nip29/src/group_list_writes.rs` — the group-list add/remove
+  doors
+
+`nmp-nip29`'s `Group` doors take the opposite approach and require the caller
+to pass `author: PublicKey` on every operation, which is the same rule broken
+from the other side: the account becomes mandatory where the ruling makes it
+optional.
+
+The correct shape is neither: the capability passes the caller's choice
+through — an optional account, absent by default — and the write plane
+resolves it. This is recorded as a defect, not a precedent.
