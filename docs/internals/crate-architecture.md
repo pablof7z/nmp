@@ -61,6 +61,35 @@ sides declare the same dependencies.
    `crates/nmp`** — and the compiler enforces it, because `nmp` has no
    dependency edge to any capability crate. (#1707 is the eviction epic.)
 
+   **The rule is about event-kind capabilities, and the facade may name a
+   protocol MECHANISM. Owner ruling, 2026-08-17 (#1791).** The two are
+   different things and the line is already drawn in practice:
+
+   - an **event-kind capability** owns the meaning of some kinds — NIP-02,
+     NIP-22, NIP-29, bookmarks. The extension surface for these is real:
+     capability N+1 is a new crate, and `nmp` must not name it.
+   - a **protocol mechanism** is wire or session machinery every app rides
+     whether or not it knows the number — NIP-11 relay information, NIP-42
+     AUTH, NIP-77 negentropy. There is no per-app extension surface here;
+     `nmp` and `nmp-runtime` need these internally regardless.
+
+   So the facade may re-export NIP-11's values, and an app reaches relay
+   information through the facade rather than as a second Cargo line. That is
+   not an unexplained exception to rule 2; it is what rule 2 says once
+   "capability" is read as the word it actually uses.
+
+   This resolves the contradiction #1791 found: `crates/nmp/src/lib.rs` stated
+   "`nmp` must not contain a single line of any capability's meaning" and "an
+   app reaches a protocol family through this facade, never as a second Cargo
+   line beside it" eighty lines apart, both as principle. Only one could be
+   the rule; the first is the rule, and it was never about mechanisms.
+
+   Two things the ruling does **not** settle, and neither is licence to widen
+   it. `nmp-nip11` being a non-optional dependency of both `nmp` and
+   `nmp-runtime` is still the one inverted edge in the workspace, and #1806
+   still owns extracting AUTH, negentropy and relay-info out of the core. A
+   permitted re-export is not a permitted dependency direction.
+
 A crate earns its existence by a real reason — a genuine ownership
 boundary, an independent lifecycle, an independently consumed artifact, a
 platform/build boundary, breaking a cycle, or a dependency that must not
@@ -816,7 +845,7 @@ that mutates store and resolver is separated from the pure session
 bookkeeping** — a structural obstacle, not a headcount.
 
 **What this changes, and what it does not.** It does not justify one new
-extraction, and none is proposed here; see open question 3. What it changes is
+extraction, and none is proposed here; see open question 2. What it changes is
 what may be *inferred*: "no cluster earns a boundary because they all need the
 same four things" was doing work it had not earned, and with it gone, the
 reason no crate is justified today is the plain one — **no cluster has yet
@@ -864,7 +893,7 @@ is a crate line today (no direct `tokio`, no threads, no channels under
 inside the reducer has yet been shown to have a stable independent interface
 or a dependency that must not exist** — which is a statement about what has
 been looked for, not a proof that none does. Producing that evidence for some
-cluster is exactly what open question 3 asks for.
+cluster is exactly what open question 2 asks for.
 
 ### A guard whose failure mode is fail-open is probably untested
 
@@ -1175,6 +1204,29 @@ the value types — `PendingWrite` owning its own transitions rather than
   doors, NIP-29) and the NIP-65 split are done; measures 1–2 above read
   zero. NIP-65's routing glue was the one exception and is now closed too:
   it is `nmp-outbox`, an `AuthorRouteProvider` an application constructs.
+- **There is no `nmp-nip51` crate, and there never will be. Owner ruling,
+  2026-08-17:** *"no, nip-51 crate should likely not exist ever."* This
+  document previously deferred the question, to be answered when a second
+  NIP-51 family arrived; bookmarks is that family, so it was about to be
+  answered by default the moment anyone built its door.
+
+  The rule the ruling states: **NIP-51 is a numbering document, not a
+  domain.** A crate owns the kinds whose *meaning* it owns, never the kinds
+  one spec happened to register in the same file. Bookmarks (kind:10003)
+  live in `nmp-bookmarks`; the simple-groups list (kind:10009) lives in
+  `nmp-nip29`, because a saved-groups list is only meaningful to something
+  that understands groups. The owner confirmed that split directly —
+  *"this is correct!"*
+
+  An `nmp-nip51` crate would be a category Nostr does not have, holding
+  unrelated kinds together for an editorial reason rather than a semantic
+  one — the same defect as any other invented category
+  (`conventions/naming-no-invented-categories.md`), applied to crate
+  boundaries instead of type names. **Do not "fix" the absence**, and do not
+  let an architecture diagram draw a single NIP-51 box; the absence reads
+  like an omission to anyone scanning the crate list, and someone will
+  eventually try to close it.
+
 - `Row`/`RowSignature` and the `ReplaceableMaterializer` contract belong in
   `nmp-grammar` (#1707 steps 1–2); the contract's own imports prove it needs
   nothing from the engine.
@@ -1203,10 +1255,10 @@ the value types — `PendingWrite` owning its own transitions rather than
   about churn, not a fresh opinion about size.
   **This settles one boundary, not every boundary.** The evidence here is
   about the line between `nmp-engine` and `nmp-runtime`; it says nothing
-  about lines *inside* `nmp-engine`, which are open question 3.
+  about lines *inside* `nmp-engine`, which are open question 2.
 - **`RelayInformationCapabilityEvidence` is reducer-side** with the
-  snapshot→evidence projection in `nmp-runtime` (#1716). Former open
-  question 2; feasible as believed, with one correction the attempt found —
+  snapshot→evidence projection in `nmp-runtime` (#1716). A since-closed open
+  question; feasible as believed, with one correction the attempt found —
   its `last_error` had to become `Option<String>`, because carrying
   `nmp_nip11::RelayInformationError` would have put the HTTP crate back in
   the reducer's imports for a `Display` call the runtime can make itself.
@@ -1258,7 +1310,7 @@ Marked open on purpose; do not infer answers.
 - #1745 — corrects the manifest-first framing that made agents treat a
   distinct dependency list as a crate prerequisite.
 - #1739 — the correction that produced the cluster table, the two-guarantees
-  wording, and open question 3: this document had ruled out a future reducer
+  wording, and open question 2: this document had ruled out a future reducer
   crate on evidence that only rejected four specific seams.
 - #1721 — revisit the 20 public struct fields the engine/runtime cut froze.
   Not a defect; a public field is forever in a way a method is not, and five
