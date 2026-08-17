@@ -1810,9 +1810,14 @@ pub fn live_query_to_ffi(query: nmp::LiveQuery) -> FfiLiveQuery {
 }
 
 pub fn evidence_to_ffi(e: AcquisitionEvidence) -> FfiAcquisitionEvidence {
+    // Exhaustive destructure: a new engine acquisition-evidence fact cannot
+    // be silently dropped at this boundary -- adding a field to
+    // `nmp::AcquisitionEvidence` breaks this conversion until the FFI
+    // record carries it too.
+    let AcquisitionEvidence { sources, shortfall } = e;
     FfiAcquisitionEvidence {
-        sources: e.sources.into_iter().map(source_evidence_to_ffi).collect(),
-        shortfall: e.shortfall.into_iter().map(shortfall_fact_to_ffi).collect(),
+        sources: sources.into_iter().map(source_evidence_to_ffi).collect(),
+        shortfall: shortfall.into_iter().map(shortfall_fact_to_ffi).collect(),
     }
 }
 
@@ -2068,24 +2073,40 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteFact {
 }
 
 pub fn publish_queue_entry_to_ffi(entry: &GPublishQueueEntry) -> FfiPublishQueueEntry {
+    // Exhaustive destructure: a new engine publish-queue fact cannot be
+    // silently dropped at this boundary -- adding a field to
+    // `nmp::PublishQueueEntry` breaks this conversion until the FFI record
+    // carries it too. By reference, so every field is borrowed rather than
+    // moved out of the caller's entry.
+    let GPublishQueueEntry {
+        receipt_id,
+        event_id,
+        pubkey,
+        accepted_at,
+        signing,
+        relays,
+        route_complete,
+        relay_states,
+        outcome,
+        persistence_fault,
+    } = entry;
     FfiPublishQueueEntry {
-        receipt_id: entry.receipt_id.0,
-        event_id: entry.event_id.to_hex(),
-        pubkey: entry.pubkey.to_hex(),
-        accepted_at: entry.accepted_at.as_secs(),
-        signing: signing_state_to_ffi(&entry.signing),
-        relays: entry.relays.iter().map(RelayUrl::to_string).collect(),
-        route_complete: entry.route_complete,
-        relay_states: entry
-            .relay_states
+        receipt_id: receipt_id.0,
+        event_id: event_id.to_hex(),
+        pubkey: pubkey.to_hex(),
+        accepted_at: accepted_at.as_secs(),
+        signing: signing_state_to_ffi(signing),
+        relays: relays.iter().map(RelayUrl::to_string).collect(),
+        route_complete: *route_complete,
+        relay_states: relay_states
             .iter()
             .map(|(relay, state)| FfiQueueRelayState {
                 relay: relay.to_string(),
                 state: relay_state_to_ffi(state),
             })
             .collect(),
-        outcome: entry.outcome.as_ref().map(write_outcome_to_ffi),
-        persistence_fault: entry.persistence_fault.clone(),
+        outcome: outcome.as_ref().map(write_outcome_to_ffi),
+        persistence_fault: persistence_fault.clone(),
     }
 }
 
@@ -2295,21 +2316,42 @@ fn stalled_write_stage_to_ffi(stage: StalledWriteStage) -> FfiStalledWriteStage 
 }
 
 fn stalled_write_to_ffi(write: StalledWrite) -> FfiStalledWrite {
+    // Exhaustive destructure: a new facade stalled-write fact cannot be
+    // silently dropped at this boundary -- adding a field to
+    // `nmp::StalledWrite` breaks this conversion until the FFI record
+    // carries it too.
+    let StalledWrite {
+        id,
+        stage,
+        detail,
+        stalled_since,
+    } = write;
     FfiStalledWrite {
-        id: write.id,
-        stage: stalled_write_stage_to_ffi(write.stage),
-        detail: write.detail,
-        stalled_since: write.stalled_since.as_secs(),
+        id,
+        stage: stalled_write_stage_to_ffi(stage),
+        detail,
+        stalled_since: stalled_since.as_secs(),
     }
 }
 
 fn stalled_write_totals_to_ffi(totals: StalledWriteTotals) -> FfiStalledWriteTotals {
+    // Exhaustive destructure: a new facade stalled-write-totals fact cannot
+    // be silently dropped at this boundary -- adding a field to
+    // `nmp::StalledWriteTotals` breaks this conversion until the FFI record
+    // carries it too.
+    let StalledWriteTotals {
+        unroutable,
+        unsignable,
+        undeliverable,
+        omitted_details,
+        detail_limit,
+    } = totals;
     FfiStalledWriteTotals {
-        unroutable: totals.unroutable,
-        unsignable: totals.unsignable,
-        undeliverable: totals.undeliverable,
-        omitted_details: totals.omitted_details,
-        detail_limit: totals.detail_limit,
+        unroutable,
+        unsignable,
+        undeliverable,
+        omitted_details,
+        detail_limit,
     }
 }
 
