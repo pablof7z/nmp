@@ -87,8 +87,7 @@ impl Fixture {
         );
         self.core
             .nip77
-            .handoffs
-            .children_of(&self.plan_sub_id)
+            .handoff_children_of(&self.plan_sub_id)
             .iter()
             .next()
             .cloned()
@@ -188,14 +187,13 @@ fn zero_wire_metadata_attach_extends_the_live_candidate_generation() {
 fn zero_wire_metadata_attach_extends_the_open_neg_generation() {
     let mut fixture = Fixture::new();
     let candidate = fixture.begin_candidate();
-    let handoff = fixture.core.take_pending_neg_handoff(&candidate).unwrap();
+    let handoff = fixture.core.nip77.take_handoff(&candidate).unwrap();
     fixture.core.abandon_sub(&candidate);
     fixture.core.open_neg_session(handoff, &mut Vec::new());
     let neg = fixture
         .core
         .nip77
-        .sessions
-        .children_of(&fixture.plan_sub_id)
+        .session_children_of(&fixture.plan_sub_id)
         .iter()
         .next()
         .cloned()
@@ -209,19 +207,18 @@ fn zero_wire_metadata_attach_extends_the_open_neg_generation() {
 fn zero_wire_metadata_attach_extends_the_retained_neg_owner_during_missing_id_backfill() {
     let mut fixture = Fixture::new();
     let candidate = fixture.begin_candidate();
-    let handoff = fixture.core.take_pending_neg_handoff(&candidate).unwrap();
+    let handoff = fixture.core.nip77.take_handoff(&candidate).unwrap();
     fixture.core.abandon_sub(&candidate);
     fixture.core.open_neg_session(handoff, &mut Vec::new());
     let neg = fixture
         .core
         .nip77
-        .sessions
-        .children_of(&fixture.plan_sub_id)
+        .session_children_of(&fixture.plan_sub_id)
         .iter()
         .next()
         .cloned()
         .unwrap();
-    let session = fixture.core.take_neg_session(&neg).unwrap();
+    let session = fixture.core.nip77.take_session(&neg).unwrap();
     fixture.core.finish_neg_session(
         neg.clone(),
         fixture.relay.clone(),
@@ -238,15 +235,14 @@ fn zero_wire_metadata_attach_extends_the_retained_neg_owner_during_missing_id_ba
 fn zero_wire_metadata_attach_extends_candidate_and_backlog_generations() {
     let mut fixture = Fixture::new();
     let candidate = fixture.begin_candidate();
-    let handoff = fixture.core.take_pending_neg_handoff(&candidate).unwrap();
+    let handoff = fixture.core.nip77.take_handoff(&candidate).unwrap();
     fixture
         .core
         .handoff_fallback_to_req(handoff, &mut Vec::new());
     let backlog = fixture
         .core
         .nip77
-        .backfills
-        .children_of(&fixture.plan_sub_id)
+        .backfill_children_of(&fixture.plan_sub_id)
         .iter()
         .next()
         .cloned()
@@ -282,7 +278,7 @@ fn exact_public_disconnect_retires_the_active_nip77_child_and_every_reverse_owne
     fixture
         .core
         .on_wire_request_handoff(RequestHandoffOutcome::Accepted { attempt_id, handle });
-    let handoff = fixture.core.take_pending_neg_handoff(&candidate).unwrap();
+    let handoff = fixture.core.nip77.take_handoff(&candidate).unwrap();
     fixture
         .core
         .activate_live_and_open_neg(handoff, &mut Vec::new());
@@ -290,23 +286,116 @@ fn exact_public_disconnect_retires_the_active_nip77_child_and_every_reverse_owne
         fixture.core.nip77.live_for_plan(&fixture.plan_sub_id),
         Some(&candidate)
     );
-    assert!(!fixture.core.nip77.sessions.is_empty());
+    assert!(!fixture.core.nip77.sessions_is_empty());
 
     fixture
         .core
         .on_relay_disconnected(handle, fixture.session.clone(), DisconnectReason::Error);
     assert!(fixture.core.nip77.live_is_empty());
-    assert!(fixture.core.nip77.handoffs.is_empty());
-    assert!(fixture.core.nip77.handoffs.is_empty());
-    assert!(fixture.core.nip77.sessions.is_empty());
-    assert!(fixture.core.nip77.sessions.is_empty());
-    assert!(fixture.core.nip77.backfills.is_empty());
-    assert!(fixture.core.nip77.backfills.is_empty());
+    assert!(fixture.core.nip77.handoffs_is_empty());
+    assert!(fixture.core.nip77.handoffs_is_empty());
+    assert!(fixture.core.nip77.sessions_is_empty());
+    assert!(fixture.core.nip77.sessions_is_empty());
+    assert!(fixture.core.nip77.backfills_is_empty());
+    assert!(fixture.core.nip77.backfills_is_empty());
     assert_eq!(fixture.core.attempts.counts().attempts, 0);
     assert_eq!(fixture.core.attempts.counts().session_keys, 0);
     assert_eq!(fixture.core.attempts.counts().retry_jobs, 0);
     assert_eq!(fixture.core.attempts.counts().retry_session_keys, 0);
     fixture.finish();
+}
+
+/// `Nip77Sessions::assert_consistent`'s falsifier for the corruption a
+/// count can never see. Two real plans on one relay, each with its own
+/// pending handoff, then only the reverse index's two entries swapped
+/// between them -- the forward map (which handoff belongs to which plan)
+/// and every count `bench_ownership_census` reports are untouched. A
+/// consistency check built from counts alone would read this as healthy;
+/// `assert_owner_consistency` compares by identity and must not.
+#[test]
+#[should_panic(expected = "is not named by the owner it reports")]
+fn assert_consistent_catches_a_cardinality_preserving_swap_between_plans() {
+    let relay = RelayUrl::parse("wss://nip77-plan-swap.example").unwrap();
+    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
+    core.prober
+        .states
+        .insert(relay.clone(), crate::negentropy::ProbeState::Supported);
+
+    let install_plan = |core: &mut EngineCore, kind: u16| -> SubId {
+        let atom = ContextualAtom {
+            filter: ConcreteFilter {
+                kinds: Some(BTreeSet::from([kind])),
+                since: Some(100),
+                ..ConcreteFilter::default()
+            },
+            source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            access: AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
+        };
+        let plan_sub_id = SubId::for_wire(relay.clone(), &atom.filter, &atom.source, atom.access);
+        core.attribution.observe_atom(&atom);
+        core.attribution
+            .retain_live_request_claims(&plan_sub_id, BTreeSet::from([coverage_key(&atom)]));
+        core.install_plan_execution_metadata(
+            plan_sub_id.clone(),
+            atom.filter.clone(),
+            BTreeSet::from([coverage_key(&atom)]),
+            BTreeSet::from([DemandKey::for_atom(&atom)]),
+        );
+        plan_sub_id
+    };
+
+    let plan_a = install_plan(&mut core, 1);
+    let plan_b = install_plan(&mut core, 2);
+
+    let probed_a = core
+        .prober
+        .probed(&relay)
+        .expect("fixture relay is behaviorally proven");
+    core.begin_neg_handoff(
+        probed_a,
+        plan_a.clone(),
+        None,
+        ConcreteFilter {
+            kinds: Some(BTreeSet::from([1])),
+            since: Some(100),
+            ..ConcreteFilter::default()
+        },
+        &mut Vec::new(),
+    );
+    let probed_b = core
+        .prober
+        .probed(&relay)
+        .expect("fixture relay is behaviorally proven");
+    core.begin_neg_handoff(
+        probed_b,
+        plan_b.clone(),
+        None,
+        ConcreteFilter {
+            kinds: Some(BTreeSet::from([2])),
+            since: Some(100),
+            ..ConcreteFilter::default()
+        },
+        &mut Vec::new(),
+    );
+
+    // Precondition: two plans, one live handoff each, mirror intact.
+    let counts = core.nip77.counts();
+    assert_eq!(counts.handoffs, 2);
+    assert_eq!(counts.handoff_plan_keys, 2);
+    assert_eq!(counts.handoff_plan_edges, 2);
+    core.assert_owner_consistency("before swap");
+
+    core.nip77.swap_handoff_owners_for_test(&plan_a, &plan_b);
+
+    // Every count above is identical after the swap -- one handoff moved
+    // reverse-index owners, zero were created or destroyed.
+    let counts = core.nip77.counts();
+    assert_eq!(counts.handoffs, 2);
+    assert_eq!(counts.handoff_plan_keys, 2);
+    assert_eq!(counts.handoff_plan_edges, 2);
+
+    core.assert_owner_consistency("after swap");
 }
 
 #[path = "nip77_metadata_tests/refusal.rs"]

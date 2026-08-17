@@ -349,11 +349,8 @@ impl EngineCore {
             return None;
         }
         let mut found = None;
-        for (sub_id, neg) in self.nip77.sessions.iter() {
-            if neg.relay != session.relay {
-                continue;
-            }
-            if coordinate_request_shape(&neg.filter, coordinate).is_some() {
+        for (sub_id, filter) in self.nip77.sessions_on_relay(&session.relay) {
+            if coordinate_request_shape(filter, coordinate).is_some() {
                 found = min_sub_id(found, sub_id);
             }
         }

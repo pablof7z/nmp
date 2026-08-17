@@ -704,17 +704,13 @@ impl EngineCore {
                 .plan_execution_metadata
                 .get(&attempt.sub_id)
                 .is_some_and(|metadata| metadata.filter == attempt.filter),
-            RequestAttemptPurpose::Nip77LiveCandidate { plan_sub_id } => self
-                .nip77
-                .handoffs
-                .children_of(plan_sub_id)
-                .contains(&attempt.sub_id),
+            RequestAttemptPurpose::Nip77LiveCandidate { plan_sub_id } => {
+                self.nip77.is_handoff_child_of(plan_sub_id, &attempt.sub_id)
+            }
             RequestAttemptPurpose::Nip77MissingIds { plan_sub_id }
             | RequestAttemptPurpose::Nip77Backlog { plan_sub_id } => self
                 .nip77
-                .backfills
-                .children_of(plan_sub_id)
-                .contains(&attempt.sub_id),
+                .is_backfill_child_of(plan_sub_id, &attempt.sub_id),
             RequestAttemptPurpose::Nip77Open { .. }
             | RequestAttemptPurpose::Nip77Probe
             | RequestAttemptPurpose::Nip77Continue => false,

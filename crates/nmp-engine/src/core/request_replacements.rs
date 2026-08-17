@@ -32,9 +32,7 @@
 //! `PlanIndexed::take` and `PlanIndexed::take_owner` already got.
 //!
 //! Fields are private. Every reach-in from `query.rs` and `auth_transport.rs`
-//! is a named method on this owner instead of a raw map operation, unlike
-//! `Nip77Sessions`, whose three maps stay `pub(super)` for its own reasons —
-//! this owner does not inherit that choice.
+//! is a named method on this owner instead of a raw map operation.
 
 use nmp_grammar::RelaySessionKey;
 use nmp_router::{RequestReplacement, SubId};
