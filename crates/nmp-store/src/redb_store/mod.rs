@@ -40,7 +40,11 @@ use std::sync::atomic::AtomicU8;
 ))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use nmp_grammar::{ConcreteFilter, ContextualAtom};
+use nmp_grammar::ContextualAtom;
+// Only the test modules below still name a `ConcreteFilter` directly: nothing
+// on the durable path handles a filter any more (#1849).
+#[cfg(test)]
+use nmp_grammar::ConcreteFilter;
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event, EventId, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp};
 use redb::{Database, ReadableTable, TableDefinition};
@@ -51,8 +55,7 @@ use serde::{Deserialize, Serialize};
 use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_wins};
 use crate::binary_event::{self, decode_hex_32, IndexedMatch, PreparedFilter, StoredEventView};
 use crate::coverage::{
-    coverage_key as compute_coverage_key, merge_interval, shrink_after_eviction, window_erase,
-    GcVictimIndex, ShapeRecord,
+    coverage_key as compute_coverage_key, merge_interval, shrink_after_eviction, GcVictimIndex,
 };
 use crate::persistent_store_lifetime::{
     acquire_for_open, reset_store, RedbStoreOpenError, RequiredLockedFileBackend, StoreOwnership,

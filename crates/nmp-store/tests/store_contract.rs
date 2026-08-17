@@ -1191,14 +1191,16 @@ fn gc_coverage_shrink_deletes_when_only_the_max_victim_would_empty_the_row() {
     });
 }
 
+/// The accepted over-invalidation (#1849). A kind:9 victim sitting inside a
+/// kind:1-shaped row's interval DOES shrink it, because the row does not —
+/// and the database does not — record which filter it was proven against.
+/// This is the safe error direction: the row now under-claims, so the range
+/// is fetched again. The precision that would leave the row untouched was
+/// bought by durably retaining every filter a user had ever issued.
 #[test]
-fn gc_coverage_shrink_ignores_victims_of_a_non_matching_kind() {
+fn gc_coverage_shrink_over_invalidates_a_row_a_victim_never_matched() {
     with_store(|store| {
         let k = keys();
-        // A kind:9 event sitting squarely inside a kind:1-shaped row's
-        // interval must never shrink it -- shape-fingerprint pruning
-        // means the row's own shape (kind 1) never even considers a
-        // kind-9 victim, regardless of where its timestamp falls.
         let other_kind = EventBuilder::new(Kind::from(9u16), "noise")
             .custom_created_at(Timestamp::from(50u64))
             .sign_with_keys(&k)
@@ -1220,15 +1222,19 @@ fn gc_coverage_shrink_ignores_victims_of_a_non_matching_kind() {
             report.events_evicted, 1,
             "the kind:9 event is still an unclaimed victim"
         );
-        assert_eq!(report.coverage_rows_shrunk, 0);
+        assert_eq!(report.coverage_rows_shrunk, 1);
         assert_eq!(report.coverage_rows_deleted, 0);
 
         let key = coverage_key(&atom(&s));
         let interval = store
             .get_coverage(key, &r)
             .expect("coverage peek")
-            .expect("row untouched");
-        assert_eq!(interval.from, Timestamp::from(0u64));
+            .expect("row still proves the upper side");
+        assert_eq!(
+            interval.from,
+            Timestamp::from(51u64),
+            "the interval is raised past the victim it never matched -- a refetch, not a lie"
+        );
         assert_eq!(interval.through, Timestamp::from(100u64));
     });
 }
