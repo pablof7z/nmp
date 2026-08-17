@@ -2203,6 +2203,46 @@ pub struct EngineCore {
     /// `nmp::EngineConfig::max_publish_attempts`. Counts
     /// observations, never wall-clock.
     max_publish_attempts: u64,
+    /// Suppresses the per-`handle()` turn-level mirror check
+    /// (`assert_owner_consistency`, called unconditionally under
+    /// `#[cfg(test)]` at the end of [`Self::handle`]) for exactly the named
+    /// tests below (#1562). Two distinct, both narrow, reasons:
+    ///
+    /// 1. **Amortized-COST falsifiers** that drive `handle()` directly once
+    ///    per item to prove no O(n) revisit hides behind the production
+    ///    entrypoint --
+    ///    `lifecycle::ten_thousand_distinct_pending_cancellations_never_rebuild_surviving_demand`
+    ///    and
+    ///    `scale_teardown::ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work`.
+    ///    These are not mirror-STRUCTURE proofs -- the `Subscribe`/
+    ///    `Unsubscribe` transitions they drive are already checked, under the
+    ///    turn-level call, by hundreds of other tests with bounded fixtures
+    ///    -- so scanning the full O(n)-sized state at every one of their N
+    ///    calls buys no additional coverage for an O(n^2) test-suite cost
+    ///    (measured: one of the two names above alone exceeded 9 minutes and
+    ///    never finished, versus 4.85s with the check off).
+    /// 2. **Handle-less wire-ownership algebra fixtures**, which call
+    ///    `retain_wire_atom_owner`/`release_wire_atom_owner`/`wire.retain`
+    ///    directly to exercise owner-count/routing-evidence bookkeeping
+    ///    without ever indexing a handle -- a state real production cannot
+    ///    reach (`attach_wire_handle` always indexes the handle first; see
+    ///    its own precondition assertion) but that this owner's docs call
+    ///    out as "a legitimate unit to exercise without any handle at all,
+    ///    and several admission proofs do exactly that". Those admission
+    ///    proofs are `routing_evidence::disjoint_routing_evidence_owners_remain_exact_in_both_close_orders`,
+    ///    `routing_evidence::second_outbox_hint_opens_only_the_missing_relay_for_both_owner_close_orders`,
+    ///    `routing_evidence::preflush_hint_owner_churn_combines_pending_and_incumbent_assignment_truth`,
+    ///    `scale_teardown::later_exact_owner_routing_evidence_retracts_the_uncovered_diagnostic_on_admission`,
+    ///    and `diagnostics_scale::a_later_admission_cohort_never_visits_ten_thousand_incumbents`.
+    ///    The guard fires correctly on their fixture; it proves nothing about
+    ///    whether production can reach that shape, which is exactly why
+    ///    these are exempted rather than "fixed".
+    ///
+    /// Default `false`; only
+    /// [`Self::suppress_turn_level_consistency_for_named_exception`] sets it,
+    /// and every other test leaves it untouched.
+    #[cfg(test)]
+    turn_level_consistency_suppressed_for_named_exception: bool,
     /// Opt-in work counters for lifecycle attribution. Ordinary production
     /// builds pay no field or increment cost.
     #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -2392,6 +2432,8 @@ impl EngineCore {
             transport_degraded: None,
             retry_scheduler_blocked: false,
             max_publish_attempts: crate::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
+            #[cfg(test)]
+            turn_level_consistency_suppressed_for_named_exception: false,
             #[cfg(any(test, feature = "bench-instrumentation"))]
             projection_store_queries: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -2580,6 +2622,9 @@ impl EngineCore {
     /// live target under the wrong demand all preserve every number it
     /// reports. Tests that care about structure call this; tests that care
     /// about totals call the census; nothing should use one for the other.
+    ///
+    /// Covers seven owners: `wire`, `request_targets`, `nip77`,
+    /// `request_replacements`, `attempts`, `stalled_writes`, `history`.
     #[cfg(any(test, feature = "bench-instrumentation"))]
     pub fn assert_owner_consistency(&self, at: &str) {
         self.wire.assert_consistent(at);
@@ -2594,6 +2639,7 @@ impl EngineCore {
                 connected: &self.connected_relays,
             },
         );
+        self.history.assert_consistent(at);
     }
 
     #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -3344,7 +3390,38 @@ impl EngineCore {
         if self.prune_unowned_relay_state() {
             effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
         }
+        // The check is a property of a TURN, not of whichever owner happens
+        // to ship its own falsifier: every one of the ~500 existing tests in
+        // this crate drives at least one `handle()` call, so this single
+        // site turns the whole corpus into a mirror falsifier for every
+        // extracted owner at once, instead of depending on each test author
+        // remembering to call `assert_owner_consistency` themselves (#1562).
+        // `#[cfg(test)]`, not the wider `bench-instrumentation` gate the
+        // owners' own `assert_consistent` methods use: this runs on every
+        // `handle()` call in every test, so it must never ship in a
+        // production or benchmark build.
+        //
+        // The named-exception suppression is the one escape hatch, and it is
+        // exactly that narrow: see
+        // `turn_level_consistency_suppressed_for_named_exception`'s doc.
+        #[cfg(test)]
+        if !self.turn_level_consistency_suppressed_for_named_exception {
+            self.assert_owner_consistency("end of handle()");
+        }
         effects
+    }
+
+    /// Opt out of the per-`handle()` turn-level mirror check for the rest of
+    /// this `EngineCore`'s life. Exactly seven call sites may call this --
+    /// see `turn_level_consistency_suppressed_for_named_exception`'s doc for
+    /// which, and for the two distinct reasons (amortized-cost proof,
+    /// handle-less algebra fixture) that justify each. Any other test
+    /// reaching for this method is very likely hiding a real mirror bug
+    /// rather than a real cost problem or a deliberately handle-less
+    /// fixture -- prefer fixing the fixture instead.
+    #[cfg(test)]
+    pub(super) fn suppress_turn_level_consistency_for_named_exception(&mut self) {
+        self.turn_level_consistency_suppressed_for_named_exception = true;
     }
 
     fn prune_unowned_relay_state(&mut self) -> bool {
