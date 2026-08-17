@@ -120,6 +120,19 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   `behaviorally_proven` and `nip77Handoff` never leaving `none`;
   reconciliation engages on the NEXT request (a reconnect replay), where the
   same divergence costs 10 events instead of 70.
+- **Negentropy has no app-facing door, and the owner ruled it should have
+  one.** Asked on 2026-08-17 whether apps should be able to use negentropy
+  explicitly, he answered *"meaning if apps should be able to use negentropy
+  explicitly? yes, they should"*. Today NIP-77 surfaces to an app only as
+  three diagnostics string fields and one terminal request variant; nothing
+  is app-constructible. This is a ruling on direction, not a design — and
+  whatever the door turns out to be has to survive the two facts recorded
+  directly above and below it: a cold start never reconciles, and nothing
+  distinguishes reconciled from refetched per query. Exposing today's
+  behaviour as-is would hand an app a door that silently does a full refetch
+  on first use. Related: #1806 owns extracting NIP-77 out of the core, which
+  is a different question from whether an app can drive it.
+
 - **NIP-77 reconciliation is invisible per query (#1888).** Negentropy
   coverage is attributed through the same `attribute_eose` path as an ordinary
   EOSE, so `SourceEvidence.reconciledThrough` and `SourceStatus` are identical
@@ -289,10 +302,15 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   product preparation (`.nmp.toml`, `nmp init/prepare/verify`, cached
   Apple/Kotlin/Android products) is first-class; runtime qualification remains
   platform work.
-- **Broad multi-platform UI remains open (#75, #561).** Still unbuilt: broad
-  Compose UI parity and a Compose Gallery, broader registry/template breadth,
-  NIP-25 live reaction resources/write intents (#155), and broader
-  product/photo/highlight/media component families.
+- **Broad multi-platform UI remains open (#75, #561), and Kotlin UI parity is
+  wanted but deliberately unscheduled.** Asked on 2026-08-17 whether Kotlin
+  reaching Swift `NMPUI`'s parity is a goal — Swift ships 15 files, Kotlin one
+  — the owner answered *"out of scope for now, yes, but not now"*: it is
+  intended, and it is not queued. Recorded here so it stops reading as an open
+  question anyone needs to re-ask. Still unbuilt: broad Compose UI parity and
+  a Compose Gallery, broader registry/template breadth, NIP-25 live reaction
+  resources/write intents (#155), and broader product/photo/highlight/media
+  component families.
 
 ## Reducer invariants without falsifiers
 
