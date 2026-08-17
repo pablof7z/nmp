@@ -299,6 +299,61 @@ Every tier's mirror moved together: `FfiReadRouting { Auto, Explicit }`,
 the error surface (`EmptyExplicitRelaySet`, with the outboxes variant deleted).
 Bindings regenerated for both tiers.
 
+## Three findings worth more than the diff
+
+### Scaffolding appearing around a change is a symptom
+
+While the hint lane ran unconditionally, `differential_oracle` panicked on a
+relay outside its fixture universe, and I widened the universe to accommodate
+it. That widening was the change telling me something, and I initially heard it
+as a fixture gap.
+
+It was not. The oracle's demand is entirely author-bearing, so under master it
+never reaches that relay; the only reason it did was the lane I had widened.
+Once the lane was narrowed to the unbound case, the oracle passed against its
+**original** universe and the widening was reverted.
+
+That reversion is the strongest single piece of evidence in this PR that
+author-bearing routing is byte-for-byte master's — stronger than any green
+suite, because it is a test that was *forced to change* and then *forced back*.
+The general lesson: when a refactor makes you loosen a fixture, ask whether the
+fixture was right and the change is wrong, before assuming the reverse.
+
+### Test on the discriminator, not on the symptom
+
+`an_author_bearing_group_never_reaches_a_hint_relay_outside_the_solve` asserts
+that no route carries `lane == Hint && route_kind == Supplemental`. It
+deliberately does **not** assert that the hint relay is absent from the plan.
+
+A hint relay chosen **by the solve** carries `RouteKind::Coverage`; only the
+direct lane mints `Supplemental`. Writing the test against relay presence would
+have forbidden something legitimate — the solver is free to pick a hint relay
+on merit, and should be — and would have failed for the wrong reason the first
+time a solver heuristic changed. The pair `(lane, route_kind)` is the exact
+discriminator between "the solve chose this" and "a lane smuggled this in".
+
+### A test that cannot fail is worse than no test
+
+The brief for the admit path asked for "an authorless atom joining a group that
+already emitted a REQ". Written literally — admit one cohort, then the other —
+that test **passes forever against a broken widen**, and I only know that
+because I broke the widen and watched it stay green rather than writing the
+suggested test and calling the path covered.
+
+`an_authorless_atom_keeps_its_reach_whichever_order_admission_sees_it` covers
+three shapes, and they are not equivalent:
+
+| Shape | Catches the widen break? | Why |
+|---|---|---|
+| author-bearing cohort, then authorless | **No** | `admit` compiles each cohort against an EMPTY incumbent namespace, so the lone unbound atom forms its own group and never meets the sibling's author set |
+| authorless cohort, then author-bearing | **No** | same, mirrored |
+| **both atoms in one cohort** | **Yes** | the only shape that reproduces `compile`'s grouping, so the only one where the author union can narrow the unbound member |
+
+The two sequential shapes are structurally immune and are kept as
+documentation of that immunity. **The cohort shape is the load-bearing one — do
+not delete it as redundant with the other two, because it is the only one that
+can fail.**
+
 ## Proven, not believed
 
 Every tier built and run on one machine. `pwd` and `git rev-parse HEAD` were
@@ -333,17 +388,26 @@ Reconciled per target rather than in aggregate — a diff of the 121-row
 `+10` total, `0` failed everywhere, `ignored` unchanged. No offsetting errors
 hide inside the total.
 
-### Other tiers
+### Other tiers — final whole-branch state at `8ec5eee2`
+
+Re-run against the branch tip as a whole rather than per commit, because the
+*branch* changes the public surface even where an individual commit does not.
 
 | Tier | Command | Result |
 |---|---|---|
-| Swift | `swift test` (Packages/NMP) | 181 passed, 3 skipped, **0 failures** |
-| Kotlin | `./gradlew test` (Packages/NMPKotlin) | BUILD SUCCESSFUL, 119 tests |
-| Canary iOS | `xcodebuild -scheme Canary -destination 'generic/platform=iOS Simulator'` after `xcodegen generate` | **BUILD SUCCEEDED** |
+| Swift | `swift test` (Packages/NMP) | 181 tests, 3 skipped, **0 failures** |
+| Kotlin | `./gradlew cleanTest test` (Packages/NMPKotlin) | 22 suites, **119 tests, 0 failures, 0 errors**, 3 skipped |
 | CanaryScenarios | `swift build --build-tests` | clean |
+| Canary iOS | `xcodegen generate` then `xcodebuild -scheme Canary -destination 'generic/platform=iOS Simulator' clean build` | **BUILD SUCCEEDED** |
 | Lints | `cargo clippy --workspace --all-targets`, `cargo fmt --all --check` | 0 warnings, clean |
 
-`swift test` rather than `swift build` was load-bearing: **~20 bare-filter
+`cleanTest` rather than `test` for Kotlin: a plain `test` completed in 905ms
+against up-to-date outputs, which is Gradle replaying a previous result rather
+than running anything. Counts are parsed from the JUnit XML in
+`build/test-results/test/`, not from the console summary.
+
+`swift test` rather than `swift build` was load-bearing, and is why the
+final run above is whole-branch rather than per-commit: **~20 bare-filter
 `observe` call sites survived in the Canary scenario *test* targets**, which
 `swift build` does not compile. They are migrated.
 
