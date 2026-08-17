@@ -9,7 +9,7 @@ NMP does not need a blessed `.filter`, `.sorted`, or `.map` wrapper for this.
 ## Swift
 
 ```swift
-for await snapshot in try engine.observe(demand) {
+for await snapshot in try engine.observe(.single(demand)) {
     let visible = snapshot.rows
         .filter(productPolicy.admits)
         .sorted(using: productPolicy.order)
@@ -22,7 +22,7 @@ for await snapshot in try engine.observe(demand) {
 ## Kotlin
 
 ```kotlin
-engine.observe(demand)
+engine.observe(LiveQuery.single(demand))
     .map { snapshot ->
         RenderState(
             rows = snapshot.rows

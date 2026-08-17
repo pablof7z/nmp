@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 
-use nmp_grammar::{
-    AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey, SourceAuthority,
-};
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey};
 use nmp_router::{Router, RuleRegistry};
 use nmp_router_testkit::{test_relay, FixtureRoutingFacts};
 use nostr::Keys;
@@ -10,7 +8,7 @@ use nostr::Keys;
 #[test]
 fn authorless_public_a_b_are_three_exact_session_plans() {
     let relay = test_relay(0);
-    let source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let source = ReadRouting::Explicit(vec![relay.clone()]);
     let filter = ConcreteFilter {
         kinds: Some(BTreeSet::from([1])),
         ..ConcreteFilter::default()
@@ -26,7 +24,7 @@ fn authorless_public_a_b_are_three_exact_session_plans() {
         .into_iter()
         .map(|access| ContextualAtom {
             filter: filter.clone(),
-            source: source.clone(),
+            routing: source.clone(),
             access,
             routing_evidence: BTreeSet::new(),
         })
@@ -77,13 +75,13 @@ fn same_session_different_source_partitions_are_extended_not_overwritten() {
     let demand = BTreeSet::from([
         ContextualAtom {
             filter: filter.clone(),
-            source: SourceAuthority::Public,
+            routing: ReadRouting::Auto,
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         },
         ContextualAtom {
             filter,
-            source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            routing: ReadRouting::Explicit(vec![relay.clone()]),
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         },

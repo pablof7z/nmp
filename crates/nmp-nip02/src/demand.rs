@@ -6,17 +6,20 @@ use nmp_grammar::{Binding, Demand, Filter, IdentityField};
 /// live-query path. Logged out resolves to zero atoms; account changes
 /// reroot this same demand without a component-managed subscription graph.
 pub fn current_account_demand() -> Demand {
-    Demand::from_filter(Filter {
-        kinds: Some(BTreeSet::from([3u16])),
-        authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-        ..Filter::default()
-    })
+    Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([3u16])),
+            authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_grammar::SourceAuthority;
+    use nmp_grammar::ReadRouting;
 
     #[test]
     fn contact_list_uses_current_account_author_outboxes() {
@@ -26,6 +29,6 @@ mod tests {
             demand.selection.authors,
             Some(Binding::Reactive(IdentityField::ActivePubkey))
         );
-        assert_eq!(demand.source, SourceAuthority::AuthorOutboxes);
+        assert_eq!(demand.routing, ReadRouting::Auto);
     }
 }

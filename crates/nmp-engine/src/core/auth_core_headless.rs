@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, SourceAuthority};
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting};
 use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::RedbStore;
 use nmp_transport::{DisconnectReason, RelayFrame, RelayHandle};
@@ -32,7 +32,7 @@ impl Fixture {
         };
         let atom = ContextualAtom {
             filter,
-            source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            routing: ReadRouting::Explicit(vec![relay.clone()]),
             access: session.access,
             routing_evidence: BTreeSet::new(),
         };

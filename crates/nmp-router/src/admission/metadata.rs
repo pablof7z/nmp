@@ -98,7 +98,7 @@ impl Router {
     ) -> Option<crate::ownership::RequestKey> {
         let exact = (
             session.clone(),
-            candidate.source.clone(),
+            candidate.routing.clone(),
             candidate.filter.clone(),
         );
         if let Some(request) = self.request_by_exact_filter.get(&exact) {
@@ -122,7 +122,7 @@ impl Router {
                 }
                 let position = self.request_position_by_key[*request_key];
                 let incumbent = &self.prev_plan.reqs[session][position];
-                incumbent.source == candidate.source
+                incumbent.routing == candidate.routing
                     && physical_filter_covers(&incumbent.filter, &candidate.filter)
             })
             .cloned()
@@ -146,7 +146,7 @@ impl Router {
             .find(|request_key| {
                 let position = self.request_position_by_key[*request_key];
                 let incumbent = &self.prev_plan.reqs[&request_key.0][position];
-                incumbent.source == atom.source
+                incumbent.routing == atom.routing
                     && physical_filter_covers(&incumbent.filter, &atom.filter)
             })
             .cloned()?;
@@ -160,7 +160,7 @@ impl Router {
         let candidate = WireReq {
             sub_id: incumbent.sub_id.clone(),
             filter: atom.filter.clone(),
-            source: atom.source.clone(),
+            routing: atom.routing.clone(),
             provenance: contribution.provenance,
             coverage_claims: contribution.coverage_claims,
             owner_demands: BTreeSet::from([demand]),
@@ -229,7 +229,7 @@ impl Router {
         self.request_by_exact_filter.insert(
             (
                 session.clone(),
-                request.source.clone(),
+                request.routing.clone(),
                 request.filter.clone(),
             ),
             (session.clone(), request.sub_id.clone()),
@@ -245,7 +245,7 @@ impl Router {
         let candidate_ref = candidate.as_ref()?;
         let exact = (
             session.clone(),
-            candidate_ref.source.clone(),
+            candidate_ref.routing.clone(),
             candidate_ref.filter.clone(),
         );
         let request_key = self.request_by_exact_filter.get(&exact).cloned()?;
@@ -270,7 +270,7 @@ impl Router {
             .request_by_exact_filter
             .get(&(
                 session.clone(),
-                candidate.as_ref()?.source.clone(),
+                candidate.as_ref()?.routing.clone(),
                 candidate.as_ref()?.filter.clone(),
             ))
             .is_some_and(|request| request == &request_key);

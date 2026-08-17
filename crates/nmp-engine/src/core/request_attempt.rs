@@ -62,6 +62,7 @@ pub(super) struct RequestAttemptState {
     pub(super) filter: ConcreteFilter,
     pub(super) coverage_claims: std::collections::BTreeSet<CoverageKey>,
     pub(super) owner_demands: std::collections::BTreeSet<nmp_router::DemandKey>,
+    pub(super) lanes: std::collections::BTreeSet<nmp_router::Lane>,
     pub(super) replay: bool,
     pub(super) event_failure_target: EventFailureTarget,
     pub(super) request_revision: Option<u64>,
@@ -78,6 +79,9 @@ pub(super) struct RequestSend<'a> {
     pub(super) filter: &'a ConcreteFilter,
     pub(super) coverage_claims: BTreeSet<CoverageKey>,
     pub(super) owner_demands: BTreeSet<nmp_router::DemandKey>,
+    /// The routing lanes that asked for this REQ. Reported verbatim on the
+    /// resulting `ObservationFact::RelayRequest`.
+    pub(super) lanes: BTreeSet<nmp_router::Lane>,
     pub(super) replay: bool,
     pub(super) event_failure_target: EventFailureTarget,
 }
@@ -689,6 +693,7 @@ impl CoreState {
                     filter: &filter,
                     coverage_claims: attempt.coverage_claims,
                     owner_demands: attempt.owner_demands,
+                    lanes: attempt.lanes,
                     replay: attempt.replay,
                     event_failure_target: attempt.event_failure_target,
                 },
@@ -729,7 +734,7 @@ impl CoreState {
 /// two drive the real `pub(super)` surface `CoreState` itself calls.
 #[cfg(test)]
 mod tests {
-    use nmp_grammar::{AccessContext, SourceAuthority};
+    use nmp_grammar::{AccessContext, ReadRouting};
     use nostr::RelayUrl;
 
     use super::*;
@@ -751,7 +756,7 @@ mod tests {
         let sub_id = SubId::for_wire(
             relay.clone(),
             &filter,
-            &SourceAuthority::Public,
+            &ReadRouting::Auto,
             AccessContext::Public,
         );
         let state = RequestAttemptState {
@@ -761,6 +766,7 @@ mod tests {
             filter,
             coverage_claims: BTreeSet::new(),
             owner_demands: BTreeSet::new(),
+            lanes: BTreeSet::new(),
             replay: false,
             event_failure_target: EventFailureTarget::ThisSend,
             request_revision: None,

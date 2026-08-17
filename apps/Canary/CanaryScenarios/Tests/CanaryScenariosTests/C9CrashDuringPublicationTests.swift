@@ -183,7 +183,7 @@ final class C9CrashDuringPublicationTests: XCTestCase {
         }
 
         let filter = NMPFilter(kinds: [1], authors: .literal([accountHex]))
-        let query = try engine.observe(filter)
+        let query = try engine.observe(.single(NMPDemand(selection: filter)))
 
         actor Tracker {
             private var lastRelayState: [String: RelayState] = [:]

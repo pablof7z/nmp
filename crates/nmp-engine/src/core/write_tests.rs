@@ -1057,13 +1057,16 @@ mod semantic_successor_tests {
             .unwrap();
         let mut core = EngineCore::new(store, 10);
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
-        core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(
-            nmp_grammar::Filter {
-                kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
-                authors: Some(nmp_grammar::Binding::Literal(BTreeSet::from([author
-                    .public_key()
-                    .to_hex()]))),
-                ..nmp_grammar::Filter::default()
+        core.handle(EngineMsg::Subscribe(LiveQuery::single(
+            nmp_grammar::Demand {
+                selection: nmp_grammar::Filter {
+                    kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
+                    authors: Some(nmp_grammar::Binding::Literal(BTreeSet::from([author
+                        .public_key()
+                        .to_hex()]))),
+                    ..nmp_grammar::Filter::default()
+                },
+                ..nmp_grammar::Demand::default()
             },
         )));
         core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
@@ -1529,13 +1532,16 @@ mod semantic_successor_tests {
             .unwrap();
         let mut core = EngineCore::new(store, 10);
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
-        core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(
-            nmp_grammar::Filter {
-                kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
-                authors: Some(nmp_grammar::Binding::Literal(BTreeSet::from([author
-                    .public_key()
-                    .to_hex()]))),
-                ..nmp_grammar::Filter::default()
+        core.handle(EngineMsg::Subscribe(LiveQuery::single(
+            nmp_grammar::Demand {
+                selection: nmp_grammar::Filter {
+                    kinds: Some(BTreeSet::from([Kind::ContactList.as_u16()])),
+                    authors: Some(nmp_grammar::Binding::Literal(BTreeSet::from([author
+                        .public_key()
+                        .to_hex()]))),
+                    ..nmp_grammar::Filter::default()
+                },
+                ..nmp_grammar::Demand::default()
             },
         )));
         core.install_replaceable_materializer(ReplaceableMaterializerRegistration {

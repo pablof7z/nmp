@@ -64,7 +64,14 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         relay.seed(routeEvent)
 
         let routeQuery = try engine.observe(
-            NMPFilter(kinds: [10_002], authors: .literal([testHex(routeAccount.publicKey)])),
+            .single(
+                NMPDemand(
+                    selection: NMPFilter(
+                        kinds: [10_002],
+                        authors: .literal([testHex(routeAccount.publicKey)])
+                    )
+                )
+            ),
             window: .expandable(initial: 1, max: 1)
         )
         let routeProbe = QueryProbe()
@@ -92,7 +99,14 @@ final class BoundedRelayTimeSharingTests: XCTestCase {
         )
 
         let query = try engine.observe(
-            NMPFilter(kinds: [1], authors: .literal([testHex(publishAccount.publicKey)])),
+            .single(
+                NMPDemand(
+                    selection: NMPFilter(
+                        kinds: [1],
+                        authors: .literal([testHex(publishAccount.publicKey)])
+                    )
+                )
+            ),
             window: .expandable(initial: 1, max: 1)
         )
         let queryProbe = QueryProbe()

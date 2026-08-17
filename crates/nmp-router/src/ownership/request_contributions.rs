@@ -1,12 +1,12 @@
 //! Exact per-demand contributions to one immutable physical request.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use nmp_grammar::ContextualAtom;
 use nmp_store::{coverage_claim_atoms, coverage_key};
 
 use crate::plan::{DemandKey, WireReq};
-use crate::route::{self, AtomClass};
+use crate::route;
 use crate::Router;
 
 use super::{RequestContributionDelta, RequestKey, RequestOwnerContribution};
@@ -28,10 +28,7 @@ impl Router {
             .filter(|(owner, _)| owner == &demand)
             .copied()
             .collect();
-        let authors = match route::classify(&atom.filter, &atom.source) {
-            AtomClass::Coverage { authors, .. } | AtomClass::Supplemental { authors } => authors,
-            AtomClass::Exact(_) => BTreeSet::new(),
-        };
+        let authors = route::outbox_authors(&atom.filter, &atom.routing);
         let provenance = request
             .provenance
             .iter()
@@ -222,22 +219,18 @@ impl Router {
         }
         for demand in removed {
             if let Some(atom) = self.active_demands.get(&demand) {
-                if let AtomClass::Coverage { authors, .. } =
-                    route::classify(&atom.filter, &atom.source)
-                {
-                    for author in authors {
-                        let remove =
-                            self.active_outbox_authors
-                                .get_mut(&author)
-                                .is_some_and(|count| {
-                                    *count = count
-                                        .checked_sub(1)
-                                        .expect("active outbox author refcount cannot underflow");
-                                    *count == 0
-                                });
-                        if remove {
-                            self.active_outbox_authors.remove(&author);
-                        }
+                for author in route::outbox_authors(&atom.filter, &atom.routing) {
+                    let remove = self
+                        .active_outbox_authors
+                        .get_mut(&author)
+                        .is_some_and(|count| {
+                            *count = count
+                                .checked_sub(1)
+                                .expect("active outbox author refcount cannot underflow");
+                            *count == 0
+                        });
+                    if remove {
+                        self.active_outbox_authors.remove(&author);
                     }
                 }
             }
@@ -256,11 +249,8 @@ impl Router {
             if self.active_demands.contains_key(demand) {
                 continue;
             }
-            if let AtomClass::Coverage { authors, .. } = route::classify(&atom.filter, &atom.source)
-            {
-                for author in authors {
-                    *self.active_outbox_authors.entry(author).or_insert(0) += 1;
-                }
+            for author in route::outbox_authors(&atom.filter, &atom.routing) {
+                *self.active_outbox_authors.entry(author).or_insert(0) += 1;
             }
             for request in self.requests_by_demand.get(demand).into_iter().flatten() {
                 *self

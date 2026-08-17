@@ -57,7 +57,7 @@ The umbrella ordering and design-signoff trail live in
 
 | Concept | Current repository API | Provisional North Star |
 |---|---|---|
-| Query identity | `Demand(selection, source authority, access context, cache, freshness)` | same semantic descriptor; public spelling remains provisional |
+| Query identity | `Demand(selection, read routing, access context, cache, freshness)` | same semantic descriptor; public spelling remains provisional |
 | Nested derived query | `Derived(inner: Demand)` across Rust/FFI/Swift/Kotlin | explicit inner demand with independent source/access/cache/freshness policy |
 | Query output | row deltas/current rows plus scoped `AcquisitionEvidence`; diagnostics retain exact intervals | richer descriptor-scoped cache/acquisition/shortfall evidence |
 | Current identity | the whole session owns accounts, optional persistable providers, and current selection; accepted work pins its author and resumes only through a matching available provider | same whole-session model plus additional provider implementations |
@@ -67,7 +67,7 @@ The umbrella ordering and design-signoff trail live in
 | Protocol meaning | raw events/app code | optional exact NIP modules over the same facade |
 
 Do not infer global completeness from `AcquisitionEvidence`. It is scoped to
-one descriptor, source authority, and access context. For a coverage-satisfied
+one descriptor, read routing, and access context. For a coverage-satisfied
 `MaxAge` handle it preserves the compact opening-time source proof and
 watermarks; global diagnostics report exact per-relay/filter facts for actually
 active wire work, not a hypothetical replan of that suppressed handle.

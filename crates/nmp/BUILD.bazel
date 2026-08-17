@@ -74,7 +74,6 @@ rust_test(
     visibility = ["//visibility:public"],
 )
 
-
 rust_test(
     name = "diagnostics_headless",
     srcs = ["tests/diagnostics_headless.rs"],

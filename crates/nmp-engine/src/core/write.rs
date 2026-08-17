@@ -5085,7 +5085,7 @@ impl CoreState {
     }
 
     fn author_outbox_authors(atom: &ContextualAtom) -> Vec<PublicKey> {
-        if atom.source != SourceAuthority::AuthorOutboxes {
+        if atom.routing != ReadRouting::Auto {
             return Vec::new();
         }
         atom.filter

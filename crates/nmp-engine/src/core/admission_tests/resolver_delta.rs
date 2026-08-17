@@ -161,7 +161,7 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
         let sub_id = SubId::for_wire(
             relay,
             &surviving.filter,
-            &surviving.source,
+            &surviving.routing,
             surviving.access,
         );
         core.white_box("record_observed_request", |s| {
@@ -171,6 +171,7 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
                 filter: &surviving.filter,
                 coverage_claims: BTreeSet::from([surviving_claim]),
                 owner_demands: BTreeSet::from([surviving_demand]),
+                lanes: BTreeSet::new(),
                 replay: false,
                 event_failure_target: EventFailureTarget::ThisSend,
             })
@@ -260,7 +261,7 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
                 kinds: Some(BTreeSet::from([kind])),
                 ..ConcreteFilter::default()
             },
-            source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            routing: ReadRouting::Explicit(vec![relay.clone()]),
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
@@ -272,7 +273,7 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
             kinds: Some(BTreeSet::from([20_000])),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
@@ -284,7 +285,7 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
     let sub_id = SubId::for_wire(
         relay,
         &request_atom.filter,
-        &request_atom.source,
+        &request_atom.routing,
         request_atom.access,
     );
     core.white_box("attribution.retain_live_request_claims", |s| {
@@ -298,6 +299,7 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
             filter: &request_atom.filter,
             coverage_claims: incumbent_claims,
             owner_demands: BTreeSet::from([DemandKey::for_atom(&request_atom)]),
+            lanes: BTreeSet::new(),
             replay: false,
             event_failure_target: EventFailureTarget::ThisSend,
         })

@@ -284,7 +284,7 @@ struct ComposeView: View {
         let identity: Identity = explicitIdentityID.map { .explicit(pubkey: hexString($0)) } ?? .active
         // `.auto` outbox routing is refused outright: `AppModel`'s engine has
         // no `NMPConfig.outboxRouting` indexer configured (that capability is
-        // separate from the `.authorOutboxes` READ demand `FeedFilters`
+        // separate from the `.auto` READ demand `FeedFilters`
         // uses, which needs no such config) -- see the report for why this
         // is worth naming as an API finding rather than quietly working
         // around. `.explicit` to the same two operator relays the feed

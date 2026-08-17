@@ -37,7 +37,7 @@ use nmp_engine::core::{
 };
 use nmp_grammar::{
     AccessContext, Binding, CacheMode, ContextualAtom, Demand, Filter, Freshness, IdentityField,
-    LiveQuery, LiveQueryError, SourceAuthority,
+    LiveQuery, LiveQueryError, ReadRouting,
 };
 use nmp_router::WireOp;
 use nmp_router_testkit::FixtureRoutingFacts;
@@ -97,7 +97,7 @@ fn host_branch(host: &RelayUrl) -> Demand {
 fn host_branch_of_kind(host: &RelayUrl, kind: u16) -> Demand {
     let mut demand = Demand::new(
         selection_of(kind),
-        SourceAuthority::Pinned(BTreeSet::from([host.clone()])),
+        ReadRouting::Explicit(vec![host.clone()]),
         AccessContext::Public,
     )
     .expect("a one-relay pinned set is nonempty");
@@ -357,8 +357,8 @@ fn per_branch_evidence_is_indexed_by_canonical_branch_order() {
         let declared: Vec<BTreeSet<RelayUrl>> = query
             .branches()
             .iter()
-            .map(|branch| match &branch.source {
-                SourceAuthority::Pinned(hosts) => hosts.clone(),
+            .map(|branch| match &branch.routing {
+                ReadRouting::Explicit(hosts) => hosts.iter().cloned().collect(),
                 other => panic!("fixture branches are pinned to one host: {other:?}"),
             })
             .collect();
@@ -399,7 +399,7 @@ fn an_unplannable_branch_reports_its_own_shortfall() {
                 .to_hex()]))),
             ..Filter::default()
         },
-        SourceAuthority::AuthorOutboxes,
+        ReadRouting::Auto,
         AccessContext::Public,
     )
     .expect("an author-bound outbox demand is constructible");
@@ -547,7 +547,7 @@ fn a_reactive_change_moves_every_branch_in_one_frame() {
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
             },
-            SourceAuthority::Pinned(BTreeSet::from([host.clone()])),
+            ReadRouting::Explicit(vec![host.clone()]),
             AccessContext::Public,
         )
         .expect("a reactive pinned demand is constructible")
@@ -642,10 +642,13 @@ fn cancelling_a_union_keeps_work_a_sibling_observation_still_owns() {
 fn an_over_cap_union_refuses_the_whole_declaration() {
     let branches: Vec<LiveQuery> = (0..=LiveQuery::MAX_BRANCHES)
         .map(|index| {
-            LiveQuery::single(Demand::from_filter(Filter {
-                kinds: Some(BTreeSet::from([index as u16])),
-                ..Filter::default()
-            }))
+            LiveQuery::single(Demand {
+                selection: Filter {
+                    kinds: Some(BTreeSet::from([index as u16])),
+                    ..Filter::default()
+                },
+                ..Demand::default()
+            })
         })
         .collect();
 
@@ -664,12 +667,25 @@ fn an_over_cap_union_refuses_the_whole_declaration() {
         Err(LiveQueryError::EmptyUnion)
     );
     assert_eq!(
-        LiveQuery::union([LiveQuery::from_filter(selection())], Some(0)),
+        LiveQuery::union(
+            [LiveQuery::single(Demand {
+                selection: selection(),
+                ..Demand::default()
+            })],
+            Some(0)
+        ),
         Err(LiveQueryError::AggregateResultLimitZero)
     );
     assert_eq!(
         LiveQuery::union(
-            [LiveQuery::union([LiveQuery::from_filter(selection())], Some(4)).unwrap()],
+            [LiveQuery::union(
+                [LiveQuery::single(Demand {
+                    selection: selection(),
+                    ..Demand::default()
+                })],
+                Some(4)
+            )
+            .unwrap()],
             None
         ),
         Err(LiveQueryError::NestedAggregateResultLimit),
@@ -967,7 +983,7 @@ fn one_branchs_refresh_failure_retracts_no_sibling_row() {
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
         },
-        SourceAuthority::Pinned(BTreeSet::from([b.clone()])),
+        ReadRouting::Explicit(vec![b.clone()]),
         AccessContext::Public,
     )
     .expect("a reactive pinned demand is constructible");
@@ -1043,7 +1059,7 @@ fn max_age_branch(host: &RelayUrl, keys: &Keys) -> Demand {
                 .to_hex()]))),
             ..Filter::default()
         },
-        SourceAuthority::Pinned(BTreeSet::from([host.clone()])),
+        ReadRouting::Explicit(vec![host.clone()]),
         AccessContext::Public,
     )
     .expect("a one-relay pinned set is nonempty");
@@ -1058,7 +1074,7 @@ fn branch_atom(host: &RelayUrl, keys: &Keys) -> ContextualAtom {
             authors: Some(BTreeSet::from([keys.public_key().to_hex()])),
             ..nmp_grammar::ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([host.clone()])),
+        routing: ReadRouting::Explicit(vec![host.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }

@@ -2,7 +2,7 @@
 
 - **Status:** BUILT for the full descriptor and scoped evidence contract across
   Rust, FFI, Swift, and Kotlin (#49/#714/#1106). `Demand` identity is
-  `Selection + SourceAuthority + AccessContext`; every `Derived.inner` carries
+  `Selection + ReadRouting + AccessContext`; every `Derived.inner` carries
   its own complete demand, and its cache/freshness policy is enforced at that
   exact boundary; persisted coverage, wire sharing, and evidence are
   context-safe. Broader permanent-diagnostics expansion remains under #51.
@@ -14,11 +14,11 @@
 An app observes a demand, not merely a Nostr filter:
 
 ```text
-Demand := Selection + SourceAuthority + AccessContext
+Demand := Selection + ReadRouting + AccessContext
 ```
 
 `Selection` is the closed filter/binding graph that decides which canonical
-store rows match. `SourceAuthority` is typed policy describing which routing
+store rows match. `ReadRouting` is typed policy describing which routing
 facts may acquire those rows. `AccessContext` carries protocol state that can
 change a relay's answer, such as an AUTH identity or visibility grant.
 

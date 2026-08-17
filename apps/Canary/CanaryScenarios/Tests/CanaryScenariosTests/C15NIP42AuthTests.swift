@@ -446,10 +446,10 @@ final class C15NIP42AuthTests: XCTestCase {
             selection: NMPFilter(
                 kinds: [UInt16(Lab.restrictedKind)], authors: .literal([seeder.pubkeyHex])
             ),
-            source: .pinned([lab.relay.url]),
+            routing: .explicit([lab.relay.url]),
             access: .nip42(publicKey: accountHex)
         )
-        let query = try engine.observe(demand)
+        let query = try engine.observe(.single(demand))
         let ledger = ObservationLedger()
         let consumer = Task {
             do {
@@ -477,11 +477,13 @@ final class C15NIP42AuthTests: XCTestCase {
         // it is a diagnosis printed alongside a failure, not a contract
         // (C13's `wireSubCount` finding, same treatment).
         let control = try engine.observe(
-            NMPDemand(
-                selection: NMPFilter(
-                    kinds: [UInt16(Lab.restrictedKind)], authors: .literal([seeder.pubkeyHex])
-                ),
-                source: .pinned([lab.relay.url])
+            .single(
+                NMPDemand(
+                    selection: NMPFilter(
+                        kinds: [UInt16(Lab.restrictedKind)], authors: .literal([seeder.pubkeyHex])
+                    ),
+                    routing: .explicit([lab.relay.url])
+                )
             )
         )
         let controlLedger = ObservationLedger()
@@ -799,10 +801,10 @@ final class C15NIP42AuthTests: XCTestCase {
             selection: NMPFilter(
                 kinds: [UInt16(Lab.restrictedKind)], authors: .literal([seeder.pubkeyHex])
             ),
-            source: .pinned([lab.relay.url]),
+            routing: .explicit([lab.relay.url]),
             access: .nip42(publicKey: accountHex)
         )
-        let query = try engine.observe(demand)
+        let query = try engine.observe(.single(demand))
         let ledger = ObservationLedger()
         let consumer = Task {
             do {

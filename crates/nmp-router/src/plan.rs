@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
     fold_byte, fold_context, AccessContext, ConcreteFilter, ContextualAtom, DescriptorHash,
-    RelaySessionKey, SourceAuthority,
+    ReadRouting, RelaySessionKey,
 };
 use nmp_store::{coverage_key, CoverageKey};
 
@@ -95,7 +95,7 @@ impl SubId {
     ///
     /// `fold_context` is applied LAST, exactly as [`Self::for_wire`] does, so
     /// the #106 anti-alias property survives allocation: identical relay +
-    /// filter under different [`SourceAuthority`] can never share a token,
+    /// filter under different [`ReadRouting`] can never share a token,
     /// belt-and-braces on top of the assignment's own injectivity.
     ///
     /// Deliberately NOT derived from anything mutable the relay advertises:
@@ -103,7 +103,7 @@ impl SubId {
     /// changing its advertisement can never move an established id.
     pub(crate) fn allocate(
         relay: RelayUrl,
-        source: &SourceAuthority,
+        source: &ReadRouting,
         access: AccessContext,
         root: DescriptorHash,
         counter: u64,
@@ -116,7 +116,7 @@ impl SubId {
     }
 
     /// DERIVE a sub-id for `filter` on `relay` from the filter's OWN skeleton
-    /// (authors erased) folded with its [`SourceAuthority`]/[`AccessContext`]
+    /// (authors erased) folded with its [`ReadRouting`]/[`AccessContext`]
     /// (#106, atlas's 3rd proof floor).
     ///
     /// **This is NO LONGER how planned subscriptions are identified.** The
@@ -140,7 +140,7 @@ impl SubId {
     pub fn for_wire(
         relay: RelayUrl,
         filter: &ConcreteFilter,
-        source: &SourceAuthority,
+        source: &ReadRouting,
         access: AccessContext,
     ) -> Self {
         let (skeleton, _) = Skeleton::of(filter);
@@ -172,7 +172,7 @@ pub struct WireReq {
     /// re-partitionable for signature matching (`crate::wire_id`) — a
     /// `Public`-sourced filter must never inherit an `AuthorOutboxes`-sourced
     /// filter's token, which is the wire-side half of the #106 anti-alias.
-    pub source: SourceAuthority,
+    pub routing: ReadRouting,
     pub provenance: BTreeSet<RouteProvenance>,
     /// Exact durable coverage-claim keys carried independently of the
     /// synthetic/coalesced wire filter. Core registers each normalized shape
@@ -338,13 +338,13 @@ mod tests {
         let sub_id = SubId::for_wire(
             relay.clone(),
             &filter,
-            &SourceAuthority::AuthorOutboxes,
+            &ReadRouting::Auto,
             AccessContext::Public,
         );
         let req = WireReq {
             sub_id,
             filter,
-            source: SourceAuthority::AuthorOutboxes,
+            routing: ReadRouting::Auto,
             provenance: BTreeSet::new(),
             coverage_claims: BTreeSet::new(),
             owner_demands: BTreeSet::new(),
@@ -403,11 +403,11 @@ mod tests {
                 sub_id: SubId::for_wire(
                     relay(1),
                     &cf(1, &["bb", "cc"]),
-                    &SourceAuthority::AuthorOutboxes,
+                    &ReadRouting::Auto,
                     AccessContext::Public,
                 ),
                 filter: cf(1, &["bb", "cc"]),
-                source: SourceAuthority::AuthorOutboxes,
+                routing: ReadRouting::Auto,
                 provenance: BTreeSet::new(),
                 coverage_claims: BTreeSet::new(),
                 owner_demands: BTreeSet::new(),
@@ -421,31 +421,48 @@ mod tests {
     }
 
     /// #106/atlas's 3rd proof floor: the identical relay+filter under
-    /// DIFFERENT `SourceAuthority` must mint DIFFERENT `SubId`s. Before this
+    /// DIFFERENT `ReadRouting` must mint DIFFERENT `SubId`s. Before this
     /// fix, `SubId::for_filter` keyed purely on (relay, skeleton), so two
     /// distinct-context atoms sharing a filter would collapse onto ONE
     /// inflight attribution FIFO (`nmp-engine::core::attribution`),
     /// crediting one context's EOSE to the other's `AcquisitionEvidence` --
     /// the wire-layer twin of the store-side `CoverageKey` anti-alias.
     #[test]
-    fn for_wire_distinguishes_identical_filters_under_different_source_authority() {
+    fn for_wire_distinguishes_identical_filters_under_different_read_routing() {
         let filter = cf(1, &["aa"]);
-        let outbox_sub = SubId::for_wire(
+        let auto_sub =
+            SubId::for_wire(relay(0), &filter, &ReadRouting::Auto, AccessContext::Public);
+        let explicit_sub = SubId::for_wire(
             relay(0),
             &filter,
-            &SourceAuthority::AuthorOutboxes,
-            AccessContext::Public,
-        );
-        let public_sub = SubId::for_wire(
-            relay(0),
-            &filter,
-            &SourceAuthority::Public,
+            &ReadRouting::Explicit(vec![relay(1)]),
             AccessContext::Public,
         );
         assert_ne!(
-            outbox_sub, public_sub,
-            "identical relay+filter under different SourceAuthority must never share a SubId"
+            auto_sub, explicit_sub,
+            "identical relay+filter under different ReadRouting must never share a SubId"
         );
+    }
+
+    /// Two `Explicit` routings naming DIFFERENT relay sets are different
+    /// contexts even when asked of the same relay: `wss://a` also-asked-of
+    /// `wss://b` is not the same demand as `wss://a` alone.
+    #[test]
+    fn for_wire_distinguishes_explicit_routings_with_different_relay_sets() {
+        let filter = cf(1, &["aa"]);
+        let one = SubId::for_wire(
+            relay(0),
+            &filter,
+            &ReadRouting::Explicit(vec![relay(0)]),
+            AccessContext::Public,
+        );
+        let two = SubId::for_wire(
+            relay(0),
+            &filter,
+            &ReadRouting::Explicit(vec![relay(0), relay(1)]),
+            AccessContext::Public,
+        );
+        assert_ne!(one, two);
     }
 
     /// Author churn under a FIXED context still reuses the same `SubId`
@@ -456,18 +473,8 @@ mod tests {
     fn for_wire_author_churn_same_context_reuses_sub_id() {
         let a = cf(1, &["aa", "bb"]);
         let b = cf(1, &["aa", "cc"]);
-        let sub_a = SubId::for_wire(
-            relay(0),
-            &a,
-            &SourceAuthority::AuthorOutboxes,
-            AccessContext::Public,
-        );
-        let sub_b = SubId::for_wire(
-            relay(0),
-            &b,
-            &SourceAuthority::AuthorOutboxes,
-            AccessContext::Public,
-        );
+        let sub_a = SubId::for_wire(relay(0), &a, &ReadRouting::Auto, AccessContext::Public);
+        let sub_b = SubId::for_wire(relay(0), &b, &ReadRouting::Auto, AccessContext::Public);
         assert_eq!(sub_a, sub_b);
     }
 }

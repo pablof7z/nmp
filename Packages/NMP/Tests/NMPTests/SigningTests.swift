@@ -33,7 +33,7 @@ final class SigningTests: XCTestCase {
         XCTAssertEqual(signed.id.count, 64)
         XCTAssertEqual(signed.signature.count, 128)
 
-        let query = try engine.observe(NMPFilter(kinds: [request.kind]))
+        let query = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [request.kind]))))
         var iterator = query.makeAsyncIterator()
         let first = try await iterator.next()
         XCTAssertEqual(first?.rows, [], "sign-only must not publish or store the event")

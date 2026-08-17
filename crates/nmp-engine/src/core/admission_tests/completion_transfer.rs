@@ -17,7 +17,7 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
             authors: Some(authors),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
@@ -44,7 +44,7 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
     });
 
     let open_piece = |core: &mut EngineCore, piece: &ContextualAtom| {
-        let sub_id = SubId::for_wire(relay.clone(), &piece.filter, &piece.source, piece.access);
+        let sub_id = SubId::for_wire(relay.clone(), &piece.filter, &piece.routing, piece.access);
         let claim = coverage_key(piece);
         core.white_box("attribution.retain_live_request_claims", |s| {
             s.attribution
@@ -57,6 +57,7 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
                 filter: &piece.filter,
                 coverage_claims: BTreeSet::from([claim]),
                 owner_demands: BTreeSet::from([owner]),
+                lanes: BTreeSet::new(),
                 replay: false,
                 event_failure_target: EventFailureTarget::ThisSend,
             })
@@ -143,7 +144,7 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
                 since: Some(100),
                 ..ConcreteFilter::default()
             },
-            source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            routing: ReadRouting::Explicit(vec![relay.clone()]),
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
@@ -153,7 +154,7 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
                 since: Some(100),
                 ..ConcreteFilter::default()
             },
-            source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            routing: ReadRouting::Explicit(vec![relay.clone()]),
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
@@ -181,7 +182,7 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
         let sub_id = SubId::for_wire(
             relay,
             &incumbent.filter,
-            &incumbent.source,
+            &incumbent.routing,
             incumbent.access,
         );
         core.white_box("attribution.retain_live_request_claims", |s| {
@@ -262,7 +263,7 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
             since: Some(100),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
@@ -270,7 +271,7 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
     let sub_id = SubId::for_wire(
         relay.clone(),
         &incumbent.filter,
-        &incumbent.source,
+        &incumbent.routing,
         incumbent.access,
     );
     let added_for_generation = |generation: u16| ContextualAtom {
@@ -279,7 +280,7 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
             since: Some(100),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([sub_id.0.clone()])),
+        routing: ReadRouting::Explicit(vec![sub_id.0.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };

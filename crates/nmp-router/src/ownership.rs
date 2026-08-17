@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{ConcreteFilter, RelaySessionKey, SourceAuthority};
+use nmp_grammar::{ConcreteFilter, ReadRouting, RelaySessionKey};
 use nmp_store::CoverageKey;
 
 use crate::plan::{DemandKey, SubId, WireDelta};
@@ -17,7 +17,7 @@ mod uncovered;
 pub(crate) use refusals::{refresh_refusal_diagnostics, refused_session_class};
 
 pub(crate) type RequestKey = (RelaySessionKey, SubId);
-pub(crate) type ExactFilterKey = (RelaySessionKey, SourceAuthority, ConcreteFilter);
+pub(crate) type ExactFilterKey = (RelaySessionKey, ReadRouting, ConcreteFilter);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RequestOwnerContribution {

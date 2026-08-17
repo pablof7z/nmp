@@ -162,7 +162,7 @@ impl FfiGroup {
     /// constrains `#h` is refused with
     /// [`FfiError::GroupCallerSuppliedContextConstraint`] -- the retained
     /// group id is the sole semantic source of that row. Hand the result to
-    /// `NmpEngine::observe_query`.
+    /// `NmpEngine::observe`.
     pub fn read(&self, selection: FfiFilter) -> Result<FfiLiveQuery, FfiError> {
         let selection = filter_from_ffi(selection)?;
         let query = self.inner.read(selection)?;
@@ -859,7 +859,7 @@ pub fn any_of(ids: FfiBinding) -> Result<Arc<FfiGroupIds>, FfiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FfiAccessContext, FfiIdentityField, FfiSourceAuthority};
+    use crate::types::{FfiAccessContext, FfiIdentityField, FfiReadRouting};
 
     fn host(n: u16) -> String {
         format!("wss://host-{n}.example.com")
@@ -895,8 +895,8 @@ mod tests {
         assert_eq!(query.branches.len(), 2);
         for (branch, expected_host) in query.branches.iter().zip([host(1), host(2)]) {
             assert_eq!(
-                branch.source,
-                FfiSourceAuthority::Pinned {
+                branch.routing,
+                FfiReadRouting::Explicit {
                     relays: vec![expected_host]
                 }
             );

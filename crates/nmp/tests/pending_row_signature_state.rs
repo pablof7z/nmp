@@ -7,9 +7,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use nmp::{
-    Binding, Engine, EngineConfig, Filter, Identity, LiveQuery, RowDelta, RowSignature, SignerOp,
-    SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability, WriteIntent,
-    WritePayload, WriteRouting,
+    Binding, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, RowDelta, RowSignature,
+    SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
+    WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_grammar::EventBuilder;
 use nmp_signer::PendingSignerSender;
@@ -78,10 +78,13 @@ fn delayed_signer_promotes_the_same_visible_row_from_pending_to_signed() {
 
     let subscription = engine
         .observe(
-            LiveQuery::from_filter(Filter {
-                kinds: Some(BTreeSet::from([1])),
-                authors: Some(Binding::Literal(BTreeSet::from([pubkey.to_hex()]))),
-                ..Filter::default()
+            LiveQuery::single(Demand {
+                selection: Filter {
+                    kinds: Some(BTreeSet::from([1])),
+                    authors: Some(Binding::Literal(BTreeSet::from([pubkey.to_hex()]))),
+                    ..Filter::default()
+                },
+                ..Demand::default()
             }),
             None,
         )

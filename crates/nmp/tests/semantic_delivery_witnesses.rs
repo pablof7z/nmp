@@ -10,11 +10,11 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use nmp::{
-    AccessContext, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReceiptReattachment,
-    RelayState, ReplaceableMaterializer, ReplaceableMaterializerOperation,
+    AccessContext, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReadRouting,
+    ReceiptReattachment, RelayState, ReplaceableMaterializer, ReplaceableMaterializerOperation,
     ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec, Row, RowDelta, RowSignature,
     SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
-    SigningState, SourceAuthority, WriteFact, WriteIntent, WriteOutcome, WriteRouting,
+    SigningState, WriteFact, WriteIntent, WriteOutcome, WriteRouting,
 };
 use nmp_signer::PendingSignerSender;
 use nmp_store::{InsertOutcome, RedbStore, RelayObserved};
@@ -175,7 +175,7 @@ fn pinned_contact_lists(
                 authors: Some(nmp::Binding::Literal(BTreeSet::from([author.to_hex()]))),
                 ..Filter::default()
             },
-            SourceAuthority::Pinned(relays.into_iter().collect()),
+            ReadRouting::Explicit(relays.into_iter().collect()),
             AccessContext::Public,
         )
         .expect("one pinned source is valid"),
@@ -194,7 +194,7 @@ fn pinned_kind(
                 authors: Some(nmp::Binding::Literal(BTreeSet::from([author.to_hex()]))),
                 ..Filter::default()
             },
-            SourceAuthority::Pinned(relays.into_iter().collect()),
+            ReadRouting::Explicit(relays.into_iter().collect()),
             AccessContext::Public,
         )
         .expect("one pinned source is valid"),

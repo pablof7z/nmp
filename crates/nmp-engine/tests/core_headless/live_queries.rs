@@ -32,17 +32,23 @@ fn ingest_frame_recompiles_wire_and_emits_rows() {
 
     // $myFollows shape: kinds:[1], authors := Derived(inner=kind:3 by me,
     // project=#p) -- exactly nmp-resolver's M1 contract-test shape.
-    let my_follows = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
-            inner: nmp_grammar::Demand::from_filter(Filter {
-                kinds: Some(BTreeSet::from([3u16])),
-                authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
-                ..Filter::default()
-            }),
-            project: nmp_grammar::Selector::Tag("p".to_string()),
-        }))),
-        ..Filter::default()
+    let my_follows = LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
+                inner: Demand {
+                    selection: Filter {
+                        kinds: Some(BTreeSet::from([3u16])),
+                        authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+                        ..Filter::default()
+                    },
+                    ..Demand::default()
+                },
+                project: nmp_grammar::Selector::Tag("p".to_string()),
+            }))),
+            ..Filter::default()
+        },
+        ..Demand::default()
     });
 
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
@@ -194,11 +200,14 @@ fn ingesting_n_distinct_events_delivers_order_n_row_entries_not_order_n_squared(
 
 /// A literal-author query carrying an explicit NIP-01 `limit:N`.
 fn limited_literal_query(kinds: &[u16], author_hex: &str, limit: usize) -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        kinds: Some(kinds.iter().copied().collect()),
-        authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
-        limit: Some(limit),
-        ..Filter::default()
+    LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(kinds.iter().copied().collect()),
+            authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
+            limit: Some(limit),
+            ..Filter::default()
+        },
+        ..Demand::default()
     })
 }
 
@@ -294,14 +303,17 @@ fn limited_multi_atom_handle_merges_then_applies_the_global_top_n() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let _ = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Literal(BTreeSet::from([
-            a.public_key().to_hex(),
-            b.public_key().to_hex(),
-        ]))),
-        limit: Some(2),
-        ..Filter::default()
+    let _ = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([
+                a.public_key().to_hex(),
+                b.public_key().to_hex(),
+            ]))),
+            limit: Some(2),
+            ..Filter::default()
+        },
+        ..Demand::default()
     })));
 
     let a_100 = nmp_resolver_testkit::kind1(&a, "a-100", 100);
@@ -600,27 +612,32 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
 /// querying under the static default's WRONG guess (`AuthorOutboxes`,
 /// since the filter IS author-bearing) does not -- exactly the silent
 /// re-alias #118 describes, now provably closed.
+/// Coverage is keyed by the DECLARED routing, not by the selection's shape.
+///
+/// What an `Auto` read proved — NMP chose the relays, and may choose others
+/// tomorrow — can never satisfy an `Explicit` demand that named its own relay
+/// set, and vice versa. This is ledger #18's store-side half over the source
+/// axis that survives: the axis narrowed from three values to two, but a
+/// coverage row still belongs to exactly one of them.
 #[test]
-fn get_coverage_distinguishes_true_context_from_the_static_default_guess() {
+fn get_coverage_distinguishes_auto_from_an_explicit_relay_set() {
     let a = Keys::generate();
     let relay0 = RelayUrl::parse("wss://relay0.example.com").unwrap();
     let filter = cf(&[1], &[&a.public_key().to_hex()]);
-    // Operator policy gives this public atom a route without changing its
-    // declared source authority.
+    // Operator policy gives this atom a route without its declaring one.
     let dir = FixtureRoutingFacts::new().with_operator_app([relay0.clone()]);
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let demand = nmp_grammar::Demand::new(
-        Filter {
+    let demand = nmp_grammar::Demand {
+        selection: Filter {
             kinds: Some(BTreeSet::from([1u16])),
             authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
             ..Filter::default()
         },
-        SourceAuthority::Public,
-        AccessContext::Public,
-    )
-    .expect("Public over an author-bearing selection is legal (#106)");
+        ..nmp_grammar::Demand::default()
+    };
+    assert_eq!(demand.routing, ReadRouting::Auto);
 
     let effects = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::single(demand)));
     let (sub_id, _f) = req_for(&effects, &relay0);
@@ -637,21 +654,20 @@ fn get_coverage_distinguishes_true_context_from_the_static_default_guess() {
     ));
 
     assert!(
+        core.get_coverage(&ctx_atom_with(filter.clone(), ReadRouting::Auto), &relay0)
+            .expect("coverage peek")
+            .is_some(),
+        "the TRUE declared routing (Auto) must find the recorded coverage"
+    );
+    assert!(
         core.get_coverage(
-            &ctx_atom_with(filter.clone(), SourceAuthority::Public),
+            &ctx_atom_with(filter, ReadRouting::Explicit(vec![relay0.clone()])),
             &relay0
         )
         .expect("coverage peek")
-        .is_some(),
-        "the TRUE declared context (Public) must find the recorded coverage"
-    );
-    assert!(
-        core.get_coverage(&ctx_atom(filter), &relay0)
-            .expect("coverage peek")
-            .is_none(),
-        "the static-default's WRONG guess (AuthorOutboxes, since the filter is \
-         author-bearing) must NOT find coverage recorded under a genuinely \
-         different declared context"
+        .is_none(),
+        "an Explicit demand names its own relay set and must NOT inherit what \
+         an Auto read happened to prove at the same relay"
     );
 }
 
@@ -701,7 +717,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     ));
 
     // Two NEW handles over the IDENTICAL selection, both declared
-    // SourceAuthority::Pinned({relay_pinned}) -- the SAME AcquisitionKey --
+    // ReadRouting::Explicit({relay_pinned}) -- the SAME AcquisitionKey --
     // but one Agnostic (the default), one Strict.
     let filter = Filter {
         kinds: Some(BTreeSet::from([1u16])),
@@ -711,7 +727,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     let pinned_relays = BTreeSet::from([relay_pinned.clone()]);
     let agnostic_demand = nmp_grammar::Demand::new(
         filter,
-        SourceAuthority::Pinned(pinned_relays),
+        ReadRouting::Explicit(pinned_relays.into_iter().collect()),
         AccessContext::Public,
     )
     .expect("a nonempty pinned relay set is legal (#107)");
@@ -800,7 +816,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
 /// Unlike the Agnostic/Strict test above (same pinned set, different cache
 /// mode, sharing ONE wire subscription), this is the OTHER axis: the
 /// IDENTICAL filter pinned to two DIFFERENT relay sets is a genuinely
-/// different `SourceAuthority::Pinned` value, hence a different
+/// different `ReadRouting::Explicit` value, hence a different
 /// `AcquisitionKey` -- two fully independent handles, subs, and EOSE
 /// watermarks, never sharing so much as a wire request.
 #[test]
@@ -819,13 +835,13 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
     };
     let demand1 = nmp_grammar::Demand::new(
         filter.clone(),
-        SourceAuthority::Pinned(BTreeSet::from([relay1.clone()])),
+        ReadRouting::Explicit(vec![relay1.clone()]),
         AccessContext::Public,
     )
     .expect("nonempty pinned relay set is legal");
     let demand2 = nmp_grammar::Demand::new(
         filter,
-        SourceAuthority::Pinned(BTreeSet::from([relay2.clone()])),
+        ReadRouting::Explicit(vec![relay2.clone()]),
         AccessContext::Public,
     )
     .expect("nonempty pinned relay set is legal");
@@ -1008,11 +1024,14 @@ fn limited_fetch_never_records_coverage() {
     let mut core = new_core(dir);
     connect(&mut core, 0, &relay0);
 
-    let limited_query = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
-        limit: Some(500),
-        ..Filter::default()
+    let limited_query = LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
+            limit: Some(500),
+            ..Filter::default()
+        },
+        ..Demand::default()
     });
     let effects = core.handle_and_flush(EngineMsg::Subscribe(limited_query));
     let (sub_id, filter) = req_for(&effects, &relay0);
@@ -1138,10 +1157,13 @@ fn evidence_from(effects: &[Effect], id: ObservationId) -> Option<&[AcquisitionE
 #[test]
 fn zero_atom_query_reports_no_resolved_demand_instead_of_vacuous_evidence() {
     let mut core = new_core(FixtureRoutingFacts::new());
-    let unresolved = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([9999u16])),
-        authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
-        ..Filter::default()
+    let unresolved = LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([9999u16])),
+            authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+            ..Filter::default()
+        },
+        ..Demand::default()
     });
 
     let effects = core.handle_and_flush(EngineMsg::Subscribe(unresolved));
@@ -1392,17 +1414,23 @@ fn derived_query_evidence_surfaces_the_unproven_inner_atom_independently_of_the_
     connect(&mut core, 0, &relay0);
     connect(&mut core, 1, &relay1);
 
-    let my_follows = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
-            inner: nmp_grammar::Demand::from_filter(Filter {
-                kinds: Some(BTreeSet::from([3u16])),
-                authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
-                ..Filter::default()
-            }),
-            project: nmp_grammar::Selector::Tag("p".to_string()),
-        }))),
-        ..Filter::default()
+    let my_follows = LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
+                inner: Demand {
+                    selection: Filter {
+                        kinds: Some(BTreeSet::from([3u16])),
+                        authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+                        ..Filter::default()
+                    },
+                    ..Demand::default()
+                },
+                project: nmp_grammar::Selector::Tag("p".to_string()),
+            }))),
+            ..Filter::default()
+        },
+        ..Demand::default()
     });
 
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));
@@ -1747,10 +1775,13 @@ fn set_active_pubkey_reroots_and_recompiles() {
         .with_outbound_routes(b.public_key(), [relay_b.clone()]);
     let mut core = new_core(dir);
 
-    let whoami = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([0u16])),
-        authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
-        ..Filter::default()
+    let whoami = LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([0u16])),
+            authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
+            ..Filter::default()
+        },
+        ..Demand::default()
     });
 
     let _ = core.handle(EngineMsg::SetActivePubkey(Some(a.public_key())));

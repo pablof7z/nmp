@@ -77,7 +77,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nmp::{
-    Engine, EngineConfig, Event, Filter, Kind, LiveQuery, RelayInformationCachePolicy,
+    Demand, Engine, EngineConfig, Event, Filter, Kind, LiveQuery, RelayInformationCachePolicy,
     SignEventError, SignEventRequest, Timestamp,
 };
 
@@ -115,9 +115,12 @@ const SHUTDOWN_BOUND: Duration = Duration::from_secs(15);
 const PARK_CEILING: Duration = Duration::from_secs(60);
 
 fn note_query() -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        kinds: Some(std::collections::BTreeSet::from([1u16])),
-        ..Filter::default()
+    LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(std::collections::BTreeSet::from([1u16])),
+            ..Filter::default()
+        },
+        ..Demand::default()
     })
 }
 

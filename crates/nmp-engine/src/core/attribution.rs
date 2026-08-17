@@ -658,7 +658,7 @@ pub(super) struct AttributionCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_grammar::{AccessContext, ConcreteFilter, SourceAuthority};
+    use nmp_grammar::{AccessContext, ConcreteFilter, ReadRouting};
     use nmp_router::RelayUrl;
 
     fn relay() -> RelayUrl {
@@ -671,14 +671,14 @@ mod tests {
                 kinds: Some(BTreeSet::from([kind])),
                 ..ConcreteFilter::default()
             },
-            source: SourceAuthority::Pinned(BTreeSet::from([relay()])),
+            routing: ReadRouting::Explicit(vec![relay()]),
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         }
     }
 
     fn sub_id_for(atom: &ContextualAtom) -> SubId {
-        SubId::for_wire(relay(), &atom.filter, &atom.source, atom.access)
+        SubId::for_wire(relay(), &atom.filter, &atom.routing, atom.access)
     }
 
     /// The census counts `live_shape_owner_counts.len()` and its value sum.

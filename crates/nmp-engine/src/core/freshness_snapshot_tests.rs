@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use nmp_grammar::{
     AccessContext, Binding, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness, LiveQuery,
-    SourceAuthority,
+    ReadRouting,
 };
 use nmp_store::{CoverageInterval, RedbStore};
 use nostr::{Keys, RelayUrl, Timestamp};
@@ -26,7 +26,7 @@ fn fresh_max_age_reads_each_coverage_row_once() {
             authors: Some(BTreeSet::from([keys.public_key().to_hex()])),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
@@ -44,7 +44,7 @@ fn fresh_max_age_reads_each_coverage_row_once() {
 
     let mut demand = Demand::new(
         filter,
-        SourceAuthority::Pinned(BTreeSet::from([relay])),
+        ReadRouting::Explicit(vec![relay]),
         AccessContext::Public,
     )
     .unwrap();
@@ -82,7 +82,7 @@ fn pinned_profile_query(author: &str, relay: RelayUrl, freshness: Freshness) -> 
     };
     let mut demand = Demand::new(
         filter,
-        SourceAuthority::Pinned(BTreeSet::from([relay])),
+        ReadRouting::Explicit(vec![relay]),
         AccessContext::Public,
     )
     .unwrap();
@@ -101,7 +101,7 @@ fn max_age_opening_retains_only_its_scoped_candidate_plan() {
             authors: Some(BTreeSet::from([candidate_keys.public_key().to_hex()])),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([candidate_relay.clone()])),
+        routing: ReadRouting::Explicit(vec![candidate_relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };

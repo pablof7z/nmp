@@ -12,14 +12,13 @@
 //! query, and whose scoped values must not cross between them. A NIP-29
 //! listing derived from evidence observed at relay A must constrain the outer
 //! listing at A and never at relay B; flattening the two hosts into one
-//! `SourceAuthority::Pinned({A, B})` produces a confidently wrong
+//! `ReadRouting::Explicit({A, B})` produces a confidently wrong
 //! cross-product, and handing the app a `Vec<Demand>` makes the app own the
 //! aggregate observation NMP promises to own. A `LiveQuery` with two branches
 //! expresses exactly that and stays one observation.
 
 use std::collections::BTreeSet;
 
-use crate::binding::Filter;
 use crate::descriptor::Demand;
 
 /// The app-facing read declaration: a nonempty, canonical set of complete
@@ -116,13 +115,6 @@ impl LiveQuery {
         }
     }
 
-    /// Convenience constructor applying [`Demand::from_filter`]'s static
-    /// default to a bare `Filter` — the common single-branch case.
-    #[must_use]
-    pub fn from_filter(selection: Filter) -> Self {
-        Self::single(Demand::from_filter(selection))
-    }
-
     /// Compose independent live queries into ONE canonical declaration.
     ///
     /// Inputs flatten: a nested union contributes its branches, never a
@@ -179,13 +171,17 @@ mod tests {
     use std::hash::{DefaultHasher, Hash, Hasher};
 
     use super::*;
-    use crate::descriptor::{AccessContext, SourceAuthority};
+    use crate::binding::Filter;
+    use crate::descriptor::{AccessContext, ReadRouting};
 
     fn demand(kind: u16) -> Demand {
-        Demand::from_filter(Filter {
-            kinds: Some(BTreeSet::from([kind])),
-            ..Filter::default()
-        })
+        Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([kind])),
+                ..Filter::default()
+            },
+            ..Demand::default()
+        }
     }
 
     fn hash(value: &LiveQuery) -> u64 {
@@ -256,7 +252,7 @@ mod tests {
         let relay = nostr::RelayUrl::parse("wss://a.example").unwrap();
         let pinned = Demand::new(
             demand(1).selection,
-            SourceAuthority::Pinned(BTreeSet::from([relay])),
+            ReadRouting::Explicit(vec![relay]),
             AccessContext::Public,
         )
         .unwrap();

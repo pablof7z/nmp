@@ -817,6 +817,7 @@ impl CoreState {
                         req.filter.clone(),
                         req.coverage_claims.clone(),
                         req.owner_demands.clone(),
+                        req.provenance.iter().map(|fact| fact.lane).collect(),
                     );
                     if self.wire_request_is_live(&session, &req.sub_id, &req.filter, handle) {
                         continue;
@@ -833,6 +834,7 @@ impl CoreState {
                         filter: &req.filter,
                         coverage_claims: req.coverage_claims.clone(),
                         owner_demands: req.owner_demands.clone(),
+                        lanes: req.provenance.iter().map(|fact| fact.lane).collect(),
                         replay: true,
                         event_failure_target: EventFailureTarget::ThisSend,
                     });
@@ -975,6 +977,9 @@ impl CoreState {
                     filter: probe.filter.clone(),
                     coverage_claims: BTreeSet::new(),
                     owner_demands: BTreeSet::new(),
+                    // A protocol-support probe is not a routed acquisition:
+                    // no lane asked for it, so it reports none.
+                    lanes: BTreeSet::new(),
                     replay: false,
                     event_failure_target: EventFailureTarget::ThisSend,
                     request_revision: None,
@@ -1198,6 +1203,7 @@ impl CoreState {
                     req.filter.clone(),
                     req.coverage_claims.clone(),
                     req.owner_demands.clone(),
+                    req.provenance.iter().map(|fact| fact.lane).collect(),
                 );
                 self.record_observed_request(RequestSend {
                     session,
@@ -1205,6 +1211,7 @@ impl CoreState {
                     filter: &req.filter,
                     coverage_claims: req.coverage_claims.clone(),
                     owner_demands: req.owner_demands.clone(),
+                    lanes: req.provenance.iter().map(|fact| fact.lane).collect(),
                     replay: true,
                     event_failure_target: EventFailureTarget::ThisSend,
                 });

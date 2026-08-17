@@ -140,7 +140,7 @@ fn extend_scoped_request(
     requests.push(WireReq {
         sub_id: incumbent.sub_id.clone(),
         filter: incumbent.filter.clone(),
-        source: incumbent.source.clone(),
+        routing: incumbent.routing.clone(),
         provenance: BTreeSet::new(),
         coverage_claims: claims,
         owner_demands: demands,

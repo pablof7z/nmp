@@ -31,7 +31,8 @@ use nmp_ffi::facade::{NmpDiagnosticsStream, NmpEngine, NmpEngineConfig, NmpRowSt
 use nmp_ffi::nip02::NmpFollowStream;
 use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
-    FfiBinding, FfiFilter, FfiIdentity, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiIdentity,
+    FfiLiveQuery, FfiReadRouting, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
 
 const TEST_SECRET_KEY_HEX: &str =
@@ -49,20 +50,41 @@ fn profile_pubkey(i: usize) -> String {
     format!("{:064x}", 0x1000 + i)
 }
 
-fn kind_query(kind: u16) -> FfiFilter {
-    FfiFilter {
-        kinds: Some(vec![kind]),
-        ..FfiFilter::default()
-    }
+fn kind_query(kind: u16) -> FfiLiveQuery {
+    single(
+        FfiFilter {
+            kinds: Some(vec![kind]),
+            ..FfiFilter::default()
+        },
+        FfiReadRouting::Auto,
+    )
 }
 
-fn author_query(pubkey: &str) -> FfiFilter {
-    FfiFilter {
-        authors: Some(FfiBinding::Literal {
-            values: vec![pubkey.to_string()],
-        }),
-        kinds: Some(vec![0]), // kind:0 = profile metadata
-        ..FfiFilter::default()
+fn author_query(pubkey: &str) -> FfiLiveQuery {
+    single(
+        FfiFilter {
+            authors: Some(FfiBinding::Literal {
+                values: vec![pubkey.to_string()],
+            }),
+            kinds: Some(vec![0]), // kind:0 = profile metadata
+            ..FfiFilter::default()
+        },
+        FfiReadRouting::Auto,
+    )
+}
+
+/// One demand branch under the named wire authority, on an unauthenticated
+/// connection with the default cache and freshness policies.
+fn single(selection: FfiFilter, routing: FfiReadRouting) -> FfiLiveQuery {
+    FfiLiveQuery {
+        branches: vec![FfiDemand {
+            selection,
+            routing,
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
+            freshness: FfiFreshness::Live,
+        }],
+        aggregate_result_limit: None,
     }
 }
 

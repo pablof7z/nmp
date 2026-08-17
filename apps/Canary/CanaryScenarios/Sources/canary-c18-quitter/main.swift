@@ -250,7 +250,7 @@ struct CanaryC18Quitter {
         // A live read. Also never cancelled, and its consuming task is still
         // running at quit time.
         let observed = ObservedRows()
-        let query = try engine.observe(NMPFilter(kinds: [1], authors: .literal([authorHex])))
+        let query = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [1], authors: .literal([authorHex])))))
         Task {
             do {
                 for try await batch in query { observed.store(batch, relay: relay) }

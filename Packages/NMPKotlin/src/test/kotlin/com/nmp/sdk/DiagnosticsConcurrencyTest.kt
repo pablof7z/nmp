@@ -51,9 +51,8 @@ class DiagnosticsConcurrencyTest {
                 val demand =
                     NMPDemand(
                         selection = NMPFilter(kinds = listOf(8_811u)),
-                        source = NMPSourceAuthority.Public,
                     )
-                val query = engine.observe(demand, Window.Expandable(initial = 1uL, max = 2uL))
+                val query = engine.observe(NMPLiveQuery.single(demand), Window.Expandable(initial = 1uL, max = 2uL))
 
                 val frameCount = AtomicInteger(0)
                 val firstBatch = CompletableDeferred<RowBatch>()
@@ -116,12 +115,18 @@ class DiagnosticsConcurrencyTest {
 
                 val frameCount = AtomicInteger(0)
                 val firstBatch = CompletableDeferred<Unit>()
-                // Cold unbounded flow: `engine.observe(filter)` opens its own
+                // Cold unbounded flow: `engine.observe(query)` opens its own
                 // handle inside `flow { }` per collect; teardown is the flow's
                 // `finally`, run on coroutine cancellation -- not the Cleaner.
                 val job =
                     launch {
-                        engine.observe(NMPFilter(kinds = listOf(8_812u))).collect {
+                        engine.observe(
+                            NMPLiveQuery.single(
+                                NMPDemand(
+                                    selection = NMPFilter(kinds = listOf(8_812u)),
+                                )
+                            )
+                        ).collect {
                             frameCount.incrementAndGet()
                             if (!firstBatch.isCompleted) firstBatch.complete(Unit)
                             // Then the pull parks on next() until we cancel.
@@ -170,7 +175,13 @@ class DiagnosticsConcurrencyTest {
                 engine.session.add(TEST_SECRET_KEY.testPrivateKey(), makeCurrent = true)
 
                 // ONE Flow value, collected twice concurrently.
-                val flow = engine.observe(NMPFilter(kinds = listOf(8_821u)))
+                val flow = engine.observe(
+                        NMPLiveQuery.single(
+                            NMPDemand(
+                                selection = NMPFilter(kinds = listOf(8_821u)),
+                            )
+                        )
+                    )
 
                 val collectorA = async { runCatching { flow.first() } }
                 val collectorB = async { runCatching { flow.first() } }

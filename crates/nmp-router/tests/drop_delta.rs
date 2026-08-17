@@ -40,8 +40,10 @@ fn dropped_handle_close_reaches_wire() {
     let mut router = Router::new(RuleRegistry::default_widen_only());
 
     let mut h = Harness::new();
-    let (handle, _open_delta) =
-        h.subscribe(Demand::from_filter(literal_author_filter(&author_hex)));
+    let (handle, _open_delta) = h.subscribe(Demand {
+        selection: literal_author_filter(&author_hex),
+        ..Demand::default()
+    });
 
     let demand_open = h.demand_with_context();
     assert_eq!(demand_open.len(), 1);

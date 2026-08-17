@@ -74,7 +74,7 @@ observer queue.
 ## Fold into app state
 
 ```swift
-for await snapshot in try engine.observe(demand) {
+for await snapshot in try engine.observe(.single(demand)) {
     model.rows = snapshot.rows
     model.sourceFacts = snapshot.acquisition
     model.shortfall = snapshot.shortfall
@@ -121,7 +121,7 @@ value and observe it using the UI/runtime lifecycle you already have:
 
 ```swift
 .task(id: demand) {
-    for await snapshot in try engine.observe(demand) {
+    for await snapshot in try engine.observe(.single(demand)) {
         model.apply(snapshot)
     }
 }

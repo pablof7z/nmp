@@ -92,7 +92,7 @@ only group context (`h` plus host authority), and core signs once.
 | `06`-`08`, `30` | platform projection, embedding, packaging |
 | `09`-`13` | live-query grammar, snapshots, evidence, bounded delivery |
 | `14`-`16` | writes, replaceable edits, identity/signers |
-| `17`-`21` | source authority, routing, sync, capabilities, provenance |
+| `17`-`21` | read routing, sync, capabilities, provenance |
 | `22`-`26` | diagnostics, pressure, tests, troubleshooting |
 | `27`-`29`, `31`-`33` | modules, guarantees, examples, extension, governance |
 

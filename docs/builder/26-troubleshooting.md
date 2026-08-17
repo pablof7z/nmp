@@ -9,7 +9,7 @@ matching row. Read these facts in order:
 
 | Read | Meaning |
 |---|---|
-| No planned relays | The descriptor resolved to no routable wire work. Inspect bindings and source authority. |
+| No planned relays | The descriptor resolved to no routable wire work. Inspect bindings and read routing. |
 | `uncoveredAuthorCount > 0` | Current router facts/cap could not place part of the author demand. |
 | Exact wire filters | Confirm the compiled selection is what the app declared. |
 | Connection/AUTH state | A planned source may be offline, connecting, challenged, or rejected. |

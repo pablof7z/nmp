@@ -11,8 +11,8 @@
 use std::collections::BTreeSet;
 
 use nmp_engine::core::{Effect, EngineCore, EngineMsg, RowDelta};
-use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, RelaySessionKey};
+use nmp_grammar::{Demand, LiveQuery};
 use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::RedbStore;
 use nmp_transport::{RelayFrame, RelayHandle};
@@ -27,10 +27,13 @@ fn append_row_deltas(effects: &[Effect], delivered: &mut Vec<RowDelta>) {
 }
 
 fn literal_kind_query(kind: u16, author_hex: &str) -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([kind])),
-        authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
-        ..Filter::default()
+    LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([kind])),
+            authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
+            ..Filter::default()
+        },
+        ..Demand::default()
     })
 }
 

@@ -208,7 +208,7 @@ impl Router {
         let request_key = (session.clone(), request.sub_id.clone());
         self.request_by_exact_filter.remove(&(
             session.clone(),
-            request.source.clone(),
+            request.routing.clone(),
             request.filter.clone(),
         ));
         self.request_position_by_key.remove(&request_key);
@@ -286,7 +286,7 @@ impl Router {
         self.request_by_exact_filter.insert(
             (
                 session.clone(),
-                request.source.clone(),
+                request.routing.clone(),
                 request.filter.clone(),
             ),
             request_key.clone(),

@@ -10,8 +10,8 @@
 use std::collections::BTreeSet;
 
 use nmp_engine::core::{Effect, EngineCore, EngineMsg};
-use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, RelaySessionKey};
+use nmp_grammar::{Demand, LiveQuery};
 use nmp_resolver_testkit::{kind1, kind3};
 use nmp_router::{SubId, WireOp};
 use nmp_router_testkit::FixtureRoutingFacts;
@@ -28,10 +28,13 @@ fn new_core(dir: FixtureRoutingFacts) -> EngineCore {
 }
 
 fn literal_query(kinds: &[u16], author_hex: &str) -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        kinds: Some(kinds.iter().copied().collect()),
-        authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
-        ..Filter::default()
+    LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(kinds.iter().copied().collect()),
+            authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
+            ..Filter::default()
+        },
+        ..Demand::default()
     })
 }
 

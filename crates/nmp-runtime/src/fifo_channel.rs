@@ -607,10 +607,7 @@ mod tests {
     async fn nothing_to_supersede_still_lags() {
         let (tx, rx) = superseding_fifo_channel::<(u8, usize)>(same_subject);
         for subject in 0..FACT_CHANNEL_CAPACITY {
-            assert!(tx.send((
-                u8::try_from(subject).expect("bound fits a subject byte"),
-                0
-            )));
+            assert!(tx.send((u8::try_from(subject).expect("bound fits a subject byte"), 0)));
         }
         assert!(
             !tx.send((u8::MAX, 0)),

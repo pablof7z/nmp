@@ -17,7 +17,7 @@ import com.nmp.sdk.NMPEngine
 import com.nmp.sdk.NMPError
 import com.nmp.sdk.NMPFilter
 import com.nmp.sdk.NMPFreshness
-import com.nmp.sdk.NMPSourceAuthority
+import com.nmp.sdk.NMPReadRouting
 import com.nmp.sdk.RowBatch
 import com.nmp.sdk.SourceStatus
 import kotlinx.coroutines.CoroutineStart
@@ -333,7 +333,7 @@ class NMPRuntimeQualificationTest {
     private fun demand(relay: String): NMPDemand =
         NMPDemand(
             selection = NMPFilter(kinds = listOf(1u.toUShort())),
-            source = NMPSourceAuthority.Pinned(setOf(relay)),
+            routing = NMPReadRouting.Explicit(listOf(relay)),
             access = NMPAccessContext.Public,
             cache = NMPCacheMode.Strict,
             freshness = NMPFreshness.Live,

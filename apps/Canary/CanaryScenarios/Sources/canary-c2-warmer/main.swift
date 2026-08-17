@@ -84,7 +84,9 @@ struct CanaryC2Warmer {
         // names the RELAY in its `sources`. Without that, a run where the
         // rows somehow came from anywhere else would still print CACHED and
         // the whole scenario would rest on rows the network never delivered.
-        let query = try engine.observe(NMPFilter(kinds: [1], authors: .literal([authorHex])))
+        let query = try engine.observe(
+            .single(NMPDemand(selection: NMPFilter(kinds: [1], authors: .literal([authorHex]))))
+        )
         let cached: [String] = try await withThrowingTaskGroup(of: [String]?.self) { group in
             group.addTask {
                 for try await batch in query {

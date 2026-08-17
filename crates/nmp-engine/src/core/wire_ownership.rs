@@ -783,7 +783,7 @@ mod tests {
     use nmp_store::RedbStore;
     use nostr::{RelayUrl, Timestamp};
 
-    use super::super::{AccessContext, CoreState, Effect, EngineMsg, Freshness, SourceAuthority};
+    use super::super::{AccessContext, CoreState, Effect, EngineMsg, Freshness, ReadRouting};
     use super::*;
 
     /// A minimal atom with no routing evidence, needing no production
@@ -794,10 +794,10 @@ mod tests {
     fn atom() -> ContextualAtom {
         ContextualAtom {
             filter: ConcreteFilter::default(),
-            source: SourceAuthority::Pinned(BTreeSet::from([RelayUrl::parse(
+            routing: ReadRouting::Explicit(vec![RelayUrl::parse(
                 "wss://wire-ownership-overflow.example",
             )
-            .unwrap()])),
+            .unwrap()]),
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         }
@@ -809,8 +809,11 @@ mod tests {
     /// called with in production.
     fn subscribed_handle() -> (CoreState, HandleId) {
         let relay = RelayUrl::parse("wss://wire-ownership-double-index.example").unwrap();
-        let mut demand = Demand::from_filter(Filter::default());
-        demand.source = SourceAuthority::Pinned(BTreeSet::from([relay]));
+        let mut demand = Demand {
+            selection: Filter::default(),
+            ..Demand::default()
+        };
+        demand.routing = ReadRouting::Explicit(vec![relay]);
         demand.freshness = Freshness::Live;
         let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let opened = core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));

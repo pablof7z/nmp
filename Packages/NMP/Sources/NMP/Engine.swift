@@ -123,6 +123,15 @@ public final class NMPEngine: Sendable {
     /// is dropped automatically when the query (or its iterator) is
     /// released (see `NMPQuery`'s own doc).
     ///
+    /// There is ONE observation door and it takes a complete `NMPLiveQuery`:
+    /// one or more independent `NMPDemand` branches, each naming its own
+    /// source authority, access context, cache mode and freshness. Selection
+    /// syntax never decides wire authority (#847), so a single-branch read is
+    /// spelled `observe(.single(demand))`. The branches are observed through
+    /// ONE handle: rows are unioned by event id with provenance merged, every
+    /// batch carries one evidence entry per canonical branch, and one
+    /// teardown withdraws every branch exactly once.
+    ///
     /// `window` is the one bounding policy on this read noun (#485).
     /// `nil` (the default) observes the full live set through exact rebased
     /// deltas; intermediate reducer emits may conflate for a slow observer.
@@ -130,34 +139,14 @@ public final class NMPEngine: Sendable {
     /// newest-first window delivered as authoritative snapshots, grown only
     /// by `NMPQuery.requestRows(atLeast:)` -- delivery mode is derived from
     /// that boundedness, never chosen separately (see `Window`'s doc).
-    /// Throws `NMPError.windowZeroRows` / `.windowInitialExceedsMax` for an
-    /// invalid window, and `.windowSelectionHasLimit` when a windowed
-    /// selection already carries its own NIP-01 `limit`.
-    public func observe(_ filter: NMPFilter, window: Window? = nil) throws -> NMPQuery {
-        try NMPQuery(engine: ffi, filter: filter.toFfi(), window: window?.toFfi())
-    }
-
-    /// Open a live, detachable query over an explicit `NMPDemand` (#107) --
-    /// the constructor to reach for once `observe(_ filter:)`'s implicit
-    /// `AuthorOutboxes`/`Public` default isn't enough: declaring `.pinned`
-    /// wire authority, a non-default `NMPAccessContext`, or a non-
-    /// `.agnostic` `NMPCacheMode`. One demand is one branch, so this is
-    /// exactly `observe(.single(demand))`.
-    public func observe(_ demand: NMPDemand, window: Window? = nil) throws -> NMPQuery {
-        try observe(.single(demand), window: window)
-    }
-
-    /// Open a live, detachable query over several independent `NMPDemand`
-    /// branches (#1108). The branches are observed through ONE handle: rows
-    /// are unioned by event id with provenance merged, every batch carries
-    /// one evidence entry per canonical branch, and one teardown withdraws
-    /// every branch exactly once.
     ///
-    /// Throws `NMPError.emptyQueryUnion`, `.aggregateResultLimitZero`,
-    /// `.nestedAggregateResultLimit` or `.tooManyQueryBranches` for a
-    /// declaration that can never be observed, and
-    /// `.windowAggregateResultLimit` when a window and an aggregate result
-    /// limit would both own the merged row count.
+    /// Throws `NMPError.windowZeroRows` / `.windowInitialExceedsMax` for an
+    /// invalid window, `.windowSelectionHasLimit` when a windowed selection
+    /// already carries its own NIP-01 `limit`, `.emptyQueryUnion` /
+    /// `.aggregateResultLimitZero` / `.nestedAggregateResultLimit` /
+    /// `.tooManyQueryBranches` for a declaration that can never be observed,
+    /// and `.windowAggregateResultLimit` when a window and an aggregate
+    /// result limit would both own the merged row count.
     public func observe(_ query: NMPLiveQuery, window: Window? = nil) throws -> NMPQuery {
         try NMPQuery(engine: ffi, liveQuery: query.toFfi(), window: window?.toFfi())
     }

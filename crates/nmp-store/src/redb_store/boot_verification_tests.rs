@@ -156,7 +156,10 @@ fn populate(path: &std::path::Path) {
 fn boot(path: &std::path::Path) -> usize {
     let store = RedbStore::open(path).expect("reopen fixture store");
     let mut attempt_rows = 0usize;
-    for intent in store.recover_publish_queue().expect("recover publish queue") {
+    for intent in store
+        .recover_publish_queue()
+        .expect("recover publish queue")
+    {
         assert!(matches!(intent.work, PublishQueueWork::Event { .. }));
         store
             .recover_publish_queue_lanes(intent.intent_id)

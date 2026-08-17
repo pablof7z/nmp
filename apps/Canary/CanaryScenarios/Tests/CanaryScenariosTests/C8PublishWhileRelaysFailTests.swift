@@ -278,7 +278,7 @@ final class C8PublishWhileRelaysFailTests: XCTestCase {
         // Opened before the publish, as in C7: a fresh single-use key
         // authoring exactly one event means any row this query delivers is
         // unambiguously the published one.
-        let query = try engine.observe(NMPFilter(kinds: [1], authors: .literal([authorHex])))
+        let query = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [1], authors: .literal([authorHex])))))
         final class RowState: @unchecked Sendable {
             private let lock = NSLock()
             private var rows: [Row] = []

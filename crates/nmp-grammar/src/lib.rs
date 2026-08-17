@@ -35,7 +35,7 @@ pub use concrete::{
 };
 pub use demand::{DemandDelta, DemandOp};
 pub use descriptor::{
-    AccessContext, CacheMode, Demand, DemandError, Freshness, RelaySessionKey, SourceAuthority,
+    AccessContext, CacheMode, Demand, DemandError, Freshness, ReadRouting, RelaySessionKey,
 };
 pub use indexed_tag_name::IndexedTagName;
 pub use live_query::{LiveQuery, LiveQueryError};
@@ -53,6 +53,6 @@ pub use tagging::{
 };
 pub use text::{At, InterpolatedContent, Mention};
 pub use write::{
-    EventBuilder, Identity, ReplaceableOperation,
-    ReplaceableOperationError, ReplaceableOperationStart, WriteIntent, WritePayload, WriteRouting,
+    EventBuilder, Identity, ReplaceableOperation, ReplaceableOperationError,
+    ReplaceableOperationStart, WriteIntent, WritePayload, WriteRouting,
 };

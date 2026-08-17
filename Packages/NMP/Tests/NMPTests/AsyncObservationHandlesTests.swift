@@ -27,7 +27,7 @@ final class AsyncObservationHandlesTests: XCTestCase {
         var diagnostics: [NMPDiagnostics] = []
         var following: [NMPFollowingObservation] = []
         for k in 0..<250 {
-            queries.append(try engine.observe(NMPFilter(kinds: [UInt16(9_000 + k % 400)])))
+            queries.append(try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [UInt16(9_000 + k % 400)])))))
         }
         for _ in 0..<40 {
             diagnostics.append(try engine.observeDiagnostics())
@@ -60,7 +60,7 @@ final class AsyncObservationHandlesTests: XCTestCase {
 
         let count = 96
         let queries = try (0..<count).map { k in
-            try engine.observe(NMPFilter(kinds: [UInt16(7_000 + k)]))
+            try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [UInt16(7_000 + k)]))))
         }
 
         // Each task iterates its own observation forever; we hold them live,
@@ -135,7 +135,7 @@ final class AsyncObservationHandlesTests: XCTestCase {
             privateKey: testPrivateKey(Self.testSecretKey),
             makeCurrent: true
         )
-        let query = try engine.observe(NMPFilter(kinds: [8_811]))
+        let query = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [8_811]))))
 
         // Signalled once the iterating task has consumed the initial frame and
         // is about to park on its SECOND `next()`.
@@ -206,7 +206,7 @@ final class AsyncObservationHandlesTests: XCTestCase {
             privateKey: testPrivateKey(Self.testSecretKey),
             makeCurrent: true
         )
-        let query = try engine.observe(NMPFilter(kinds: [8_812]))
+        let query = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [8_812]))))
 
         let delivered = try await Self.consumeOneThenBreak(query)
         XCTAssertEqual(delivered, 1, "the loop exits normally after one delivered frame")
@@ -234,8 +234,8 @@ final class AsyncObservationHandlesTests: XCTestCase {
             makeCurrent: true
         )
 
-        let a = try engine.observe(NMPFilter(kinds: [8_821]))
-        let b = try engine.observe(NMPFilter(kinds: [8_822]))
+        let a = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [8_821]))))
+        let b = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [8_822]))))
 
         async let firstA = Self.firstBatch(from: a, withinSeconds: 5)
         async let firstB = Self.firstBatch(from: b, withinSeconds: 5)
@@ -268,7 +268,7 @@ final class AsyncObservationHandlesTests: XCTestCase {
             privateKey: testPrivateKey(Self.testSecretKey),
             makeCurrent: true
         )
-        let query = try engine.observe(NMPFilter(kinds: [8_831]))
+        let query = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [8_831]))))
         let startBarrier = StartBarrier(participants: 2)
 
         func pullOne() -> Task<Pull, Never> {

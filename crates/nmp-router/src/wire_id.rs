@@ -85,7 +85,7 @@ fn affinity(component: &Component, a: &ConcreteFilter, b: &ConcreteFilter) -> (u
 /// own order.
 ///
 /// `priors` is the previous plan's `(filter, token)` pairs for THIS matching
-/// partition — one relay session and one `SourceAuthority`. Anything in
+/// partition — one relay session and one `ReadRouting`. Anything in
 /// `priors` left unassigned simply does not appear in the new plan, so
 /// `crate::plan::diff_plans` emits its `Close` with no extra bookkeeping.
 ///
@@ -193,7 +193,7 @@ pub(crate) struct Assignment {
 mod tests {
     use super::*;
 
-    use nmp_grammar::{AccessContext, SourceAuthority};
+    use nmp_grammar::{AccessContext, ReadRouting};
 
     fn cf() -> ConcreteFilter {
         ConcreteFilter {
@@ -206,7 +206,7 @@ mod tests {
     fn token(n: u64) -> SubId {
         SubId::allocate(
             nmp_router_testkit::test_relay(0),
-            &SourceAuthority::Public,
+            &ReadRouting::Auto,
             AccessContext::Public,
             ConcreteFilter::default().hash(),
             n,

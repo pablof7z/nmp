@@ -23,15 +23,21 @@ fn profile_query(room: &str, limit: usize) -> Demand {
         limit: Some(limit),
         ..Filter::default()
     };
-    Demand::from_filter(Filter {
-        kinds: Some(BTreeSet::from([0u16])),
-        authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(inner),
-            project: Selector::Authors,
-        }))),
-        limit: Some(500),
-        ..Filter::default()
-    })
+    Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([0u16])),
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner: Demand {
+                    selection: inner,
+                    ..Demand::default()
+                },
+                project: Selector::Authors,
+            }))),
+            limit: Some(500),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    }
 }
 
 fn percentile(samples: &mut [Duration], numerator: usize, denominator: usize) -> Duration {

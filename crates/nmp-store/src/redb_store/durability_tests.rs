@@ -252,8 +252,8 @@ fn redb_accept_precommit_io_reopens_with_no_durable_receipt() {
     );
     assert!(store.recover_publish_queue().unwrap().is_empty());
 
-    let accepted = attempt_write(&mut store, 901)
-        .expect("the reopened store accepts the exact retry once");
+    let accepted =
+        attempt_write(&mut store, 901).expect("the reopened store accepts the exact retry once");
     assert_eq!(
         store.enumerate_publish_queue_receipts().unwrap().len(),
         1,
@@ -749,7 +749,7 @@ fn peek_atom() -> nmp_grammar::ContextualAtom {
             until: None,
             limit: None,
         },
-        source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+        routing: nmp_grammar::ReadRouting::Auto,
         access: nmp_grammar::AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }

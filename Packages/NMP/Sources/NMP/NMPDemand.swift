@@ -1,22 +1,31 @@
-// The explicit live-query identity, in ergonomic Swift shape (M4 plan §9,
-// #107). `NMPEngine.observe(_ filter: NMPFilter)` still applies the static
-// AuthorOutboxes/Public default (`nmp_grammar::Demand::from_filter`); a dev
-// reaches for `NMPDemand` once that default isn't enough -- declaring
-// `.pinned` wire authority or a non-`.agnostic` cache mode.
+// The live-query identity, in ergonomic Swift shape (M4 plan §9, #107).
+// Every read declares one: `NMPEngine.observe(_:)` takes an `NMPLiveQuery`
+// whose branches are `NMPDemand`s. No door infers routing from the
+// selection's shape (#847) -- but the routing an app gets by saying nothing
+// is `.auto`, so saying nothing is the ordinary way to read.
 
 import NMPFFI
 
-/// Which authority resolves a query's relay set (`nmp_grammar::
-/// SourceAuthority` mirror, #107).
-public enum NMPSourceAuthority: Sendable, Hashable {
-    case authorOutboxes
-    case `public`
-    /// Ask ONLY this relay set, on the wire, full stop -- never neutral
-    /// author facts, hints, provenance, or operator policy, regardless of
+/// Where a query's reads come from (`nmp_grammar::ReadRouting` mirror). A
+/// strategy, not a resolved relay set: re-executed against whatever the
+/// engine knows at each moment.
+///
+/// These two words are the whole app-facing routing vocabulary, for reads
+/// and writes alike -- see `NMPWriteRouting`.
+public enum NMPReadRouting: Sendable, Hashable {
+    /// "Figure out where to read this from." NIP-65 outbound relays for
+    /// every author the selection resolves, relay hints and prior
+    /// provenance, then the operator's app and fallback lanes.
+    ///
+    /// The default. Naming a routing value is what an app does to OVERRIDE
+    /// NMP, never what it must do to use NMP.
+    case auto
+    /// Ask ONLY this relay set, on the wire, full stop -- never widened to
+    /// outbox, directory, app, fallback or indexer relays, regardless of
     /// whether the selection is author-bearing. Must be nonempty:
-    /// `NMPEngine.observe(_ demand:)` throws `NMPError.emptyPinnedRelaySet`
-    /// if it is not.
-    case pinned(Set<String>)
+    /// `NMPEngine.observe(_:)` throws `NMPError.emptyExplicitRelaySet` if it
+    /// is not.
+    case explicit([String])
 }
 
 /// `nmp_grammar::AccessContext` mirror. Closed vocabulary: an unauthenticated
@@ -29,14 +38,13 @@ public enum NMPAccessContext: Sendable, Hashable {
 }
 
 /// `nmp_grammar::CacheMode` mirror (#107). Meaningful only alongside
-/// `NMPSourceAuthority.pinned` -- a no-op under any other source, since
-/// there is no pinned relay set to intersect a cached row's provenance
-/// against.
+/// `NMPReadRouting.explicit` -- a no-op under `.auto`, since there is no
+/// explicit relay set to intersect a cached row's provenance against.
 public enum NMPCacheMode: Sendable, Hashable {
     /// Serve every matching cached row regardless of provenance.
     case agnostic
     /// Serve only cached rows whose unioned provenance set intersects the
-    /// pinned relay set.
+    /// explicit relay set.
     case strict
 }
 
@@ -48,24 +56,33 @@ public enum NMPFreshness: Sendable, Hashable {
     case cacheOnly
 }
 
-/// The full live-query declaration a dev supplies -- `selection + source +
+/// The full live-query declaration a dev supplies -- `selection + routing +
 /// access + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565).
+///
+/// Every parameter but `selection` defaults, so the ordinary declaration is
+/// the selection and nothing else:
+///
+/// ```swift
+/// NMPDemand(selection: filter)   // routing: .auto
+/// ```
 public struct NMPDemand: Sendable, Hashable {
     public var selection: NMPFilter
-    public var source: NMPSourceAuthority
+    /// Where this demand's reads come from. Defaults to `.auto`: an app that
+    /// says nothing gets NMP's routing.
+    public var routing: NMPReadRouting
     public var access: NMPAccessContext
     public var cache: NMPCacheMode
     public var freshness: NMPFreshness
 
     public init(
         selection: NMPFilter,
-        source: NMPSourceAuthority,
+        routing: NMPReadRouting = .auto,
         access: NMPAccessContext = .public,
         cache: NMPCacheMode = .agnostic,
         freshness: NMPFreshness = .live
     ) {
         self.selection = selection
-        self.source = source
+        self.routing = routing
         self.access = access
         self.cache = cache
         self.freshness = freshness
@@ -74,20 +91,18 @@ public struct NMPDemand: Sendable, Hashable {
 
 // MARK: - Ergonomic -> Ffi
 
-extension NMPSourceAuthority {
-    func toFfi() -> FfiSourceAuthority {
+extension NMPReadRouting {
+    func toFfi() -> FfiReadRouting {
         switch self {
-        case .authorOutboxes: return .authorOutboxes
-        case .public: return .public
-        case .pinned(let relays): return .pinned(relays: Array(relays))
+        case .auto: return .auto
+        case .explicit(let relays): return .explicit(relays: relays)
         }
     }
 
-    init(_ ffi: FfiSourceAuthority) {
+    init(_ ffi: FfiReadRouting) {
         switch ffi {
-        case .authorOutboxes: self = .authorOutboxes
-        case .public: self = .public
-        case .pinned(let relays): self = .pinned(Set(relays))
+        case .auto: self = .auto
+        case .explicit(let relays): self = .explicit(relays)
         }
     }
 }
@@ -146,7 +161,7 @@ extension NMPDemand {
     func toFfi() -> FfiDemand {
         FfiDemand(
             selection: selection.toFfi(),
-            source: source.toFfi(),
+            routing: routing.toFfi(),
             access: access.toFfi(),
             cache: cache.toFfi(),
             freshness: freshness.toFfi()
@@ -156,7 +171,7 @@ extension NMPDemand {
     init(_ ffi: FfiDemand) {
         self.init(
             selection: NMPFilter(ffi.selection),
-            source: NMPSourceAuthority(ffi.source),
+            routing: NMPReadRouting(ffi.routing),
             access: NMPAccessContext(ffi.access),
             cache: NMPCacheMode(ffi.cache),
             freshness: NMPFreshness(ffi.freshness)
@@ -170,7 +185,7 @@ extension NMPDemand {
 ///
 /// Some correct reads need several branches whose results form one semantic
 /// query and whose host-scoped values must not cross between them. Flattening
-/// two hosts into one `.pinned([a, b])` produces a confidently wrong
+/// two hosts into one `.explicit([a, b])` produces a confidently wrong
 /// cross-product; handing an app a list of demands makes the app own the
 /// aggregate observation. This is neither: it is one read noun.
 ///

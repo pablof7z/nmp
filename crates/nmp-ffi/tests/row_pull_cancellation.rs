@@ -16,7 +16,8 @@ use nmp_ffi::convert::FfiRowPullError;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowPull, NmpRowStream};
 use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
-    FfiEventBuilder, FfiFilter, FfiFrame, FfiIdentity, FfiRowDelta, FfiWindow, FfiWriteIntent,
+    FfiAccessContext, FfiCacheMode, FfiDemand, FfiEventBuilder, FfiFilter, FfiFrame, FfiFreshness,
+    FfiIdentity, FfiLiveQuery, FfiReadRouting, FfiRowDelta, FfiWindow, FfiWriteIntent,
     FfiWritePayload, FfiWriteRouting,
 };
 
@@ -42,10 +43,19 @@ fn test_engine() -> Arc<NmpEngine> {
     engine
 }
 
-fn note_query() -> FfiFilter {
-    FfiFilter {
-        kinds: Some(vec![1]),
-        ..FfiFilter::default()
+fn note_query() -> FfiLiveQuery {
+    FfiLiveQuery {
+        branches: vec![FfiDemand {
+            selection: FfiFilter {
+                kinds: Some(vec![1]),
+                ..FfiFilter::default()
+            },
+            routing: FfiReadRouting::Auto,
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
+            freshness: FfiFreshness::Live,
+        }],
+        aggregate_result_limit: None,
     }
 }
 

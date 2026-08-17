@@ -88,6 +88,20 @@ pub enum ObservationFact {
         transport_generation: u64,
         request_revision: u64,
         filter: Arc<ConcreteFilter>,
+        /// WHY this relay was asked: the routing lanes that put this REQ on
+        /// the wire — the author's NIP-65 outbound set, a selector hint,
+        /// prior source provenance, or an operator app/fallback lane.
+        ///
+        /// Without this the trace said which relays were asked and never
+        /// why, which is exactly the gap that made the deleted filter-shape
+        /// inference invisible in the first place: a default that decides a
+        /// route has to report the route it decided, or it is the same
+        /// unaccountable magic under a better name.
+        ///
+        /// A SET because coalescing is real — one REQ can be two authors'
+        /// outbox lane and the operator's app lane at once, and reporting a
+        /// single lane would be true but partial.
+        lanes: BTreeSet<nmp_router::Lane>,
         replay: bool,
     },
     RequestSettled {
@@ -162,6 +176,7 @@ pub(super) struct PendingRequestEvidence {
     pub(super) sub_id: SubId,
     pub(super) filter: ConcreteFilter,
     pub(super) owner_demands: BTreeSet<nmp_router::DemandKey>,
+    pub(super) lanes: BTreeSet<nmp_router::Lane>,
     pub(super) replay: bool,
 }
 
@@ -303,6 +318,7 @@ impl CoreState {
             filter: request.filter.clone(),
             coverage_claims: request.coverage_claims,
             owner_demands: request.owner_demands.clone(),
+            lanes: request.lanes.clone(),
             replay: request.replay,
             event_failure_target: request.event_failure_target,
             request_revision: Some(send.revision()),
@@ -319,6 +335,7 @@ impl CoreState {
                 sub_id: request.sub_id.clone(),
                 filter: request.filter.clone(),
                 owner_demands: request.owner_demands,
+                lanes: request.lanes,
                 replay: request.replay,
             });
         (send, attempt_id)
@@ -492,6 +509,7 @@ impl CoreState {
                             transport_generation: handle.generation,
                             request_revision: request.request_revision,
                             filter: shared_filter.clone(),
+                            lanes: request.lanes.clone(),
                             replay: request.replay,
                         },
                         &mut effects,
@@ -1045,52 +1063,67 @@ mod tests {
     use super::*;
     use crate::core::EngineMsg;
     use nmp_grammar::LiveQuery;
-    use nmp_grammar::{Binding, Demand, Derived, Filter, Freshness, Selector, SourceAuthority};
+    use nmp_grammar::{Binding, Demand, Derived, Filter, Freshness, ReadRouting, Selector};
     use nmp_router_testkit::FixtureRoutingFacts;
     use nmp_store::{RedbStore, RelayObserved};
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     fn articles_by_follows() -> LiveQuery {
-        LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([30_023])),
-            authors: Some(Binding::Derived(Box::new(Derived {
-                inner: Demand::from_filter(Filter {
-                    kinds: Some(BTreeSet::from([3])),
-                    authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-                    ..Filter::default()
-                }),
-                project: Selector::Tag("p".to_string()),
-            }))),
-            ..Filter::default()
+        LiveQuery::single(Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([30_023])),
+                authors: Some(Binding::Derived(Box::new(Derived {
+                    inner: Demand {
+                        selection: Filter {
+                            kinds: Some(BTreeSet::from([3])),
+                            authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                            ..Filter::default()
+                        },
+                        ..Demand::default()
+                    },
+                    project: Selector::Tag("p".to_string()),
+                }))),
+                ..Filter::default()
+            },
+            ..Demand::default()
         })
     }
 
     fn pinned_articles_by_follows(relay: &RelayUrl, freshness: Freshness) -> LiveQuery {
-        let mut inner = Demand::from_filter(Filter {
-            kinds: Some(BTreeSet::from([3])),
-            authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-            ..Filter::default()
-        });
+        let mut inner = Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([3])),
+                authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                ..Filter::default()
+            },
+            ..Demand::default()
+        };
         inner.freshness = freshness;
-        let mut demand = Demand::from_filter(Filter {
-            kinds: Some(BTreeSet::from([30_023])),
-            authors: Some(Binding::Derived(Box::new(Derived {
-                inner,
-                project: Selector::Tag("p".to_string()),
-            }))),
-            ..Filter::default()
-        });
-        demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+        let mut demand = Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([30_023])),
+                authors: Some(Binding::Derived(Box::new(Derived {
+                    inner,
+                    project: Selector::Tag("p".to_string()),
+                }))),
+                ..Filter::default()
+            },
+            ..Demand::default()
+        };
+        demand.routing = ReadRouting::Explicit(vec![relay.clone()]);
         demand.freshness = freshness;
         LiveQuery::single(demand)
     }
 
     fn pinned_kind_one(relay: &RelayUrl) -> LiveQuery {
-        let mut demand = Demand::from_filter(Filter {
-            kinds: Some(BTreeSet::from([1])),
-            ..Filter::default()
-        });
-        demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+        let mut demand = Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([1])),
+                ..Filter::default()
+            },
+            ..Demand::default()
+        };
+        demand.routing = ReadRouting::Explicit(vec![relay.clone()]);
         demand.freshness = Freshness::Live;
         LiveQuery::single(demand)
     }

@@ -414,6 +414,7 @@ fn pending_execution_census_counts_every_revision_queued_under_one_wire_key() {
             filter: &request.filter,
             coverage_claims: request.coverage_claims.clone(),
             owner_demands: request.owner_demands.clone(),
+            lanes: BTreeSet::new(),
             replay: true,
             event_failure_target: EventFailureTarget::ThisSend,
         })

@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::PublishError;
 use nmp_engine::core::RowDelta;
 use nmp_engine::publish_queue::{SigningState, WriteFact};
-use nmp_grammar::LiveQuery;
 use nmp_grammar::{Binding, Filter, IdentityField};
+use nmp_grammar::{Demand, LiveQuery};
 use nmp_grammar::{EventBuilder, Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
 use nmp_router_testkit::FixtureRoutingFacts;
@@ -137,10 +137,13 @@ fn wait_for_status(
 }
 
 fn reactive_kind1() -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-        ..Filter::default()
+    LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+            ..Filter::default()
+        },
+        ..Demand::default()
     })
 }
 
@@ -732,10 +735,13 @@ fn an_explicit_identity_signs_as_a_registered_secondary_without_rerooting_active
 
     // The promoted row carries B's REAL signature -- fetch it and verify.
     let (_qh, rows_rx) = handle
-        .subscribe(LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([1u16])),
-            authors: Some(Binding::Literal(BTreeSet::from([b.public_key().to_hex()]))),
-            ..Filter::default()
+        .subscribe(LiveQuery::single(Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                authors: Some(Binding::Literal(BTreeSet::from([b.public_key().to_hex()]))),
+                ..Filter::default()
+            },
+            ..Demand::default()
         }))
         .expect("test subscription construction");
     let deadline = Instant::now() + Duration::from_secs(5);

@@ -55,21 +55,30 @@ fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
     // read it to resolve its `Derived` inner query, so the corrupt kind-3 row
     // can only strike the LATER branch. Canonical branch order sorts on the
     // selection first, and 1 < 2.
-    let first = nmp_grammar::Demand::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1])),
-        ..Filter::default()
-    });
-    let failing = nmp_grammar::Demand::from_filter(Filter {
-        kinds: Some(BTreeSet::from([2])),
-        authors: Some(Binding::Derived(Box::new(Derived {
-            inner: nmp_grammar::Demand::from_filter(Filter {
-                kinds: Some(BTreeSet::from([3])),
-                ..Filter::default()
-            }),
-            project: Selector::Tag("p".to_owned()),
-        }))),
-        ..Filter::default()
-    });
+    let first = nmp_grammar::Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1])),
+            ..Filter::default()
+        },
+        ..nmp_grammar::Demand::default()
+    };
+    let failing = nmp_grammar::Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([2])),
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner: nmp_grammar::Demand {
+                    selection: Filter {
+                        kinds: Some(BTreeSet::from([3])),
+                        ..Filter::default()
+                    },
+                    ..nmp_grammar::Demand::default()
+                },
+                project: Selector::Tag("p".to_owned()),
+            }))),
+            ..Filter::default()
+        },
+        ..nmp_grammar::Demand::default()
+    };
     let query = LiveQuery::union(
         [
             LiveQuery::single(first.clone()),
@@ -125,18 +134,21 @@ fn opening_freshness_refusal_leaves_no_candidate_request_target_index() {
         kinds: Some(BTreeSet::from([1])),
         ..Filter::default()
     };
-    let mut demand = nmp_grammar::Demand::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1])),
-        ..Filter::default()
-    });
-    demand.source = SourceAuthority::Pinned(BTreeSet::from([relay.clone()]));
+    let mut demand = nmp_grammar::Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1])),
+            ..Filter::default()
+        },
+        ..nmp_grammar::Demand::default()
+    };
+    demand.routing = ReadRouting::Explicit(vec![relay.clone()]);
     demand.freshness = Freshness::MaxAge { seconds: 60 };
     let atom = ContextualAtom {
         filter: ConcreteFilter {
             kinds: filter.kinds.clone(),
             ..ConcreteFilter::default()
         },
-        source: demand.source.clone(),
+        routing: demand.routing.clone(),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
@@ -184,27 +196,36 @@ fn resolver_refusal_carries_the_pending_drop_delta_exactly_once() {
     let (_directory, path) = canonical_corruption(3, "pending-drop-corruption.redb");
     let store = RedbStore::open(&path).expect("reopen corrupted Redb fixture");
     let mut resolver = ResolverEngine::new();
-    let first = nmp_grammar::Demand::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1])),
-        ..Filter::default()
-    });
+    let first = nmp_grammar::Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1])),
+            ..Filter::default()
+        },
+        ..nmp_grammar::Demand::default()
+    };
     let first_handle = match resolver.subscribe(&store, first) {
         SubscribeOutcome::Opened { handle, .. } => handle,
         SubscribeOutcome::Refused { error, .. } => panic!("fixture open refused: {error}"),
     };
     drop(first_handle);
 
-    let failing = nmp_grammar::Demand::from_filter(Filter {
-        kinds: Some(BTreeSet::from([2])),
-        authors: Some(Binding::Derived(Box::new(Derived {
-            inner: nmp_grammar::Demand::from_filter(Filter {
-                kinds: Some(BTreeSet::from([3])),
-                ..Filter::default()
-            }),
-            project: Selector::Tag("p".to_owned()),
-        }))),
-        ..Filter::default()
-    });
+    let failing = nmp_grammar::Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([2])),
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner: nmp_grammar::Demand {
+                    selection: Filter {
+                        kinds: Some(BTreeSet::from([3])),
+                        ..Filter::default()
+                    },
+                    ..nmp_grammar::Demand::default()
+                },
+                project: Selector::Tag("p".to_owned()),
+            }))),
+            ..Filter::default()
+        },
+        ..nmp_grammar::Demand::default()
+    };
     let delta = match resolver.subscribe(&store, failing) {
         SubscribeOutcome::Refused { error, delta } => {
             assert!(error.to_string().contains("decode canonical event view"));
@@ -234,11 +255,14 @@ fn each_refused_open_arm_consumes_a_pending_drop_into_one_same_call_wire_close()
             RedbStore::open(&path).expect("reopen corrupted Redb fixture"),
             4,
         );
-        let mut first = nmp_grammar::Demand::from_filter(Filter {
-            kinds: Some(BTreeSet::from([1])),
-            ..Filter::default()
-        });
-        first.source = SourceAuthority::Pinned(BTreeSet::from([relay]));
+        let mut first = nmp_grammar::Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([1])),
+                ..Filter::default()
+            },
+            ..nmp_grammar::Demand::default()
+        };
+        first.routing = ReadRouting::Explicit(vec![relay]);
         first.freshness = Freshness::Live;
         let observation =
             match core.open_observation(LiveQuery::single(first), Timestamp::from(0u64)) {
@@ -271,22 +295,31 @@ fn each_refused_open_arm_consumes_a_pending_drop_into_one_same_call_wire_close()
         drop(core.white_box("handles.remove", |s| s.handles.remove(&branch)));
 
         let failing = if graph_refusal {
-            nmp_grammar::Demand::from_filter(Filter {
-                kinds: Some(BTreeSet::from([2])),
-                authors: Some(Binding::Derived(Box::new(Derived {
-                    inner: nmp_grammar::Demand::from_filter(Filter {
-                        kinds: Some(BTreeSet::from([3])),
-                        ..Filter::default()
-                    }),
-                    project: Selector::Tag("p".to_owned()),
-                }))),
-                ..Filter::default()
-            })
+            nmp_grammar::Demand {
+                selection: Filter {
+                    kinds: Some(BTreeSet::from([2])),
+                    authors: Some(Binding::Derived(Box::new(Derived {
+                        inner: nmp_grammar::Demand {
+                            selection: Filter {
+                                kinds: Some(BTreeSet::from([3])),
+                                ..Filter::default()
+                            },
+                            ..nmp_grammar::Demand::default()
+                        },
+                        project: Selector::Tag("p".to_owned()),
+                    }))),
+                    ..Filter::default()
+                },
+                ..nmp_grammar::Demand::default()
+            }
         } else {
-            nmp_grammar::Demand::from_filter(Filter {
-                kinds: Some(BTreeSet::from([2])),
-                ..Filter::default()
-            })
+            nmp_grammar::Demand {
+                selection: Filter {
+                    kinds: Some(BTreeSet::from([2])),
+                    ..Filter::default()
+                },
+                ..nmp_grammar::Demand::default()
+            }
         };
         let refusal = if graph_refusal { "graph" } else { "projection" };
         let effects = match core.open_observation(LiveQuery::single(failing), Timestamp::from(0u64))
@@ -325,10 +358,13 @@ fn each_refused_open_arm_consumes_a_pending_drop_into_one_same_call_wire_close()
 }
 
 fn routed_query(author: PublicKey, kind: u16) -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
-        kinds: Some(BTreeSet::from([kind])),
-        ..Filter::default()
+    LiveQuery::single(nmp_grammar::Demand {
+        selection: Filter {
+            authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
+            kinds: Some(BTreeSet::from([kind])),
+            ..Filter::default()
+        },
+        ..nmp_grammar::Demand::default()
     })
 }
 
@@ -442,13 +478,16 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
         "existing rows and evidence stay byte-identical"
     );
 
-    let healthy_query = LiveQuery::from_filter(Filter {
-        authors: Some(Binding::Literal(BTreeSet::from(
-            [candidate_author.to_hex()],
-        ))),
-        ids: Some(Binding::Literal(BTreeSet::from([healthy_id.to_hex()]))),
-        kinds: Some(BTreeSet::from([3])),
-        ..Filter::default()
+    let healthy_query = LiveQuery::single(nmp_grammar::Demand {
+        selection: Filter {
+            authors: Some(Binding::Literal(BTreeSet::from(
+                [candidate_author.to_hex()],
+            ))),
+            ids: Some(Binding::Literal(BTreeSet::from([healthy_id.to_hex()]))),
+            kinds: Some(BTreeSet::from([3])),
+            ..Filter::default()
+        },
+        ..nmp_grammar::Demand::default()
     });
     if let ObservationOpen::Refused { reason, .. } =
         core.open_observation(healthy_query, Timestamp::from(0u64))
@@ -540,13 +579,16 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
         "existing history rows, evidence, and ownership stay byte-identical"
     );
 
-    let healthy_query = LiveQuery::from_filter(Filter {
-        authors: Some(Binding::Literal(BTreeSet::from(
-            [candidate_author.to_hex()],
-        ))),
-        ids: Some(Binding::Literal(BTreeSet::from([healthy_id.to_hex()]))),
-        kinds: Some(BTreeSet::from([3])),
-        ..Filter::default()
+    let healthy_query = LiveQuery::single(nmp_grammar::Demand {
+        selection: Filter {
+            authors: Some(Binding::Literal(BTreeSet::from(
+                [candidate_author.to_hex()],
+            ))),
+            ids: Some(Binding::Literal(BTreeSet::from([healthy_id.to_hex()]))),
+            kinds: Some(BTreeSet::from([3])),
+            ..Filter::default()
+        },
+        ..nmp_grammar::Demand::default()
     });
     if let ObservationOpen::Refused { reason, .. } = core.open_history_observation(
         HistoryQuery::new(healthy_query, 1, 2),
@@ -606,17 +648,23 @@ fn seeded_store(events: impl IntoIterator<Item = Event>, relay: &RelayUrl) -> Re
 
 fn derived_history_query() -> HistoryQuery {
     HistoryQuery::new(
-        LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([1u16])),
-            authors: Some(Binding::Derived(Box::new(Derived {
-                inner: nmp_grammar::Demand::from_filter(Filter {
-                    kinds: Some(BTreeSet::from([3u16])),
-                    authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-                    ..Filter::default()
-                }),
-                project: Selector::Tag("p".to_owned()),
-            }))),
-            ..Filter::default()
+        LiveQuery::single(nmp_grammar::Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                authors: Some(Binding::Derived(Box::new(Derived {
+                    inner: nmp_grammar::Demand {
+                        selection: Filter {
+                            kinds: Some(BTreeSet::from([3u16])),
+                            authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                            ..Filter::default()
+                        },
+                        ..nmp_grammar::Demand::default()
+                    },
+                    project: Selector::Tag("p".to_owned()),
+                }))),
+                ..Filter::default()
+            },
+            ..nmp_grammar::Demand::default()
         }),
         2,
         4,
@@ -625,9 +673,12 @@ fn derived_history_query() -> HistoryQuery {
 
 fn literal_history_query() -> HistoryQuery {
     HistoryQuery::new(
-        LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([9u16])),
-            ..Filter::default()
+        LiveQuery::single(nmp_grammar::Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([9u16])),
+                ..Filter::default()
+            },
+            ..nmp_grammar::Demand::default()
         }),
         2,
         4,
@@ -833,12 +884,15 @@ fn under_return_keeps_limit_and_disconnect_evidence_without_false_end() {
         &first,
     );
     let query = HistoryQuery::new(
-        LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([1u16])),
-            authors: Some(Binding::Literal(BTreeSet::from([keys
-                .public_key()
-                .to_hex()]))),
-            ..Filter::default()
+        LiveQuery::single(nmp_grammar::Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                authors: Some(Binding::Literal(BTreeSet::from([keys
+                    .public_key()
+                    .to_hex()]))),
+                ..Filter::default()
+            },
+            ..nmp_grammar::Demand::default()
         }),
         2,
         6,

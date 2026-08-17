@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 
-use nmp_grammar::{
-    AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey, SourceAuthority,
-};
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey};
 use nmp_store::coverage_key;
 use nostr::RelayUrl;
 
@@ -17,7 +15,7 @@ fn pinned(relay: &RelayUrl, kind: u16) -> ContextualAtom {
             kinds: Some(BTreeSet::from([kind])),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+        routing: ReadRouting::Explicit(vec![relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }
@@ -121,14 +119,14 @@ fn one_preview_never_visits_ten_thousand_unrelated_incumbent_demand_edges() {
             kinds: Some(kinds),
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(BTreeSet::from([incumbent_relay.clone()])),
+        routing: ReadRouting::Explicit(vec![incumbent_relay.clone()]),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
     let sub_id = SubId::for_wire(
         incumbent_relay,
         &physical.filter,
-        &physical.source,
+        &physical.routing,
         physical.access,
     );
     let mut router = Router::new(RuleRegistry::default_widen_only());
@@ -137,7 +135,7 @@ fn one_preview_never_visits_ten_thousand_unrelated_incumbent_demand_edges() {
         vec![WireReq {
             sub_id,
             filter: physical.filter,
-            source: physical.source,
+            routing: physical.routing,
             provenance: BTreeSet::new(),
             coverage_claims,
             owner_demands,

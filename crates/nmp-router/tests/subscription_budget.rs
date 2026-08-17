@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, RelaySessionKey, SourceAuthority,
+    AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting, RelaySessionKey,
 };
 use nmp_router::{
     AdvertisedRelayLimits, CompileBudget, DemandKey, RelayUrl, Router, RuleRegistry, WireOp,
@@ -60,7 +60,7 @@ fn atom(value: &str, limit: Option<usize>) -> ContextualAtom {
             limit,
             ..ConcreteFilter::default()
         },
-        source: SourceAuthority::Pinned(relays()),
+        routing: ReadRouting::Explicit(relays().into_iter().collect()),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }

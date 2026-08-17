@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use cucumber::{given, then, when, World as _};
-use nmp::{Binding, Engine, EngineConfig, Filter, LiveQuery, Subscription};
+use nmp::{Binding, Demand, Engine, EngineConfig, Filter, LiveQuery, Subscription};
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay, WireReq};
 use nostr::{EventBuilder, EventId, Keys, RelayUrl, Timestamp};
 
@@ -112,10 +112,13 @@ async fn cold_public_engine_observes_alices_notes(world: &mut AcceptanceWorld) {
         .expect("the scripted indexer URL parses")]))),
     )
     .expect("the public engine starts");
-    let query = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1])),
-        authors: Some(Binding::Literal(BTreeSet::from([alice_hex.clone()]))),
-        ..Filter::default()
+    let query = LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1])),
+            authors: Some(Binding::Literal(BTreeSet::from([alice_hex.clone()]))),
+            ..Filter::default()
+        },
+        ..Demand::default()
     });
     let subscription = engine
         .observe(query, None)

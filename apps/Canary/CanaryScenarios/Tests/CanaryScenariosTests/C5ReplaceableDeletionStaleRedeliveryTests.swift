@@ -246,10 +246,10 @@ final class C5ReplaceableDeletionStaleRedeliveryTests: XCTestCase {
         // is a thing an app author has to know, and it is recorded as a
         // finding.
         let profiles = try engine.observe(
-            NMPFilter(kinds: [0], authors: .literal([alice.pubkeyHex, bob.pubkeyHex]))
+            .single(NMPDemand(selection: NMPFilter(kinds: [0], authors: .literal([alice.pubkeyHex, bob.pubkeyHex]))))
         )
         let feed = try engine.observe(
-            NMPFilter(kinds: [1, 5], authors: .literal([alice.pubkeyHex, carol.pubkeyHex]))
+            .single(NMPDemand(selection: NMPFilter(kinds: [1, 5], authors: .literal([alice.pubkeyHex, carol.pubkeyHex]))))
         )
 
         let profileLedger = ObservationLedger()

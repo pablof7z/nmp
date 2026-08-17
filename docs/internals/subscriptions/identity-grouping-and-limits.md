@@ -76,7 +76,7 @@ active REQ already carries its exact `CoverageKey`, the new observation simply
 attaches to it. Otherwise the first uncovered app request arms a 10ms,
 first-arrival-anchored deadline. More compatible observations may join that
 pending cohort without extending the deadline. When it expires, NMP routes the
-cohort and coalesces it inside each `(RelaySessionKey, SourceAuthority)`
+cohort and coalesces it inside each `(RelaySessionKey, ReadRouting)`
 partition.
 
 REQs become immutable when admitted. A later cohort never widens, narrows,
@@ -156,10 +156,10 @@ mistakes cost bandwidth rather than correctness.
 
 ### 3.2 Where merging happens
 
-`Router::compile` partitions demand by `(RelaySessionKey, SourceAuthority)` —
+`Router::compile` partitions demand by `(RelaySessionKey, ReadRouting)` —
 per relay, per access context, per source — then calls `coalesce_with` within
 each partition. Coalescing is **equal-context-only**: two atoms differing in
-`AccessContext` or `SourceAuthority` never merge, and never share an id.
+`AccessContext` or `ReadRouting` never merge, and never share an id.
 
 During ordinary app admission, coalescing runs over the **pending cohort**, not
 per query and not over already-sent requests. Two unrelated observations that

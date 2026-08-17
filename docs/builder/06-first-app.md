@@ -25,11 +25,10 @@ let demand = NMPDemand(
         kinds: .literal([appKind]),
         authors: .literal(selectedAuthors)
     ),
-    source: .authorOutboxes,
     access: .public
 )
 
-for await snapshot in try engine.observe(demand) {
+for await snapshot in try engine.observe(.single(demand)) {
     model.rows = snapshot.rows
     model.acquisition = snapshot.acquisition
     model.shortfall = snapshot.shortfall
@@ -66,11 +65,10 @@ val demand = Demand(
         kinds = Binding.literal(setOf(appKind)),
         authors = Binding.literal(selectedAuthors)
     ),
-    source = SourceAuthority.AuthorOutboxes,
     access = AccessContext.Public
 )
 
-engine.observe(demand).collect { snapshot ->
+engine.observe(NMPLiveQuery.single(demand)).collect { snapshot ->
     state.update {
         it.copy(
             rows = snapshot.rows,
@@ -100,18 +98,17 @@ Direct Rust uses the same canonical facade that FFI projects. Applications do
 not assemble store, router, resolver, signer, and transport crates themselves:
 
 ```rust
-use nmp::{Demand, Engine, EngineConfig, Filter, SourceAuthority};
+use nmp::{Demand, Engine, EngineConfig, Filter, ReadRouting};
 
 let engine = Engine::new(EngineConfig::persistent(path, bootstrap))?;
 engine.set_current_pubkey(Some(selected_pubkey))?;
 
 let demand = Demand {
     selection: Filter::literal_kinds_and_authors([app_kind], selected_authors),
-    source: SourceAuthority::AuthorOutboxes,
     access: Default::default(),
 };
 
-let mut snapshots = engine.observe(demand)?;
+let mut snapshots = engine.observe(LiveQuery::single(demand), None)?;
 while let Some(snapshot) = snapshots.recv() {
     app_state.apply(snapshot);
 }

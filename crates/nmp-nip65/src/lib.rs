@@ -18,8 +18,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, Binding, Demand, EventBuilder, Filter, Identity,
-    SourceAuthority, WriteIntent, WritePayload, WriteRouting,
+    AccessContext, Binding, Demand, EventBuilder, Filter, Identity, ReadRouting, WriteIntent,
+    WritePayload, WriteRouting,
 };
 use nostr::nips::nip65::RelayMetadata;
 use nostr::{Event, EventId, Kind, PublicKey, RelayUrl, Tag};
@@ -263,7 +263,7 @@ pub fn relay_list_demand(
             )),
             ..Filter::default()
         },
-        SourceAuthority::Pinned(sources.clone()),
+        ReadRouting::Explicit(sources.iter().cloned().collect()),
         AccessContext::Public,
     )
     .ok()
@@ -684,8 +684,8 @@ mod tests {
             .reroot(BTreeSet::from([author]))
             .expect("new need opens exact query");
         assert_eq!(
-            query.demand.source,
-            SourceAuthority::Pinned(BTreeSet::from([source_a.clone(), source_b.clone()]))
+            query.demand.routing,
+            ReadRouting::Explicit(vec![source_a.clone(), source_b.clone()])
         );
 
         let newer = relay_list_event(&keys, 2, &[("wss://new.example", None)]);

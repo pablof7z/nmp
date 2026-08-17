@@ -1,9 +1,9 @@
-// The explicit live-query identity, in ergonomic Kotlin shape (#107) --
-// mirrors NMPDemand.swift field-for-field. `NMPEngine.observe(NMPFilter)`
-// still applies the static AuthorOutboxes/Public default
-// (`nmp_grammar::Demand::from_filter`); a dev reaches for `NMPDemand` once
-// that default isn't enough -- declaring `Pinned` wire authority or a
-// non-`Agnostic` cache mode.
+// The live-query identity, in ergonomic Kotlin shape (#107) -- mirrors
+// NMPDemand.swift field-for-field. Every read declares one:
+// `NMPEngine.observe` takes an `NMPLiveQuery` whose branches are
+// `NMPDemand`s. No door infers routing from the selection's shape (#847) --
+// but the routing an app gets by saying nothing is `Auto`, so saying nothing
+// is the ordinary way to read.
 
 package com.nmp.sdk
 
@@ -14,35 +14,41 @@ import uniffi.nmp_ffi.FfiFreshness
 import uniffi.nmp_ffi.FfiLiveQuery
 import uniffi.nmp_ffi.liveQueryUnion
 import uniffi.nmp_ffi.maxQueryBranches
-import uniffi.nmp_ffi.FfiSourceAuthority
+import uniffi.nmp_ffi.FfiReadRouting
 
-/** Which authority resolves a query's relay set (`nmp_grammar::
- * SourceAuthority` mirror, #107). */
-sealed class NMPSourceAuthority {
-    object AuthorOutboxes : NMPSourceAuthority()
+/** Where a query's reads come from (`nmp_grammar::ReadRouting` mirror). A
+ * strategy, not a resolved relay set: re-executed against whatever the engine
+ * knows at each moment.
+ *
+ * These two words are the whole app-facing routing vocabulary, for reads and
+ * writes alike -- see `NMPWriteRouting`. */
+sealed class NMPReadRouting {
+    /** "Figure out where to read this from." NIP-65 outbound relays for every
+     * author the selection resolves, relay hints and prior provenance, then
+     * the operator's app and fallback lanes.
+     *
+     * The default. Naming a routing value is what an app does to OVERRIDE
+     * NMP, never what it must do to use NMP. */
+    object Auto : NMPReadRouting()
 
-    object Public : NMPSourceAuthority()
-
-    /** Ask ONLY this relay set, on the wire, full stop -- never neutral
-     * author facts, hints, provenance, or operator policy, regardless of
+    /** Ask ONLY this relay set, on the wire, full stop -- never widened to
+     * outbox, directory, app, fallback or indexer relays, regardless of
      * whether the selection is author-bearing. Must be nonempty:
-     * `NMPEngine.observe(NMPDemand)` throws
-     * `NMPError.EmptyPinnedRelaySet` if it is not. */
-    data class Pinned(val relays: Set<String>) : NMPSourceAuthority()
+     * `NMPEngine.observe` throws `NMPError.EmptyExplicitRelaySet` if it is
+     * not. */
+    data class Explicit(val relays: List<String>) : NMPReadRouting()
 
-    fun toFfi(): FfiSourceAuthority =
+    fun toFfi(): FfiReadRouting =
         when (this) {
-            is AuthorOutboxes -> FfiSourceAuthority.AuthorOutboxes
-            is Public -> FfiSourceAuthority.Public
-            is Pinned -> FfiSourceAuthority.Pinned(relays.toList())
+            is Auto -> FfiReadRouting.Auto
+            is Explicit -> FfiReadRouting.Explicit(relays)
         }
 
     companion object {
-        fun from(ffi: FfiSourceAuthority): NMPSourceAuthority =
+        fun from(ffi: FfiReadRouting): NMPReadRouting =
             when (ffi) {
-                is FfiSourceAuthority.AuthorOutboxes -> AuthorOutboxes
-                is FfiSourceAuthority.Public -> Public
-                is FfiSourceAuthority.Pinned -> Pinned(ffi.relays.toSet())
+                is FfiReadRouting.Auto -> Auto
+                is FfiReadRouting.Explicit -> Explicit(ffi.relays)
             }
     }
 }
@@ -73,15 +79,14 @@ sealed class NMPAccessContext {
 }
 
 /** `nmp_grammar::CacheMode` mirror (#107). Meaningful only alongside
- * `NMPSourceAuthority.Pinned` -- a no-op under any other source, since
- * there is no pinned relay set to intersect a cached row's provenance
- * against. */
+ * `NMPReadRouting.Explicit` -- a no-op under `Auto`, since there is no
+ * explicit relay set to intersect a cached row's provenance against. */
 enum class NMPCacheMode {
     /** Serve every matching cached row regardless of provenance. */
     Agnostic,
 
     /** Serve only cached rows whose unioned provenance set intersects the
-     * pinned relay set. */
+     * explicit relay set. */
     Strict,
     ;
 
@@ -124,11 +129,16 @@ sealed class NMPFreshness {
     }
 }
 
-/** The full live-query declaration a dev supplies -- `selection + source +
- * access + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565). */
+/** The full live-query declaration a dev supplies -- `selection + routing +
+ * access + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565).
+ *
+ * Every parameter but [selection] defaults, so the ordinary declaration is
+ * the selection and nothing else: `NMPDemand(filter)` routes `Auto`. */
 data class NMPDemand(
     val selection: NMPFilter,
-    val source: NMPSourceAuthority,
+    /** Where this demand's reads come from. Defaults to [NMPReadRouting.Auto]:
+     * an app that says nothing gets NMP's routing. */
+    val routing: NMPReadRouting = NMPReadRouting.Auto,
     val access: NMPAccessContext = NMPAccessContext.Public,
     val cache: NMPCacheMode = NMPCacheMode.Agnostic,
     val freshness: NMPFreshness = NMPFreshness.Live,
@@ -136,7 +146,7 @@ data class NMPDemand(
     fun toFfi(): FfiDemand =
         FfiDemand(
             selection = selection.toFfi(),
-            source = source.toFfi(),
+            routing = routing.toFfi(),
             access = access.toFfi(),
             cache = cache.toFfi(),
             freshness = freshness.toFfi(),
@@ -146,7 +156,7 @@ data class NMPDemand(
         fun from(ffi: FfiDemand): NMPDemand =
             NMPDemand(
                 selection = NMPFilter.from(ffi.selection),
-                source = NMPSourceAuthority.from(ffi.source),
+                routing = NMPReadRouting.from(ffi.routing),
                 access = NMPAccessContext.from(ffi.access),
                 cache = NMPCacheMode.from(ffi.cache),
                 freshness = NMPFreshness.from(ffi.freshness),
@@ -161,7 +171,7 @@ data class NMPDemand(
  *
  * Some correct reads need several branches whose results form one semantic
  * query and whose host-scoped values must not cross between them. Flattening
- * two hosts into one `NMPSourceAuthority.Pinned(setOf(a, b))` produces a
+ * two hosts into one `NMPReadRouting.Explicit(listOf(a, b))` produces a
  * confidently wrong cross-product; handing an app a list of demands makes the
  * app own the aggregate observation. This is neither: it is one read noun.
  *

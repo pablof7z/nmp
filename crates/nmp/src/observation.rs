@@ -59,6 +59,30 @@ fn access_string(access: AccessContext) -> String {
     }
 }
 
+/// The routing lanes that put one REQ on the wire, as a stable
+/// comma-separated list. Canonically ordered (the set already is), so a
+/// trace assertion never depends on iteration order. Empty renders as
+/// `"none"` rather than an empty string, so "no lane asked for this" is a
+/// statement rather than a missing value — that is the honest answer for a
+/// NIP-77 probe or reconciliation step, which carry no route of their own.
+fn lanes_string(lanes: &std::collections::BTreeSet<nmp_router::Lane>) -> String {
+    if lanes.is_empty() {
+        return "none".to_owned();
+    }
+    lanes
+        .iter()
+        .map(|lane| match lane {
+            nmp_router::Lane::AuthorOutbound => "author_outbound",
+            nmp_router::Lane::Hint => "hint",
+            nmp_router::Lane::Provenance => "provenance",
+            nmp_router::Lane::OperatorApp => "operator_app",
+            nmp_router::Lane::OperatorFallback => "operator_fallback",
+            nmp_router::Lane::Exact => "exact",
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn attribute(key: &str, value: impl ToString) -> (String, String) {
     (key.to_owned(), value.to_string())
 }
@@ -135,6 +159,7 @@ impl ObservationEvidence {
                 transport_generation,
                 request_revision,
                 filter,
+                lanes,
                 replay,
             } => {
                 evidence.kind = "relay_request";
@@ -146,6 +171,12 @@ impl ObservationEvidence {
                     attribute("access", access_string(access)),
                     attribute("transport_generation", transport_generation),
                     attribute("request_revision", request_revision),
+                    // WHY this relay was asked. `ReadRouting::Auto` decides a
+                    // route on the app's behalf, so the trace has to say
+                    // which lane it decided on — otherwise a default that
+                    // routes is indistinguishable from the filter-shape
+                    // inference it replaced.
+                    attribute("lanes", lanes_string(&lanes)),
                     attribute("replay", replay),
                 ];
             }

@@ -6,10 +6,10 @@ use std::collections::{BTreeSet, HashSet};
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::RowDelta;
-use nmp_grammar::LiveQuery;
 use nmp_grammar::{
-    AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter as QueryFilter, SourceAuthority,
+    AccessContext, Binding, ConcreteFilter, ContextualAtom, Filter as QueryFilter, ReadRouting,
 };
+use nmp_grammar::{Demand, LiveQuery};
 use nmp_runtime::{EngineThread, RowsReceiver};
 use nmp_store::{coverage_key, CoverageInterval, RedbStore, RelayObserved};
 use nmp_transport::PoolConfig;
@@ -19,11 +19,14 @@ const HISTORY_LEN: usize = 128;
 const VISIBLE_LIMIT: usize = 8;
 
 fn limited_query(author_hex: String) -> LiveQuery {
-    LiveQuery::from_filter(QueryFilter {
-        kinds: Some(BTreeSet::from([1])),
-        authors: Some(Binding::Literal(BTreeSet::from([author_hex]))),
-        limit: Some(VISIBLE_LIMIT),
-        ..QueryFilter::default()
+    LiveQuery::single(Demand {
+        selection: QueryFilter {
+            kinds: Some(BTreeSet::from([1])),
+            authors: Some(Binding::Literal(BTreeSet::from([author_hex]))),
+            limit: Some(VISIBLE_LIMIT),
+            ..QueryFilter::default()
+        },
+        ..Demand::default()
     })
 }
 
@@ -75,7 +78,7 @@ fn bounded_runtime_working_sets_do_not_delete_default_durable_history() {
             until: None,
             limit: None,
         },
-        source: SourceAuthority::AuthorOutboxes,
+        routing: ReadRouting::Auto,
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };

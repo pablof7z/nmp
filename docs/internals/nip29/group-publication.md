@@ -112,7 +112,7 @@ lifecycle. The `Group` therefore **mints a `Demand`**, the way
 `group_discovery_demand(host)` already does today, and the app takes it
 through ordinary `observe`.
 
-The host rides on the `Demand` itself as `SourceAuthority::Pinned({host})` —
+The host rides on the `Demand` itself as `ReadRouting::Explicit({host})` —
 `crates/nmp-nip29/src/demand.rs:1-12` documents this as #107's primitive,
 deliberately never a directory fact, so the pinned host flows through
 `ContextualAtom` identity, per-source `AcquisitionEvidence`, and diagnostics
@@ -368,7 +368,7 @@ resolving evidence at relay A while listing at relay B would be a confidently
 follows lookup) keeps its own authority; NIP-29 never recursively repins it.
 
 **Cache is scoped to the host too, not just the wire request.**
-`SourceAuthority::Pinned` alone only scopes which relay is *asked*;
+`ReadRouting::Explicit` alone only scopes which relay is *asked*;
 `CacheMode` separately governs which already-cached rows may *answer*, and the
 grammar's `Agnostic` default ignores provenance — so a naive pinned demand
 could let host A's cached kind:39002 row answer host B's structurally
@@ -407,7 +407,7 @@ state the underlying kinds cannot establish.
   `GROUP_ADMINS_KIND` / `GROUP_MEMBERS_KIND` (39000/39001/39002),
   `member_list_includes_at`, `admin_list_includes_at`: one host's complete
   discovery branch, every NIP-29-owned nesting level pinned to that host. `pinned_public_at` is the one choke point every NIP-29 demand
-  passes through for BOTH axes: `SourceAuthority::Pinned` (which relay is
+  passes through for BOTH axes: `ReadRouting::Explicit` (which relay is
   asked) and `CacheMode::Strict` (which cached rows may answer) — closing the
   cross-host cache leak a merely-pinned-but-`Agnostic` demand would otherwise
   have (`0ec66f8d`).

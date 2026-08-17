@@ -1136,15 +1136,15 @@ mod source_verdict_tests {
     //! costs a signature check.
 
     use std::collections::{BTreeMap, BTreeSet};
-    
+
     use nostr::{Event, EventBuilder, Keys, Kind, Timestamp};
 
     use super::{
         validate_source_event, AccessContextId, QualifiedSource, SourceEvidence, SourcePlanId,
     };
     use crate::{
-        sentinel_signature, LocalOrigin, Provenance, SemanticRefusal, SigState, StoredEvent,
-        schnorr_verifications,
+        schnorr_verifications, sentinel_signature, LocalOrigin, Provenance, SemanticRefusal,
+        SigState, StoredEvent,
     };
 
     fn stored(local: Option<LocalOrigin>) -> StoredEvent {

@@ -30,8 +30,8 @@ use nmp_engine::core::{AcquisitionEvidence, RowDelta, SourceStatus};
 use nmp_engine::publish_queue::{RelayState, WriteFact};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{
-    AccessContext, Binding, CacheMode, Demand, Derived, Filter, Freshness, IdentityField, Selector,
-    SetAlgebra, SetOp, SourceAuthority,
+    AccessContext, Binding, CacheMode, Demand, Derived, Filter, Freshness, IdentityField,
+    ReadRouting, Selector, SetAlgebra, SetOp,
 };
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
@@ -71,10 +71,13 @@ fn mirror_keys(k: &Keys) -> RelayKeys {
 }
 
 fn literal_kind1(author_hex: &str) -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1u16])),
-        authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
-        ..Filter::default()
+    LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1u16])),
+            authors: Some(Binding::Literal(BTreeSet::from([author_hex.to_string()]))),
+            ..Filter::default()
+        },
+        ..Demand::default()
     })
 }
 
@@ -685,14 +688,16 @@ impl AuthPolicy for DenyAuth {
     }
 }
 
+/// The same demand every other capstone read makes, under a NIP-42 access
+/// context. Routing is `Auto` whatever the selection names -- this helper
+/// used to branch on `authors.is_some()`, which was the deleted filter-shape
+/// inference reimplemented in a test fixture.
 fn authenticated_demand(selection: Filter, pubkey: nostr::PublicKey) -> Demand {
-    let source = if selection.authors.is_some() {
-        SourceAuthority::AuthorOutboxes
-    } else {
-        SourceAuthority::Public
-    };
-    Demand::new(selection, source, AccessContext::Nip42(pubkey))
-        .expect("authenticated capstone demand is valid")
+    Demand {
+        selection,
+        access: AccessContext::Nip42(pubkey),
+        ..Demand::default()
+    }
 }
 
 fn authenticated_literal_kind1(pubkey: nostr::PublicKey) -> LiveQuery {
@@ -807,7 +812,7 @@ fn public_engine_nested_strict_cache_uses_independent_relay_witnesses_before_lim
             limit: Some(2),
             ..Filter::default()
         },
-        SourceAuthority::Pinned(BTreeSet::from([relay_a.clone()])),
+        ReadRouting::Explicit(vec![relay_a.clone()]),
         AccessContext::Public,
     )
     .unwrap();
@@ -822,7 +827,7 @@ fn public_engine_nested_strict_cache_uses_independent_relay_witnesses_before_lim
             }))),
             ..Filter::default()
         },
-        SourceAuthority::Pinned(BTreeSet::from([relay_a])),
+        ReadRouting::Explicit(vec![relay_a]),
         AccessContext::Public,
     )
     .unwrap();

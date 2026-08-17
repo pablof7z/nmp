@@ -8,8 +8,8 @@
 use nostr::{EventId, PublicKey};
 
 use crate::convert::{
-    demand_to_ffi, identity_to_ffi, parse_pubkey, write_payload_to_ffi,
-    write_routing_to_ffi, FfiError,
+    demand_to_ffi, identity_to_ffi, parse_pubkey, write_payload_to_ffi, write_routing_to_ffi,
+    FfiError,
 };
 use crate::types::{FfiDemand, FfiRow, FfiWriteIntent};
 
@@ -359,7 +359,7 @@ pub fn comment_intent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FfiIdentity, FfiSourceAuthority, FfiWritePayload, FfiWriteRouting};
+    use crate::types::{FfiIdentity, FfiReadRouting, FfiWritePayload, FfiWriteRouting};
 
     fn podcast_root() -> FfiCommentRoot {
         FfiCommentRoot::External {
@@ -373,7 +373,7 @@ mod tests {
     fn comment_thread_demand_scopes_kind_1111() {
         let demand = comment_thread_demand(podcast_root()).unwrap();
         assert_eq!(demand.selection.kinds, Some(vec![1111]));
-        assert!(matches!(demand.source, FfiSourceAuthority::Public));
+        assert!(matches!(demand.routing, FfiReadRouting::Auto));
     }
 
     #[test]

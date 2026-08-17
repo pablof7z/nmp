@@ -222,16 +222,22 @@ pub struct FfiFilter {
     pub limit: Option<u32>,
 }
 
-/// Which authority resolves a [`FfiDemand`]'s relay set
-/// (`nmp_grammar::SourceAuthority` mirror, #107). `relays` is a raw URL
-/// string list -- `convert::demand_from_ffi` parses/canonicalizes/
-/// dedupes/sorts each one and rejects an empty set with a typed
-/// [`crate::convert::FfiError`], never a panic.
-#[derive(Debug, Clone, PartialEq, Eq, Enum)]
-pub enum FfiSourceAuthority {
-    AuthorOutboxes,
-    Public,
-    Pinned { relays: Vec<String> },
+/// Where an [`FfiDemand`]'s reads come from (`nmp_grammar::ReadRouting`
+/// mirror). Exactly the two words the Rust surface has, and the same two
+/// [`FfiWriteRouting`] has.
+///
+/// `Auto` is what an app gets by saying nothing, and it is total — no
+/// selection can fail against it. `relays` is a raw URL string list;
+/// `convert::demand_from_ffi` parses/canonicalizes/dedupes/sorts each one
+/// and rejects an empty set with a typed [`crate::convert::FfiError`],
+/// never a panic.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Enum)]
+pub enum FfiReadRouting {
+    #[default]
+    Auto,
+    Explicit {
+        relays: Vec<String>,
+    },
 }
 
 /// `nmp_grammar::AccessContext` mirror with a stable expected NIP-42 key.
@@ -242,7 +248,7 @@ pub enum FfiAccessContext {
 }
 
 /// `nmp_grammar::CacheMode` mirror (#107). Meaningful only alongside
-/// `FfiSourceAuthority::Pinned` -- see that type's doc.
+/// [`FfiReadRouting::Explicit`] -- see that type's doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum FfiCacheMode {
     Agnostic,
@@ -258,16 +264,17 @@ pub enum FfiFreshness {
     CacheOnly,
 }
 
-/// The full live-query declaration an app supplies -- `selection + source +
-/// access + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565). `NmpEngine::
-/// observe` still accepts a bare [`FfiFilter`] for the common case (the
-/// static `AuthorOutboxes`/`Public` default, #106's `Demand::from_filter`);
-/// this is the explicit constructor an app reaches for once it needs to
-/// declare `Pinned` wire authority or a non-`Agnostic` cache mode.
+/// The full live-query declaration an app supplies -- `selection + routing +
+/// access + cache + freshness` (`nmp_grammar::Demand` mirror,
+/// #106/#107/#565). Every branch of every `NmpEngine::observe` call is one
+/// of these: there is no bare-[`FfiFilter`] door, so routing is a declared
+/// value rather than something inferred from the selection's shape (#847) --
+/// but the value an app declares by saying nothing is
+/// [`FfiReadRouting::Auto`], so saying nothing is the ordinary case.
 #[derive(Debug, Clone, PartialEq, Eq, Record)]
 pub struct FfiDemand {
     pub selection: FfiFilter,
-    pub source: FfiSourceAuthority,
+    pub routing: FfiReadRouting,
     pub access: FfiAccessContext,
     pub cache: FfiCacheMode,
     pub freshness: FfiFreshness,
@@ -1520,7 +1527,7 @@ mod live_query_union_tests {
                     until: None,
                     limit: None,
                 },
-                source: FfiSourceAuthority::Pinned {
+                routing: FfiReadRouting::Explicit {
                     relays: vec![format!("wss://{relay}.example.com")],
                 },
                 access: FfiAccessContext::Public,

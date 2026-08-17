@@ -1,12 +1,28 @@
 use super::*;
 use crate::types::{
-    FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFrame, FfiIdentity,
-    FfiLiveQuery, FfiNotSentReason, FfiRowDelta, FfiSignEventRequest, FfiSigningState,
-    FfiSourceAuthority, FfiWindow, FfiWindowLoad, FfiWriteFact, FfiWriteOutcome, FfiWritePayload,
+    FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFrame, FfiFreshness,
+    FfiIdentity, FfiLiveQuery, FfiNotSentReason, FfiReadRouting, FfiRowDelta, FfiSignEventRequest,
+    FfiSigningState, FfiWindow, FfiWindowLoad, FfiWriteFact, FfiWriteOutcome, FfiWritePayload,
     FfiWriteRouting,
 };
 use std::collections::BTreeSet;
 use std::time::Duration;
+
+/// One `Public` demand branch over `selection`, on an unauthenticated
+/// connection with the default cache and freshness policies -- the shortest
+/// complete live query a test can declare now that no door infers one.
+fn public_query(selection: FfiFilter) -> FfiLiveQuery {
+    FfiLiveQuery {
+        branches: vec![FfiDemand {
+            selection,
+            routing: FfiReadRouting::Auto,
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
+            freshness: FfiFreshness::Live,
+        }],
+        aggregate_result_limit: None,
+    }
+}
 
 #[cfg(any(feature = "nip02", feature = "nip65"))]
 fn ffi_private_key(keys: &nostr::Keys) -> Arc<FfiPrivateKey> {
@@ -369,7 +385,7 @@ fn ffi_windowed_query(author: String) -> FfiLiveQuery {
                 }),
                 ..FfiFilter::default()
             },
-            source: FfiSourceAuthority::AuthorOutboxes,
+            routing: FfiReadRouting::Auto,
             access: FfiAccessContext::Public,
             cache: FfiCacheMode::Agnostic,
             freshness: crate::types::FfiFreshness::Live,
@@ -442,7 +458,7 @@ async fn ffi_windowed_observe_delivers_snapshot_frames_grows_and_reports_at_boun
     )
     .unwrap();
     let handle = engine
-        .observe_query(
+        .observe(
             ffi_windowed_query(keys.public_key().to_hex()),
             Some(FfiWindow::Expandable { initial: 1, max: 2 }),
         )
@@ -467,10 +483,10 @@ async fn ffi_windowed_observe_delivers_snapshot_frames_grows_and_reports_at_boun
     // the same verb fails closed, typed.
     let unbounded = engine
         .observe(
-            FfiFilter {
+            public_query(FfiFilter {
                 kinds: Some(vec![7_778]),
                 ..FfiFilter::default()
-            },
+            }),
             None,
         )
         .unwrap();
@@ -492,7 +508,7 @@ fn ffi_window_validation_is_typed() {
 
     let zero = engine
         .observe(
-            FfiFilter::default(),
+            public_query(FfiFilter::default()),
             Some(FfiWindow::Expandable { initial: 0, max: 4 }),
         )
         .map(|_| ())
@@ -501,7 +517,7 @@ fn ffi_window_validation_is_typed() {
 
     let inverted = engine
         .observe(
-            FfiFilter::default(),
+            public_query(FfiFilter::default()),
             Some(FfiWindow::Expandable { initial: 5, max: 2 }),
         )
         .map(|_| ())
@@ -513,10 +529,10 @@ fn ffi_window_validation_is_typed() {
 
     let limited = engine
         .observe(
-            FfiFilter {
+            public_query(FfiFilter {
                 limit: Some(1),
                 ..FfiFilter::default()
-            },
+            }),
             Some(FfiWindow::Expandable { initial: 1, max: 4 }),
         )
         .map(|_| ())
@@ -539,10 +555,10 @@ async fn ffi_shutdown_closes_windowed_observer_and_fails_request_rows_closed() {
     let engine = NmpEngine::new(NmpEngineConfig::default(), None).expect("engine must build");
     let handle = engine
         .observe(
-            FfiFilter {
+            public_query(FfiFilter {
                 kinds: Some(vec![7_778]),
                 ..FfiFilter::default()
-            },
+            }),
             Some(FfiWindow::Expandable { initial: 1, max: 4 }),
         )
         .expect("windowed observation must start");
@@ -1215,10 +1231,10 @@ async fn ffi_repeated_cancel_across_arc_owners_and_drop_yields_terminal_none() {
 
     let handle = engine
         .observe(
-            FfiFilter {
+            public_query(FfiFilter {
                 kinds: Some(vec![9999]),
                 ..FfiFilter::default()
-            },
+            }),
             None,
         )
         .expect("a well-formed filter must be accepted");
@@ -1261,10 +1277,10 @@ async fn ffi_slow_consumer_receives_one_exact_rebased_frame_then_closes() {
     let kind = nostr::Kind::Custom(44_646);
     let handle = engine
         .observe(
-            FfiFilter {
+            public_query(FfiFilter {
                 kinds: Some(vec![kind.as_u16()]),
                 ..FfiFilter::default()
-            },
+            }),
             None,
         )
         .expect("query must open");

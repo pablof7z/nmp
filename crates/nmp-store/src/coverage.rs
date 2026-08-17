@@ -50,7 +50,7 @@ pub const COVERAGE_KEY_VERSION: u8 = 2;
 /// refined by Fable's C). Two atoms that differ only in their time window
 /// or result cap hash identically — a floored refetch (`since = T+1`) must
 /// find the SAME row, never a fresh one. Two atoms that differ in
-/// `SourceAuthority`/`AccessContext` must NEVER share a row, even with an
+/// `ReadRouting`/`AccessContext` must NEVER share a row, even with an
 /// otherwise-identical selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CoverageKey(DescriptorHash);
@@ -85,7 +85,7 @@ pub(crate) fn window_erase(filter: &ConcreteFilter) -> ConcreteFilter {
 pub fn coverage_key(atom: &ContextualAtom) -> CoverageKey {
     let windowed = ContextualAtom {
         filter: window_erase(&atom.filter),
-        source: atom.source.clone(),
+        routing: atom.routing.clone(),
         access: atom.access,
         routing_evidence: BTreeSet::new(),
     };
@@ -331,7 +331,7 @@ mod tests {
     fn atom(filter: ConcreteFilter) -> ContextualAtom {
         ContextualAtom {
             filter,
-            source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+            routing: nmp_grammar::ReadRouting::Auto,
             access: nmp_grammar::AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         }
@@ -373,24 +373,31 @@ mod tests {
 
     /// #106's store-side anti-alias (Fable's C refinement, ledger #18's
     /// twin of the resolver-side `ContextualAtom` fix): the IDENTICAL
-    /// selection under different `SourceAuthority` must never share a
+    /// selection under different `ReadRouting` must never share a
     /// coverage row.
     #[test]
-    fn coverage_key_differs_for_different_source_authority() {
+    fn coverage_key_differs_for_different_read_routing() {
         let filter = cf(&[1], &["aa"], None, None);
-        let outbox = ContextualAtom {
+        let auto = ContextualAtom {
             filter: filter.clone(),
-            source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+            routing: nmp_grammar::ReadRouting::Auto,
             access: nmp_grammar::AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
-        let public = ContextualAtom {
+        let explicit = ContextualAtom {
             filter,
-            source: nmp_grammar::SourceAuthority::Public,
+            routing: nmp_grammar::ReadRouting::Explicit(vec![nostr::RelayUrl::parse(
+                "wss://coverage-anti-alias.example",
+            )
+            .unwrap()]),
             access: nmp_grammar::AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
-        assert_ne!(coverage_key(&outbox), coverage_key(&public));
+        assert_ne!(
+            coverage_key(&auto),
+            coverage_key(&explicit),
+            "what one relay set proved must never satisfy a demand routed anywhere NMP chooses"
+        );
     }
 
     /// #49's access-context anti-alias falsifier: a proven public interval
@@ -401,13 +408,13 @@ mod tests {
         let filter = cf(&[1], &["aa"], None, None);
         let public = ContextualAtom {
             filter: filter.clone(),
-            source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+            routing: nmp_grammar::ReadRouting::Auto,
             access: nmp_grammar::AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
         let authenticated = ContextualAtom {
             filter,
-            source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+            routing: nmp_grammar::ReadRouting::Auto,
             access: nmp_grammar::AccessContext::Nip42(nostr::Keys::generate().public_key()),
             routing_evidence: BTreeSet::new(),
         };

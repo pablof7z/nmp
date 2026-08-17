@@ -36,7 +36,7 @@
 ## NMP terms
 
 - **Live query:** the read workload observed through a native reactive stream.
-- **Demand:** `Selection + SourceAuthority + AccessContext`, the semantic
+- **Demand:** `Selection + ReadRouting + AccessContext`, the semantic
   descriptor NMP keeps live.
 - **Selection:** a Nostr filter whose set-valued fields may contain bindings.
 - **Binding:** `Literal | Reactive(CurrentPubkey) | Derived | SetOp`, the closed

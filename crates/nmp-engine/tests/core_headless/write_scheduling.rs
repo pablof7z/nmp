@@ -933,7 +933,11 @@ fn one_flaky_relay_costs_the_whole_delivery_queue() {
                 generation: 1,
             },
             signer_session(&flaky, event.pubkey),
-            RelayFrame::from(RelayMessage::ok(event.id, false, "rate-limited: measurement")),
+            RelayFrame::from(RelayMessage::ok(
+                event.id,
+                false,
+                "rate-limited: measurement",
+            )),
         ));
         spent += receipt_statuses(&refused).len();
         retries += 1;

@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use proptest::prelude::*;
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, SourceAuthority};
+use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting};
 use nmp_router::{CompileOutcome, RelayUrl, Router, RuleRegistry, SubId, WireOp, WireReq};
 use nmp_router_testkit::FixtureRoutingFacts;
 
@@ -45,7 +45,7 @@ fn author(n: u32) -> String {
 fn pinned_atom(filter: ConcreteFilter) -> ContextualAtom {
     ContextualAtom {
         filter,
-        source: SourceAuthority::Pinned(relays()),
+        routing: ReadRouting::Explicit(relays().into_iter().collect()),
         access: AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     }

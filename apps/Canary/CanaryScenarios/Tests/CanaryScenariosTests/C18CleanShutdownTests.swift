@@ -559,7 +559,7 @@ final class C18CleanShutdownTests: XCTestCase {
         timeout: TimeInterval,
         _ predicate: @escaping @Sendable (RowBatch) -> Bool
     ) async -> RowBatch? {
-        guard let query = try? engine.observe(filter) else { return nil }
+        guard let query = try? engine.observe(.single(NMPDemand(selection: filter))) else { return nil }
         defer { query.cancel() }
         return await withTaskGroup(of: RowBatch?.self) { group in
             group.addTask {

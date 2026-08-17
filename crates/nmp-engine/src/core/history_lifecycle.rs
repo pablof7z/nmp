@@ -1410,8 +1410,10 @@ impl CoreState {
         let mut by_id: BTreeMap<EventId, Row> = BTreeMap::new();
         for (branch, live) in state.live_handle_ids.iter().enumerate() {
             let declaration = &state.query.live_query().branches()[branch];
-            let pinned_relays = match (declaration.cache, &declaration.source) {
-                (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays),
+            let pinned_relays = match (declaration.cache, &declaration.routing) {
+                (CacheMode::Strict, ReadRouting::Explicit(relays)) => {
+                    Some(relays.iter().cloned().collect::<BTreeSet<_>>())
+                }
                 _ => None,
             };
             for mut atom in self.resolver.root_atoms(*live) {
@@ -1424,7 +1426,7 @@ impl CoreState {
                 // outside one branch's newest `target_rows` already has that
                 // many newer witnesses in that same branch, so it can never
                 // belong to the global newest `target_rows` either.
-                let rows = match pinned_relays {
+                let rows = match pinned_relays.as_ref() {
                     Some(relays) => {
                         self.store
                             .query_newest_under_pin(&filter, relays, state.target_rows)?
@@ -1520,8 +1522,10 @@ impl CoreState {
         let mut candidates = BTreeMap::<EventId, Row>::new();
         for (branch, live) in state.live_handle_ids.iter().enumerate() {
             let declaration = &state.query.live_query().branches()[branch];
-            let pinned_relays = match (declaration.cache, &declaration.source) {
-                (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays),
+            let pinned_relays = match (declaration.cache, &declaration.routing) {
+                (CacheMode::Strict, ReadRouting::Explicit(relays)) => {
+                    Some(relays.iter().cloned().collect::<BTreeSet<_>>())
+                }
                 _ => None,
             };
             for mut atom in self.resolver.root_atoms(*live) {
@@ -1530,7 +1534,7 @@ impl CoreState {
                 self.history_store_queries
                     .set(self.history_store_queries.get().saturating_add(1));
                 let filter = atom.to_nostr();
-                let rows = match pinned_relays {
+                let rows = match pinned_relays.as_ref() {
                     Some(relays) => self
                         .store
                         .query_newest_before_under_pin(&filter, relays, before, needed)?,
@@ -1655,8 +1659,10 @@ impl CoreState {
                 .any(|filter| filter.match_event(event, MatchEventOptions::new()))
         };
         let declaration = &state.query.live_query().branches()[0];
-        let pinned_relays = match (declaration.cache, &declaration.source) {
-            (CacheMode::Strict, SourceAuthority::Pinned(relays)) => Some(relays.clone()),
+        let pinned_relays = match (declaration.cache, &declaration.routing) {
+            (CacheMode::Strict, ReadRouting::Explicit(relays)) => {
+                Some(relays.iter().cloned().collect::<BTreeSet<_>>())
+            }
             _ => None,
         };
         // The one rule, `nmp_store::visible_under_pin`, over the committed
@@ -2014,9 +2020,12 @@ mod tests {
         let mut core = CoreState::new(store, 20);
         let query_for = |kind: u16| {
             HistoryQuery::new(
-                LiveQuery::from_filter(Filter {
-                    kinds: Some(BTreeSet::from([kind])),
-                    ..Filter::default()
+                LiveQuery::single(nmp_grammar::Demand {
+                    selection: Filter {
+                        kinds: Some(BTreeSet::from([kind])),
+                        ..Filter::default()
+                    },
+                    ..nmp_grammar::Demand::default()
                 }),
                 3,
                 6,
@@ -2143,9 +2152,12 @@ mod tests {
         // A minimal second window, deliberately reusing a handle id already
         // live under `first`.
         let query = HistoryQuery::new(
-            LiveQuery::from_filter(Filter {
-                kinds: Some(BTreeSet::from([3u16])),
-                ..Filter::default()
+            LiveQuery::single(nmp_grammar::Demand {
+                selection: Filter {
+                    kinds: Some(BTreeSet::from([3u16])),
+                    ..Filter::default()
+                },
+                ..nmp_grammar::Demand::default()
             }),
             3,
             6,

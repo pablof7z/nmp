@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 
 use nmp::{
     AccessContext, CacheMode, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery,
-    RelayState, Row, RowDelta, SourceAuthority, WriteFact, WriteIntent, WritePayload, WriteRouting,
+    ReadRouting, RelayState, Row, RowDelta, WriteFact, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_nip29 as nip29;
 use nmp_runtime::FifoReceiver;
@@ -124,7 +124,7 @@ fn pinned_strict_branch(hosts: &[RelayUrl], kind: u16) -> Demand {
             kinds: Some(BTreeSet::from([kind])),
             ..Filter::default()
         },
-        SourceAuthority::Pinned(hosts.iter().cloned().collect()),
+        ReadRouting::Explicit(hosts.to_vec()),
         AccessContext::Public,
     )
     .expect("a nonempty pinned set with a non-outbox source is constructible");

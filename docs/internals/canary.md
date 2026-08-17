@@ -246,7 +246,7 @@ feature keys, "NIP-22 comments" is the protocol's name and the name of
 `apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C1ColdStartLiveFeedTests.swift` seeds
 one event over a real `EVENT` frame before the engine exists (empty store,
 already-seeded relay), constructs `NMPEngine` normally, opens one
-`engine.observe(NMPFilter(kinds:authors:))`, waits (bounded, no sleep-as-oracle)
+`engine.observe(.single(NMPDemand(selection:source:)))`, waits (bounded, no sleep-as-oracle)
 for the historical row, then — from inside that SAME still-open subscription —
 seeds a second event through the relay and waits for it to arrive live with no
 duplicate canonical row (`Set(rows.map(\.id)).count == rows.count == 2`).
@@ -785,7 +785,7 @@ reactive assertion can be reached.
 No API finding for C4. The composition was expressible exactly as documented,
 with no internal knowledge required and no app-side workaround. Two honest
 observations rather than findings. First, the lab pins both the inner and outer
-demand to the one relay (`.pinned`) because `.authorOutboxes` would need
+demand to the one relay (`.explicit`) because `.auto` would need
 `NMPConfig.outboxRouting` indexers the lab does not have — the read/write
 routing asymmetry already recorded below, not a C4 defect. Second, C4 proves
 the binding **grows**; whether it retracts rows when a derived set *shrinks*
@@ -1433,7 +1433,7 @@ The point of the app is to surface places where the public API makes an
 ordinary thing awkward. It produced one before it ever ran.
 
 **Reads get outbox routing for free; writes do not.** A feed uses
-`NMPDemand(source: .authorOutboxes)` with no configuration at all. But
+`NMPDemand(source: .auto)` with no configuration at all. But
 `WriteRouting.auto` is a separate capability requiring `NMPConfig.outboxRouting`
 to be populated with indexers, and its own documentation says an engine
 constructed without them refuses it. An app that gets self-bootstrapping outbox

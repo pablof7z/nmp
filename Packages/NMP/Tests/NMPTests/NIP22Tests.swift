@@ -244,7 +244,7 @@ final class NIP22Tests: XCTestCase {
 
         let root = CommentRoot.external(target: .podcastEpisode(guid: "guid-query-path"))
         let demand = try commentThreadDemand(root: root)
-        let query = try engine.observe(demand)
+        let query = try engine.observe(.single(demand))
 
         let intent = try NMP.commentIntent(
             on: .root(root),

@@ -263,7 +263,7 @@ class NIP22Test {
 
                 val root = CommentRoot.External(Nip73.PodcastEpisode("guid-query-path"))
                 val demand = commentThreadDemand(root)
-                val rowFlow = engine.observe(demand)
+                val rowFlow = engine.observe(NMPLiveQuery.single(demand))
 
                 val intent =
                     commentIntent(

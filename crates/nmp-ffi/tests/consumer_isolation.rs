@@ -14,17 +14,27 @@ use std::time::{Duration, Instant};
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
-    FfiFilter, FfiFrame, FfiIdentity, FfiRowDelta, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiAccessContext, FfiCacheMode, FfiDemand, FfiFilter, FfiFrame, FfiFreshness, FfiIdentity,
+    FfiLiveQuery, FfiReadRouting, FfiRowDelta, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
 
 const TEST_SECRET_KEY_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000001";
 const CHANGES: usize = 400;
 
-fn note_query() -> FfiFilter {
-    FfiFilter {
-        kinds: Some(vec![1]),
-        ..FfiFilter::default()
+fn note_query() -> FfiLiveQuery {
+    FfiLiveQuery {
+        branches: vec![FfiDemand {
+            selection: FfiFilter {
+                kinds: Some(vec![1]),
+                ..FfiFilter::default()
+            },
+            routing: FfiReadRouting::Auto,
+            access: FfiAccessContext::Public,
+            cache: FfiCacheMode::Agnostic,
+            freshness: FfiFreshness::Live,
+        }],
+        aggregate_result_limit: None,
     }
 }
 

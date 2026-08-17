@@ -253,7 +253,7 @@ fn two_group_ids_on_the_same_host_stay_separated_by_h_at_the_wire() {
 /// the retained relay scope. A real, resolvable author outbox routing fact
 /// for the SAME identity sits in the routing directory the whole time; a
 /// group read must never widen onto it, because `group_demand_at` mints
-/// `SourceAuthority::Pinned`, never `AuthorOutboxes`, and the router cannot
+/// `ReadRouting::Explicit`, never `AuthorOutboxes`, and the router cannot
 /// add a source a `Pinned` demand did not name.
 #[test]
 fn a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox() {

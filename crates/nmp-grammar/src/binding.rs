@@ -136,11 +136,14 @@ mod tests {
 
         // AddressCoord selector round-trips through a Derived binding.
         let derived = Derived {
-            inner: Demand::from_filter(Filter {
-                kinds: Some(Set::from([30003])),
-                authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-                ..Filter::default()
-            }),
+            inner: Demand {
+                selection: Filter {
+                    kinds: Some(Set::from([30003])),
+                    authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                    ..Filter::default()
+                },
+                ..Demand::default()
+            },
             project: Selector::AddressCoord,
         };
         assert_eq!(derived.project, Selector::AddressCoord);

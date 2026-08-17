@@ -37,7 +37,7 @@ plane or optional debug mode.
 The semantic descriptor is:
 
 ```text
-Demand := Selection + SourceAuthority + AccessContext
+Demand := Selection + ReadRouting + AccessContext
 ```
 
 - **Selection** says which stored events match. It is a Nostr `Filter` whose
@@ -77,7 +77,7 @@ Binding  := Literal(set)
 Selector := Authors | Ids | Tag(name: String) | AddressCoord
 ```
 
-Every derived inner node owns a complete demand. Its source authority, access
+Every derived inner node owns a complete demand. Its read routing, access
 context, cache mode, and freshness policy are explicit and independent from the
 outer demand; implicit outer-context inheritance is unrepresentable.
 

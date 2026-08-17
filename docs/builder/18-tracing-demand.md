@@ -12,7 +12,7 @@ observe(Demand { selection, source, access })
     v
 concrete selection atoms + dependency provenance
     |
-    | apply typed source authority and access context
+    | apply declared read routing and access context
     v
 source intents + candidate facts
     |
@@ -45,7 +45,7 @@ relay merely because an `authors` field happens to exist.
 
 The descriptor explicitly says where acquisition may come from:
 
-- `AuthorOutboxes` authorizes NIP-65 discovery/coverage for selected authors;
+- `Auto` authorizes NIP-65 discovery/coverage for selected authors;
 - an opaque protocol-host authority authorizes its validated relay/object;
 - a private-protocol context authorizes verified recipient inbox facts; and
 - operator bootstrap policy authorizes discovery lanes.
@@ -120,12 +120,11 @@ An app-owned derived index might resolve from:
 ids := Derived(
   inner: Demand {
     selection: kinds:[appIndexKind], authors:[CurrentPubkey],
-    source: AuthorOutboxes,
     access: Public
   },
   project: Tag(e)
 )
-outer.source := AuthorOutboxes
+outer.source := Auto
 outer.access := Public
 ```
 

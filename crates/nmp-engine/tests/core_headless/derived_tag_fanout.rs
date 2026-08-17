@@ -55,7 +55,7 @@ fn group_admins(
 }
 
 /// The query under study, pinned to `relays` — mosaico reaches the wire via
-/// `SourceAuthority::Pinned` (`ExplicitPinned`), never via outbox routing,
+/// `ReadRouting::Explicit` (`ExplicitPinned`), never via outbox routing,
 /// so the study must too or the outer atom never routes at all.
 fn group_state_of_my_admin_groups(relays: &[RelayUrl]) -> LiveQuery {
     let pinned: BTreeSet<RelayUrl> = relays.iter().cloned().collect();
@@ -68,7 +68,7 @@ fn group_state_of_my_admin_groups(relays: &[RelayUrl]) -> LiveQuery {
             )]),
             ..Filter::default()
         },
-        SourceAuthority::Pinned(pinned.clone()),
+        ReadRouting::Explicit(pinned.clone().into_iter().collect()),
         AccessContext::Public,
     )
     .expect("pinned inner demand with a nonempty relay set is constructible");
@@ -86,7 +86,7 @@ fn group_state_of_my_admin_groups(relays: &[RelayUrl]) -> LiveQuery {
     LiveQuery::single(
         nmp_grammar::Demand::new(
             outer,
-            SourceAuthority::Pinned(pinned),
+            ReadRouting::Explicit(pinned.into_iter().collect()),
             AccessContext::Public,
         )
         .expect("pinned outer demand with a nonempty relay set is constructible"),
@@ -719,7 +719,7 @@ fn d_never_eosing_relay_still_serves_every_value() {
 /// distinct relay sessions.
 ///
 /// INVERTED, and the number to expect is PER RELAY rather than 1: coalescing
-/// is partitioned by `(RelaySessionKey, SourceAuthority)`
+/// is partitioned by `(RelaySessionKey, ReadRouting)`
 /// (`Router::compile`), so two pinned relays are two partitions and the
 /// collapsed answer is ONE sub EACH -- two in total, each carrying all four
 /// values. It previously asserted at least four (one per value), which is the
@@ -830,7 +830,7 @@ fn posts_by_my_follows(relays: &[RelayUrl]) -> LiveQuery {
             authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
             ..Filter::default()
         },
-        SourceAuthority::Pinned(pinned.clone()),
+        ReadRouting::Explicit(pinned.clone().into_iter().collect()),
         AccessContext::Public,
     )
     .expect("pinned inner demand with a nonempty relay set is constructible");
@@ -845,7 +845,7 @@ fn posts_by_my_follows(relays: &[RelayUrl]) -> LiveQuery {
     LiveQuery::single(
         nmp_grammar::Demand::new(
             outer,
-            SourceAuthority::Pinned(pinned),
+            ReadRouting::Explicit(pinned.into_iter().collect()),
             AccessContext::Public,
         )
         .expect("pinned outer demand with a nonempty relay set is constructible"),

@@ -17,7 +17,10 @@ fn author_outbox_queries_need_a_provider_until_a_positive_route_or_withdrawal() 
     };
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
 
-    let opened = core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(filter.clone())));
+    let opened = core.handle(EngineMsg::Subscribe(LiveQuery::single(Demand {
+        selection: filter.clone(),
+        ..Demand::default()
+    })));
     assert!(opened.iter().any(|effect| {
         matches!(
             effect,
@@ -36,7 +39,7 @@ fn author_outbox_queries_need_a_provider_until_a_positive_route_or_withdrawal() 
 
     let pinned = Demand::new(
         filter,
-        SourceAuthority::Pinned(BTreeSet::from([test_relay(65)])),
+        ReadRouting::Explicit(vec![test_relay(65)]),
         AccessContext::Public,
     )
     .expect("exact provider query");
@@ -73,10 +76,13 @@ fn author_outbox_queries_need_a_provider_until_a_positive_route_or_withdrawal() 
 #[test]
 fn shared_author_outbox_need_retires_only_with_its_last_wire_owner() {
     let author = Keys::generate().public_key();
-    let query = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1])),
-        authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
-        ..Filter::default()
+    let query = LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1])),
+            authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
+            ..Filter::default()
+        },
+        ..Demand::default()
     });
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
 
@@ -139,14 +145,17 @@ mod affected_handle_invalidation_tests {
     }
 
     fn room_query_for_kind(room: usize, kind: u16, limit: usize) -> LiveQuery {
-        LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([kind])),
-            tags: BTreeMap::from([(
-                IndexedTagName::new('h').unwrap(),
-                Binding::Literal(BTreeSet::from([format!("room-{room}")])),
-            )]),
-            limit: Some(limit),
-            ..Filter::default()
+        LiveQuery::single(Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([kind])),
+                tags: BTreeMap::from([(
+                    IndexedTagName::new('h').unwrap(),
+                    Binding::Literal(BTreeSet::from([format!("room-{room}")])),
+                )]),
+                limit: Some(limit),
+                ..Filter::default()
+            },
+            ..Demand::default()
         })
     }
 
@@ -155,12 +164,15 @@ mod affected_handle_invalidation_tests {
     }
 
     fn unlimited_room_query(room: usize) -> LiveQuery {
-        LiveQuery::from_filter(Filter {
-            tags: BTreeMap::from([(
-                IndexedTagName::new('h').unwrap(),
-                Binding::Literal(BTreeSet::from([format!("room-{room}")])),
-            )]),
-            ..Filter::default()
+        LiveQuery::single(Demand {
+            selection: Filter {
+                tags: BTreeMap::from([(
+                    IndexedTagName::new('h').unwrap(),
+                    Binding::Literal(BTreeSet::from([format!("room-{room}")])),
+                )]),
+                ..Filter::default()
+            },
+            ..Demand::default()
         })
     }
 
@@ -264,17 +276,25 @@ mod affected_handle_invalidation_tests {
         let mut core = EngineCore::new(store, 20);
         core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
 
-        let follows_query = LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([1u16])),
-            authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
-                inner: nmp_grammar::Demand::from_filter(Filter {
-                    kinds: Some(BTreeSet::from([3u16])),
-                    authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
-                    ..Filter::default()
-                }),
-                project: nmp_grammar::Selector::Tag("p".to_owned()),
-            }))),
-            ..Filter::default()
+        let follows_query = LiveQuery::single(Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([1u16])),
+                authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
+                    inner: Demand {
+                        selection: Filter {
+                            kinds: Some(BTreeSet::from([3u16])),
+                            authors: Some(Binding::Reactive(
+                                nmp_grammar::IdentityField::ActivePubkey,
+                            )),
+                            ..Filter::default()
+                        },
+                        ..Demand::default()
+                    },
+                    project: nmp_grammar::Selector::Tag("p".to_owned()),
+                }))),
+                ..Filter::default()
+            },
+            ..Demand::default()
         });
         let subscribe = core.handle(EngineMsg::Subscribe(follows_query));
         let handle = subscribed_handle(&subscribe);
@@ -458,9 +478,10 @@ mod affected_handle_invalidation_tests {
         core.white_box("active_pubkey", |s| {
             s.active_pubkey = Some(keys.public_key())
         });
-        let subscribe = core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(
-            Filter::default(),
-        )));
+        let subscribe = core.handle(EngineMsg::Subscribe(LiveQuery::single(Demand {
+            selection: Filter::default(),
+            ..Demand::default()
+        })));
         let handle = subscribed_handle(&subscribe);
 
         core.projection_store_queries.set(0);
@@ -733,9 +754,10 @@ mod affected_handle_invalidation_tests {
                 )
                 .unwrap();
             let mut core = EngineCore::new(store, 13);
-            let subscribed = core.handle(EngineMsg::Subscribe(LiveQuery::from_filter(
-                Filter::default(),
-            )));
+            let subscribed = core.handle(EngineMsg::Subscribe(LiveQuery::single(Demand {
+                selection: Filter::default(),
+                ..Demand::default()
+            })));
             let handle = subscribed_handle(&subscribed);
             (core, handle)
         };
@@ -1222,7 +1244,7 @@ mod affected_handle_invalidation_tests {
         let pinned = RelayUrl::parse("wss://strict-pinned.example").unwrap();
         let other = RelayUrl::parse("wss://strict-other.example").unwrap();
         let mut demand = room_query(25).branches()[0].clone();
-        demand.source = SourceAuthority::Pinned(BTreeSet::from([pinned.clone()]));
+        demand.routing = ReadRouting::Explicit(vec![pinned.clone()]);
         demand.cache = CacheMode::Strict;
 
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
@@ -1283,17 +1305,25 @@ mod affected_handle_invalidation_tests {
         });
         core.handle(EngineMsg::SetActivePubkey(Some(me.public_key())));
 
-        let query = LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([9u16])),
-            authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
-                inner: nmp_grammar::Demand::from_filter(Filter {
-                    kinds: Some(BTreeSet::from([3u16])),
-                    authors: Some(Binding::Reactive(nmp_grammar::IdentityField::ActivePubkey)),
-                    ..Filter::default()
-                }),
-                project: nmp_grammar::Selector::Tag("p".to_owned()),
-            }))),
-            ..Filter::default()
+        let query = LiveQuery::single(Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([9u16])),
+                authors: Some(Binding::Derived(Box::new(nmp_grammar::Derived {
+                    inner: Demand {
+                        selection: Filter {
+                            kinds: Some(BTreeSet::from([3u16])),
+                            authors: Some(Binding::Reactive(
+                                nmp_grammar::IdentityField::ActivePubkey,
+                            )),
+                            ..Filter::default()
+                        },
+                        ..Demand::default()
+                    },
+                    project: nmp_grammar::Selector::Tag("p".to_owned()),
+                }))),
+                ..Filter::default()
+            },
+            ..Demand::default()
         });
         core.handle(EngineMsg::Subscribe(query));
 
@@ -1507,7 +1537,7 @@ mod coverage_evidence_refresh_tests {
                     kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
                     ..Filter::default()
                 },
-                SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+                ReadRouting::Explicit(vec![relay.clone()]),
                 AccessContext::Public,
             )
             .unwrap(),
@@ -1531,7 +1561,7 @@ mod coverage_evidence_refresh_tests {
                     limit,
                     ..Filter::default()
                 },
-                SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+                ReadRouting::Explicit(vec![relay.clone()]),
                 AccessContext::Public,
             )
             .unwrap(),
@@ -1678,6 +1708,7 @@ mod coverage_evidence_refresh_tests {
                 filter: &neg_filter,
                 coverage_claims: target.coverage_claims.clone(),
                 owner_demands: target.owner_demands.clone(),
+                lanes: BTreeSet::new(),
                 replay: false,
                 event_failure_target: EventFailureTarget::ThisSend,
             })
@@ -1688,6 +1719,7 @@ mod coverage_evidence_refresh_tests {
                 neg_filter.clone(),
                 target.coverage_claims.clone(),
                 target.owner_demands.clone(),
+                BTreeSet::new(),
             )
         });
         let request_facts = accept_request(

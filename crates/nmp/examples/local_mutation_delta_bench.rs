@@ -111,33 +111,51 @@ fn deterministic_keys(index: usize) -> Keys {
     Keys::parse(&format!("{:064x}", index + 1)).expect("small nonzero scalar")
 }
 
-fn scenario_filter(scenario: Scenario, author: &Keys) -> Filter {
+fn scenario_demand(scenario: Scenario, author: &Keys) -> Demand {
     let authors = || {
         Some(Binding::Literal(BTreeSet::from([author
             .public_key()
             .to_hex()])))
     };
+    // Each scenario names its own source authority. The two author-bearing
+    // shapes chase outboxes because that is what they are measuring, not
+    // because they happen to bind `authors`.
     match scenario {
-        Scenario::Global => Filter::default(),
-        Scenario::HotRoom => Filter {
-            tags: BTreeMap::from([(
-                IndexedTagName::new('h').unwrap(),
-                Binding::Literal(BTreeSet::from(["nmp-scale-hot-room".to_owned()])),
-            )]),
-            ..Filter::default()
+        Scenario::Global => Demand {
+            selection: Filter::default(),
+            ..Demand::default()
         },
-        Scenario::Author => Filter {
-            authors: authors(),
-            ..Filter::default()
+        Scenario::HotRoom => Demand {
+            selection: Filter {
+                tags: BTreeMap::from([(
+                    IndexedTagName::new('h').unwrap(),
+                    Binding::Literal(BTreeSet::from(["nmp-scale-hot-room".to_owned()])),
+                )]),
+                ..Filter::default()
+            },
+            ..Demand::default()
         },
-        Scenario::Kind => Filter {
-            kinds: Some(BTreeSet::from([9u16])),
-            ..Filter::default()
+        Scenario::Author => Demand {
+            selection: Filter {
+                authors: authors(),
+                ..Filter::default()
+            },
+            ..Demand::default()
         },
-        Scenario::AuthorKind => Filter {
-            kinds: Some(BTreeSet::from([9u16])),
-            authors: authors(),
-            ..Filter::default()
+        Scenario::Kind => Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([9u16])),
+                ..Filter::default()
+            },
+            ..Demand::default()
+        },
+        Scenario::AuthorKind => Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([9u16])),
+                authors: authors(),
+                ..Filter::default()
+            },
+            ..Demand::default()
         },
     }
 }
@@ -305,7 +323,7 @@ fn main() {
         let store = RedbStore::open(&path).expect("open benchmark store");
         let mut core = EngineCore::new(store, 20);
         let (_handle, initial_rows) = initial_snapshot(core.handle(EngineMsg::Subscribe(
-            LiveQuery::from_filter(scenario_filter(scenario, &author)),
+            LiveQuery::single(scenario_demand(scenario, &author)),
         )));
         let mut local_direct = Samples::default();
         let mut local_forced = Samples::default();

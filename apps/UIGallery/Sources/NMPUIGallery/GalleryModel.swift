@@ -70,13 +70,11 @@ final class GalleryModel: ObservableObject {
                     kinds: [0],
                     authors: .literal([pubkey]),
                     limit: 1
-                ),
-                source: .authorOutboxes
+                )
             )
         case .eventID(let id), .event(let id, _, _, _):
             return NMPDemand(
-                selection: NMPFilter(ids: .literal([id]), limit: 1),
-                source: .public
+                selection: NMPFilter(ids: .literal([id]), limit: 1)
             )
         case .coordinate(let kind, let author, let identifier, _):
             return NMPDemand(
@@ -85,8 +83,7 @@ final class GalleryModel: ObservableObject {
                     authors: .literal([author]),
                     tags: ["d": .literal([identifier])],
                     limit: 1
-                ),
-                source: .authorOutboxes
+                )
             )
         }
     }

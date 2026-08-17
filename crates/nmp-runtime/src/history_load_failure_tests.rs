@@ -14,7 +14,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{Binding, Derived, Filter, LiveQuery, Selector};
+use nmp_grammar::{Binding, Demand, Derived, Filter, LiveQuery, Selector};
 use nmp_store::{testing, RedbStore, RelayObserved};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 
@@ -63,9 +63,12 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
         ObservationOwnershipCensus::default()
     );
 
-    let ordinary = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([1])),
-        ..Filter::default()
+    let ordinary = LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([1])),
+            ..Filter::default()
+        },
+        ..Demand::default()
     });
     assert!(matches!(
         handle.subscribe(ordinary),
@@ -77,9 +80,12 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
         ObservationOwnershipCensus::default(),
         "post-handle ordinary projection refusal must roll back every owner"
     );
-    let healthy = LiveQuery::from_filter(Filter {
-        kinds: Some(BTreeSet::from([2])),
-        ..Filter::default()
+    let healthy = LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([2])),
+            ..Filter::default()
+        },
+        ..Demand::default()
     });
     let (ordinary_handle, ordinary_rows) = handle.subscribe(healthy.clone()).expect(
         "a disjoint healthy ordinary filter proves corruption is targeted and runtime survived",
@@ -94,9 +100,12 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
     );
 
     let history = HistoryQuery::new(
-        LiveQuery::from_filter(Filter {
-            kinds: Some(BTreeSet::from([1])),
-            ..Filter::default()
+        LiveQuery::single(Demand {
+            selection: Filter {
+                kinds: Some(BTreeSet::from([1])),
+                ..Filter::default()
+            },
+            ..Demand::default()
         }),
         1,
         2,
@@ -123,16 +132,22 @@ fn observation_open_failures_are_typed_leak_free_and_leave_runtime_usable() {
         ObservationOwnershipCensus::default()
     );
 
-    let derived = LiveQuery::from_filter(Filter {
-        authors: Some(Binding::Derived(Box::new(Derived {
-            inner: nmp_grammar::Demand::from_filter(Filter {
-                kinds: Some(BTreeSet::from([1])),
-                ..Filter::default()
-            }),
-            project: Selector::Tag("p".to_owned()),
-        }))),
-        kinds: Some(BTreeSet::from([4])),
-        ..Filter::default()
+    let derived = LiveQuery::single(Demand {
+        selection: Filter {
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner: Demand {
+                    selection: Filter {
+                        kinds: Some(BTreeSet::from([1])),
+                        ..Filter::default()
+                    },
+                    ..Demand::default()
+                },
+                project: Selector::Tag("p".to_owned()),
+            }))),
+            kinds: Some(BTreeSet::from([4])),
+            ..Filter::default()
+        },
+        ..Demand::default()
     });
     assert!(matches!(
         handle.subscribe(derived.clone()),
@@ -170,9 +185,12 @@ fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() 
             EngineThread::spawn(store, 4, nmp_transport::PoolConfig::default()).unwrap();
         let caller_handle = handle.clone();
         let caller = std::thread::spawn(move || {
-            caller_handle.subscribe(LiveQuery::from_filter(Filter {
-                kinds: Some(BTreeSet::from([1])),
-                ..Filter::default()
+            caller_handle.subscribe(LiveQuery::single(Demand {
+                selection: Filter {
+                    kinds: Some(BTreeSet::from([1])),
+                    ..Filter::default()
+                },
+                ..Demand::default()
             }))
         });
         blocked.wait_until_entered();
@@ -195,9 +213,12 @@ fn shutdown_queued_during_each_refusal_keeps_the_typed_reply_and_never_panics() 
         let caller_handle = handle.clone();
         let caller = std::thread::spawn(move || {
             caller_handle.subscribe_history(HistoryQuery::new(
-                LiveQuery::from_filter(Filter {
-                    kinds: Some(BTreeSet::from([2])),
-                    ..Filter::default()
+                LiveQuery::single(Demand {
+                    selection: Filter {
+                        kinds: Some(BTreeSet::from([2])),
+                        ..Filter::default()
+                    },
+                    ..Demand::default()
                 }),
                 1,
                 2,

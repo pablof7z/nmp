@@ -72,7 +72,13 @@ final class DiagnosticsTests: XCTestCase {
         defer { engine.shutdown() }
 
         let hexPubkey = String(repeating: "a", count: 64)
-        let query = try engine.observe(NMPFilter(kinds: [1], authors: .literal([hexPubkey])))
+        let query = try engine.observe(
+            .single(
+                NMPDemand(
+                    selection: NMPFilter(kinds: [1], authors: .literal([hexPubkey]))
+                )
+            )
+        )
 
         let diagnostics = try engine.observeDiagnostics()
         let snapshot = await Self.firstSnapshot(

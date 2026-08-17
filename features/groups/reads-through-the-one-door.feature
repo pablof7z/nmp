@@ -104,7 +104,7 @@ Feature: Reading a group goes through the one read door
   # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-006
   # nmp:status=built
   # nmp:evidence=rust:nmp::a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox
-  # nmp:falsifier=sourcing a group read's Demand from SourceAuthority::AuthorOutboxes instead of Pinned makes a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox see the discovered author outbox relay contacted alongside or instead of the retained pinned host
+  # nmp:falsifier=sourcing a group read's Demand from ReadRouting::Auto instead of Pinned makes a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox see the discovered author outbox relay contacted alongside or instead of the retained pinned host
   @nip29
   Scenario: The host is a query-declared pinning, not a directory fact
     Given a filter selecting kind 9
@@ -116,7 +116,7 @@ Feature: Reading a group goes through the one read door
   # nmp:id=PROTOCOL-READSTHROUGHTHEONEDOOR-007
   # nmp:status=built
   # nmp:evidence=rust:nmp::an_unproven_host_never_presents_a_group_read_as_authoritatively_empty
-  # nmp:falsifier=the same SourceAuthority::AuthorOutboxes substitution above (with no active identity and no routing facts registered) makes an_unproven_host_never_presents_a_group_read_as_authoritatively_empty see a non-empty shortfall -- the "nothing is even trying" fact -- instead of the honest single Connecting source this scenario requires
+  # nmp:falsifier=the same ReadRouting::Auto substitution above (with no active identity and no routing facts registered) makes an_unproven_host_never_presents_a_group_read_as_authoritatively_empty see a non-empty shortfall -- the "nothing is even trying" fact -- instead of the honest single Connecting source this scenario requires
   @nip29
   Scenario: An unreachable host does not make the group look empty
     Given relay "wss://relay.groups.example" cannot connect

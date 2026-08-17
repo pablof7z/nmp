@@ -374,7 +374,7 @@ mod tests {
     #[test]
     #[cfg(feature = "nip29")]
     fn nip29_browsing_still_demands_an_explicitly_supplied_host() {
-        use crate::types::{FfiFilter, FfiSourceAuthority};
+        use crate::types::{FfiFilter, FfiReadRouting};
 
         let list = parse_simple_groups_list_tolerant(fabricated_row(10_009));
         let selected = list.items[0].clone();
@@ -386,8 +386,8 @@ mod tests {
             .expect("a single-host group read is one branch");
         assert_eq!(query.branches.len(), 1);
         assert_eq!(
-            query.branches[0].source,
-            FfiSourceAuthority::Pinned {
+            query.branches[0].routing,
+            FfiReadRouting::Explicit {
                 relays: vec![selected.host_relay.clone()]
             }
         );

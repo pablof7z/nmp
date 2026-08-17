@@ -2,10 +2,10 @@ use std::sync::{Arc, Mutex};
 
 use super::NmpEngine;
 use crate::convert::{
-    filter_from_ffi, frame_to_ffi, live_query_from_ffi, window_from_ffi, FfiError,
-    FfiRequestRowsError, FfiRowPullError,
+    frame_to_ffi, live_query_from_ffi, window_from_ffi, FfiError, FfiRequestRowsError,
+    FfiRowPullError,
 };
-use crate::types::{FfiFilter, FfiFrame, FfiLiveQuery, FfiWindow};
+use crate::types::{FfiFrame, FfiLiveQuery, FfiWindow};
 
 /// The app-facing pull-based handle to a live subscription (returned by
 /// [`NmpEngine::observe`], #680/#762). Native SDKs synchronously call
@@ -116,36 +116,19 @@ impl NmpEngine {
     /// `initial > max` fail closed here with a typed [`FfiError`]; a
     /// windowed selection that already declares a NIP-01 `limit` fails with
     /// [`FfiError::WindowSelectionHasLimit`].
-    pub fn observe(
-        &self,
-        query: FfiFilter,
-        window: Option<FfiWindow>,
-    ) -> Result<Arc<NmpRowStream>, FfiError> {
-        let filter = filter_from_ffi(query)?;
-        let window = window_from_ffi(window)?;
-        let windowed = window.is_some();
-        let subscription = self
-            .engine
-            .observe_async(nmp::LiveQuery::from_filter(filter), window)?;
-        Ok(NmpRowStream::new(subscription, windowed))
-    }
-
-    /// Open a live subscription over an explicit [`FfiLiveQuery`] (#1108) --
-    /// the constructor an app reaches for once [`Self::observe`]'s bare
-    /// [`FfiFilter`] (which always takes `Demand::from_filter`'s static
-    /// default, one branch) isn't enough: declaring `Pinned` wire authority,
-    /// a non-default `AccessContext`, a non-`Agnostic` `CacheMode`, SEVERAL
-    /// independent demand branches, or a bound on their merged row union.
+    ///
+    /// The query is always a complete [`FfiLiveQuery`]: one or more demand
+    /// branches, each naming its own source authority, access context, cache
+    /// mode and freshness. There is no bare-filter door -- selection syntax
+    /// never decides wire authority (#847).
     ///
     /// Branches are observed through this ONE subscription: rows are unioned
     /// by event id with provenance merged, each frame carries one evidence
     /// entry per canonical branch, and one cancellation withdraws every
-    /// branch exactly once. Same pull-based/cancel/window shape as `observe`
-    /// in every other respect (see that method's doc for the `window`
-    /// policy); a window and an `aggregate_result_limit` are two owners of
-    /// row membership and fail closed with
+    /// branch exactly once. A window and an `aggregate_result_limit` are two
+    /// owners of row membership and fail closed with
     /// [`FfiError::WindowAggregateResultLimit`].
-    pub fn observe_query(
+    pub fn observe(
         &self,
         query: FfiLiveQuery,
         window: Option<FfiWindow>,

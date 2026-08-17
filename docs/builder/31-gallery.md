@@ -10,7 +10,7 @@ Observe one caller-owned kind from literal authors:
 ```text
 selection: kinds = Literal([appKind])
            authors = Literal(selectedAuthors)
-source:    AuthorOutboxes
+source:    Auto
 access:    Public
 ```
 
@@ -24,7 +24,6 @@ An app-owned index event names record ids in `e` tags:
 outer.ids = Derived(
   inner: Demand {
     selection: kinds:[appIndexKind], authors:[CurrentPubkey],
-    source: AuthorOutboxes,
     access: Public
   },
   project: Tag(e)
@@ -132,7 +131,7 @@ identity and cannot prove acquisition for another context.
 ## 10. Permanent diagnostics
 
 Every example above should be explainable on screen: descriptor expansion,
-source authority, exact relay filters, access/AUTH, received kinds, pending
+read routing, exact relay filters, access/AUTH, received kinds, pending
 intent, signer state, route reasons, attempts, caps, and shortfall.
 
 If an example needs app-owned subscription repair, raw relay expansion, a

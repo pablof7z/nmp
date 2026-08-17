@@ -7,7 +7,7 @@ use nmp_grammar::{ContextualAtom, RelaySessionKey};
 use crate::budget::CompileBudget;
 use crate::ownership::{refresh_refusal_diagnostics, refused_session_class};
 use crate::plan::{DemandKey, WireDelta, WireOp, WireReq};
-use crate::route::{self, AtomClass};
+use crate::route;
 use crate::{RequestMetadataRemoval, Router, WithdrawalOutcome};
 
 impl Router {
@@ -98,20 +98,16 @@ impl Router {
                 continue;
             };
             uncovered_authors_changed |= self.remove_uncovered_demand(key);
-            if let AtomClass::Coverage { authors, .. } =
-                route::classify(&active_atom.filter, &active_atom.source)
-            {
-                for author in authors {
-                    let remove = self
-                        .active_outbox_authors
-                        .get_mut(&author)
-                        .is_some_and(|count| {
-                            *count = count.saturating_sub(1);
-                            *count == 0
-                        });
-                    if remove {
-                        self.active_outbox_authors.remove(&author);
-                    }
+            for author in route::outbox_authors(&active_atom.filter, &active_atom.routing) {
+                let remove = self
+                    .active_outbox_authors
+                    .get_mut(&author)
+                    .is_some_and(|count| {
+                        *count = count.saturating_sub(1);
+                        *count == 0
+                    });
+                if remove {
+                    self.active_outbox_authors.remove(&author);
                 }
             }
             for request in self
@@ -218,7 +214,7 @@ impl Router {
             self.request_by_exact_filter.remove(&(
                 session.clone(),
                 self.prev_plan.reqs[&session][self.request_position_by_key[&request_key]]
-                    .source
+                    .routing
                     .clone(),
                 self.prev_plan.reqs[&session][self.request_position_by_key[&request_key]]
                     .filter

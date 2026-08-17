@@ -1,7 +1,7 @@
 # NMPKotlin (Kotlin/JVM falsifier, #40)
 
 The **minimal Kotlin/Flow falsifier** for #40 (parent epic #43) -- proves the
-two-noun surface (`observe(filter): Flow<RowBatch>`, `publish(intent):
+two-noun surface (`observe(query): Flow<RowBatch>`, `publish(intent):
 Flow<WriteStatus>`, `observeDiagnostics(): Flow<DiagnosticsSnapshot>`) ports
 cleanly onto Kotlin's `Flow`, using the SAME canonical Rust facade
 (`crates/nmp-ffi`) Swift already ships against. This is **not** the M6
@@ -95,9 +95,8 @@ val demand = NMPDemand(
         authors = NMPBinding.Literal(setOf(target.pubkey)),
         limit = 1u,
     ),
-    source = NMPSourceAuthority.AuthorOutboxes,
 )
-val profile = nmp.observe(demand)
+val profile = nmp.observe(NMPLiveQuery.single(demand))
 ```
 
 Parsing opens no query and requires no engine. A literal renderer can use the
@@ -174,7 +173,7 @@ feature-selection workflow.
   exactly what `callbackFlow` exists for.
 - **Cold vs. eager subscription is a real, deliberate divergence from
   Swift.** `NMPQuery` (Swift) subscribes eagerly at construction (ARC
-  refcounting starts immediately). `observe(filter)` here returns a COLD
+  refcounting starts immediately). `observe(query)` here returns a COLD
   `Flow` -- the underlying `engine.observe()` FFI call happens lazily, on
   `collect()`, and each independent `collect()` opens its own engine-side
   subscription. This isn't a shortcut; it's what

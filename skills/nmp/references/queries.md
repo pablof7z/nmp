@@ -6,7 +6,7 @@ A query descriptor is a value, not a callback:
 
 ```text
 LiveQuery  = branches: [Demand] (1..=64) + aggregate_result_limit: Option<usize>
-Demand     = selection Filter + SourceAuthority + AccessContext + CacheMode + Freshness
+Demand     = selection Filter + ReadRouting + AccessContext + CacheMode + Freshness
 Binding    = Literal | Reactive(ActivePubkey) | Derived | SetOp
 Derived    = { inner: Demand, project: Selector }
 Selector   = Authors | Ids | Tag(name) | AddressCoord
@@ -29,7 +29,7 @@ outer query; no platform implicitly inherits or reapplies defaults.
 
 ## Source and cache rules
 
-- `AuthorOutboxes` requires an authors binding.
+- `Auto` requires an authors binding.
 - `Pinned` requires a nonempty relay set and asks only those relays.
 - `CacheMode::Strict` matters only with pinned authority; it limits cached rows to provenance intersecting the pinned relay set.
 - `AccessContext` is `Public` or `Nip42(expectedPublicKey)`. NIP-42 freezes the

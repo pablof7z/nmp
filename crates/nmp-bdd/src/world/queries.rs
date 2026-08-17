@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::LiveQuery;
-use nmp_grammar::{AccessContext, IndexedTagName, SourceAuthority};
+use nmp_grammar::{AccessContext, IndexedTagName, ReadRouting};
 use nmp_grammar::{Binding, Demand, Derived, Filter, IdentityField, Selector};
 use nmp_router::RelayUrl;
 
@@ -25,17 +25,23 @@ const GROUP_STATE_KINDS: [u16; 3] = [39_000, 39_001, 39_002];
 /// starter catalog names (approach doc §2.4). Identical in structure to
 /// `nmp`'s runtime-integration fixture query.
 pub fn my_follows_query() -> LiveQuery {
-    LiveQuery::from_filter(Filter {
-        kinds: Some(std::collections::BTreeSet::from([1u16])),
-        authors: Some(Binding::Derived(Box::new(Derived {
-            inner: Demand::from_filter(Filter {
-                kinds: Some(std::collections::BTreeSet::from([3u16])),
-                authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
-                ..Filter::default()
-            }),
-            project: Selector::Tag("p".to_string()),
-        }))),
-        ..Filter::default()
+    LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(std::collections::BTreeSet::from([1u16])),
+            authors: Some(Binding::Derived(Box::new(Derived {
+                inner: Demand {
+                    selection: Filter {
+                        kinds: Some(std::collections::BTreeSet::from([3u16])),
+                        authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
+                        ..Filter::default()
+                    },
+                    ..Demand::default()
+                },
+                project: Selector::Tag("p".to_string()),
+            }))),
+            ..Filter::default()
+        },
+        ..Demand::default()
     })
 }
 
@@ -138,7 +144,7 @@ pub fn my_group_state_query(relay: &RelayUrl) -> LiveQuery {
             )]),
             ..Filter::default()
         },
-        SourceAuthority::Pinned(pinned.clone()),
+        ReadRouting::Explicit(pinned.clone().into_iter().collect()),
         AccessContext::Public,
     )
     .expect("nmp-bdd: a pinned inner demand over a nonempty relay set is constructible");
@@ -155,7 +161,7 @@ pub fn my_group_state_query(relay: &RelayUrl) -> LiveQuery {
                 )]),
                 ..Filter::default()
             },
-            SourceAuthority::Pinned(pinned),
+            ReadRouting::Explicit(pinned.into_iter().collect()),
             AccessContext::Public,
         )
         .expect("nmp-bdd: a pinned outer demand over a nonempty relay set is constructible"),
@@ -181,7 +187,7 @@ pub(super) fn group_metadata_query(relays: BTreeSet<RelayUrl>, group_id: &str) -
                 )]),
                 ..Filter::default()
             },
-            SourceAuthority::Pinned(relays),
+            ReadRouting::Explicit(relays.into_iter().collect()),
             AccessContext::Public,
         )
         .expect("nmp-bdd: a pinned demand over a nonempty relay set is constructible"),
@@ -211,7 +217,7 @@ fn pinned_query_from_relays(relays: BTreeSet<RelayUrl>, filter: Filter) -> LiveQ
     LiveQuery::single(
         Demand::new(
             filter,
-            SourceAuthority::Pinned(relays),
+            ReadRouting::Explicit(relays.into_iter().collect()),
             AccessContext::Public,
         )
         .expect("nmp-bdd: a pinned demand over a nonempty relay set is constructible"),

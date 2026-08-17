@@ -112,24 +112,17 @@ class NMPEngine(
      * BUILT: the caller applies `stateIn(scope, WhileSubscribed())` (the
      * Room idiom verbatim) if it wants a hot, shared, latest-value read --
      * this SDK never invents its own observer/container type. See
-     * Query.kt's `observeQuery` for the teardown-mapping finding. */
-    fun observe(filter: NMPFilter): Flow<RowBatch> = observeQuery(ffi, filter)
-
-    /** Open a live, detachable query over an explicit `NMPDemand` (#107) --
-     * the constructor to reach for once [observe]'s implicit
-     * `AuthorOutboxes`/`Public` default isn't enough: declaring
-     * `NMPSourceAuthority.Pinned` wire authority, a non-default
-     * `NMPAccessContext`, or a non-`Agnostic` `NMPCacheMode`. One demand is
-     * one branch, so this is exactly `observe(NMPLiveQuery.single(demand))`. */
-    fun observe(demand: NMPDemand): Flow<RowBatch> =
-        observeQuery(ffi, NMPLiveQuery.single(demand))
-
-    /** Open a live, detachable query over several independent `NMPDemand`
-     * branches (#1108). The branches are observed through ONE stream: rows
-     * are unioned by event id with provenance merged, every batch carries one
-     * evidence entry per canonical branch, and one teardown withdraws every
-     * branch exactly once. Throws [NMPError.EmptyQueryUnion],
-     * [NMPError.AggregateResultLimitZero],
+     * Query.kt's `observeQuery` for the teardown-mapping finding.
+     *
+     * The query is always a complete [NMPLiveQuery]: one or more independent
+     * [NMPDemand] branches, each naming its own source authority, access
+     * context, cache mode and freshness. Selection syntax never decides wire
+     * authority (#847), so a single-branch read is spelled
+     * `observe(NMPLiveQuery.single(demand))`. The branches are observed
+     * through ONE stream: rows are unioned by event id with provenance
+     * merged, every batch carries one evidence entry per canonical branch,
+     * and one teardown withdraws every branch exactly once. Throws
+     * [NMPError.EmptyQueryUnion], [NMPError.AggregateResultLimitZero],
      * [NMPError.NestedAggregateResultLimit] or
      * [NMPError.TooManyQueryBranches] for a declaration that can never be
      * observed. */
@@ -141,25 +134,15 @@ class NMPEngine(
      * [NMPQuery.frames] flow plus the [NMPQuery.requestRows] growth
      * capability; delivery is derived from boundedness (see Window.kt's
      * header for why bounded means snapshots and unbounded means deltas).
-     * Throws typed [NMPError.WindowZeroRows] /
+     * The window bounds the MERGED union globally, never one window per
+     * branch. Throws typed [NMPError.WindowZeroRows] /
      * [NMPError.WindowInitialExceedsMax] /
-     * [NMPError.WindowSelectionHasLimit] on an invalid window. */
-    fun observe(filter: NMPFilter, window: Window): NMPQuery =
-        NMPQuery(nmpRethrowing { ffi.observe(filter.toFfi(), window.toFfi()) })
-
-    /** The explicit-`NMPDemand` windowed overload (#107 x #485): same
-     * bounded snapshot/growth discipline as the `NMPFilter` overload, for
-     * demands that declare wire authority, access context, or cache mode. */
-    fun observe(demand: NMPDemand, window: Window): NMPQuery =
-        observe(NMPLiveQuery.single(demand), window)
-
-    /** The explicit-`NMPLiveQuery` windowed overload (#1108 x #485): the
-     * window bounds the MERGED union globally, never one window per branch.
-     * A live query that already declares an aggregate result limit is refused
-     * with [NMPError.WindowAggregateResultLimit] -- a window and an aggregate
-     * bound would be two competing owners of the merged row count. */
+     * [NMPError.WindowSelectionHasLimit] on an invalid window, and
+     * [NMPError.WindowAggregateResultLimit] when the live query already
+     * declares an aggregate result limit -- a window and an aggregate bound
+     * would be two competing owners of the merged row count. */
     fun observe(query: NMPLiveQuery, window: Window): NMPQuery =
-        NMPQuery(nmpRethrowing { ffi.observeQuery(query.toFfi(), window.toFfi()) })
+        NMPQuery(nmpRethrowing { ffi.observe(query.toFfi(), window.toFfi()) })
 
     // MARK: - Diagnostics (M5) -- "the acceptance test rendered on screen,
     // permanently": per-relay wire-sub count, the exact wire filters sent,

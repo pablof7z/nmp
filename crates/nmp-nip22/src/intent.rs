@@ -15,8 +15,8 @@
 //! wants "a NIP-22 comment on this specifically" calls this.
 
 use nmp_grammar::{
-    EventBuilder, Identity, Modifiers, RootScope, WriteIntent, WritePayload,
-    WriteRouting, COMMENT_KIND,
+    EventBuilder, Identity, Modifiers, RootScope, WriteIntent, WritePayload, WriteRouting,
+    COMMENT_KIND,
 };
 use nostr::Kind;
 

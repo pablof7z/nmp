@@ -33,9 +33,9 @@ use super::publish_queue_codec::{
 use super::publish_queue_ops::terminal_intent_evidence_bytes;
 use super::query::expiration_key;
 use super::schema::{
-    persist_err, PUBLISH_QUEUE_DEADLINES,
-    PUBLISH_QUEUE_DEADLINES_BY_INTENT, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_ROUTE_REVISIONS,
-    SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS, SEMANTIC_RESOURCES,
+    persist_err, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT, PUBLISH_QUEUE_LANES,
+    PUBLISH_QUEUE_ROUTE_REVISIONS, SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS,
+    SEMANTIC_RESOURCES,
 };
 use super::semantic_edit_codec::{
     coordinate_key, decode_operation, decode_resource, encode_operation, encode_resource,
@@ -320,13 +320,7 @@ fn apply_plan(
     ingest: &mut RedbIngestTxn<'_, '_>,
     write_txn: &redb::WriteTransaction,
     coordinate: Coordinate,
-    new_intent: Option<(
-        IntentId,
-        u64,
-        PublicKey,
-        String,
-        Timestamp,
-    )>,
+    new_intent: Option<(IntentId, u64, PublicKey, String, Timestamp)>,
     plan: SemanticTransitionPlan,
 ) -> Result<SemanticInstallOutcome, PersistenceError> {
     let mut resources = write_txn
@@ -596,13 +590,8 @@ fn apply_plan(
         }
     }
 
-    if let Some((
-        intent_id,
-        receipt_id,
-        expected_pubkey,
-        signing_identity_ref,
-        accepted_at,
-    )) = new_intent
+    if let Some((intent_id, receipt_id, expected_pubkey, signing_identity_ref, accepted_at)) =
+        new_intent
     {
         let update = plan
             .receipt_updates

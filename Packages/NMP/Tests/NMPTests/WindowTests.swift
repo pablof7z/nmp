@@ -106,17 +106,16 @@ final class WindowTests: XCTestCase {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
         let demand = NMPDemand(
-            selection: NMPFilter(kinds: [7_779]),
-            source: .public
+            selection: NMPFilter(kinds: [7_779])
         )
 
         XCTAssertThrowsError(
-            try engine.observe(demand, window: .expandable(initial: 0, max: 2))
+            try engine.observe(.single(demand), window: .expandable(initial: 0, max: 2))
         ) { error in
             XCTAssertEqual(error as? NMPError, .windowZeroRows)
         }
         XCTAssertThrowsError(
-            try engine.observe(demand, window: .expandable(initial: 3, max: 2))
+            try engine.observe(.single(demand), window: .expandable(initial: 3, max: 2))
         ) { error in
             XCTAssertEqual(
                 error as? NMPError,
@@ -124,16 +123,15 @@ final class WindowTests: XCTestCase {
             )
         }
         let limited = NMPDemand(
-            selection: NMPFilter(kinds: [7_779], limit: 1),
-            source: .public
+            selection: NMPFilter(kinds: [7_779], limit: 1)
         )
         XCTAssertThrowsError(
-            try engine.observe(limited, window: .expandable(initial: 1, max: 2))
+            try engine.observe(.single(limited), window: .expandable(initial: 1, max: 2))
         ) { error in
             XCTAssertEqual(error as? NMPError, .windowSelectionHasLimit)
         }
 
-        let query = try engine.observe(demand, window: .expandable(initial: 1, max: 2))
+        let query = try engine.observe(.single(demand), window: .expandable(initial: 1, max: 2))
         let first = await Self.firstBatch(from: query, timeoutSeconds: 5)
         XCTAssertEqual(first?.rows, [])
         XCTAssertEqual(first?.load, .idle)
@@ -149,7 +147,7 @@ final class WindowTests: XCTestCase {
     func testRequestRowsOnAnUnwindowedQueryThrowsUnwindowed() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
-        let query = try engine.observe(NMPFilter(kinds: [7_781]))
+        let query = try engine.observe(.single(NMPDemand(selection: NMPFilter(kinds: [7_781]))))
 
         XCTAssertThrowsError(try query.requestRows(atLeast: 10)) { error in
             XCTAssertEqual(error as? NMPRequestRowsError, .unwindowed)
@@ -165,10 +163,9 @@ final class WindowTests: XCTestCase {
         let engine = try NMPEngine(config: NMPConfig())
         defer { engine.shutdown() }
         let demand = NMPDemand(
-            selection: NMPFilter(kinds: [7_782]),
-            source: .public
+            selection: NMPFilter(kinds: [7_782])
         )
-        let query = try engine.observe(demand, window: .expandable(initial: 1, max: 1))
+        let query = try engine.observe(.single(demand), window: .expandable(initial: 1, max: 1))
 
         // #680: the handle is single-consumer/single-pass -- ONE iterator for
         // the whole read (a second `makeAsyncIterator` would open a second
@@ -198,10 +195,9 @@ final class WindowTests: XCTestCase {
     func testEngineShutdownClosesAWindowedIteratorWithinBound() async throws {
         let engine = try NMPEngine(config: NMPConfig())
         let demand = NMPDemand(
-            selection: NMPFilter(kinds: [7_780]),
-            source: .public
+            selection: NMPFilter(kinds: [7_780])
         )
-        let query = try engine.observe(demand, window: .expandable(initial: 1, max: 2))
+        let query = try engine.observe(.single(demand), window: .expandable(initial: 1, max: 2))
 
         // ONE iterator for the whole read (#680 single-pass handle): drain it
         // to completion; engine shutdown drops the producer and closes it.

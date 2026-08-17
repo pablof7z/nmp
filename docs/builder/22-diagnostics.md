@@ -17,7 +17,7 @@ state.
 For every active descriptor, show:
 
 - selection plus expanded binding graph;
-- source authority and access context;
+- read routing and access context;
 - descriptor/plan revision;
 - graph nodes and reference counts;
 - compiled atoms and route reasons;

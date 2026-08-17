@@ -18,7 +18,7 @@ final class NMPLiveQueryTests: XCTestCase {
     ) -> NMPDemand {
         NMPDemand(
             selection: NMPFilter(kinds: [1]),
-            source: .pinned([relay]),
+            routing: .explicit([relay]),
             freshness: freshness
         )
     }

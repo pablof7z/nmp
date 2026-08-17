@@ -160,10 +160,8 @@ fn known_id_with_a_different_signature_is_skipped_without_schnorr() {
     let known_sig: Arc<dyn KnownSig> = Arc::new(MapKnownSig { known });
     let mut verifier = default_verifier(known_sig);
 
-    let verdicts = verifier.verify_batch(&[
-        Arc::new(resigned.clone()),
-        Arc::new(transplanted.clone()),
-    ]);
+    let verdicts =
+        verifier.verify_batch(&[Arc::new(resigned.clone()), Arc::new(transplanted.clone())]);
 
     assert_eq!(
         verdicts,

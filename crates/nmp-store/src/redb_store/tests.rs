@@ -917,7 +917,7 @@ fn configured_coverage_write_failure_targets_one_row_rolls_back_and_is_consumed_
             kinds: Some(BTreeSet::from([kind])),
             ..ConcreteFilter::default()
         },
-        source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+        routing: nmp_grammar::ReadRouting::Auto,
         access: nmp_grammar::AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
@@ -1261,7 +1261,7 @@ fn coverage_row_key_carries_the_full_256_bit_digest() {
     };
     let atom = ContextualAtom {
         filter,
-        source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+        routing: nmp_grammar::ReadRouting::Auto,
         access: nmp_grammar::AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };
@@ -3334,7 +3334,7 @@ fn a_persisted_coverage_row_carries_no_filter_derived_bytes() {
     };
     let atom = ContextualAtom {
         filter,
-        source: nmp_grammar::SourceAuthority::AuthorOutboxes,
+        routing: nmp_grammar::ReadRouting::Auto,
         access: nmp_grammar::AccessContext::Public,
         routing_evidence: BTreeSet::new(),
     };

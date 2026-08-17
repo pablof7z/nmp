@@ -380,15 +380,15 @@ mod tests {
 
     use super::*;
     use nmp_grammar::{
-        AccessContext, Demand, Derived, IdentityField, IndexedTagName, Selector, SourceAuthority,
+        AccessContext, Demand, Derived, IdentityField, IndexedTagName, ReadRouting, Selector,
     };
 
     fn host(n: u16) -> RelayUrl {
         RelayUrl::parse(&format!("wss://host-{n}.example.com")).expect("a well-formed host")
     }
 
-    fn pinned(host: RelayUrl) -> SourceAuthority {
-        SourceAuthority::Pinned(BTreeSet::from([host]))
+    fn pinned(host: RelayUrl) -> ReadRouting {
+        ReadRouting::Explicit(vec![host])
     }
 
     fn me() -> Binding {
@@ -418,7 +418,7 @@ mod tests {
                     authors: Some(me()),
                     ..Filter::default()
                 },
-                SourceAuthority::AuthorOutboxes,
+                ReadRouting::Auto,
                 AccessContext::Public,
             )
             .expect("an author-bound outbox demand is constructible"),
@@ -436,7 +436,7 @@ mod tests {
                     authors: Some(me()),
                     ..Filter::default()
                 },
-                SourceAuthority::AuthorOutboxes,
+                ReadRouting::Auto,
                 AccessContext::Public,
             )
             .expect("an author-bound outbox demand is constructible"),
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn a_lowered_member_predicate_pins_its_own_level_to_the_exact_host() {
         let lowered = lowered(member_list_includes(me()), &host(1));
-        assert_eq!(derived(&lowered).inner.source, pinned(host(1)));
+        assert_eq!(derived(&lowered).inner.routing, pinned(host(1)));
         assert_eq!(
             derived(&lowered).inner.selection.kinds,
             Some(BTreeSet::from([39002u16]))
@@ -510,7 +510,7 @@ mod tests {
                 "photography".to_string()
             ])))
         );
-        assert_eq!(inner.source, pinned(host(1)));
+        assert_eq!(inner.routing, pinned(host(1)));
     }
 
     /// The host-evaluated leaf is evaluated with NIP-29's OWN pin, so it may
@@ -549,8 +549,8 @@ mod tests {
     fn a_derived_id_source_keeps_its_own_authority_and_stays_reactive() {
         let lowered = lowered(any_of(my_saved_group_list()), &host(1));
         assert_eq!(
-            derived(&lowered).inner.source,
-            SourceAuthority::AuthorOutboxes,
+            derived(&lowered).inner.routing,
+            ReadRouting::Auto,
             "the app's own list resolves from the app's own relays, never from the group's host"
         );
         assert_eq!(
@@ -578,7 +578,7 @@ mod tests {
                 assert_eq!(set.operands.len(), 2);
                 for operand in &set.operands {
                     assert_eq!(
-                        derived(operand).inner.source,
+                        derived(operand).inner.routing,
                         pinned(host(1)),
                         "every NIP-29-owned level is pinned to the branch host"
                     );
@@ -600,7 +600,7 @@ mod tests {
 
         // Depth 1: NIP-29's own admin-record lookup, pinned to the host.
         let admin_records = &derived(&lowered).inner;
-        assert_eq!(admin_records.source, pinned(host(1)));
+        assert_eq!(admin_records.routing, pinned(host(1)));
 
         // Depth 2: the app's follows lookup, still on the author's outboxes.
         let p = IndexedTagName::new('p').unwrap();
@@ -610,8 +610,8 @@ mod tests {
             .get(&p)
             .expect("the admin lookup binds #p to the caller's subjects");
         assert_eq!(
-            derived(subjects).inner.source,
-            SourceAuthority::AuthorOutboxes,
+            derived(subjects).inner.routing,
+            ReadRouting::Auto,
             "NIP-29 never recursively overwrites app-owned authority"
         );
     }
@@ -625,8 +625,8 @@ mod tests {
         let at_one = lowered(ids.clone(), &host(1));
         let at_two = lowered(ids, &host(2));
         assert_ne!(at_one, at_two);
-        assert_eq!(derived(&at_one).inner.source, pinned(host(1)));
-        assert_eq!(derived(&at_two).inner.source, pinned(host(2)));
+        assert_eq!(derived(&at_one).inner.routing, pinned(host(1)));
+        assert_eq!(derived(&at_two).inner.routing, pinned(host(2)));
     }
 
     /// A known-id watch needs no relational question and no subject: the ids
@@ -658,7 +658,7 @@ mod tests {
             Binding::SetOp(set) => {
                 assert_eq!(set.op, SetAlgebra::Union);
                 assert_eq!(set.operands.len(), 2);
-                assert_eq!(derived(&set.operands[0]).inner.source, pinned(host(1)));
+                assert_eq!(derived(&set.operands[0]).inner.routing, pinned(host(1)));
                 assert_eq!(set.operands[1], pinned_ids);
             }
             other => panic!("expected SetOp, got {other:?}"),

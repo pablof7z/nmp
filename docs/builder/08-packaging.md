@@ -115,7 +115,7 @@ projection:
 
 ```kotlin
 val engine = NMPEngine(NMPConfig())
-engine.observe(demand).collect { snapshot ->
+engine.observe(NMPLiveQuery.single(demand)).collect { snapshot ->
     appState = appState.withSnapshot(snapshot)
 }
 ```

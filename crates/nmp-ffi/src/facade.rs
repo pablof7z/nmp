@@ -35,10 +35,10 @@ use crate::session::{
     FfiPrivateKey, FfiPublicKey, FfiSessionAccount, FfiSessionPayload, FfiSessionSnapshot,
 };
 use crate::types::{
-    FfiCancelWriteError, FfiCancelWriteOutcome, FfiPublishQueueEntry,
-    FfiPublishQueueError, FfiReceiptReattachment, FfiRelayInformation,
-    FfiRelayInformationCachePolicy, FfiRelayInformationDocument, FfiRelayInformationFreshness,
-    FfiRelayInformationLimitations, FfiRemoveQueueEntryError, FfiSignEventRequest, FfiWriteIntent,
+    FfiCancelWriteError, FfiCancelWriteOutcome, FfiPublishQueueEntry, FfiPublishQueueError,
+    FfiReceiptReattachment, FfiRelayInformation, FfiRelayInformationCachePolicy,
+    FfiRelayInformationDocument, FfiRelayInformationFreshness, FfiRelayInformationLimitations,
+    FfiRemoveQueueEntryError, FfiSignEventRequest, FfiWriteIntent,
 };
 use nmp::ReceiptReattachment;
 

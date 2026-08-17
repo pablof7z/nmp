@@ -26,7 +26,7 @@ impl Fixture {
                 since: Some(100),
                 ..ConcreteFilter::default()
             },
-            source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            routing: ReadRouting::Explicit(vec![relay.clone()]),
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
@@ -36,14 +36,14 @@ impl Fixture {
                 since: Some(100),
                 ..ConcreteFilter::default()
             },
-            source: incumbent.source.clone(),
+            routing: incumbent.routing.clone(),
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
         let plan_sub_id = SubId::for_wire(
             relay.clone(),
             &incumbent.filter,
-            &incumbent.source,
+            &incumbent.routing,
             incumbent.access,
         );
         let incumbent_claims = BTreeSet::from([coverage_key(&incumbent)]);
@@ -60,6 +60,7 @@ impl Fixture {
                 incumbent.filter.clone(),
                 incumbent_claims,
                 incumbent_demands,
+                BTreeSet::new(),
             )
         });
         core.white_box("prober.force_supported_for_test", |s| {
@@ -374,11 +375,11 @@ fn assert_consistent_catches_a_cardinality_preserving_swap_between_plans() {
                 since: Some(100),
                 ..ConcreteFilter::default()
             },
-            source: SourceAuthority::Pinned(BTreeSet::from([relay.clone()])),
+            routing: ReadRouting::Explicit(vec![relay.clone()]),
             access: AccessContext::Public,
             routing_evidence: BTreeSet::new(),
         };
-        let plan_sub_id = SubId::for_wire(relay.clone(), &atom.filter, &atom.source, atom.access);
+        let plan_sub_id = SubId::for_wire(relay.clone(), &atom.filter, &atom.routing, atom.access);
         core.set_active_demand(&BTreeSet::from([atom.clone()]));
         core.white_box("attribution.retain_live_request_claims", |s| {
             s.attribution
@@ -390,6 +391,7 @@ fn assert_consistent_catches_a_cardinality_preserving_swap_between_plans() {
                 atom.filter.clone(),
                 BTreeSet::from([coverage_key(&atom)]),
                 BTreeSet::from([DemandKey::for_atom(&atom)]),
+                BTreeSet::new(),
             )
         });
         plan_sub_id

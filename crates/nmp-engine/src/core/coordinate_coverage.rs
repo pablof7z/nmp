@@ -51,7 +51,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
     Binding, CacheMode, ConcreteFilter, Demand, Filter, Freshness, IndexedTagName, LiveQuery,
-    RelaySessionKey, SourceAuthority,
+    ReadRouting, RelaySessionKey,
 };
 use nmp_router::SubId;
 use nmp_store::CoverageInterval;
@@ -403,7 +403,7 @@ impl CoreState {
         }
         let demand = Demand::new(
             coordinate_filter(coordinate),
-            SourceAuthority::Pinned(BTreeSet::from([session.relay.clone()])),
+            ReadRouting::Explicit(vec![session.relay.clone()]),
             session.access,
         )
         .expect("one relay-pinned coordinate demand is never empty");
@@ -685,7 +685,7 @@ mod tests {
         core.handle(EngineMsg::RelayConnected(handle, session.clone()));
         let demand = Demand::new(
             filter,
-            SourceAuthority::Pinned(BTreeSet::from([relay])),
+            ReadRouting::Explicit(vec![relay]),
             AccessContext::Public,
         )
         .expect("a relay-pinned read is nonempty");
@@ -996,7 +996,7 @@ mod tests {
                 kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
                 ..Filter::default()
             },
-            SourceAuthority::Pinned(BTreeSet::from([relay()])),
+            ReadRouting::Explicit(vec![relay()]),
             AccessContext::Public,
         )
         .expect("a relay-pinned read is nonempty");
