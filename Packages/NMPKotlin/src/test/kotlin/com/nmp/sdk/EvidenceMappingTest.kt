@@ -474,5 +474,5 @@ class EvidenceMappingTest {
         reconciledThrough: ULong?,
         status: FfiSourceStatus,
         authenticateAs: String? = null,
-    ): FfiSourceEvidence = FfiSourceEvidence(relay, access, reconciledThrough, status)
+    ): FfiSourceEvidence = FfiSourceEvidence(relay, authenticateAs, reconciledThrough, status)
 }

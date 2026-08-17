@@ -2,6 +2,7 @@ package com.nmp.sdk
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 
 // A construction/round-trip test of the ergonomic Demand descriptor (#107).
