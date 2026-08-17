@@ -52,10 +52,19 @@ public final class RelayHandle {
 
     /// - Parameters:
     ///   - binaryPath: path to the real strfry binary (see setup-strfry.sh).
-    public init(name: String, workDir: URL, binaryPath: URL) async throws {
+    ///   - dataDir: `nil` (the default) gives this relay its own `workDir/data`
+    ///     LMDB directory. Passing ANOTHER handle's `dataDir` starts a second
+    ///     relay process, on its own ephemeral port, over that same durable
+    ///     store -- which is how a scenario writes into a relay's database
+    ///     during a window when the relay's OWN port is deliberately dead
+    ///     (C13's outage). LMDB is a single-writer store: the two processes
+    ///     must not run at the same time, and no lab call enforces that.
+    public init(
+        name: String, workDir: URL, binaryPath: URL, dataDir sharedDataDir: URL? = nil
+    ) async throws {
         self.name = name
         self.workDir = workDir
-        self.dataDir = workDir.appendingPathComponent("data", isDirectory: true)
+        self.dataDir = sharedDataDir ?? workDir.appendingPathComponent("data", isDirectory: true)
         self.configPath = workDir.appendingPathComponent("strfry.conf")
         self.logPath = workDir.appendingPathComponent("relay.log")
         self.binaryPath = binaryPath
@@ -127,6 +136,17 @@ public final class RelayHandle {
     public func heal() {
         guard let proc = process, proc.isRunning else { return }
         Foundation.kill(proc.processIdentifier, SIGCONT)
+    }
+
+    /// Attempts ONE real TCP connection to this relay's port and reports
+    /// whether it was accepted. `isRunning` only says whether this handle's
+    /// child process object is alive; this says whether anything at all is
+    /// listening, which is the fact a scenario claiming "the relay is
+    /// unreachable" actually needs. A frozen (`partition()`ed) relay still
+    /// answers a TCP connect, so this is a liveness probe of the LISTENER,
+    /// never a proof that the relay is responsive.
+    public func isReachable(timeout: TimeInterval = 1) async -> Bool {
+        await Self.attemptConnect(port: port, timeout: timeout)
     }
 
     private func signalAndWait(_ signal: Int32, timeout: TimeInterval) async throws {
