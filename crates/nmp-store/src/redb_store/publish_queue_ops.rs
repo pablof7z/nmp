@@ -2008,12 +2008,6 @@ pub(super) fn publish_queue_receipts_after(
     Ok(out)
 }
 
-pub(super) fn maintain_terminal_receipts(
-    store: &mut RedbStore,
-) -> Result<Vec<u64>, PersistenceError> {
-    maintain_terminal_receipts_at(store, wall_clock_now(), TerminalRetentionLimits::PRODUCTION)
-}
-
 pub(crate) fn maintain_terminal_receipts_at(
     store: &mut RedbStore,
     now: Timestamp,
