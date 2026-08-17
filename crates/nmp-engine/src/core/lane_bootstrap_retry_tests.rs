@@ -176,7 +176,7 @@ fn transient_redb_bootstrap_failure_is_fully_reversible() {
         ]),
         "an unresolved bootstrap must retain every route candidate"
     );
-    assert!(core.pending.contains_key(&receipt));
+    assert!(core.pending.contains(&receipt));
 
     // The construction-armed refusal is consumed by the failed Redb
     // transaction. Nothing external tells the reducer; its own deadline is
@@ -206,7 +206,7 @@ fn transient_redb_bootstrap_failure_is_fully_reversible() {
     deliver_ok(&mut core, &author, &relay_b, 1, &signed);
 
     assert!(
-        !core.pending.contains_key(&receipt),
+        !core.pending.contains(&receipt),
         "the receipt must reach a terminal state rather than parking in pending"
     );
     let after = core
@@ -294,7 +294,7 @@ fn an_unresolved_bootstrap_keeps_retaining_and_backs_off() {
         let (receipt, signed, _) =
             publish_narrow(&mut core, &author, &[relay_a.clone(), relay_b.clone()], 703);
         deliver_ok(&mut core, &author, &relay_a, 0, &signed);
-        assert!(core.pending.contains_key(&receipt));
+        assert!(core.pending.contains(&receipt));
         (receipt, core.pending[&receipt].intent_id)
     };
     testing::corrupt_first_publish_queue_attempt(&path, &intent_id.0.to_be_bytes())
@@ -324,7 +324,7 @@ fn an_unresolved_bootstrap_keeps_retaining_and_backs_off() {
             expected,
             "an unresolved bootstrap must keep retaining every candidate"
         );
-        assert!(core.pending.contains_key(&receipt));
+        assert!(core.pending.contains(&receipt));
         assert_eq!(
             core.lane_bootstrap_retries[&receipt].failures, expected_failures,
             "each due tick must actually re-attempt the bootstrap"

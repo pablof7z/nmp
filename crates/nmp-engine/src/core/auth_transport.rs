@@ -1456,15 +1456,13 @@ impl CoreState {
                 // re-implementing it.
                 let demand_changed = !ingest.committed.delta.is_empty();
                 let satisfied_pending = !ingest.satisfied_intents.is_empty();
+                // An ordinary relay delivered the signed bytes an accepted
+                // intent was still waiting for. The owner decides what that
+                // means for the obligation's own signing state -- including
+                // the local signer request that may still be outstanding for
+                // it -- and hands back the receipt to settle.
                 for (intent_id, canonical) in ingest.satisfied_intents {
-                    if let Some((receipt_id, pending)) = self
-                        .pending
-                        .iter_mut()
-                        .find(|(_, pending)| pending.intent_id == intent_id)
-                    {
-                        pending.already_signed = true;
-                        pending.sign_request_in_flight = false;
-                        let receipt_id = *receipt_id;
+                    if let Some(receipt_id) = self.pending.adopt_ingested_signature(intent_id) {
                         self.on_signed(receipt_id, canonical, effects);
                     }
                 }

@@ -622,7 +622,7 @@ fn one_auth_denied_lane_does_not_stop_other_lanes_on_the_same_receipt() {
             WriteFact::Relay { relay, state: RelayState::AuthFailed { .. }, .. }
         ) if *id == receipt && relay == &denied_relay
     )));
-    assert!(core.pending.contains_key(&receipt));
+    assert!(core.pending.contains(&receipt));
 
     let released = core.handle(EngineMsg::AuthProbeReleased(
         ordinary_handle,
@@ -653,7 +653,7 @@ fn one_auth_denied_lane_does_not_stop_other_lanes_on_the_same_receipt() {
         Effect::EmitReceipt(id, WriteFact::Relay { relay, state: RelayState::Published, .. })
             if *id == receipt && relay == &ordinary_relay
     )));
-    assert!(!core.pending.contains_key(&receipt));
+    assert!(!core.pending.contains(&receipt));
 }
 
 #[test]

@@ -8,112 +8,25 @@
 use super::*;
 
 impl CoreState {
-    /// Move `receipts_by_lane_relay` from one persisted-relay set to another
-    /// for one receipt: drop it from every relay it no longer persists to,
-    /// add it to every relay it newly does.
-    ///
-    /// The ONLY writer of `receipts_by_lane_relay`, in both directions. Its
-    /// four callers are `replace_lane_projection` (an exact rebuild against a
-    /// freshly recovered lane set), [`Self::reset_lane_projection_for_successor`]
-    /// (a reset to the empty set, with no recovered lanes to diff against),
-    /// and the two single-relay additions `apply_committed_lane` and
-    /// `mark_lane_projection_uncertain`.
-    ///
-    /// The last two used to insert into the index directly. That was safe --
-    /// they only ever add -- but it made this "the one door" true for removal
-    /// and false for addition, which is how the divergence this function
-    /// exists to end began: one rewrite site pruning and its sibling not
-    /// (#1606). A door that is only sometimes the door is not a door.
-    fn update_lane_relay_index(
-        &mut self,
-        id: ReceiptId,
-        previous: &BTreeSet<RelayUrl>,
-        next: &BTreeSet<RelayUrl>,
-    ) {
-        for relay in previous.difference(next) {
-            if let Some(receipts) = self.receipts_by_lane_relay.get_mut(relay) {
-                receipts.remove(&id);
-                if receipts.is_empty() {
-                    self.receipts_by_lane_relay.remove(relay);
-                }
-            }
-        }
-        for relay in next.difference(previous) {
-            self.receipts_by_lane_relay
-                .entry(relay.clone())
-                .or_default()
-                .insert(id);
-        }
-    }
-
-    /// Replace one intent's projection from a complete recovered lane set.
-    ///
-    /// Bootstrap returns every retained lane for the intent, so this is an
-    /// exact rebuild rather than an incremental merge. Keeping the reverse
-    /// wake index in the same door prevents its membership from drifting from
-    /// the per-intent projection.
-    fn replace_lane_projection(&mut self, id: ReceiptId, lanes: &[PublishQueueLane]) {
-        if !self.pending.contains_key(&id) {
-            self.lane_projection_unprovable = true;
-            return;
-        }
-        let next = LaneWorkerProjection::from_recovered(lanes);
-        let previous = self
-            .pending
-            .get(&id)
-            .map(|pending| pending.lane_projection.persisted.clone())
-            .unwrap_or_default();
-
-        self.update_lane_relay_index(id, &previous, &next.persisted);
-        if let Some(pending) = self.pending.get_mut(&id) {
-            pending.lane_projection = next;
-        }
-    }
-
     /// Reset one pending write's lane projection to empty ahead of a
-    /// replaceable-operation successor rewrite, releasing every relay it
-    /// currently persists to in `receipts_by_lane_relay`.
+    /// replaceable-operation successor rewrite.
     ///
     /// A member rewritten onto a new generation owns no lane the old
     /// generation minted: nothing may re-attach to them, so the projection
-    /// resets to empty exactly as `replace_lane_projection` would reset it
-    /// against an empty recovered lane set. Both call sites that rewrite an
-    /// existing member in place (`write.rs`'s
-    /// `install_materialized_replaceable_successor` and
-    /// `write/replaceable_operation.rs`'s member-rewrite branch) used to
-    /// assign `LaneWorkerProjection::default()` to the field directly and
-    /// never told this index, so every relay the old generation had
-    /// persisted lanes on kept naming the receipt in
-    /// `receipts_by_lane_relay` until the next full boot recovery (#1606).
+    /// resets to empty exactly as an exact rebuild against an empty recovered
+    /// lane set would reset it.
     pub(in crate::core) fn reset_lane_projection_for_successor(&mut self, id: ReceiptId) {
-        let previous = self
-            .pending
-            .get(&id)
-            .map(|pending| pending.lane_projection.persisted.clone())
-            .unwrap_or_default();
-        self.update_lane_relay_index(id, &previous, &BTreeSet::new());
-        if let Some(pending) = self.pending.get_mut(&id) {
-            pending.lane_projection = LaneWorkerProjection::default();
-        }
+        self.pending.reset_lane_projection(id);
     }
 
     /// Apply one successful store mutation's exact post-state.
     fn apply_committed_lane(&mut self, lane: &PublishQueueLane) {
-        let Some(id) = self.intent_receipts.get(&lane.key.intent_id).copied() else {
+        let owned = self
+            .pending
+            .receipt_for_intent(lane.key.intent_id)
+            .is_some_and(|id| self.pending.apply_committed_lane(id, lane));
+        if !owned {
             self.lane_projection_unprovable = true;
-            return;
-        };
-        let Some(pending) = self.pending.get_mut(&id) else {
-            self.lane_projection_unprovable = true;
-            return;
-        };
-        let newly_persisted = pending.lane_projection.apply(lane);
-        if newly_persisted {
-            self.update_lane_relay_index(
-                id,
-                &BTreeSet::new(),
-                &BTreeSet::from([lane.key.relay.clone()]),
-            );
         }
     }
 
@@ -123,21 +36,12 @@ impl CoreState {
     /// retired after explicit recovery; a false-negative can strand a durable
     /// obligation forever.
     fn mark_lane_projection_uncertain(&mut self, key: &PublishQueueLaneKey) {
-        let Some(id) = self.intent_receipts.get(&key.intent_id).copied() else {
+        let owned = self
+            .pending
+            .receipt_for_intent(key.intent_id)
+            .is_some_and(|id| self.pending.mark_lane_uncertain(id, key.relay.clone()));
+        if !owned {
             self.lane_projection_unprovable = true;
-            return;
-        };
-        let Some(pending) = self.pending.get_mut(&id) else {
-            self.lane_projection_unprovable = true;
-            return;
-        };
-        let newly_persisted = pending.lane_projection.mark_uncertain(key.relay.clone());
-        if newly_persisted {
-            self.update_lane_relay_index(
-                id,
-                &BTreeSet::new(),
-                &BTreeSet::from([key.relay.clone()]),
-            );
         }
     }
 
@@ -176,15 +80,19 @@ impl CoreState {
         let result = self.store.bootstrap_publish_queue_lanes(intent_id);
         match result {
             Ok(lanes) => {
-                if let Some(id) = self.intent_receipts.get(&intent_id).copied() {
-                    self.replace_lane_projection(id, &lanes);
-                    // The exact rebuild above supersedes every conservative
-                    // guess this gap was standing in for, including any
-                    // `uncertain` relay it left behind. This is the one place
-                    // a bootstrap gap is allowed to close.
-                    self.lane_bootstrap_retries.remove(&id);
-                } else {
-                    self.lane_projection_unprovable = true;
+                match self.pending.receipt_for_intent(intent_id) {
+                    Some(id) => {
+                        if !self.pending.replace_lane_projection(id, &lanes) {
+                            self.lane_projection_unprovable = true;
+                        }
+                        // The exact rebuild above supersedes every
+                        // conservative guess this gap was standing in for,
+                        // including any `uncertain` relay it left behind. This
+                        // is the one place a bootstrap gap is allowed to
+                        // close.
+                        self.lane_bootstrap_retries.remove(&id);
+                    }
+                    None => self.lane_projection_unprovable = true,
                 }
                 Ok(lanes)
             }
@@ -196,9 +104,9 @@ impl CoreState {
                 // owned until a retry commits.
                 for relay in candidate_relays.into_iter().flatten() {
                     if let Some(event_id) = self
-                        .intent_receipts
-                        .get(&intent_id)
-                        .and_then(|receipt| self.pending.get(receipt))
+                        .pending
+                        .receipt_for_intent(intent_id)
+                        .and_then(|receipt| self.pending.get(&receipt))
                         .map(|pending| pending.frozen.id)
                     {
                         self.mark_lane_projection_uncertain(&PublishQueueLaneKey {
@@ -239,9 +147,11 @@ impl CoreState {
                 "semantic lane recovery found a non-current event generation",
             ));
         }
-        if let Some(id) = self.intent_receipts.get(&intent_id).copied() {
-            self.replace_lane_projection(id, &lanes);
-        } else {
+        let rebuilt = self
+            .pending
+            .receipt_for_intent(intent_id)
+            .is_some_and(|id| self.pending.replace_lane_projection(id, &lanes));
+        if !rebuilt {
             self.lane_projection_unprovable = true;
         }
         Ok(lanes)
@@ -258,7 +168,7 @@ impl CoreState {
         intent_id: IntentId,
         candidates: Option<&BTreeSet<RelayUrl>>,
     ) {
-        let Some(id) = self.intent_receipts.get(&intent_id).copied() else {
+        let Some(id) = self.pending.receipt_for_intent(intent_id) else {
             // No receipt owns this intent, so there is no pending write to
             // retry on behalf of and nothing that could later close the gap.
             self.lane_projection_unprovable = true;
@@ -588,7 +498,7 @@ mod tests {
         ));
         assert_projection_matches_store(&core);
         assert!(
-            !core.pending.contains_key(&receipt),
+            !core.pending.contains(&receipt),
             "the exact terminal projection allows the store-validated close"
         );
     }

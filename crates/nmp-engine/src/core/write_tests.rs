@@ -1436,11 +1436,11 @@ mod semantic_successor_tests {
                 .iter()
                 .any(|tag| tag.as_slice() == ["p", &person.to_hex()]));
         }
-        assert_eq!(core.pending.len(), 3);
-        assert_eq!(core.intent_receipts.len(), 3);
+        assert_eq!(core.pending.counts().obligations, 3);
+        assert_eq!(core.pending.counts().intent_keys, 3);
         assert_eq!(
             receipts.iter().copied().collect::<BTreeSet<_>>(),
-            core.pending.keys().copied().collect()
+            core.pending.receipt_ids().into_iter().collect()
         );
         assert!(core
             .pending
@@ -1596,18 +1596,21 @@ mod semantic_successor_tests {
         // asserting that bytes no receipt owns are still owned, once per
         // rewrite, until the next boot recovery.
         assert!(
-            !core.event_to_receipts.is_empty(),
+            core.pending.indexed_events().next().is_some(),
             "precondition: the scenario must index some frozen bytes, or the emptiness \
              assertion below is vacuous"
         );
+        let orphaned: Vec<_> = core
+            .pending
+            .indexed_events()
+            .filter(|(_, receipts)| receipts.is_empty())
+            .map(|(event_id, _)| *event_id)
+            .collect();
         assert!(
-            core.event_to_receipts
-                .values()
-                .all(|receipts| !receipts.is_empty()),
+            orphaned.is_empty(),
             "a retired generation's event id survives in event_to_receipts owned by no \
              receipt -- the member rewrite released the receipt without pruning the \
-             entry: {:?}",
-            core.event_to_receipts
+             entry: {orphaned:?}"
         );
 
         // Only the generation's first member -- the physical delivery
@@ -1633,12 +1636,11 @@ mod semantic_successor_tests {
         // relay connection. Without this the test below could pass because
         // the scenario never indexed the receipt in the first place, not
         // because the rewrite released it.
+        let indexed = core.pending.receipts_with_lane_on(&destination_a);
         assert!(
-            core.receipts_by_lane_relay
-                .get(&destination_a)
-                .is_some_and(|receipts| receipts.contains(&owner_receipt)),
-            "setup did not persist E1's lane for the owner's receipt on {destination_a}: {:?}",
-            core.receipts_by_lane_relay
+            indexed.contains(&owner_receipt),
+            "setup did not persist E1's lane for the owner's receipt on {destination_a}: \
+             {indexed:?}"
         );
 
         // A newer relay-observed source triggers a successor materialization
@@ -1657,14 +1659,11 @@ mod semantic_successor_tests {
         // The postcondition that matters: the owner's OLD generation is
         // superseded and its lane_projection was reset, so its relay must
         // not still be naming this receipt.
+        let indexed = core.pending.receipts_with_lane_on(&destination_a);
         assert!(
-            !core
-                .receipts_by_lane_relay
-                .get(&destination_a)
-                .is_some_and(|receipts| receipts.contains(&owner_receipt)),
+            !indexed.contains(&owner_receipt),
             "the owner's receipt is still indexed under {destination_a} after its successor \
-             rewrite -- receipts_by_lane_relay leaked the superseded generation's lane: {:?}",
-            core.receipts_by_lane_relay
+             rewrite -- the lane index leaked the superseded generation's lane: {indexed:?}"
         );
     }
 

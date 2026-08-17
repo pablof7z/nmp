@@ -72,6 +72,7 @@ mod observation;
 #[cfg(test)]
 mod outbox_tests;
 mod owner_index;
+mod pending_writes;
 mod query;
 #[cfg(test)]
 mod query_tests;
@@ -469,6 +470,7 @@ use observation::{
 pub use observation::{
     ObservationEvidence, ObservationFact, RequestTerminal, ResolutionCause, ResolvedBindingValue,
 };
+use pending_writes::PendingWrites;
 pub use query::Nip77Frame;
 pub use request_attempt::{LocalSendRefusal, RequestAttemptId, RequestHandoffOutcome};
 use request_attempt::{RequestAttemptPurpose, RequestAttemptState, RequestAttempts, RequestSend};
@@ -1133,6 +1135,12 @@ pub struct CoreOwnershipCensus {
     pub wire_routing_evidence_facts: usize,
     pub wire_routing_evidence_refs: usize,
     pub active_physical_requests: usize,
+    pub pending_write_obligations: usize,
+    pub pending_write_intent_keys: usize,
+    pub pending_write_event_keys: usize,
+    pub pending_write_event_edges: usize,
+    pub pending_write_lane_relay_keys: usize,
+    pub pending_write_lane_relay_edges: usize,
     pub pending_execution_owner_keys: usize,
     pub pending_execution_owners: usize,
     pub request_attempts: usize,
@@ -1919,8 +1927,8 @@ struct PendingRequestClaimTransfer {
 ///
 /// This is temporary scaffolding that SHRINKS. Every owner extracted from
 /// here (`RequestTargets`, `WireOwnership`, `HistorySessions`,
-/// `RequestAttempts`, `AuthorRouteNeeds`, `Nip77Sessions` so far) removes
-/// fields and decisions from it. It is not the semantic owner of engine
+/// `RequestAttempts`, `AuthorRouteNeeds`, `Nip77Sessions`, `PendingWrites` so
+/// far) removes fields and decisions from it. It is not the semantic owner of engine
 /// state and must not become one -- that is the god object this
 /// decomposition exists to dissolve.
 #[doc(hidden)]
@@ -2061,11 +2069,13 @@ pub struct CoreState {
     #[cfg(any(test, feature = "test-instrumentation"))]
     maintenance_turns: u64,
     active_pubkey: Option<PublicKey>,
-    /// Publish queue (§3.4 / VISION §7 ledger #6/#9). `pending` is keyed by
-    /// `ReceiptId` from `Publish` through to the last terminal per-relay
-    /// status; `event_to_receipt` lets an inbound `OK` frame (keyed by
-    /// `EventId` on the wire) find its receipt.
-    pending: HashMap<ReceiptId, PendingWrite>,
+    /// Every open durable write obligation and the three indexes that mirror
+    /// it (§3.4 / VISION §7 ledger #6/#9). Its five fields are private to
+    /// `pending_writes.rs`, so "which receipt owns this intent", "which
+    /// receipts own these bytes" and "which receipts have a lane on this
+    /// relay" have one implementation each instead of a door plus the
+    /// hand-written spellings that kept drifting from it (#1606).
+    pending: PendingWrites,
     /// Last complete neutral author-route provider-work set published to the
     /// optional protocol assembly. The set is the union of unresolved write
     /// contributors and authors in live `AuthorOutboxes` reads without a
@@ -2090,66 +2100,13 @@ pub struct CoreState {
     /// `stalled_write_census.rs`, so the cache can never drift from the
     /// census it is a projection of.
     stalled_writes: StalledWriteCensus,
-    /// Active durable obligations grouped by their final frozen event id.
-    /// Used both to correlate relay OK frames after signing and, #903, to
-    /// join an ordinary query row directly to every live receipt that owns
-    /// those exact bytes. It includes signer-parked writes from acceptance
-    /// onward, excludes terminal retained history, and is rebuilt from the
-    /// store's open intents on every boot.
-    event_to_receipts: HashMap<EventId, BTreeSet<ReceiptId>>,
-    /// O(1) reverse index of `pending`'s own `intent_id` field (epic #507
-    /// finding E5): `receipt_for_intent` used to be a full linear scan of
-    /// `pending`, run once per due deadline in
-    /// `consume_due_publish_queue_deadlines`. Maintained at every real
-    /// `pending.insert`/`pending.remove` (never at `fail_and_compensate`'s
-    /// transient remove-then-reinsert, which never changes which intent a
-    /// receipt owns). This mirrors `pending` exactly and needs no separate
-    /// invalidation story: it is rebuilt from scratch, in step with
-    /// `pending`, every `recover_on_boot`.
-    intent_receipts: HashMap<IntentId, ReceiptId>,
-    /// Relay -> receipts with a lane on that relay (epic #507 finding E5).
-    /// A narrowing INDEX only, never a second source of truth: the store's
-    /// `PUBLISH_QUEUE_LANES` table stays authoritative (its keys are intent-first,
-    /// and `close_terminal_intent` deliberately never deletes a closed
-    /// intent's own terminal lane rows -- `RedbStore` only drops
-    /// `PUBLISH_QUEUE_INTENTS`/the deadline indexes there, per that
-    /// door's own doc comment: "Receipts and all route/attempt/detail
-    /// evidence are retained" -- so a durable relay-scoped secondary table
-    /// would still index retained garbage and would need transactional
-    /// maintenance across every lane-writing door).
-    /// This index instead rides the reducer's own `pending`/`recover_on_boot`
-    /// lifecycle: rebuilt deterministically at boot, so there is no cache-
-    /// invalidation question distinct from the one `pending` itself already
-    /// answers. `wake_relay_lanes` uses this to avoid re-reading every
-    /// outstanding write's lanes on every relay connect/disconnect/auth
-    /// event -- it only narrows WHICH intents to re-read via
-    /// `recover_publish_queue_lanes`, the store read itself remains the truth.
-    /// Kept in lockstep with each `PendingWrite::lane_projection.persisted`
-    /// set by the one projection door; cleaned by walking that exact set on
-    /// a real removal.
-    receipts_by_lane_relay: HashMap<RelayUrl, BTreeSet<ReceiptId>>,
-    /// Safety valve for `receipts_by_lane_relay` (epic #507 finding E5): set
-    /// to true the moment ANY path could have created/learned lanes but the
-    /// index could not record them (a `bootstrap_publish_queue_lanes` or
-    /// `recover_route_revisions` error during `recover_on_boot`/`on_signed`).
-    /// `recover_on_boot` resets it to false at the start of its one-shot,
-    /// deterministic rebuild -- the same moment `pending` itself is rebuilt
-    /// from scratch -- and a later failure during that same rebuild (or any
-    /// post-boot lane-learning call) sets it back to true for the rest of
-    /// this process's life; nothing un-degrades it mid-process, on purpose.
-    /// While true, `wake_relay_lanes` falls back to the full
-    /// `recover_all_lanes` scan unchanged: a missed wakeup permanently wedges
-    /// a durable write lane (the worst bug class here -- see the idle-
-    /// barrier missed-wakeup fix, d755f39, and #507's own missed-wakeup
-    /// finding), so an unprovable index is always treated as untrustworthy
-    /// rather than guessed at.
-    lane_relay_index_degraded: bool,
     /// A lane-worker projection gap that NO in-process reconciliation can
     /// close: a committed lane fact arrived for an intent this reducer does
     /// not track, or boot could not read the pending set at all. There is
     /// nothing to retry, so this stays latched until the next
-    /// `recover_on_boot` rebuilds `pending` from scratch. Unlike
-    /// `lane_relay_index_degraded` it never triggers a fallback scan:
+    /// `recover_on_boot` rebuilds `pending` from scratch. Unlike the pending
+    /// writes owner's own degraded lane index it never triggers a fallback
+    /// scan:
     /// [`Self::relay_worker_requirements`] returns `None` and the runtime
     /// retains every existing session.
     lane_projection_unprovable: bool,
@@ -2446,13 +2403,9 @@ impl CoreState {
             #[cfg(any(test, feature = "test-instrumentation"))]
             maintenance_turns: 0,
             active_pubkey: None,
-            pending: HashMap::new(),
+            pending: PendingWrites::default(),
             last_author_route_needs: BTreeSet::new(),
             stalled_writes: StalledWriteCensus::default(),
-            event_to_receipts: HashMap::new(),
-            intent_receipts: HashMap::new(),
-            receipts_by_lane_relay: HashMap::new(),
-            lane_relay_index_degraded: false,
             lane_projection_unprovable: false,
             lane_bootstrap_retries: BTreeMap::new(),
             prober: Prober::new(),
@@ -2686,6 +2639,7 @@ impl CoreState {
         self.nip77.assert_consistent(at);
         self.request_replacements.assert_consistent(at);
         self.attempts.assert_consistent(at);
+        self.pending.assert_consistent(at);
         self.stalled_writes.assert_consistent(
             at,
             StalledWriteInputs {
@@ -2708,6 +2662,7 @@ impl CoreState {
         let targets = self.request_targets.counts();
         let nip77 = self.nip77.counts();
         let replacements = self.request_replacements.counts();
+        let writes = self.pending.counts();
         CoreOwnershipCensus {
             observations: self.observations.len(),
             branch_handles: self.handles.len(),
@@ -2753,6 +2708,12 @@ impl CoreState {
             wire_routing_evidence_facts: wire.routing_evidence_facts,
             wire_routing_evidence_refs: wire.routing_evidence_refs,
             active_physical_requests: router.plan_requests,
+            pending_write_obligations: writes.obligations,
+            pending_write_intent_keys: writes.intent_keys,
+            pending_write_event_keys: writes.event_keys,
+            pending_write_event_edges: writes.event_edges,
+            pending_write_lane_relay_keys: writes.lane_relay_keys,
+            pending_write_lane_relay_edges: writes.lane_relay_edges,
             pending_execution_owner_keys: self.pending_request_evidence.len(),
             pending_execution_owners: self
                 .pending_request_evidence
