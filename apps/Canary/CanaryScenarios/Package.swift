@@ -35,6 +35,20 @@ let package = Package(
                 .product(name: "NMP", package: "NMP")
             ]
         ),
+        // C2's ONLINE half. The claim under test is what survives a
+        // RESTART, and a second `NMPEngine` built inside the process that
+        // just filled the store is not a restart -- the pages, the
+        // allocator and every decoded row are still in that address
+        // space. This executable fills the store and quits; the scenario
+        // waits for it to be really gone before opening the store again,
+        // so the read it then asserts on is genuinely cold. Needs NMP
+        // only -- the relay's lifecycle stays the parent's job.
+        .executableTarget(
+            name: "canary-c2-warmer",
+            dependencies: [
+                .product(name: "NMP", package: "NMP")
+            ]
+        ),
         // C17's measured half. Memory footprint, open file descriptors and
         // live thread count are properties of a PROCESS, and issue #1796 is
         // the standing proof that a process-wide measurement inside a shared
