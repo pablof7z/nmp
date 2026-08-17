@@ -285,6 +285,13 @@ sealed class RelayWaiting {
 
     object NeedsAuth : RelayWaiting()
 
+    /** Nothing is blocking this lane: it is routed, scheduled, and its turn to
+     * send has not come. No attempt is running, so no ordinal is spent.
+     * Deliberately NOT [NotConnected] -- a queued write is not an unreachable
+     * relay, and only one of those is worth troubling a person with. [since]
+     * is the instant the lane became eligible, not a deadline. */
+    data class Eligible(val since: ULong) : RelayWaiting()
+
     /** The last attempt failed in a way that permits another one, and
      * [cause]/[detail] say WHY -- "we will try again" and "we will try again
      * because the relay rate-limited us" are different messages and only the
@@ -307,6 +314,7 @@ sealed class RelayWaiting {
             when (ffi) {
                 is FfiRelayWaiting.NotConnected -> NotConnected
                 is FfiRelayWaiting.NeedsAuth -> NeedsAuth
+                is FfiRelayWaiting.Eligible -> Eligible(ffi.since)
                 is FfiRelayWaiting.BackingOff ->
                     BackingOff(
                         ffi.attempt,
@@ -320,9 +328,16 @@ sealed class RelayWaiting {
 }
 
 /** What is true at ONE relay. [Published], [Rejected], [AuthFailed] and
- * [GaveUp] are terminal for that relay; [Waiting] and [Sent] are not. */
+ * [GaveUp] are terminal for that relay; [Waiting], [Attempting] and [Sent] are
+ * not. */
 sealed class RelayState {
     data class Waiting(val waiting: RelayWaiting) : RelayState()
+
+    /** An attempt is running and its ordinal is spent, but nothing about the
+     * wire is proved: transport has not answered the handoff yet, or cannot
+     * say whether the bytes reached the socket. Deliberately NOT folded into
+     * [Sent], whose whole content is the proof. */
+    data class Attempting(val attempt: ULong, val startedAt: ULong) : RelayState()
 
     /** Transport proved socket write + flush. Not an ack, and not terminal. */
     data class Sent(val attempt: ULong, val writtenAt: ULong) : RelayState()
@@ -352,13 +367,14 @@ sealed class RelayState {
         get() =
             when (this) {
                 is Published, is Rejected, is AuthFailed, is GaveUp -> true
-                is Waiting, is Sent -> false
+                is Waiting, is Attempting, is Sent -> false
             }
 
     companion object {
         internal fun from(ffi: FfiRelayState): RelayState =
             when (ffi) {
                 is FfiRelayState.Waiting -> Waiting(RelayWaiting.from(ffi.waiting))
+                is FfiRelayState.Attempting -> Attempting(ffi.attempt, ffi.startedAt)
                 is FfiRelayState.Sent -> Sent(ffi.attempt, ffi.writtenAt)
                 is FfiRelayState.Published -> Published
                 is FfiRelayState.Rejected -> Rejected(ffi.reason)
