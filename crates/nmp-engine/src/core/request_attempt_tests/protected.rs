@@ -31,9 +31,7 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
         generation: 2,
     };
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&atom)
-    });
+    core.set_active_demand(&BTreeSet::from([atom.clone()]));
     core.white_box("attribution.retain_live_request_claims", |s| {
         s.attribution
             .retain_live_request_claims(&sub_id, claims.clone())
@@ -85,15 +83,10 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
     core.white_box("on_relay_disconnected", |s| {
         s.on_relay_disconnected(next_handle, session, DisconnectReason::Closed)
     });
-    core.white_box("attribution.release_live_request_claims", |s| {
-        s.attribution.release_live_request_claims(&sub_id)
+    core.white_box("retire_plan_execution_metadata", |s| {
+        s.retire_plan_execution_metadata(&sub_id)
     });
-    core.white_box("plan_execution_metadata.remove", |s| {
-        s.plan_execution_metadata.remove(&sub_id)
-    });
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&atom)
-    });
+    core.set_active_demand(&BTreeSet::new());
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()

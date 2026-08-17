@@ -204,21 +204,6 @@ impl AttributionState {
         Self::default()
     }
 
-    /// Learn the ContextualAtom behind every atom in `demand` (called once
-    /// per recompile, from the resolver's full current `active_demand()` —
-    /// cheap, and the only way `CoreState` ever sees the atoms' shapes at
-    /// all). `demand` carries each atom's full `ContextualAtom` identity
-    /// (#106) so the retained value is keyed AND populated the SAME way
-    /// `record_send`/`attribute_eose`'s `CoverageKey`s already are.
-    pub(crate) fn observe_demand<'a>(
-        &mut self,
-        demand: impl IntoIterator<Item = &'a ContextualAtom>,
-    ) {
-        for atom in demand {
-            self.observe_atom(atom);
-        }
-    }
-
     pub(crate) fn observe_atom(&mut self, atom: &ContextualAtom) {
         let demand = DemandKey::for_atom(atom);
         if !self.active_demands.insert(demand) {
@@ -241,18 +226,31 @@ impl AttributionState {
         }
     }
 
-    /// Prune `shape_by_key` down to keys still reachable from SOMEWHERE
-    /// (finding E3, epic #507): called once per recompile, right after
-    /// [`Self::observe_demand`] (same `demand` argument), mirroring
-    /// `CoreState`'s own `nip11_information.retain(..)` immediately below
-    /// it in `core/mod.rs::recompile` -- without this, `shape_by_key` grows
-    /// once per distinct atom shape ever demanded for the life of the
-    /// process, which for a long-running client visiting many distinct
-    /// profiles/queries over a session is unbounded.
+    /// The current logical demand is now exactly `demand`: install it, learn
+    /// the `ContextualAtom` behind every atom in it, and prune the retained
+    /// shape registry down to keys still reachable from SOMEWHERE (finding
+    /// E3, epic #507).
+    ///
+    /// `demand` carries each atom's full `ContextualAtom` identity (#106) so
+    /// the retained value is keyed AND populated the SAME way
+    /// `record_send`/`attribute_eose`'s `CoverageKey`s already are. Without
+    /// the prune, `shape_by_key` grows once per distinct atom shape ever
+    /// demanded for the life of the process, which for a long-running client
+    /// visiting many distinct profiles/queries over a session is unbounded.
+    ///
+    /// This is ONE call because it is one fact. It used to be two —
+    /// `observe_demand(demand)` followed nine lines later by
+    /// `prune_shapes(demand)` in `core/mod.rs::recompile`, over the same
+    /// argument. The first was dead work: everything it wrote to
+    /// `active_demands`, `active_shape_owner_counts` and `shape_by_key` the
+    /// second rebuilt from scratch, and the only statement between them
+    /// (`flush_author_outbox_route_need_changes`) neither reads nor writes
+    /// attribution. Every in-crate falsifier hand-wrote only the first half
+    /// of that pair, so nothing could ever have caught the two drifting
+    /// apart (#1850).
     ///
     /// A key is still reachable, and MUST be retained, if EITHER:
-    /// - it is `coverage_key(atom)` for some atom in the CURRENT `demand`
-    ///   (the same set [`Self::observe_demand`] was just called with), or
+    /// - it is `coverage_key(atom)` for some atom in the CURRENT `demand`, or
     /// - it is still `coverage_claims` by some snapshot outstanding in `inflight`.
     ///
     /// The second clause is load-bearing, not defensive: `attribute_eose`
@@ -270,7 +268,7 @@ impl AttributionState {
     /// per this struct's own doc, exactly as it was before this method
     /// existed -- so under-pruning here is the acceptable failure mode,
     /// never over-pruning.
-    pub(crate) fn prune_shapes<'a>(
+    pub(crate) fn set_active_demand<'a>(
         &mut self,
         demand: impl IntoIterator<Item = &'a ContextualAtom>,
     ) {
@@ -480,10 +478,12 @@ impl AttributionState {
         self.release_snapshot(&snapshot);
     }
 
+    /// Whether any send on `sub_id` is still outstanding. An entry exists in
+    /// `inflight` exactly while its FIFO is non-empty — the emptiness clause
+    /// this used to carry was a workaround for two completion paths that
+    /// popped the last snapshot and left the entry behind (#1850).
     pub(crate) fn has_inflight(&self, sub_id: &SubId) -> bool {
-        self.inflight
-            .get(sub_id)
-            .is_some_and(|snapshots| !snapshots.is_empty())
+        self.inflight.contains_key(sub_id)
     }
 
     pub(crate) fn discard_wire_mapping(&mut self, session: &RelaySessionKey, sub_id: &SubId) {
@@ -498,5 +498,306 @@ impl AttributionState {
         for key in claims {
             self.release_live_shape_owner(key);
         }
+    }
+
+    /// Exact structural consistency for every mirror this owner keeps, by
+    /// identity rather than by count.
+    ///
+    /// [`Self::counts`] next to this counts things — the right instrument for
+    /// leaks and boundedness, and the wrong one for structure. Two of the
+    /// three refcount maps here are pure derived data with an authoritative
+    /// source in the same struct (`live_shape_owner_counts` from
+    /// `live_request_claims`, `inflight_shape_owner_counts` from `inflight`),
+    /// and both are maintained by `saturating_sub`. A refcount that
+    /// underflows saturates to zero, drops its key, and takes the retained
+    /// shape with it via [`Self::remove_unowned_shape`] — after which the
+    /// census reports a SMALLER number, and every falsifier that ends by
+    /// asserting an all-zero census passes. That is precisely the failure the
+    /// count cannot see, so it is recomputed from the source here instead.
+    ///
+    /// The `sub_id_by_wire` clause is the same shape of unchecked assumption:
+    /// [`Self::discard_sub`] reconstructs a mapping's session key from the
+    /// `SubId` alone (`RelaySessionKey::new(sub_id.0, sub_id.2)`), which is
+    /// only exact while every mapping is filed under the session its own
+    /// `SubId` names. Nothing checked that; a mapping filed under any other
+    /// session leaks forever and the count is identical either way.
+    ///
+    /// Deliberately NOT asserted, and known: `active_shape_owner_counts`
+    /// cannot be recomputed from `active_demands`, because a `DemandKey` is a
+    /// hash and does not carry the `ContextualAtom` its claim shapes come
+    /// from. Only the structural clauses (no zero counts, no counts without
+    /// demand) apply to it. Recomputing it would require retaining the atoms,
+    /// which is state added to prove state.
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) fn assert_consistent(&self, at: &str) {
+        for (sub_id, claims) in &self.live_request_claims {
+            assert!(
+                !claims.is_empty(),
+                "{at}: attribution kept an empty live-request claim set for {sub_id:?}"
+            );
+        }
+        let mut expected_live: HashMap<CoverageKey, usize> = HashMap::new();
+        for claims in self.live_request_claims.values() {
+            for key in claims {
+                *expected_live.entry(*key).or_insert(0) += 1;
+            }
+        }
+        assert_eq!(
+            self.live_shape_owner_counts, expected_live,
+            "{at}: attribution's live shape refcounts disagree with the claim sets they count"
+        );
+
+        for (sub_id, snapshots) in &self.inflight {
+            assert!(
+                !snapshots.is_empty(),
+                "{at}: attribution kept an empty in-flight FIFO for {sub_id:?}"
+            );
+        }
+        let mut expected_inflight: HashMap<CoverageKey, usize> = HashMap::new();
+        for snapshots in self.inflight.values() {
+            for snapshot in snapshots {
+                for key in &snapshot.coverage_claims {
+                    *expected_inflight.entry(*key).or_insert(0) += 1;
+                }
+            }
+        }
+        assert_eq!(
+            self.inflight_shape_owner_counts, expected_inflight,
+            "{at}: attribution's in-flight shape refcounts disagree with the send-time \
+             snapshots they count"
+        );
+
+        for (key, count) in &self.active_shape_owner_counts {
+            assert_ne!(
+                *count, 0,
+                "{at}: attribution kept a zero active shape refcount for {key:?}"
+            );
+        }
+        assert!(
+            self.active_shape_owner_counts.is_empty() || !self.active_demands.is_empty(),
+            "{at}: attribution retains active shape owners with no active demand at all"
+        );
+
+        for key in self.shape_by_key.keys() {
+            assert!(
+                self.active_shape_owner_counts.contains_key(key)
+                    || self.live_shape_owner_counts.contains_key(key)
+                    || self.inflight_shape_owner_counts.contains_key(key),
+                "{at}: attribution retains the shape for {key:?} with no owner of any kind"
+            );
+        }
+
+        for ((session, wire), sub_id) in &self.sub_id_by_wire {
+            assert_eq!(
+                session,
+                &RelaySessionKey::new(sub_id.0.clone(), sub_id.2),
+                "{at}: attribution filed a wire mapping under a session its own SubId does \
+                 not name, which discard_sub can never find again"
+            );
+            assert_eq!(
+                wire,
+                &wire_sub_id_string(sub_id),
+                "{at}: attribution filed a wire mapping under a string its own SubId does \
+                 not spell"
+            );
+        }
+    }
+
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    pub(super) fn counts(&self) -> AttributionCounts {
+        AttributionCounts {
+            inflight_subs: self.inflight.len(),
+            wire_keys: self.sub_id_by_wire.len(),
+            shape_keys: self.shape_by_key.len(),
+            active_demands: self.active_demands.len(),
+            active_shape_keys: self.active_shape_owner_counts.len(),
+            active_shape_refs: self.active_shape_owner_counts.values().sum(),
+            live_request_keys: self.live_request_claims.len(),
+            live_shape_keys: self.live_shape_owner_counts.len(),
+            live_shape_refs: self.live_shape_owner_counts.values().sum(),
+            inflight_shape_keys: self.inflight_shape_owner_counts.len(),
+            inflight_shape_refs: self.inflight_shape_owner_counts.values().sum(),
+        }
+    }
+}
+
+/// The eleven numbers `CoreOwnershipCensus` carries for this owner, named.
+///
+/// It replaces an eleven-element `(usize, ..., usize)` tuple destructured
+/// positionally at the one call site. Every sibling owner (`RequestAttempts`,
+/// `WireOwnership`, `Nip77Sessions`, `HistorySessions`, `RequestReplacements`)
+/// already returns a named struct; attribution was the one that did not, and
+/// eleven interchangeable positional `usize`s mean any adjacent pair could be
+/// transposed with the whole suite still green.
+#[cfg(any(test, feature = "bench-instrumentation"))]
+pub(super) struct AttributionCounts {
+    pub(super) inflight_subs: usize,
+    pub(super) wire_keys: usize,
+    pub(super) shape_keys: usize,
+    pub(super) active_demands: usize,
+    pub(super) active_shape_keys: usize,
+    pub(super) active_shape_refs: usize,
+    pub(super) live_request_keys: usize,
+    pub(super) live_shape_keys: usize,
+    pub(super) live_shape_refs: usize,
+    pub(super) inflight_shape_keys: usize,
+    pub(super) inflight_shape_refs: usize,
+}
+
+/// The owner's own falsifiers, in the file that owns the state they drive.
+///
+/// #1850 read attribution's 100 in-crate test reach-ins as "unit tests of this
+/// owner living in `core/admission_tests/`, which should move next to the
+/// owner". Reading them, that is not what they are: every one of those tests
+/// drives `CoreState` orchestration (`apply_request_metadata_updates`,
+/// `record_observed_request`, `on_relay_frame`, `abandon_sub`) and asserts on
+/// the store, so moving them here would misfile engine tests. What was
+/// genuinely missing is the layer below them — this module. Attribution was
+/// the one extracted owner with no `assert_consistent` at all, so it was also
+/// the one owner with nothing to unit-test.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nmp_grammar::{AccessContext, ConcreteFilter, SourceAuthority};
+    use nmp_router::RelayUrl;
+
+    fn relay() -> RelayUrl {
+        RelayUrl::parse("wss://attribution-owner.example").expect("valid relay url")
+    }
+
+    fn atom(kind: u16) -> ContextualAtom {
+        ContextualAtom {
+            filter: ConcreteFilter {
+                kinds: Some(BTreeSet::from([kind])),
+                ..ConcreteFilter::default()
+            },
+            source: SourceAuthority::Pinned(BTreeSet::from([relay()])),
+            access: AccessContext::Public,
+            routing_evidence: BTreeSet::new(),
+        }
+    }
+
+    fn sub_id_for(atom: &ContextualAtom) -> SubId {
+        SubId::for_wire(relay(), &atom.filter, &atom.source, atom.access)
+    }
+
+    /// The census counts `live_shape_owner_counts.len()` and its value sum.
+    /// Both fall when a refcount saturates to zero one release early, and the
+    /// falsifiers that end by asserting an all-zero census read a smaller
+    /// number as "clean". Recomputing the map from `live_request_claims` is
+    /// what makes the corruption visible at all.
+    #[test]
+    fn assert_consistent_catches_a_live_refcount_that_lost_an_owner_the_claim_set_still_names() {
+        let shared = atom(1);
+        let key = coverage_key(&shared);
+        let first = sub_id_for(&shared);
+        let mut second_atom = shared.clone();
+        second_atom.filter.since = Some(10);
+        let second = sub_id_for(&second_atom);
+
+        let mut attribution = AttributionState::new();
+        attribution.set_active_demand([&shared]);
+        attribution.retain_live_request_claims(&first, BTreeSet::from([key]));
+        attribution.retain_live_request_claims(&second, BTreeSet::from([key]));
+        attribution.assert_consistent("two requests retain one shape");
+        assert_eq!(attribution.counts().live_shape_refs, 2);
+
+        // Exactly what one saturating underflow leaves behind: the claim sets
+        // still name two owners, the refcount says one.
+        attribution.live_shape_owner_counts.insert(key, 1);
+
+        let census_still_agrees = attribution.counts().live_request_keys == 2
+            && attribution.counts().live_shape_keys == 1;
+        assert!(
+            census_still_agrees,
+            "the corruption must be invisible to every count for this test to mean anything"
+        );
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            attribution.assert_consistent("corrupted")
+        }));
+        assert!(
+            caught.is_err(),
+            "a live refcount disagreeing with the claim sets it counts must be caught"
+        );
+    }
+
+    /// [`AttributionState::discard_sub`] reconstructs a mapping's session from
+    /// the `SubId` alone. A mapping filed under any other session is
+    /// unreachable by that reconstruction and leaks for the life of the
+    /// process — with every census number identical.
+    #[test]
+    fn assert_consistent_catches_a_wire_mapping_discard_sub_could_never_find_again() {
+        let subscribed = atom(1);
+        let sub_id = sub_id_for(&subscribed);
+        let mut attribution = AttributionState::new();
+        attribution.set_active_demand([&subscribed]);
+        attribution.record_send(
+            &RelaySessionKey::public(relay()),
+            &sub_id,
+            &subscribed.filter,
+            BTreeSet::from([coverage_key(&subscribed)]),
+            EventFailureTarget::ThisSend,
+        );
+        attribution.assert_consistent("one send on its own session");
+
+        let before = attribution.counts().wire_keys;
+        let wire = wire_sub_id_string(&sub_id);
+        attribution
+            .sub_id_by_wire
+            .remove(&(RelaySessionKey::public(relay()), wire.clone()));
+        attribution.sub_id_by_wire.insert(
+            (
+                RelaySessionKey::new(
+                    RelayUrl::parse("wss://somewhere-else.example").expect("valid relay url"),
+                    AccessContext::Public,
+                ),
+                wire,
+            ),
+            sub_id.clone(),
+        );
+        assert_eq!(
+            attribution.counts().wire_keys,
+            before,
+            "the misfiling must preserve every count for this test to mean anything"
+        );
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            attribution.assert_consistent("corrupted")
+        }));
+        assert!(
+            caught.is_err(),
+            "a wire mapping filed under a session its own SubId does not name must be caught"
+        );
+    }
+
+    /// Three of the five FIFO mutators dropped an emptied entry and two did
+    /// not, so every completed EOSE left an empty `VecDeque` behind until the
+    /// sub was abandoned — and two `is_empty()` guards elsewhere existed only
+    /// to tolerate it (#1850).
+    #[test]
+    fn a_completed_send_leaves_no_empty_fifo_behind() {
+        let subscribed = atom(1);
+        let sub_id = sub_id_for(&subscribed);
+        let session = RelaySessionKey::public(relay());
+        let mut attribution = AttributionState::new();
+        attribution.set_active_demand([&subscribed]);
+        attribution.record_send(
+            &session,
+            &sub_id,
+            &subscribed.filter,
+            BTreeSet::from([coverage_key(&subscribed)]),
+            EventFailureTarget::ThisSend,
+        );
+        assert!(attribution.has_inflight(&sub_id));
+
+        let completed = attribution.attribute_eose_detailed(
+            &session,
+            &wire_sub_id_string(&sub_id),
+            Timestamp::from(100u64),
+        );
+        assert!(completed.is_some());
+        assert!(!attribution.has_inflight(&sub_id));
+        assert_eq!(attribution.counts().inflight_subs, 0);
+        attribution.assert_consistent("after the only send completed");
     }
 }

@@ -165,37 +165,6 @@ impl AttributionState {
             .remove(&(session, wire_sub_id_string(sub_id)));
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    pub(crate) fn ownership_census(
-        &self,
-    ) -> (
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-    ) {
-        (
-            self.inflight.len(),
-            self.sub_id_by_wire.len(),
-            self.shape_by_key.len(),
-            self.active_demands.len(),
-            self.active_shape_owner_counts.len(),
-            self.active_shape_owner_counts.values().sum(),
-            self.live_request_claims.len(),
-            self.live_shape_owner_counts.len(),
-            self.live_shape_owner_counts.values().sum(),
-            self.inflight_shape_owner_counts.len(),
-            self.inflight_shape_owner_counts.values().sum(),
-        )
-    }
-
     #[cfg(test)]
     pub(crate) fn current_claims(&self, sub_id: &SubId) -> BTreeSet<CoverageKey> {
         self.inflight
@@ -245,10 +214,6 @@ impl AttributionState {
             .get(&(session.clone(), wire_sub_id.to_string()))
             .cloned()?;
         let fifo = self.inflight.get_mut(&sub_id)?;
-        if fifo.is_empty() {
-            return None;
-        }
-
         let coverage_authority = fifo
             .iter()
             .find_map(|snapshot| match snapshot.coverage_authority {
@@ -280,7 +245,11 @@ impl AttributionState {
 
         let completed = fifo
             .pop_front()
-            .expect("non-empty attribution FIFO checked above");
+            .expect("an in-flight FIFO is removed the moment it empties");
+        let drained = fifo.is_empty();
+        if drained {
+            self.inflight.remove(&sub_id);
+        }
         Some(self.complete_snapshot(sub_id, completed, coverage_authority, result))
     }
 
@@ -309,6 +278,9 @@ impl AttributionState {
         let snapshot = fifo
             .remove(position)
             .expect("position came from this exact attribution FIFO");
+        if fifo.is_empty() {
+            self.inflight.remove(&sub_id);
+        }
         let from = snapshot.floor.unwrap_or_else(|| Timestamp::from(0u64));
         let through = snapshot
             .until

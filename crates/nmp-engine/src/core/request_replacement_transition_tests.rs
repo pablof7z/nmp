@@ -54,8 +54,16 @@ impl Fixture {
         }
     }
 
+    /// One recompile, in the order `CoreState::recompile` performs it: install
+    /// `demand` as attribution's current logical demand, then compile the
+    /// router from the same set. Each caller used to hand-write the
+    /// attribution half — `observe_atom` for whatever arrived and
+    /// `release_atom` for whatever left, twenty sites across five tests — so
+    /// the fixture's "recompile" and the reducer's could drift apart with
+    /// nothing to catch it (#1850).
     fn compile(&mut self, demand: BTreeSet<ContextualAtom>) -> Vec<Effect> {
-        let outcome = self.core.white_box("router.compile", |s| {
+        let outcome = self.core.white_box("recompile", |s| {
+            s.attribution.set_active_demand(demand.iter());
             s.router
                 .compile(&demand, &s.routing_facts, s.compile_budget())
         });
@@ -97,9 +105,6 @@ impl Fixture {
     }
 
     fn establish_active_nip77(&mut self, atom: &ContextualAtom) -> (SubId, SubId) {
-        self.core.white_box("attribution.observe_atom", |s| {
-            s.attribution.observe_atom(atom)
-        });
         let opened = self.compile(BTreeSet::from([atom.clone()]));
         let (_, plan_sub_id, filter, attempt_id) = only_request(&opened);
         self.core
@@ -169,9 +174,6 @@ fn predecessor_candidate_eose_during_replacement_keeps_its_plan_metadata() {
     let first = fixture.atom(20);
     let second = fixture.atom(21);
 
-    fixture.core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&first)
-    });
     let opened = fixture.compile(BTreeSet::from([first.clone()]));
     let (_, first_plan, first_filter, first_attempt) = only_request(&opened);
     fixture
@@ -204,12 +206,6 @@ fn predecessor_candidate_eose_during_replacement_keeps_its_plan_metadata() {
             handle: fixture.handle,
         });
 
-    fixture.core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&second)
-    });
-    fixture.core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&first)
-    });
     let replacement = fixture.compile(BTreeSet::from([second.clone()]));
     let (_, second_candidate, _, second_attempt) = only_request(&replacement);
     assert!(fixture.core.request_replacements.len() == 1);
@@ -231,9 +227,6 @@ fn predecessor_candidate_eose_during_replacement_keeps_its_plan_metadata() {
         });
     fixture.eose(&second_candidate);
     fixture.compile(BTreeSet::new());
-    fixture.core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&second)
-    });
     assert_eq!(
         fixture.core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -249,12 +242,6 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
     let second_claim = coverage_key(&second);
     let (first_plan, old_child) = fixture.establish_active_nip77(&first);
 
-    fixture.core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&second)
-    });
-    fixture.core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&first)
-    });
     let second_effects = fixture.compile(BTreeSet::from([second.clone()]));
     let (_, second_candidate, _, second_attempt) = only_request(&second_effects);
     fixture
@@ -271,12 +258,6 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
         Some(&old_child)
     );
 
-    fixture.core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&third)
-    });
-    fixture.core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&second)
-    });
     let third_effects = fixture.compile(BTreeSet::from([third.clone()]));
     let (_, third_candidate, _, third_attempt) = only_request(&third_effects);
     let third_plan = fixture.core.router.plan().reqs[&fixture.session][0]
@@ -338,9 +319,6 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
     );
 
     fixture.compile(BTreeSet::new());
-    fixture.core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&third)
-    });
     assert_eq!(
         fixture.core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -354,12 +332,6 @@ fn withdrawing_an_accepted_nip77_candidate_before_eose_closes_candidate_and_pred
     let second = fixture.atom(7);
     let (_, old_child) = fixture.establish_active_nip77(&first);
 
-    fixture.core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&second)
-    });
-    fixture.core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&first)
-    });
     let replacement = fixture.compile(BTreeSet::from([second.clone()]));
     let (_, successor_child, _, successor_attempt) = only_request(&replacement);
     fixture
@@ -380,9 +352,6 @@ fn withdrawing_an_accepted_nip77_candidate_before_eose_closes_candidate_and_pred
             1
         );
     }
-    fixture.core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&second)
-    });
     assert_eq!(
         fixture.core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -396,12 +365,6 @@ fn withdrawing_a_refused_nip77_successor_retires_its_predecessor_and_every_trans
     let second = fixture.atom(5);
     let (_, old_child) = fixture.establish_active_nip77(&first);
 
-    fixture.core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&second)
-    });
-    fixture.core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&first)
-    });
     let replacement = fixture.compile(BTreeSet::from([second.clone()]));
     let (_, successor_child, _, successor_attempt) = only_request(&replacement);
     fixture
@@ -425,9 +388,6 @@ fn withdrawing_a_refused_nip77_successor_retires_its_predecessor_and_every_trans
             .count(),
         1
     );
-    fixture.core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&second)
-    });
     assert_eq!(
         fixture.core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -437,22 +397,12 @@ fn withdrawing_a_refused_nip77_successor_retires_its_predecessor_and_every_trans
 #[test]
 fn accepted_byte_changed_replacements_retain_only_one_current_request() {
     let mut fixture = Fixture::new("bounded-accepted-replacements");
-    let mut current = fixture.atom(10);
-    fixture.core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&current)
-    });
-    let opened = fixture.compile(BTreeSet::from([current.clone()]));
+    let opened = fixture.compile(BTreeSet::from([fixture.atom(10)]));
     let mut current_sub = fixture.accept(&opened);
 
     for author in 11..=42 {
         let next = fixture.atom(author);
-        fixture.core.white_box("attribution.observe_atom", |s| {
-            s.attribution.observe_atom(&next)
-        });
-        fixture.core.white_box("attribution.release_atom", |s| {
-            s.attribution.release_atom(&current)
-        });
-        let replacement = fixture.compile(BTreeSet::from([next.clone()]));
+        let replacement = fixture.compile(BTreeSet::from([next]));
         let (_, next_sub, _, next_attempt) = only_request(&replacement);
         assert_ne!(current_sub, next_sub);
         assert_eq!(
@@ -472,14 +422,10 @@ fn accepted_byte_changed_replacements_retain_only_one_current_request() {
         assert_eq!(census.request_replacement_jobs, 0);
         assert_eq!(census.live_wire_owners, 1);
         assert_eq!(census.active_execution_owners, 1);
-        current = next;
         current_sub = next_sub;
     }
 
     fixture.compile(BTreeSet::new());
-    fixture.core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&current)
-    });
     assert_eq!(
         fixture.core.bench_ownership_census(),
         CoreOwnershipCensus::default()

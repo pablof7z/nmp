@@ -304,16 +304,15 @@ impl CoreState {
                 .get()
                 .saturating_add(demand.len() as u64),
         );
-        self.attribution.observe_demand(demand.iter());
         self.flush_author_outbox_route_need_changes(effects);
-        // Finding E3 (epic #507): prune `shape_by_key` against the SAME
-        // `demand` just observed above, plus every key still `coverage_claims` by
-        // an outstanding attribution snapshot (see `prune_shapes`'s own
-        // doc for why the latter is required) -- mirrors the
-        // `nip11_information.retain(..)` a few lines below, in the same
-        // function, against the same kind of "current authoritative set"
-        // (`planned`/`demand`) recompile just established.
-        self.attribution.prune_shapes(demand.iter());
+        // Finding E3 (epic #507): install `demand` as the current logical
+        // demand and prune `shape_by_key` against it plus every key still
+        // `coverage_claims` by an outstanding attribution snapshot (see
+        // `set_active_demand`'s own doc for why the latter is required) --
+        // mirrors the `nip11_information.retain(..)` a few lines below, in
+        // the same function, against the same kind of "current authoritative
+        // set" (`planned`/`demand`) recompile just established.
+        self.attribution.set_active_demand(demand.iter());
         let outcome = self
             .router
             .compile(&demand, &self.routing_facts, self.compile_budget());
@@ -512,6 +511,27 @@ impl CoreState {
                 owner_demands,
             },
         );
+    }
+
+    /// This physical plan request is gone: drop its execution metadata and
+    /// release the claim shapes it retained.
+    ///
+    /// One fact, and it used to be two half-updates in two owners spelled out
+    /// side by side at four production sites (`apply_router_plan_delta`'s
+    /// `WireOp::Close`, `cancel_replacement_successor_work`,
+    /// `retire_replacement_predecessor`,
+    /// `abandon_request_replacements_for_session`) and ten falsifier sites.
+    /// A caller that performed one and forgot the other left a retained
+    /// coverage shape with no plan behind it, or a plan entry claiming shapes
+    /// attribution had already released, and every count still agreed (#1850).
+    ///
+    /// Deliberately not symmetric with [`Self::install_plan_execution_metadata`]:
+    /// the two AUTH replay paths in `auth_transport.rs` re-install metadata for
+    /// an already-retained plan request on purpose, so folding the retention
+    /// into installation would add a call those two sites do not make.
+    pub(in crate::core) fn retire_plan_execution_metadata(&mut self, sub_id: &SubId) {
+        self.attribution.release_live_request_claims(sub_id);
+        self.plan_execution_metadata.remove(sub_id);
     }
 
     fn extend_plan_execution_metadata(&mut self, update: &nmp_router::RequestMetadataUpdate) {
@@ -952,8 +972,7 @@ impl CoreState {
                     }
                     WireOp::Close(sub_id) => {
                         if !transition_priors.contains(&(session.clone(), sub_id.clone())) {
-                            self.plan_execution_metadata.remove(sub_id);
-                            self.attribution.release_live_request_claims(sub_id);
+                            self.retire_plan_execution_metadata(sub_id);
                         }
                     }
                 }
@@ -1851,8 +1870,7 @@ impl CoreState {
         let session = RelaySessionKey::new(successor.0.clone(), successor.2);
         let closes = self.cancel_nip77_repair_for_plan(successor, effects);
         self.abandon_sub(successor);
-        self.attribution.release_live_request_claims(successor);
-        self.plan_execution_metadata.remove(successor);
+        self.retire_plan_execution_metadata(successor);
         self.cancel_request_claim_transfers(&session, successor, None);
         if !closes.is_empty() {
             effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
@@ -1879,10 +1897,7 @@ impl CoreState {
             closes.insert(replacement.prior_sub_id.clone());
         }
         self.abandon_sub(&replacement.prior_sub_id);
-        self.attribution
-            .release_live_request_claims(&replacement.prior_sub_id);
-        self.plan_execution_metadata
-            .remove(&replacement.prior_sub_id);
+        self.retire_plan_execution_metadata(&replacement.prior_sub_id);
         self.cancel_request_claim_transfers(&replacement.session, &replacement.prior_sub_id, None);
         if !closes.is_empty() {
             effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
@@ -1918,10 +1933,7 @@ impl CoreState {
         session: &RelaySessionKey,
     ) {
         for (_successor, replacement) in self.request_replacements.take_for_session(session) {
-            self.attribution
-                .release_live_request_claims(&replacement.prior_sub_id);
-            self.plan_execution_metadata
-                .remove(&replacement.prior_sub_id);
+            self.retire_plan_execution_metadata(&replacement.prior_sub_id);
             self.cancel_request_claim_transfers(session, &replacement.prior_sub_id, None);
         }
     }

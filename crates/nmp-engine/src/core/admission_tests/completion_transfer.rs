@@ -29,11 +29,11 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
     let residual_claim = coverage_key(&residual_piece);
     let owner = DemandKey::for_atom(&whole);
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-    for shape in [&whole, &incumbent_piece, &residual_piece] {
-        core.white_box("attribution.observe_atom", |s| {
-            s.attribution.observe_atom(shape)
-        });
-    }
+    core.set_active_demand(&BTreeSet::from([
+        whole.clone(),
+        incumbent_piece.clone(),
+        residual_piece.clone(),
+    ]));
     let transport = TransportRelayHandle {
         slot: 81,
         generation: 1,
@@ -117,19 +117,15 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
             s.live_wire_requests
                 .remove(&(session.clone(), sub_id.clone()))
         });
-        core.white_box("attribution.release_live_request_claims", |s| {
-            s.attribution.release_live_request_claims(&sub_id)
+        core.white_box("retire_plan_execution_metadata", |s| {
+            s.retire_plan_execution_metadata(&sub_id)
         });
         core.white_box("abandon_sub", |s| s.abandon_sub(&sub_id));
     }
     core.white_box("slot_to_relay.remove", |s| {
         s.slot_to_relay.remove(&transport.slot)
     });
-    for shape in [&whole, &incumbent_piece, &residual_piece] {
-        core.white_box("attribution.release_atom", |s| {
-            s.attribution.release_atom(shape)
-        });
-    }
+    core.set_active_demand(&BTreeSet::new());
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -181,12 +177,7 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
             RedbStore::open(&path).expect("reopen corrupted Redb fixture"),
             20,
         );
-        core.white_box("attribution.observe_atom", |s| {
-            s.attribution.observe_atom(&incumbent)
-        });
-        core.white_box("attribution.observe_atom", |s| {
-            s.attribution.observe_atom(&added)
-        });
+        core.set_active_demand(&BTreeSet::from([incumbent.clone(), added.clone()]));
         let sub_id = SubId::for_wire(
             relay,
             &incumbent.filter,
@@ -249,15 +240,10 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
         core.white_box("live_wire_requests.remove", |s| {
             s.live_wire_requests.remove(&(session, sub_id.clone()))
         });
-        core.white_box("attribution.release_live_request_claims", |s| {
-            s.attribution.release_live_request_claims(&sub_id)
+        core.white_box("retire_plan_execution_metadata", |s| {
+            s.retire_plan_execution_metadata(&sub_id)
         });
-        core.white_box("attribution.release_atom", |s| {
-            s.attribution.release_atom(&incumbent)
-        });
-        core.white_box("attribution.release_atom", |s| {
-            s.attribution.release_atom(&added)
-        });
+        core.set_active_demand(&BTreeSet::new());
         assert_eq!(
             core.bench_ownership_census(),
             CoreOwnershipCensus::default()
@@ -303,9 +289,10 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
     let store = RedbStore::open_with_failed_coverage_write(&path, first_added_claim, relay)
         .expect("persistent exact coverage-write failure fixture");
     let mut core = EngineCore::new(store, 20);
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&incumbent)
-    });
+    let added_atoms: Vec<_> = (1..=GENERATIONS).map(added_for_generation).collect();
+    let mut demand = BTreeSet::from([incumbent.clone()]);
+    demand.extend(added_atoms.iter().cloned());
+    core.set_active_demand(&demand);
     core.white_box("attribution.retain_live_request_claims", |s| {
         s.attribution
             .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]))
@@ -332,13 +319,9 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
         )
     });
 
-    let mut added_atoms = Vec::with_capacity(GENERATIONS as usize);
-    for generation in 1..=GENERATIONS {
-        let added = added_for_generation(generation);
-        let claim = coverage_key(&added);
-        core.white_box("attribution.observe_atom", |s| {
-            s.attribution.observe_atom(&added)
-        });
+    for (index, added) in added_atoms.iter().enumerate() {
+        let generation = index as u16 + 1;
+        let claim = coverage_key(added);
         core.white_box("live_wire_requests.get_mut", |s| {
             if let Some(live) = s
                 .live_wire_requests
@@ -360,12 +343,11 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
                     sub_id: sub_id.clone(),
                     filter_hash: incumbent.filter.hash(),
                     added_coverage_claims: BTreeSet::from([claim]),
-                    added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
+                    added_owner_demands: BTreeSet::from([DemandKey::for_atom(added)]),
                 }],
                 &mut Vec::new(),
             )
         });
-        added_atoms.push(added);
     }
 
     assert_eq!(core.pending_request_claim_transfers.len(), 1);
@@ -406,17 +388,10 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
     core.white_box("live_wire_requests.remove", |s| {
         s.live_wire_requests.remove(&(session, sub_id.clone()))
     });
-    core.white_box("attribution.release_live_request_claims", |s| {
-        s.attribution.release_live_request_claims(&sub_id)
+    core.white_box("retire_plan_execution_metadata", |s| {
+        s.retire_plan_execution_metadata(&sub_id)
     });
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&incumbent)
-    });
-    for added in added_atoms {
-        core.white_box("attribution.release_atom", |s| {
-            s.attribution.release_atom(&added)
-        });
-    }
+    core.set_active_demand(&BTreeSet::new());
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()

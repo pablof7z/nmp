@@ -49,12 +49,7 @@ impl Fixture {
         let incumbent_claims = BTreeSet::from([coverage_key(&incumbent)]);
         let incumbent_demands = BTreeSet::from([DemandKey::for_atom(&incumbent)]);
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-        core.white_box("attribution.observe_atom", |s| {
-            s.attribution.observe_atom(&incumbent)
-        });
-        core.white_box("attribution.observe_atom", |s| {
-            s.attribution.observe_atom(&added)
-        });
+        core.set_active_demand(&BTreeSet::from([incumbent.clone(), added.clone()]));
         core.white_box("attribution.retain_live_request_claims", |s| {
             s.attribution
                 .retain_live_request_claims(&plan_sub_id, incumbent_claims.clone())
@@ -252,19 +247,10 @@ impl Fixture {
         self.core.white_box("cancel_nip77_repair_for_plan", |s| {
             s.cancel_nip77_repair_for_plan(&self.plan_sub_id, &mut Vec::new())
         });
-        self.core
-            .white_box("attribution.release_live_request_claims", |s| {
-                s.attribution.release_live_request_claims(&self.plan_sub_id)
-            });
-        self.core.white_box("plan_execution_metadata.remove", |s| {
-            s.plan_execution_metadata.remove(&self.plan_sub_id)
+        self.core.white_box("retire_plan_execution_metadata", |s| {
+            s.retire_plan_execution_metadata(&self.plan_sub_id)
         });
-        self.core.white_box("attribution.release_atom", |s| {
-            s.attribution.release_atom(&self.incumbent)
-        });
-        self.core.white_box("attribution.release_atom", |s| {
-            s.attribution.release_atom(&self.added)
-        });
+        self.core.set_active_demand(&BTreeSet::new());
         assert_eq!(
             self.core.bench_ownership_census(),
             CoreOwnershipCensus::default()
@@ -393,9 +379,7 @@ fn assert_consistent_catches_a_cardinality_preserving_swap_between_plans() {
             routing_evidence: BTreeSet::new(),
         };
         let plan_sub_id = SubId::for_wire(relay.clone(), &atom.filter, &atom.source, atom.access);
-        core.white_box("attribution.observe_atom", |s| {
-            s.attribution.observe_atom(&atom)
-        });
+        core.set_active_demand(&BTreeSet::from([atom.clone()]));
         core.white_box("attribution.retain_live_request_claims", |s| {
             s.attribution
                 .retain_live_request_claims(&plan_sub_id, BTreeSet::from([coverage_key(&atom)]))

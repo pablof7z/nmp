@@ -33,7 +33,7 @@ mod relay_session_key_tests {
         let session_a = RelaySessionKey::new(relay.clone(), access_a);
         let session_b = RelaySessionKey::new(relay, AccessContext::Nip42(b));
         let mut attribution = AttributionState::new();
-        attribution.observe_demand([&atom]);
+        attribution.set_active_demand([&atom]);
         attribution.record_send(
             &session_a,
             &sub_id,
@@ -179,7 +179,7 @@ mod relay_session_key_tests {
         let wire_a = wire_sub_id_string(&sub_a);
         let wire_b = wire_sub_id_string(&sub_b);
         let mut attribution = AttributionState::new();
-        attribution.observe_demand([&atom_a, &atom_b]);
+        attribution.set_active_demand([&atom_a, &atom_b]);
 
         for _ in 0..2 {
             attribution.record_send(

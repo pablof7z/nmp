@@ -19,12 +19,7 @@ fn local_owner_detach_prunes_the_current_attribution_generation_before_eose() {
         incumbent.access,
     );
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&incumbent)
-    });
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&added)
-    });
+    core.set_active_demand(&BTreeSet::from([incumbent.clone(), added.clone()]));
     core.white_box("attribution.retain_live_request_claims", |s| {
         s.attribution
             .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]))
@@ -53,9 +48,7 @@ fn local_owner_detach_prunes_the_current_attribution_generation_before_eose() {
         )
     });
 
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&added)
-    });
+    core.set_active_demand(&BTreeSet::from([incumbent.clone()]));
     core.white_box("apply_request_metadata_removals", |s| {
         s.apply_request_metadata_removals(&[nmp_router::RequestMetadataRemoval {
             session: session.clone(),
@@ -98,12 +91,10 @@ fn local_owner_detach_prunes_the_current_attribution_generation_before_eose() {
     );
 
     core.white_box("abandon_sub", |s| s.abandon_sub(&sub_id));
-    core.white_box("attribution.release_live_request_claims", |s| {
-        s.attribution.release_live_request_claims(&sub_id)
+    core.white_box("retire_plan_execution_metadata", |s| {
+        s.retire_plan_execution_metadata(&sub_id)
     });
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&incumbent)
-    });
+    core.set_active_demand(&BTreeSet::new());
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()
@@ -133,11 +124,11 @@ fn aliased_current_claim_stays_until_its_last_owner_and_can_reattach_before_eose
         incumbent.access,
     );
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-    for atom in [&incumbent, &first_alias, &second_alias] {
-        core.white_box("attribution.observe_atom", |s| {
-            s.attribution.observe_atom(atom)
-        });
-    }
+    core.set_active_demand(&BTreeSet::from([
+        incumbent.clone(),
+        first_alias.clone(),
+        second_alias.clone(),
+    ]));
     core.white_box("attribution.retain_live_request_claims", |s| {
         s.attribution
             .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]))
@@ -166,9 +157,7 @@ fn aliased_current_claim_stays_until_its_last_owner_and_can_reattach_before_eose
         )
     });
 
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&first_alias)
-    });
+    core.set_active_demand(&BTreeSet::from([incumbent.clone(), second_alias.clone()]));
     core.white_box("apply_request_metadata_removals", |s| {
         s.apply_request_metadata_removals(&[nmp_router::RequestMetadataRemoval {
             session: session.clone(),
@@ -184,9 +173,7 @@ fn aliased_current_claim_stays_until_its_last_owner_and_can_reattach_before_eose
         "the remaining exact DemandKey owner retains its aliased claim"
     );
 
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&second_alias)
-    });
+    core.set_active_demand(&BTreeSet::from([incumbent.clone()]));
     core.white_box("apply_request_metadata_removals", |s| {
         s.apply_request_metadata_removals(&[nmp_router::RequestMetadataRemoval {
             session: session.clone(),
@@ -201,9 +188,7 @@ fn aliased_current_claim_stays_until_its_last_owner_and_can_reattach_before_eose
         BTreeSet::from([incumbent_claim])
     );
 
-    core.white_box("attribution.observe_atom", |s| {
-        s.attribution.observe_atom(&first_alias)
-    });
+    core.set_active_demand(&BTreeSet::from([incumbent.clone(), first_alias.clone()]));
     core.white_box("apply_request_metadata_updates", |s| {
         s.apply_request_metadata_updates(
             &[nmp_router::RequestMetadataUpdate {
@@ -242,15 +227,10 @@ fn aliased_current_claim_stays_until_its_last_owner_and_can_reattach_before_eose
     );
 
     core.white_box("abandon_sub", |s| s.abandon_sub(&sub_id));
-    core.white_box("attribution.release_live_request_claims", |s| {
-        s.attribution.release_live_request_claims(&sub_id)
+    core.white_box("retire_plan_execution_metadata", |s| {
+        s.retire_plan_execution_metadata(&sub_id)
     });
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&first_alias)
-    });
-    core.white_box("attribution.release_atom", |s| {
-        s.attribution.release_atom(&incumbent)
-    });
+    core.set_active_demand(&BTreeSet::new());
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()

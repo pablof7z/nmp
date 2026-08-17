@@ -353,17 +353,6 @@ fn assert_only_refusal_diagnostic(effects: &[Effect], expected: &str) {
     );
 }
 
-fn assert_plan_unchanged(actual: &RelayPlan, expected: &RelayPlan) {
-    assert_eq!(actual.reqs, expected.reqs);
-    assert_eq!(actual.limited_demands, expected.limited_demands);
-    assert_eq!(actual.limited_demands, expected.limited_demands);
-    assert_eq!(actual.refused_sessions, expected.refused_sessions);
-    assert_eq!(
-        actual.subscription_shortfalls,
-        expected.subscription_shortfalls
-    );
-}
-
 #[test]
 fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
     let existing_author = Keys::generate().public_key();
@@ -436,7 +425,7 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
     assert_only_refusal_diagnostic(&effects, &diagnostic);
     assert_eq!(core.observation_ownership_census(), baseline_census);
     assert_eq!(core.active_demand(), baseline_demand);
-    assert_plan_unchanged(core.router.plan(), &baseline_plan);
+    assert_eq!(core.router.plan(), &baseline_plan);
     assert_eq!(
         core.router_compiles.get(),
         baseline_compiles,
@@ -539,7 +528,7 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
     assert_only_refusal_diagnostic(&effects, &diagnostic);
     assert_eq!(core.observation_ownership_census(), baseline_census);
     assert_eq!(core.active_demand(), baseline_demand);
-    assert_plan_unchanged(core.router.plan(), &baseline_plan);
+    assert_eq!(core.router.plan(), &baseline_plan);
     assert_eq!(
         core.router_compiles.get(),
         baseline_compiles,

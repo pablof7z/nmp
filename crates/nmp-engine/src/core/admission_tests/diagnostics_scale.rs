@@ -145,10 +145,8 @@ fn a_later_admission_cohort_never_visits_ten_thousand_incumbents() {
             .count(),
         10_000
     );
+    core.set_active_demand(&incumbent_atoms);
     for atom in incumbent_atoms {
-        core.white_box("attribution.observe_atom", |s| {
-            s.attribution.observe_atom(&atom)
-        });
         core.white_box("wire.retain", |s| s.wire.retain(&atom));
     }
     core.white_box("planned_read_sessions.insert", |s| {
