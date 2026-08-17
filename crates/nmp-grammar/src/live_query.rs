@@ -172,7 +172,7 @@ mod tests {
 
     use super::*;
     use crate::binding::Filter;
-    use crate::descriptor::{AccessContext, ReadRouting};
+    use crate::descriptor::ReadRouting;
 
     fn demand(kind: u16) -> Demand {
         Demand {
@@ -253,7 +253,7 @@ mod tests {
         let pinned = Demand::new(
             demand(1).selection,
             ReadRouting::Explicit(vec![relay]),
-            AccessContext::Public,
+            None,
         )
         .unwrap();
         let query = LiveQuery::union(

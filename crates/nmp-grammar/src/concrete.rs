@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::descriptor::{AccessContext, ReadRouting};
+use crate::descriptor::ReadRouting;
 use crate::indexed_tag_name::IndexedTagName;
 
 /// A relay fact carried by a projected value through a `Derived` graph.
@@ -189,7 +189,7 @@ impl ConcreteFilter {
 
 /// A resolved demand atom paired with its full identity context (#106):
 /// the same [`ConcreteFilter`] requested under two different
-/// [`ReadRouting`]/[`AccessContext`] pairs is TWO distinct atoms —
+/// [`ReadRouting`]/authenticated-identity pairs is TWO distinct atoms —
 /// distinct refcount entries, distinct [`DescriptorHash`]es, distinct
 /// coverage/attribution identity. This is the anti-alias fix bug-class
 /// ledger #18 names: `ConcreteFilter::hash()` alone can never distinguish
@@ -206,7 +206,12 @@ impl ConcreteFilter {
 pub struct ContextualAtom {
     pub filter: ConcreteFilter,
     pub routing: ReadRouting,
-    pub access: AccessContext,
+    /// The identity this atom's reads authenticate as if challenged — the
+    /// demand's override, or the engine's current account resolved at compile
+    /// time. Part of atom identity because two demands that would
+    /// authenticate as different people are genuinely different acquisitions:
+    /// what a relay serves depends on who asked.
+    pub authenticated_as: Option<nostr::PublicKey>,
     /// Runtime routing facts projected with this atom. These facts are part
     /// of live atom identity so provenance growth produces an exact
     /// close/open delta, but `nmp-store::coverage_key` deliberately erases
@@ -221,7 +226,7 @@ impl ContextualAtom {
     /// Durable coverage deliberately erases routing evidence before calling
     /// this method; see `nmp_store::coverage_key`.
     pub fn hash(&self) -> DescriptorHash {
-        let contextual = fold_context(self.filter.hash(), &self.routing, self.access);
+        let contextual = fold_context(self.filter.hash(), &self.routing, self.authenticated_as);
         if self.routing_evidence.is_empty() {
             return contextual;
         }
@@ -241,7 +246,7 @@ impl ContextualAtom {
     }
 }
 
-/// Fold `source`/`access` context onto an existing hash, producing a NEW,
+/// Fold `source`/identity context onto an existing hash, producing a NEW,
 /// still framing-unambiguous digest. [`ContextualAtom::hash`] is the
 /// primary caller; exposed publicly so a caller with its OWN base hash
 /// that isn't a bare `ConcreteFilter::hash()` -- e.g. `nmp-router`'s
@@ -256,7 +261,7 @@ impl ContextualAtom {
 pub fn fold_context(
     base: DescriptorHash,
     routing: &ReadRouting,
-    access: AccessContext,
+    authenticated_as: Option<nostr::PublicKey>,
 ) -> DescriptorHash {
     let tagged = match routing {
         ReadRouting::Auto => fold_byte(base, 0),
@@ -284,9 +289,15 @@ pub fn fold_context(
             DescriptorHash(*blake3::hash(&bytes).as_bytes())
         }
     };
-    match access {
-        AccessContext::Public => fold_byte(tagged, 0),
-        AccessContext::Nip42(public_key) => {
+    // Absent and present MUST fold to distinct, stable bytes, and the two
+    // arms must stay framing-unambiguous against each other: absent folds a
+    // bare `0` tag byte, present folds a `1` tag byte followed by the key's
+    // fixed 32 bytes. A present key can therefore never be mistaken for an
+    // absent one whose base digest happened to end in the key's bytes — the
+    // tag byte sits between them and the width is fixed.
+    match authenticated_as {
+        None => fold_byte(tagged, 0),
+        Some(public_key) => {
             let mut bytes = Vec::with_capacity(65);
             bytes.extend_from_slice(tagged.as_bytes());
             bytes.push(1);
@@ -406,7 +417,7 @@ mod tests {
         let auto = ContextualAtom {
             filter: filter.clone(),
             routing: crate::descriptor::ReadRouting::Auto,
-            access: crate::descriptor::AccessContext::Public,
+            authenticated_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let explicit = ContextualAtom {
@@ -415,7 +426,7 @@ mod tests {
                 "wss://r1.example",
             )
             .unwrap()]),
-            access: crate::descriptor::AccessContext::Public,
+            authenticated_as: None,
             routing_evidence: BTreeSet::new(),
         };
         assert_ne!(
@@ -437,13 +448,13 @@ mod tests {
         let pinned_r1 = ContextualAtom {
             filter: filter.clone(),
             routing: crate::descriptor::ReadRouting::Explicit(vec![r1]),
-            access: crate::descriptor::AccessContext::Public,
+            authenticated_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let pinned_r2 = ContextualAtom {
             filter,
             routing: crate::descriptor::ReadRouting::Explicit(vec![r2]),
-            access: crate::descriptor::AccessContext::Public,
+            authenticated_as: None,
             routing_evidence: BTreeSet::new(),
         };
         assert_ne!(
@@ -471,7 +482,7 @@ mod tests {
         let atom = |relays: Vec<nostr::RelayUrl>| ContextualAtom {
             filter: filter.clone(),
             routing: crate::descriptor::ReadRouting::Explicit(relays),
-            access: crate::descriptor::AccessContext::Public,
+            authenticated_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let ascending = atom(vec![r1.clone(), r2.clone()]);
@@ -495,21 +506,21 @@ mod tests {
     #[test]
     fn one_routing_intent_declared_in_two_orders_is_one_atom() {
         use crate::binding::Filter;
-        use crate::descriptor::{AccessContext, Demand, ReadRouting};
+        use crate::descriptor::{Demand, ReadRouting};
         let r1 = nostr::RelayUrl::parse("wss://r1.example").unwrap();
         let r2 = nostr::RelayUrl::parse("wss://r2.example").unwrap();
         let declare = |relays: Vec<nostr::RelayUrl>| {
             Demand::new(
                 Filter::default(),
                 ReadRouting::Explicit(relays),
-                AccessContext::Public,
+                None,
             )
             .expect("a nonempty explicit relay set is legal")
         };
         let atom = |demand: Demand| ContextualAtom {
             filter: cf(vec!["aa"], vec![]),
             routing: demand.routing,
-            access: demand.access,
+            authenticated_as: demand.authenticate_as,
             routing_evidence: BTreeSet::new(),
         };
         assert_eq!(
@@ -523,7 +534,7 @@ mod tests {
         let mut hinted = ContextualAtom {
             filter: cf(vec!["aa"], vec![]),
             routing: crate::descriptor::ReadRouting::Auto,
-            access: crate::descriptor::AccessContext::Public,
+            authenticated_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let plain = hinted.clone();
