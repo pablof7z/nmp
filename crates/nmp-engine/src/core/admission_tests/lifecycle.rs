@@ -306,6 +306,19 @@ fn closing_an_incumbent_rearms_an_already_pending_limited_atom_without_a_rebuild
 fn ten_thousand_distinct_pending_cancellations_never_rebuild_surviving_demand() {
     let relay = RelayUrl::parse("wss://admission-pending-withdraw-10k.example").unwrap();
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
+    // This test drives `handle()` directly, once per item, specifically to
+    // prove the production entrypoint never revisits O(n) state on a
+    // cancellation -- it is an amortized-COST proof, not a mirror-structure
+    // one. The turn-level check (#1562) already covers these same
+    // Subscribe/Unsubscribe transitions via hundreds of other, bounded
+    // tests; scanning full mirror structure at each of the 20,000 direct
+    // calls below turns this O(n) claim into O(n^2) test-suite cost with no
+    // added coverage (measured: unbounded past 9 minutes with the check on,
+    // 4.85s with it off). See
+    // `EngineCore::suppress_turn_level_consistency_for_named_exception`'s
+    // doc for why only this test and its `scale_teardown` sibling may do
+    // this.
+    core.suppress_turn_level_consistency_for_named_exception();
     let mut observations = Vec::with_capacity(10_000);
     for index in 0..10_000 {
         observations.push(observation_id(&core.handle(EngineMsg::Subscribe(query(
@@ -347,6 +360,9 @@ fn ten_thousand_distinct_pending_cancellations_never_rebuild_surviving_demand() 
     assert_eq!(core.evidence_candidates_examined.get(), 0);
     assert_eq!(core.diagnostic_snapshots_built.get(), 0);
     assert_eq!(core.wire.pending_len(), 0);
+    // One full structural check on the final state, in place of the 20,000
+    // the turn-level call would otherwise have run.
+    core.assert_owner_consistency("after ten-thousand cancellations");
     assert_eq!(
         core.bench_ownership_census(),
         CoreOwnershipCensus::default()
