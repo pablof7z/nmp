@@ -208,7 +208,17 @@ pub struct BudgetShortfall {
 }
 
 /// The full per-relay plan for the CURRENT demand set.
-#[derive(Clone, Default, Debug)]
+///
+/// `PartialEq` is what "the plan did not change" is spelled with. Ten
+/// falsifiers in `nmp-engine` made that claim before this derive existed, and
+/// each had to hand-pick a subset to compare — one request out of the only
+/// session, one session's vector, the first ten thousand of a slice, or a
+/// four-`assert_eq!` helper that compared `limited_demands` twice and would
+/// silently not cover a fifth field added here (#1850). Every one of those
+/// spellings passes while the router adds a request, refuses a session, or
+/// records a shortfall. Comparing the whole value is both the exact claim and
+/// the only one that stays exact as this struct grows.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct RelayPlan {
     pub reqs: BTreeMap<RelaySessionKey, Vec<WireReq>>,
     /// Exact demand identities for which a local bound removed at least one

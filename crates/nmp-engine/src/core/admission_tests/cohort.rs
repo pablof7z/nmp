@@ -257,11 +257,27 @@ fn reattaching_a_covered_atom_keeps_its_shared_immutable_request_active() {
         wire_ops(&b_closed).is_empty(),
         "reattached A still owns the shared physical request"
     );
-    let retained = &core.router.plan().reqs.get(&session).unwrap()[0];
-    assert_eq!(retained.sub_id, immutable_request.sub_id);
-    assert_eq!(retained.filter, immutable_request.filter);
-    assert_eq!(retained.owner_demands.len(), 1);
-    assert_eq!(retained.coverage_claims.len(), 1);
+    // The claim is that the reattached A is the one owner the shared request
+    // keeps -- so name it. `owner_demands.len() == 1` and
+    // `coverage_claims.len() == 1` were cardinalities where identities were
+    // available, and both pass just as well if the DEPARTED B is the
+    // survivor; `source` and `provenance` were not checked at all (#1850).
+    // The request's identity (`sub_id`, `filter`, `source`, `provenance`) is
+    // byte-identical across B's departure; its local metadata is exactly A's
+    // contribution, which is the whole point of the immutable-request rule.
+    let reattached = core
+        .wire
+        .atoms_for_handle(core.observations[&second_a].branches[0]);
+    assert_eq!(
+        core.router.plan().reqs.get(&session).unwrap(),
+        &vec![nmp_router::WireReq {
+            owner_demands: reattached.iter().map(DemandKey::for_atom).collect(),
+            coverage_claims: reattached.iter().map(coverage_key).collect(),
+            ..immutable_request.clone()
+        }],
+        "B's departure leaves the request's identity byte-identical and its \
+         local metadata exactly A's"
+    );
 
     let final_closed = core.handle(EngineMsg::Unsubscribe(second_a));
     assert_eq!(

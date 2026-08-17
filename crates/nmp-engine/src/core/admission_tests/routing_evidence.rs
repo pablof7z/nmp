@@ -46,7 +46,11 @@ fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
                 .count(),
             1
         );
-        let immutable_request = core.router.plan().reqs.values().next().unwrap()[0].clone();
+        // The claim is that routing-evidence churn never perturbs the plan,
+        // so the baseline is the WHOLE plan: comparing one request out of the
+        // only session would pass while the router added a second one,
+        // refused a session, or recorded a shortfall (#1850).
+        let planned = core.router.plan().clone();
 
         core.white_box("retain_wire_atom_owner", |s| {
             s.retain_wire_atom_owner(&survivor_atom)
@@ -56,10 +60,7 @@ fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
             core.wire.effective_atom(&key).unwrap().routing_evidence,
             BTreeSet::from([first, survivor.clone()])
         );
-        assert_eq!(
-            core.router.plan().reqs.values().next().unwrap()[0],
-            immutable_request
-        );
+        assert_eq!(core.router.plan(), &planned);
 
         assert!(core.white_box("release_wire_atom_owner", |s| s
             .release_wire_atom_owner(&first_atom)
@@ -69,10 +70,7 @@ fn disjoint_routing_evidence_owners_remain_exact_in_both_close_orders() {
             core.wire.effective_atom(&key).unwrap().routing_evidence,
             BTreeSet::from([survivor.clone()])
         );
-        assert_eq!(
-            core.router.plan().reqs.values().next().unwrap()[0],
-            immutable_request
-        );
+        assert_eq!(core.router.plan(), &planned);
         assert_eq!(
             core.wire_demand().iter().next().unwrap().routing_evidence,
             BTreeSet::from([survivor])
