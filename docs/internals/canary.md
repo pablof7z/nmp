@@ -850,10 +850,6 @@ finding above). That is a Canary-lab defect rather than an NMP one, and it is
 fixed by `RelayHandle.probe` rather than by changing `isReachable`, whose
 boolean is still the right tool for the waits C2 and C13 use it for.
 
-**C15's relay lab is qualified; C15 itself is NOT proven.** The distinction is
-the whole point of the paragraph below, and an earlier revision of this section
-got it wrong by calling C15 "proven live".
-
 **C14 is proven live** (#1888), and the thing it proves is not "the events
 arrived" — that is equally true of a refetch — but that NMP **transferred the
 difference instead of the whole set**.
