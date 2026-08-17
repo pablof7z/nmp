@@ -55,10 +55,19 @@ for i in $(seq 1 "$N"); do WT+=("$TMP/worktree-$i"); done
 
 cleanup() {
   for w in "${WT[@]}"; do
-    # Shut the server down first: an orphaned Bazel JVM holds its output base
-    # (hundreds of MB) open after the worktree is gone.
+    # Each worktree gets its own Bazel output base, ~640MB here, and it lives
+    # OUTSIDE the worktree -- removing the worktree does not remove it, it
+    # just orphans it. Four rounds x N worktrees of silently orphaned output
+    # bases is how a disk fills. Ask Bazel where it is before shutting the
+    # server down, because `bazel info` needs a live workspace to answer.
+    local ob=""
+    ob="$( cd "$w" 2>/dev/null && bazel info output_base 2>/dev/null )" || ob=""
     ( cd "$w" 2>/dev/null && bazel shutdown ) >/dev/null 2>&1 || true
     git -C "$REPO" worktree remove --force "$w" >/dev/null 2>&1 || true
+    # Only ever delete a path Bazel itself named, and only under its own root.
+    case "$ob" in
+      */_bazel_*/[0-9a-f]*) rm -rf "$ob" ;;
+    esac
   done
   rm -rf "$TMP"
   git -C "$REPO" worktree prune >/dev/null 2>&1 || true

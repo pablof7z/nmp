@@ -13,6 +13,14 @@ common --@rules_rust//rust/toolchain/channel:channel=nightly
 # workspace path, so two worktrees building the same action hit one store.
 common --disk_cache=~/.cache/bazel-nmp-diskcache
 
+# Bound it. The disk cache has no size limit by default and only grows -- it
+# reached 14G during the four-round concurrent-worktree proof alone, and the
+# most expensive operational failure this repo has had was a disk filling to
+# 100%, which broke every tool call rather than just the build. Bazel collects
+# it down to this size once the server has been idle for
+# --experimental_disk_cache_gc_idle_delay (5m).
+common --experimental_disk_cache_gc_max_size=50G
+
 # Keep Bazel's own output symlinks out of Cargo's `target/` to avoid the two
 # build systems fighting over the same directory tree.
 build --symlink_prefix=bazel-
