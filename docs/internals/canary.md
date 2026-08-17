@@ -131,7 +131,10 @@ Policed by review only:
 Three SwiftPM packages, not the Xcode project. `apps/Canary/RelayLabKit` is
 the relay-lab controller itself — start, stop, kill, restart, partition,
 heal, seed, ephemeral port, isolated temp directory, bounded-poll readiness
-rather than sleeps. It knows nothing about NMP; it is a generic real-relay
+rather than sleeps, a one-shot real-TCP reachability probe (`isReachable`,
+what "the relay is genuinely unreachable" has to mean), and an optional
+shared `dataDir` so a second relay process can write into a stopped relay's
+durable store on its own port — C13's outage window. It knows nothing about NMP; it is a generic real-relay
 lifecycle library, reusable outside this app entirely. It is consumed by two
 thin CLI targets a developer runs directly (`swift run relay-lab-lifecycle
 <strfry-binary>`, `relay-lab-nip42`) to bring the lab up and drive it by
@@ -353,7 +356,9 @@ Two facts about the starting position, established by survey:
   (`WriteIntent`, `Receipt` and `reattachReceipt` are complete and well
   specified) but because no screen uses them.
 - **Session identity did not survive restart**, which silently blocked C2, C9
-  and C12: there was no identity for a resumed write to remain frozen to.
+  and C12: there was no identity for a resumed write to remain frozen to. Both
+  C9 and C2 are now proven through `NMPSessionPayload`, so the blocker is
+  closed for those two; C12 remains unwritten.
 
 **C17 is proven as an oracle, and two of its three phases pass. The third
 fails, and the failure is a real finding (#1846), not a scenario defect.**
@@ -465,6 +470,115 @@ counts, wire filters and coverage state, but nothing about retained
 per-filter bookkeeping or memory — so an app hitting #1846 has no
 public surface that would tell it what is growing, and neither did this
 scenario.
+
+**C13 is proven live** (#1863), and it is also this suite's first exercise of
+**two concurrent observations sharing one query** — the shape nothing else in
+this repository covers, because the scale tests all use one handle per key,
+which is exactly why they missed #1848 (a shared-demand lifecycle defect where
+a demand was never closed).
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C13RelayDisconnectReconnectTests.swift`
+opens two `NMPQuery` handles over the IDENTICAL filter, consumes both in
+independent tasks for the whole scenario, and drives them through a real
+strfry process that is `SIGKILL`ed and brought back on the same port over the
+same LMDB directory. Six phases, ~8-10s per run, stable over six runs:
+
+1. **Genuinely live**, asserted not assumed: both observations were delivered
+   the seeded event AND `observeDiagnostics()` reports **exactly one** wire
+   subscription for the two of them. That exact `1` is what makes "sharing"
+   true rather than two independent demands wearing the name; without it
+   phases 5-6 would prove nothing about sharing at all.
+2. **Genuinely severed**: the port stops accepting a real TCP connection
+   (`RelayHandle.isReachable`, new in `RelayLabKit`) and both observations'
+   own `SourceStatus` walks `finishedStoredEvents` → `disconnected`.
+3. **The event really arrived during the outage.** A second strfry process,
+   on its own ephemeral port over the SAME LMDB directory
+   (`RelayHandle(dataDir:)`, new), writes it over a real `EVENT` frame with a
+   real `OK` while the app's port is provably dead. Deterministic by
+   construction — the app was dialing a port with nothing behind it and has
+   never been told the sidecar's port exists — rather than a race won.
+4. **Both sharers resume** with no app action whatsoever: no reopened query,
+   no new engine, no app-side retry. Exactly the two ids, once each, in both,
+   checked against the latest snapshot AND the union of everything either ever
+   saw, so a row that appears and then vanishes is a loss rather than a pass.
+5. **Closing one sharer leaves the other working** — a third event published
+   after `sharerOne.cancel()` still reaches sharer two, and the closed one
+   never receives it.
+6. **Closing the last sharer releases the wire** — `wireSubCount` 1 → 0.
+
+Falsified four ways, each restored and re-confirmed green. Never restarting
+the relay left both sharers holding only the pre-outage id with status `error`.
+Never closing the last sharer left `wireSubCount` stuck at `1` after a bounded
+15s wait — #1848's own defect, caught. Closing BOTH sharers before the third
+publish made the survivor miss it. **The fourth is the one that matters most**:
+publishing the "outage-window" event BEFORE the outage instead of during it
+leaves phase 4 fully green — `bothSawDuring=true` — and ONLY the phase-3
+precondition catches it. That is precisely the vacuous reconnect proof this
+scenario would otherwise have been, and it is now mechanically ruled out.
+
+**C13's API finding.** `RelayDiagnostics.wireSubCount` does **not** fall to
+zero while a relay's socket is dead: measured at `1` for the whole outage with
+the relay row still present in the snapshot, and `transportDegraded` `nil`
+throughout. It counts subscriptions the relay is *planned* to hold, which is
+honest while NMP retries — but it means the engine-global diagnostics stream
+cannot answer "is this relay's subscription established right now", and the
+only public fact that can is per-QUERY `SourceEvidence.status`, which requires
+an app to already be holding a query. An app watching only `observeDiagnostics()`
+sees no difference between a healthy relay and a dead one. That gap is #755's
+subject. The scenario's first draft asserted the zero; the assertion was
+**removed rather than inverted**, and the number is printed on every run so
+neither value is silently promoted to a contract.
+
+**C2 is proven live** (#1864) — the headline local-first claim, which had no
+end-to-end evidence anywhere until now.
+`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C2CacheThenOfflineRestartTests.swift`
+runs the ONLINE half in a sibling executable, `canary-c2-warmer`, that signs in
+with a real local-key account, reads two relay-seeded events (waiting until
+every row names the relay in its own `sources`, so the network really served
+them), exports its session the way a shipped app persists one, and **quits
+cleanly**. This is a third reason for the parent/child split, distinct from
+C9's (`kill -9` proves nothing against an in-process `Engine` drop) and C17's
+(#1796, process-wide measurement): a second `NMPEngine` built over the same
+store path inside the process that just filled it is not a restart at all —
+the Redb pages, the allocator and every decoded row are still in that address
+space, so a read served from anywhere other than the durable file would look
+identical. The scenario waits for the writer to be genuinely gone (exited,
+waited on, `terminationStatus == 0`) before opening the store.
+
+Then the relay is `SIGKILL`ed and required to REFUSE a real TCP connection —
+before the restarted engine is built and again after every assertion, because
+a relay that came back mid-scenario would otherwise be invisible. A fresh
+engine over the same store path, still pointed at the now-dead relay URL, with
+the persisted `NMPSessionPayload` restored, then proves in one run (~2.7s):
+
+- the same account is signed in, with `providerKind == .localKey` and
+  `signingAvailability == .available` — a login, not a public key. A restored
+  account that cannot sign is a logged-in user who can do nothing, and a local
+  key needs no network, so being offline is no excuse;
+- exactly the two cached ids, two rows, **and their content** — ids alone
+  would pass for rows that survived as bare keys;
+- the query reports the dead relay honestly (`connecting`, never
+  `requesting`/`finishedStoredEvents`/`coverageSatisfied`), so a stale feed is
+  not readable as a complete one (bug-class ledger #7);
+- `reconciledThrough` is still present across the restart. `SourceEvidence`'s
+  own doc names this case — a source can be down while still carrying a
+  perfectly good watermark from before it dropped — and it is what makes an
+  offline cache reasonable-about rather than merely present. This is the
+  public-API reading of #1087's claim.
+
+Falsified three ways, each restored and re-confirmed green: a different, empty
+store path returned `0` rows with empty content and a `nil` watermark; leaving
+the relay UP left every feed assertion green (`rows=2`, right content) with
+only the two reachability preconditions failing — the C2 analogue of C13's
+fourth falsifier, and the same lesson; restoring with `sessionPayload: nil`
+left `accounts=0`, `current=none`, `provider=nil`, `signing=nil`.
+
+No API finding for C2 — `NMPSessionPayload`, `NMPSession.export()`, the
+persistent `storePath` and the acquisition evidence all behaved exactly as
+documented, with no app-side workaround anywhere in the scenario. One honest
+observation rather than a finding: the cached feed comes back whether or not
+the session is restored, because a literal-author filter needs no account.
+The identity half and the feed half are independent claims and are separately
+falsifiable, which is why both are asserted.
 
 **C15's relay lab is qualified; C15 itself is NOT proven.** The distinction is
 the whole point of the paragraph below, and an earlier revision of this section
