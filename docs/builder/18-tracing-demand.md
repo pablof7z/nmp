@@ -12,7 +12,7 @@ observe(Demand { selection, source, access })
     v
 concrete selection atoms + dependency provenance
     |
-    | apply declared read routing and access context
+    | apply declared read routing and authenticated identity
     v
 source intents + candidate facts
     |
@@ -30,7 +30,7 @@ QuerySnapshot { rows, cache, acquisition, shortfall }
 ```
 
 The compiler may be incremental, but it is deterministic for the same
-descriptor, store revision, source facts, access context, and configured limits.
+descriptor, store revision, source facts, authenticated identity, and configured limits.
 
 ## 1. Resolve the selection graph
 
@@ -59,7 +59,7 @@ these lanes on the app surface —
 `docs/internals/conventions/naming-no-invented-categories.md` §3 records why.
 
 Access context says which AUTH identity or visibility grant applies. Equal
-selections under different access contexts retain separate evidence unless the
+selections under different authenticated identities retain separate evidence unless the
 compiler can prove sharing safe.
 
 Filter shape decides nothing about routing. An authorless selection does not

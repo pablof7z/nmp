@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting, RelaySessionKey,
-    RoutingEvidence, RoutingEvidenceKind,
+    ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting, RoutingEvidence,
+    RoutingEvidenceKind,
 };
 use nmp_router::{
     AdvertisedRelayLimits, CompileBudget, DemandKey, Router, RuleRegistry, Shortfall,

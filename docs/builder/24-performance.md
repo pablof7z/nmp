@@ -21,7 +21,7 @@ NMP may refcount identical demand and widen wire filters only under a proved
 rule such as author union. The semantic descriptor is:
 
 ```text
-Demand = Selection + ReadRouting + AccessContext
+Demand = Selection + ReadRouting + AuthenticateAs
 ```
 
 Equal selections may share local matching and binding-resolution work. Wire

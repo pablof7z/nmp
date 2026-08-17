@@ -106,7 +106,7 @@ not a stable consumer contract. The honest shipping state is tracked in
 
 Engine-level contract tests must show that:
 
-- a nested `Derived` demand uses its own source/access context even when the
+- a nested `Derived` demand uses its own source/identity even when the
   outer demand names a different protocol host or AUTH identity;
 - changing inner or outer context recompiles only dependent work and never
   aliases their acquisition evidence;

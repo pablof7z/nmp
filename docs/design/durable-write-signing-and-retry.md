@@ -5,7 +5,7 @@
   lane-state projection across Rust/FFI/Swift/Kotlin satisfy this contract.
 - **Owns:** the meaning of `Accepted`, pending-row semantics, signer selection,
   receipt persistence, retry ownership, and bounded progress when read and
-  write access contexts compete for physical relay sessions.
+  write authenticated identities compete for physical relay sessions.
 
 ## 1. Acceptance transaction
 
@@ -319,7 +319,7 @@ The reducer makes the scheduling authority explicit:
 - nonterminal write ownership emits `EnsureWriteRelay`; only that effect may
   release the same relay's Public session and claim its slot;
 - a protected read does not gain write priority merely because it also uses a
-  non-Public access context;
+  identity-bound session;
 - no admission path evicts a different relay or raises the physical-session
   ceiling.
 

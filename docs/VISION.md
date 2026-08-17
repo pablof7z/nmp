@@ -37,7 +37,7 @@ plane or optional debug mode.
 The semantic descriptor is:
 
 ```text
-Demand := Selection + ReadRouting + AccessContext
+Demand := Selection + ReadRouting + AuthenticateAs
 ```
 
 - **Selection** says which stored events match. It is a Nostr `Filter` whose

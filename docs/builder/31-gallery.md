@@ -31,7 +31,7 @@ outer.ids = Derived(
 ```
 
 The engine owns the expanded ids and incremental demand repair. The inner
-index demand carries its own source/access context rather than inheriting the
+index demand carries its own source/identity rather than inheriting the
 outer observation's context.
 
 ## 3. Multi-account addressed data

@@ -5,7 +5,6 @@
 //! synchronized before ordinary effect dispatch can ask which sessions remain
 //! owned.
 
-use nmp_grammar::RelaySessionKey;
 use super::*;
 
 impl CoreState {

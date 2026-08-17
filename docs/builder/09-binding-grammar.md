@@ -163,12 +163,12 @@ lifecycle.
 
 NIP-02 may similarly expose `myFollows()` as a module-owned convenience that
 expands to a kind:3 contact-list projection with its own user-list source and
-access context. That does not make a follows-based feed or kind:1 a core
+authenticated identity. That does not make a follows-based feed or kind:1 a core
 feature.
 
 ## Selection is not the whole descriptor
 
-The same selection can be acquired under different routing or access context:
+The same selection can be acquired under different routing or authenticated identity:
 
 ```swift
 let publicDemand = NMPDemand(

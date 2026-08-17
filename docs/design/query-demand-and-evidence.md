@@ -2,7 +2,7 @@
 
 - **Status:** BUILT for the full descriptor and scoped evidence contract across
   Rust, FFI, Swift, and Kotlin (#49/#714/#1106). `Demand` identity is
-  `Selection + ReadRouting + AccessContext`; every `Derived.inner` carries
+  `Selection + ReadRouting + AuthenticateAs`; every `Derived.inner` carries
   its own complete demand, and its cache/freshness policy is enforced at that
   exact boundary; persisted coverage, wire sharing, and evidence are
   context-safe. Broader permanent-diagnostics expansion remains under #51.
@@ -14,12 +14,12 @@
 An app observes a demand, not merely a Nostr filter:
 
 ```text
-Demand := Selection + ReadRouting + AccessContext
+Demand := Selection + ReadRouting + AuthenticateAs
 ```
 
 `Selection` is the closed filter/binding graph that decides which canonical
 store rows match. `ReadRouting` is typed policy describing which routing
-facts may acquire those rows. `AccessContext` carries protocol state that can
+facts may acquire those rows. The authenticated identity carries protocol state that can
 change a relay's answer, such as an AUTH identity or visibility grant.
 
 Names and concrete record layouts remain provisional. The invariant is that all
@@ -70,10 +70,10 @@ a hostile future-dated event cannot manufacture freshness.
 
 - Equal full descriptors may share graph nodes, wire demand, and evidence.
 - Equal selections may share resolution and local store matching even when
-  source/access context differs.
+  source/identity differs.
 - Wire filters may share only when the compiler can prove the shared request is
-  valid for every participating source/access context.
-- Evidence from one source/access context never proves acquisition under
+  valid for every participating source/identity.
+- Evidence from one source/identity never proves acquisition under
   another.
 - Handles that differ only in their root cache/freshness policy share
   acquisition identity but keep independent projection and wire-contribution
@@ -220,10 +220,10 @@ Diagnostics is a read-only explanation of the same compiler, store, and
 transport state. It must not reconstruct evidence from raw callbacks through a
 parallel path.
 
-## 5. Local trust and access context
+## 5. Local trust and authenticated identity
 
 One engine instance has one shared canonical cache. Accounts inside it are not
-mutually isolated users. AUTH/access context is retained because it changes
+mutually isolated users. AUTH/authenticated identity is retained because it changes
 what was requested and observed, not because matching rows are hidden from
 other local queries after validation.
 
@@ -234,7 +234,7 @@ not an implicit account switch.
 
 Before this contract is marked built, tests must show:
 
-- equal selections with different access contexts do not share evidence
+- equal selections with different authenticated identities do not share evidence
   incorrectly;
 - changing `$currentPubkey` reroots dependent demand while an unrelated
   multi-account literal query remains live;

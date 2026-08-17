@@ -57,7 +57,7 @@ after routing is already usable.
 ## Exact settlement
 
 The generic evidence fact is `RequestSettled`. It cites the exact path,
-filter revision, relay, access context, transport generation, request
+filter revision, relay, authenticated identity, transport generation, request
 revision, observed time, and terminal:
 
 - `Eose` after the exact ordinary NIP-01 request reaches EOSE.

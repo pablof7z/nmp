@@ -159,15 +159,15 @@ semantics, return explicit shortfall, reject with a type, or backpressure with a
 diagnostic reason. Every projection and interior queue must prove the bound end
 to end.
 
-### #18: source/access contexts cannot borrow evidence incorrectly
+### #18: source/identitys cannot borrow evidence incorrectly
 
 **Excludes:** equal filters under different AUTH or read routing sharing a
 watermark as though they were the same request.
 
-Descriptor identity is `Selection + ReadRouting + AccessContext`.
+Descriptor identity is `Selection + ReadRouting + AuthenticateAs`.
 Selection work may share; wire demand and evidence share only after a
 compatibility proof. Every nested `Derived` demand carries its own explicit
-source/access context; it cannot inherit or borrow the outer demand's evidence.
+source/identity; it cannot inherit or borrow the outer demand's evidence.
 
 ### #19: event/delivery persistence cannot become a secret vault
 

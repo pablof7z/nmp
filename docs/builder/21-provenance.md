@@ -31,7 +31,7 @@ Every source/wire lane records a typed reason:
 - operator discovery policy; or
 - another closed authority accepted by the compiler.
 
-Diagnostics connects that reason to the descriptor/intent, access context,
+Diagnostics connects that reason to the descriptor/intent, authenticated identity,
 exact relay/filter, and any coalescing decision.
 
 ## Naming an exact relay set is a capability, not an authority
@@ -80,9 +80,9 @@ There is no conversion from opaque private authority to public routing.
 ## Coalescing preserves attribution
 
 When compatible source requests share one widened wire filter, NMP retains the
-descriptors, authority, access contexts, and coverage keys absorbed into the
+descriptors, authority, authenticated identities, and coverage keys absorbed into the
 request. Local re-filtering delivers rows only to valid selections, and one
-source's evidence cannot prove another access context.
+source's evidence cannot prove another authenticated identity.
 
 ## What to verify in diagnostics
 

@@ -113,7 +113,7 @@ coverage, evidence, and routing
   would orphan per-value coverage.
 - **Routing evidence** is threaded per resolved element; a pre-batched atom
   would smear per-value relay hints into one blob.
-- **The outbox solver** regroups by `(Skeleton, AccessContext)` and re-unions
+- **The outbox solver** regroups by `(Skeleton, authenticate_as)` and re-unions
   authors for the k-cover — it *requires* per-author granularity.
 - **Retraction** is an exact set diff on cached atoms; singleton atoms make
   withdrawal of one value surgical.
@@ -160,9 +160,9 @@ mistakes cost bandwidth rather than correctness.
 ### 3.2 Where merging happens
 
 `Router::compile` partitions demand by `(RelaySessionKey, ReadRouting)` —
-per relay, per access context, per source — then calls `coalesce_with` within
+per relay, per authenticated identity, per source — then calls `coalesce_with` within
 each partition. Coalescing is **equal-context-only**: two atoms differing in
-`AccessContext` or `ReadRouting` never merge, and never share an id.
+`authenticate_as` or `ReadRouting` never merge, and never share an id.
 
 During ordinary app admission, coalescing runs over the **pending cohort**, not
 per query and not over already-sent requests. Two unrelated observations that
@@ -335,7 +335,7 @@ equality.
 
 `SubId::allocate` (`crates/nmp-router/src/plan.rs`) mints an opaque,
 never-reused id from the router's monotonic counter plus relay, source, and
-access context. The filter is not encoded into the token.
+authenticated identity. The filter is not encoded into the token.
 
 An exact byte-identical request keeps its allocated id and emits no wire work.
 When the filter bytes change, structural component matching identifies the

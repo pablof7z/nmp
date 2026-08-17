@@ -49,13 +49,13 @@ command API.
 A live query describes more than a local filter:
 
 ```text
-Demand = Selection + ReadRouting + AccessContext
+Demand = Selection + ReadRouting + authenticate_as
 ```
 
 `Selection` says which events match. `ReadRouting` says which relay facts
-may acquire them. `AccessContext` carries protocol context such as AUTH that can
+may acquire them. `authenticate_as` carries protocol context such as AUTH that can
 change what a source returns. Keeping those parts together prevents equal
-filters under incompatible authority or access contexts from borrowing each
+filters under incompatible authority or authenticated identities from borrowing each
 other's evidence.
 
 ## Reactive demand, not app-managed subscription repair
@@ -83,7 +83,7 @@ expanded set, route repair, reference counts, and exact REQ changes. Changing
 the current pubkey reroots only graphs that reference that input; literal
 multi-account queries remain unchanged.
 
-The nested contact-list demand carries its own source and access context. It
+The nested contact-list demand carries its own source and authenticated identity. It
 does not inherit context from the outer kind:9999 observation, so both demands
 remain independently hashable, routable, and explainable.
 

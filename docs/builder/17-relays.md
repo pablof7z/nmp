@@ -71,7 +71,7 @@ A protocol module composes these for you rather than handing you a relay to
 pass around: `NMPGroup.read` returns a live query already carrying one branch
 per host, each `.explicit` to that host alone.
 
-Selection, read routing, and access context all participate in descriptor
+Selection, read routing, and authenticated identity all participate in descriptor
 identity, safe wire sharing, diagnostics, and acquisition evidence.
 
 ## Writes carry typed routing context

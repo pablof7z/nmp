@@ -17,7 +17,7 @@ state.
 For every active descriptor, show:
 
 - selection plus expanded binding graph;
-- read routing and access context;
+- read routing and authenticated identity;
 - descriptor/plan revision;
 - graph nodes and reference counts;
 - compiled atoms and route reasons;
@@ -79,7 +79,7 @@ Diagnostics reports facts. It does not synthesize `syncHealth`,
 ## Debugging order
 
 1. Did the descriptor produce a source plan?
-2. What exact authority and access context produced each lane?
+2. What exact authority and authenticated identity produced each lane?
 3. What exact filter reached each relay?
 4. Did the connection or AUTH state prevent the request?
 5. What arrived and what per-source EOSE/watermark evidence exists?
