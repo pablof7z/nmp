@@ -294,6 +294,13 @@ recovery through the public API only:
    back to `.waiting`/`.sent` — none observed, across every run — while the
    still-pending relay (healed after the crash) completes normally.
 
+   **What this proves, exactly.** No *app-visible receipt-state* regression.
+   It does **not** prove no network resend: the oracle watches `receipt.status`
+   only, so NMP re-sending the `EVENT` to the already-succeeded relay — which
+   the relay would deduplicate — leaves the receipt at `.published` and the
+   assertion green. Proving the stronger claim needs relay-side inbound EVENT
+   counts, or a public NMP delivery-attempt fact. Neither exists yet.
+
 All three passed on every run (4 consecutive full-suite runs, ~1s each) as
 originally validated. Falsified three ways at that time, each restored
 afterward: pointing the restarted engine at a different store path made
@@ -343,8 +350,22 @@ Two facts about the starting position, established by survey:
 - **Session identity did not survive restart**, which silently blocked C2, C9
   and C12: there was no identity for a resumed write to remain frozen to.
 
-**C15 is proven live**, and the route to proving it corrected an earlier
-mistake worth keeping.
+**C15's relay lab is qualified; C15 itself is NOT proven.** The distinction is
+the whole point of the paragraph below, and an earlier revision of this section
+got it wrong by calling C15 "proven live".
+
+What the run below establishes is that **strfry can be driven through a
+complete NIP-42 round trip on demand** — a prerequisite for the scenario, and a
+real result, since the first two attempts to obtain one failed. What it does
+not touch is NMP: the handshake is driven by the *controller*, not by
+`NMPEngine`. So none of the following is yet proven — NMP notices the challenge,
+NMP consults the configured AUTH policy, NMP signs a kind:22242 event bound to
+that exact challenge and relay, or NMP recovers after a denial or a reconnect.
+
+C15 becomes proven when the NMP path closes the round trip. Until then it
+belongs under "not executed", not under the passing scenarios.
+
+The route to the qualification corrected an earlier mistake worth keeping.
 
 The first probe gated writes with a strfry `writePolicy` plugin that rejects
 unless the connection is authenticated. That denial is real — but

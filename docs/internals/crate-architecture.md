@@ -594,6 +594,27 @@ reducer saw only a value `core` defines itself, which is what let the crate
 line remove `reqwest` from the reducer's future manifest. Ask which side owns
 the state before asking whether the cluster is self-contained.
 
+> **OVERTURNED by #1806 (Pablo, 2026-08-17).** NIP-77 — with NIP-42 AUTH and
+> NIP-11 — must come out of the core. The rejection above is not retracted as
+> an *observation*: the dependency really does gain a hop, and "ask which side
+> owns the state" is still the right question. What it got wrong is treating
+> the answer as a verdict on the boundary. The reducer holding `Prober` and
+> matching `NegStep` directly is **the defect the epic names**, not a fact the
+> boundary must accommodate — a crate whose stated job is "owns all protocol
+> state, touches no socket" links a specific wire protocol's implementation
+> (`nmp-engine/Cargo.toml:55`), its generic request-attempt owner is
+> six-sevenths one protocol's taxonomy, and four of its own effect types name
+> the protocol.
+>
+> This same section already carries the counter-argument, ~50 lines above:
+> *"were the NIP-77 FSM its own crate declaring `hex`, `write.rs` reaching for
+> it would be `E0433`."* That is the package answer being preferred on the
+> exact axis this rejection dismissed.
+>
+> The open question is no longer *whether*. It is *what a wire-mechanism seam
+> emits, and how the reducer sequences it without naming the protocol*. Until
+> that seam is designed, read this section as history, not as guidance.
+
 ### "They all need the same four things" — the claim, checked
 
 The argument that carried the most weight above is that every cluster needs
@@ -694,7 +715,7 @@ that the claim is unlikely, it is four counter-examples already compiled.
 | 6 | **AuthorOutboxRouteNeeds** | — | — | — | — | 0 of 5 mutating functions touch any of the four — but it emits `Effect::AuthorRouteNeedsChanged` from its own method instead of returning an outcome. **Axis 2**, not axis 1. |
 | 7 | **AttemptCorrelations** | root | fact | — | root | Rejected on **appears**, not coupling: `AttemptCorrelationTarget` names `ReceiptId`, `RelaySessionKey` and `PublishQueueLaneKey` — a ~50-line crate whose public type drags three vocabularies. |
 | 8 | **LiveWireOwnership** (9 fields) | root | root | **fact** | root | 4 of 8 mutating functions read `self.router.plan()`; none calls store or resolver. One genuinely foreign reader (`observation.rs`, a membership predicate). |
-| 9 | **NegentropySessions** (NIP-77, 10 fields) | root | fact | fact | root | 22 mutating functions, 2 touch router/clock. Its crate rejection was a **dependency** argument, not a coupling one: `negentropy` is already on the reducer's allowed list, so `nmp-nip77` gains a hop rather than removing an edge. |
+| 9 | **NegentropySessions** (NIP-77, 10 fields) | root | fact | fact | root | 22 mutating functions, 2 touch router/clock. Its crate rejection was a **dependency** argument, not a coupling one: `negentropy` is already on the reducer's allowed list, so `nmp-nip77` gains a hop rather than removing an edge. **That rejection is overturned by #1806** — see the note under the rejection list. |
 | 10 | **ObservationBranches** (`observations`, `handles`) | root | — | — | **root** | 3 of 7 mutating functions call the resolver — all of them root subscribe/unsubscribe *around* the map update, the `HistorySessions` shape exactly. |
 | 11 | **RequestClaimTransfers** | root | fact | fact | root | Clock is a deadline; router reads are plan facts. |
 | 12 | **RetryScheduler** (`retry_scheduler_blocked`) | root | **fact** | — | root | 8 of 12 mutating functions read `clock`, all to compute a deadline — the exact shape `RequestAttempts` already converted to an argument. This is I8. |
