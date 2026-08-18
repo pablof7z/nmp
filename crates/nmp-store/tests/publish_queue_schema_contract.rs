@@ -3,10 +3,10 @@
 //! Two claims live here, and both are falsifiable by a one-line edit to
 //! `schema.rs`:
 //!
-//! 1. A fresh store creates EXACTLY the 29 production tables, named exactly
+//! 1. A fresh store creates EXACTLY the 27 production tables, named exactly
 //!    as listed below. The old spelling of the publish queue (`outbox_*`,
-//!    then `delivery_*`) is gone, not aliased, and so is every tree #1248
-//!    folded into a neighbour's key space.
+//!    then `delivery_*`) is gone, not aliased, and so is every tree folded
+//!    into a neighbour's key space.
 //! 2. **No table name carries a version suffix.** The single durable epoch
 //!    authority is `SCHEMA_VERSION`; a per-table `_v1`/`_v6`/`_v8` marker
 //!    advertises a coexistence that has never existed and cannot (#1026).
@@ -36,7 +36,7 @@ const PUBLISH_QUEUE_META: TableDefinition<&[u8], &[u8]> =
 /// What is left is: does this need a DIFFERENT LEADING SORT DIMENSION than its
 /// neighbour, or is it a GENUINELY DISTINCT KEY SPACE? If neither, it is a
 /// column, and it belongs in its neighbour's key space.
-const PRODUCTION_TABLES: [&str; 28] = [
+const PRODUCTION_TABLES: [&str; 27] = [
     "addr_index",
     "coverage",
     "event_ids",
@@ -47,7 +47,6 @@ const PRODUCTION_TABLES: [&str; 28] = [
     "publish_queue_attempt_details",
     "publish_queue_attempts",
     "publish_queue_deadlines",
-    "publish_queue_deadlines_by_intent",
     "publish_queue_displaced",
     "publish_queue_intents",
     "publish_queue_kind5_claims",
@@ -67,11 +66,12 @@ const PRODUCTION_TABLES: [&str; 28] = [
     "tombstones",
 ];
 
-/// Table names #1248 folded away. A fresh store must not create any of them
-/// again: each was a column of a key space a neighbour already owned, or a
-/// scalar row that never needed a tree, and re-creating one under the same
-/// epoch would resurrect a layout nothing reads.
-const FOLDED_AWAY_TABLES: [&str; 18] = [
+/// Table names folded away (#1248 and after). A fresh store must not create
+/// any of them again: each was a column of a key space a neighbour already
+/// owned, a scalar row that never needed a tree, or a reverse index over a
+/// fact its neighbour's own key prefix already answers — and re-creating one
+/// under the same epoch would resurrect a layout nothing reads.
+const FOLDED_AWAY_TABLES: [&str; 19] = [
     "addr_tombstones",
     "event_local",
     "event_observations",
@@ -84,6 +84,7 @@ const FOLDED_AWAY_TABLES: [&str; 18] = [
     "postings_meta",
     "postings_run_by_min",
     "postings_run_meta",
+    "publish_queue_deadlines_by_intent",
     "publish_queue_suppress_by_addr",
     "publish_queue_suppress_by_id",
     "relay_keys",

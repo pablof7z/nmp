@@ -1154,17 +1154,20 @@ pub enum PromotionTarget {
     ReplaceableMaterialization(Box<ReplaceableMaterializationTarget>),
 }
 
-/// Versioned, durable evidence for one publication attempt. The key is the
-/// full `(intent, relay, ordinal)` tuple: a restart can never confuse a new
-/// send with an older ambiguous send, and the exact signed bytes are retained
-/// rather than reconstructed from mutable routing state.
+/// Durable evidence for one publication attempt. The key is the full
+/// `(intent, relay, ordinal)` tuple: a restart can never confuse a new send
+/// with an older ambiguous send.
+///
+/// The row names the event it sent rather than carrying it. `start_lane_attempt`
+/// refuses unless the attempt bytes are byte-identical to the intent's promoted
+/// signed event, so a copy per `(intent, relay, ordinal)` stored the same note
+/// as many times as the publish was retried across as many relays.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishQueueAttempt {
-    pub version: u8,
     pub intent_id: IntentId,
     pub relay: RelayUrl,
     pub ordinal: u64,
-    pub event: Event,
+    pub event_id: EventId,
     pub outcome: PublishQueueAttemptOutcome,
 }
 
@@ -1184,7 +1187,6 @@ pub struct PublishQueueLaneKey {
 /// authoritative row recovery and scheduling read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishQueueLane {
-    pub version: u8,
     pub key: PublishQueueLaneKey,
     pub revision: u64,
     pub last_ordinal: u64,
@@ -1319,7 +1321,6 @@ pub struct PublishQueueAttemptTransient {
 /// pre-detail attempt shape to adopt or synthesize a shell for (#867).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishQueueAttemptDetails {
-    pub version: u8,
     pub intent_id: IntentId,
     pub relay: RelayUrl,
     pub ordinal: u64,
@@ -1399,7 +1400,6 @@ pub enum CloseIntentOutcome {
 /// state is empty or has changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishQueueRouteRevision {
-    pub version: u8,
     pub intent_id: IntentId,
     pub ordinal: u64,
     pub relays: BTreeSet<RelayUrl>,

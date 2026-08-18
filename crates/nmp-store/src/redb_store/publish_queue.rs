@@ -1,10 +1,10 @@
 use super::publish_queue_codec::{
-    codec_error, deadline_by_intent_key, deadline_key, decode_addr_claimants, decode_claimants,
-    decode_lane, decode_meta_u64, decode_receipt, encode_addr_claimants, encode_claimants,
-    encode_deadline, encode_lane, encode_meta_u64, encode_receipt, lane_key, receipt_key,
-    terminal_receipt_key, PublishQueueRelayId, LAST_TERMINAL_AT_KEY, NEXT_INTENT_ID_KEY,
-    NEXT_RECEIPT_ID_KEY, NEXT_TERMINAL_SEQUENCE_KEY, TERMINAL_RECEIPT_BYTES_KEY,
-    TERMINAL_RECEIPT_COUNT_KEY,
+    codec_error, deadline_key, decode_addr_claimants, decode_claimants, decode_lane,
+    decode_meta_u64, decode_receipt, encode_addr_claimants, encode_claimants, encode_deadline,
+    encode_lane, encode_meta_u64, encode_receipt, lane_key, lane_range, parse_lane_key,
+    receipt_key, terminal_receipt_key, PublishQueueRelayId, LAST_TERMINAL_AT_KEY,
+    NEXT_INTENT_ID_KEY, NEXT_RECEIPT_ID_KEY, NEXT_TERMINAL_SEQUENCE_KEY,
+    TERMINAL_RECEIPT_BYTES_KEY, TERMINAL_RECEIPT_COUNT_KEY,
 };
 use super::schema::{addr_suppress_key, id_suppress_key, persist_err};
 use super::{
@@ -14,17 +14,27 @@ use super::{
     Serialize, Timestamp,
 };
 
-pub(super) fn lane_deadline(lane: &PublishQueueLane) -> Option<PublishQueueDeadline> {
-    let (at, kind) = match lane.state {
+/// The one place a lane state's deadline is named. A `PUBLISH_QUEUE_DEADLINES`
+/// row exists exactly when this returns `Some`, and its key is
+/// `deadline_key(at, intent, relay)` — which is what makes the lane table its
+/// own by-intent index (see [`intent_deadline_keys`]).
+fn lane_state_deadline(
+    state: &PublishQueueLaneState,
+) -> Option<(Timestamp, PublishQueueDeadlineKind)> {
+    match state {
         PublishQueueLaneState::Transient { eligible_at, .. } => {
-            (eligible_at, PublishQueueDeadlineKind::RetryEligible)
+            Some((*eligible_at, PublishQueueDeadlineKind::RetryEligible))
         }
         PublishQueueLaneState::InFlight {
             phase: PublishQueueInFlightPhase::AwaitingAck { deadline },
             ..
-        } => (deadline, PublishQueueDeadlineKind::AckTimeout),
-        _ => return None,
-    };
+        } => Some((*deadline, PublishQueueDeadlineKind::AckTimeout)),
+        _ => None,
+    }
+}
+
+pub(super) fn lane_deadline(lane: &PublishQueueLane) -> Option<PublishQueueDeadline> {
+    let (at, kind) = lane_state_deadline(&lane.state)?;
     Some(PublishQueueDeadline {
         at,
         key: lane.key.clone(),
@@ -33,10 +43,44 @@ pub(super) fn lane_deadline(lane: &PublishQueueLane) -> Option<PublishQueueDeadl
     })
 }
 
+/// Every `PUBLISH_QUEUE_DEADLINES` key one intent currently owns, derived from
+/// that intent's own lane rows.
+///
+/// A deadline belongs to exactly one lane and its timestamp IS the lane
+/// state's, so the intent-prefixed lane range answers "which deadlines are
+/// this intent's" without a second copy of the same fact in a reverse index
+/// that could disagree with it. Callers that also delete lane rows must call
+/// this BEFORE removing them.
+pub(super) fn intent_deadline_keys(
+    lanes: &impl ReadableTable<&'static [u8; 12], &'static [u8]>,
+    intent_id: IntentId,
+) -> Result<Vec<[u8; 20]>, PersistenceError> {
+    let (lower, upper) = lane_range(intent_id);
+    let mut keys = Vec::new();
+    for row in lanes
+        .range::<&[u8; 12]>(&lower..=&upper)
+        .map_err(persist_err)?
+    {
+        let (key, value) = row.map_err(persist_err)?;
+        let (key_intent, relay_id) =
+            parse_lane_key(key.value()).map_err(|error| codec_error("lane key", error))?;
+        if key_intent != intent_id {
+            return Err(PersistenceError::invariant(
+                "lane deadline range escaped intent prefix",
+            ));
+        }
+        let (_, _, _, state) =
+            decode_lane(value.value()).map_err(|error| codec_error("lane", error))?;
+        if let Some((at, _)) = lane_state_deadline(&state) {
+            keys.push(deadline_key(at, intent_id, relay_id));
+        }
+    }
+    Ok(keys)
+}
+
 pub(super) fn replace_lane_in_txn(
     lanes: &mut redb::Table<'_, &'static [u8; 12], &'static [u8]>,
     deadlines: &mut redb::Table<'_, &'static [u8; 20], &'static [u8]>,
-    deadlines_by_intent: &mut redb::Table<'_, &'static [u8; 20], &'static [u8]>,
     key: &PublishQueueLaneKey,
     relay_id: PublishQueueRelayId,
     expected_revision: u64,
@@ -57,22 +101,17 @@ pub(super) fn replace_lane_in_txn(
         return Err(PersistenceError::invariant("stale delivery lane revision"));
     }
     let current = PublishQueueLane {
-        version: 1,
         key: key.clone(),
         revision,
         last_ordinal,
         state: current_state,
     };
     if let Some(old) = lane_deadline(&current) {
-        let ordered_key = deadline_key(old.at, key.intent_id, relay_id);
-        let by_intent_key = deadline_by_intent_key(key.intent_id, old.at, relay_id);
-        deadlines.remove(&ordered_key).map_err(persist_err)?;
-        deadlines_by_intent
-            .remove(&by_intent_key)
+        deadlines
+            .remove(&deadline_key(old.at, key.intent_id, relay_id))
             .map_err(persist_err)?;
     }
     let lane = PublishQueueLane {
-        version: 1,
         key: key.clone(),
         revision: current
             .revision
@@ -100,13 +139,11 @@ pub(super) fn replace_lane_in_txn(
         .map_err(persist_err)?;
     if let Some(deadline) = lane_deadline(&lane) {
         let encoded = encode_deadline(deadline.lane_revision, deadline.kind);
-        let ordered_key = deadline_key(deadline.at, key.intent_id, relay_id);
-        let by_intent_key = deadline_by_intent_key(key.intent_id, deadline.at, relay_id);
         deadlines
-            .insert(&ordered_key, encoded.as_slice())
-            .map_err(persist_err)?;
-        deadlines_by_intent
-            .insert(&by_intent_key, encoded.as_slice())
+            .insert(
+                &deadline_key(deadline.at, key.intent_id, relay_id),
+                encoded.as_slice(),
+            )
             .map_err(persist_err)?;
     }
     Ok(lane)

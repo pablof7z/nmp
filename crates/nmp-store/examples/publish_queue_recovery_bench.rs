@@ -203,7 +203,7 @@ fn semantic_snapshot(store: &RedbStore) -> (usize, usize, String) {
                 attempt.intent_id.0,
                 attempt.relay,
                 attempt.ordinal,
-                attempt.event.id,
+                attempt.event_id,
                 attempt.outcome
             )
             .unwrap();

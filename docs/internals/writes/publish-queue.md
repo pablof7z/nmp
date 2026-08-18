@@ -124,7 +124,6 @@ Every ordering-sensitive key is fixed width and big-endian:
 | route revision | `intent:u64 \| ordinal:u64` |
 | ordered deadline | `at:u64 \| intent:u64 \| relay_id:u32` |
 | terminal receipt FIFO | `meta-prefix \| completion_sequence:u64 \| receipt_id:u64` |
-| deadline cleanup index | `intent:u64 \| at:u64 \| relay_id:u32` |
 | address suppression | bounded bytes, with binary values |
 | id suppression | raw `event_id:[u8;32] \| pubkey:[u8;32]` |
 
@@ -133,10 +132,23 @@ The namespace consists of:
 `publish_queue_intents`, `publish_queue_displaced`,
 `publish_queue_receipts`, `publish_queue_route_revisions`, `publish_queue_lanes`,
 `publish_queue_attempts`, `publish_queue_attempt_details`,
-`publish_queue_deadlines`, `publish_queue_deadlines_by_intent`,
+`publish_queue_deadlines`,
 `publish_queue_relays`, `publish_queue_relay_ids`,
 `publish_queue_kind5_claims`, `publish_queue_suppress_by_id`,
 `publish_queue_suppress_by_addr`, and `publish_queue_meta`.
+
+A deadline belongs to one lane, and its timestamp IS that lane state's, so
+the intent-prefixed lane range is the deadline table's by-intent index. Close
+and retirement read the lane rows to name the deadlines an intent owns; a
+reverse index over the same fact would only add a second copy that could
+disagree with the first. A deadline row no lane names is corruption of the
+epoch, refused on read rather than swept away by close.
+
+An attempt row names the event it sent rather than carrying it. The body lives
+once, on the intent that promoted it, and `start_lane_attempt` refuses unless
+the attempt bytes are byte-identical to that promoted body — so a per-row copy
+stored the same note once per `(intent, relay, ordinal)`, which for a 5-relay
+publish retried three times was fifteen extra copies.
 
 Values use an explicit eight-byte envelope: four ASCII magic bytes, one codec
 version byte, and three zero reserved bytes. Integers are big-endian; variants
@@ -186,7 +198,7 @@ records the selected fact. In particular:
 - signature promotion or pre-signature compensation updates the canonical row,
   intent, receipt, and suppression/displacement state together;
 - route revision and any new relay dictionary rows commit together;
-- lane cursor, immutable attempt, additive detail, and both deadline indexes
+- lane cursor, immutable attempt, additive detail, and the deadline row
   change in the same transition transaction;
 - terminal close removes bounded open-work rows only after every persisted lane
   is terminal, while retained receipt and attempt evidence survive;

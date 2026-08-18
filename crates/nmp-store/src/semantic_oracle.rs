@@ -72,23 +72,24 @@ const EXPECTED_SEMANTIC_TRACE: &[(&str, &str)] = &[
     ("replaceable delivery superseded", "ee2b61751a9366da7dacc58b6621ad69ce62ff8cdae50854023ae01678c023d7"),
     ("superseding delivery compensated", "234a899c07ac2e96554acbe187c3bdc69e4ca52c19f2485ef1440bcd4ac0d3e4"),
     ("multi-relay delivery accepted", "89a54e29ceda3a77b86d2cb9a8a741a573756483c3a1b6cab91ba13623fdd33f"),
-    ("multi-relay lanes durable", "5ce3089e76d30f35df45e7377e1d8970dc542c5c85e1569dc5aaf2e62ccf4d07"),
-    ("ambiguous handoff became outcome unknown", "3b1fbfb2870d54b04517fd6b4c1bded18eab2b276b25e377c18a497bdeda84f0"),
-    ("delivery attempt gave up", "822d99fc58664cb97576e5a386c5d22d8e8893c4d71d861ecc1e7b8ad8935929"),
-    ("in-flight delivery interrupted", "63d5bf0586e7246fdc90e7f7c17d0f78d89ad3f885451f7806a5fdcbb9f6c244"),
-    ("retry ended in relay rejection", "e29d07319978d77da151b7f5412ce17746a15317fd7f671a9a959cc6450a7bb5"),
-    ("multi-relay terminal obligation closed", "e29d07319978d77da151b7f5412ce17746a15317fd7f671a9a959cc6450a7bb5"),
-    ("publication route durable", "2f042e0f7ce6285fa1bc49f5c40183251b977cd077878405e08e7994024a41b7"),
-    ("publication lanes bootstrapped", "c7c50d4f9e927755a64f107faa6dfb73dbc2099bd03b07f955f64f8be1f77587"),
-    ("publication lane eligible", "b04194e8ed615edbccbf626c7c34c02c91874be8a8e90dce48a376f44fa6626f"),
-    ("publication attempt started", "1215654ab878ce428231bb6577c89b74692d0f24137aefb8230b7c6c67a8a4e8"),
-    ("publication retry scheduled", "5cf8a010d6263c284a506cd458eb7d75c9f78c52321a3a7f1a78b1b99618b2f2"),
-    ("publication retry eligible", "001c2bc15a5fda4559b4dac24fd262650c2992b0be19d172521fdcf23c6e2e62"),
-    ("publication retry started", "fa079d30e0de928a2700fdd12426d53ffedc07d52584e290c3b00f6c649746d8"),
-    ("publication handed off", "a8f279c1f76b650161118cf50ff88d459e4075cea3e8f9b2836eaebda7accbcb"),
-    ("publication receipt acked", "9115ea7a5e6b18474ccde7e1dac0927db6b1ff19586b61f099677bade79639b6"),
-    ("publication obligation closed", "9115ea7a5e6b18474ccde7e1dac0927db6b1ff19586b61f099677bade79639b6"),
+    ("multi-relay lanes durable", "54b00c6bdb29affed80879448b2da07251aeba28991fb9a83f62282e2aab2d20"),
+    ("ambiguous handoff became outcome unknown", "f5fa34bef08e3cabdd4fc2c9fd4519289e2fac798965d46074a402dac4528039"),
+    ("delivery attempt gave up", "381224dba9cdc222a82636cdc81e3e579d987bdf5c53352f29f56404e03c1e14"),
+    ("in-flight delivery interrupted", "646a9ad9bbb773a51e9c6852e2e0bade37bb1ae3e4b4780f72ba987ba7cd303f"),
+    ("retry ended in relay rejection", "045516cfca3a730f4269e9ececa7659f75aa89035433d69e202bd3855562b746"),
+    ("multi-relay terminal obligation closed", "045516cfca3a730f4269e9ececa7659f75aa89035433d69e202bd3855562b746"),
+    ("publication route durable", "23e6ae7db71c900b4284cc8387deef7335b9d070f26815ad20ca36117367d10a"),
+    ("publication lanes bootstrapped", "2b697e6c39c121f62e67a3dfbd14b2d425d7f0ecbda972aa1946b042e60a2a72"),
+    ("publication lane eligible", "dfa65796a16c139a2b7a1336ae07052f56dec02796f28c29db0407c602aecdb7"),
+    ("publication attempt started", "277921ec9624bab892a32b92b8a507be87d259967130d671ee228d8e6c80b045"),
+    ("publication retry scheduled", "f84cebe521948f75a0f1d8b2c228d0cc3178e35e39f0361f978492b49685d72a"),
+    ("publication retry eligible", "046e6019218ab1ebabf4f2882017e8b874dd3421dee8d8f4887927e2d22aef93"),
+    ("publication retry started", "8a3231cefcdcf4911e2ba7c61a505babd56b3f04939baac161a86377f57c2adf"),
+    ("publication handed off", "18367d9e30f68778af9e84fbb2946412b6958e2a3adbc02c50072eedd36982ee"),
+    ("publication receipt acked", "ff416389fd48daea76ebeca9d459bad0af2a15dcf05d6f4ecb7b8537db8a9a84"),
+    ("publication obligation closed", "ff416389fd48daea76ebeca9d459bad0af2a15dcf05d6f4ecb7b8537db8a9a84"),
 ];
+
 
 #[derive(Default)]
 struct OracleContext {
@@ -399,7 +400,10 @@ fn normalized_state(
         .iter()
         .map(|(atom, relay)| {
             let interval = store
-                .get_coverage(coverage_key(atom), &RelaySessionKey::unauthenticated(relay.clone()))
+                .get_coverage(
+                    coverage_key(atom),
+                    &RelaySessionKey::unauthenticated(relay.clone()),
+                )
                 .expect("oracle coverage read");
             json!({
                 "key": RedbStore::coverage_row_key(

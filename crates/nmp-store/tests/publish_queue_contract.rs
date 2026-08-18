@@ -18,8 +18,10 @@ use std::path::Path;
 
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, CompensateOutcome,
-    EventCursor, GcRetentionSet, InsertOutcome, IntentSigState, LocalOrigin, PersistenceFault,
-    PromoteOutcome, PromotionTarget, PublishQueueAttemptOutcome, PublishQueueIntent,
+    EventCursor, GcRetentionSet, HandoffEvidence, InsertOutcome, IntentSigState, LocalOrigin,
+    PersistenceFault, PromoteOutcome, PromotionTarget, PublishQueueAttemptHandoff,
+    PublishQueueAttemptOutcome, PublishQueueIntent, PublishQueuePostHandoffState,
+    PublishQueueTransientCause,
     PublishQueueReceipt, PublishQueueReceiptPayload, PublishQueueWork, ReceiptState, RedbStore,
     RefuseReason, RelayObserved, RemoveQueueEntryOutcome, RetractReason, SigState, StoredEvent,
     VerifiedSignature,
@@ -847,6 +849,167 @@ fn a_newer_replaceable_stops_an_older_started_obligation_but_keeps_bounded_safet
             .all(|intent| { intent.intent_id != older_intent }));
     });
 }
+
+/// Retiring an intent sweeps EVERY deadline it owns, and only its own.
+///
+/// `publish_queue_deadlines_by_intent` used to answer "which deadline rows
+/// belong to this intent". It is gone; the surviving table is keyed
+/// `(time, intent, relay)`, which cannot be ranged by intent at all. The
+/// answer now comes from the intent's own lane rows, because a deadline row
+/// exists exactly when a lane is `Transient` or `InFlight{AwaitingAck}` and
+/// its timestamp IS that lane state's.
+///
+/// Two failure modes, so two halves that must BOTH hold:
+///
+/// - name too few keys and the target's rows outlive the lanes they belonged
+///   to (the store then refuses with `deadline references missing lane`);
+/// - name too many — a `lane_range` bound that runs past the intent prefix —
+///   and a sibling intent silently loses a deadline it still needs. That is
+///   the half a single-lane, single-intent test cannot see, which is why the
+///   target owns two lanes here (one in each deadline-bearing state) and an
+///   unrelated intent holds a live deadline of its own across the retirement.
+#[test]
+fn retiring_an_intent_sweeps_all_its_live_deadlines_and_spares_a_siblings() {
+    with_store(|store| {
+        let k = keys();
+
+        // The bystander: a different replaceable address, so the supersession
+        // below cannot touch it. One lane, one live retry deadline.
+        let (sibling_frozen, sibling_signed) = compose(&k, Kind::Metadata, "profile", 50);
+        let sibling_intent = do_accept(store, accept(sibling_frozen, k.public_key(), 50))
+            .journaled_intent_id()
+            .unwrap();
+        store
+            .promote_signed(
+                PromotionTarget::Event(sibling_intent),
+                evidence(&sibling_signed),
+            )
+            .unwrap();
+        store
+            .record_route_revision(
+                sibling_intent,
+                BTreeSet::from([RelayUrl::parse("wss://sibling.example").unwrap()]),
+            )
+            .unwrap();
+        let sibling_lane = store
+            .bootstrap_publish_queue_lanes(sibling_intent)
+            .unwrap()
+            .remove(0);
+        store
+            .set_lane_transient(
+                &sibling_lane.key,
+                sibling_lane.revision,
+                0,
+                Timestamp::from(400u64),
+                PublishQueueTransientCause::ConnectionLost,
+                None,
+            )
+            .unwrap();
+
+        // The target: two lanes, one Transient and one AwaitingAck, so both
+        // arms of the lane-state-to-deadline mapping are on the floor.
+        let (older_frozen, older_signed) = compose(&k, Kind::ContactList, "older contacts", 100);
+        let older_intent = do_accept(store, accept(older_frozen, k.public_key(), 100))
+            .journaled_intent_id()
+            .unwrap();
+        store
+            .promote_signed(
+                PromotionTarget::Event(older_intent),
+                evidence(&older_signed),
+            )
+            .unwrap();
+        store
+            .record_route_revision(
+                older_intent,
+                BTreeSet::from([
+                    RelayUrl::parse("wss://target-a.example").unwrap(),
+                    RelayUrl::parse("wss://target-b.example").unwrap(),
+                ]),
+            )
+            .unwrap();
+        let mut target_lanes = store.bootstrap_publish_queue_lanes(older_intent).unwrap();
+        assert_eq!(target_lanes.len(), 2, "two routed relays, two lanes");
+        let second = target_lanes.remove(1);
+        let first = target_lanes.remove(0);
+
+        let eligible = store
+            .set_lane_eligible(&first.key, first.revision, Timestamp::from(101u64))
+            .unwrap();
+        let (attempt, in_flight) = store
+            .start_lane_attempt(
+                &eligible.key,
+                eligible.revision,
+                older_signed,
+                Timestamp::from(102u64),
+            )
+            .unwrap();
+        store
+            .record_lane_handoff(
+                &in_flight.key,
+                in_flight.revision,
+                attempt.ordinal,
+                PublishQueueAttemptHandoff {
+                    at: Timestamp::from(103u64),
+                    result: HandoffEvidence::Written,
+                },
+                PublishQueuePostHandoffState::AwaitingAck {
+                    deadline: Timestamp::from(150u64),
+                },
+            )
+            .unwrap();
+        store
+            .set_lane_transient(
+                &second.key,
+                second.revision,
+                0,
+                Timestamp::from(250u64),
+                PublishQueueTransientCause::ConnectionLost,
+                None,
+            )
+            .unwrap();
+
+        let owners = |store: &RedbStore| {
+            let mut seen = store
+                .due_publish_queue_deadlines(Timestamp::from(u64::MAX), 16)
+                .unwrap()
+                .into_iter()
+                .map(|deadline| (deadline.key.intent_id, deadline.at.as_secs()))
+                .collect::<Vec<_>>();
+            seen.sort();
+            seen
+        };
+        assert_eq!(
+            owners(store),
+            vec![
+                (sibling_intent, 400),
+                (older_intent, 150),
+                (older_intent, 250)
+            ],
+            "three live deadlines, two of them the target's"
+        );
+
+        let (newer_frozen, _) = compose(&k, Kind::ContactList, "newer contacts", 200);
+        assert!(matches!(
+            do_accept(store, accept(newer_frozen, k.public_key(), 200)),
+            AcceptOutcome::Superseded { .. }
+        ));
+
+        assert!(store
+            .recover_publish_queue_lanes(older_intent)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            owners(store),
+            vec![(sibling_intent, 400)],
+            "both target deadlines swept, the sibling's untouched"
+        );
+        assert_eq!(
+            store.next_publish_queue_deadline().unwrap(),
+            Some(Timestamp::from(400u64))
+        );
+    });
+}
+
 
 #[test]
 fn explicit_not_handed_off_evidence_destroys_the_obsolete_receipt() {
