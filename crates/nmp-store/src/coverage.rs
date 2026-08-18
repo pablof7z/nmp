@@ -342,14 +342,20 @@ mod tests {
         assert_ne!(coverage_key(&atom(a)), coverage_key(&atom(b)));
     }
 
-    /// `CoverageKey` is the DURABLE redb watermark key (ledger #7): a forged
-    /// collision here attaches evidence to the wrong filter. Pin its width at 32 bytes
-    /// (256-bit BLAKE3, via `DescriptorHash`) -- NOT the 8-byte FNV-64 value
-    /// it replaced -- so a future change can't silently narrow it back down.
+    /// `CoverageKey` HOLDS the query shape it was built from; it does not
+    /// summarise it. That is what lets a caller ask whether one key's shape
+    /// contains another's, which a digest could never answer.
+    ///
+    /// This test used to pin the key's width at 32 bytes, guarding a BLAKE3
+    /// digest against being narrowed back to the 8-byte value it replaced.
+    /// There is no digest now, so there is no width to defend -- the property
+    /// worth defending is that the shape survives and can be read back.
     #[test]
-    fn coverage_key_is_a_256_bit_digest_not_64() {
-        let a = cf(&[1], &["aa"], None, None);
-        assert_eq!(coverage_key(&atom(a.clone())).atom().filter.authors, atom(a).filter.authors);
+    fn coverage_key_retains_the_shape_it_was_built_from() {
+        let filter = cf(&[1], &["aa"], None, None);
+        let key = coverage_key(&atom(filter.clone()));
+        assert_eq!(key.atom().filter.authors, filter.authors);
+        assert_eq!(key.atom().filter.kinds, filter.kinds);
     }
 
     /// Same filter hashed twice (simulating a re-derive across two separate
