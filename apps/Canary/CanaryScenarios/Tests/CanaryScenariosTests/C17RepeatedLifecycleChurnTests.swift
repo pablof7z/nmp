@@ -217,8 +217,12 @@ final class C17RepeatedLifecycleChurnTests: XCTestCase {
                 + "\(UInt64(run.samples[run.samples.count - 1].mallocBytes)) B). The bound is "
                 + "this measurement's resolution, established by running a phase with proven "
                 + "zero per-cycle growth; exceeding it means the open/close cycle itself "
-                + "retains heap. Re-run with C17_CYCLES set 4x higher: a per-cycle leak ends "
-                + "4x higher, a one-time cost ends in the same place."
+                + "retains heap. Re-run with C17_CYCLES set 4x higher and compare THIS "
+                + "B/cycle rate, not total heap: a per-cycle leak HOLDS the same rate, a "
+                + "one-time cost falls to a quarter of it, and noise collapses toward zero "
+                + "and can change sign. (The rate's divisor is the window span 3n/8, which "
+                + "grows with run length -- so a real leak's numerator grows with it and "
+                + "cancels. Total heap does end 4x higher; this number does not.)"
         )
 
         // 5: footprint, as a TOTAL drift bound rather than a per-cycle rate.
