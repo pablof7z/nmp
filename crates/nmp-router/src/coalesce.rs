@@ -241,6 +241,132 @@ fn neither_limited(a: &ConcreteFilter, b: &ConcreteFilter) -> bool {
     a.limit.is_none() && b.limit.is_none()
 }
 
+/// `Containment` — the merge rule for the case `StructuralUnion` cannot see:
+/// one operand's match set is already a SUBSET of the other's, so the
+/// container alone serves both and nothing needs widening at all.
+///
+/// `StructuralUnion` asks a question about SHAPE — "does exactly one array
+/// component differ?" — and uses it as a proxy for a question about MATCH
+/// SETS. The proxy is sound where it fires but silent where a subset
+/// relationship spans two or more components. Measured case, from
+/// `docs/internals/subscriptions/identity-grouping-and-limits.md` §3.2:
+/// `{kinds:[0,1], authors:[a,b]}` and `{kinds:[1], authors:[a]}` in one
+/// cohort shipped BOTH REQs, one wholly contained in the other, because two
+/// components differ. The relay was asked twice for work the first REQ
+/// already covers.
+///
+/// Containment against ALREADY-SENT work was never the gap — `admission.rs`
+/// consults per-axis containment against a running incumbent and emits no
+/// REQ at all. This rule closes the asymmetry: the same question, asked
+/// between two candidates in one cohort.
+///
+/// WIDENING, in its strongest form. Where `StructuralUnion` returns a
+/// filter strictly weaker than both operands, this returns one of the
+/// operands unchanged, having established `matches(b) ⊆ matches(a)`. So
+/// `matches(merged) = matches(a) ⊇ matches(a) ∪ matches(b)` — the contract
+/// holds with EQUALITY, and no event is fetched that the container was not
+/// already going to fetch. The cartesian-corner objection that pins
+/// `StructuralUnion` to exactly one component does not apply here, because
+/// no union is formed: there are no corners to over-widen into.
+///
+/// The polarity that makes tags dangerous in `StructuralUnion` inverts
+/// again here, in the opposite direction, and is worth stating outright.
+/// Tags are CONJUNCTIVE across names: a filter that does not mention `#d`
+/// matches every event, tagged or not. So for `b` to be contained in `a`,
+/// every name `a` constrains must ALSO be constrained by `b`, with a subset
+/// of `a`'s values. `b` carrying EXTRA names is fine — each extra name
+/// narrows `b` further, which only strengthens the containment. Getting
+/// this backwards would treat a filter matching everything on an axis as
+/// contained by one matching a single value.
+pub struct Containment;
+
+/// `true` when `matches(inner) ⊆ matches(outer)` for every event.
+///
+/// Set axes (`kinds`/`authors`/`ids`): `None` is UNCONSTRAINED, so an
+/// unconstrained `outer` contains any `inner`, while an unconstrained
+/// `inner` is contained only by an equally unconstrained `outer`.
+///
+/// Bounds (`since`/`until`): `None` is the open end. `outer` must admit a
+/// window at least as wide as `inner`'s on both sides.
+fn contains(outer: &ConcreteFilter, inner: &ConcreteFilter) -> bool {
+    fn set_contains<T: Ord>(outer: &Option<BTreeSet<T>>, inner: &Option<BTreeSet<T>>) -> bool {
+        match (outer, inner) {
+            // Outer constrains nothing on this axis: it admits everything.
+            (None, _) => true,
+            // Outer constrains, inner does not: inner admits values outer
+            // rejects.
+            (Some(_), None) => false,
+            (Some(o), Some(i)) => i.is_subset(o),
+        }
+    }
+
+    if !set_contains(&outer.kinds, &inner.kinds)
+        || !set_contains(&outer.authors, &inner.authors)
+        || !set_contains(&outer.ids, &inner.ids)
+    {
+        return false;
+    }
+
+    // CONJUNCTIVE: every name `outer` constrains must be constrained by
+    // `inner` too, with a subset of the values. Extra names on `inner` only
+    // narrow it further and are fine.
+    for (name, outer_values) in &outer.tags {
+        match inner.tags.get(name) {
+            Some(inner_values) if inner_values.is_subset(outer_values) => {}
+            _ => return false,
+        }
+    }
+
+    // `since` is an inclusive LOWER bound: a smaller value admits more.
+    match (outer.since, inner.since) {
+        (None, _) => {}
+        (Some(_), None) => return false,
+        (Some(o), Some(i)) if o <= i => {}
+        _ => return false,
+    }
+    // `until` is an inclusive UPPER bound: a larger value admits more.
+    match (outer.until, inner.until) {
+        (None, _) => {}
+        (Some(_), None) => return false,
+        (Some(o), Some(i)) if o >= i => {}
+        _ => return false,
+    }
+
+    true
+}
+
+impl MergeRule for Containment {
+    fn name(&self) -> &'static str {
+        "Containment"
+    }
+
+    fn try_merge(&self, a: &ConcreteFilter, b: &ConcreteFilter) -> Option<ConcreteFilter> {
+        // Same reasoning as `StructuralUnion`, and it must be checked FIRST
+        // for the same reason: a `limit` caps DELIVERED ROWS, not the match
+        // set. `{kinds:[1], limit:10}` is contained by `{kinds:[0,1]}` as a
+        // predicate, but serving both from the container delivers the
+        // container's ten newest rows, which need not include ten of kind 1.
+        // Containment of predicates is not containment of results.
+        if !neither_limited(a, b) {
+            return None;
+        }
+
+        // Exact duplicates are `coalesce_with`'s hash dedup to own; a rule
+        // that "merged" them would spin the fixed point.
+        if a == b {
+            return None;
+        }
+
+        if contains(a, b) {
+            Some(a.clone())
+        } else if contains(b, a) {
+            Some(b.clone())
+        } else {
+            None
+        }
+    }
+}
+
 /// A rule that is DELIBERATELY non-widening — construction-only, used by
 /// `non_widening_rule_is_dropped_and_ships_separately` (test 13) to prove
 /// the drop mechanism actually works. It "merges" `a`/`b` by discarding `b`
@@ -278,12 +404,22 @@ pub struct RuleRegistry {
 }
 
 impl RuleRegistry {
-    /// The default, PROVEN-widening registry. ONE rule, spanning all four
-    /// array axes — see [`StructuralUnion`] for why it is not three rules
-    /// plus a missing fourth.
+    /// The default, PROVEN-widening registry. Two rules, asking two
+    /// different questions:
+    ///
+    /// - [`Containment`] first — is one operand's match set already a
+    ///   SUBSET of the other's? Then the container alone serves both and
+    ///   nothing widens. Tried first because it is the cheaper outcome:
+    ///   one operand survives unchanged rather than a new union filter.
+    /// - [`StructuralUnion`] second — spanning all four array axes; see its
+    ///   docs for why it is not three rules plus a missing fourth.
+    ///
+    /// `StructuralUnion` alone was shape-only, and shape is a proxy for the
+    /// match-set question that goes silent whenever a subset relationship
+    /// spans more than one component (#1907).
     pub fn default_widen_only() -> Self {
         Self {
-            rules: vec![Arc::new(StructuralUnion)],
+            rules: vec![Arc::new(Containment), Arc::new(StructuralUnion)],
             dropped: Vec::new(),
             pair_attempts: Cell::new(0),
         }
@@ -1072,18 +1208,128 @@ mod tests {
 
     // ---- through the registry --------------------------------------------
 
-    /// End to end: the #900 pair ships as TWO REQs, and the authorless one
-    /// keeps its unconstrained `authors`.
+    /// THE measured gap, verbatim from
+    /// `docs/internals/subscriptions/identity-grouping-and-limits.md` §3.2:
+    /// `{kinds:[0,1], authors:[a,b]}` and `{kinds:[1], authors:[a]}` in one
+    /// cohort produced TWO REQs, "one wholly contained in the other",
+    /// because the pair differs in two components and `StructuralUnion`
+    /// requires exactly one.
+    ///
+    /// Nothing about that pair needs widening. The second filter's match set
+    /// is already a subset of the first's, so the first alone serves both.
+    /// The relay was being asked twice for work one REQ already covered, and
+    /// per-relay REQ budget is the scarce resource this whole module exists
+    /// to respect.
     #[test]
-    fn coalesce_ships_an_unconstrained_authors_filter_separately() {
+    fn a_wholly_contained_candidate_ships_no_req_of_its_own() {
+        let wide = cf(&[0, 1], &["aa", "bb"]);
+        let narrow = cf(&[1], &["aa"]);
+        // The premise: two components differ, so StructuralUnion is silent.
+        assert!(
+            StructuralUnion.try_merge(&wide, &narrow).is_none(),
+            "premise: this pair is outside StructuralUnion's one-component domain"
+        );
+
+        let out = RuleRegistry::default_widen_only().coalesce(Set::from([wide.clone(), narrow]));
+        assert_eq!(out.len(), 1, "one REQ, not two");
+        assert_eq!(out[0], wide, "the survivor is the container, unchanged");
+    }
+
+    /// Containment must not fire on a pair that merely OVERLAPS. Each of
+    /// these admits events the other rejects (`kind:0` by `aa` only matches
+    /// the first; `kind:2` by `aa` only the second), so collapsing either
+    /// way would drop demanded events -- the #900 failure mode on a new
+    /// axis.
+    #[test]
+    fn overlapping_but_uncontained_filters_do_not_collapse() {
+        let a = cf(&[0, 1], &["aa"]);
+        let b = cf(&[1, 2], &["aa"]);
+        assert!(Containment.try_merge(&a, &b).is_none());
+        assert!(Containment.try_merge(&b, &a).is_none());
+    }
+
+    /// Tags are CONJUNCTIVE across names, so containment on them runs the
+    /// opposite way from the value sets. A filter constraining `#e` is
+    /// contained by one constraining nothing on `#e`; a filter constraining
+    /// BOTH `#e` and `#p` is contained by one constraining only `#e`,
+    /// because each extra name narrows further.
+    ///
+    /// The inverse must never hold: `{#e:X}` does not contain `{}` on that
+    /// axis, and treating it as if it did would collapse a
+    /// matches-everything filter into a single-value one.
+    #[test]
+    fn tag_containment_runs_the_conjunctive_way() {
+        let untagged = cf(&[1], &["aa"]);
+        let mut e_only = untagged.clone();
+        e_only.tags.insert(name('e'), Set::from(["X".to_string()]));
+        let mut e_and_p = e_only.clone();
+        e_and_p.tags.insert(name('p'), Set::from(["Y".to_string()]));
+
+        // Fewer names = wider, so the untagged filter absorbs both.
+        assert_eq!(
+            Containment.try_merge(&untagged, &e_only),
+            Some(untagged.clone())
+        );
+        assert_eq!(
+            Containment.try_merge(&untagged, &e_and_p),
+            Some(untagged.clone())
+        );
+        // And `#e` alone absorbs `#e` AND `#p`.
+        assert_eq!(
+            Containment.try_merge(&e_only, &e_and_p),
+            Some(e_only.clone())
+        );
+        // A narrower tag value set never absorbs a wider one.
+        let mut e_wide = untagged.clone();
+        e_wide.tags.insert(name('e'), Set::from(["X".to_string(), "Z".to_string()]));
+        assert_eq!(Containment.try_merge(&e_wide, &e_only), Some(e_wide));
+    }
+
+    /// A `limit` caps DELIVERED ROWS, not the match set, so predicate
+    /// containment does not imply result containment: serving
+    /// `{kinds:[1], limit:10}` from `{kinds:[0,1]}` delivers the
+    /// container's ten newest rows, which need not include ten of kind 1.
+    /// Refused on either side, exactly as `StructuralUnion` refuses it.
+    #[test]
+    fn containment_refuses_when_either_side_is_limited() {
+        let wide = cf(&[0, 1], &["aa"]);
+        let mut narrow = cf(&[1], &["aa"]);
+        narrow.limit = Some(10);
+        assert!(Containment.try_merge(&wide, &narrow).is_none());
+        assert!(Containment.try_merge(&narrow, &wide).is_none());
+    }
+
+    /// End to end on the #900 pair: it now COLLAPSES to one REQ, and the
+    /// survivor is the UNCONSTRAINED filter.
+    ///
+    /// #900 was a NARROWING: `AuthorUnion` read `authors: None` as the empty
+    /// set and merged `{kinds:[1], authors:None}` with `{kinds:[1],
+    /// authors:[aa]}` down to `{authors:[aa]}`, silently dropping every
+    /// other author from the wire. The fix at the time was to refuse the
+    /// pair, so it shipped as two REQs.
+    ///
+    /// Refusing was never the only sound answer, just the only one
+    /// `StructuralUnion` could express. `Containment` sees that the
+    /// authorless filter's match set already contains the other's and keeps
+    /// THE WIDE ONE — one REQ, and every event both operands asked for.
+    ///
+    /// This is a strictly stronger #900 guard than the two-REQ assertion it
+    /// replaces: that one proved no narrowing occurred by proving no merge
+    /// occurred at all. This proves the merge happens AND lands on the wide
+    /// side. A regression to #900's behaviour would surface here as
+    /// `authors == Some({"aa"})`.
+    #[test]
+    fn the_unconstrained_authors_filter_absorbs_the_narrower_one() {
         let filters = Set::from([cf(&[1], &[]), cf(&[1], &["aa"])]);
         let out = RuleRegistry::default_widen_only().coalesce(filters);
-        assert_eq!(
-            out.len(),
-            2,
-            "an unconstrained filter must not be coverage_claims"
+        assert_eq!(out.len(), 1, "the narrower filter is wholly contained");
+        assert!(
+            out[0].authors.is_none(),
+            "the survivor must be the UNCONSTRAINED filter, never the \
+             narrowed one -- that direction is #900: got {:?}",
+            out[0].authors
         );
-        assert!(out.iter().any(|f| f.authors.is_none()));
+        assert_eq!(out[0].kinds, Some(Set::from([1u16])));
     }
 
     /// End-to-end through the registry: two limited, otherwise-mergeable
@@ -1183,12 +1429,24 @@ mod tests {
         );
         assert_eq!(registry.dropped_rules(), &["DiscardSecondOperand"]);
 
-        // Two filters sharing `kinds` but differing in `since` -- outside
-        // StructuralUnion's domain (a differing scalar is a refusal), but
-        // squarely inside DiscardSecondOperand's (unsound) applicability
-        // predicate. With the rule dropped, both ship as separate REQs --
+        // Two filters sharing `kinds`, one bounded BELOW and one bounded
+        // ABOVE. Outside StructuralUnion's domain (differing scalars are a
+        // refusal, and these differ in two components), and outside
+        // Containment's (neither window contains the other: each admits
+        // events the other rejects). Squarely inside DiscardSecondOperand's
+        // (unsound) applicability predicate, which asks only that `kinds`
+        // match. With the rule dropped, both ship as separate REQs --
         // neither is silently discarded.
-        let filters = Set::from([cf_since(&[1], 100), cf_since(&[1], 200)]);
+        //
+        // Deliberately NOT two `since` bounds: `since:100` CONTAINS
+        // `since:200`, so Containment would legitimately collapse them and
+        // this test would pass for a reason that has nothing to do with the
+        // drop mechanism it exists to prove.
+        let mut lower = cf(&[1], &["aa"]);
+        lower.since = Some(100);
+        let mut upper = cf(&[1], &["aa"]);
+        upper.until = Some(100);
+        let filters = Set::from([lower, upper]);
         let out = registry.coalesce(filters);
         assert_eq!(out.len(), 2, "dropped rule must not fire");
     }
