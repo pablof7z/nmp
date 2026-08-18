@@ -367,7 +367,6 @@ fn apply_plan(
             })
         });
         match (source, current_winner.as_ref()) {
-            (crate::QualifiedSource::Absent, None) => None,
             // A capability-defined write makes no assertion about prior
             // state, so it is authorized to reconcile against whatever the
             // address index actually holds -- nothing (a genuine first

@@ -413,14 +413,14 @@ impl CoreState {
         // last on purpose and is only ever a base for the FIRST operation on
         // a coordinate: the row an app composes over is the current
         // materialization, which already carries every retained operation's
-        // effects. Reaching it with a snapshot that has operations would
-        // apply them a second time. It cannot happen today -- a retained
-        // generation means every operation is `Qualified` or
+        // effects, so reaching it with a snapshot that has operations would
+        // apply them a second time. That is a closed case, not a hazard -- a
+        // retained generation means every operation is `Qualified` or
         // `CapabilityDefault` (`ensure_all_qualified` refuses a candidate
-        // otherwise), `CapabilityDefault` returned above, and `Qualified`
-        // over anything but a qualified absence retains its source event.
-        // Qualified absence is the one hole, and nothing in the engine ever
-        // mints `QualifiedSource::Absent`.
+        // otherwise), `CapabilityDefault` returned above, and `Qualified` is
+        // now only ever event-qualified, which retains its source event. The
+        // qualified-absence hole that used to sit here was deleted along
+        // with `QualifiedSource::Absent` itself.
         let source = snapshot
             .and_then(|snapshot| snapshot.source.as_ref())
             .map(|stored| UnsignedEvent::from(stored.event.clone()))
@@ -630,7 +630,6 @@ impl CoreState {
                             QualifiedSource::Event { event_id, .. } => {
                                 StartingSource::Event(event_id)
                             }
-                            QualifiedSource::Absent => StartingSource::Absent,
                             QualifiedSource::Unresolved => requirement.source,
                         },
                     }
@@ -641,7 +640,6 @@ impl CoreState {
                 access: source_access,
                 source: match source.qualified {
                     QualifiedSource::Event { event_id, .. } => StartingSource::Event(event_id),
-                    QualifiedSource::Absent => StartingSource::Absent,
                     QualifiedSource::Unresolved => source_event_id
                         .map_or(StartingSource::CapabilityDefault, StartingSource::Event),
                 },
@@ -684,7 +682,7 @@ impl CoreState {
 
         let source_floor = match source.qualified {
             QualifiedSource::Event { created_at, .. } => created_at.as_secs().saturating_add(1),
-            QualifiedSource::Absent | QualifiedSource::Unresolved => 0,
+            QualifiedSource::Unresolved => 0,
         };
         let prior_floor = snapshot
             .as_ref()
