@@ -3125,7 +3125,7 @@ impl CoreState {
         match self.store.expire_due(now) {
             Ok(expired) if !expired.is_empty() => {
                 let removed: Vec<_> = expired.into_iter().map(|se| se.event).collect();
-                match self.resolver.retract(&self.store, removed) {
+                match self.resolver.retract(&self.store, Vec::new(), removed) {
                     Ok(committed) => {
                         self.apply_committed_mutation(committed, &mut effects);
                     }
@@ -3832,7 +3832,7 @@ impl CoreState {
         let removed = expired.into_iter().map(|row| row.event).collect();
         let committed = self
             .resolver
-            .retract(&self.store, removed)
+            .retract(&self.store, Vec::new(), removed)
             .expect("benchmark expiry reaction");
         let mut effects = Vec::new();
         if force_refresh {
