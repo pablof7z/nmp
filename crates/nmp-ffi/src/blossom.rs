@@ -29,13 +29,19 @@
 //! raw `created_at`/`kind`/`tags`/`content` tokens that feed straight into
 //! the engine's governed sign-only operation
 //! (`NmpEngine::sign_event(FfiSignEventRequest, ...)`, whose author is
-//! frozen from the current account -- so the draft's `author_pubkey_hex`
-//! must be that account for the engine path). The signed result
+//! frozen from the current account). The signed result
 //! ([`crate::types::FfiSignedEvent`]) then enters
 //! [`FfiBlossomAuthorization::validate_signed_event`]; a raw event JSON
 //! string enters [`FfiBlossomAuthorization::validate`]. Both doors run the
 //! full BUD-11 fail-closed validation -- an unvalidated event can never
 //! become an `Authorization` header on this side of the boundary either.
+//!
+//! AUTHOR BINDING: whoever signs decides the author, and neither signer
+//! path is obliged to use the key the draft was composed for. Both
+//! validation doors therefore take the draft's `author_pubkey_hex` and
+//! refuse a signature by any other identity
+//! ([`FfiBlossomAuthError::AuthorMismatch`]) -- the signature of a wrong
+//! account is perfectly valid, so nothing else in the taxonomy can see it.
 //!
 //! BLOCKING CLIENT DISCIPLINE: [`FfiBlossomClient`]'s methods BLOCK the
 //! calling thread for up to the configured request deadline -- native
@@ -238,6 +244,15 @@ pub enum FfiBlossomAuthError {
     },
     /// Not kind 24242.
     WrongKind { found: u16 },
+    /// The event was signed by an identity other than the expected author
+    /// -- `nmp_blossom::AuthValidationError::AuthorMismatch` mirror. The
+    /// signature is valid, just someone else's, so `BadSignature` cannot
+    /// catch it. This is what refuses an authorization drafted for one
+    /// account and signed by whichever account the engine currently holds.
+    AuthorMismatch {
+        expected_pubkey_hex: String,
+        found_pubkey_hex: String,
+    },
     /// The Schnorr signature (or event id) does not verify.
     BadSignature { reason: String },
     /// No `t` tag with a value at all.
@@ -284,6 +299,14 @@ impl std::fmt::Display for FfiBlossomAuthError {
             Self::WrongKind { found } => {
                 write!(f, "authorization event kind {found} is not 24242")
             }
+            Self::AuthorMismatch {
+                expected_pubkey_hex,
+                found_pubkey_hex,
+            } => write!(
+                f,
+                "authorization is signed by {found_pubkey_hex} but was expected to speak for \
+                 {expected_pubkey_hex}"
+            ),
             Self::BadSignature { reason } => {
                 write!(f, "authorization event signature is invalid: {reason}")
             }
@@ -337,6 +360,12 @@ pub(crate) fn auth_draft_error_to_ffi(error: AuthDraftError) -> FfiBlossomAuthEr
 pub(crate) fn auth_validation_error_to_ffi(error: AuthValidationError) -> FfiBlossomAuthError {
     match error {
         AuthValidationError::WrongKind { found } => FfiBlossomAuthError::WrongKind { found },
+        AuthValidationError::AuthorMismatch { expected, found } => {
+            FfiBlossomAuthError::AuthorMismatch {
+                expected_pubkey_hex: expected.to_hex(),
+                found_pubkey_hex: found.to_hex(),
+            }
+        }
         AuthValidationError::BadSignature { reason } => {
             FfiBlossomAuthError::BadSignature { reason }
         }
@@ -381,16 +410,22 @@ fn parse_auth_blob_sha256(hex: &str) -> Result<Sha256Hash, FfiBlossomAuthError> 
 /// the app does, through whichever signer path it has:
 ///
 /// - engine sign-only path: feed `created_at_secs`/`kind`/`tags`/`content`
-///   into `FfiSignEventRequest` and call `NmpEngine::sign_event` (the
-///   author is frozen from the CURRENT ACCOUNT, so `author_pubkey_hex`
-///   passed to the draft builder must be that account's pubkey); the
+///   into `FfiSignEventRequest` and call `NmpEngine::sign_event`; the
 ///   resulting `FfiSignedEvent` enters
 ///   [`FfiBlossomAuthorization::validate_signed_event`];
 /// - external/native signer path: hand `unsigned_event_json` to the
 ///   signer, then pass the signed event's canonical JSON to
 ///   [`FfiBlossomAuthorization::validate`].
+///
+/// Either way the signer -- not this draft -- decides the author, so both
+/// validation doors take [`Self::author_pubkey_hex`] back and refuse a
+/// signature by anyone else ([`FfiBlossomAuthError::AuthorMismatch`]).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct FfiBlossomAuthDraft {
+    /// The identity this draft was composed for. Hand it to whichever
+    /// [`FfiBlossomAuthorization`] door validates the signed result: that
+    /// is what binds the signature to the identity the caller meant.
+    pub author_pubkey_hex: String,
     /// The draft as canonical unsigned-event JSON (`nostr::UnsignedEvent`),
     /// for external signers that consume event JSON.
     pub unsigned_event_json: String,
@@ -413,6 +448,7 @@ fn draft_to_ffi(
     blob: Option<Sha256Hash>,
 ) -> FfiBlossomAuthDraft {
     FfiBlossomAuthDraft {
+        author_pubkey_hex: unsigned.pubkey.to_hex(),
         unsigned_event_json: unsigned.as_json(),
         blob_sha256_hex: blob.map(|hash| hash.to_hex()),
         verb,
@@ -520,15 +556,18 @@ impl FfiBlossomAuthorization {
     /// The shared fail-closed door both constructors funnel through.
     fn validate_parsed(
         event: nostr::Event,
+        author_pubkey_hex: String,
         verb: FfiBlossomVerb,
         blob_sha256_hex: Option<String>,
         now_secs: u64,
     ) -> Result<Arc<Self>, FfiBlossomAuthError> {
+        let author = parse_author_pubkey(&author_pubkey_hex)?;
         let blob = blob_sha256_hex
             .as_deref()
             .map(parse_auth_blob_sha256)
             .transpose()?;
         let expected = ExpectedAuthorization {
+            author,
             verb: verb_from_ffi(verb),
             blob,
         };
@@ -541,7 +580,11 @@ impl FfiBlossomAuthorization {
 #[uniffi::export]
 impl FfiBlossomAuthorization {
     /// Fail-closed BUD-11 validation of a signed kind:24242 event supplied
-    /// as canonical event JSON (the external/native-signer path). `verb` is
+    /// as canonical event JSON (the external/native-signer path).
+    /// `author_pubkey_hex` is the identity the authorization must speak
+    /// for -- pass [`FfiBlossomAuthDraft::author_pubkey_hex`]; a signature
+    /// by any other account is
+    /// [`FfiBlossomAuthError::AuthorMismatch`]. `verb` is
     /// what the caller is ABOUT to use the authorization for; `blob_sha256_hex`
     /// binds the exact blob for verbs that grant one (upload/delete/mirror
     /// -- mirror validates under `Upload`); `now_secs` is the caller's
@@ -549,6 +592,7 @@ impl FfiBlossomAuthorization {
     #[uniffi::constructor]
     pub fn validate(
         signed_event_json: String,
+        author_pubkey_hex: String,
         verb: FfiBlossomVerb,
         blob_sha256_hex: Option<String>,
         now_secs: u64,
@@ -558,7 +602,7 @@ impl FfiBlossomAuthorization {
                 reason: error.to_string(),
             }
         })?;
-        Self::validate_parsed(event, verb, blob_sha256_hex, now_secs)
+        Self::validate_parsed(event, author_pubkey_hex, verb, blob_sha256_hex, now_secs)
     }
 
     /// Fail-closed BUD-11 validation of the exact value
@@ -567,9 +611,15 @@ impl FfiBlossomAuthorization {
     /// its raw tokens through the same strict `nostr::Event` parser (a
     /// malformed id/sig/pubkey is a typed
     /// [`FfiBlossomAuthError::InvalidEventJson`], never a panic).
+    ///
+    /// `sign_event` signs with whichever account the engine currently
+    /// holds, which is not necessarily the one the draft was built for;
+    /// that divergence surfaces HERE as
+    /// [`FfiBlossomAuthError::AuthorMismatch`].
     #[uniffi::constructor]
     pub fn validate_signed_event(
         event: FfiSignedEvent,
+        author_pubkey_hex: String,
         verb: FfiBlossomVerb,
         blob_sha256_hex: Option<String>,
         now_secs: u64,
@@ -589,7 +639,7 @@ impl FfiBlossomAuthorization {
                 reason: error.to_string(),
             }
         })?;
-        Self::validate_parsed(event, verb, blob_sha256_hex, now_secs)
+        Self::validate_parsed(event, author_pubkey_hex, verb, blob_sha256_hex, now_secs)
     }
 
     /// The verb this authorization was validated FOR.
@@ -1986,6 +2036,7 @@ mod tests {
 
         let auth = FfiBlossomAuthorization::validate(
             json.clone(),
+            keys.public_key().to_hex(),
             FfiBlossomVerb::Upload,
             Some(blob_hex.clone()),
             now,
@@ -1999,6 +2050,7 @@ mod tests {
         tampered["content"] = serde_json::Value::String("tampered".to_string());
         match FfiBlossomAuthorization::validate(
             tampered.to_string(),
+            keys.public_key().to_hex(),
             FfiBlossomVerb::Upload,
             Some(blob_hex.clone()),
             now,
@@ -2011,6 +2063,7 @@ mod tests {
         // Cross-verb replay is refused typed.
         match FfiBlossomAuthorization::validate(
             json.clone(),
+            keys.public_key().to_hex(),
             FfiBlossomVerb::Delete,
             Some(blob_hex.clone()),
             now,
@@ -2026,6 +2079,7 @@ mod tests {
         let other_hex = hex_of(b"other blob");
         match FfiBlossomAuthorization::validate(
             json,
+            keys.public_key().to_hex(),
             FfiBlossomVerb::Upload,
             Some(other_hex.clone()),
             now,
@@ -2039,6 +2093,7 @@ mod tests {
         // Non-JSON input is a typed refusal, never a panic.
         match FfiBlossomAuthorization::validate(
             "not json".to_string(),
+            keys.public_key().to_hex(),
             FfiBlossomVerb::Upload,
             None,
             now,
@@ -2070,6 +2125,7 @@ mod tests {
 
         let auth = FfiBlossomAuthorization::validate_signed_event(
             record.clone(),
+            keys.public_key().to_hex(),
             FfiBlossomVerb::Delete,
             Some(blob_hex.clone()),
             now,
@@ -2081,6 +2137,7 @@ mod tests {
         tampered.content = "tampered".to_string();
         match FfiBlossomAuthorization::validate_signed_event(
             tampered,
+            keys.public_key().to_hex(),
             FfiBlossomVerb::Delete,
             Some(blob_hex.clone()),
             now,
@@ -2094,6 +2151,7 @@ mod tests {
         malformed.sig = "zz".to_string();
         match FfiBlossomAuthorization::validate_signed_event(
             malformed,
+            keys.public_key().to_hex(),
             FfiBlossomVerb::Delete,
             Some(blob_hex),
             now,
@@ -2101,6 +2159,100 @@ mod tests {
             Err(FfiBlossomAuthError::InvalidEventJson { .. }) => {}
             other => panic!("expected InvalidEventJson, got {other:?}"),
         }
+    }
+
+    /// FALSIFIER (author binding): a draft composed for account A but
+    /// signed by account B is refused as `AuthorMismatch` at BOTH doors --
+    /// the engine sign-only door (`validate_signed_event`, where
+    /// `sign_event` freezes the author from whatever account is current)
+    /// and the external-signer JSON door. The signature is genuinely valid
+    /// for B, so `BadSignature` cannot fire and every other check passes;
+    /// without this refusal the header ships attributed to B.
+    #[test]
+    fn an_authorization_signed_by_a_different_account_is_refused_at_both_doors() {
+        let declared = nostr::Keys::generate();
+        let actual_signer = nostr::Keys::generate();
+        let blob_hex = hex_of(b"blob");
+        let now = 1_700_000_000u64;
+
+        // The draft names `declared`; the signer that actually runs is
+        // `actual_signer`, so the event's own pubkey is the latter.
+        let json = signed_auth_json(&actual_signer, FfiBlossomVerb::Upload, Some(&blob_hex), now);
+        let event = nostr::Event::from_json(&json).expect("event JSON parses");
+        assert_eq!(event.pubkey, actual_signer.public_key());
+
+        match FfiBlossomAuthorization::validate(
+            json,
+            declared.public_key().to_hex(),
+            FfiBlossomVerb::Upload,
+            Some(blob_hex.clone()),
+            now,
+        ) {
+            Err(FfiBlossomAuthError::AuthorMismatch {
+                expected_pubkey_hex,
+                found_pubkey_hex,
+            }) => {
+                assert_eq!(expected_pubkey_hex, declared.public_key().to_hex());
+                assert_eq!(found_pubkey_hex, actual_signer.public_key().to_hex());
+            }
+            Ok(_) => panic!("an authorization signed by another account must never validate"),
+            Err(other) => panic!("expected AuthorMismatch, got {other:?}"),
+        }
+
+        let record = FfiSignedEvent {
+            id: event.id.to_hex(),
+            pubkey: event.pubkey.to_hex(),
+            created_at: event.created_at.as_secs(),
+            kind: event.kind.as_u16(),
+            tags: event.tags.iter().map(|tag| tag.clone().to_vec()).collect(),
+            content: event.content.clone(),
+            sig: event.sig.to_string(),
+        };
+        match FfiBlossomAuthorization::validate_signed_event(
+            record.clone(),
+            declared.public_key().to_hex(),
+            FfiBlossomVerb::Upload,
+            Some(blob_hex.clone()),
+            now,
+        ) {
+            Err(FfiBlossomAuthError::AuthorMismatch {
+                expected_pubkey_hex,
+                found_pubkey_hex,
+            }) => {
+                assert_eq!(expected_pubkey_hex, declared.public_key().to_hex());
+                assert_eq!(found_pubkey_hex, actual_signer.public_key().to_hex());
+            }
+            Ok(_) => panic!("the engine sign-only door must refuse a wrong-account signature"),
+            Err(other) => panic!("expected AuthorMismatch, got {other:?}"),
+        }
+
+        // The same record under its OWN author validates -- the refusal is
+        // about identity, not a blanket rejection.
+        FfiBlossomAuthorization::validate_signed_event(
+            record,
+            actual_signer.public_key().to_hex(),
+            FfiBlossomVerb::Upload,
+            Some(blob_hex),
+            now,
+        )
+        .expect("the signer's own authorization validates");
+    }
+
+    /// Invariant (author binding): the draft records the identity it was
+    /// composed for, so the caller hands the SAME value to validation
+    /// instead of re-deriving it from a reference that may have moved on.
+    #[test]
+    fn a_draft_reports_the_author_it_was_composed_for() {
+        let keys = nostr::Keys::generate();
+        let draft = blossom_upload_authorization_draft(
+            keys.public_key().to_hex(),
+            hex_of(b"blob"),
+            1_700_000_000,
+            1_700_000_600,
+            "test upload".to_string(),
+        )
+        .expect("a valid draft");
+        assert_eq!(draft.author_pubkey_hex, keys.public_key().to_hex());
     }
 
     /// Invariant (#555): `None` config knobs resolve to EXACTLY the crate
@@ -2139,6 +2291,7 @@ mod tests {
         let now = 1_700_000_000u64;
         let auth = FfiBlossomAuthorization::validate(
             signed_auth_json(&keys, FfiBlossomVerb::Upload, Some(&blob_hex), now),
+            keys.public_key().to_hex(),
             FfiBlossomVerb::Upload,
             Some(blob_hex.clone()),
             now,
@@ -2219,6 +2372,7 @@ mod tests {
         let now = 1_700_000_000u64;
         let auth = FfiBlossomAuthorization::validate(
             signed_auth_json(&keys, FfiBlossomVerb::Upload, Some(&blob_hex), now),
+            keys.public_key().to_hex(),
             FfiBlossomVerb::Upload,
             Some(blob_hex.clone()),
             now,
@@ -2341,6 +2495,7 @@ mod tests {
         let now = nostr::Timestamp::now().as_secs();
         let upload_auth = FfiBlossomAuthorization::validate(
             signed_auth_json(&keys, FfiBlossomVerb::Upload, Some(&blob_hex), now),
+            keys.public_key().to_hex(),
             FfiBlossomVerb::Upload,
             Some(blob_hex.clone()),
             now,

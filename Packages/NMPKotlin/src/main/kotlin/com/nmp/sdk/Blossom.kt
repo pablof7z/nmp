@@ -10,12 +10,13 @@
 //   val draft = blossomUploadAuthorizationDraft(
 //       authorPubkeyHex = currentAccount, blobSha256Hex = hash,
 //       createdAt = now, expiration = now + 300u, description = "upload")
-//   // Engine sign-only path (the author is frozen from the ACTIVE
-//   // ACCOUNT, so `authorPubkeyHex` must be that account's pubkey):
+//   // Engine sign-only path (`signEvent` freezes the author from whatever
+//   // account is current when it runs, so validation is handed the draft's
+//   // own author and refuses a signature by anyone else):
 //   val signed = engine.signEvent(draft.signRequest)
 //   val auth = BlossomAuthorization.validate(
-//       signedEvent = signed, verb = BlossomVerb.UPLOAD,
-//       blobSha256Hex = hash, now = now)
+//       signedEvent = signed, authorPubkeyHex = draft.authorPubkeyHex,
+//       verb = BlossomVerb.UPLOAD, blobSha256Hex = hash, now = now)
 //   // External signers instead sign `draft.unsignedEventJson` and pass
 //   // the signed event's canonical JSON to
 //   // `BlossomAuthorization.validate(signedEventJson = ..., ...)`.
@@ -185,6 +186,16 @@ sealed class BlossomAuthError(message: String) : Exception(message) {
     data class WrongKind(val found: UShort) :
         BlossomAuthError("authorization event kind $found is not 24242")
 
+    /** The event was signed by an identity other than the expected author.
+     * The signature is valid, just someone else's, so [BadSignature]
+     * cannot catch it -- this is what refuses an authorization drafted for
+     * one account and signed by whichever account is current. */
+    data class AuthorMismatch(val expectedPubkeyHex: String, val foundPubkeyHex: String) :
+        BlossomAuthError(
+            "authorization is signed by $foundPubkeyHex but was expected to speak for " +
+                expectedPubkeyHex,
+        )
+
     data class BadSignature(val reason: String) :
         BlossomAuthError("authorization event signature is invalid: $reason")
 
@@ -217,6 +228,8 @@ sealed class BlossomAuthError(message: String) : Exception(message) {
                 is FfiBlossomAuthException.ExpirationNotAfterCreatedAt ->
                     ExpirationNotAfterCreatedAt(ffi.createdAtSecs, ffi.expirationSecs)
                 is FfiBlossomAuthException.WrongKind -> WrongKind(ffi.found)
+                is FfiBlossomAuthException.AuthorMismatch ->
+                    AuthorMismatch(ffi.expectedPubkeyHex, ffi.foundPubkeyHex)
                 is FfiBlossomAuthException.BadSignature -> BadSignature(ffi.reason)
                 is FfiBlossomAuthException.MissingVerb -> MissingVerb
                 is FfiBlossomAuthException.MultipleVerbs -> MultipleVerbs
@@ -552,8 +565,14 @@ sealed class BlossomListError(message: String) : Exception(message) {
 /** An UNSIGNED kind:24242 authorization draft (`FfiBlossomAuthDraft`
  * mirror). Sign it via the engine (`signRequest` -> `NMPEngine.signEvent`)
  * or hand `unsignedEventJson` to an external signer; nothing in this SDK
- * holds keys. */
+ * holds keys. Either signer decides the author, so pass [authorPubkeyHex]
+ * back to `BlossomAuthorization.validate`: a signature by any other
+ * identity is refused as [BlossomAuthError.AuthorMismatch]. */
 data class BlossomAuthorizationDraft(
+    /** The identity this draft was composed for. Hand it to
+     * `BlossomAuthorization.validate` -- that is what binds the signature
+     * to the identity the caller meant. */
+    val authorPubkeyHex: String,
     /** The draft as canonical unsigned-event JSON, for external signers. */
     val unsignedEventJson: String,
     /** The blob this draft binds via its `x` tag (`null` for `list`). */
@@ -566,14 +585,16 @@ data class BlossomAuthorizationDraft(
     val content: String,
 ) {
     /** The engine sign-only request for this exact draft.
-     * `NMPEngine.signEvent` freezes the author from the CURRENT ACCOUNT, so
-     * the draft's `authorPubkeyHex` must be that account's pubkey. */
+     * `NMPEngine.signEvent` freezes the author from whichever account is
+     * current when it runs; validation compares that against
+     * [authorPubkeyHex]. */
     val signRequest: NMPUnsignedEvent
         get() = NMPUnsignedEvent(createdAt, kind, tags, content)
 
     companion object {
         internal fun from(ffi: FfiBlossomAuthDraft): BlossomAuthorizationDraft =
             BlossomAuthorizationDraft(
+                ffi.authorPubkeyHex,
                 ffi.unsignedEventJson,
                 ffi.blobSha256Hex,
                 BlossomVerb.from(ffi.verb),
@@ -670,13 +691,18 @@ class BlossomAuthorization private constructor(internal val ffi: FfiBlossomAutho
 
     companion object {
         /** Fail-closed BUD-11 validation of a signed event supplied as
-         * canonical event JSON (the external-signer path). [verb] is what
+         * canonical event JSON (the external-signer path).
+         * [authorPubkeyHex] is the identity the authorization must speak
+         * for -- pass [BlossomAuthorizationDraft.authorPubkeyHex]; a
+         * signature by any other account is
+         * [BlossomAuthError.AuthorMismatch]. [verb] is what
          * the caller is ABOUT to use the authorization for;
          * [blobSha256Hex] binds the exact blob for verbs that grant one
          * (`UPLOAD`/`DELETE`; mirror validates under `UPLOAD`); [now] is
          * the caller's clock (unix seconds). */
         fun validate(
             signedEventJson: String,
+            authorPubkeyHex: String,
             verb: BlossomVerb,
             blobSha256Hex: String?,
             now: ULong,
@@ -685,6 +711,7 @@ class BlossomAuthorization private constructor(internal val ffi: FfiBlossomAutho
                 blossomAuthRethrowing {
                     FfiBlossomAuthorization.validate(
                         signedEventJson,
+                        authorPubkeyHex,
                         verb.toFfi(),
                         blobSha256Hex,
                         now,
@@ -694,9 +721,13 @@ class BlossomAuthorization private constructor(internal val ffi: FfiBlossomAutho
 
         /** Fail-closed BUD-11 validation of the exact value
          * `NMPEngine.signEvent` returns (the engine sign-only path) -- the
-         * same checks as the JSON door. */
+         * same checks as the JSON door. `signEvent` signs with whichever
+         * account the engine currently holds, which need not be the one
+         * the draft was built for; that divergence surfaces here as
+         * [BlossomAuthError.AuthorMismatch]. */
         fun validate(
             signedEvent: NMPSignedEvent,
+            authorPubkeyHex: String,
             verb: BlossomVerb,
             blobSha256Hex: String?,
             now: ULong,
@@ -713,6 +744,7 @@ class BlossomAuthorization private constructor(internal val ffi: FfiBlossomAutho
                             content = signedEvent.content,
                             sig = signedEvent.signature,
                         ),
+                        authorPubkeyHex,
                         verb.toFfi(),
                         blobSha256Hex,
                         now,
