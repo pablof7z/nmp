@@ -18,13 +18,8 @@ pub struct ReplaceableMaterializationCall {
 }
 
 enum ReplaceableMaterializationInput {
-    Existing {
-        source: Box<UnsignedEvent>,
-        current: Box<UnsignedEvent>,
-    },
-    CapabilityDefault {
-        coordinate: Coordinate,
-    },
+    Existing { source: Box<UnsignedEvent> },
+    CapabilityDefault { coordinate: Coordinate },
 }
 
 pub enum ReplaceableMaterializationOutcome {
@@ -64,14 +59,12 @@ impl ReplaceableMaterializationCall {
     pub(super) fn new(
         materializer: Arc<dyn nmp_grammar::ReplaceableMaterializer>,
         source: UnsignedEvent,
-        current: UnsignedEvent,
         operations: Vec<Vec<u8>>,
     ) -> Self {
         Self {
             materializer,
             input: ReplaceableMaterializationInput::Existing {
                 source: Box::new(source),
-                current: Box::new(current),
             },
             operations,
         }
@@ -84,8 +77,8 @@ impl ReplaceableMaterializationCall {
             .map(|operation| ReplaceableMaterializerOperation::new(operation))
             .collect::<Vec<_>>();
         let result = match &self.input {
-            ReplaceableMaterializationInput::Existing { source, current } => {
-                self.materializer.materialize(source, current, &operations)
+            ReplaceableMaterializationInput::Existing { source } => {
+                self.materializer.materialize(source, &operations)
             }
             ReplaceableMaterializationInput::CapabilityDefault { coordinate } => self
                 .materializer
@@ -246,6 +239,13 @@ impl CoreState {
                 },
             ));
         }
+        // Every contributing operation, replayed from the base -- not a
+        // delta over the previous generation. The generation already carries
+        // the retained operations' effects, so handing it the whole list
+        // applied each of them a second time. That was invisible only
+        // because every shipped materializer happens to be idempotent; a
+        // capability that appends unconditionally saw its own list corrupted
+        // (`each_contributing_operation_reaches_the_materializer_exactly_once`).
         let mut replay_operations = snapshot
             .as_ref()
             .map(|snapshot| {
@@ -408,6 +408,19 @@ impl CoreState {
                 coordinate: coordinate.clone(),
             });
         }
+        // The base the whole operation list replays onto, and the only thing
+        // the materializer is handed. The app-supplied `original_source` is
+        // last on purpose and is only ever a base for the FIRST operation on
+        // a coordinate: the row an app composes over is the current
+        // materialization, which already carries every retained operation's
+        // effects. Reaching it with a snapshot that has operations would
+        // apply them a second time. It cannot happen today -- a retained
+        // generation means every operation is `Qualified` or
+        // `CapabilityDefault` (`ensure_all_qualified` refuses a candidate
+        // otherwise), `CapabilityDefault` returned above, and `Qualified`
+        // over anything but a qualified absence retains its source event.
+        // Qualified absence is the one hole, and nothing in the engine ever
+        // mints `QualifiedSource::Absent`.
         let source = snapshot
             .and_then(|snapshot| snapshot.source.as_ref())
             .map(|stored| UnsignedEvent::from(stored.event.clone()))
@@ -425,38 +438,8 @@ impl CoreState {
                 }),
             );
         };
-        let current_id = snapshot
-            .and_then(|snapshot| snapshot.current.generation.as_ref())
-            .map(|generation| generation.materialization.event_id)
-            .or(source.id)
-            .expect("registered operation retained a complete source id");
-        let current = if source.id == Some(current_id) {
-            source.clone()
-        } else {
-            let rows = self
-                .store
-                .query(&nostr::Filter::new().id(current_id))
-                .map_err(|error| {
-                    self.refuse_publish(PublishError::PersistenceFailed {
-                        reason: error.to_string(),
-                    })
-                })?;
-            let Some(stored) = rows
-                .into_iter()
-                .find(|stored| stored.event.id == current_id)
-            else {
-                return Err(
-                    self.refuse_publish(PublishError::ReplaceableOperationRefused {
-                        reason: "complete current materialization is no longer retained"
-                            .to_string(),
-                    }),
-                );
-            };
-            UnsignedEvent::from(stored.event)
-        };
         Ok(ReplaceableMaterializationInput::Existing {
             source: Box::new(source),
-            current: Box::new(current),
         })
     }
 

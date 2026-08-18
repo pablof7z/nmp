@@ -292,19 +292,14 @@ impl ReplaceableMaterializer for GroupListMaterializer {
     fn materialize(
         &self,
         source: &UnsignedEvent,
-        current: &UnsignedEvent,
         operations: &[ReplaceableMaterializerOperation<'_>],
     ) -> Result<EventBuilder, ReplaceableMaterializerRefusal> {
-        if source.kind != GROUP_LIST_KIND
-            || current.kind != GROUP_LIST_KIND
-            || source.pubkey != current.pubkey
-            || source.tags.identifier() != current.tags.identifier()
-        {
+        if source.kind != GROUP_LIST_KIND {
             return Err(ReplaceableMaterializerRefusal {
-                reason: "NIP-29 group-list materialization source coordinate changed".to_string(),
+                reason: "NIP-29 group-list materialization source is not a group list".to_string(),
             });
         }
-        apply_operations(current, operations)
+        apply_operations(source, operations)
     }
 
     fn materialize_default(

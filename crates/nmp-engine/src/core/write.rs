@@ -1741,7 +1741,6 @@ impl CoreState {
             let source_unsigned = UnsignedEvent::from(source.event.clone());
             let call = ReplaceableMaterializationCall::new(
                 registration.materializer.clone(),
-                source_unsigned.clone(),
                 source_unsigned,
                 snapshot
                     .operations
@@ -3017,12 +3016,7 @@ impl CoreState {
             .iter()
             .map(|operation| operation.plan.bytes().to_vec())
             .collect::<Vec<_>>();
-        let call = ReplaceableMaterializationCall::new(
-            materializer,
-            source_unsigned.clone(),
-            source_unsigned,
-            operations,
-        );
+        let call = ReplaceableMaterializationCall::new(materializer, source_unsigned, operations);
         let outcome = self.run_replaceable_materialization(call);
         self.install_materialized_replaceable_successor(
             ReplaceableSuccessorInput {

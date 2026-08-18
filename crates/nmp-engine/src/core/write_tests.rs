@@ -510,11 +510,10 @@ mod semantic_successor_tests {
     impl ReplaceableMaterializer for AddPeople {
         fn materialize(
             &self,
-            _source: &UnsignedEvent,
-            current: &UnsignedEvent,
+            source: &UnsignedEvent,
             operations: &[ReplaceableMaterializerOperation<'_>],
         ) -> Result<nmp_grammar::EventBuilder, ReplaceableMaterializerRefusal> {
-            let mut tags = current.tags.clone().to_vec();
+            let mut tags = source.tags.clone().to_vec();
             for operation in operations {
                 let key = PublicKey::from_slice(operation.bytes()).map_err(|error| {
                     ReplaceableMaterializerRefusal {
@@ -529,9 +528,9 @@ mod semantic_successor_tests {
                 }
             }
             Ok(nmp_grammar::EventBuilder {
-                kind: current.kind,
+                kind: source.kind,
                 tags,
-                content: current.content.clone(),
+                content: source.content.clone(),
                 created_at: None,
             })
         }
@@ -1988,6 +1987,165 @@ mod semantic_successor_tests {
         assert!(
             !core.retry_scheduler_blocked,
             "retired E1 deadlines must be gone rather than poisoning the current scheduler"
+        );
+    }
+
+    /// Every shipped materializer guards its own append -- NIP-02 checks for
+    /// an existing `p` tag before adding one, NIP-29 and bookmarks do the
+    /// same -- so applying an operation twice is invisible to all of them.
+    /// This one appends unconditionally, which is the only way to observe
+    /// what the engine actually hands a materializer.
+    struct AppendPeople;
+
+    impl ReplaceableMaterializer for AppendPeople {
+        fn materialize(
+            &self,
+            source: &UnsignedEvent,
+            operations: &[ReplaceableMaterializerOperation<'_>],
+        ) -> Result<nmp_grammar::EventBuilder, ReplaceableMaterializerRefusal> {
+            let mut tags = source.tags.clone().to_vec();
+            for operation in operations {
+                let key = PublicKey::from_slice(operation.bytes()).map_err(|error| {
+                    ReplaceableMaterializerRefusal {
+                        reason: error.to_string(),
+                    }
+                })?;
+                // No existing-tag guard on purpose: this is the falsifier's
+                // whole point.
+                tags.push(Tag::public_key(key));
+            }
+            Ok(nmp_grammar::EventBuilder {
+                kind: source.kind,
+                tags,
+                content: source.content.clone(),
+                created_at: None,
+            })
+        }
+
+        fn materialize_default(
+            &self,
+            coordinate: &Coordinate,
+            operations: &[ReplaceableMaterializerOperation<'_>],
+        ) -> Result<nmp_grammar::EventBuilder, ReplaceableMaterializerRefusal> {
+            let mut tags = if coordinate.kind.is_addressable() {
+                vec![Tag::identifier(coordinate.identifier.clone())]
+            } else {
+                Vec::new()
+            };
+            for operation in operations {
+                let key = PublicKey::from_slice(operation.bytes()).map_err(|error| {
+                    ReplaceableMaterializerRefusal {
+                        reason: error.to_string(),
+                    }
+                })?;
+                tags.push(Tag::public_key(key));
+            }
+            Ok(nmp_grammar::EventBuilder {
+                kind: coordinate.kind,
+                tags,
+                content: String::new(),
+                created_at: None,
+            })
+        }
+    }
+
+    const EXACTLY_ONCE_PROGRAM: [u8; 16] = [21; 16];
+    const EXACTLY_ONCE_FORMAT: [u8; 16] = [22; 16];
+
+    fn people(event: &UnsignedEvent) -> Vec<String> {
+        event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let cells = tag.as_slice();
+                (cells.first().is_some_and(|cell| cell == "p"))
+                    .then(|| cells.get(1).cloned())
+                    .flatten()
+            })
+            .collect()
+    }
+
+    /// Composes one operation over `current` and returns the generation the
+    /// engine asked to have signed.
+    fn append_person(
+        core: &mut EngineCore,
+        current: &UnsignedEvent,
+        person: PublicKey,
+        destination: &RelayUrl,
+    ) -> UnsignedEvent {
+        let operation = nmp_grammar::ReplaceableOperation::from_registered_parts(
+            EXACTLY_ONCE_PROGRAM,
+            EXACTLY_ONCE_FORMAT,
+            current.clone(),
+            current.clone(),
+            person.to_bytes().to_vec(),
+        )
+        .expect("the operation names a valid replaceable coordinate");
+        let mut preparation = core.prepare_publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(operation),
+            routing: WriteRouting::Explicit(vec![destination.clone()]),
+            identity: Identity::Active,
+        });
+        let effects = loop {
+            match preparation {
+                PublishPreparation::Complete(effects) => break effects,
+                PublishPreparation::Materialize(prepared) => {
+                    let PreparedReplaceableMaterialization { call, continuation } = *prepared;
+                    let outcome = core.run_replaceable_materialization(call);
+                    preparation =
+                        core.complete_body_complete_replaceable_operation(continuation, outcome);
+                }
+            }
+        };
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::RequestSign(_, _, unsigned) => Some(unsigned.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the operation must materialize a generation: {effects:#?}"))
+    }
+
+    /// The engine replays the whole contributing-operation list, so the value
+    /// it replays onto must be the base those operations were composed
+    /// against. Replaying them onto the previous generation -- which already
+    /// carries their effects -- applies every earlier operation a second
+    /// time. The relay-source successor path already gets this right: it
+    /// re-applies the full list onto each newly qualified source. The publish
+    /// path did not.
+    #[test]
+    fn each_contributing_operation_reaches_the_materializer_exactly_once() {
+        let author = Keys::generate();
+        let alice = Keys::generate().public_key();
+        let bob = Keys::generate().public_key();
+        let source_relay = RelayUrl::parse("wss://exactly-once-source.example").unwrap();
+        let destination = RelayUrl::parse("wss://exactly-once-destination.example").unwrap();
+        let base = source(&author, 1, "base body", &[]);
+        let base_unsigned = UnsignedEvent::from(base.clone());
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
+        store
+            .insert(base, RelayObserved::new(source_relay, Timestamp::from(1)))
+            .unwrap();
+        let mut core = EngineCore::new(store, 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
+            program: EXACTLY_ONCE_PROGRAM,
+            format: EXACTLY_ONCE_FORMAT,
+            materializer: Arc::new(AppendPeople),
+        });
+
+        let e1 = append_person(&mut core, &base_unsigned, alice, &destination);
+        assert_eq!(
+            people(&e1),
+            vec![alice.to_hex()],
+            "the first operation applies once over the relay source"
+        );
+
+        let e2 = append_person(&mut core, &e1, bob, &destination);
+        assert_eq!(
+            people(&e2),
+            vec![alice.to_hex(), bob.to_hex()],
+            "the second delta must not re-apply the first operation"
         );
     }
 }

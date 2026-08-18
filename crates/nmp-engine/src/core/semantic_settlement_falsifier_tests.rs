@@ -75,14 +75,13 @@ struct TinyContactListMaterializer;
 impl ReplaceableMaterializer for TinyContactListMaterializer {
     fn materialize(
         &self,
-        _source: &nostr::UnsignedEvent,
-        current: &nostr::UnsignedEvent,
+        source: &nostr::UnsignedEvent,
         _operations: &[ReplaceableMaterializerOperation<'_>],
     ) -> Result<nmp_grammar::EventBuilder, ReplaceableMaterializerRefusal> {
         Ok(nmp_grammar::EventBuilder {
-            kind: current.kind,
-            tags: current.tags.clone().to_vec().into_iter().collect(),
-            content: current.content.clone(),
+            kind: source.kind,
+            tags: source.tags.clone().to_vec().into_iter().collect(),
+            content: source.content.clone(),
             created_at: None,
         })
     }

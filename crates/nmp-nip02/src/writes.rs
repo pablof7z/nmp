@@ -158,24 +158,16 @@ impl ReplaceableMaterializer for FollowMaterializer {
     fn materialize(
         &self,
         source: &nostr::UnsignedEvent,
-        current: &nostr::UnsignedEvent,
         operations: &[ReplaceableMaterializerOperation<'_>],
     ) -> Result<EventBuilder, ReplaceableMaterializerRefusal> {
-        if source.kind != Kind::ContactList
-            || current.kind != Kind::ContactList
-            || source.pubkey != current.pubkey
-            || source.tags.identifier() != current.tags.identifier()
-        {
+        if source.kind != Kind::ContactList {
             return Err(ReplaceableMaterializerRefusal {
-                reason: "NIP-02 materialization source coordinate changed".to_string(),
+                reason: "NIP-02 materialization source is not a contact list".to_string(),
             });
         }
 
-        apply_follow_operations(
-            current,
-            operations.iter().map(|operation| operation.bytes()),
-        )
-        .map_err(|reason| ReplaceableMaterializerRefusal { reason })
+        apply_follow_operations(source, operations.iter().map(|operation| operation.bytes()))
+            .map_err(|reason| ReplaceableMaterializerRefusal { reason })
     }
 
     fn materialize_default(

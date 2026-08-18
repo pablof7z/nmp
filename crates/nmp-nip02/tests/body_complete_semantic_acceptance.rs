@@ -234,7 +234,6 @@ impl ReplaceableMaterializer for AlwaysRefuse {
     fn materialize(
         &self,
         _source: &nostr::UnsignedEvent,
-        _current: &nostr::UnsignedEvent,
         _operations: &[ReplaceableMaterializerOperation<'_>],
     ) -> Result<nmp::EventBuilder, ReplaceableMaterializerRefusal> {
         Err(ReplaceableMaterializerRefusal {

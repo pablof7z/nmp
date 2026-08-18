@@ -241,19 +241,14 @@ impl ReplaceableMaterializer for BookmarksMaterializer {
     fn materialize(
         &self,
         source: &nostr::UnsignedEvent,
-        current: &nostr::UnsignedEvent,
         operations: &[ReplaceableMaterializerOperation<'_>],
     ) -> Result<EventBuilder, ReplaceableMaterializerRefusal> {
-        if source.kind.as_u16() != BOOKMARKS_KIND
-            || current.kind.as_u16() != BOOKMARKS_KIND
-            || source.pubkey != current.pubkey
-            || source.tags.identifier() != current.tags.identifier()
-        {
+        if source.kind.as_u16() != BOOKMARKS_KIND {
             return Err(ReplaceableMaterializerRefusal {
-                reason: "bookmarks materialization source coordinate changed".to_string(),
+                reason: "bookmarks materialization source is not a bookmarks list".to_string(),
             });
         }
-        apply_operations(current, operations)
+        apply_operations(source, operations)
     }
 
     fn materialize_default(

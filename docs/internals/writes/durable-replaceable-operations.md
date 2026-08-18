@@ -646,11 +646,15 @@ work may replace it with a complete successor, but an accepted receipt never
 transitions to a bodyless state.
 
 Preparing that first complete body may call capability code, but the call does
-not run inside a Redb transaction. NMP copies only the immutable source and
-current events, ordered operation bytes, capability identity, and the durable
-versions needed to recognize a stale answer. The compiled capability then runs
-directly as ordinary trusted product code: no store, resolver, receipt,
-routing handle, or mutable engine state is available to it.
+not run inside a Redb transaction. NMP copies only the immutable source event,
+the ordered bytes of every contributing operation, capability identity, and the
+durable versions needed to recognize a stale answer. The current materialization
+is not among them: it already carries those operations' effects, so replaying
+the list onto it would apply each of them twice. Every generation is built from
+the source, and the capability is not asked to reason about its own previous
+output. The compiled capability then runs directly as ordinary trusted product
+code: no store, resolver, receipt, routing handle, or mutable engine state is
+available to it.
 
 When the capability returns, NMP checks the durable source, current event, and
 operation set again before taking custody. If any of them changed, the old

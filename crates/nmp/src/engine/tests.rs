@@ -42,11 +42,10 @@ struct AddPeopleMaterializer;
 impl crate::ReplaceableMaterializer for AddPeopleMaterializer {
     fn materialize(
         &self,
-        _source: &UnsignedEvent,
-        current: &UnsignedEvent,
+        source: &UnsignedEvent,
         operations: &[crate::ReplaceableMaterializerOperation<'_>],
     ) -> Result<nmp_grammar::EventBuilder, crate::ReplaceableMaterializerRefusal> {
-        let mut tags = current.tags.clone().to_vec();
+        let mut tags = source.tags.clone().to_vec();
         for operation in operations {
             let person = PublicKey::from_slice(operation.bytes()).map_err(|error| {
                 crate::ReplaceableMaterializerRefusal {
@@ -61,9 +60,9 @@ impl crate::ReplaceableMaterializer for AddPeopleMaterializer {
             }
         }
         Ok(nmp_grammar::EventBuilder {
-            kind: current.kind,
+            kind: source.kind,
             tags,
-            content: current.content.clone(),
+            content: source.content.clone(),
             created_at: None,
         })
     }
@@ -109,8 +108,7 @@ enum InitialMaterializerFailure {
 impl crate::ReplaceableMaterializer for InitialMaterializerFailure {
     fn materialize(
         &self,
-        _source: &UnsignedEvent,
-        current: &UnsignedEvent,
+        source: &UnsignedEvent,
         _operations: &[crate::ReplaceableMaterializerOperation<'_>],
     ) -> Result<nmp_grammar::EventBuilder, crate::ReplaceableMaterializerRefusal> {
         match self {
@@ -119,8 +117,8 @@ impl crate::ReplaceableMaterializer for InitialMaterializerFailure {
             }),
             Self::InvalidCoordinate => Ok(nmp_grammar::EventBuilder {
                 kind: Kind::TextNote,
-                tags: current.tags.clone().to_vec(),
-                content: current.content.clone(),
+                tags: source.tags.clone().to_vec(),
+                content: source.content.clone(),
                 created_at: None,
             }),
         }

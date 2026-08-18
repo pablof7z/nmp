@@ -43,11 +43,27 @@ pub struct ReplaceableMaterializerRefusal {
 }
 
 /// Capability-owned synchronous interpretation of opaque operations.
+///
+/// Both methods must be pure: deterministic in their arguments, and free of
+/// side effects. NMP calls them with no store transaction open and no
+/// promise of calling them once -- a compare-and-swap that loses re-prepares
+/// the whole materialization from the newer snapshot, and a newly qualified
+/// relay source re-applies every contributing operation onto it. An
+/// implementation that counts calls, mutates shared state, or reads a clock
+/// is reading NMP's retry behaviour, not its own operations.
 pub trait ReplaceableMaterializer: Send + Sync + 'static {
+    /// Apply every operation in `operations` to `source`, in order, exactly
+    /// once each.
+    ///
+    /// `source` is the value the operations are composed against, never a
+    /// value that already carries their effects: the retained relay source
+    /// when there is one, and the newly qualified relay source when one
+    /// arrives and the whole list is replayed onto it. Implementations may
+    /// therefore assume each operation is new to `source` -- but must not
+    /// assume the result of a previous call is ever handed back.
     fn materialize(
         &self,
         source: &UnsignedEvent,
-        current: &UnsignedEvent,
         operations: &[ReplaceableMaterializerOperation<'_>],
     ) -> Result<EventBuilder, ReplaceableMaterializerRefusal>;
 
