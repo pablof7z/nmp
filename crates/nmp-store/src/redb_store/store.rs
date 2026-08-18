@@ -14,11 +14,11 @@ use super::schema::{
     observation_relay_key, persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX,
     COVERAGE, EVENTS, EVENT_IDS, EXPIRATION_INDEX, POSTINGS_CATALOG, POSTINGS_READY,
     POSTINGS_SEGMENTS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
-    PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT, PUBLISH_QUEUE_DISPLACED,
-    PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META,
-    PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_RELAYS, PUBLISH_QUEUE_RELAY_IDS,
-    PUBLISH_QUEUE_ROUTE_REVISIONS, PUBLISH_QUEUE_SUPPRESS, REDB_CACHE_BYTES, RELAYS, RELAY_IDS,
-    SCHEMA_VERSION, SCHEMA_VERSION_KEY, SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS,
+    PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DISPLACED, PUBLISH_QUEUE_INTENTS,
+    PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS,
+    PUBLISH_QUEUE_RELAYS, PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS,
+    PUBLISH_QUEUE_SUPPRESS, REDB_CACHE_BYTES, RELAYS, RELAY_IDS, SCHEMA_VERSION,
+    SCHEMA_VERSION_KEY, SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS,
     SEMANTIC_RESOURCES, STORE_META, TOMBSTONES,
 };
 #[cfg(any(
@@ -757,13 +757,9 @@ impl RedbStore {
             let mut deadlines = write_txn
                 .open_table(PUBLISH_QUEUE_DEADLINES)
                 .map_err(persist_err)?;
-            let mut deadlines_by_intent = write_txn
-                .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
-                .map_err(persist_err)?;
             replace_lane_in_txn(
                 &mut lanes,
                 &mut deadlines,
-                &mut deadlines_by_intent,
                 key,
                 relay_id,
                 expected_revision,
@@ -958,7 +954,6 @@ impl RedbStore {
                 write_txn.open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)?;
                 write_txn.open_table(PUBLISH_QUEUE_LANES)?;
                 write_txn.open_table(PUBLISH_QUEUE_DEADLINES)?;
-                write_txn.open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)?;
                 write_txn.open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)?;
                 let mut publish_queue_meta = write_txn.open_table(PUBLISH_QUEUE_META)?;
                 publish_queue_meta.insert(

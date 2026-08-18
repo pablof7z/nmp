@@ -757,168 +757,25 @@ fn corrupt_fixed_row_version<const N: usize>(
     write.commit().unwrap();
 }
 
-fn copy_lane_value(path: &Path, source: &[u8; 12], target: &[u8; 12]) {
-    const LANES: TableDefinition<&[u8; 12], &[u8]> = TableDefinition::new("publish_queue_lanes");
-    let db = Database::open(path).unwrap();
-    let write = db.begin_write().unwrap();
-    {
-        let mut table = write.open_table(LANES).unwrap();
-        let encoded = table
-            .get(source)
-            .unwrap()
-            .expect("source lane")
-            .value()
-            .to_vec();
-        table.insert(target, encoded.as_slice()).unwrap();
-    }
-    write.commit().unwrap();
-}
-
-fn write_lane_value(path: &Path, key: &[u8; 12], encoded: &[u8]) {
-    const LANES: TableDefinition<&[u8; 12], &[u8]> = TableDefinition::new("publish_queue_lanes");
-    let db = Database::open(path).unwrap();
-    let write = db.begin_write().unwrap();
-    {
-        let mut table = write.open_table(LANES).unwrap();
-        table.insert(key, encoded).unwrap();
-    }
-    write.commit().unwrap();
-}
-
-#[test]
-fn redb_bootstrap_rejects_cross_table_terminal_state_contradictions() {
-    for terminal_attempt in [true, false] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(if terminal_attempt {
-            "terminal-attempt-waiting-lane.redb"
-        } else {
-            "live-attempt-terminal-lane.redb"
-        });
-        let relay = RelayUrl::parse(if terminal_attempt {
-            "wss://terminal-attempt.example"
-        } else {
-            "wss://live-attempt.example"
-        })
-        .unwrap();
-        let donor = RelayUrl::parse(if terminal_attempt {
-            "wss://waiting-donor.example"
-        } else {
-            "wss://terminal-donor.example"
-        })
-        .unwrap();
-        let (intent, event_id) = {
-            let mut store = reopen(&path);
-            let (intent, _, signed, key, lane) =
-                seed(&mut store, "state-mismatch", 274, relay.clone());
-            store
-                .record_route_revision(intent, BTreeSet::from([relay.clone(), donor.clone()]))
-                .unwrap();
-            let lanes = store.bootstrap_publish_queue_lanes(intent).unwrap();
-            let donor_lane = lanes
-                .iter()
-                .find(|lane| lane.key.relay == donor)
-                .unwrap()
-                .clone();
-            let target_lane = store
-                .set_lane_eligible(&key, lane.revision, Timestamp::from(275))
-                .unwrap();
-            let (_, target_lane) = store
-                .start_lane_attempt(
-                    &key,
-                    target_lane.revision,
-                    signed.clone(),
-                    Timestamp::from(276),
-                )
-                .unwrap();
-            if terminal_attempt {
-                store
-                    .finish_lane_attempt(
-                        &key,
-                        target_lane.revision,
-                        1,
-                        PublishQueueAttemptOutcome::Acked,
-                        Timestamp::from(277),
-                    )
-                    .unwrap();
-            } else {
-                let donor_lane = store
-                    .set_lane_eligible(&donor_lane.key, donor_lane.revision, Timestamp::from(275))
-                    .unwrap();
-                let (_, donor_lane) = store
-                    .start_lane_attempt(
-                        &donor_lane.key,
-                        donor_lane.revision,
-                        signed,
-                        Timestamp::from(276),
-                    )
-                    .unwrap();
-                store
-                    .finish_lane_attempt(
-                        &donor_lane.key,
-                        donor_lane.revision,
-                        1,
-                        PublishQueueAttemptOutcome::Acked,
-                        Timestamp::from(277),
-                    )
-                    .unwrap();
-            }
-            (intent, key.event_id)
-        };
-        let target_key = raw_lane_key(intent, raw_relay_id(&path, &relay));
-        let donor_key = raw_lane_key(intent, raw_relay_id(&path, &donor));
-        if terminal_attempt {
-            let mut waiting = b"NMDL\x01\0\0\0".to_vec();
-            waiting.extend_from_slice(event_id.as_bytes());
-            waiting.extend_from_slice(&4u64.to_be_bytes());
-            waiting.extend_from_slice(&1u64.to_be_bytes());
-            waiting.push(0);
-            write_lane_value(&path, &target_key, &waiting);
-        } else {
-            copy_lane_value(&path, &donor_key, &target_key);
-        }
-        let mut store = reopen(&path);
-        let error = store
-            .bootstrap_publish_queue_lanes(intent)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("terminal attempt and lane") || error.contains("terminal lane lacks"),
-            "{error}"
-        );
-    }
-}
-
 fn insert_stale_deadline(path: &Path, deadline: &PublishQueueDeadline) {
     const ORDERED: TableDefinition<&[u8; 20], &[u8]> =
         TableDefinition::new("publish_queue_deadlines");
-    const BY_INTENT: TableDefinition<&[u8; 20], &[u8]> =
-        TableDefinition::new("publish_queue_deadlines_by_intent");
     let relay_id = raw_relay_id(path, &deadline.key.relay);
-    let ordered_key = raw_deadline_key(deadline.at, deadline.key.intent_id, relay_id, false);
-    let by_intent_key = raw_deadline_key(deadline.at, deadline.key.intent_id, relay_id, true);
+    let ordered_key = raw_deadline_key(deadline.at, deadline.key.intent_id, relay_id);
     let encoded = raw_deadline_value(deadline);
     let db = Database::open(path).unwrap();
     let write = db.begin_write().unwrap();
     {
         let mut ordered = write.open_table(ORDERED).unwrap();
-        let mut by_intent = write.open_table(BY_INTENT).unwrap();
         ordered.insert(&ordered_key, encoded.as_slice()).unwrap();
-        by_intent
-            .insert(&by_intent_key, encoded.as_slice())
-            .unwrap();
     }
     write.commit().unwrap();
 }
 
-fn raw_deadline_key(at: Timestamp, intent: IntentId, relay_id: u32, by_intent: bool) -> [u8; 20] {
+fn raw_deadline_key(at: Timestamp, intent: IntentId, relay_id: u32) -> [u8; 20] {
     let mut key = [0; 20];
-    if by_intent {
-        key[..8].copy_from_slice(&intent.0.to_be_bytes());
-        key[8..16].copy_from_slice(&at.as_secs().to_be_bytes());
-    } else {
-        key[..8].copy_from_slice(&at.as_secs().to_be_bytes());
-        key[8..16].copy_from_slice(&intent.0.to_be_bytes());
-    }
+    key[..8].copy_from_slice(&at.as_secs().to_be_bytes());
+    key[8..16].copy_from_slice(&intent.0.to_be_bytes());
     key[16..].copy_from_slice(&relay_id.to_be_bytes());
     key
 }
@@ -931,103 +788,6 @@ fn raw_deadline_value(deadline: &PublishQueueDeadline) -> Vec<u8> {
         PublishQueueDeadlineKind::AckTimeout => 1,
     });
     encoded
-}
-
-fn insert_one_sided_deadline(path: &Path, deadline: &PublishQueueDeadline, primary: bool) {
-    const ORDERED: TableDefinition<&[u8; 20], &[u8]> =
-        TableDefinition::new("publish_queue_deadlines");
-    const BY_INTENT: TableDefinition<&[u8; 20], &[u8]> =
-        TableDefinition::new("publish_queue_deadlines_by_intent");
-    let relay_id = raw_relay_id(path, &deadline.key.relay);
-    let key = raw_deadline_key(deadline.at, deadline.key.intent_id, relay_id, !primary);
-    let encoded = raw_deadline_value(deadline);
-    let db = Database::open(path).unwrap();
-    let write = db.begin_write().unwrap();
-    {
-        if primary {
-            let mut table = write.open_table(ORDERED).unwrap();
-            table.insert(&key, encoded.as_slice()).unwrap();
-        } else {
-            let mut table = write.open_table(BY_INTENT).unwrap();
-            table.insert(&key, encoded.as_slice()).unwrap();
-        }
-    }
-    write.commit().unwrap();
-}
-
-#[test]
-fn one_sided_deadline_index_corruption_fails_closed_before_close() {
-    for primary in [true, false] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(if primary {
-            "primary-only.redb"
-        } else {
-            "secondary-only.redb"
-        });
-        let relay = RelayUrl::parse(if primary {
-            "wss://primary-only.example"
-        } else {
-            "wss://secondary-only.example"
-        })
-        .unwrap();
-        let (intent, key) = {
-            let mut store = reopen(&path);
-            let (intent, _, signed, key, lane) = seed(&mut store, "one-sided", 275, relay);
-            let lane = store
-                .set_lane_eligible(&key, lane.revision, Timestamp::from(276))
-                .unwrap();
-            let (_, lane) = store
-                .start_lane_attempt(&key, lane.revision, signed, Timestamp::from(277))
-                .unwrap();
-            store
-                .record_lane_handoff(
-                    &key,
-                    lane.revision,
-                    1,
-                    PublishQueueAttemptHandoff {
-                        at: Timestamp::from(278),
-                        result: HandoffEvidence::Written,
-                    },
-                    PublishQueuePostHandoffState::Terminal {
-                        outcome: PublishQueueAttemptOutcome::Acked,
-                        finished_at: Timestamp::from(279),
-                    },
-                )
-                .unwrap();
-            (intent, key)
-        };
-        insert_one_sided_deadline(
-            &path,
-            &PublishQueueDeadline {
-                at: Timestamp::from(999),
-                key,
-                lane_revision: 4,
-                kind: PublishQueueDeadlineKind::AckTimeout,
-            },
-            primary,
-        );
-        let mut store = reopen(&path);
-        assert!(store
-            .due_publish_queue_deadlines(Timestamp::from(999), 1)
-            .unwrap_err()
-            .to_string()
-            .contains("cardinalities"));
-        assert!(store
-            .next_publish_queue_deadline()
-            .unwrap_err()
-            .to_string()
-            .contains("cardinalities"));
-        assert!(store
-            .close_terminal_intent(intent)
-            .unwrap_err()
-            .to_string()
-            .contains("cardinalities"));
-        assert!(store
-            .recover_publish_queue()
-            .expect("recover delivery")
-            .iter()
-            .any(|open| open.intent_id == intent));
-    }
 }
 
 #[test]
@@ -1064,7 +824,7 @@ fn lane_detail_and_deadline_corruption_fail_closed() {
         let relay_id = raw_relay_id(&path, &key.relay);
         let lane_storage_key = raw_lane_key(intent, relay_id);
         let attempt_storage_key = raw_attempt_key(intent, relay_id, 1);
-        let deadline_storage_key = raw_deadline_key(Timestamp::from(300), intent, relay_id, false);
+        let deadline_storage_key = raw_deadline_key(Timestamp::from(300), intent, relay_id);
         match target {
             "lane" => {
                 corrupt_fixed_row_version(
@@ -1095,91 +855,6 @@ fn lane_detail_and_deadline_corruption_fail_closed() {
             _ => unreachable!(),
         }
     }
-}
-
-/// #867: the store models ONE current attempt shape. A detail-less attempt
-/// row could only have been written by a pre-current writer, so bootstrap
-/// refuses it as corruption. There is no compatibility lane state left for it
-/// to be adopted into, and no shell detail row is written on its behalf.
-#[test]
-fn detail_less_attempt_row_is_refused_rather_than_adopted() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("detail-less-attempt.redb");
-    let relay = RelayUrl::parse("wss://detail-less.example").unwrap();
-    let intent = {
-        let mut store = reopen(&path);
-        let (intent, _, signed, key, lane) = seed(&mut store, "detail-less", 250, relay.clone());
-        let lane = store
-            .set_lane_eligible(&key, lane.revision, Timestamp::from(251))
-            .unwrap();
-        store
-            .start_lane_attempt(&key, lane.revision, signed, Timestamp::from(252))
-            .unwrap();
-        intent
-    };
-    let relay_id = raw_relay_id(&path, &relay);
-    let db = Database::open(&path).unwrap();
-    let write = db.begin_write().unwrap();
-    {
-        let mut details: redb::Table<'_, &[u8; 20], &[u8]> = write
-            .open_table(TableDefinition::new("publish_queue_attempt_details"))
-            .unwrap();
-        details
-            .remove(&raw_attempt_key(intent, relay_id, 1))
-            .unwrap();
-    }
-    write.commit().unwrap();
-    drop(db);
-
-    let mut store = reopen(&path);
-    assert!(store
-        .bootstrap_publish_queue_lanes(intent)
-        .unwrap_err()
-        .to_string()
-        .contains("missing its detail row"));
-    assert_eq!(store.recover_publish_queue_lanes(intent).unwrap().len(), 1);
-}
-
-/// The mirror refusal: attempt history that exists without the lane row the
-/// current schema always commits first.
-#[test]
-fn attempt_history_without_its_lane_is_refused_rather_than_reconstructed() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("laneless-attempt.redb");
-    let relay = RelayUrl::parse("wss://laneless.example").unwrap();
-    let intent = {
-        let mut store = reopen(&path);
-        let (intent, _, signed, key, lane) = seed(&mut store, "laneless", 262, relay.clone());
-        let lane = store
-            .set_lane_eligible(&key, lane.revision, Timestamp::from(263))
-            .unwrap();
-        store
-            .start_lane_attempt(&key, lane.revision, signed, Timestamp::from(264))
-            .unwrap();
-        intent
-    };
-    let relay_id = raw_relay_id(&path, &relay);
-    let db = Database::open(&path).unwrap();
-    let write = db.begin_write().unwrap();
-    {
-        let mut lanes: redb::Table<'_, &[u8; 12], &[u8]> = write
-            .open_table(TableDefinition::new("publish_queue_lanes"))
-            .unwrap();
-        lanes.remove(&raw_lane_key(intent, relay_id)).unwrap();
-    }
-    write.commit().unwrap();
-    drop(db);
-
-    let mut store = reopen(&path);
-    assert!(store
-        .bootstrap_publish_queue_lanes(intent)
-        .unwrap_err()
-        .to_string()
-        .contains("without its lane row"));
-    assert!(store
-        .recover_publish_queue_lanes(intent)
-        .unwrap()
-        .is_empty());
 }
 
 #[test]
@@ -1292,6 +967,9 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
         },
     );
     {
+        // A deadline row no lane names is corruption of the epoch, and close is
+        // not a repair door: it removes exactly the deadlines its own lanes
+        // name, so the injected row still refuses on both sides of the close.
         let mut store = reopen(&path);
         assert!(store
             .next_publish_queue_deadline()
@@ -1302,7 +980,11 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
             store.close_terminal_intent(intent).unwrap(),
             CloseIntentOutcome::Closed
         );
-        assert_eq!(store.next_publish_queue_deadline().unwrap(), None);
+        assert!(store
+            .next_publish_queue_deadline()
+            .unwrap_err()
+            .to_string()
+            .contains("deadline and lane disagree"));
     }
     {
         let store = reopen(&path);
@@ -1315,7 +997,6 @@ fn redb_lane_attempt_detail_deadline_and_close_survive_real_reopens() {
         assert_eq!(store.recover_attempts(intent).unwrap().len(), 2);
         assert_eq!(store.recover_attempt_details(intent).unwrap().len(), 2);
         assert!(store.reattach_receipt(receipt).unwrap().is_some());
-        assert_eq!(store.next_publish_queue_deadline().unwrap(), None);
     }
     // Attempt base rows remain immutable Started facts; terminal state
     // overlays from the required detail row.

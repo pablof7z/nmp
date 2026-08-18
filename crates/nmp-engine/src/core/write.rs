@@ -2605,7 +2605,7 @@ impl CoreState {
             let mut awaiting_auth = BTreeSet::new();
             let mut retry_eligible = BTreeSet::new();
             for attempt in attempts {
-                let event_id = attempt.event.id;
+                let event_id = attempt.event_id;
                 let replay_relay = attempt.relay.clone();
                 let replay_ordinal = attempt.ordinal;
                 let replay_key = |phase| ReceiptReplayFactKey::Attempt {
@@ -2956,7 +2956,7 @@ impl CoreState {
                         return true;
                     }
                 };
-                if attempts.iter().any(|attempt| attempt.event.id == source.id) {
+                if attempts.iter().any(|attempt| attempt.event_id == source.id) {
                     // Successor lanes retain predecessor attempts as immutable
                     // delivery history. A relay may replay one of those
                     // previously published materializations after the public

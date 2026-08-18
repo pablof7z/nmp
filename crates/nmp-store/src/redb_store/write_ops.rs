@@ -9,21 +9,20 @@ use super::mutation::{
     tombstone_refuses,
 };
 use super::publish_queue::{
-    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, is_suppressed_in_txn, mark_terminal_receipt,
-    remove_addr_claimant_in_txn, remove_claimant_in_txn, update_publish_queue_receipt,
-    PublishQueueIntentRecord, PublishQueueReceiptRecord, SuppressClaimRecord,
+    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, intent_deadline_keys, is_suppressed_in_txn,
+    mark_terminal_receipt, remove_addr_claimant_in_txn, remove_claimant_in_txn,
+    update_publish_queue_receipt, PublishQueueIntentRecord, PublishQueueReceiptRecord,
+    SuppressClaimRecord,
 };
 use super::publish_queue_codec::{
-    attempt_range, codec_error, deadline_intent_range, deadline_key, decode_attempt_handoff,
-    decode_claims, decode_deadline, decode_displaced, decode_intent, encode_claims,
-    encode_displaced, encode_intent, encode_receipt, id_claim_key, intent_key, lane_range,
-    parse_deadline_by_intent_key, parse_lane_key, receipt_key, route_revision_range,
+    attempt_range, codec_error, decode_attempt_handoff, decode_claims, decode_displaced,
+    decode_intent, encode_claims, encode_displaced, encode_intent, encode_receipt, id_claim_key,
+    intent_key, lane_range, parse_lane_key, receipt_key, route_revision_range,
 };
 use super::query::expiration_key;
 use super::schema::{
     persist_err, EventKey, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
-    PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT, PUBLISH_QUEUE_LANES,
-    PUBLISH_QUEUE_ROUTE_REVISIONS,
+    PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
 #[cfg(test)]
 use super::store::RedbCrashPoint;
@@ -59,9 +58,6 @@ fn retire_superseded_owners_in_txn(
         .map_err(persist_err)?;
     let mut deadlines = write_txn
         .open_table(PUBLISH_QUEUE_DEADLINES)
-        .map_err(persist_err)?;
-    let mut deadlines_by_intent = write_txn
-        .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
         .map_err(persist_err)?;
 
     let owners = replaced
@@ -99,6 +95,9 @@ fn retire_superseded_owners_in_txn(
                 Ok::<_, PersistenceError>((*key.value(), handoff))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // Read the deadlines the lanes name while the lane rows still
+        // stand: they are removed further down, in the retirement pass.
+        let deadline_keys = intent_deadline_keys(&lanes, owner)?;
         let mut lane_keys = Vec::new();
         let mut lane_started = false;
         let (lane_lower, lane_upper) = lane_range(owner);
@@ -139,6 +138,7 @@ fn retire_superseded_owners_in_txn(
             owner,
             intent.receipt_id,
             lane_keys,
+            deadline_keys,
             attempt_keys,
             attempt_detail_rows
                 .into_iter()
@@ -148,8 +148,15 @@ fn retire_superseded_owners_in_txn(
         ));
     }
 
-    for (owner, receipt_id, lane_keys, attempt_keys, attempt_detail_keys, retain_safety_receipt) in
-        &eligible
+    for (
+        owner,
+        receipt_id,
+        lane_keys,
+        deadline_keys,
+        attempt_keys,
+        attempt_detail_keys,
+        retain_safety_receipt,
+    ) in &eligible
     {
         if let Some(local) = replaced.provenance.local.as_mut() {
             local.owners.remove(owner);
@@ -183,32 +190,8 @@ fn retire_superseded_owners_in_txn(
             route_revisions.remove(&route_key).map_err(persist_err)?;
         }
 
-        let (lower, upper) = deadline_intent_range(*owner);
-        let deadline_rows = deadlines_by_intent
-            .range::<&[u8; 20]>(&lower..=&upper)
-            .map_err(persist_err)?
-            .map(|row| {
-                let (by_intent_key, encoded) = row.map_err(persist_err)?;
-                let (key_intent, at, relay_id) =
-                    parse_deadline_by_intent_key(by_intent_key.value())
-                        .map_err(|error| codec_error("deadline-by-intent key", error))?;
-                if key_intent != *owner {
-                    return Err(PersistenceError::invariant(
-                        "deadline retirement range escaped intent prefix",
-                    ));
-                }
-                let value = decode_deadline(encoded.value())
-                    .map_err(|error| codec_error("deadline", error))?;
-                Ok((*by_intent_key.value(), at, relay_id, value))
-            })
-            .collect::<Result<Vec<_>, PersistenceError>>()?;
-        for (by_intent_key, at, relay_id, _) in deadline_rows {
-            deadlines
-                .remove(&deadline_key(at, *owner, relay_id))
-                .map_err(persist_err)?;
-            deadlines_by_intent
-                .remove(&by_intent_key)
-                .map_err(persist_err)?;
+        for stale in deadline_keys {
+            deadlines.remove(stale).map_err(persist_err)?;
         }
         if *retain_safety_receipt {
             update_publish_queue_receipt(

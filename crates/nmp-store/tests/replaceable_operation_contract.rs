@@ -571,7 +571,7 @@ fn exercise_source_successor(store: &mut RedbStore) -> SourceSuccessorEvidence {
     assert_eq!(store.next_publish_queue_deadline().unwrap(), None);
     let attempts = store.recover_attempts(intent).unwrap();
     assert_eq!(attempts.len(), 1);
-    assert_eq!(attempts[0].event.id, first_id);
+    assert_eq!(attempts[0].event_id, first_id);
 
     SourceSuccessorEvidence {
         coordinate,
@@ -628,7 +628,7 @@ fn qualified_source_and_complete_successor_survive_redb_reopen() {
     assert_eq!(reopened.next_publish_queue_deadline().unwrap(), None);
     let attempts = reopened.recover_attempts(evidence.intent).unwrap();
     assert_eq!(attempts.len(), 1);
-    assert_eq!(attempts[0].event.id, evidence.predecessor);
+    assert_eq!(attempts[0].event_id, evidence.predecessor);
 }
 
 #[test]

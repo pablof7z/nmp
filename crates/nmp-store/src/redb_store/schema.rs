@@ -161,7 +161,7 @@ pub(super) const POSTINGS_READY: &str = "postings_query_ready";
 /// accepted writes, lanes, attempts, receipts, and route facts — because they
 /// share one `redb::Database` transaction boundary and are therefore one
 /// epoch, not seven independently-versioned ones.
-pub(super) const SCHEMA_VERSION: u64 = 26;
+pub(super) const SCHEMA_VERSION: u64 = 27;
 /// Bound redb's process-private page cache for mobile/desktop clients.
 ///
 /// redb 4.1 defaults this cache to 1 GiB. A million-event sequential ingest
@@ -310,8 +310,6 @@ pub(super) const PUBLISH_QUEUE_LANES: TableDefinition<&[u8; 12], &[u8]> =
     TableDefinition::new("publish_queue_lanes");
 pub(super) const PUBLISH_QUEUE_DEADLINES: TableDefinition<&[u8; 20], &[u8]> =
     TableDefinition::new("publish_queue_deadlines");
-pub(super) const PUBLISH_QUEUE_DEADLINES_BY_INTENT: TableDefinition<&[u8; 20], &[u8]> =
-    TableDefinition::new("publish_queue_deadlines_by_intent");
 pub(super) const PUBLISH_QUEUE_ATTEMPT_DETAILS: TableDefinition<&[u8; 20], &[u8]> =
     TableDefinition::new("publish_queue_attempt_details");
 pub(super) const PUBLISH_QUEUE_META: TableDefinition<&[u8], &[u8]> =

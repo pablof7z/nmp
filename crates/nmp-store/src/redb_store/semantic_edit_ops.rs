@@ -19,23 +19,20 @@ use crate::{
 use super::ingest_txn::{GovernedIngestTxn, GovernedWrite, RedbIngestTxn};
 use super::mutation::{remove_row_in_txn, tombstone_refuses};
 use super::publish_queue::{
-    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, mark_terminal_receipt,
+    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, intent_deadline_keys, mark_terminal_receipt,
     PublishQueueIntentRecord, PublishQueueIntentRecordWork, PublishQueueMaterializationRecord,
     PublishQueueReceiptRecord,
 };
 use super::publish_queue_codec::{
-    codec_error, deadline_by_intent_key, deadline_intent_range, deadline_key, decode_deadline,
-    decode_intent, decode_lane, decode_receipt, decode_route, encode_intent, encode_lane,
-    encode_receipt, encode_route, intent_key, lane_key, lane_range, parse_deadline_by_intent_key,
-    parse_lane_key, parse_route_revision_key, receipt_key, route_revision_key,
-    route_revision_range,
+    codec_error, decode_intent, decode_lane, decode_receipt, decode_route, encode_intent,
+    encode_lane, encode_receipt, encode_route, intent_key, lane_key, lane_range, parse_lane_key,
+    parse_route_revision_key, receipt_key, route_revision_key, route_revision_range,
 };
 use super::publish_queue_ops::terminal_intent_evidence_bytes;
 use super::query::expiration_key;
 use super::schema::{
-    persist_err, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DEADLINES_BY_INTENT, PUBLISH_QUEUE_LANES,
-    PUBLISH_QUEUE_ROUTE_REVISIONS, SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS,
-    SEMANTIC_RESOURCES,
+    persist_err, PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_ROUTE_REVISIONS,
+    SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS, SEMANTIC_RESOURCES,
 };
 use super::semantic_edit_codec::{
     coordinate_key, decode_operation, decode_resource, encode_operation, encode_resource,
@@ -67,9 +64,6 @@ fn install_successor_delivery_lanes(
     let mut deadlines = write_txn
         .open_table(PUBLISH_QUEUE_DEADLINES)
         .map_err(persist_err)?;
-    let mut deadlines_by_intent = write_txn
-        .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
-        .map_err(persist_err)?;
 
     let mut relay_ids = std::collections::BTreeSet::new();
     let mut owner_last_ordinals = BTreeMap::new();
@@ -95,30 +89,10 @@ fn install_successor_delivery_lanes(
     }
 
     for member in &previous.members {
-        let (deadline_lower, deadline_upper) = deadline_intent_range(*member);
-        let deadline_rows = deadlines_by_intent
-            .range::<&[u8; 20]>(&deadline_lower..=&deadline_upper)
-            .map_err(persist_err)?
-            .map(|row| {
-                row.map(|(key, value)| (*key.value(), value.value().to_vec()))
-                    .map_err(persist_err)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        for (by_intent, encoded) in deadline_rows {
-            let (key_intent, at, relay_id) = parse_deadline_by_intent_key(&by_intent)
-                .map_err(|error| codec_error("deadline index key", error))?;
-            if key_intent != *member {
-                return Err(PersistenceError::invariant(
-                    "successor deadline range escaped semantic member",
-                ));
-            }
-            decode_deadline(&encoded).map_err(|error| codec_error("deadline index", error))?;
-            deadlines
-                .remove(&deadline_key(at, *member, relay_id))
-                .map_err(persist_err)?;
-            deadlines_by_intent
-                .remove(&deadline_by_intent_key(*member, at, relay_id))
-                .map_err(persist_err)?;
+        // The predecessor's lanes still stand here; they are what names the
+        // deadlines it owns, and they are rewritten only below.
+        for stale in intent_deadline_keys(&lanes, *member)? {
+            deadlines.remove(&stale).map_err(persist_err)?;
         }
 
         let (lane_lower, lane_upper) = lane_range(*member);
@@ -951,35 +925,12 @@ pub(super) fn close_cohort(
         let mut deadlines = write_txn
             .open_table(PUBLISH_QUEUE_DEADLINES)
             .map_err(persist_err)?;
-        let mut deadlines_by_intent = write_txn
-            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
+        let member_lanes = write_txn
+            .open_table(PUBLISH_QUEUE_LANES)
             .map_err(persist_err)?;
         for (member, intent, mut receipt, evidence_bytes) in member_records {
-            let (lower, upper) = deadline_intent_range(member);
-            let deadline_rows = deadlines_by_intent
-                .range::<&[u8; 20]>(&lower..=&upper)
-                .map_err(persist_err)?
-                .map(|row| {
-                    row.map(|(key, value)| (*key.value(), value.value().to_vec()))
-                        .map_err(persist_err)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            for (by_intent, encoded) in deadline_rows {
-                let (key_intent, at, relay_id) = parse_deadline_by_intent_key(&by_intent)
-                    .map_err(|error| codec_error("semantic close deadline key", error))?;
-                if key_intent != member {
-                    return Err(PersistenceError::invariant(
-                        "semantic close deadline range escaped member",
-                    ));
-                }
-                decode_deadline(&encoded)
-                    .map_err(|error| codec_error("semantic close deadline", error))?;
-                deadlines
-                    .remove(&deadline_key(at, member, relay_id))
-                    .map_err(persist_err)?;
-                deadlines_by_intent
-                    .remove(&by_intent)
-                    .map_err(persist_err)?;
+            for stale in intent_deadline_keys(&member_lanes, member)? {
+                deadlines.remove(&stale).map_err(persist_err)?;
             }
             ingest
                 .publish_queue_intents
@@ -1009,7 +960,6 @@ pub(super) fn close_cohort(
                 evidence_bytes,
             )?;
         }
-        drop(deadlines_by_intent);
         drop(deadlines);
 
         let (lower, upper) = operation_range(&coordinate)?;
