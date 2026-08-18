@@ -16,7 +16,7 @@ use nmp_ffi::convert::FfiRowPullError;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowPull, NmpRowStream};
 use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
-    FfiAccessContext, FfiCacheMode, FfiDemand, FfiEventBuilder, FfiFilter, FfiFrame, FfiFreshness,
+    FfiCacheMode, FfiDemand, FfiEventBuilder, FfiFilter, FfiFrame, FfiFreshness,
     FfiIdentity, FfiLiveQuery, FfiReadRouting, FfiRowDelta, FfiWindow, FfiWriteIntent,
     FfiWritePayload, FfiWriteRouting,
 };
@@ -51,7 +51,7 @@ fn note_query() -> FfiLiveQuery {
                 ..FfiFilter::default()
             },
             routing: FfiReadRouting::Auto,
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         }],

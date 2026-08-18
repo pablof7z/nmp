@@ -63,7 +63,7 @@
 // THIS SCENARIO IS RED, AND IT IS RED ON PURPOSE. Every precondition above
 // passes -- the relay demands AUTH, the challenge is real, the identity
 // scoping is live, the row is retrievable by a client that authenticates.
-// NMP then opens the `.nip42` session, reports it under exactly the
+// NMP then opens the identity-bound session, reports it under exactly the
 // requested access identity, reaches `awaitingAuth(awaitingChallenge)` and
 // stays there forever. It sends NOTHING: not the AUTH proof, not even the
 // REQ. The installed policy is never consulted, and `AuthDiagnostics`
@@ -203,9 +203,9 @@ final class C15NIP42AuthTests: XCTestCase {
         /// AUTH negotiation shows up: `awaitingAuth(awaitingChallenge)` ->
         /// `awaitingAuth(awaitingPolicy)` -> ... -> `requesting`.
         var statusHistory: [String] = []
-        /// Every distinct `NMPAccessContext` this source was reported under.
-        /// A `.nip42` entry is NMP naming the identity it is holding the
-        /// session as -- a public fact, not an inference.
+        /// Every distinct authenticated identity this source was reported
+        /// under. A `nip42(<key>)` entry is NMP naming the identity it is
+        /// holding the session as -- a public fact, not an inference.
         var accessHistory: [String] = []
         var ended: String?
     }
@@ -224,7 +224,7 @@ final class C15NIP42AuthTests: XCTestCase {
             let label = Self.label(source.status)
             state.relayStatus = label
             if state.statusHistory.last != label { state.statusHistory.append(label) }
-            let access = Self.label(source.access)
+            let access = Self.label(source.authenticateAs)
             if state.accessHistory.last != access { state.accessHistory.append(access) }
         }
 
@@ -262,11 +262,9 @@ final class C15NIP42AuthTests: XCTestCase {
             }
         }
 
-        static func label(_ access: NMPAccessContext) -> String {
-            switch access {
-            case .public: return "public"
-            case .nip42(let publicKey): return "nip42(\(publicKey))"
-            }
+        static func label(_ authenticateAs: String?) -> String {
+            guard let authenticateAs else { return "public" }
+            return "nip42(\(authenticateAs))"
         }
     }
 
@@ -312,7 +310,7 @@ final class C15NIP42AuthTests: XCTestCase {
 
         func describeAuth() -> String {
             let rows = allAuthRows().map {
-                "  relay=\($0.relay) access=\(ObservationLedger.label($0.access)) "
+                "  relay=\($0.relay) authenticateAs=\(ObservationLedger.label($0.authenticateAs)) "
                     + "gen=\($0.transportGeneration) epoch=\($0.epochSequence.map(String.init) ?? "nil") "
                     + "descriptor=\($0.challengeDescriptor ?? "nil") "
                     + "phase=\(ObservationLedger.label($0.phase)) "
@@ -423,7 +421,7 @@ final class C15NIP42AuthTests: XCTestCase {
         // --- Phase 1: NMP answers the challenge itself --------------------
         //
         // One app-owned policy, installed for exactly this account, and one
-        // observation declaring `.nip42` access against exactly this relay.
+        // observation naming `authenticateAs: <account>` against exactly this relay.
         // Nothing else in the app does anything: no handshake code, no
         // kind:22242 anywhere in this file, no retry loop.
 
@@ -447,7 +445,7 @@ final class C15NIP42AuthTests: XCTestCase {
                 kinds: [UInt16(Lab.restrictedKind)], authors: .literal([seeder.pubkeyHex])
             ),
             routing: .explicit([lab.relay.url]),
-            access: .nip42(publicKey: accountHex)
+            authenticateAs: accountHex
         )
         let query = try engine.observe(.single(demand))
         let ledger = ObservationLedger()
@@ -461,12 +459,12 @@ final class C15NIP42AuthTests: XCTestCase {
         }
         defer { consumer.cancel() }
 
-        // --- Control: the SAME query with `.public` access ----------------
+        // --- Control: the SAME query with authenticateAs: nil -------------
         //
         // Identical relay, identical filter, one field different. A
-        // `.public` session is not parked, so its REQ genuinely reaches the
+        // unbound session is not parked, so its REQ genuinely reaches the
         // relay -- and the relay answers it with a challenge and a CLOSED,
-        // which NMP surfaces as a failing source. The `.nip42` observation
+        // which NMP surfaces as a failing source. The identity-bound observation
         // above meanwhile transmits nothing at all and reports
         // `awaitingAuth(awaitingChallenge)` indefinitely.
         //
@@ -505,9 +503,9 @@ final class C15NIP42AuthTests: XCTestCase {
         let afterFirst = await ledger.current()
         let controlState = await controlLedger.current()
         note(
-            "CONTROL (.public, same relay+filter): status=\(controlState.relayStatus) "
+            "CONTROL (authenticateAs: nil, same relay+filter): status=\(controlState.relayStatus) "
                 + "history=\(controlState.statusHistory) rows=\(controlState.latest.count) "
-                + "| SUBJECT (.nip42): status=\(afterFirst.relayStatus) "
+                + "| SUBJECT (authenticateAs: <account>): status=\(afterFirst.relayStatus) "
                 + "history=\(afterFirst.statusHistory)"
         )
         control.cancel()
@@ -528,9 +526,9 @@ final class C15NIP42AuthTests: XCTestCase {
             policy.seen.isEmpty,
             "NMP never consulted the installed AUTH policy. The relay demands AUTH for this filter "
                 + "(proven above by an NMP-free client), the demand declared "
-                + "`.nip42(\(accountHex))`, and a policy was installed for that exact key. "
-                + "The `.nip42` observation is \(afterFirst.relayStatus) with history "
-                + "\(afterFirst.statusHistory), while the CONTROL `.public` observation over the "
+                + "`authenticateAs: \(accountHex)`, and a policy was installed for that exact key. "
+                + "The identity-bound observation is \(afterFirst.relayStatus) with history "
+                + "\(afterFirst.statusHistory), while the CONTROL unbound observation over the "
                 + "SAME relay and filter is \(controlState.relayStatus) with history "
                 + "\(controlState.statusHistory) -- so the relay is answering NMP, and the "
                 + "protected session is the one that never transmits.\n"
@@ -547,7 +545,7 @@ final class C15NIP42AuthTests: XCTestCase {
         XCTAssertEqual(
             firstRequest.expectedPublicKey, accountHex,
             "the policy was consulted for \(firstRequest.expectedPublicKey), not the account the "
-                + "demand's `.nip42` access named"
+                + "demand's `authenticateAs` named"
         )
         XCTAssertFalse(
             firstRequest.challenge.isEmpty,
@@ -586,11 +584,11 @@ final class C15NIP42AuthTests: XCTestCase {
         )
         // NMP names the identity it holds the session as, through the
         // query's own evidence. Without this the row could in principle have
-        // arrived over a `.public` session.
+        // arrived over an unbound session.
         XCTAssertTrue(
             afterFirst.accessHistory.contains("nip42(\(accountHex))"),
-            "the source that served this row was never reported under `.nip42(\(accountHex))` "
-                + "access: \(afterFirst.accessHistory)"
+            "the source that served this row was never reported under `nip42(\(accountHex))` "
+                + "identity: \(afterFirst.accessHistory)"
         )
 
         // And the engine's own AUTH diagnostics agree, with a signed event
@@ -802,7 +800,7 @@ final class C15NIP42AuthTests: XCTestCase {
                 kinds: [UInt16(Lab.restrictedKind)], authors: .literal([seeder.pubkeyHex])
             ),
             routing: .explicit([lab.relay.url]),
-            access: .nip42(publicKey: accountHex)
+            authenticateAs: accountHex
         )
         let query = try engine.observe(.single(demand))
         let ledger = ObservationLedger()
@@ -899,7 +897,7 @@ final class C15NIP42AuthTests: XCTestCase {
         )
         XCTAssertTrue(
             afterRecovery.accessHistory.contains("nip42(\(accountHex))"),
-            "the recovered source was never reported under `.nip42(\(accountHex))`: "
+            "the recovered source was never reported under `nip42(\(accountHex))`: "
                 + "\(afterRecovery.accessHistory)"
         )
         XCTAssertTrue(

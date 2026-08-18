@@ -98,7 +98,7 @@ fn run_case(label: &str, events: &[Event], rooms: &[String], max_created_at: u64
         slot: 0,
         generation: 1,
     };
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     black_box(core.handle(EngineMsg::RelayConnected(relay_handle, session.clone())));
     for room in rooms.iter().take(handles) {
         black_box(core.handle(EngineMsg::Subscribe(room_query(room))));

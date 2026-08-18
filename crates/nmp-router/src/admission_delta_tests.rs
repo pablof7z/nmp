@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey};
 use nmp_store::coverage_key;
 use nostr::{Keys, RelayUrl};
 
@@ -17,7 +17,7 @@ fn pinned(relay: &RelayUrl, kinds: impl IntoIterator<Item = u16>) -> ContextualA
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -137,7 +137,7 @@ fn withdrawing_one_attached_owner_prunes_only_its_local_request_metadata() {
 fn ten_thousand_local_owner_detaches_touch_only_the_departing_metadata() {
     const OWNERS: u16 = 10_000;
     let relay = RelayUrl::parse("wss://metadata-detach-10k.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let mut atoms = Vec::with_capacity(OWNERS as usize);
     let mut kinds = BTreeSet::new();
     let mut owner_demands = BTreeSet::new();
@@ -150,7 +150,7 @@ fn ten_thousand_local_owner_detaches_touch_only_the_departing_metadata() {
         atoms.push(atom);
     }
     let physical = pinned(&relay, kinds);
-    let sub_id = SubId::for_wire(relay, &physical.filter, &physical.routing, physical.access);
+    let sub_id = SubId::for_wire(relay, &physical.filter, &physical.routing, physical.authenticate_as);
     let mut router = Router::new(RuleRegistry::default_widen_only());
     router.prev_plan.reqs.insert(
         session,
@@ -198,7 +198,7 @@ fn ten_thousand_local_owner_detaches_touch_only_the_departing_metadata() {
 #[test]
 fn aliased_claim_stays_until_its_last_distinct_demand_owner_leaves() {
     let relay = RelayUrl::parse("wss://metadata-claim-alias.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let mut first = pinned(&relay, [1]);
     first.filter.since = Some(10);
     let mut second = first.clone();
@@ -208,7 +208,7 @@ fn aliased_claim_stays_until_its_last_distinct_demand_owner_leaves() {
     let first_demand = DemandKey::for_atom(&first);
     let second_demand = DemandKey::for_atom(&second);
     assert_ne!(first_demand, second_demand);
-    let sub_id = SubId::for_wire(relay, &first.filter, &first.routing, first.access);
+    let sub_id = SubId::for_wire(relay, &first.filter, &first.routing, first.authenticate_as);
     let mut router = Router::new(RuleRegistry::default_widen_only());
     router.prev_plan.reqs.insert(
         session,
@@ -263,9 +263,9 @@ fn full_compile_probes_only_the_one_surviving_request_out_of_ten_thousand_priors
             stale_relay.clone(),
             &stale.filter,
             &stale.routing,
-            stale.access,
+            stale.authenticate_as,
         );
-        let session = RelaySessionKey::public(stale_relay);
+        let session = RelaySessionKey::unauthenticated(stale_relay);
         let request_key = (session.clone(), sub_id.clone());
         let physical_claims = BTreeSet::from([coverage_key(&stale)]);
         router.prev_plan.reqs.insert(

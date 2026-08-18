@@ -412,7 +412,7 @@ mod tests {
             Effect::EnsureWriteRelay(session)
                 if session == &RelaySessionKey::new(
                     relay.clone(),
-                    AccessContext::Nip42(author.public_key())
+                    Some(author.public_key())
                 )
         )));
         (id, signed)
@@ -428,7 +428,7 @@ mod tests {
             .map(|target| target.session.clone())
             .collect();
         for pending in core.pending.values() {
-            let access = AccessContext::Nip42(pending.signing_pubkey);
+            let access = Some(pending.signing_pubkey);
             expected.extend(
                 pending
                     .pending_relays
@@ -463,7 +463,7 @@ mod tests {
         let author = Keys::generate();
         let relay = RelayUrl::parse("wss://projection-lifecycle.example.com").unwrap();
         let session =
-            RelaySessionKey::new(relay.clone(), AccessContext::Nip42(author.public_key()));
+            RelaySessionKey::new(relay.clone(), Some(author.public_key()));
         let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 10);
 
         let (receipt, signed) = publish_waiting(&mut core, &author, &relay, 1);
@@ -518,11 +518,11 @@ mod tests {
         assert_eq!(
             actual,
             BTreeSet::from([
-                RelaySessionKey::new(relay.clone(), AccessContext::Nip42(author_a.public_key())),
-                RelaySessionKey::new(relay.clone(), AccessContext::Nip42(author_b.public_key())),
+                RelaySessionKey::new(relay.clone(), Some(author_a.public_key())),
+                RelaySessionKey::new(relay.clone(), Some(author_b.public_key())),
             ])
         );
-        assert!(!actual.contains(&RelaySessionKey::public(relay)));
+        assert!(!actual.contains(&RelaySessionKey::unauthenticated(relay)));
     }
 
     #[test]
@@ -533,8 +533,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("worker-projection.redb");
         let expected = BTreeSet::from([
-            RelaySessionKey::new(relay.clone(), AccessContext::Nip42(author_a.public_key())),
-            RelaySessionKey::new(relay.clone(), AccessContext::Nip42(author_b.public_key())),
+            RelaySessionKey::new(relay.clone(), Some(author_a.public_key())),
+            RelaySessionKey::new(relay.clone(), Some(author_b.public_key())),
         ]);
 
         {
@@ -589,7 +589,7 @@ mod tests {
             .writes
             .contains(&RelaySessionKey::new(
                 relay,
-                AccessContext::Nip42(author.public_key())
+                Some(author.public_key())
             )));
     }
 

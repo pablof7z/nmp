@@ -55,7 +55,7 @@ These transforms may decide presentation. They may not feed opaque code back
 into:
 
 - binding resolution;
-- routing or access context;
+- routing or authenticated identity;
 - wire coalescing;
 - persistence or replaceable winner selection;
 - protocol validation;

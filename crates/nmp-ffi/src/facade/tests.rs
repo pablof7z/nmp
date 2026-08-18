@@ -1,6 +1,6 @@
 use super::*;
 use crate::types::{
-    FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFrame, FfiFreshness,
+    FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFrame, FfiFreshness,
     FfiIdentity, FfiLiveQuery, FfiNotSentReason, FfiReadRouting, FfiRowDelta, FfiSignEventRequest,
     FfiSigningState, FfiWindow, FfiWindowLoad, FfiWriteFact, FfiWriteOutcome, FfiWritePayload,
     FfiWriteRouting,
@@ -16,7 +16,7 @@ fn public_query(selection: FfiFilter) -> FfiLiveQuery {
         branches: vec![FfiDemand {
             selection,
             routing: FfiReadRouting::Auto,
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         }],
@@ -386,7 +386,7 @@ fn ffi_windowed_query(author: String) -> FfiLiveQuery {
                 ..FfiFilter::default()
             },
             routing: FfiReadRouting::Auto,
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: crate::types::FfiFreshness::Live,
         }],

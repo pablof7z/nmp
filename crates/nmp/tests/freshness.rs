@@ -7,7 +7,7 @@ use nmp_engine::core::{
 use nmp_grammar::Derived;
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{
-    AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness,
+    Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness,
     ReadRouting, RelaySessionKey, Selector,
 };
 use nmp_router::WireOp;
@@ -62,7 +62,7 @@ fn atom(keys: &Keys, routing: ReadRouting) -> ContextualAtom {
     ContextualAtom {
         filter: concrete(keys),
         routing,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -85,8 +85,7 @@ fn nested_query(
 ) -> LiveQuery {
     let mut inner = Demand::new(
         filter(keys),
-        ReadRouting::Explicit(vec![inner_relay.clone()]),
-        AccessContext::Public,
+        ReadRouting::Explicit(vec![inner_relay.clone()])
     )
     .unwrap();
     inner.freshness = inner_freshness;
@@ -100,8 +99,7 @@ fn nested_query(
     };
     let mut outer = Demand::new(
         outer_selection,
-        ReadRouting::Explicit(vec![outer_relay.clone()]),
-        AccessContext::Public,
+        ReadRouting::Explicit(vec![outer_relay.clone()])
     )
     .unwrap();
     outer.freshness = outer_freshness;
@@ -111,8 +109,7 @@ fn nested_query(
 fn pinned_query(keys: &Keys, relay: &RelayUrl, freshness: Freshness) -> LiveQuery {
     let mut demand = Demand::new(
         filter(keys),
-        ReadRouting::Explicit(vec![relay.clone()]),
-        AccessContext::Public,
+        ReadRouting::Explicit(vec![relay.clone()])
     )
     .unwrap();
     demand.freshness = freshness;
@@ -245,7 +242,7 @@ fn record(store: &mut RedbStore, atom: &ContextualAtom, relay: &RelayUrl, throug
     store
         .record_coverage(&[(
             atom.clone(),
-            relay.clone(),
+            RelaySessionKey::unauthenticated(relay.clone()),
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(through)),
         )])
         .unwrap();
@@ -413,7 +410,7 @@ fn nested_cache_only_opens_no_inner_wire_under_live_outer() {
     assert_eq!(
         requested_filters(&effects),
         BTreeSet::from([(
-            RelaySessionKey::public(outer_relay.clone()),
+            RelaySessionKey::unauthenticated(outer_relay.clone()),
             ConcreteFilter {
                 kinds: Some(BTreeSet::from([7u16])),
                 authors: Some(BTreeSet::from([keys.public_key().to_hex()])),
@@ -467,8 +464,7 @@ fn nested_strict_pins_do_not_contaminate_public_root_cache_projection() {
 
     let mut inner = Demand::new(
         filter(&inner_author),
-        ReadRouting::Explicit(vec![inner_relay]),
-        AccessContext::Public,
+        ReadRouting::Explicit(vec![inner_relay])
     )
     .unwrap();
     inner.cache = CacheMode::Strict;
@@ -482,8 +478,7 @@ fn nested_strict_pins_do_not_contaminate_public_root_cache_projection() {
             }))),
             ..Filter::default()
         },
-        ReadRouting::Auto,
-        AccessContext::Public,
+        ReadRouting::Auto
     )
     .unwrap();
     root.cache = CacheMode::Strict;
@@ -524,7 +519,7 @@ fn nested_live_opens_wire_under_cache_only_outer() {
 
     assert_eq!(
         requested_filters(&effects),
-        BTreeSet::from([(RelaySessionKey::public(inner_relay), concrete(&keys),)]),
+        BTreeSet::from([(RelaySessionKey::unauthenticated(inner_relay), concrete(&keys),)]),
         "the inner Live request remains, while the outer CacheOnly atom contributes no wire work"
     );
 }
@@ -562,7 +557,7 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
     assert_eq!(
         requested_filters(&fresh_effects),
         BTreeSet::from([(
-            RelaySessionKey::public(outer_relay.clone()),
+            RelaySessionKey::unauthenticated(outer_relay.clone()),
             ConcreteFilter {
                 kinds: Some(BTreeSet::from([7u16])),
                 authors: Some(BTreeSet::from([keys.public_key().to_hex()])),
@@ -618,7 +613,7 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
     assert_eq!(
         requested_filters(&sibling_opened),
         BTreeSet::from([(
-            RelaySessionKey::public(sibling_relay.clone()),
+            RelaySessionKey::unauthenticated(sibling_relay.clone()),
             concrete(&sibling_keys),
         )]),
         "the independent live sibling starts with exactly its own wire request"
@@ -639,9 +634,9 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
     assert_eq!(
         requested_filters(&stale_effects),
         BTreeSet::from([
-            (RelaySessionKey::public(inner_relay), concrete(&keys)),
+            (RelaySessionKey::unauthenticated(inner_relay), concrete(&keys)),
             (
-                RelaySessionKey::public(outer_relay),
+                RelaySessionKey::unauthenticated(outer_relay),
                 ConcreteFilter {
                     kinds: Some(BTreeSet::from([7u16])),
                     authors: Some(BTreeSet::from([keys.public_key().to_hex()])),
@@ -818,7 +813,7 @@ fn max_age_requires_fresh_coverage_from_every_assigned_outbox() {
 fn stale_max_age_refreshes_coverage_once_and_remains_live() {
     let keys = Keys::generate();
     let relay = RelayUrl::parse("wss://refresh.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let handle = RelayHandle {
         slot: 1,
         generation: 1,
@@ -852,7 +847,7 @@ fn stale_max_age_refreshes_coverage_once_and_remains_live() {
         "EOSE does not suppress the live tail"
     );
     assert_eq!(
-        core.get_coverage(&atom(&keys, ReadRouting::Auto), &relay)
+        core.get_coverage(&atom(&keys, ReadRouting::Auto), &RelaySessionKey::unauthenticated(relay.clone()))
             .expect("coverage peek")
             .expect("a proven row")
             .through,
@@ -878,7 +873,7 @@ fn pinned_strict_max_age_uses_pinned_scope_for_coverage_and_rows() {
         )
         .unwrap();
     record(&mut store, &demand_atom, &pinned, 99_000);
-    let mut demand = Demand::new(filter(&keys), source, AccessContext::Public).unwrap();
+    let mut demand = Demand::new(filter(&keys), source).unwrap();
     demand.cache = CacheMode::Strict;
     demand.freshness = Freshness::MaxAge { seconds: 3_600 };
     let mut core = EngineCore::new(store, 10);
@@ -899,7 +894,7 @@ fn future_event_time_never_inflates_coverage_or_freshness() {
         &keys,
         &relay,
     );
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let handle = RelayHandle {
         slot: 1,
         generation: 1,
@@ -927,7 +922,7 @@ fn future_event_time_never_inflates_coverage_or_freshness() {
         ))),
     ));
     assert_eq!(
-        core.get_coverage(&atom(&keys, ReadRouting::Auto), &relay)
+        core.get_coverage(&atom(&keys, ReadRouting::Auto), &RelaySessionKey::unauthenticated(relay.clone()))
             .expect("coverage peek")
             .expect("a proven row")
             .through,

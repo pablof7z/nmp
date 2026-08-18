@@ -164,11 +164,11 @@ sealed class SourceStatus {
  * state. */
 data class SourceEvidence(
     val relay: String,
-    /** The frozen access identity of the physical session that produced this
-     * per-source fact (#8): the same relay URL under [NMPAccessContext.Public]
-     * versus a [NMPAccessContext.Nip42] identity is a distinct, non-aliasing
+    /** The identity the physical session that produced this per-source fact
+     * was bound to (#8): the same relay URL bound to no identity versus bound
+     * to a key is a distinct, non-aliasing
      * source. */
-    val access: NMPAccessContext,
+    val authenticateAs: String?,
     val reconciledThrough: ULong?,
     val status: SourceStatus,
 ) {
@@ -176,7 +176,7 @@ data class SourceEvidence(
         fun from(ffi: FfiSourceEvidence): SourceEvidence =
             SourceEvidence(
                 relay = ffi.relay,
-                access = NMPAccessContext.from(ffi.access),
+                authenticateAs = ffi.authenticateAs,
                 reconciledThrough = ffi.reconciledThrough,
                 status = SourceStatus.from(ffi.status),
             )

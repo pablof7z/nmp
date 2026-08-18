@@ -5,7 +5,7 @@
 //! never depends on mechanism-crate types or reconstructs causality from
 //! engine-global diagnostics.
 
-use nmp_grammar::{AccessContext, IdentityField};
+use nmp_grammar::{IdentityField};
 use nostr::JsonUtil;
 
 /// One ordered fact from a live observation's real execution.
@@ -52,10 +52,10 @@ fn identity_field_string(field: IdentityField) -> &'static str {
     }
 }
 
-fn access_string(access: AccessContext) -> String {
-    match access {
-        AccessContext::Public => "public".to_owned(),
-        AccessContext::Nip42(public_key) => format!("nip42:{}", public_key.to_hex()),
+fn identity_string(authenticate_as: Option<nostr::PublicKey>) -> String {
+    match authenticate_as {
+        None => "public".to_owned(),
+        Some(public_key) => format!("nip42:{}", public_key.to_hex()),
     }
 }
 
@@ -155,7 +155,7 @@ impl ObservationEvidence {
                 path,
                 filter_revision,
                 relay,
-                access,
+                authenticate_as,
                 transport_generation,
                 request_revision,
                 filter,
@@ -168,7 +168,7 @@ impl ObservationEvidence {
                 evidence.values = vec![filter.to_nostr().as_json()];
                 evidence.attributes = vec![
                     attribute("relay", relay),
-                    attribute("access", access_string(access)),
+                    attribute("authenticate_as", identity_string(authenticate_as)),
                     attribute("transport_generation", transport_generation),
                     attribute("request_revision", request_revision),
                     // WHY this relay was asked. `ReadRouting::Auto` decides a
@@ -184,7 +184,7 @@ impl ObservationEvidence {
                 path,
                 filter_revision,
                 relay,
-                access,
+                authenticate_as,
                 transport_generation,
                 request_revision,
                 observed_at,
@@ -195,7 +195,7 @@ impl ObservationEvidence {
                 evidence.revision = Some(filter_revision);
                 evidence.attributes = vec![
                     attribute("relay", relay),
-                    attribute("access", access_string(access)),
+                    attribute("authenticate_as", identity_string(authenticate_as)),
                     attribute("transport_generation", transport_generation),
                     attribute("request_revision", request_revision),
                     attribute("observed_at", observed_at.as_secs()),
@@ -212,7 +212,7 @@ impl ObservationEvidence {
                 path,
                 filter_revision,
                 relay,
-                access,
+                authenticate_as,
                 transport_generation,
                 request_revision,
                 reason,
@@ -222,7 +222,7 @@ impl ObservationEvidence {
                 evidence.revision = Some(filter_revision);
                 evidence.attributes = vec![
                     attribute("relay", relay),
-                    attribute("access", access_string(access)),
+                    attribute("authenticate_as", identity_string(authenticate_as)),
                     attribute("transport_generation", transport_generation),
                 ];
                 if let Some(request_revision) = request_revision {
@@ -236,7 +236,7 @@ impl ObservationEvidence {
                 path,
                 filter_revision,
                 relay,
-                access,
+                authenticate_as,
                 request_revision,
                 retry_at,
                 cause,
@@ -246,7 +246,7 @@ impl ObservationEvidence {
                 evidence.revision = Some(filter_revision);
                 evidence.attributes = vec![
                     attribute("relay", relay),
-                    attribute("access", access_string(access)),
+                    attribute("authenticate_as", identity_string(authenticate_as)),
                     attribute("request_revision", request_revision),
                     attribute("retry_at", retry_at.as_secs()),
                 ];

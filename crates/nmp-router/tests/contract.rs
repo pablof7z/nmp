@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey};
 use nmp_router::{Lane, PublicKey, RouteKind, Router, RuleRegistry, ShortfallReason};
 use nmp_router_testkit::{test_relay, FixtureRoutingFacts};
 use nostr::Keys;
@@ -19,7 +19,7 @@ fn outbox(kind: u16, authors: &[PublicKey]) -> ContextualAtom {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Auto,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -28,7 +28,7 @@ fn exact(filter: ConcreteFilter, relays: BTreeSet<nmp_router::RelayUrl>) -> Cont
     ContextualAtom {
         filter,
         routing: ReadRouting::Explicit(relays.into_iter().collect()),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -38,7 +38,7 @@ fn router() -> Router {
 }
 
 fn session(relay: nmp_router::RelayUrl) -> RelaySessionKey {
-    RelaySessionKey::public(relay)
+    RelaySessionKey::unauthenticated(relay)
 }
 
 #[test]
@@ -198,7 +198,7 @@ fn public_authorless_atom_has_no_hidden_directory_destination() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Auto,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let mut router = router();
@@ -246,7 +246,7 @@ fn an_authorless_demand_is_not_narrowed_by_an_author_bearing_sibling() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Auto,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     router.compile(
@@ -433,7 +433,7 @@ fn an_unbound_group_routes_its_hints_directly() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Auto,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::from([nmp_grammar::RoutingEvidence {
             relay: hint.clone(),
             origin: nmp_grammar::RoutingEvidenceKind::Hint,
@@ -475,7 +475,7 @@ fn an_authorless_atom_keeps_its_reach_whichever_order_admission_sees_it() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Auto,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let bearing = outbox(1, &[alice]);

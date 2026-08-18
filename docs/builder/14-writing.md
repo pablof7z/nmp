@@ -59,7 +59,7 @@ who signs it**. Nothing else. Three consequences he stated directly:
 
 This is a ruling on direction. It is not a specification, and nothing here
 says what the collapsed types are called or how the pieces that currently
-carry access context and payload variants land afterwards. Do not implement
+carry authenticated identity and payload variants land afterwards. Do not implement
 from this paragraph; implement from a design that answers those, and check it
 against these words.
 

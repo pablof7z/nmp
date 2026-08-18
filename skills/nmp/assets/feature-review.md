@@ -10,7 +10,7 @@
 
 - Schema/kind/tag owner:
 - Participating content owner:
-- Routing/access context:
+- Routing/authenticated identity:
 - App-owned presentation/policy:
 - Why an existing `Filter`, `Demand`, or `WriteIntent` is insufficient:
 

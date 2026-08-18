@@ -16,7 +16,7 @@ struct Nip77StatusFixture {
 impl Nip77StatusFixture {
     fn open() -> Self {
         let relay = RelayUrl::parse("wss://request-attempt-nip77-phases.example").unwrap();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let handle = TransportRelayHandle {
             slot: 98,
             generation: 1,

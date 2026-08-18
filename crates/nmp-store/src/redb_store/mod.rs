@@ -40,7 +40,7 @@ use std::sync::atomic::AtomicU8;
 ))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use nmp_grammar::ContextualAtom;
+use nmp_grammar::{ContextualAtom, RelaySessionKey};
 // Only the test modules below still name a `ConcreteFilter` directly: nothing
 // on the durable path handles a filter any more (#1849).
 #[cfg(test)]
@@ -393,14 +393,16 @@ impl RedbStore {
     /// `gc`.
     pub fn record_coverage(
         &mut self,
-        claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
+        claims: &[(ContextualAtom, RelaySessionKey, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
         event_ops::record_coverage(self, claims)
     }
 
-    /// The proven interval for `key` at `relay`, or `Ok(None)` if no row
-    /// exists. `Ok(None)` means this relay has no persisted interval for
-    /// this key; it makes no wider claim.
+    /// The proven interval for `key` on `session`, or `Ok(None)` if no row
+    /// exists. `Ok(None)` means this exact source — this relay, read under
+    /// this authenticated identity — has no persisted interval for this key;
+    /// it makes no wider claim, and in particular says nothing about what the
+    /// same relay proved under a different identity.
     ///
     /// Fallible for the same reason [`Self::next_expiration`] is
     /// (#122/#763). The distinction is load-bearing here rather than merely
@@ -410,9 +412,9 @@ impl RedbStore {
     pub fn get_coverage(
         &self,
         key: CoverageKey,
-        relay: &RelayUrl,
+        session: &RelaySessionKey,
     ) -> Result<Option<CoverageInterval>, PersistenceError> {
-        event_ops::get_coverage(self, key, relay)
+        event_ops::get_coverage(self, key, session)
     }
 
     /// Apply an EXPLICIT durable-retention policy by running claim-based GC

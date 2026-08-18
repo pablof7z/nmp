@@ -31,7 +31,7 @@ use nmp_ffi::facade::{NmpDiagnosticsStream, NmpEngine, NmpEngineConfig, NmpRowSt
 use nmp_ffi::nip02::NmpFollowStream;
 use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
-    FfiAccessContext, FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiIdentity,
+    FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiIdentity,
     FfiLiveQuery, FfiReadRouting, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
 
@@ -80,7 +80,7 @@ fn single(selection: FfiFilter, routing: FfiReadRouting) -> FfiLiveQuery {
         branches: vec![FfiDemand {
             selection,
             routing,
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         }],

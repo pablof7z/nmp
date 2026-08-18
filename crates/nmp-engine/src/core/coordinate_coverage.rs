@@ -345,7 +345,7 @@ impl CoreState {
         // public question and never for a protected one — the same
         // access-context rule the rest of this module keeps free by carrying
         // it in the session key.
-        if session.access != nmp_grammar::AccessContext::Public {
+        if session.authenticate_as.is_some() {
             return None;
         }
         let mut found = None;
@@ -404,12 +404,16 @@ impl CoreState {
         let demand = Demand::new(
             coordinate_filter(coordinate),
             ReadRouting::Explicit(vec![session.relay.clone()]),
-            session.access,
         )
         .expect("one relay-pinned coordinate demand is never empty");
         let demand = Demand {
             cache: CacheMode::Strict,
             freshness: Freshness::Live,
+            // This read is pinned to ONE existing session, so it must ask as
+            // whoever that session already is — otherwise a coordinate check
+            // on an authenticated socket would be answered by a demand that
+            // named nobody.
+            authenticate_as: session.authenticate_as,
             ..demand
         };
         #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -597,7 +601,6 @@ fn request_can_witness(filter: &ConcreteFilter) -> bool {
 mod tests {
     use std::borrow::Cow;
 
-    use nmp_grammar::AccessContext;
     use nmp_router_testkit::test_relay;
     use nmp_store::RedbStore;
     use nmp_transport::{RelayFrame, RelayHandle as TransportRelayHandle};
@@ -676,7 +679,7 @@ mod tests {
     /// the way to an accepted wire request.
     fn covering_read(filter: Filter) -> Fixture {
         let relay = relay();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let handle = TransportRelayHandle {
             slot: 3,
             generation: 1,
@@ -685,8 +688,7 @@ mod tests {
         core.handle(EngineMsg::RelayConnected(handle, session.clone()));
         let demand = Demand::new(
             filter,
-            ReadRouting::Explicit(vec![relay]),
-            AccessContext::Public,
+            ReadRouting::Explicit(vec![relay])
         )
         .expect("a relay-pinned read is nonempty");
         core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));
@@ -996,8 +998,7 @@ mod tests {
                 kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay()]),
-            AccessContext::Public,
+            ReadRouting::Explicit(vec![relay()])
         )
         .expect("a relay-pinned read is nonempty");
         fixture
@@ -1047,7 +1048,7 @@ mod tests {
         fixture.end_stored_events();
 
         let protected =
-            RelaySessionKey::new(relay(), AccessContext::Nip42(Keys::generate().public_key()));
+            RelaySessionKey::new(relay(), Some(Keys::generate().public_key()));
         assert_eq!(
             fixture
                 .core

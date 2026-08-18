@@ -859,7 +859,7 @@ pub fn any_of(ids: FfiBinding) -> Result<Arc<FfiGroupIds>, FfiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FfiAccessContext, FfiIdentityField, FfiReadRouting};
+    use crate::types::{FfiIdentityField, FfiReadRouting};
 
     fn host(n: u16) -> String {
         format!("wss://host-{n}.example.com")
@@ -900,7 +900,7 @@ mod tests {
                     relays: vec![expected_host]
                 }
             );
-            assert_eq!(branch.access, FfiAccessContext::Public);
+            assert_eq!(branch.authenticate_as, None);
             assert_eq!(
                 branch.selection.tags.get("h"),
                 Some(&FfiBinding::Literal {

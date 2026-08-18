@@ -36,7 +36,7 @@ timeline, follows, profiles, or any other content family is the center of NMP.
 - Protocol examples name their owner, such as NIP-02, NIP-29, or NIP-68.
 - A reusable helper expands to the closed public grammar and is never a hidden
   subscription lifecycle.
-- Every nested `Derived` query names its own source/access context; it never
+- Every nested `Derived` query names its own source/identity; it never
   inherits the outer demand's context implicitly.
 - Indexed filter tag keys are one ASCII letter, while event/projection tag
   names are arbitrary strings. Never introduce a blessed tag whitelist.
@@ -61,7 +61,7 @@ Use the snapshot vocabulary consistently:
 
 - canonical rows from the local cache;
 - cache revision/provenance evidence;
-- acquisition facts for currently planned sources and access contexts; and
+- acquisition facts for currently planned sources and authenticated identities; and
 - explicit shortfall when demand has no routable candidate or a local limit
   prevented intended work.
 

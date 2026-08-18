@@ -2,7 +2,7 @@ use super::*;
 use nmp_engine::core::{AuthorRouteReplacement, ReceiptId, Row};
 use nmp_engine::publish_queue::{RelayState, RelayWaiting, WriteFact};
 use nmp_grammar::{
-    AccessContext, Binding, Filter, Identity, RelaySessionKey, WriteIntent, WritePayload,
+    Binding, Filter, Identity, RelaySessionKey, WriteIntent, WritePayload,
     WriteRouting,
 };
 use nmp_store::RedbStore;
@@ -337,7 +337,7 @@ fn fresh_and_recovered_auto_writes_share_one_later_author_route() {
         slot: 0,
         generation: 1,
     };
-    let session = RelaySessionKey::new(outbox.clone(), AccessContext::Nip42(author.public_key()));
+    let session = RelaySessionKey::new(outbox.clone(), Some(author.public_key()));
     let mut delivery = core.handle(EngineMsg::RelayConnected(transport, session.clone()));
     delivery.extend(core.handle(EngineMsg::RelayInformationResolved(outbox.clone(), None)));
     delivery.extend(core.handle(EngineMsg::AuthProbeReleased(transport, session.clone())));

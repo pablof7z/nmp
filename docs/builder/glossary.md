@@ -29,20 +29,20 @@
 - **Negentropy:** NIP-77 set reconciliation that identifies which event ids one
   side is missing without replaying the entire set.
 - **AUTH:** NIP-42 relay challenge/response. The identity used can change what
-  one source returns, so it participates in access context.
+  one source returns, so it participates in authenticated identity.
 - **npub / nsec / hex:** public-key, secret-key, and raw encodings. Secret
   material never belongs in the event/delivery store.
 
 ## NMP terms
 
 - **Live query:** the read workload observed through a native reactive stream.
-- **Demand:** `Selection + ReadRouting + AccessContext`, the semantic
+- **Demand:** `Selection + ReadRouting + AuthenticateAs`, the semantic
   descriptor NMP keeps live.
 - **Selection:** a Nostr filter whose set-valued fields may contain bindings.
 - **Binding:** `Literal | Reactive(CurrentPubkey) | Derived | SetOp`, the closed
   grammar for a selection field's value.
 - **Derived:** a binding whose explicit inner `Demand` produces values through
-  a closed selector. The inner demand has its own source/access context and
+  a closed selector. The inner demand has its own source/identity and
   never implicitly inherits the outer demand's context.
 - **Selector:** `Authors | Ids | Tag(EventTagName) | AddressCoord`, the closed
   projection vocabulary used by `Derived`. Tag projection accepts arbitrary

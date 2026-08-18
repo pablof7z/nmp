@@ -6,7 +6,7 @@ A query descriptor is a value, not a callback:
 
 ```text
 LiveQuery  = branches: [Demand] (1..=64) + aggregate_result_limit: Option<usize>
-Demand     = selection Filter + ReadRouting + AccessContext + CacheMode + Freshness
+Demand     = selection Filter + ReadRouting + authenticateAs + CacheMode + Freshness
 Binding    = Literal | Reactive(ActivePubkey) | Derived | SetOp
 Derived    = { inner: Demand, project: Selector }
 Selector   = Authors | Ids | Tag(name) | AddressCoord
@@ -32,8 +32,10 @@ outer query; no platform implicitly inherits or reapplies defaults.
 - `Auto` is the default and has no precondition: a demand that names no routing gets it, whatever its selection binds.
 - `Explicit` requires a nonempty relay set and asks only those relays.
 - `CacheMode::Strict` matters only under `Explicit`; it limits cached rows to provenance intersecting that relay set.
-- `AccessContext` is `Public` or `Nip42(expectedPublicKey)`. NIP-42 freezes the
-  expected identity in the demand; active-account changes cannot redirect it.
+- `authenticateAs` is an optional public key. Absent — the default and the
+  ordinary case — reads on the connection bound to no identity. Naming a key
+  freezes that identity in the demand; active-account changes cannot redirect
+  it. There is no value meaning "unauthenticated": absence is it.
 - `Freshness` is per-handle acquisition policy — `Live`, `MaxAge { seconds }`, or `CacheOnly` — and is deliberately excluded from atom, wire, and coverage identity, so it never splits a shared subscription.
 
 ## Delivered state

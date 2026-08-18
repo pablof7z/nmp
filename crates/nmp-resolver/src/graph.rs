@@ -11,7 +11,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use nmp_grammar::{
-    AccessContext, CacheMode, ConcreteFilter, ContextualAtom, Freshness, ReadRouting,
+    CacheMode, ConcreteFilter, ContextualAtom, Freshness, ReadRouting,
 };
 
 use crate::engine::{ResolutionNodeKind, ResolutionNodeSnapshot, ResolvedValue};
@@ -69,14 +69,14 @@ pub(crate) struct FilterNodeData {
     pub(crate) limit: Option<usize>,
     pub(crate) bound: Vec<(FieldSlot, NodeId)>,
     pub(crate) cached_atoms: BTreeSet<ContextualAtom>,
-    /// This FilterNode's OWN Demand's source/access -- set once at
+    /// This FilterNode's OWN Demand's source/authenticate_as -- set once at
     /// construction (#106) and never mutated. Uniform for every atom this
     /// node ever produces; a nested `Derived`'s inner FilterNode carries its
     /// OWN (possibly different) context, never this one's (a Demand's
-    /// source/access is never inherited across a `Binding::Derived`
+    /// source/authenticate_as is never inherited across a `Binding::Derived`
     /// boundary -- see `nmp_grammar::Derived`'s doc).
     pub(crate) routing: ReadRouting,
-    pub(crate) access: AccessContext,
+    pub(crate) authenticate_as: Option<nostr::PublicKey>,
 }
 
 /// One graph node: a `BindingNode` variant or a `FilterNode`.
@@ -404,7 +404,7 @@ impl Graph {
             return BTreeSet::from([ContextualAtom {
                 filter: base,
                 routing: f.routing.clone(),
-                access: f.access,
+                authenticate_as: f.authenticate_as,
                 routing_evidence: BTreeSet::new(),
             }]);
         }
@@ -436,7 +436,7 @@ impl Graph {
             .map(|(filter, routing_evidence)| ContextualAtom {
                 filter,
                 routing: f.routing.clone(),
-                access: f.access,
+                authenticate_as: f.authenticate_as,
                 routing_evidence,
             })
             .collect()
@@ -603,7 +603,7 @@ mod destination_tests {
                 bound: vec![(slot, binding_id)],
                 cached_atoms: BTreeSet::new(),
                 routing: ReadRouting::Auto,
-                access: AccessContext::Public,
+                authenticate_as: None,
             }),
             ParentLink::Root,
             0,
@@ -661,7 +661,7 @@ mod destination_tests {
                 bound: Vec::new(),
                 cached_atoms: BTreeSet::new(),
                 routing: ReadRouting::Auto,
-                access: AccessContext::Public,
+                authenticate_as: None,
             }),
             ParentLink::DerivedInner(live_derived),
             2,
@@ -703,7 +703,7 @@ mod destination_tests {
                 bound: vec![(FieldSlot::Authors, set_op)],
                 cached_atoms: BTreeSet::new(),
                 routing: ReadRouting::Auto,
-                access: AccessContext::Public,
+                authenticate_as: None,
             }),
             ParentLink::Root,
             0,

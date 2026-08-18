@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn local_owner_detach_prunes_the_current_attribution_generation_before_eose() {
     let relay = RelayUrl::parse("wss://core-metadata-detach.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let incumbent = query_atom(&relay, "incumbent");
     let added = query_atom(&relay, "added");
     let incumbent_claim = coverage_key(&incumbent);
@@ -16,7 +16,7 @@ fn local_owner_detach_prunes_the_current_attribution_generation_before_eose() {
         relay,
         &incumbent.filter,
         &incumbent.routing,
-        incumbent.access,
+        incumbent.authenticate_as,
     );
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     core.set_active_demand(&BTreeSet::from([incumbent.clone(), added.clone()]));
@@ -105,7 +105,7 @@ fn local_owner_detach_prunes_the_current_attribution_generation_before_eose() {
 #[test]
 fn aliased_current_claim_stays_until_its_last_owner_and_can_reattach_before_eose() {
     let relay = RelayUrl::parse("wss://core-metadata-alias.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let incumbent = query_atom(&relay, "incumbent");
     let mut first_alias = query_atom(&relay, "aliased");
     first_alias.filter.since = Some(10);
@@ -122,7 +122,7 @@ fn aliased_current_claim_stays_until_its_last_owner_and_can_reattach_before_eose
         relay,
         &incumbent.filter,
         &incumbent.routing,
-        incumbent.access,
+        incumbent.authenticate_as,
     );
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     core.set_active_demand(&BTreeSet::from([

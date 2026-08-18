@@ -7,7 +7,7 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
     let relay = RelayUrl::parse("wss://protected-request-retry.example").unwrap();
     let session = RelaySessionKey::new(
         relay.clone(),
-        AccessContext::Nip42(nostr::Keys::generate().public_key()),
+        Some(nostr::Keys::generate().public_key()),
     );
     let filter = ConcreteFilter {
         kinds: Some(BTreeSet::from([1u16])),
@@ -16,10 +16,10 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
     let atom = ContextualAtom {
         filter: filter.clone(),
         routing: ReadRouting::Explicit(vec![relay]),
-        access: session.access,
+        authenticate_as: session.authenticate_as,
         routing_evidence: BTreeSet::new(),
     };
-    let sub_id = SubId::for_wire(session.relay.clone(), &filter, &atom.routing, atom.access);
+    let sub_id = SubId::for_wire(session.relay.clone(), &filter, &atom.routing, atom.authenticate_as);
     let claims = BTreeSet::from([nmp_store::coverage_key(&atom)]);
     let owners = BTreeSet::from([nmp_router::DemandKey::for_atom(&atom)]);
     let first_handle = TransportRelayHandle {

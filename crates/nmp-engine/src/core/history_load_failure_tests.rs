@@ -1,3 +1,4 @@
+use nmp_grammar::RelaySessionKey;
 use std::collections::{BTreeSet, HashMap};
 
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
@@ -149,7 +150,7 @@ fn opening_freshness_refusal_leaves_no_candidate_request_target_index() {
             ..ConcreteFilter::default()
         },
         routing: demand.routing.clone(),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let coverage_key = nmp_store::coverage_key(&atom);
@@ -158,7 +159,7 @@ fn opening_freshness_refusal_leaves_no_candidate_request_target_index() {
         store
             .record_coverage(&[(
                 atom,
-                relay.clone(),
+                RelaySessionKey::unauthenticated(relay.clone()),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
             )])
             .expect("seed coverage row");

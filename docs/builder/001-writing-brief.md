@@ -102,7 +102,7 @@ only group context (`h` plus host authority), and core signs once.
 - Is core still useful with no protocol module enabled?
 - Did a social/content example accidentally become a core default?
 - Can every engine decision be printed and explained?
-- Does every nested derived demand state its own source/access context?
+- Does every nested derived demand state its own source/identity?
 - Are arbitrary event tag names distinct from indexed single-letter filter
   keys, with no whitelist?
 - Are query facts scoped to known sources instead of global truth?

@@ -115,7 +115,7 @@ class NMPEngine(
      * Query.kt's `observeQuery` for the teardown-mapping finding.
      *
      * The query is always a complete [NMPLiveQuery]: one or more independent
-     * [NMPDemand] branches, each naming its own routing, access
+     * [NMPDemand] branches, each naming its own routing, identity
      * context, cache mode and freshness. Selection syntax never decides
      * routing (#847), so a single-branch read is spelled
      * `observe(NMPLiveQuery.single(demand))`. The branches are observed

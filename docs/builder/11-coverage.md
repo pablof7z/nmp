@@ -9,7 +9,7 @@ the sources NMP actually planned.
 
 ## What a source can prove
 
-For one exact demand, source, access context, request, and time window, NMP may
+For one exact demand, source, authenticated identity, request, and time window, NMP may
 observe facts such as:
 
 - cached-only: no current acquisition is planned;
@@ -142,7 +142,7 @@ evidence boundary, not its row set:
   be superseded, expire, or be retracted because of other engine work.
 
 The retained evidence is a historical justification scoped to that descriptor,
-read routing, and access context. It is not a claim about global
+read routing, and authenticated identity. It is not a claim about global
 completeness or the routing plan NMP would choose now. To ask how the same
 demand would plan now, open a new `live` observation or a newly evaluated
 `maxAge` observation. Global diagnostics describe only the actually active

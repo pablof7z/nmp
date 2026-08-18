@@ -106,7 +106,7 @@ mod tests {
     fn source(reconciled_through: Option<Timestamp>) -> SourceEvidence {
         SourceEvidence {
             relay: RelayUrl::parse("ws://hub.test").expect("a literal relay url parses"),
-            access: nmp_grammar::AccessContext::Public,
+            authenticate_as: None,
             reconciled_through,
             status: SourceStatus::Requesting,
         }

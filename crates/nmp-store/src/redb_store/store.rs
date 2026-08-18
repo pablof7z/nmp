@@ -1,3 +1,4 @@
+use nmp_grammar::RelaySessionKey;
 use super::canonical::{decode_observed_at, fold_seen_at};
 use super::commit::commit_prepared;
 use super::postings::Family;
@@ -1170,9 +1171,21 @@ impl RedbStore {
     /// It is part of the durable key, not a compatibility discriminator: no
     /// reader tests for its absence, because a row lacking it cannot exist in
     /// the one current epoch.
-    pub(super) const COVERAGE_ROW_KEY_PREFIX: &'static str = "d2:";
+    pub(super) const COVERAGE_ROW_KEY_PREFIX: &'static str = "d3:";
 
-    pub(super) fn coverage_row_key(key: CoverageKey, relay: &RelayUrl) -> String {
+    /// The durable coverage row key: shape digest, then the SOURCE — which
+    /// is a relay AND the identity the session reading it was authenticated
+    /// as. Both halves of the source belong here for the same reason: what a
+    /// row proves was fetched depends on where it was fetched from and on
+    /// who asked. A row proven on a connection bound to nobody must never
+    /// satisfy a read authenticated as an account, and two accounts must
+    /// never share a row — merging either way would claim completeness that
+    /// was never earned, silently.
+    ///
+    /// The identity is DISCOVERED (`RelaySessionKey::authenticate_as`),
+    /// never the demand's override: the override says what was asked for,
+    /// this says what was actually proven.
+    pub(super) fn coverage_row_key(key: CoverageKey, session: &RelaySessionKey) -> String {
         use std::fmt::Write as _;
 
         // Full 32-byte BLAKE3 digest, hex-encoded -- NOT truncated to 64
@@ -1183,7 +1196,19 @@ impl RedbStore {
         for byte in key.as_bytes() {
             let _ = write!(hex, "{byte:02x}");
         }
-        format!("{}{hex}:{}", Self::COVERAGE_ROW_KEY_PREFIX, relay.as_str())
+        // The identity is appended after the relay, hex or empty. The relay
+        // URL cannot contain the `:` separator followed by 64 hex chars in a
+        // way that aliases a different (relay, identity) pair, because the
+        // identity field is fixed-width-or-empty and terminal.
+        let identity = session
+            .authenticate_as
+            .map(|key| key.to_hex())
+            .unwrap_or_default();
+        format!(
+            "{}{hex}:{}:{identity}",
+            Self::COVERAGE_ROW_KEY_PREFIX,
+            session.relay.as_str()
+        )
     }
 
     /// Materialize one portable `EVENTS` value into a [`StoredEvent`] —

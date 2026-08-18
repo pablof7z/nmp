@@ -1,5 +1,6 @@
 //! Fresh request replacement transition ownership (#774).
 
+use nmp_grammar::RelaySessionKey;
 use std::{borrow::Cow, collections::BTreeSet};
 
 use nmp_store::{coverage_key, RedbStore};
@@ -17,7 +18,7 @@ struct Fixture {
 impl Fixture {
     fn new(name: &str) -> Self {
         let relay = RelayUrl::parse(&format!("wss://{name}.example")).unwrap();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let handle = TransportRelayHandle {
             slot: 93,
             generation: 1,
@@ -49,7 +50,7 @@ impl Fixture {
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Explicit(vec![self.relay.clone()]),
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         }
     }
@@ -292,7 +293,7 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
     assert!(fixture
         .core
         .store
-        .get_coverage(second_claim, &fixture.relay)
+        .get_coverage(second_claim, &RelaySessionKey::unauthenticated(fixture.relay.clone()))
         .unwrap()
         .is_none());
     assert_eq!(

@@ -136,7 +136,7 @@ fn second_outbox_hint_opens_only_the_missing_relay_for_both_owner_close_orders()
             core.router.diagnostics().uncovered_authors[&author].reason,
             nmp_router::ShortfallReason::FewerCandidatesThanK
         );
-        let first_session = RelaySessionKey::public(first_evidence.relay.clone());
+        let first_session = RelaySessionKey::unauthenticated(first_evidence.relay.clone());
         let incumbent = core.router.plan().reqs[&first_session][0].clone();
         assert_eq!(core.wire.pending_len(), 0);
 
@@ -231,7 +231,7 @@ fn preflush_hint_owner_churn_combines_pending_and_incumbent_assignment_truth() {
         b.routing_evidence.insert(evidence_b.clone());
         core.white_box("retain_wire_atom_owner", |s| s.retain_wire_atom_owner(&a));
         flush(&mut core);
-        let incumbent_session = RelaySessionKey::public(evidence_a.relay.clone());
+        let incumbent_session = RelaySessionKey::unauthenticated(evidence_a.relay.clone());
         let incumbent = core.router.plan().reqs[&incumbent_session][0].clone();
 
         core.white_box("retain_wire_atom_owner", |s| s.retain_wire_atom_owner(&b));

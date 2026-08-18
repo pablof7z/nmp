@@ -66,7 +66,7 @@ impl DemandDelta {
 mod tests {
     use super::*;
     use crate::concrete::ConcreteFilter;
-    use crate::descriptor::{AccessContext, ReadRouting};
+    use crate::descriptor::ReadRouting;
     use std::collections::BTreeSet;
 
     fn atom(kind: u16) -> ContextualAtom {
@@ -76,7 +76,7 @@ mod tests {
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Auto,
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         }
     }

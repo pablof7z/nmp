@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting, RelaySessionKey,
-    RoutingEvidence, RoutingEvidenceKind,
+    ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting, RoutingEvidence,
+    RoutingEvidenceKind,
 };
 use nmp_router::{
     AdvertisedRelayLimits, CompileBudget, DemandKey, Router, RuleRegistry, Shortfall,
@@ -28,7 +28,7 @@ fn atom_on(relays: BTreeSet<RelayUrl>, value: &str) -> ContextualAtom {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(relays.into_iter().collect()),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -41,7 +41,7 @@ fn routeless_outbox_atom(author: PublicKey) -> ContextualAtom {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Auto,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -57,7 +57,7 @@ fn projected_outbox_atom(
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Auto,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: relays
             .into_iter()
             .map(|relay| RoutingEvidence {
@@ -81,7 +81,7 @@ fn pinned_kind_atom(relay: &RelayUrl, kinds: impl IntoIterator<Item = u16>) -> C
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -98,7 +98,7 @@ fn pinned_author_kind_atom(
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }

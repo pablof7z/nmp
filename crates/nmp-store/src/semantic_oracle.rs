@@ -9,10 +9,11 @@
 //! survive recovery without relying on another store implementation as an
 //! oracle.
 
+use nmp_grammar::RelaySessionKey;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, ReadRouting};
 use nostr::secp256k1::rand::{rngs::StdRng, SeedableRng};
 use nostr::secp256k1::SECP256K1;
 use nostr::{Event, EventBuilder, Filter, JsonUtil, Keys, Kind, RelayUrl, Tag, Timestamp};
@@ -48,167 +49,167 @@ struct Checkpoint {
 const EXPECTED_SEMANTIC_TRACE: &[(&str, &str)] = &[
     (
         "insert",
-        "438cd8b97ec0e2be28042aa5ace9bd7fc75bd8a583e3f0c9787b893132608fe2",
+        "e4bfbc122f7096164bf8276d798535fcea08e34fb4386b8441bb845369862037",
     ),
     (
         "duplicate provenance",
-        "3e7ec1339084ef345d59b35677fb3fe242525892540fd209e14523b1d533a13c",
+        "87676751be853bf6c396b3e784533ee895ac29e56d09415b8f09233d73b3dea0",
     ),
     (
         "replaceable first winner",
-        "a68348d2f5d27925b89105f0151b5145cb4af95405b09af3e8fc2ac634b0a4c0",
+        "58b1511d06bbaf7cbbc7941e4c18a3448d4e9869e0107acca423613e3c428cb1",
     ),
     (
         "replaceable conflict",
-        "1df9d7308e5241259493eb3256c27555af8f108bab4baf841872cd9b4da73e82",
+        "5164d12e4dcbf21050842ab106a5d27c17670a426c7daa5cab3e050cbe6fdfb5",
     ),
     (
         "addressable first winner",
-        "d85cf593a1c4e8489b78ced897c9c33a08daf26495d620c8f43a5ec6cee52aa2",
+        "56e102c0d15597d014eab487c1d09df00cbc53b84a2042b6052c3405d8686b62",
     ),
     (
         "addressable conflict",
-        "eca8a0d61721f735e4d4e9e7045c212c3a966abc4fe4b4e633801caf882d725f",
+        "5ae6bbe91419885fff9b5a95c15a2fc1ea1cd724d6bb6a64204c52d47c458bce",
     ),
     (
         "deletion target",
-        "8e9a22dedef5dcf718ddbe4d0bc5c80fe43ef26f566992e9836852f05caa2d7d",
+        "2e67e65dbdc862ff1d4e77659bc148a990e9c17d5085e0bfd4044dc892a3bc9c",
     ),
     (
         "deletion",
-        "3bae52aa6e311be89264014232bc6b823ac8fa830f41d45bbf5a48b0bde35e37",
+        "a8780a6f8cc858f3295f74f1e9f7a2a9416578570281c0497ea6a6f65114a2d6",
     ),
     (
         "deletion before target",
-        "f802b018266aa1490f9e365b5dfad5a3675a7b361ca7aa421444d70c8fc290fc",
+        "bed5462707a8d690fd0ed3d398ec3628459ccb1e011127a3ebb339dc08ef9a67",
     ),
     (
         "tombstoned target refused",
-        "f802b018266aa1490f9e365b5dfad5a3675a7b361ca7aa421444d70c8fc290fc",
+        "bed5462707a8d690fd0ed3d398ec3628459ccb1e011127a3ebb339dc08ef9a67",
     ),
     (
         "expiry indexed",
-        "7168d16aa531fcb41e3233915c78fdf9edd4b8510542fdccaffd4e4956424b48",
+        "75e61755892db7047d219f34bcb56255dc9e9e5e366809246bbd543fb7cb2506",
     ),
     (
         "expiry applied",
-        "f802b018266aa1490f9e365b5dfad5a3675a7b361ca7aa421444d70c8fc290fc",
+        "bed5462707a8d690fd0ed3d398ec3628459ccb1e011127a3ebb339dc08ef9a67",
     ),
     (
         "coverage fact persisted",
-        "582aad6704ef47e5604c53e00f75080c3512faa51f8497bacd22285c3857f7e5",
+        "4818fdab107f95654aa4087a2bbdd8d7ad24b2da02c963d2ce104bfd9bb15e5d",
     ),
     (
         "coverage recorded after facts",
-        "67c3444fc94484ab6e1a88ed79c4f21032fd8dbe4a93a1f636549dd2b4107952",
+        "a469e2ac775af3219f81acbd9037704aeca23db35bb5f9115eef0dc4214af806",
     ),
     (
         "coverage-safe gc",
-        "2a253ec599c7a2159d0477855a75974ed29fbe040c4f4d3be540220c5051b8b2",
+        "696d871fe7b3490150b2fd38fd73940008171e0335fc0e026a2baa3bf20586bf",
     ),
     (
         "maximum coverage fact and claim persisted",
-        "d2303426800c988d08fe682b24ca948766d9723be54dd294089d0b890877d25b",
+        "36a143a231011a2e10c6bf61091933c9228ada217fd4cbd970c16c6cadfa4ce6",
     ),
     (
         "maximum coverage removed with fact",
-        "2a253ec599c7a2159d0477855a75974ed29fbe040c4f4d3be540220c5051b8b2",
+        "696d871fe7b3490150b2fd38fd73940008171e0335fc0e026a2baa3bf20586bf",
     ),
     (
         "pending write accepted",
-        "89d7ad04daf5d3371b54da60839cec7bdf4d295f48451acd9de2839a20bd2965",
+        "d06d5f5b1e9221946c83790cbd39ed6e91700e39fcd4cc97c3c6b18174021b8f",
     ),
     (
         "pending write signed",
-        "7796710791a29258fec0f7c85fdc08eaa12e3dbada5724a37767a40a8a1001e0",
+        "494cc1b7b347f00921ec73f37c64473970601bf210556ddf284923bd0acc9762",
     ),
     (
         "cancellable write accepted",
-        "0d94ee7c4827c3f1d5641032294e82ee5cf4279caa647efe1879a8d801d2c200",
+        "5e17931f507f7bd797f574f4b30cf0bfce0432db78194ff622e1971919b32176",
     ),
     (
         "write cancelled",
-        "2d36c0fdced730f1c5bc8c6600ec74ecd39368aed48135d3881905b8e0e1f3e0",
+        "c1c825d65097e9b714f8ad83d4487c31c3fbc7f9f29c522d560ca9e6d4c7209a",
     ),
     (
         "replaceable delivery accepted",
-        "193c10569dd7bb80a2aa58289fb80cb18bebfad50893219a8d80ae559fba5210",
+        "6553128467db1df7a24a2d0ff2b76c0d7c081d5a76e6902cc160dda5a12b654e",
     ),
     (
         "replaceable delivery superseded",
-        "d058ec28f482f0bf276ff2cea24b459901535a2bddd8a6a173e80fa4fd02f776",
+        "dc72897ea6e4aeeca918c89dea5d4cceb9ac29340860e77ce667e324d0b4d704",
     ),
     (
         "superseding delivery compensated",
-        "a9dd593aed8abfcb3d4682046732ae4bc548604b1d36ae24ab729fa7d8146447",
+        "0c923c9697f4acb8881ec06411540ac9f69bba46d0677669b039eadc9b8de37e",
     ),
     (
         "multi-relay delivery accepted",
-        "e4f65711422f464d12a58cc1ad31c366658ef75ee64849366528b6bf4d5d11be",
+        "e5b67f6ff6f02a1010df04294431863b60405d4b1cca401767381bdb39bfb39a",
     ),
     (
         "multi-relay lanes durable",
-        "5c2e495734ac08203cd09e06254b8b3e7d6ee46acb650e4c9b1ab5d7c66fcea8",
+        "f0f6ed8c77212385a7696060bfdbbbcbce48206fb93ae8f7e73830e060c7dcd8",
     ),
     (
         "ambiguous handoff became outcome unknown",
-        "8a9c9dbc07d719764f053a6e8ab63de430d8e5311989c9b80625fe799adfbe67",
+        "f53037c563191879e52ef99e225bb27b9358fbfddd7931532329c97b2eb52c93",
     ),
     (
         "delivery attempt gave up",
-        "1587bc3a213e7b313afb99ea8f65c67d88f2f5784a7e55fd042d761a7b7f767e",
+        "394e854b2ae889a65a4a4aac4b26303ffd149b4db8f424e700e655e31e2ecc88",
     ),
     (
         "in-flight delivery interrupted",
-        "9cbeb8678476e4bfdf3d2b738848c7ed422682ccb42260c9590b282d52416f1d",
+        "c536ee587ed4d89d926abaf27c92d54db7fa5decfd0a870d3bcc72946698593a",
     ),
     (
         "retry ended in relay rejection",
-        "05e93aae6eac089b08e742a9f8d93687f7635f741ed20dd8a74bfd8084753523",
+        "bd5ef285c7d409854b3d9233bcb39466124146300e5c7af9db7fe53b62662143",
     ),
     (
         "multi-relay terminal obligation closed",
-        "05e93aae6eac089b08e742a9f8d93687f7635f741ed20dd8a74bfd8084753523",
+        "bd5ef285c7d409854b3d9233bcb39466124146300e5c7af9db7fe53b62662143",
     ),
     (
         "publication route durable",
-        "4a417b275884f33462148d18b0b60888a225b71fd3c31ce418896bd198eecadb",
+        "0c2c6063418e2738ba7c892c5e308962654587e5d2d5796368d414b103161989",
     ),
     (
         "publication lanes bootstrapped",
-        "b2fc2d23ab28f651fc3fdcfd1c23bbf78956d8146769c43b64fce956845f9d7b",
+        "a046f70a50f06359286993024680790807866a9ec1457cde9fe6fc5c28c59578",
     ),
     (
         "publication lane eligible",
-        "3ab760f8ec669a0d6c62287e909151040da97f3dc2dfac5e8913292079ba2272",
+        "5514d85f8b2d91678287eb5825510ccceb5723840227bcdf48117fe81bcdff08",
     ),
     (
         "publication attempt started",
-        "83533bff9f96cc04625678dd0b01c566be1b0a2787dea289d8791c7d838143d5",
+        "78c729fbe7b92be454e6a65b971847a66bcb977c175c213f85ef686d3704ec9d",
     ),
     (
         "publication retry scheduled",
-        "1d49dae0a31b25373882d9a7e0478a2e3ca0db41229174f009da1d67c6d78a0c",
+        "d75b3d29ebe135103feb240dbdbec559cbb8ba34bbebafeec7f156aa27b96ddd",
     ),
     (
         "publication retry eligible",
-        "73d21ec206155ac4e17dd821ebe8a62807536aa77ee0d25fa205130d3616f534",
+        "b245df535fa79241707d38f5b74b32d95c36ec635c681b0c9f5438c7f33e0fc7",
     ),
     (
         "publication retry started",
-        "df903b8d6211415b286f6f33d3bdca27f67a0550e9fccfa62be777cf9020c007",
+        "96beac3ade63b22ed0a892b16bd4a8edc9fa80e868b3c786ee13d84b81f132c5",
     ),
     (
         "publication handed off",
-        "484053ad90512913ba8b75d1a27e6af926bf1502d67f030f7f851a206d0cd998",
+        "9bfa80fc5b5468e58444adab0d2fff502ee6a0a6b701f69bc52d5a2897272320",
     ),
     (
         "publication receipt acked",
-        "e581d3ba1ae85d141e9e52fc154d5a4f8ef05b1fa2d5b512d79aa4975572bf39",
+        "a21e687349a033d5af2a7f58aeeef1efc93e4fa0ece69e073b7f26e7fd6cf971",
     ),
     (
         "publication obligation closed",
-        "e581d3ba1ae85d141e9e52fc154d5a4f8ef05b1fa2d5b512d79aa4975572bf39",
+        "a21e687349a033d5af2a7f58aeeef1efc93e4fa0ece69e073b7f26e7fd6cf971",
     ),
 ];
 
@@ -434,7 +435,7 @@ fn coverage_atom(keys: &Keys) -> ContextualAtom {
             limit: None,
         },
         routing: ReadRouting::Auto,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -521,7 +522,7 @@ fn normalized_state(
         .iter()
         .map(|(atom, relay)| {
             let interval = store
-                .get_coverage(coverage_key(atom), relay)
+                .get_coverage(coverage_key(atom), &RelaySessionKey::unauthenticated(relay.clone()))
                 .expect("oracle coverage read");
             json!({
                 "key": blake3::hash(coverage_key(atom).as_bytes()).to_hex().to_string(),
@@ -888,12 +889,12 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         .record_coverage(&[
             (
                 atom.clone(),
-                primary.clone(),
+                RelaySessionKey::unauthenticated(primary.clone()),
                 CoverageInterval::new(Timestamp::from(0), Timestamp::from(300)),
             ),
             (
                 atom.clone(),
-                secondary.clone(),
+                RelaySessionKey::unauthenticated(secondary.clone()),
                 CoverageInterval::new(Timestamp::from(0), Timestamp::from(300)),
             ),
         ])
@@ -929,7 +930,7 @@ fn run_trace(mut harness: Harness, fixture: &TraceFixture) -> Vec<Checkpoint> {
         .store()
         .record_coverage(&[(
             max_atom.clone(),
-            primary.clone(),
+            RelaySessionKey::unauthenticated(primary.clone()),
             CoverageInterval::new(Timestamp::from(u64::MAX), Timestamp::from(u64::MAX)),
         )])
         .unwrap();

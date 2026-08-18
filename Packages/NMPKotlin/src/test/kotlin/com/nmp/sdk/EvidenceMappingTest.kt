@@ -5,7 +5,6 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import uniffi.nmp_ffi.FfiAccessContext
 import uniffi.nmp_ffi.FfiAcquisitionEvidence
 import uniffi.nmp_ffi.FfiAuthPhase
 import uniffi.nmp_ffi.FfiAuthDenialSource
@@ -474,6 +473,6 @@ class EvidenceMappingTest {
         relay: String,
         reconciledThrough: ULong?,
         status: FfiSourceStatus,
-        access: FfiAccessContext = FfiAccessContext.Public,
-    ): FfiSourceEvidence = FfiSourceEvidence(relay, access, reconciledThrough, status)
+        authenticateAs: String? = null,
+    ): FfiSourceEvidence = FfiSourceEvidence(relay, authenticateAs, reconciledThrough, status)
 }

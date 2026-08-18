@@ -21,7 +21,7 @@ mod clock;
 // ---- fixtures ----------------------------------------------------------
 
 fn session_for(relay: &RelayUrl, author: &Keys) -> RelaySessionKey {
-    RelaySessionKey::new(relay.clone(), AccessContext::Nip42(author.public_key()))
+    RelaySessionKey::new(relay.clone(), Some(author.public_key()))
 }
 
 /// Accept and sign one durable narrow write, returning the effects the
@@ -102,7 +102,7 @@ fn durable_worker_oracle(core: &EngineCore) -> BTreeSet<RelaySessionKey> {
         .map(|target| target.session.clone())
         .collect();
     for pending in core.pending.values() {
-        let access = AccessContext::Nip42(pending.signing_pubkey);
+        let access = Some(pending.signing_pubkey);
         expected.extend(
             pending
                 .pending_relays

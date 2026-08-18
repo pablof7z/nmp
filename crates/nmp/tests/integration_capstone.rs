@@ -30,7 +30,7 @@ use nmp_engine::core::{AcquisitionEvidence, RowDelta, SourceStatus};
 use nmp_engine::publish_queue::{RelayState, WriteFact};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{
-    AccessContext, Binding, CacheMode, Demand, Derived, Filter, Freshness, IdentityField,
+    Binding, CacheMode, Demand, Derived, Filter, Freshness, IdentityField,
     ReadRouting, Selector, SetAlgebra, SetOp,
 };
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
@@ -695,7 +695,7 @@ impl AuthPolicy for DenyAuth {
 fn authenticated_demand(selection: Filter, pubkey: nostr::PublicKey) -> Demand {
     Demand {
         selection,
-        access: AccessContext::Nip42(pubkey),
+        authenticate_as: Some(pubkey),
         ..Demand::default()
     }
 }
@@ -812,8 +812,7 @@ fn public_engine_nested_strict_cache_uses_independent_relay_witnesses_before_lim
             limit: Some(2),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![relay_a.clone()]),
-        AccessContext::Public,
+        ReadRouting::Explicit(vec![relay_a.clone()])
     )
     .unwrap();
     inner.cache = CacheMode::Strict;
@@ -827,8 +826,7 @@ fn public_engine_nested_strict_cache_uses_independent_relay_witnesses_before_lim
             }))),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![relay_a]),
-        AccessContext::Public,
+        ReadRouting::Explicit(vec![relay_a])
     )
     .unwrap();
     outer.freshness = Freshness::CacheOnly;

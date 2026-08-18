@@ -29,6 +29,7 @@
 //! its handle is registered leaves residue only in the resolver graph, which
 //! `active_demand` (computed from the handle table) reports as absent.
 
+use nmp_grammar::RelaySessionKey;
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_engine::core::{
@@ -36,7 +37,7 @@ use nmp_engine::core::{
     ObservationId, RowDelta, ShortfallFact,
 };
 use nmp_grammar::{
-    AccessContext, Binding, CacheMode, ContextualAtom, Demand, Filter, Freshness, IdentityField,
+    Binding, CacheMode, ContextualAtom, Demand, Filter, Freshness, IdentityField,
     LiveQuery, LiveQueryError, ReadRouting,
 };
 use nmp_router::WireOp;
@@ -97,8 +98,7 @@ fn host_branch(host: &RelayUrl) -> Demand {
 fn host_branch_of_kind(host: &RelayUrl, kind: u16) -> Demand {
     let mut demand = Demand::new(
         selection_of(kind),
-        ReadRouting::Explicit(vec![host.clone()]),
-        AccessContext::Public,
+        ReadRouting::Explicit(vec![host.clone()])
     )
     .expect("a one-relay pinned set is nonempty");
     demand.cache = CacheMode::Strict;
@@ -300,7 +300,7 @@ fn equal_branches_keep_independent_evidence_entries() {
     let host = relay("shared");
     let mut core = core();
 
-    // Same selection, same routing, same access: only the per-handle
+    // Same selection, same routing, same authenticate_as: only the per-handle
     // freshness policy differs. These two branches may share every atom, wire
     // request and coverage row underneath -- and must STILL be two branches,
     // because collapsing them would silently discard one branch's own policy.
@@ -399,8 +399,7 @@ fn an_unplannable_branch_reports_its_own_shortfall() {
                 .to_hex()]))),
             ..Filter::default()
         },
-        ReadRouting::Auto,
-        AccessContext::Public,
+        ReadRouting::Auto
     )
     .expect("an author-bound outbox demand is constructible");
 
@@ -547,8 +546,7 @@ fn a_reactive_change_moves_every_branch_in_one_frame() {
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![host.clone()]),
-            AccessContext::Public,
+            ReadRouting::Explicit(vec![host.clone()])
         )
         .expect("a reactive pinned demand is constructible")
     };
@@ -983,8 +981,7 @@ fn one_branchs_refresh_failure_retracts_no_sibling_row() {
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![b.clone()]),
-        AccessContext::Public,
+        ReadRouting::Explicit(vec![b.clone()])
     )
     .expect("a reactive pinned demand is constructible");
 
@@ -1059,8 +1056,7 @@ fn max_age_branch(host: &RelayUrl, keys: &Keys) -> Demand {
                 .to_hex()]))),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![host.clone()]),
-        AccessContext::Public,
+        ReadRouting::Explicit(vec![host.clone()])
     )
     .expect("a one-relay pinned set is nonempty");
     demand.freshness = Freshness::MaxAge { seconds: 3_600 };
@@ -1075,7 +1071,7 @@ fn branch_atom(host: &RelayUrl, keys: &Keys) -> ContextualAtom {
             ..nmp_grammar::ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![host.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -1094,7 +1090,7 @@ fn each_redeclared_branch_decides_freshness_from_its_own_stored_coverage() {
         store
             .record_coverage(&[(
                 branch_atom(&a, &keys),
-                a.clone(),
+                RelaySessionKey::unauthenticated(a.clone()),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(99_000u64)),
             )])
             .expect("fixture coverage");

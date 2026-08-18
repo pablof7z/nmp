@@ -37,14 +37,14 @@ use nmp_ffi::nip02::{
 };
 use nmp_ffi::session::{FfiPrivateKey, FfiPublicKey};
 use nmp_ffi::types::{
-    FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthPhase, FfiBinding,
+    FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthPhase, FfiBinding,
     FfiCacheMode, FfiCancelWriteOutcome, FfiDemand, FfiDiagnosticsSnapshot, FfiFilter,
     FfiFreshness, FfiIdentity, FfiLiveQuery, FfiNotSentReason, FfiReadRouting,
     FfiReceiptReattachment, FfiRefuseReason, FfiRelayState, FfiRelayWaiting, FfiRetryCause,
     FfiRowDelta, FfiShortfallFact, FfiSigningState, FfiSourceStatus, FfiStalledWriteStage,
     FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
-use nmp_grammar::{AccessContext, Demand, Derived, ReadRouting, Selector};
+use nmp_grammar::{Demand, Derived, ReadRouting, Selector};
 use nmp_nip02::{
     follow_capability, follow_writes, observe_following, set_following, FollowAvailability,
     FollowChange, FollowObservation, FollowRelationship, FollowSnapshot,
@@ -583,7 +583,7 @@ struct NormRelayDiagnostics {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct NormAuthSession {
     relay: String,
-    access: String,
+    authenticate_as: String,
     transport_generation: u64,
     epoch_sequence: Option<u64>,
     challenge_descriptor: Option<String>,
@@ -831,17 +831,17 @@ fn ffi_auth_diagnostics_phase_name(phase: FfiAuthPhase) -> &'static str {
     }
 }
 
-fn direct_access_name(access: AccessContext) -> String {
-    match access {
-        AccessContext::Public => "public".to_string(),
-        AccessContext::Nip42(public_key) => format!("nip42:{}", public_key.to_hex()),
+fn direct_access_name(authenticate_as: Option<nostr::PublicKey>) -> String {
+    match authenticate_as {
+        None => "public".to_string(),
+        Some(public_key) => format!("nip42:{}", public_key.to_hex()),
     }
 }
 
-fn ffi_access_name(access: FfiAccessContext) -> String {
-    match access {
-        FfiAccessContext::Public => "public".to_string(),
-        FfiAccessContext::Nip42 { public_key } => format!("nip42:{public_key}"),
+fn ffi_access_name(authenticate_as: Option<String>) -> String {
+    match authenticate_as {
+        None => "public".to_string(),
+        Some(public_key) => format!("nip42:{public_key}"),
     }
 }
 
@@ -1286,7 +1286,7 @@ fn normalize_direct_diagnostics(snapshot: DiagnosticsSnapshot, relay: &str) -> N
         .into_iter()
         .map(|session| NormAuthSession {
             relay: normalize_url(session.relay.as_str(), relay),
-            access: direct_access_name(session.access),
+            authenticate_as: direct_access_name(session.authenticate_as),
             transport_generation: session.transport_generation,
             epoch_sequence: session.epoch_sequence,
             challenge_descriptor: session.challenge_hash,
@@ -1378,7 +1378,7 @@ fn normalize_ffi_diagnostics(snapshot: FfiDiagnosticsSnapshot, relay: &str) -> N
         .into_iter()
         .map(|session| NormAuthSession {
             relay: normalize_url(&session.relay, relay),
-            access: ffi_access_name(session.access),
+            authenticate_as: ffi_access_name(session.authenticate_as),
             transport_generation: session.transport_generation,
             epoch_sequence: session.epoch_sequence,
             challenge_descriptor: session.challenge_descriptor,
@@ -1457,7 +1457,7 @@ fn auth_diagnostics_phase_survives_the_ffi_boundary_intact() {
             .enumerate()
             .map(|(index, phase)| AuthDiagnosticsSnapshot {
                 relay: relay.clone(),
-                access: AccessContext::Nip42(public_key),
+                authenticate_as: Some(public_key),
                 transport_generation: 11 + index as u64,
                 epoch_sequence: Some(23 + index as u64),
                 challenge_hash: Some(format!("blake3:challenge-{index}")),
@@ -1534,7 +1534,7 @@ fn ffi_live_query(pubkey: &str, kind: u16) -> FfiLiveQuery {
                 ..FfiFilter::default()
             },
             routing: FfiReadRouting::Auto,
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         }],
@@ -1654,8 +1654,7 @@ fn pinned_contact_list(author: PublicKey, relay: RelayUrl) -> Demand {
             authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![relay]),
-        AccessContext::Public,
+        ReadRouting::Explicit(vec![relay])
     )
     .expect("the contact-list source is pinned to one relay")
 }
@@ -1672,8 +1671,7 @@ fn pinned_follow_feed(author: PublicKey, relay: RelayUrl) -> LiveQuery {
             }))),
             ..Filter::default()
         },
-        ReadRouting::Explicit(relays.into_iter().collect()),
-        AccessContext::Public,
+        ReadRouting::Explicit(relays.into_iter().collect())
     )
     .expect("the derived feed is pinned to the same relay");
     LiveQuery::single(feed)
@@ -2050,7 +2048,7 @@ fn collect_ffi_receipts_until_awaiting_auth(
 }
 
 /// The exact ordered pre-ack facts every durable parity write now exposes.
-/// #8 U2: durable writes ride the cold `AccessContext::Nip42` session
+/// #8 U2: durable writes ride the cold identity-bound session
 /// instead of the already-warm public read session, so the reducer emits
 /// one deterministic `AwaitingRelay` beat between `Routed` and `Sent` (it
 /// schedules the eligible lane in the same turn that dials the session,

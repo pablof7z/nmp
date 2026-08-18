@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, IndexedTagName, ReadRouting};
 use nmp_router::{RelayUrl, Router, RuleRegistry, WireOp};
 use nmp_router_testkit::FixtureRoutingFacts;
 
@@ -39,7 +39,7 @@ fn atom(groups: &[String]) -> ContextualAtom {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(relays().into_iter().collect()),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -218,7 +218,7 @@ fn the_authors_slot_achieves_one_live_sub_with_fresh_transitions() {
                     ..ConcreteFilter::default()
                 },
                 routing: ReadRouting::Explicit(relays().into_iter().collect()),
-                access: AccessContext::Public,
+                authenticate_as: None,
                 routing_evidence: BTreeSet::new(),
             })
             .collect();
@@ -278,7 +278,7 @@ fn limited_identical_except_authors_atoms_each_reach_the_wire() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(relays().into_iter().collect()),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let a = format!("{:064x}", 0xaa);
@@ -357,7 +357,7 @@ fn unlimited_identical_except_authors_atoms_merge_instead_of_colliding() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(relays().into_iter().collect()),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let a = format!("{:064x}", 0xaa);

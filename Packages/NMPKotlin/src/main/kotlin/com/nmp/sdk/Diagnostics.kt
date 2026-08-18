@@ -58,11 +58,10 @@ data class FilterCoverage(val filter: String, val coverage: CoverageInterval?) {
  * a REAL number read off the running engine -- never fabricated/estimated. */
 data class RelayDiagnostics(
     val relay: String,
-    /** The frozen access identity of the physical session these diagnostics
-     * describe (#8): the same relay under [NMPAccessContext.Public] versus a
-     * [NMPAccessContext.Nip42] identity is a distinct session with its own
-     * row. */
-    val access: NMPAccessContext,
+    /** The identity the physical session these diagnostics describe was
+     * bound to (#8): the same relay bound to no identity versus bound to a
+     * key is a distinct session with its own row. */
+    val authenticateAs: String?,
     val wireSubCount: UInt,
     /** This relay's own advertised subscription ceiling, when it publishes
      * one, and how many of our subscriptions it has refused. Capacity
@@ -93,7 +92,7 @@ data class RelayDiagnostics(
         fun from(ffi: FfiRelayDiagnostics): RelayDiagnostics =
             RelayDiagnostics(
                 relay = ffi.relay,
-                access = NMPAccessContext.from(ffi.access),
+                authenticateAs = ffi.authenticateAs,
                 wireSubCount = ffi.wireSubCount,
                 subscriptionBudget = ffi.subscriptionBudget,
                 subscriptionsRefused = ffi.subscriptionsRefused,
@@ -123,7 +122,7 @@ data class RelayDiagnostics(
  * second thing that can disagree with the first. */
 data class AuthDiagnostics(
     val relay: String,
-    val access: NMPAccessContext,
+    val authenticateAs: String?,
     val transportGeneration: ULong,
     val epochSequence: ULong?,
     val challengeDescriptor: String?,
@@ -136,7 +135,7 @@ data class AuthDiagnostics(
         fun from(ffi: FfiAuthDiagnostics): AuthDiagnostics =
             AuthDiagnostics(
                 relay = ffi.relay,
-                access = NMPAccessContext.from(ffi.access),
+                authenticateAs = ffi.authenticateAs,
                 transportGeneration = ffi.transportGeneration,
                 epochSequence = ffi.epochSequence,
                 challengeDescriptor = ffi.challengeDescriptor,

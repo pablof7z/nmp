@@ -1358,7 +1358,7 @@ fn run_connected_inner(
         // Arbitrate a protected generation's first inbound frame before
         // accepting any ordinary outbound command. Control wakeups only
         // buffer commands during this worker-owned interval; they cannot
-        // terminate it or flush ordinary wire. Public sessions skip this
+        // terminate it or flush ordinary wire. session bound to no identitys skip this
         // entire handshake and enter the established read/write loop below.
         let initial_read_deadline = Instant::now() + INITIAL_READ_OBSERVATION_WINDOW;
         loop {
@@ -2458,7 +2458,7 @@ mod tests {
 
     fn ephemeral_target(generation: u64, operation: u64) -> EphemeralTarget {
         EphemeralTarget {
-            session: RelaySessionKey::public(
+            session: RelaySessionKey::unauthenticated(
                 RelayUrl::parse("wss://relay.example").expect("test relay url"),
             ),
             generation,

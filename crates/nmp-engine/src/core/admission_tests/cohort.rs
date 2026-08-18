@@ -67,7 +67,7 @@ fn unbounded_profile_observations_group_without_losing_independent_owners() {
     );
     assert_eq!(filters[0].kinds, Some(BTreeSet::from([0])));
     assert_eq!(filters[0].limit, None);
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     assert_eq!(
         relay_request_observations(&accept_first_request(&mut core, &session, 1)),
         BTreeSet::from([alice_observation, bob_observation])
@@ -121,7 +121,7 @@ fn later_uncovered_demand_opens_a_second_req_without_replacing_the_running_one()
         .unwrap();
     assert_ne!(first_id, second_id);
     assert_eq!(
-        core.router.plan().reqs[&RelaySessionKey::public(relay)].len(),
+        core.router.plan().reqs[&RelaySessionKey::unauthenticated(relay)].len(),
         2
     );
 }
@@ -350,7 +350,7 @@ fn delayed_accepted_handoff_cannot_resurrect_a_fully_withdrawn_request() {
 fn pending_handoff_resolves_the_current_exact_owner_set() {
     for close_first_owner in [false, true] {
         let relay = RelayUrl::parse("wss://admission-pending-request-owners.example").unwrap();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let first = observation_id(&core.handle(EngineMsg::Subscribe(query(
             &relay,
@@ -401,7 +401,7 @@ fn pending_handoff_resolves_the_current_exact_owner_set() {
 #[test]
 fn pending_execution_census_counts_every_revision_queued_under_one_wire_key() {
     let relay = RelayUrl::parse("wss://admission-pending-census.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let observation =
         observation_id(&core.handle(EngineMsg::Subscribe(query(&relay, "same", Freshness::Live))));

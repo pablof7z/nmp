@@ -63,21 +63,20 @@ public struct FilterCoverage: Sendable, Hashable {
 /// actually received per kind, and per-filter coverage state. Every field is
 /// a REAL number read off the running engine -- never fabricated/estimated.
 public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
-    // One relay URL can now host distinct sessions (#8: `.public` vs a
-    // `.nip42` identity), so identity must include the access context or two
-    // rows on the same URL would collide.
+    // One relay URL can host distinct sessions (#8: unauthenticated versus
+    // bound to an identity), so identity must include that key or two rows
+    // on the same URL would collide.
     public var id: String {
-        switch access {
-        case .public: return relay
-        case let .nip42(publicKey): return "\(relay)#nip42:\(publicKey)"
-        }
+        guard let authenticateAs else { return relay }
+        return "\(relay)#nip42:\(authenticateAs)"
     }
 
     public let relay: String
-    /// The frozen access identity of the physical session these diagnostics
-    /// describe (#8): the same relay under `.public` versus a `.nip42`
-    /// identity is a distinct session with its own row.
-    public let access: NMPAccessContext
+    /// The identity this session is bound to, hex; `nil` if bound to none.
+    /// The frozen identity of the physical session these diagnostics describe
+    /// (#8): the same relay unauthenticated versus bound to a key is a
+    /// distinct session with its own row.
+    public let authenticateAs: String?
     public let wireSubCount: UInt32
     /// This relay's own advertised concurrent-subscription budget (NIP-11
     /// `limitation.max_subscriptions`, #931). `nil` means the relay
@@ -109,7 +108,7 @@ public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
 
     init(_ ffi: FfiRelayDiagnostics) {
         relay = ffi.relay
-        access = NMPAccessContext(ffi.access)
+        authenticateAs = ffi.authenticateAs
         wireSubCount = ffi.wireSubCount
         subscriptionBudget = ffi.subscriptionBudget
         subscriptionsRefused = ffi.subscriptionsRefused
@@ -139,7 +138,8 @@ public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
 /// a second thing that can disagree with the first.
 public struct AuthDiagnostics: Sendable, Hashable {
     public let relay: String
-    public let access: NMPAccessContext
+    /// The identity this session is bound to, hex; `nil` if bound to none.
+    public let authenticateAs: String?
     public let transportGeneration: UInt64
     public let epochSequence: UInt64?
     public let challengeDescriptor: String?
@@ -150,7 +150,7 @@ public struct AuthDiagnostics: Sendable, Hashable {
 
     init(_ ffi: FfiAuthDiagnostics) {
         relay = ffi.relay
-        access = NMPAccessContext(ffi.access)
+        authenticateAs = ffi.authenticateAs
         transportGeneration = ffi.transportGeneration
         epochSequence = ffi.epochSequence
         challengeDescriptor = ffi.challengeDescriptor

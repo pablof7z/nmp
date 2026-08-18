@@ -36,22 +36,26 @@ use nostr::{Event, Timestamp};
 /// The `CoverageKey` schema version (#106): folded into every key's HASH
 /// (below) and PREFIXED onto its durable row key
 /// (`RedbStore::coverage_row_key`). The current identity is the full
-/// [`ContextualAtom`] (`source`/`access` folded in), so two Demands differing
-/// only in intended authority never share a coverage row (bug-class ledger
-/// #18's store-side twin of the atom-refcount fix).
+/// [`ContextualAtom`] (routing and the demand's identity folded in), so two
+/// Demands that would authenticate as different keys never share a coverage
+/// row (bug-class ledger #18's store-side twin of the atom-refcount fix).
 ///
 /// It is a schema tag, not a compatibility discriminator: no reader decodes a
 /// different version, and `gc` has no purge pass for one (#867).
-pub const COVERAGE_KEY_VERSION: u8 = 2;
+///
+/// Bumped 2 -> 3 for the durable row-key format change alone. The DIGEST is
+/// byte-identical to version 2 for every value the fold can take, so this
+/// buys no correctness on its own and no aliasing bug motivated it.
+pub const COVERAGE_KEY_VERSION: u8 = 3;
 
 /// The coverage identity of a narrow demand atom: its [`ContextualAtom`]
-/// (selection + source + access, #106) with `since`/`until`/`limit` ERASED
+/// (selection + routing + identity, #106) with `since`/`until`/`limit` ERASED
 /// from the selection, canonically hashed and version-tagged (ruling §1,
 /// refined by Fable's C). Two atoms that differ only in their time window
 /// or result cap hash identically — a floored refetch (`since = T+1`) must
 /// find the SAME row, never a fresh one. Two atoms that differ in
-/// `ReadRouting`/`AccessContext` must NEVER share a row, even with an
-/// otherwise-identical selection.
+/// `ReadRouting`, or in the identity they authenticate as, must NEVER share
+/// a row, even with an otherwise-identical selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CoverageKey(DescriptorHash);
 
@@ -79,14 +83,14 @@ pub(crate) fn window_erase(filter: &ConcreteFilter) -> ConcreteFilter {
     }
 }
 
-/// The coverage key for `atom`'s window-erased shape UNDER its declared
-/// `source`/`access` (ruling §1, #106-widened): version-tagged via
+/// The coverage key for `atom`'s window-erased shape UNDER its `source` and
+/// authenticated identity (ruling §1, #106-widened): version-tagged via
 /// [`COVERAGE_KEY_VERSION`].
 pub fn coverage_key(atom: &ContextualAtom) -> CoverageKey {
     let windowed = ContextualAtom {
         filter: window_erase(&atom.filter),
         routing: atom.routing.clone(),
-        access: atom.access,
+        authenticate_as: atom.authenticate_as,
         routing_evidence: BTreeSet::new(),
     };
     CoverageKey(fold_byte(windowed.hash(), COVERAGE_KEY_VERSION))
@@ -332,7 +336,7 @@ mod tests {
         ContextualAtom {
             filter,
             routing: nmp_grammar::ReadRouting::Auto,
-            access: nmp_grammar::AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         }
     }
@@ -381,7 +385,7 @@ mod tests {
         let auto = ContextualAtom {
             filter: filter.clone(),
             routing: nmp_grammar::ReadRouting::Auto,
-            access: nmp_grammar::AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let explicit = ContextualAtom {
@@ -390,7 +394,7 @@ mod tests {
                 "wss://coverage-anti-alias.example",
             )
             .unwrap()]),
-            access: nmp_grammar::AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         assert_ne!(
@@ -404,21 +408,21 @@ mod tests {
     /// cannot satisfy the identical selection acquired through an
     /// authenticated NIP-42 session (or vice versa).
     #[test]
-    fn coverage_key_differs_for_different_access_context() {
+    fn coverage_key_differs_for_different_session_identity() {
         let filter = cf(&[1], &["aa"], None, None);
-        let public = ContextualAtom {
+        let unauthenticated = ContextualAtom {
             filter: filter.clone(),
             routing: nmp_grammar::ReadRouting::Auto,
-            access: nmp_grammar::AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let authenticated = ContextualAtom {
             filter,
             routing: nmp_grammar::ReadRouting::Auto,
-            access: nmp_grammar::AccessContext::Nip42(nostr::Keys::generate().public_key()),
+            authenticate_as: Some(nostr::Keys::generate().public_key()),
             routing_evidence: BTreeSet::new(),
         };
-        assert_ne!(coverage_key(&public), coverage_key(&authenticated));
+        assert_ne!(coverage_key(&unauthenticated), coverage_key(&authenticated));
     }
 
     #[test]

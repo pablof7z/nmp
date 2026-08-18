@@ -8,9 +8,10 @@
 //! 12) is `RedbStore`-only — it specifically exercises closing and
 //! reopening the same file.
 
+use nmp_grammar::RelaySessionKey;
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, ReadRouting};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, ReadRouting};
 use nmp_store::{
     coverage_key, sentinel_signature, AcceptWrite, AcceptWritePayload, CoverageInterval,
     EventCursor, GcRetentionSet, InsertOutcome, IntentSigState, Provenance, RedbStore,
@@ -93,7 +94,7 @@ fn atom(filter: &ConcreteFilter) -> ContextualAtom {
     ContextualAtom {
         filter: filter.clone(),
         routing: ReadRouting::Auto,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -815,14 +816,14 @@ fn record_coverage_then_get_coverage_roundtrip() {
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
             )])
             .unwrap();
 
         let key = coverage_key(&atom(&s));
         let interval = store
-            .get_coverage(key, &r)
+            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .expect("row should exist");
         assert_eq!(interval.from, Timestamp::from(0u64));
@@ -836,7 +837,7 @@ fn get_coverage_returns_none_when_no_row_recorded() {
         let s = shape(&[1], None);
         let key = coverage_key(&atom(&s));
         assert!(store
-            .get_coverage(key, &relay("wss://r1"))
+            .get_coverage(key, &RelaySessionKey::unauthenticated(relay("wss://r1")))
             .expect("coverage peek")
             .is_none());
     });
@@ -850,7 +851,7 @@ fn coverage_key_is_window_erased_a_floored_refetch_finds_the_same_row() {
         store
             .record_coverage(&[(
                 atom(&unfloored),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
             )])
             .unwrap();
@@ -865,7 +866,7 @@ fn coverage_key_is_window_erased_a_floored_refetch_finds_the_same_row() {
         let key = coverage_key(&atom(&floored));
         assert_eq!(key, coverage_key(&atom(&unfloored)));
         let interval = store
-            .get_coverage(key, &r)
+            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .expect("same row, found via the floored atom's key");
         assert_eq!(interval.through, Timestamp::from(100u64));
@@ -889,7 +890,7 @@ fn limited_fetch_that_never_calls_record_coverage_leaves_get_coverage_none() {
         // point. We only assert the store's side: nothing was ever recorded.
         let key = coverage_key(&atom(&limited_shape));
         assert!(store
-            .get_coverage(key, &relay("wss://r1"))
+            .get_coverage(key, &RelaySessionKey::unauthenticated(relay("wss://r1")))
             .expect("coverage peek")
             .is_none());
     });
@@ -903,7 +904,7 @@ fn coverage_merge_extends_across_two_record_coverage_calls() {
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
             )])
             .unwrap();
@@ -912,13 +913,13 @@ fn coverage_merge_extends_across_two_record_coverage_calls() {
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::from(101u64), Timestamp::from(200u64)),
             )])
             .unwrap();
 
         let key = coverage_key(&atom(&s));
-        let interval = store.get_coverage(key, &r).expect("coverage peek").unwrap();
+        let interval = store.get_coverage(key, &RelaySessionKey::unauthenticated(r.clone())).expect("coverage peek").unwrap();
         assert_eq!(interval.from, Timestamp::from(0u64));
         assert_eq!(interval.through, Timestamp::from(200u64));
     });
@@ -932,7 +933,7 @@ fn coverage_merge_keeps_greater_through_on_disjoint_recording() {
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::from(300u64), Timestamp::from(400u64)),
             )])
             .unwrap();
@@ -940,13 +941,13 @@ fn coverage_merge_keeps_greater_through_on_disjoint_recording() {
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(50u64)),
             )])
             .unwrap();
 
         let key = coverage_key(&atom(&s));
-        let interval = store.get_coverage(key, &r).expect("coverage peek").unwrap();
+        let interval = store.get_coverage(key, &RelaySessionKey::unauthenticated(r.clone())).expect("coverage peek").unwrap();
         assert_eq!(interval.from, Timestamp::from(300u64));
         assert_eq!(interval.through, Timestamp::from(400u64));
     });
@@ -969,7 +970,7 @@ fn explicit_gc_policy_evicts_durable_row_and_lowers_covering_watermark() {
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
             )])
             .unwrap();
@@ -982,7 +983,7 @@ fn explicit_gc_policy_evicts_durable_row_and_lowers_covering_watermark() {
 
         let key = coverage_key(&atom(&s));
         let interval = store
-            .get_coverage(key, &r)
+            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .expect("row should survive, shrunk");
         assert_eq!(interval.from, Timestamp::from(151u64));
@@ -1007,7 +1008,7 @@ fn gc_deletes_watermark_row_when_shrink_empties_it() {
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::from(100u64), Timestamp::from(100u64)),
             )])
             .unwrap();
@@ -1020,7 +1021,7 @@ fn gc_deletes_watermark_row_when_shrink_empties_it() {
 
         let key = coverage_key(&atom(&s));
         assert!(store
-            .get_coverage(key, &r)
+            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .is_none());
     });
@@ -1039,7 +1040,7 @@ fn gc_deletes_coverage_when_evicting_the_maximum_timestamp_boundary() {
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::max(), Timestamp::max()),
             )])
             .unwrap();
@@ -1052,7 +1053,7 @@ fn gc_deletes_coverage_when_evicting_the_maximum_timestamp_boundary() {
         let key = coverage_key(&atom(&s));
         assert!(
             store
-                .get_coverage(key, &r)
+                .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
                 .expect("coverage peek")
                 .is_none(),
             "coverage must not claim the evicted u64::MAX point"
@@ -1129,7 +1130,7 @@ fn gc_coverage_shrink_uses_only_the_max_matching_victim_and_counts_once_per_row(
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
             )])
             .unwrap();
@@ -1147,7 +1148,7 @@ fn gc_coverage_shrink_uses_only_the_max_matching_victim_and_counts_once_per_row(
 
         let key = coverage_key(&atom(&s));
         let interval = store
-            .get_coverage(key, &r)
+            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .expect("row survives, shrunk");
         assert_eq!(interval.from, Timestamp::from(101u64));
@@ -1173,7 +1174,7 @@ fn gc_coverage_shrink_deletes_when_only_the_max_victim_would_empty_the_row() {
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::from(50u64), Timestamp::from(100u64)),
             )])
             .unwrap();
@@ -1185,7 +1186,7 @@ fn gc_coverage_shrink_deletes_when_only_the_max_victim_would_empty_the_row() {
 
         let key = coverage_key(&atom(&s));
         assert!(store
-            .get_coverage(key, &r)
+            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .is_none());
     });
@@ -1212,7 +1213,7 @@ fn gc_coverage_shrink_over_invalidates_a_row_a_victim_never_matched() {
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
             )])
             .unwrap();
@@ -1227,7 +1228,7 @@ fn gc_coverage_shrink_over_invalidates_a_row_a_victim_never_matched() {
 
         let key = coverage_key(&atom(&s));
         let interval = store
-            .get_coverage(key, &r)
+            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .expect("row still proves the upper side");
         assert_eq!(
@@ -1378,7 +1379,7 @@ fn persistence_roundtrip_events_and_coverage_survive_reopen() {
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(150u64)),
             )])
             .unwrap();
@@ -1400,7 +1401,7 @@ fn persistence_roundtrip_events_and_coverage_survive_reopen() {
     assert_eq!(text_results[0].event.id, regular_id);
 
     let interval = store
-        .get_coverage(key, &r)
+        .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
         .expect("coverage peek")
         .expect("coverage survives reopen");
     assert_eq!(interval.from, Timestamp::from(0u64));
@@ -1424,7 +1425,7 @@ fn gc_max_timestamp_coverage_deletion_survives_redb_reopen() {
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::max(), Timestamp::max()),
             )])
             .unwrap();
@@ -1438,7 +1439,7 @@ fn gc_max_timestamp_coverage_deletion_survives_redb_reopen() {
     let store = RedbStore::open(&path).expect("reopen redb store");
     assert!(
         store
-            .get_coverage(key, &r)
+            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .is_none(),
         "the deleted u64::MAX coverage row must not survive reopen"
@@ -1847,14 +1848,14 @@ fn coverage_remains_exact_across_all_retractions_and_only_gc_lowers_it() {
         store
             .record_coverage(&[(
                 atom(&s),
-                r.clone(),
+                RelaySessionKey::unauthenticated(r.clone()),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(300u64)),
             )])
             .unwrap();
 
         let key = coverage_key(&atom(&s));
         let before = store
-            .get_coverage(key, &r)
+            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .expect("row exists");
 
@@ -1865,7 +1866,7 @@ fn coverage_remains_exact_across_all_retractions_and_only_gc_lowers_it() {
             InsertOutcome::Superseded { .. }
         ));
         assert_eq!(
-            store.get_coverage(key, &r).expect("coverage peek"),
+            store.get_coverage(key, &RelaySessionKey::unauthenticated(r.clone())).expect("coverage peek"),
             Some(before),
             "supersession must not touch coverage"
         );
@@ -1873,14 +1874,14 @@ fn coverage_remains_exact_across_all_retractions_and_only_gc_lowers_it() {
         let deletion = deletion_event(&k, vec![Tag::event(deleted_target_id)], 200);
         store.insert(deletion, observed("wss://r1", 2)).unwrap();
         let after_delete = store
-            .get_coverage(key, &r)
+            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .expect("row still exists");
         assert_eq!(before, after_delete, "delete must not touch coverage");
 
         store.expire_due(Timestamp::from(200u64)).unwrap();
         let after_expiry = store
-            .get_coverage(key, &r)
+            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .expect("row still exists");
         assert_eq!(before, after_expiry, "expiry must not touch coverage");
@@ -1911,7 +1912,7 @@ fn coverage_remains_exact_across_all_retractions_and_only_gc_lowers_it() {
             .compensate_write(accepted.journaled_intent_id().expect("pending intent"))
             .expect("compensate pending row");
         assert_eq!(
-            store.get_coverage(key, &r).expect("coverage peek"),
+            store.get_coverage(key, &RelaySessionKey::unauthenticated(r.clone())).expect("coverage peek"),
             Some(before),
             "pre-signature termination must not touch coverage"
         );
@@ -1921,7 +1922,7 @@ fn coverage_remains_exact_across_all_retractions_and_only_gc_lowers_it() {
         let report = store.gc(&GcRetentionSet::new(vec![])).unwrap();
         assert!(report.coverage_rows_shrunk + report.coverage_rows_deleted > 0);
         assert_ne!(
-            store.get_coverage(key, &r).expect("coverage peek"),
+            store.get_coverage(key, &RelaySessionKey::unauthenticated(r.clone())).expect("coverage peek"),
             Some(before),
             "GC must remain the only operation in this matrix that lowers coverage"
         );

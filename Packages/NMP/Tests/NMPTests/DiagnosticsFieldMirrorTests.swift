@@ -84,7 +84,7 @@ final class DiagnosticsFieldMirrorTests: XCTestCase {
     func testRelayDiagnosticsMirrorsEveryFfiField() {
         let ffi = FfiRelayDiagnostics(
             relay: "wss://mirror-fixture.example",
-            access: .public,
+            authenticateAs: nil,
             wireSubCount: 1,
             subscriptionBudget: 1,
             subscriptionsRefused: 1,
@@ -109,7 +109,7 @@ final class DiagnosticsFieldMirrorTests: XCTestCase {
     func testAuthDiagnosticsMirrorsEveryFfiField() {
         let ffi = FfiAuthDiagnostics(
             relay: "wss://mirror-fixture.example",
-            access: .public,
+            authenticateAs: nil,
             transportGeneration: 1,
             epochSequence: nil,
             challengeDescriptor: nil,

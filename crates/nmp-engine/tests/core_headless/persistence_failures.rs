@@ -1,3 +1,4 @@
+use nmp_grammar::RelaySessionKey;
 use super::*;
 use nmp_store::testing;
 
@@ -243,7 +244,7 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
     );
     let atom = ctx_atom(cf(&[1], &[&author.public_key().to_hex()]));
     assert_eq!(
-        core.get_coverage(&atom, &relay).expect("coverage peek"),
+        core.get_coverage(&atom, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage peek"),
         None
     );
 
@@ -285,7 +286,7 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
     );
     let healthy_atom = ctx_atom(cf(&[2], &[&healthy_author.public_key().to_hex()]));
     assert!(core
-        .get_coverage(&healthy_atom, &healthy_relay)
+        .get_coverage(&healthy_atom, &RelaySessionKey::unauthenticated(healthy_relay.clone()))
         .expect("coverage peek")
         .is_some());
 }
@@ -294,7 +295,7 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
 /// URL. Two identical pinned selections therefore keep independent coverage
 /// authority when one runs on Public and the other on `Nip42(author)`.
 #[test]
-fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
+fn failed_event_commit_isolated_by_session_identity_on_the_same_relay() {
     let public_author = Keys::generate();
     let protected_author = Keys::generate();
     let relay = RelayUrl::parse("wss://access-isolation.example.com").unwrap();
@@ -304,17 +305,15 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
         ..Filter::default()
     };
     let public_query = LiveQuery::single(
-        nmp_grammar::Demand::new(selection.clone(), source.clone(), AccessContext::Public)
+        nmp_grammar::Demand::new(selection.clone(), source.clone())
             .expect("public pinned demand"),
     );
-    let protected_query = LiveQuery::single(
-        nmp_grammar::Demand::new(
-            selection,
-            source.clone(),
-            AccessContext::Nip42(protected_author.public_key()),
-        )
-        .expect("protected pinned demand"),
-    );
+    let protected_query = {
+        let mut demand = nmp_grammar::Demand::new(selection, source.clone())
+            .expect("protected pinned demand");
+        demand.authenticate_as = Some(protected_author.public_key());
+        LiveQuery::single(demand)
+    };
     let store = RedbStore::temporary_with_observation_precommit_io()
         .expect("temporary Redb observation-I/O fixture");
     let mut core =
@@ -424,22 +423,22 @@ fn failed_event_commit_isolated_by_access_context_on_the_same_relay() {
     let public_atom = ContextualAtom {
         filter: concrete.clone(),
         routing: source.clone(),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let protected_atom = ContextualAtom {
         filter: concrete,
         routing: source,
-        access: AccessContext::Nip42(protected_author.public_key()),
+        authenticate_as: Some(protected_author.public_key()),
         routing_evidence: BTreeSet::new(),
     };
     assert_eq!(
-        core.get_coverage(&public_atom, &relay)
+        core.get_coverage(&public_atom, &RelaySessionKey::unauthenticated(relay.clone()))
             .expect("coverage peek"),
         None
     );
     assert!(core
-        .get_coverage(&protected_atom, &relay)
+        .get_coverage(&protected_atom, &RelaySessionKey::unauthenticated(relay.clone()))
         .expect("coverage peek")
         .is_some());
 }
@@ -528,7 +527,7 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
     );
     for atom in [&atom_a, &atom_b, &atom_c] {
         assert_eq!(
-            core.get_coverage(atom, &relay).expect("coverage peek"),
+            core.get_coverage(atom, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage peek"),
             None,
             "stale EOSE must not mint coverage after reconstruction"
         );
@@ -551,7 +550,7 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
     );
     for atom in [&atom_a, &atom_b, &atom_c] {
         assert!(
-            core.get_coverage(atom, &relay)
+            core.get_coverage(atom, &RelaySessionKey::unauthenticated(relay.clone()))
                 .expect("coverage peek")
                 .is_some(),
             "the fresh successor must retain coverage authority"
@@ -637,8 +636,7 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
                 kinds: Some(BTreeSet::from([5u16])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay.clone()]),
-            AccessContext::Public,
+            ReadRouting::Explicit(vec![relay.clone()])
         )
         .expect("a literal kind:5 request can be pinned to the fixture relay"),
     );
@@ -704,7 +702,7 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
         ReadRouting::Explicit(vec![relay.clone()]),
     );
     assert!(core
-        .get_coverage(&atom, &relay)
+        .get_coverage(&atom, &RelaySessionKey::unauthenticated(relay.clone()))
         .expect("coverage peek")
         .is_some());
 
@@ -744,7 +742,7 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         store
             .record_coverage(&[(
                 atom_a.clone(),
-                failed_relay.clone(),
+                RelaySessionKey::unauthenticated(failed_relay.clone()),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
             )])
             .expect("seed exact coverage row");
@@ -825,7 +823,7 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         eose_frame(&wire_sub_string(&failed_request.sub_id)),
     ));
     let corrupt_error = core
-        .get_coverage(&atom_a, &failed_relay)
+        .get_coverage(&atom_a, &RelaySessionKey::unauthenticated(failed_relay.clone()))
         .expect_err("the corrupt coverage row must remain unreadable");
     assert_eq!(
         corrupt_error.fault(),
@@ -838,7 +836,7 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         corrupt_error.message()
     );
     assert_eq!(
-        core.get_coverage(&atom_b, &failed_relay)
+        core.get_coverage(&atom_b, &RelaySessionKey::unauthenticated(failed_relay.clone()))
             .expect("coverage peek"),
         None
     );
@@ -853,7 +851,7 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
     ));
     let healthy_atom = ctx_atom(cf(&[1], &[&healthy.public_key().to_hex()]));
     assert!(core
-        .get_coverage(&healthy_atom, &healthy_relay)
+        .get_coverage(&healthy_atom, &RelaySessionKey::unauthenticated(healthy_relay.clone()))
         .expect("coverage peek")
         .is_some());
 }
@@ -1712,7 +1710,7 @@ fn a_failing_publish_queue_deadline_read_is_a_typed_error_not_a_false_none() {
 /// relay plan exists. If the post-admission coverage projection fails, the
 /// engine degrades without replacing that seed with fabricated relay proof.
 ///
-/// `AcquisitionEvidence::sources[..].reconciled_through == None` is a claim
+/// `AcquisitionEvidence::sources[..].reconciled_through.is_none()` is a claim
 /// about what a relay has proven. A store that could not be read has
 /// established no such thing, so it must not be able to render as one.
 #[test]
@@ -1729,7 +1727,7 @@ fn a_failing_post_admission_coverage_peek_keeps_the_immediate_seed() {
         store
             .record_coverage(&[(
                 atom.clone(),
-                relay.clone(),
+                RelaySessionKey::unauthenticated(relay.clone()),
                 CoverageInterval::new(Timestamp::from(10u64), Timestamp::from(20u64)),
             )])
             .expect("seed exact coverage row");
@@ -1750,7 +1748,7 @@ fn a_failing_post_admission_coverage_peek_keeps_the_immediate_seed() {
     {
         let store = RedbStore::open(&path).expect("inspect refused corruption controls");
         assert_eq!(
-            store.get_coverage(key, &relay).unwrap(),
+            store.get_coverage(key, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
             Some(CoverageInterval::new(
                 Timestamp::from(10u64),
                 Timestamp::from(20u64)
@@ -1824,12 +1822,12 @@ fn a_failing_coverage_peek_never_republishes_live_evidence_as_unproven() {
             .record_coverage(&[
                 (
                     atom_a,
-                    relay.clone(),
+                    RelaySessionKey::unauthenticated(relay.clone()),
                     CoverageInterval::new(Timestamp::from(10u64), Timestamp::from(20u64)),
                 ),
                 (
                     atom_b.clone(),
-                    relay.clone(),
+                    RelaySessionKey::unauthenticated(relay.clone()),
                     CoverageInterval::new(Timestamp::from(10u64), Timestamp::from(20u64)),
                 ),
             ])

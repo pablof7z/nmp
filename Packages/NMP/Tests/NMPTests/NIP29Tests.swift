@@ -38,7 +38,7 @@ final class NIP29Tests: XCTestCase {
                 return XCTFail("expected .explicit, got \(branch.routing)")
             }
             XCTAssertEqual(relays, [expectedHost])
-            XCTAssertEqual(branch.access, .public)
+            XCTAssertNil(branch.authenticateAs)
             guard case .literal(let values) = branch.selection.tags["h"] else {
                 return XCTFail("expected an h tag literal binding")
             }

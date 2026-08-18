@@ -22,7 +22,7 @@
 use super::*;
 use crate::auth::{AuthPolicy, AuthPolicyOp, AuthPolicyRegistry, AuthPolicyRequest};
 use nmp_engine::core::{AuthEffect, AuthEpoch, AuthOpToken};
-use nmp_grammar::{AccessContext, RelaySessionKey};
+use nmp_grammar::{RelaySessionKey};
 use nmp_transport::{PoolConfig, RelayHandle};
 use nostr::{Keys, RelayUrl};
 use std::cell::RefCell;
@@ -57,7 +57,7 @@ fn relay_auth_dispatch_delivers_the_epilogue_effect_instead_of_dropping_it() {
 
     let relay = RelayUrl::parse("wss://relay-auth-epilogue.example.com").unwrap();
     let expected_pubkey = Keys::generate().public_key();
-    let session = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(expected_pubkey));
+    let session = RelaySessionKey::new(relay.clone(), Some(expected_pubkey));
 
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
     // Nothing subscribes to or writes through `session`, so

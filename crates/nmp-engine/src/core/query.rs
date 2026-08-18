@@ -3,6 +3,7 @@
 //! This module owns subscription lifetimes, router recompilation, discovery,
 //! NIP-77 handoff/repair, and committed-store mutations projected to observers.
 
+use nmp_grammar::RelaySessionKey;
 use super::attribution::CompletedCoverageClaim;
 use super::observation::StoredEvents;
 use super::*;
@@ -44,7 +45,7 @@ impl CoreState {
     /// commits one request-scoped batch atomically through this door.
     fn record_request_coverage_batch(
         &mut self,
-        batch: &[(ContextualAtom, RelayUrl, CoverageInterval)],
+        batch: &[(ContextualAtom, RelaySessionKey, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
         self.store.record_coverage(batch)
     }
@@ -722,7 +723,7 @@ impl CoreState {
             .claims
             .values()
             .cloned()
-            .map(|atom| (atom, pending.session.relay.clone(), pending.interval))
+            .map(|atom| (atom, pending.session.clone(), pending.interval))
             .collect();
         if let Err(error) = self.record_request_coverage_batch(&batch) {
             #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -897,7 +898,7 @@ impl CoreState {
                     planned
                         .keys()
                         .filter(|session| {
-                            session.access != AccessContext::Public
+                            session.authenticate_as.is_some()
                                 && !self.auth_ready_sessions.contains_key(*session)
                         })
                         .cloned()
@@ -919,7 +920,7 @@ impl CoreState {
                             .planned_read_session_counts_by_relay
                             .entry(session.relay.clone())
                             .or_insert(0) += 1;
-                        if session.access != AccessContext::Public
+                        if session.authenticate_as.is_some()
                             && !self.auth_ready_sessions.contains_key(&session)
                         {
                             effects.push(Effect::EnsureReadRelay(session));
@@ -995,7 +996,7 @@ impl CoreState {
             // `finish_auth_ok`, replays the full planned set on readiness,
             // so nothing is lost), and no CLOSE is needed pre-auth — nothing
             // was ever sent on that socket for this plan to withdraw.
-            if session.access != AccessContext::Public
+            if session.authenticate_as.is_some()
                 && !self.auth_ready_sessions.contains_key(session)
             {
                 continue;
@@ -1029,7 +1030,7 @@ impl CoreState {
                         // about an authenticated session's view.
                         let broad = filter.limit.is_none();
                         match (
-                            broad && session.access == AccessContext::Public,
+                            broad && session.authenticate_as.is_none(),
                             self.prober.probed(&session.relay),
                         ) {
                             (true, Some(probed)) => {
@@ -1700,7 +1701,7 @@ impl CoreState {
         let stale_closes = self.cancel_nip77_repair_for_plan(&plan_sub_id, effects);
         if !stale_closes.is_empty() {
             effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
-                ops: vec![(RelaySessionKey::public(probed.url().clone()), stale_closes)],
+                ops: vec![(RelaySessionKey::unauthenticated(probed.url().clone()), stale_closes)],
             })));
         }
 
@@ -1709,7 +1710,7 @@ impl CoreState {
             ..filter.clone()
         };
         let live_sub_id = self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_LIVE_ROLE, &live_filter);
-        let public_session = RelaySessionKey::public(probed.url().clone());
+        let public_session = RelaySessionKey::unauthenticated(probed.url().clone());
         let metadata = self
             .plan_execution_metadata
             .get(&plan_sub_id)
@@ -1966,7 +1967,7 @@ impl CoreState {
                 self.abandon_sub(prior);
                 effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
                     ops: vec![(
-                        RelaySessionKey::public(handoff.probed.url().clone()),
+                        RelaySessionKey::unauthenticated(handoff.probed.url().clone()),
                         vec![WireOp::Close(prior.clone())],
                     )],
                 })));
@@ -2028,7 +2029,7 @@ impl CoreState {
 
         let neg_sub_id = self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_NEG_ROLE, &neg_filter);
 
-        let public_session = RelaySessionKey::public(probed.url().clone());
+        let public_session = RelaySessionKey::unauthenticated(probed.url().clone());
         let metadata = self
             .plan_execution_metadata
             .get(&plan_sub_id)
@@ -2194,7 +2195,7 @@ impl CoreState {
         match step {
             Ok(NegStep::Continue(next_hex)) => {
                 let attempt_id = self.attempts.mint(RequestAttemptState {
-                    session: RelaySessionKey::public(relay.clone()),
+                    session: RelaySessionKey::unauthenticated(relay.clone()),
                     sub_id: sub_id.clone(),
                     filter_hash,
                     filter,
@@ -2312,7 +2313,7 @@ impl CoreState {
             // -- `coverage_claims` is deliberately empty; it targets exactly the
             // ids negentropy already proved, it is not itself a proof over
             // any atom's shape (the credit it unlocks is `sub_id`'s).
-            let public_session = RelaySessionKey::public(relay.clone());
+            let public_session = RelaySessionKey::unauthenticated(relay.clone());
             self.record_observed_request_with_purpose(
                 RequestSend {
                     session: &public_session,
@@ -2335,7 +2336,7 @@ impl CoreState {
             );
             effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
                 ops: vec![(
-                    RelaySessionKey::public(relay.clone()),
+                    RelaySessionKey::unauthenticated(relay.clone()),
                     vec![WireOp::Req(backfill_sub, backfill)],
                 )],
             })));
@@ -2355,11 +2356,11 @@ impl CoreState {
         relay: &RelayUrl,
         effects: &mut Vec<Effect>,
     ) -> Option<BTreeSet<CoverageKey>> {
-        // Negentropy sessions are opened exclusively on the Public session
+        // Negentropy sessions are opened exclusively on the session bound to no identity
         // (#8), so their credit resolves through the same Public-session
         // attribution key `open_neg_session` recorded under.
         let attributed = self.attribution.attribute_correlated_completion(
-            &RelaySessionKey::public(relay.clone()),
+            &RelaySessionKey::unauthenticated(relay.clone()),
             &wire_sub_id_string(sub_id),
             attribution_send,
             completed_at,
@@ -2390,7 +2391,13 @@ impl CoreState {
 
         let mut batch = Vec::with_capacity(claims.len());
         for claim in &claims {
-            batch.push((claim.atom.clone(), relay.clone(), claim.interval));
+            // Negentropy runs only on the connection bound to nobody (#8),
+            // the same session `open_neg_session` recorded attribution under.
+            batch.push((
+                claim.atom.clone(),
+                RelaySessionKey::unauthenticated(relay.clone()),
+                claim.interval,
+            ));
         }
 
         if let Err(error) = self.record_request_coverage_batch(&batch) {
@@ -2510,7 +2517,7 @@ impl CoreState {
             .cloned()
             .expect("a fallback role is derived from an installed plan request");
         let evidence_demands = metadata.owner_demands.clone();
-        let public_session = RelaySessionKey::public(relay.clone());
+        let public_session = RelaySessionKey::unauthenticated(relay.clone());
         self.record_observed_request_with_purpose(
             RequestSend {
                 session: &public_session,
@@ -2533,7 +2540,7 @@ impl CoreState {
         );
         ops.push(WireOp::Req(backlog_sub_id, filter));
         effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
-            ops: vec![(RelaySessionKey::public(relay), ops)],
+            ops: vec![(RelaySessionKey::unauthenticated(relay), ops)],
         })));
         effects.push(Effect::DiagnosticsChanged);
     }

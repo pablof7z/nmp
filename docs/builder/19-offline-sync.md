@@ -20,7 +20,7 @@ not collapse them into `syncHealth`, `synced`, or global completeness.
 ## Watermarks are scoped evidence
 
 EOSE or a completed reconciliation proves that one relay finished one request
-shape for one window under one source/access context. Persisting that evidence
+shape for one window under one source/identity. Persisting that evidence
 supports restart, incremental acquisition, diagnostics, and avoiding redundant
 work.
 

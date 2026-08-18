@@ -222,14 +222,14 @@ receipt.
 
 A **source** is a place the chosen read policy consults for replaceable state.
 A **source-qualified current event** is the current replacement winner observed
-under that explicit source plan and access context.
+under that explicit source plan and authenticated identity.
 
 A **source plan** is that explicit bounded read policy: which relays and access
 identities count, what evidence is required from them, and when the plan is
 **closed**. Closed means the policy expects no more source work for this
 operation; it does not mean the network is globally complete.
 
-An **access context** is the relay-facing identity under which a query or write
+An **authenticated identity** is the relay-facing identity under which a query or write
 occurs—for example, unauthenticated public access or NIP-42 authentication as
 pubkey P. Evidence and relay responses obtained under different access
 contexts are not interchangeable merely because the relay URL is the same.
@@ -755,7 +755,7 @@ E2 receives current delivery work.
 
 Semantic replay needs a base, but Nostr offers no authoritative global read.
 The app or capability therefore selects a bounded source plan: the exact relays,
-authors, access contexts, and settlement evidence it considers sufficient.
+authors, authenticated identities, and settlement evidence it considers sufficient.
 
 ### 7.1 Source plan and destination plan are different
 
@@ -1356,7 +1356,7 @@ destination. Source evidence and destination policy remain separate inputs.
 
 ### 13.4 Each relay destination is one event-qualified obligation
 
-For each exact `(event id, relay, access context)`, the engine records a
+For each exact `(event id, relay, authenticated identity)`, the engine records a
 progressive state such as:
 
 - waiting for connection capacity;

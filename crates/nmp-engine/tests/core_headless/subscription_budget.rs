@@ -29,8 +29,7 @@ fn limited_pinned_query(kind: u16) -> LiveQuery {
                 limit: Some(10),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay()]),
-            AccessContext::Public,
+            ReadRouting::Explicit(vec![relay()])
         )
         .expect("pinned demand with a nonempty relay set is constructible"),
     )

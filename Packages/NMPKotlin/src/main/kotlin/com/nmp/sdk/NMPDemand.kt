@@ -7,7 +7,6 @@
 
 package com.nmp.sdk
 
-import uniffi.nmp_ffi.FfiAccessContext
 import uniffi.nmp_ffi.FfiCacheMode
 import uniffi.nmp_ffi.FfiDemand
 import uniffi.nmp_ffi.FfiFreshness
@@ -49,31 +48,6 @@ sealed class NMPReadRouting {
             when (ffi) {
                 is FfiReadRouting.Auto -> Auto
                 is FfiReadRouting.Explicit -> Explicit(ffi.relays)
-            }
-    }
-}
-
-/** `nmp_grammar::AccessContext` mirror. Closed vocabulary: an unauthenticated
- * [Public] connection, or NIP-42 authentication against one stable expected
- * public key (hex). The [Nip42] identity is frozen in the demand; changing the
- * current account never redirects it (#8). Modelled as a sealed class rather
- * than an enum so the authenticated variant can carry its expected key. */
-sealed class NMPAccessContext {
-    object Public : NMPAccessContext()
-
-    data class Nip42(val publicKey: String) : NMPAccessContext()
-
-    fun toFfi(): FfiAccessContext =
-        when (this) {
-            is Public -> FfiAccessContext.Public
-            is Nip42 -> FfiAccessContext.Nip42(publicKey)
-        }
-
-    companion object {
-        fun from(ffi: FfiAccessContext): NMPAccessContext =
-            when (ffi) {
-                is FfiAccessContext.Public -> Public
-                is FfiAccessContext.Nip42 -> Nip42(ffi.publicKey)
             }
     }
 }
@@ -130,7 +104,8 @@ sealed class NMPFreshness {
 }
 
 /** The full live-query declaration a dev supplies -- `selection + routing +
- * access + cache + freshness` (`nmp_grammar::Demand` mirror, #106/#107/#565).
+ * authenticateAs + cache + freshness` (`nmp_grammar::Demand` mirror,
+ * #106/#107/#565).
  *
  * Every parameter but [selection] defaults, so the ordinary declaration is
  * the selection and nothing else: `NMPDemand(filter)` routes `Auto`. */
@@ -139,7 +114,13 @@ data class NMPDemand(
     /** Where this demand's reads come from. Defaults to [NMPReadRouting.Auto]:
      * an app that says nothing gets NMP's routing. */
     val routing: NMPReadRouting = NMPReadRouting.Auto,
-    val access: NMPAccessContext = NMPAccessContext.Public,
+    /** The identity these reads authenticate as, a 32-byte hex public key.
+     * `null` -- the default and the ordinary case -- reads on the connection
+     * bound to no identity, which today never authenticates: a relay's NIP-42
+     * challenge on such a connection is currently dropped rather than routed
+     * to the installed auth policy (issue #1889). A non-null key pins these
+     * reads to a session that authenticates as it. */
+    val authenticateAs: String? = null,
     val cache: NMPCacheMode = NMPCacheMode.Agnostic,
     val freshness: NMPFreshness = NMPFreshness.Live,
 ) {
@@ -147,7 +128,7 @@ data class NMPDemand(
         FfiDemand(
             selection = selection.toFfi(),
             routing = routing.toFfi(),
-            access = access.toFfi(),
+            authenticateAs = authenticateAs,
             cache = cache.toFfi(),
             freshness = freshness.toFfi(),
         )
@@ -157,7 +138,7 @@ data class NMPDemand(
             NMPDemand(
                 selection = NMPFilter.from(ffi.selection),
                 routing = NMPReadRouting.from(ffi.routing),
-                access = NMPAccessContext.from(ffi.access),
+                authenticateAs = ffi.authenticateAs,
                 cache = NMPCacheMode.from(ffi.cache),
                 freshness = NMPFreshness.from(ffi.freshness),
             )

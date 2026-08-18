@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use nmp_engine::core::{HistoryQuery, RowDelta};
 use nmp_grammar::LiveQuery;
-use nmp_grammar::{AccessContext, Binding, Demand, Filter, ReadRouting};
+use nmp_grammar::{Binding, Demand, Filter, ReadRouting};
 use nmp_runtime::{EngineThread, HistoryReceiver, RowsMsg, RowsReceiver};
 use nmp_store::RedbStore;
 use nmp_transport::PoolConfig;
@@ -664,8 +664,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let selection = corpus.selection.clone();
     let demand = Demand::new(
         selection.clone(),
-        ReadRouting::Explicit(relay_urls.iter().cloned().collect()),
-        AccessContext::Public,
+        ReadRouting::Explicit(relay_urls.iter().cloned().collect())
     )?;
     #[cfg(feature = "bench-instrumentation")]
     nmp_engine::ingest_attribution::reset();

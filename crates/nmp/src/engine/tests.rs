@@ -654,7 +654,6 @@ fn loopback_relay_reaches_the_facade_transport_pool_without_opt_in() {
                 ..crate::Filter::default()
             },
             crate::ReadRouting::Explicit(vec![relay]),
-            crate::AccessContext::Public,
         )
         .expect("build pinned local-relay demand"),
     );

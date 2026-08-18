@@ -224,7 +224,7 @@ committed lane state is terminal    -> remove relay
 - sessions referenced by in-flight attempt correlations.
 
 It maps each relay to a `RelaySessionKey` using the write's signing identity and
-NIP-42 access context. The URL alone is not an identity: the same relay URL
+NIP-42 authenticated identity. The URL alone is not an identity: the same relay URL
 under Public access or different authenticated accounts must not be
 accidentally merged.
 

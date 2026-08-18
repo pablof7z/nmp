@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use nostr::{EventId, JsonUtil, RelayUrl, Timestamp};
 
-use nmp_grammar::{AccessContext, RelaySessionKey};
+use nmp_grammar::{RelaySessionKey};
 use nmp_router::{Diagnostics, Lane, RelayPlan, WireReq};
 use nmp_store::{CoverageInterval, CoverageKey, PersistenceError};
 
@@ -56,7 +56,7 @@ pub struct FilterCoverageEntry {
 pub struct RelayDiagnosticsSnapshot {
     pub relay: RelayUrl,
     /// Frozen access identity of the physical session this row describes.
-    pub access: AccessContext,
+    pub authenticate_as: Option<nostr::PublicKey>,
     pub wire_sub_count: usize,
     /// This relay's own advertised concurrent-subscription budget (NIP-11
     /// `limitation.max_subscriptions`, #931). `None` means the relay
@@ -115,7 +115,7 @@ pub struct RelayDiagnosticsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthDiagnosticsSnapshot {
     pub relay: RelayUrl,
-    pub access: AccessContext,
+    pub authenticate_as: Option<nostr::PublicKey>,
     pub transport_slot: u32,
     pub transport_generation: u64,
     pub epoch_sequence: Option<u64>,
@@ -336,7 +336,7 @@ pub(crate) fn build(
     diag: &Diagnostics,
     plan: &RelayPlan,
     events_by_session_kind: &HashMap<RelaySessionKey, BTreeMap<u16, u64>>,
-    get_coverage: impl Fn(&RelayUrl, CoverageKey) -> Result<Option<CoverageInterval>, PersistenceError>,
+    get_coverage: impl Fn(&RelaySessionKey, CoverageKey) -> Result<Option<CoverageInterval>, PersistenceError>,
 ) -> DiagnosticsSnapshot {
     // A coverage read that could not answer is kept as the snapshot's own
     // store-degradation fact rather than rendered as `coverage: None`
@@ -362,7 +362,7 @@ pub(crate) fn build(
             .flatten()
             .map(|req| {
                 let text = req.filter.to_nostr().as_json();
-                let coverage = match request_coverage(&session.relay, req, &get_coverage) {
+                let coverage = match request_coverage(session, req, &get_coverage) {
                     Ok(coverage) => coverage,
                     Err(error) => {
                         coverage_unreadable.get_or_insert_with(|| error.to_string());
@@ -384,7 +384,7 @@ pub(crate) fn build(
 
         relays.push(RelayDiagnosticsSnapshot {
             relay: session.relay.clone(),
-            access: session.access,
+            authenticate_as: session.authenticate_as,
             wire_sub_count: rd.wire_sub_count,
             subscription_budget: rd.subscription_budget,
             subscriptions_refused: rd.subscriptions_refused,
@@ -460,19 +460,19 @@ pub(crate) fn stalled_write_id(intent_id: u64, frozen: &EventId) -> String {
 /// intersection shared by ALL coverage_claims atoms; an absent atom row or disjoint
 /// intervals yields `None` rather than fabricating a wire-filter watermark.
 fn request_coverage(
-    relay: &RelayUrl,
+    session: &RelaySessionKey,
     req: &WireReq,
-    get_coverage: &impl Fn(&RelayUrl, CoverageKey) -> Result<Option<CoverageInterval>, PersistenceError>,
+    get_coverage: &impl Fn(&RelaySessionKey, CoverageKey) -> Result<Option<CoverageInterval>, PersistenceError>,
 ) -> Result<Option<CoverageInterval>, PersistenceError> {
     let mut keys = req.coverage_claims.iter().copied();
     let Some(first_key) = keys.next() else {
         return Ok(None);
     };
-    let Some(mut common) = get_coverage(relay, first_key)? else {
+    let Some(mut common) = get_coverage(session, first_key)? else {
         return Ok(None);
     };
     for key in keys {
-        let Some(next) = get_coverage(relay, key)? else {
+        let Some(next) = get_coverage(session, key)? else {
             return Ok(None);
         };
         let intersection = CoverageInterval {

@@ -19,7 +19,7 @@ use super::*;
 // ---- fixtures ----------------------------------------------------------
 
 fn session_for(relay: &RelayUrl, author: &Keys) -> RelaySessionKey {
-    RelaySessionKey::new(relay.clone(), AccessContext::Nip42(author.public_key()))
+    RelaySessionKey::new(relay.clone(), Some(author.public_key()))
 }
 
 /// Accept and sign one durable narrow write, returning the effects the

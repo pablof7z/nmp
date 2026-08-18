@@ -1,13 +1,14 @@
 //! [`Demand`] — the full live-query identity (#106,
 //! `docs/design/query-demand-and-evidence.md`): `selection + routing +
-//! access`, not filter-only. Two queries with the same [`Filter`] but
+//! authenticated identity`, not filter-only. Two queries with the same [`Filter`] but
 //! different intended routing must never collapse to the same atom/
 //! refcount/coverage/attribution identity — that collapse (bug-class ledger
 //! #18) is exactly what conflating "what rows match" with "where reads come
 //! from" caused.
 //!
-//! [`ReadRouting`]/[`AccessContext`] are CLOSED vocabularies (VISION
-//! P4-style): extend the enum, never admit a free-form config string.
+//! [`ReadRouting`] is a CLOSED vocabulary (VISION P4-style): extend the enum,
+//! never admit a free-form config string. Authenticated identity is NOT a
+//! vocabulary — it is an optional public key, absent by default.
 
 use crate::binding::Filter;
 
@@ -52,39 +53,51 @@ pub enum ReadRouting {
     Explicit(Vec<nostr::RelayUrl>),
 }
 
-/// The connection-scoped access/AUTH context a [`Demand`] carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum AccessContext {
-    /// An unauthenticated relay connection. It never shares a physical
-    /// session or acquisition evidence with an authenticated context.
-    #[default]
-    Public,
-    /// Authenticate the exact relay session with this explicit identity.
-    /// The value is fixed in the demand; changing the engine's active account
-    /// cannot redirect it.
-    Nip42(nostr::PublicKey),
-}
-
-/// The complete identity of one physical relay session.
+/// The complete identity of one physical relay session: a URL plus the
+/// identity that session is bound to.
 ///
-/// NIP-42 visibility is connection-scoped, so a URL without its frozen
-/// access context is never a sufficient key for planning, transport,
+/// `Some(key)` is a session that authenticates as `key`. `None` is the
+/// ordinary connection, bound to nobody.
+///
+/// What `None` means TODAY, exactly: such a connection never authenticates.
+/// `CoreState::on_auth_challenge` returns immediately for it, so a relay's
+/// challenge is dropped rather than routed to the installed policy. Making
+/// that challenge reach the policy — so that a connection can acquire an
+/// identity instead of being born with one — is issue #1889, and it is not
+/// done here. Until it is, an identity is only ever supplied up front: by a
+/// write, which knows the key it is publishing as, or by a read that names
+/// an override.
+///
+/// One websocket carries at most one NIP-42 identity, which is why this —
+/// and not the URL alone — is the session key: two accounts publishing to
+/// the same relay concurrently are genuinely two sockets (`nmp-engine`'s
+/// `same_url_keeps_distinct_signing_identities_in_worker_demand`). NIP-42
+/// visibility is connection-scoped, so a URL without the identity its socket
+/// is bound to is never a sufficient key for planning, transport,
 /// attribution, replay, or coverage.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RelaySessionKey {
     pub relay: nostr::RelayUrl,
-    pub access: AccessContext,
+    pub authenticate_as: Option<nostr::PublicKey>,
 }
 
 impl RelaySessionKey {
     #[must_use]
-    pub const fn new(relay: nostr::RelayUrl, access: AccessContext) -> Self {
-        Self { relay, access }
+    pub const fn new(
+        relay: nostr::RelayUrl,
+        authenticate_as: Option<nostr::PublicKey>,
+    ) -> Self {
+        Self {
+            relay,
+            authenticate_as,
+        }
     }
 
+    /// The ordinary connection, bound to no identity. This is what every
+    /// read plans against; it is not a category an app selects.
     #[must_use]
-    pub const fn public(relay: nostr::RelayUrl) -> Self {
-        Self::new(relay, AccessContext::Public)
+    pub const fn unauthenticated(relay: nostr::RelayUrl) -> Self {
+        Self::new(relay, None)
     }
 }
 
@@ -135,11 +148,12 @@ pub enum Freshness {
 }
 
 /// The full live-query declaration. Its semantic identity is
-/// `selection + routing + access` (#106); `cache` and `freshness` remain
-/// per-handle policy axes.
+/// `selection + routing + authenticated identity` (#106); `cache` and
+/// `freshness` remain per-handle policy axes.
 /// `selection` is pure `Filter` — no context field is ever added to `Filter`
-/// itself, keeping the grammar's own encoding/hashing untouched; `routing`/
-/// `access` fold into identity one level up, at [`crate::ContextualAtom`].
+/// itself, keeping the grammar's own encoding/hashing untouched; `routing`
+/// and the resolved identity fold into identity one level up, at
+/// [`crate::ContextualAtom`].
 ///
 /// Every field defaults, so the ordinary declaration is the selection and
 /// nothing else:
@@ -161,7 +175,20 @@ pub struct Demand {
     /// Where this demand's reads come from. Defaults to
     /// [`ReadRouting::Auto`]: an app that says nothing gets NMP's routing.
     pub routing: ReadRouting,
-    pub access: AccessContext,
+    /// The identity this demand's reads authenticate as. `None` — the
+    /// default, and the overwhelmingly ordinary case — reads on the
+    /// connection bound to nobody, which today never authenticates (see
+    /// [`RelaySessionKey`] for exactly what that means and for the issue
+    /// that changes it). `Some(key)` pins the reads to a session that
+    /// authenticates as `key`.
+    ///
+    /// Carried verbatim into [`crate::ContextualAtom`] and from there into
+    /// the session key: nothing resolves it, and no current account is
+    /// consulted anywhere on this path.
+    ///
+    /// A defaulted field, never a constructor argument — the common case says
+    /// nothing (`docs/internals/writes/identity.md`).
+    pub authenticate_as: Option<nostr::PublicKey>,
     /// Orthogonal to `routing`/`access` (see [`CacheMode`]'s doc) — a
     /// sibling field, deliberately excluded from `ContextualAtom`'s hashed
     /// identity.
@@ -199,10 +226,12 @@ impl std::fmt::Display for DemandError {
 impl std::error::Error for DemandError {}
 
 impl Demand {
-    /// The validating constructor, for the `routing`/`access` combinations
-    /// the plain `Demand { selection, ..Demand::default() }` declaration
-    /// does not cover -- [`ReadRouting::Explicit`], and any routing under a
-    /// NIP-42 [`AccessContext`].
+    /// The validating constructor, for the one combination the plain
+    /// `Demand { selection, ..Demand::default() }` declaration does not
+    /// cover -- [`ReadRouting::Explicit`], whose relay set must be validated
+    /// and normalized. `authenticate_as` is a defaulted FIELD, not an
+    /// argument here: taxing every caller to write `None` is exactly the
+    /// ceremony `docs/internals/writes/identity.md` exists to delete.
     ///
     /// Normalizes an `Explicit` relay set on the way in: sorted and
     /// deduplicated, so one routing intent has exactly ONE representation.
@@ -212,11 +241,7 @@ impl Demand {
     /// normalization `Explicit([b, a])` and `Explicit([a, b])` would be two
     /// distinct atoms, two refcount entries and two wire subscriptions for
     /// one demand.
-    pub fn new(
-        selection: Filter,
-        routing: ReadRouting,
-        access: AccessContext,
-    ) -> Result<Self, DemandError> {
+    pub fn new(selection: Filter, routing: ReadRouting) -> Result<Self, DemandError> {
         let routing = match routing {
             ReadRouting::Auto => ReadRouting::Auto,
             ReadRouting::Explicit(relays) if relays.is_empty() => {
@@ -231,7 +256,7 @@ impl Demand {
         Ok(Self {
             selection,
             routing,
-            access,
+            authenticate_as: None,
             cache: CacheMode::Agnostic,
             freshness: Freshness::Live,
         })
@@ -242,8 +267,8 @@ impl Demand {
     /// (`ContextualAtom`) -- `cache` is deliberately excluded (see
     /// [`CacheMode`]'s doc), which is what makes #107's addition of that
     /// field a one-line, identity-neutral change.
-    pub fn atom_context(&self) -> (ReadRouting, AccessContext) {
-        (self.routing.clone(), self.access)
+    pub fn atom_context(&self) -> (ReadRouting, Option<nostr::PublicKey>) {
+        (self.routing.clone(), self.authenticate_as)
     }
 }
 
@@ -271,7 +296,7 @@ mod tests {
             ..Demand::default()
         };
         assert_eq!(demand.routing, ReadRouting::Auto);
-        assert_eq!(demand.access, AccessContext::Public);
+        assert_eq!(demand.authenticate_as, None);
         assert_eq!(demand.cache, CacheMode::Agnostic);
         assert_eq!(demand.freshness, Freshness::Live);
     }
@@ -288,8 +313,7 @@ mod tests {
                 kinds: Some(BTreeSet::from([1u16])),
                 ..Filter::default()
             },
-            ReadRouting::Auto,
-            AccessContext::Public,
+            ReadRouting::Auto
         )
         .expect("Auto is total");
         let author_bearing = Demand::new(
@@ -298,8 +322,7 @@ mod tests {
                 authors: Some(Binding::Literal(BTreeSet::from(["a".repeat(64)]))),
                 ..Filter::default()
             },
-            ReadRouting::Auto,
-            AccessContext::Public,
+            ReadRouting::Auto
         )
         .expect("Auto is total");
         assert_eq!(authorless.routing, ReadRouting::Auto);
@@ -351,8 +374,7 @@ mod tests {
         };
         let explicit = Demand::new(
             selection.clone(),
-            ReadRouting::Explicit(vec![relay("relay.example")]),
-            AccessContext::Public,
+            ReadRouting::Explicit(vec![relay("relay.example")])
         )
         .expect("a nonempty explicit relay set is legal");
 
@@ -370,8 +392,7 @@ mod tests {
                 kinds: Some(BTreeSet::from([1u16])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(Vec::new()),
-            AccessContext::Public,
+            ReadRouting::Explicit(Vec::new())
         )
         .unwrap_err();
         assert_eq!(err, DemandError::ExplicitRequiresNonemptyRelaySet);
@@ -384,8 +405,7 @@ mod tests {
                 kinds: Some(BTreeSet::from([1u16])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay("relay.example")]),
-            AccessContext::Public,
+            ReadRouting::Explicit(vec![relay("relay.example")])
         )
         .expect("a nonempty explicit relay set is legal");
         assert_eq!(
@@ -410,14 +430,12 @@ mod tests {
                 relay("b.example"),
                 relay("a.example"),
                 relay("b.example"),
-            ]),
-            AccessContext::Public,
+            ])
         )
         .expect("a nonempty explicit relay set is legal");
         let canonical = Demand::new(
             selection,
-            ReadRouting::Explicit(vec![relay("a.example"), relay("b.example")]),
-            AccessContext::Public,
+            ReadRouting::Explicit(vec![relay("a.example"), relay("b.example")])
         )
         .expect("a nonempty explicit relay set is legal");
 
@@ -443,7 +461,7 @@ mod tests {
         demand.freshness = Freshness::MaxAge { seconds: 14_400 };
         assert_eq!(
             demand.atom_context(),
-            (ReadRouting::Auto, AccessContext::Public)
+            (ReadRouting::Auto, None)
         );
         assert_eq!(demand.atom_context(), context);
     }

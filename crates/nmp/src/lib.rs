@@ -208,7 +208,7 @@ pub use subscription::{
 // the invented category they named; see
 // `docs/internals/conventions/naming-no-invented-categories.md` section 3.
 pub use nmp_grammar::{
-    AccessContext, Binding, CacheMode, Demand, DemandError, Derived, Filter, Freshness,
+    Binding, CacheMode, Demand, DemandError, Derived, Filter, Freshness,
     IdentityField, IndexedTagName, LiveQuery, LiveQueryError, ReadRouting, Selector, SetAlgebra,
     SetOp,
 };

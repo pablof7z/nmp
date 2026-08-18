@@ -58,7 +58,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ReadRouting};
+use nmp_grammar::{ConcreteFilter, ReadRouting};
 use nmp_router::SubId;
 use nostr::{EventId, RelayUrl};
 
@@ -205,7 +205,7 @@ impl Prober {
             relay.clone(),
             &filter,
             &ReadRouting::Auto,
-            AccessContext::Public,
+            None,
         );
         let wire_id = crate::core::wire_sub_id_string(&sub_id);
 

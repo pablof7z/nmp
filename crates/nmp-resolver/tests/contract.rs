@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, DemandDelta,
+    Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, DemandDelta,
     DemandOp, Derived, Filter, Freshness, IdentityField, IndexedTagName, ReadRouting,
     RoutingEvidence, RoutingEvidenceKind, Selector, SetAlgebra, SetOp,
 };
@@ -74,7 +74,7 @@ fn atom(filter: ConcreteFilter, routing: ReadRouting) -> ContextualAtom {
     ContextualAtom {
         filter,
         routing,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -558,8 +558,7 @@ fn derived_inner_strict_cache_filters_provenance_before_limit() {
             limit: Some(2),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![pinned.clone()]),
-        AccessContext::Public,
+        ReadRouting::Explicit(vec![pinned.clone()])
     )
     .unwrap();
     inner.cache = CacheMode::Strict;
@@ -627,8 +626,7 @@ fn derived_inner_agnostic_cache_accepts_rows_from_any_provenance_before_limit() 
             limit: Some(1),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![pinned]),
-        AccessContext::Public,
+        ReadRouting::Explicit(vec![pinned])
     )
     .unwrap();
     let outer = Filter {
@@ -710,8 +708,7 @@ fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
                 kinds: Some(BTreeSet::from([1u16])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![pinned.clone()]),
-            AccessContext::Public,
+            ReadRouting::Explicit(vec![pinned.clone()])
         )
         .unwrap();
         inner.cache = cache;
@@ -778,7 +775,7 @@ fn derived_inner_cache_policies_do_not_cross_contaminate_reactive_recompute() {
 /// Neither context may inherit or overwrite the other, including on identity
 /// reroot.
 #[test]
-fn derived_inner_and_outer_demands_keep_independent_source_and_access_contexts() {
+fn derived_inner_and_outer_demands_keep_independent_source_and_identities() {
     let mut h = Harness::new();
     let a = Keys::generate();
     let b = Keys::generate();
@@ -791,8 +788,7 @@ fn derived_inner_and_outer_demands_keep_independent_source_and_access_contexts()
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
         },
-        ReadRouting::Auto,
-        AccessContext::Public,
+        ReadRouting::Auto
     )
     .unwrap();
     let mut outer_tags = BTreeMap::new();
@@ -803,23 +799,26 @@ fn derived_inner_and_outer_demands_keep_independent_source_and_access_contexts()
             project: Selector::Tag("h".to_string()),
         })),
     );
-    let outer = Demand::new(
+    let outer_base = Demand::new(
         Filter {
             kinds: Some(BTreeSet::from([9u16])),
             tags: outer_tags,
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![pinned.clone()]),
-        AccessContext::Nip42(a.public_key()),
+        ReadRouting::Explicit(vec![pinned.clone()])
     )
     .unwrap();
+    let outer = Demand {
+        authenticate_as: Some(a.public_key()),
+        ..outer_base
+    };
 
     let (_handle, opened) = h.subscribe(outer);
     let [DemandOp::Open(inner_atom)] = opened.ops.as_slice() else {
         panic!("only the unresolved Derived inner atom should open first");
     };
     assert_eq!(inner_atom.routing, ReadRouting::Auto);
-    assert_eq!(inner_atom.access, AccessContext::Public);
+    assert_eq!(inner_atom.authenticate_as, None);
     assert_eq!(
         inner_atom.filter,
         cf_kinds_authors(&[10_009], &[&a.public_key().to_hex()])
@@ -840,14 +839,14 @@ fn derived_inner_and_outer_demands_keep_independent_source_and_access_contexts()
         })
         .expect("projecting the contact list must open the outer content atom");
     assert_eq!(outer_atom.routing, ReadRouting::Explicit(vec![pinned]));
-    assert_eq!(outer_atom.access, AccessContext::Nip42(a.public_key()));
+    assert_eq!(outer_atom.authenticate_as, Some(a.public_key()));
 
     let reroot = h.set_active(Some(b.public_key()));
     assert!(
         reroot.closed().iter().any(|atom| {
             atom.filter.kinds == Some(BTreeSet::from([9u16]))
                 && matches!(atom.routing, ReadRouting::Explicit(_))
-                && atom.access == AccessContext::Nip42(a.public_key())
+                && atom.authenticate_as == Some(a.public_key())
         }),
         "reroot must withdraw the dependent host/AUTH group atom"
     );
@@ -862,7 +861,7 @@ fn derived_inner_and_outer_demands_keep_independent_source_and_access_contexts()
         cf_kinds_authors(&[10_009], &[&b.public_key().to_hex()])
     );
     assert_eq!(opened[0].routing, ReadRouting::Auto);
-    assert_eq!(opened[0].access, AccessContext::Public);
+    assert_eq!(opened[0].authenticate_as, None);
 }
 
 // ---- 1. depth1_myfollows_surgical_delta ---------------------------------

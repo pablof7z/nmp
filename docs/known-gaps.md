@@ -23,7 +23,7 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   adapter merely interfacing to the hardware; the deleted app-supplied signer
   mailbox (#1290) inverted that ownership and was removed rather than kept.
 - **NIP-42 deadlocks against any relay that challenges in response to a
-  request (#1889).** An app declaring `NMPAccessContext.nip42` against strfry
+  request (#1889).** An app naming `authenticateAs` against strfry
   never exchanges a byte with it: NMP withholds a protected session's REQs
   until AUTH completes and only starts AUTH on an INBOUND `["AUTH", challenge]`
   frame, while strfry only challenges in response to a request it wants to

@@ -1188,7 +1188,7 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
         .iter()
         .filter_map(|effect| match effect {
             Effect::PublishEvent(session, event, _)
-                if session.access == AccessContext::Nip42(event.pubkey) =>
+                if session.authenticate_as == Some(event.pubkey) =>
             {
                 Some(session.relay.clone())
             }
@@ -1212,7 +1212,7 @@ fn scheduler_has_stable_order_and_enforces_global_and_per_relay_caps() {
             .iter()
             .filter_map(|effect| match effect {
                 Effect::PublishEvent(session, event, _)
-                    if session.access == AccessContext::Nip42(event.pubkey) =>
+                    if session.authenticate_as == Some(event.pubkey) =>
                 {
                     Some(session.relay.clone())
                 }

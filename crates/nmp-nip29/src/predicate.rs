@@ -380,7 +380,7 @@ mod tests {
 
     use super::*;
     use nmp_grammar::{
-        AccessContext, Demand, Derived, IdentityField, IndexedTagName, ReadRouting, Selector,
+        Demand, Derived, IdentityField, IndexedTagName, ReadRouting, Selector,
     };
 
     fn host(n: u16) -> RelayUrl {
@@ -418,8 +418,7 @@ mod tests {
                     authors: Some(me()),
                     ..Filter::default()
                 },
-                ReadRouting::Auto,
-                AccessContext::Public,
+                ReadRouting::Auto
             )
             .expect("an author-bound outbox demand is constructible"),
             project: Selector::Tag("p".to_string()),
@@ -436,8 +435,7 @@ mod tests {
                     authors: Some(me()),
                     ..Filter::default()
                 },
-                ReadRouting::Auto,
-                AccessContext::Public,
+                ReadRouting::Auto
             )
             .expect("an author-bound outbox demand is constructible"),
             project: Selector::Tag("group".to_string()),

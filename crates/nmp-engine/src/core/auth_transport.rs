@@ -4,6 +4,7 @@
 //! checks, inbound frame reduction, and the transition between authenticated
 //! sessions and ordinary query/write work.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 
 impl CoreState {
@@ -108,7 +109,7 @@ impl CoreState {
             };
             let lane_session = RelaySessionKey::new(
                 lane.key.relay.clone(),
-                AccessContext::Nip42(pending.signing_pubkey),
+                Some(pending.signing_pubkey),
             );
             if &lane_session != session {
                 continue;
@@ -193,7 +194,7 @@ impl CoreState {
         session: RelaySessionKey,
         challenge: String,
     ) -> Vec<Effect> {
-        let AccessContext::Nip42(expected_pubkey) = session.access else {
+        let Some(expected_pubkey) = session.authenticate_as else {
             return Vec::new();
         };
         self.auth_probe_sessions.remove(&session);
@@ -278,7 +279,7 @@ impl CoreState {
         handle: TransportRelayHandle,
         session: RelaySessionKey,
     ) -> Vec<Effect> {
-        if session.access == AccessContext::Public {
+        if session.authenticate_as.is_none() {
             return Vec::new();
         }
         self.auth_probe_sessions.remove(&session);
@@ -321,7 +322,7 @@ impl CoreState {
         reason: String,
         effects: &mut Vec<Effect>,
     ) {
-        let AccessContext::Nip42(pubkey) = session.access else {
+        let Some(pubkey) = session.authenticate_as else {
             return;
         };
         let lanes = match self.recover_all_lanes() {
@@ -343,7 +344,7 @@ impl CoreState {
                 .map(|pending| {
                     RelaySessionKey::new(
                         lane.key.relay.clone(),
-                        AccessContext::Nip42(pending.signing_pubkey),
+                        Some(pending.signing_pubkey),
                     )
                 })
                 .is_some_and(|candidate| candidate == *session);
@@ -413,7 +414,7 @@ impl CoreState {
         let mut effects = Vec::new();
         let denial = match outcome {
             AuthPolicyOutcome::Allow => {
-                let AccessContext::Nip42(expected_pubkey) = state.epoch.session.access else {
+                let Some(expected_pubkey) = state.epoch.session.authenticate_as else {
                     return Vec::new();
                 };
                 let clock = self.clock.as_secs();
@@ -701,7 +702,7 @@ impl CoreState {
                     AuthCapability::Policy => state.policy_instance == Some(instance),
                     AuthCapability::Signer => state.signer_instance == Some(instance),
                 };
-                (session.access == AccessContext::Nip42(pubkey) && owns_instance)
+                (session.authenticate_as == Some(pubkey) && owns_instance)
                     .then(|| session.clone())
             })
             .collect();
@@ -750,10 +751,10 @@ impl CoreState {
         }
         // A fresh PROTECTED connection generation is NEVER pre-authorized
         // (#8): any AUTH readiness earned by an earlier generation died with
-        // that socket. Public sessions own no AUTH epoch; invalidating one
+        // that socket. Sessions bound to no identity own no AUTH epoch; invalidating one
         // here would erase an initial REQ already accepted by this exact
         // still-dialing handle, then manufacture a duplicate replay (#1075).
-        if session.access != AccessContext::Public {
+        if session.authenticate_as.is_some() {
             self.invalidate_auth_epoch(&session, false, &mut effects);
         }
         self.slot_to_relay
@@ -773,7 +774,7 @@ impl CoreState {
         // then dropped" fact).
         self.connected_relays.insert(session.clone());
         self.ever_connected_relays.insert(session.clone());
-        if !same_physical_session && session.access != AccessContext::Public {
+        if !same_physical_session && session.authenticate_as.is_some() {
             if self.auth_required_sessions.contains(&session) {
                 self.auth_probe_sessions.remove(&session);
             } else {
@@ -792,13 +793,13 @@ impl CoreState {
         // broad Public request repeats the same live-first NIP-77 handoff as
         // an ordinary recompile; it must never regress to reconcile-first or
         // silently change strategy on reconnect (#563).
-        // ONLY a Public session replays its planned REQs at connect time. A
+        // ONLY a session bound to no identity replays its planned REQs at connect time. A
         // protected session's REQs park until the AUTH reducer's ready
         // transition (`finish_auth_ok`) proves THIS generation completed
         // AUTH (#8) — sending them earlier would leak the protected demand
         // onto an unauthenticated socket and record attribution snapshots no
         // honest EOSE can ever discharge.
-        if session.access == AccessContext::Public {
+        if session.authenticate_as.is_none() {
             if let Some(reqs) = planned_read_reqs.as_ref() {
                 // A new websocket generation has no live subscriptions even
                 // if the previous generation's accepted-wire owner map still
@@ -923,7 +924,7 @@ impl CoreState {
         // only (#8): the document is unauthenticated HTTP and the probe runs
         // over the unauthenticated socket, so a URL planned solely under
         // protected sessions retains no document and probes nothing.
-        let public_session = RelaySessionKey::public(url.clone());
+        let public_session = RelaySessionKey::unauthenticated(url.clone());
         let planned = self.router.plan().reqs.contains_key(&public_session);
         // The PLANNING-relevant projection of this document, before and
         // after (#931). NIP-11 acquisition is driven by connect, and connect
@@ -1063,10 +1064,10 @@ impl CoreState {
             self.suspend_disconnected_lanes(&session, &mut effects);
             // Negentropy (probe, live reconciliations, one-shot backfills)
             // is PUBLIC-session-only work (#8), so its teardown fires only
-            // when the Public session itself dropped -- a protected
+            // when the session bound to no identity itself dropped -- a protected
             // session's disconnect must not kill a reconciliation still
             // healthy on the URL's live Public socket.
-            if session.access == AccessContext::Public {
+            if session.authenticate_as.is_none() {
                 self.nip77.drop_live_for_relay(&session.relay);
                 // Any reconciliation open against this relay dies with the
                 // connection -- there is nothing left to `NEG-CLOSE` (the
@@ -1924,7 +1925,7 @@ impl CoreState {
                 // session, so a NEG frame arriving on a protected session
                 // could only be a foreign/confused reply — it must not
                 // resolve the Public probe or step a Public reconciliation.
-                if session.access != AccessContext::Public {
+                if session.authenticate_as.is_some() {
                     return effects;
                 }
                 let wire_id = subscription_id.as_str();
@@ -1953,7 +1954,7 @@ impl CoreState {
                 // Same PUBLIC-session-only gate as `NegMsg` above (#8): a
                 // protected session's NEG-ERR must not classify the URL as
                 // Unsupported or tear a Public reconciliation down to REQ.
-                if session.access != AccessContext::Public {
+                if session.authenticate_as.is_some() {
                     return effects;
                 }
                 let wire_id = subscription_id.as_str();

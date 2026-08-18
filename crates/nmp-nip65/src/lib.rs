@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    AccessContext, Binding, Demand, EventBuilder, Filter, Identity, ReadRouting, WriteIntent,
+    Binding, Demand, EventBuilder, Filter, Identity, ReadRouting, WriteIntent,
     WritePayload, WriteRouting,
 };
 use nostr::nips::nip65::RelayMetadata;
@@ -263,8 +263,7 @@ pub fn relay_list_demand(
             )),
             ..Filter::default()
         },
-        ReadRouting::Explicit(sources.iter().cloned().collect()),
-        AccessContext::Public,
+        ReadRouting::Explicit(sources.iter().cloned().collect())
     )
     .ok()
 }

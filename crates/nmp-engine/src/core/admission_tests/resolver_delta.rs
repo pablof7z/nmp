@@ -1,5 +1,6 @@
 //! resolver delta admission proofs.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 
 #[test]
@@ -93,7 +94,7 @@ fn one_handle_partial_resolver_closes_touch_only_departing_refcounts_in_both_ord
 fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target() {
     for terminal in ["accepted", "refused", "eose"] {
         let relay = RelayUrl::parse("wss://partial-resolver-distinct.example").unwrap();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
         let observation =
             observation_id(&core.handle(EngineMsg::Subscribe(bounded_query(&relay, "departing"))));
@@ -162,7 +163,7 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
             relay,
             &surviving.filter,
             &surviving.routing,
-            surviving.access,
+            surviving.authenticate_as,
         );
         core.white_box("record_observed_request", |s| {
             s.record_observed_request(RequestSend {
@@ -251,7 +252,7 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
 #[test]
 fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
     let relay = RelayUrl::parse("wss://core-metadata-delta-10k.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
     let mut atoms = Vec::with_capacity(10_001);
     let mut incumbent_claims = BTreeSet::new();
@@ -262,7 +263,7 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Explicit(vec![relay.clone()]),
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         incumbent_claims.insert(coverage_key(&atom));
@@ -274,7 +275,7 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
     let added_claim = coverage_key(&added_atom);
@@ -286,7 +287,7 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
         relay,
         &request_atom.filter,
         &request_atom.routing,
-        request_atom.access,
+        request_atom.authenticate_as,
     );
     core.white_box("attribution.retain_live_request_claims", |s| {
         s.attribution

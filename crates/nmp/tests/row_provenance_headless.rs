@@ -43,7 +43,7 @@ fn connect(core: &mut EngineCore, slot: u32, url: &RelayUrl) {
             slot,
             generation: 1,
         },
-        RelaySessionKey::public(url.clone()),
+        RelaySessionKey::unauthenticated(url.clone()),
     ));
 }
 
@@ -62,7 +62,7 @@ fn deliver(
             slot,
             generation: 1,
         },
-        RelaySessionKey::public(relay.clone()),
+        RelaySessionKey::unauthenticated(relay.clone()),
         event_frame("s", event.clone()),
     ))
 }

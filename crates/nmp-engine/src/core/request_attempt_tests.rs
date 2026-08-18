@@ -1,5 +1,6 @@
 //! Exact local REQ attempt, refusal, and retry ownership (#849).
 
+use nmp_grammar::RelaySessionKey;
 use std::{borrow::Cow, collections::BTreeSet};
 
 use nmp_grammar::{Binding, Demand, Filter, IndexedTagName};
@@ -80,7 +81,7 @@ fn atom(relay: &RelayUrl, author: &str) -> ContextualAtom {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -112,7 +113,7 @@ fn apply_compile(core: &mut EngineCore, demand: BTreeSet<ContextualAtom>) -> Vec
 #[test]
 fn repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_only_on_accept() {
     let relay = RelayUrl::parse("wss://request-attempt.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let handle = TransportRelayHandle {
         slot: 81,
         generation: 1,
@@ -173,7 +174,7 @@ fn repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_
             ))),
         )
     });
-    assert!(core.store.get_coverage(claim, &relay).unwrap().is_none());
+    assert!(core.store.get_coverage(claim, &RelaySessionKey::unauthenticated(relay.clone())).unwrap().is_none());
 
     let retry_one = core.handle(EngineMsg::Tick(due_one));
     let (_, _, _, second_attempt) = only_request(&retry_one);
@@ -242,7 +243,7 @@ fn repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_
 #[test]
 fn nip77_candidate_status_projects_its_role_id_to_the_live_plan_request() {
     let relay = RelayUrl::parse("wss://request-attempt-nip77.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let handle = TransportRelayHandle {
         slot: 97,
         generation: 1,
@@ -277,7 +278,7 @@ fn nip77_candidate_status_projects_its_role_id_to_the_live_plan_request() {
 #[test]
 fn dynamic_full_recompile_publishes_awaiting_request_before_wire_dispatch() {
     let relay = RelayUrl::parse("wss://request-recompile-order.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let handle = TransportRelayHandle {
         slot: 96,
         generation: 1,

@@ -108,7 +108,7 @@ sealed class NMPBinding {
 
     /** Projects `inner`'s matching rows through `project` (e.g. "authors of
      * my kind:3 contact list, projected through their `p` tags" = follows).
-     * The inner demand owns source, access, cache, and freshness independently
+     * The inner demand owns source, identity, cache, and freshness independently
      * from the outer demand. */
     data class Derived(val inner: NMPDemand, val project: NMPSelector) : NMPBinding()
 

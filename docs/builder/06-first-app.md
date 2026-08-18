@@ -65,7 +65,7 @@ val demand = Demand(
         kinds = Binding.literal(setOf(appKind)),
         authors = Binding.literal(selectedAuthors)
     ),
-    access = AccessContext.Public
+    authenticateAs = null
 )
 
 engine.observe(NMPLiveQuery.single(demand)).collect { snapshot ->

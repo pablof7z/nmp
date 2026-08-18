@@ -3,6 +3,7 @@
 //! Callers name a store path, receipt, attempt, route key, or intent. They do
 //! not name a Redb table.
 
+use nmp_grammar::RelaySessionKey;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -326,7 +327,7 @@ pub fn corrupt_coverage(
 ) -> Result<(), PersistenceError> {
     let db = Database::open(path).map_err(persist_err)?;
     let tx = db.begin_write().map_err(persist_err)?;
-    let row_key = RedbStore::coverage_row_key(key, relay);
+    let row_key = RedbStore::coverage_row_key(key, &RelaySessionKey::unauthenticated(relay.clone()));
     {
         let mut coverage = tx.open_table(COVERAGE).map_err(persist_err)?;
         if coverage

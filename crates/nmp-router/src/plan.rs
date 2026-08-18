@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    fold_byte, fold_context, AccessContext, ConcreteFilter, ContextualAtom, DescriptorHash,
+    fold_byte, fold_context, ConcreteFilter, ContextualAtom, DescriptorHash,
     ReadRouting, RelaySessionKey,
 };
 use nmp_store::{coverage_key, CoverageKey};
@@ -73,11 +73,11 @@ impl DemandKey {
 const ALLOCATED_DOMAIN: u8 = 0xa1;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct SubId(pub RelayUrl, pub SkeletonHash, pub AccessContext);
+pub struct SubId(pub RelayUrl, pub SkeletonHash, pub Option<nostr::PublicKey>);
 
 impl SubId {
     /// Mint a FRESH, never-before-used wire token for `relay` under
-    /// `source`/`access`.
+    /// `source` and authenticated identity.
     ///
     /// `counter` is the router's own monotonic mint counter, so no token is
     /// ever recycled within a `Router`'s lifetime — reuse would let a stale
@@ -104,7 +104,7 @@ impl SubId {
     pub(crate) fn allocate(
         relay: RelayUrl,
         source: &ReadRouting,
-        access: AccessContext,
+        authenticate_as: Option<nostr::PublicKey>,
         root: DescriptorHash,
         counter: u64,
     ) -> Self {
@@ -112,11 +112,11 @@ impl SubId {
         for byte in counter.to_be_bytes() {
             hash = fold_byte(hash, byte);
         }
-        SubId(relay, fold_context(hash, source, access), access)
+        SubId(relay, fold_context(hash, source, authenticate_as), authenticate_as)
     }
 
     /// DERIVE a sub-id for `filter` on `relay` from the filter's OWN skeleton
-    /// (authors erased) folded with its [`ReadRouting`]/[`AccessContext`]
+    /// (authors erased) folded with its [`ReadRouting`] and authenticated identity
     /// (#106, atlas's 3rd proof floor).
     ///
     /// **This is NO LONGER how planned subscriptions are identified.** The
@@ -141,10 +141,10 @@ impl SubId {
         relay: RelayUrl,
         filter: &ConcreteFilter,
         source: &ReadRouting,
-        access: AccessContext,
+        authenticate_as: Option<nostr::PublicKey>,
     ) -> Self {
         let (skeleton, _) = Skeleton::of(filter);
-        SubId(relay, fold_context(skeleton.hash(), source, access), access)
+        SubId(relay, fold_context(skeleton.hash(), source, authenticate_as), authenticate_as)
     }
 }
 
@@ -167,7 +167,7 @@ pub struct WireReq {
     pub sub_id: SubId,
     pub filter: ConcreteFilter,
     /// The declared routing this req was compiled under. `SubId` already
-    /// carries the relay and the [`AccessContext`]; this is the missing half
+    /// carries the relay and the authenticated identity; this is the missing half
     /// of the identity context, and it is what makes the previous plan
     /// re-partitionable for signature matching (`crate::wire_id`) — an
     /// `Auto`-routed filter must never inherit an `Explicit`-routed filter's
@@ -339,7 +339,7 @@ mod tests {
             relay.clone(),
             &filter,
             &ReadRouting::Auto,
-            AccessContext::Public,
+            None,
         );
         let req = WireReq {
             sub_id,
@@ -351,7 +351,7 @@ mod tests {
             coverage_assignments: BTreeSet::new(),
         };
         RelayPlan {
-            reqs: BTreeMap::from([(RelaySessionKey::public(relay), vec![req])]),
+            reqs: BTreeMap::from([(RelaySessionKey::unauthenticated(relay), vec![req])]),
             ..RelayPlan::default()
         }
     }
@@ -370,7 +370,7 @@ mod tests {
         let delta = diff_plans(&prev, &next);
         assert_eq!(delta.ops.len(), 1);
         let (r, ops) = &delta.ops[0];
-        assert_eq!(r, &RelaySessionKey::public(relay(0)));
+        assert_eq!(r, &RelaySessionKey::unauthenticated(relay(0)));
         assert_eq!(ops.len(), 1);
         assert!(
             matches!(&ops[0], WireOp::Req(_, f) if f.authors == Some(BTreeSet::from([author("aa"), author("cc")])))
@@ -398,13 +398,13 @@ mod tests {
         let mut next = prev.clone();
         // Change relay 1's filter only.
         next.reqs.insert(
-            RelaySessionKey::public(relay(1)),
+            RelaySessionKey::unauthenticated(relay(1)),
             vec![WireReq {
                 sub_id: SubId::for_wire(
                     relay(1),
                     &cf(1, &["bb", "cc"]),
                     &ReadRouting::Auto,
-                    AccessContext::Public,
+                    None,
                 ),
                 filter: cf(1, &["bb", "cc"]),
                 routing: ReadRouting::Auto,
@@ -417,7 +417,7 @@ mod tests {
 
         let delta = diff_plans(&prev, &next);
         assert_eq!(delta.ops.len(), 1);
-        assert_eq!(delta.ops[0].0, RelaySessionKey::public(relay(1)));
+        assert_eq!(delta.ops[0].0, RelaySessionKey::unauthenticated(relay(1)));
     }
 
     /// #106/atlas's 3rd proof floor: the identical relay+filter under
@@ -431,12 +431,12 @@ mod tests {
     fn for_wire_distinguishes_identical_filters_under_different_read_routing() {
         let filter = cf(1, &["aa"]);
         let auto_sub =
-            SubId::for_wire(relay(0), &filter, &ReadRouting::Auto, AccessContext::Public);
+            SubId::for_wire(relay(0), &filter, &ReadRouting::Auto, None);
         let explicit_sub = SubId::for_wire(
             relay(0),
             &filter,
             &ReadRouting::Explicit(vec![relay(1)]),
-            AccessContext::Public,
+            None,
         );
         assert_ne!(
             auto_sub, explicit_sub,
@@ -454,13 +454,13 @@ mod tests {
             relay(0),
             &filter,
             &ReadRouting::Explicit(vec![relay(0)]),
-            AccessContext::Public,
+            None,
         );
         let two = SubId::for_wire(
             relay(0),
             &filter,
             &ReadRouting::Explicit(vec![relay(0), relay(1)]),
-            AccessContext::Public,
+            None,
         );
         assert_ne!(one, two);
     }
@@ -473,8 +473,8 @@ mod tests {
     fn for_wire_author_churn_same_context_reuses_sub_id() {
         let a = cf(1, &["aa", "bb"]);
         let b = cf(1, &["aa", "cc"]);
-        let sub_a = SubId::for_wire(relay(0), &a, &ReadRouting::Auto, AccessContext::Public);
-        let sub_b = SubId::for_wire(relay(0), &b, &ReadRouting::Auto, AccessContext::Public);
+        let sub_a = SubId::for_wire(relay(0), &a, &ReadRouting::Auto, None);
+        let sub_b = SubId::for_wire(relay(0), &b, &ReadRouting::Auto, None);
         assert_eq!(sub_a, sub_b);
     }
 }

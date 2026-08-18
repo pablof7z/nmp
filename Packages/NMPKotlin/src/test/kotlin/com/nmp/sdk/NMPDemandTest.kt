@@ -2,18 +2,19 @@ package com.nmp.sdk
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 
 // A construction/round-trip test of the ergonomic Demand descriptor (#107).
 // No network -- this only proves the Kotlin-value <-> Ffi-value conversion
-// is lossless for every ReadRouting/AccessContext/CacheMode/Freshness case.
+// is lossless for every ReadRouting/authenticateAs/CacheMode/Freshness case.
 class NMPDemandTest {
     @Test
     fun aDemandThatNamesNoRoutingRoundTripsAsAuto() {
         val demand = NMPDemand(selection = NMPFilter(kinds = listOf(1u)))
         val ffi = demand.toFfi()
         assertEquals(uniffi.nmp_ffi.FfiReadRouting.Auto, ffi.routing)
-        assertEquals(uniffi.nmp_ffi.FfiAccessContext.Public, ffi.access)
+        assertNull(ffi.authenticateAs)
         assertEquals(uniffi.nmp_ffi.FfiCacheMode.AGNOSTIC, ffi.cache)
         assertEquals(uniffi.nmp_ffi.FfiFreshness.Live, ffi.freshness)
         assertEquals(demand, NMPDemand.from(ffi))
@@ -38,7 +39,7 @@ class NMPDemandTest {
     fun cacheModeDefaultsToAgnosticWhenUnspecified() {
         val demand = NMPDemand(selection = NMPFilter(kinds = listOf(1u)))
         assertEquals(NMPCacheMode.Agnostic, demand.cache)
-        assertEquals(NMPAccessContext.Public, demand.access)
+        assertNull(demand.authenticateAs)
     }
 
     @Test
@@ -47,7 +48,7 @@ class NMPDemandTest {
             NMPDemand(
                 selection = NMPFilter(kinds = listOf(1u)),
                 routing = NMPReadRouting.Explicit(listOf("wss://relay.example.com")),
-                access = NMPAccessContext.Nip42("a".repeat(64)),
+                authenticateAs = "a".repeat(64),
             )
         assertEquals(demand, NMPDemand.from(demand.toFfi()))
     }
@@ -62,7 +63,7 @@ class NMPDemandTest {
                         authors = NMPBinding.Reactive(NMPIdentityField.ActivePubkey),
                     ),
                 routing = NMPReadRouting.Explicit(listOf("wss://inner.example.com")),
-                access = NMPAccessContext.Nip42("a".repeat(64)),
+                authenticateAs = "a".repeat(64),
                 cache = NMPCacheMode.Strict,
                 freshness = NMPFreshness.MaxAge(600uL),
             )
@@ -77,7 +78,7 @@ class NMPDemandTest {
         assertEquals(inner, NMPDemand.from(derived.derived.inner()))
         assertEquals(filter, NMPFilter.from(ffi))
 
-        val publicInner = inner.copy(access = NMPAccessContext.Public)
+        val publicInner = inner.copy(authenticateAs = null)
         val sameSelectionDifferentContext =
             NMPFilter(
                 kinds = listOf(1u),

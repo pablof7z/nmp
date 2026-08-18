@@ -1,5 +1,6 @@
 //! Admission-window and surgical lifecycle falsifiers for #1341/#1342.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 use nmp_grammar::{
     Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, IdentityField,
@@ -61,7 +62,7 @@ fn bounded_atom(relay: &RelayUrl, value: &str) -> ContextualAtom {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -77,7 +78,7 @@ fn query_atom(relay: &RelayUrl, value: &str) -> ContextualAtom {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -153,7 +154,7 @@ fn profile_atom(relay: &RelayUrl, author: PublicKey) -> ContextualAtom {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Explicit(vec![relay.clone()]),
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -183,8 +184,7 @@ fn routeless_outbox_query(author: PublicKey) -> LiveQuery {
                 authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
                 ..Filter::default()
             },
-            ReadRouting::Auto,
-            AccessContext::Public,
+            ReadRouting::Auto
         )
         .unwrap(),
     )
@@ -198,7 +198,7 @@ fn routeless_outbox_atom(author: PublicKey) -> ContextualAtom {
             ..ConcreteFilter::default()
         },
         routing: ReadRouting::Auto,
-        access: AccessContext::Public,
+        authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     }
 }
@@ -240,14 +240,14 @@ fn current_source_statuses(core: &EngineCore, observation: ObservationId) -> Vec
 #[test]
 fn fresh_max_age_is_coverage_satisfied_alone_and_never_borrows_live_placement() {
     let relay = RelayUrl::parse("wss://max-age-evidence.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let value = "fresh-owner";
     let atom = query_atom(&relay, value);
     let mut store = RedbStore::temporary().expect("temporary Redb store");
     store
         .record_coverage(&[(
             atom,
-            relay.clone(),
+            RelaySessionKey::unauthenticated(relay.clone()),
             CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(100u64)),
         )])
         .unwrap();

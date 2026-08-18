@@ -652,7 +652,7 @@ owns the ordinary NMP handle and threads immutable cycle/depth context.
   redirect, MIME, size, and privacy policy; they are not implied by Nostr
   event acquisition.
 - Embedded private/decrypted content must not be inserted into a public shared
-  cache or rendered outside its authorized access context.
+  cache or rendered outside its authorized authenticated identity.
 - Rendered Markdown/HTML never executes arbitrary script or unsafe markup.
 - Parser byte/node limits, immutable recursion depth, media limits, and NMP's
   independent engine resource ceilings are enforced at their owning layers.

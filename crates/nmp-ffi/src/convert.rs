@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 
 use nmp::{
-    AccessContext as GAccessContext, AcquisitionEvidence, AuthDenialSource as GAuthDenialSource,
+    AcquisitionEvidence, AuthDenialSource as GAuthDenialSource,
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, AuthPhase, Binding as GBinding,
     CacheMode as GCacheMode, CancelWriteError, CancelWriteOutcome, CoverageInterval,
     Demand as GDemand, DemandError as GDemandError, Derived as GDerived, DiagnosticsSnapshot,
@@ -32,7 +32,7 @@ use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, Tag, Timestamp};
 
 use crate::types::{
-    FfiAccessContext, FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthDiagnostics,
+    FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthDiagnostics,
     FfiAuthPhase, FfiBinding, FfiCacheMode, FfiCancelWriteError, FfiCancelWriteOutcome,
     FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiEventBuilder, FfiFilter,
     FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentity, FfiIdentityField, FfiKindCount,
@@ -1599,20 +1599,12 @@ fn read_routing_to_ffi(s: GReadRouting) -> FfiReadRouting {
     }
 }
 
-fn access_context_from_ffi(a: FfiAccessContext) -> Result<GAccessContext, FfiError> {
-    Ok(match a {
-        FfiAccessContext::Public => GAccessContext::Public,
-        FfiAccessContext::Nip42 { public_key } => GAccessContext::Nip42(parse_pubkey(&public_key)?),
-    })
+fn auth_identity_from_ffi(a: Option<String>) -> Result<Option<nostr::PublicKey>, FfiError> {
+    a.as_deref().map(parse_pubkey).transpose()
 }
 
-fn access_context_to_ffi(a: GAccessContext) -> FfiAccessContext {
-    match a {
-        GAccessContext::Public => FfiAccessContext::Public,
-        GAccessContext::Nip42(public_key) => FfiAccessContext::Nip42 {
-            public_key: public_key.to_hex(),
-        },
-    }
+fn auth_identity_to_ffi(a: Option<nostr::PublicKey>) -> Option<String> {
+    a.map(|public_key| public_key.to_hex())
 }
 
 fn cache_mode_from_ffi(c: FfiCacheMode) -> GCacheMode {
@@ -1653,8 +1645,8 @@ pub fn demand_from_ffi(d: FfiDemand) -> Result<GDemand, FfiError> {
     let mut demand = GDemand::new(
         filter_from_ffi(d.selection)?,
         read_routing_from_ffi(d.routing)?,
-        access_context_from_ffi(d.access)?,
     )?;
+    demand.authenticate_as = auth_identity_from_ffi(d.authenticate_as)?;
     demand.cache = cache_mode_from_ffi(d.cache);
     demand.freshness = freshness_from_ffi(d.freshness);
     Ok(demand)
@@ -1664,7 +1656,7 @@ pub fn demand_to_ffi(d: GDemand) -> FfiDemand {
     FfiDemand {
         selection: filter_to_ffi(d.selection),
         routing: read_routing_to_ffi(d.routing),
-        access: access_context_to_ffi(d.access),
+        authenticate_as: auth_identity_to_ffi(d.authenticate_as),
         cache: cache_mode_to_ffi(d.cache),
         freshness: freshness_to_ffi(d.freshness),
     }
@@ -1736,7 +1728,7 @@ fn source_status_to_ffi(s: SourceStatus) -> FfiSourceStatus {
 fn source_evidence_to_ffi(s: SourceEvidence) -> FfiSourceEvidence {
     FfiSourceEvidence {
         relay: s.relay.to_string(),
-        access: access_context_to_ffi(s.access),
+        authenticate_as: auth_identity_to_ffi(s.authenticate_as),
         reconciled_through: s.reconciled_through.map(|ts| ts.as_secs()),
         status: source_status_to_ffi(s.status),
     }
@@ -1864,7 +1856,7 @@ pub fn window_load_to_ffi(load: WindowLoad) -> FfiWindowLoad {
 /// `nmp::Frame -> FfiFrame` -- the ONE wire shape both observation modes
 /// share, with delivery derived from boundedness (#485):
 ///
-/// - Unbounded (`frame.window == None`): map the engine-composed exact rebased
+/// - Unbounded (`frame.window.is_none()`): map the engine-composed exact rebased
 ///   deltas; the full set is never redelivered (full-set redelivery is the
 ///   O(rows squared) P0).
 /// - Windowed: ship the complete bounded row set + growth fact and DROP the
@@ -2201,7 +2193,7 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
     // record carries it too.
     let RelayDiagnosticsSnapshot {
         relay,
-        access,
+        authenticate_as,
         wire_sub_count,
         subscription_budget,
         subscriptions_refused,
@@ -2222,7 +2214,7 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
     } = r;
     FfiRelayDiagnostics {
         relay: relay.to_string(),
-        access: access_context_to_ffi(access),
+        authenticate_as: auth_identity_to_ffi(authenticate_as),
         wire_sub_count: wire_sub_count as u32,
         subscription_budget: subscription_budget.map(|budget| budget as u32),
         subscriptions_refused: subscriptions_refused as u32,
@@ -2281,7 +2273,7 @@ fn auth_diagnostics_to_ffi(snapshot: AuthDiagnosticsSnapshot) -> FfiAuthDiagnost
     // record carries it too.
     let AuthDiagnosticsSnapshot {
         relay,
-        access,
+        authenticate_as,
         transport_generation,
         epoch_sequence,
         challenge_hash,
@@ -2292,7 +2284,7 @@ fn auth_diagnostics_to_ffi(snapshot: AuthDiagnosticsSnapshot) -> FfiAuthDiagnost
     } = snapshot;
     FfiAuthDiagnostics {
         relay: relay.to_string(),
-        access: access_context_to_ffi(access),
+        authenticate_as: auth_identity_to_ffi(authenticate_as),
         transport_generation,
         epoch_sequence,
         challenge_descriptor: challenge_hash,
@@ -2998,7 +2990,7 @@ mod tests {
             .enumerate()
             .map(|(index, status)| SourceEvidence {
                 relay: RelayUrl::parse(&format!("wss://source-{index}.example.com")).unwrap(),
-                access: GAccessContext::Public,
+                authenticate_as: None,
                 reconciled_through: (index % 2 == 0).then(|| Timestamp::from(index as u64 + 10)),
                 status,
             })
@@ -3085,7 +3077,7 @@ mod tests {
             .enumerate()
             .map(|(index, phase)| AuthDiagnosticsSnapshot {
                 relay: relay.clone(),
-                access: GAccessContext::Nip42(public_key),
+                authenticate_as: Some(public_key),
                 transport_generation: 40 + index as u64,
                 epoch_sequence: Some(80 + index as u64),
                 challenge_hash: Some(format!("challenge-descriptor-{index}")),
@@ -3099,7 +3091,7 @@ mod tests {
             auth_sessions,
             relays: vec![RelayDiagnosticsSnapshot {
                 relay: relay.clone(),
-                access: GAccessContext::Public,
+                authenticate_as: None,
                 wire_sub_count: 2,
                 subscription_budget: Some(20),
                 subscriptions_refused: 3,
@@ -3249,10 +3241,8 @@ mod tests {
         assert_eq!(distinct.len(), auth_phases.len());
         assert_eq!(ffi.auth_sessions[0].relay, relay.to_string());
         assert_eq!(
-            ffi.auth_sessions[0].access,
-            FfiAccessContext::Nip42 {
-                public_key: pk_hex()
-            }
+            ffi.auth_sessions[0].authenticate_as,
+            Some(pk_hex())
         );
         assert_eq!(ffi.auth_sessions[0].transport_generation, 40);
         assert_eq!(ffi.auth_sessions[0].epoch_sequence, Some(80));
@@ -3336,7 +3326,7 @@ mod tests {
                         ..FfiFilter::default()
                     },
                     routing: FfiReadRouting::Auto,
-                    access: FfiAccessContext::Public,
+                    authenticate_as: None,
                     cache: FfiCacheMode::Agnostic,
                     freshness: FfiFreshness::Live,
                 },
@@ -3356,7 +3346,7 @@ mod tests {
                         ..FfiFilter::default()
                     },
                     routing: FfiReadRouting::Auto,
-                    access: FfiAccessContext::Public,
+                    authenticate_as: None,
                     cache: FfiCacheMode::Agnostic,
                     freshness: FfiFreshness::Live,
                 },
@@ -3397,14 +3387,12 @@ mod tests {
             routing: FfiReadRouting::Explicit {
                 relays: vec!["wss://inner.example.com".to_string()],
             },
-            access: FfiAccessContext::Nip42 {
-                public_key: pk_hex(),
-            },
+            authenticate_as: Some(pk_hex()),
             cache: FfiCacheMode::Strict,
             freshness: FfiFreshness::MaxAge { seconds: 600 },
         };
         let mut public_inner = inner.clone();
-        public_inner.access = FfiAccessContext::Public;
+        public_inner.authenticate_as = None;
         assert_ne!(
             inner, public_inner,
             "identical nested selections under different access contexts are distinct descriptors"
@@ -3423,7 +3411,7 @@ mod tests {
                 ..FfiFilter::default()
             },
             routing: FfiReadRouting::Auto,
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         };
@@ -3438,7 +3426,7 @@ mod tests {
             panic!("expected derived authors binding");
         };
         assert!(matches!(derived.inner.routing, GReadRouting::Explicit(_)));
-        assert!(matches!(derived.inner.access, GAccessContext::Nip42(_)));
+        assert!(matches!(derived.inner.authenticate_as, Some(_)));
         assert_eq!(derived.inner.cache, GCacheMode::Strict);
         assert_eq!(derived.inner.freshness, GFreshness::MaxAge { seconds: 600 });
 
@@ -3458,7 +3446,7 @@ mod tests {
                 ..FfiFilter::default()
             },
             routing: FfiReadRouting::Auto,
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         };
@@ -4089,7 +4077,7 @@ mod tests {
                     "wss://a.example.com".to_string(),
                 ],
             },
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Strict,
             freshness: FfiFreshness::MaxAge { seconds: 14_400 },
         };
@@ -4126,7 +4114,7 @@ mod tests {
         let demand = FfiDemand {
             selection: ffi_filter_kind1_author(&pk_hex()),
             routing: FfiReadRouting::Explicit { relays: vec![] },
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         };
@@ -4150,7 +4138,7 @@ mod tests {
             routing: FfiReadRouting::Explicit {
                 relays: vec!["not-a-url".to_string()],
             },
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         };
@@ -4175,7 +4163,7 @@ mod tests {
                 ..FfiFilter::default()
             },
             routing: FfiReadRouting::Auto,
-            access: FfiAccessContext::Public,
+            authenticate_as: None,
             cache: FfiCacheMode::Agnostic,
             freshness: FfiFreshness::Live,
         };
@@ -4195,7 +4183,7 @@ mod tests {
             let demand = FfiDemand {
                 selection: ffi_filter_kind1_author(&pk_hex()),
                 routing: FfiReadRouting::Auto,
-                access: FfiAccessContext::Public,
+                authenticate_as: None,
                 cache: FfiCacheMode::Agnostic,
                 freshness,
             };

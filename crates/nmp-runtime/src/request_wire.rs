@@ -65,7 +65,7 @@ pub(super) fn apply_wire_delta(
     outcomes
 }
 
-/// `Effect::Replay`: for a Public session, `reqs` is `EngineCore`'s current
+/// `Effect::Replay`: for a session bound to no identity, `reqs` is `EngineCore`'s current
 /// plan minus requests already accepted on this exact transport handle. For a
 /// protected session it is the full plan released by the AUTH reducer's ready
 /// transition (`finish_auth_ok`). Sending these on the exact connected handle

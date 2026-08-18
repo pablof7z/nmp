@@ -204,7 +204,7 @@ impl PoolInner {
 
     #[cfg(test)]
     pub(super) fn ensure_open(&mut self, url: &RelayUrl) -> RelayHandle {
-        self.try_ensure_session(&RelaySessionKey::public(url.clone()))
+        self.try_ensure_session(&RelaySessionKey::unauthenticated(url.clone()))
             .expect("test relay worker spawn/admission must succeed")
     }
 
@@ -213,7 +213,7 @@ impl PoolInner {
         &mut self,
         url: &RelayUrl,
     ) -> Result<RelayHandle, RelayOpenError> {
-        self.try_ensure_session(&RelaySessionKey::public(url.clone()))
+        self.try_ensure_session(&RelaySessionKey::unauthenticated(url.clone()))
     }
 
     pub(super) fn try_ensure_session(
@@ -406,7 +406,7 @@ impl PoolInner {
             slot_id,
             worker_id,
             session.relay.clone(),
-            session.access != nmp_grammar::AccessContext::Public,
+            session.authenticate_as.is_some(),
             self.worker_event_tx
                 .as_ref()
                 .expect("spawn_worker never called after shutdown (ensure_open guards it)")
@@ -955,7 +955,7 @@ fn apply_worker_event_with_verdict(
                 // would never be reclaimed. Taking the worker and retiring it
                 // -- exactly the same door `close`/`shutdown` use -- frees
                 // both the OS thread and the cap slot immediately, and
-                // leaves `state.worker == None` so a subsequent
+                // leaves `state.worker.is_none()` so a subsequent
                 // `ensure_open` reopens a FRESH generation instead of
                 // handing back a stale one. This is reported on BOTH
                 // branches below (was-connected and never-connected) --
@@ -1339,7 +1339,7 @@ mod tests {
         );
         assert!(
             guard
-                .live_session_handle(&RelaySessionKey::public(url.clone()))
+                .live_session_handle(&RelaySessionKey::unauthenticated(url.clone()))
                 .is_none(),
             "the pool must never auto-redial a permanently-failed relay itself"
         );
@@ -1848,7 +1848,7 @@ mod tests {
         let h2 = guard.ensure_open(&url);
         assert_ne!(h1.generation, h2.generation);
 
-        let session = RelaySessionKey::public(url);
+        let session = RelaySessionKey::unauthenticated(url);
         let delivered = apply_worker_event(
             &mut guard,
             WorkerEvent {

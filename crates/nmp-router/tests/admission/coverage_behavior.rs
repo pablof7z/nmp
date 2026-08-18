@@ -1,5 +1,6 @@
 //! coverage behavior admission integration proofs.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 
 #[test]
@@ -14,7 +15,7 @@ fn one_pending_cohort_coalesces_but_a_later_cohort_never_rewrites_it() {
         20,
     );
     assert_eq!(reqs(&first), 1);
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let incumbent = router.plan().reqs[&session][0].clone();
 
     let later = router.admit(&BTreeSet::from([atom(&relay, "carol")]), &facts, 20);
@@ -133,7 +134,7 @@ fn partial_running_coverage_never_underfetches_the_uncovered_author_residual() {
 #[ignore = "known violation #1341: representable incumbent residual is not yet subtracted"]
 fn representable_running_filter_residual_is_executed_and_owned_as_one_lifecycle() {
     let relay = RelayUrl::parse("wss://router-representable-filter-residual.example").unwrap();
-    let session = RelaySessionKey::public(relay.clone());
+    let session = RelaySessionKey::unauthenticated(relay.clone());
     let author_a = Keys::generate().public_key();
     let author_b = Keys::generate().public_key();
     let author_c = Keys::generate().public_key();

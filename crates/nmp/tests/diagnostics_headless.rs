@@ -44,7 +44,7 @@ fn connect(core: &mut EngineCore, slot: u32, url: &RelayUrl) -> Vec<Effect> {
             slot,
             generation: 1,
         },
-        RelaySessionKey::public(url.clone()),
+        RelaySessionKey::unauthenticated(url.clone()),
     ))
 }
 
@@ -157,7 +157,7 @@ fn diagnostics_snapshot_reports_real_per_relay_subs_filters_and_per_kind_event_c
             slot: 0,
             generation: 1,
         },
-        RelaySessionKey::public(relay0.clone()),
+        RelaySessionKey::unauthenticated(relay0.clone()),
         event_frame(&wire0, kind1(&me, "hello", 10)),
     ));
     assert!(
@@ -172,7 +172,7 @@ fn diagnostics_snapshot_reports_real_per_relay_subs_filters_and_per_kind_event_c
             slot: 0,
             generation: 1,
         },
-        RelaySessionKey::public(relay0.clone()),
+        RelaySessionKey::unauthenticated(relay0.clone()),
         event_frame(&wire0, kind3(&me, &[friend.public_key()], 11)),
     ));
     let _ = core.handle(EngineMsg::RelayFrame(
@@ -180,7 +180,7 @@ fn diagnostics_snapshot_reports_real_per_relay_subs_filters_and_per_kind_event_c
             slot: 0,
             generation: 1,
         },
-        RelaySessionKey::public(relay0.clone()),
+        RelaySessionKey::unauthenticated(relay0.clone()),
         event_frame(&wire0, relay_list(&me, 12)),
     ));
     // A second kind:1 from relay0 -- the counter must ACCUMULATE, not just
@@ -190,7 +190,7 @@ fn diagnostics_snapshot_reports_real_per_relay_subs_filters_and_per_kind_event_c
             slot: 0,
             generation: 1,
         },
-        RelaySessionKey::public(relay0.clone()),
+        RelaySessionKey::unauthenticated(relay0.clone()),
         event_frame(&wire0, kind1(&me, "again", 13)),
     ));
 
@@ -201,7 +201,7 @@ fn diagnostics_snapshot_reports_real_per_relay_subs_filters_and_per_kind_event_c
             slot: 1,
             generation: 1,
         },
-        RelaySessionKey::public(relay1.clone()),
+        RelaySessionKey::unauthenticated(relay1.clone()),
         event_frame(&wire1, kind1(&friend, "from friend", 20)),
     ));
 
@@ -277,7 +277,7 @@ fn diagnostics_coverage_flips_none_to_proven_interval_on_eose_and_pushes_reactiv
             slot: 0,
             generation: 1,
         },
-        RelaySessionKey::public(relay0.clone()),
+        RelaySessionKey::unauthenticated(relay0.clone()),
         eose_frame(&wire0),
     ));
     assert!(
@@ -341,7 +341,7 @@ fn coalesced_wire_diagnostics_reads_coverage_claims_atom_evidence() {
             slot: 0,
             generation: 1,
         },
-        RelaySessionKey::public(relay.clone()),
+        RelaySessionKey::unauthenticated(relay.clone()),
         eose_frame(&wire_sub_string(&sub)),
     ));
     let after = core.diagnostics_snapshot();

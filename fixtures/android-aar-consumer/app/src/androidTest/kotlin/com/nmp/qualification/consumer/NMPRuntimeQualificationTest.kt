@@ -9,7 +9,6 @@ import android.view.Choreographer
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.nmp.sdk.NMPAccessContext
 import com.nmp.sdk.NMPCacheMode
 import com.nmp.sdk.NMPConfig
 import com.nmp.sdk.NMPDemand
@@ -334,7 +333,7 @@ class NMPRuntimeQualificationTest {
         NMPDemand(
             selection = NMPFilter(kinds = listOf(1u.toUShort())),
             routing = NMPReadRouting.Explicit(listOf(relay)),
-            access = NMPAccessContext.Public,
+            authenticateAs = null,
             cache = NMPCacheMode.Strict,
             freshness = NMPFreshness.Live,
         )

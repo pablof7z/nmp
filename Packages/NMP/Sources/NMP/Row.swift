@@ -164,16 +164,17 @@ public enum SourceStatus: Sendable, Hashable {
 /// state.
 public struct SourceEvidence: Sendable, Hashable {
     public let relay: String
-    /// The frozen access identity of the physical session that produced this
-    /// per-source fact (#8): the same relay URL under `.public` versus a
-    /// `.nip42` identity is a distinct, non-aliasing source.
-    public let access: NMPAccessContext
+    /// The identity this session is bound to, hex; `nil` if bound to none.
+    /// The identity the physical session that produced this row was bound to
+    /// is a per-source fact (#8): the same relay URL unauthenticated versus
+    /// bound to a key is a distinct, non-aliasing source.
+    public let authenticateAs: String?
     public let reconciledThrough: UInt64?
     public let status: SourceStatus
 
     init(_ ffi: FfiSourceEvidence) {
         relay = ffi.relay
-        access = NMPAccessContext(ffi.access)
+        authenticateAs = ffi.authenticateAs
         reconciledThrough = ffi.reconciledThrough
         status = SourceStatus(ffi.status)
     }

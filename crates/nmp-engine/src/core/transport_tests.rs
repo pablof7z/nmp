@@ -1,5 +1,6 @@
 //! Ownership-domain tests moved with the implementation they falsify.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 
 #[cfg(test)]
@@ -17,7 +18,7 @@ mod relay_session_key_tests {
         let relay = relay();
         let a = Keys::generate().public_key();
         let b = Keys::generate().public_key();
-        let access_a = AccessContext::Nip42(a);
+        let access_a = Some(a);
         let filter = ConcreteFilter {
             kinds: Some(BTreeSet::from([1])),
             ..ConcreteFilter::default()
@@ -25,13 +26,13 @@ mod relay_session_key_tests {
         let atom = ContextualAtom {
             filter: filter.clone(),
             routing: ReadRouting::Auto,
-            access: access_a,
+            authenticate_as: access_a,
             routing_evidence: BTreeSet::new(),
         };
         let key = coverage_key(&atom);
         let sub_id = SubId::for_wire(relay.clone(), &filter, &ReadRouting::Auto, access_a);
         let session_a = RelaySessionKey::new(relay.clone(), access_a);
-        let session_b = RelaySessionKey::new(relay, AccessContext::Nip42(b));
+        let session_b = RelaySessionKey::new(relay, Some(b));
         let mut attribution = AttributionState::new();
         attribution.set_active_demand([&atom]);
         attribution.record_send(
@@ -57,7 +58,7 @@ mod relay_session_key_tests {
     #[test]
     fn correlated_completion_uses_exact_send_shape_and_completion_cap() {
         let relay = relay();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let filter = ConcreteFilter {
             kinds: Some(BTreeSet::from([1])),
             until: Some(150),
@@ -66,11 +67,11 @@ mod relay_session_key_tests {
         let atom = ContextualAtom {
             filter: filter.clone(),
             routing: ReadRouting::Auto,
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let key = coverage_key(&atom);
-        let sub_id = SubId::for_wire(relay, &filter, &ReadRouting::Auto, AccessContext::Public);
+        let sub_id = SubId::for_wire(relay, &filter, &ReadRouting::Auto, None);
         let mut attribution = AttributionState::new();
         attribution.observe_atom(&atom);
         let completed_send = attribution.record_send(
@@ -88,7 +89,7 @@ mod relay_session_key_tests {
             session.relay.clone(),
             &replay_filter,
             &ReadRouting::Auto,
-            AccessContext::Public,
+            None,
         );
         assert_ne!(sub_id, replay_sub_id, "changed bytes require a fresh id");
         attribution.record_send(
@@ -132,10 +133,10 @@ mod relay_session_key_tests {
     #[test]
     fn event_commit_poison_is_fifo_scoped_monotonic_and_retires_with_owners() {
         let relay = relay();
-        let public_session = RelaySessionKey::public(relay.clone());
+        let public_session = RelaySessionKey::unauthenticated(relay.clone());
         let protected_session = RelaySessionKey::new(
             relay.clone(),
-            AccessContext::Nip42(Keys::generate().public_key()),
+            Some(Keys::generate().public_key()),
         );
         let filter_a = ConcreteFilter {
             kinds: Some(BTreeSet::from([1])),
@@ -148,13 +149,13 @@ mod relay_session_key_tests {
         let atom_a = ContextualAtom {
             filter: filter_a.clone(),
             routing: ReadRouting::Auto,
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let atom_b = ContextualAtom {
             filter: filter_b.clone(),
             routing: ReadRouting::Auto,
-            access: protected_session.access,
+            authenticate_as: protected_session.authenticate_as,
             routing_evidence: BTreeSet::new(),
         };
         let key_a = coverage_key(&atom_a);
@@ -163,13 +164,13 @@ mod relay_session_key_tests {
             relay.clone(),
             &filter_a,
             &ReadRouting::Auto,
-            AccessContext::Public,
+            None,
         );
         let sub_b = SubId::for_wire(
             relay,
             &filter_b,
             &ReadRouting::Auto,
-            protected_session.access,
+            protected_session.authenticate_as,
         );
         let wire_a = wire_sub_id_string(&sub_a);
         let wire_b = wire_sub_id_string(&sub_b);
@@ -263,7 +264,7 @@ mod relay_session_key_tests {
     #[test]
     fn missing_id_event_failure_poisons_the_original_neg_send() {
         let relay = relay();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let filter = ConcreteFilter {
             kinds: Some(BTreeSet::from([1])),
             ..ConcreteFilter::default()
@@ -271,7 +272,7 @@ mod relay_session_key_tests {
         let atom = ContextualAtom {
             filter: filter.clone(),
             routing: ReadRouting::Auto,
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let key = coverage_key(&atom);
@@ -279,7 +280,7 @@ mod relay_session_key_tests {
             relay.clone(),
             &filter,
             &ReadRouting::Auto,
-            AccessContext::Public,
+            None,
         );
         let backfill_filter = ConcreteFilter {
             ids: Some(BTreeSet::from(["01".repeat(32)])),
@@ -289,7 +290,7 @@ mod relay_session_key_tests {
             relay,
             &backfill_filter,
             &ReadRouting::Auto,
-            AccessContext::Public,
+            None,
         );
         let mut attribution = AttributionState::new();
         let neg_send = attribution.record_send(
@@ -326,9 +327,9 @@ mod relay_session_key_tests {
         let relay = relay();
         let a = Keys::generate().public_key();
         let b = Keys::generate().public_key();
-        let public = RelaySessionKey::public(relay.clone());
-        let session_a = RelaySessionKey::new(relay.clone(), AccessContext::Nip42(a));
-        let session_b = RelaySessionKey::new(relay, AccessContext::Nip42(b));
+        let unauthenticated = RelaySessionKey::unauthenticated(relay.clone());
+        let session_a = RelaySessionKey::new(relay.clone(), Some(a));
+        let session_b = RelaySessionKey::new(relay, Some(b));
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
         let handles = [
             TransportRelayHandle {
@@ -344,7 +345,7 @@ mod relay_session_key_tests {
                 generation: 1,
             },
         ];
-        core.handle(EngineMsg::RelayConnected(handles[0], public.clone()));
+        core.handle(EngineMsg::RelayConnected(handles[0], unauthenticated.clone()));
         core.handle(EngineMsg::RelayConnected(handles[1], session_a.clone()));
         core.handle(EngineMsg::RelayConnected(handles[2], session_b.clone()));
 
@@ -354,7 +355,7 @@ mod relay_session_key_tests {
             DisconnectReason::Closed,
         ));
 
-        assert!(core.connected_relays.contains(&public));
+        assert!(core.connected_relays.contains(&unauthenticated));
         assert!(!core.connected_relays.contains(&session_a));
         assert!(core.connected_relays.contains(&session_b));
     }
@@ -362,10 +363,10 @@ mod relay_session_key_tests {
     #[test]
     fn protected_neg_frames_cannot_resolve_the_public_probe_or_inherit_its_diagnostics() {
         let relay = relay();
-        let public = RelaySessionKey::public(relay.clone());
+        let unauthenticated = RelaySessionKey::unauthenticated(relay.clone());
         let protected = RelaySessionKey::new(
             relay.clone(),
-            AccessContext::Nip42(Keys::generate().public_key()),
+            Some(Keys::generate().public_key()),
         );
         let filter = ConcreteFilter {
             kinds: Some(BTreeSet::from([1])),
@@ -375,13 +376,13 @@ mod relay_session_key_tests {
             ContextualAtom {
                 filter: filter.clone(),
                 routing: ReadRouting::Explicit(vec![relay.clone()]),
-                access: AccessContext::Public,
+                authenticate_as: None,
                 routing_evidence: BTreeSet::new(),
             },
             ContextualAtom {
                 filter,
                 routing: ReadRouting::Explicit(vec![relay.clone()]),
-                access: protected.access,
+                authenticate_as: protected.authenticate_as,
                 routing_evidence: BTreeSet::new(),
             },
         ]);
@@ -389,7 +390,7 @@ mod relay_session_key_tests {
         core.white_box("router.compile", |s| {
             s.router.compile(&atoms, &s.routing_facts, s.cap)
         });
-        let public_handle = TransportRelayHandle {
+        let unauthenticated_handle = TransportRelayHandle {
             slot: 5,
             generation: 1,
         };
@@ -397,7 +398,7 @@ mod relay_session_key_tests {
             slot: 6,
             generation: 1,
         };
-        core.handle(EngineMsg::RelayConnected(public_handle, public.clone()));
+        core.handle(EngineMsg::RelayConnected(unauthenticated_handle, unauthenticated.clone()));
         core.handle(EngineMsg::RelayConnected(
             protected_handle,
             protected.clone(),
@@ -438,12 +439,12 @@ mod relay_session_key_tests {
         let public_diagnostics = probing
             .relays
             .iter()
-            .find(|entry| entry.access == AccessContext::Public)
+            .find(|entry| entry.authenticate_as.is_none())
             .unwrap();
         let protected_diagnostics = probing
             .relays
             .iter()
-            .find(|entry| entry.access == protected.access)
+            .find(|entry| entry.authenticate_as == protected.authenticate_as)
             .unwrap();
         assert_eq!(public_diagnostics.nip77_behavior, "probing");
         assert_eq!(protected_diagnostics.nip77_behavior, "unknown");
@@ -452,7 +453,7 @@ mod relay_session_key_tests {
             subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(wire_id)),
             message: std::borrow::Cow::Owned("6100".to_string()),
         });
-        core.handle(EngineMsg::RelayFrame(public_handle, public, public_neg_msg));
+        core.handle(EngineMsg::RelayFrame(unauthenticated_handle, unauthenticated, public_neg_msg));
         assert_eq!(
             core.prober.state(&relay),
             crate::negentropy::ProbeState::Supported
@@ -462,7 +463,7 @@ mod relay_session_key_tests {
             resolved
                 .relays
                 .iter()
-                .find(|entry| entry.access == AccessContext::Public)
+                .find(|entry| entry.authenticate_as.is_none())
                 .unwrap()
                 .nip77_behavior,
             "behaviorally_proven"
@@ -471,7 +472,7 @@ mod relay_session_key_tests {
             resolved
                 .relays
                 .iter()
-                .find(|entry| entry.access == protected.access)
+                .find(|entry| entry.authenticate_as == protected.authenticate_as)
                 .unwrap()
                 .nip77_behavior,
             "unknown"
@@ -481,14 +482,14 @@ mod relay_session_key_tests {
     #[test]
     fn intentional_close_never_reopens_a_still_planned_session() {
         let relay = relay();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let atom = ContextualAtom {
             filter: ConcreteFilter {
                 kinds: Some(BTreeSet::from([1])),
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Explicit(vec![relay]),
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
@@ -609,7 +610,7 @@ mod relay_health_tests {
             slot: 7,
             generation: 1,
         };
-        let session = RelaySessionKey::public(RelayUrl::parse("wss://health.example.com").unwrap());
+        let session = RelaySessionKey::unauthenticated(RelayUrl::parse("wss://health.example.com").unwrap());
         let health = RelayHealth {
             last_error: Some("signature verification worker unavailable".to_string()),
             invalid_signature_count: 0,

@@ -79,7 +79,7 @@ final class FilterBuilderTests: XCTestCase {
         let inner = NMPDemand(
             selection: NMPFilter(kinds: [3], authors: .reactive(.activePubkey)),
             routing: .explicit(["wss://inner.example.com"]),
-            access: .nip42(publicKey: String(repeating: "a", count: 64)),
+            authenticateAs: String(repeating: "a", count: 64),
             cache: .strict,
             freshness: .maxAge(seconds: 600)
         )
@@ -96,7 +96,7 @@ final class FilterBuilderTests: XCTestCase {
         XCTAssertEqual(NMPFilter(ffi), filter)
 
         var publicInner = inner
-        publicInner.access = .public
+        publicInner.authenticateAs = nil
         let sameSelectionDifferentContext = NMPFilter(
             kinds: [1],
             authors: .derived(inner: publicInner, project: .tag("p"))

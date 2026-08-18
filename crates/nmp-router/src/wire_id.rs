@@ -193,7 +193,7 @@ pub(crate) struct Assignment {
 mod tests {
     use super::*;
 
-    use nmp_grammar::{AccessContext, ReadRouting};
+    use nmp_grammar::{ReadRouting};
 
     fn cf() -> ConcreteFilter {
         ConcreteFilter {
@@ -207,7 +207,7 @@ mod tests {
         SubId::allocate(
             nmp_router_testkit::test_relay(0),
             &ReadRouting::Auto,
-            AccessContext::Public,
+            None,
             ConcreteFilter::default().hash(),
             n,
         )

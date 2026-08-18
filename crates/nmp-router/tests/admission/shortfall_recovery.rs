@@ -1,5 +1,6 @@
 //! shortfall recovery admission integration proofs.
 
+use nmp_grammar::RelaySessionKey;
 use super::*;
 
 #[test]
@@ -19,7 +20,7 @@ fn second_projected_hint_adds_only_the_missing_session_and_heals_shortfall() {
         reqs(&router.admit(&BTreeSet::from([effective.clone()]), &facts, 20)),
         1
     );
-    let first_session = RelaySessionKey::public(first_relay);
+    let first_session = RelaySessionKey::unauthenticated(first_relay);
     let incumbent = router.plan().reqs[&first_session][0].clone();
     assert_eq!(
         router.diagnostics().uncovered_authors[&author].reason,
@@ -35,7 +36,7 @@ fn second_projected_hint_adds_only_the_missing_session_and_heals_shortfall() {
     assert_eq!(reqs(&healed), 1);
     assert_eq!(router.plan().reqs[&first_session], vec![incumbent]);
     assert_eq!(
-        router.plan().reqs[&RelaySessionKey::public(second_relay)].len(),
+        router.plan().reqs[&RelaySessionKey::unauthenticated(second_relay)].len(),
         1
     );
     assert!(!router.diagnostics().uncovered_authors.contains_key(&author));

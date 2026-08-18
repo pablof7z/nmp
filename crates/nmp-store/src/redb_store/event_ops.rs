@@ -1,3 +1,4 @@
+use nmp_grammar::RelaySessionKey;
 use super::commit::commit_prepared;
 use super::ingest::insert_with_tables;
 use super::ingest_txn::GovernedWrite;
@@ -584,7 +585,7 @@ pub(super) fn next_expiration(store: &RedbStore) -> Result<Option<Timestamp>, Pe
 
 pub(super) fn record_coverage(
     store: &mut RedbStore,
-    claims: &[(ContextualAtom, RelayUrl, CoverageInterval)],
+    claims: &[(ContextualAtom, RelaySessionKey, CoverageInterval)],
 ) -> Result<(), PersistenceError> {
     if claims.is_empty() {
         return Ok(());
@@ -592,9 +593,9 @@ pub(super) fn record_coverage(
     let write_txn = store.database()?.begin_write().map_err(persist_err)?;
     {
         let mut coverage = write_txn.open_table(COVERAGE).map_err(persist_err)?;
-        for (atom, relay, proven) in claims {
+        for (atom, session, proven) in claims {
             let key = compute_coverage_key(atom);
-            let row_key = RedbStore::coverage_row_key(key, relay);
+            let row_key = RedbStore::coverage_row_key(key, session);
             let existing = coverage
                 .get(row_key.as_str())
                 .map_err(persist_err)?
@@ -617,8 +618,8 @@ pub(super) fn record_coverage(
         .fail_next_coverage_write
         .as_ref()
         .is_some_and(|(target_key, target_relay)| {
-            claims.iter().any(|(atom, relay, _)| {
-                compute_coverage_key(atom) == *target_key && relay == target_relay
+            claims.iter().any(|(atom, session, _)| {
+                compute_coverage_key(atom) == *target_key && session.relay == *target_relay
             })
         })
     {
@@ -648,7 +649,7 @@ pub(super) fn record_coverage(
 pub(super) fn get_coverage(
     store: &RedbStore,
     key: CoverageKey,
-    relay: &RelayUrl,
+    session: &RelaySessionKey,
 ) -> Result<Option<CoverageInterval>, PersistenceError> {
     #[cfg(any(
         test,
@@ -656,7 +657,7 @@ pub(super) fn get_coverage(
         feature = "test-instrumentation"
     ))]
     store.coverage_reads.fetch_add(1, Ordering::Relaxed);
-    let row_key = RedbStore::coverage_row_key(key, relay);
+    let row_key = RedbStore::coverage_row_key(key, session);
     let read_txn = store.database()?.begin_read().map_err(persist_err)?;
     let coverage = read_txn.open_table(COVERAGE).map_err(persist_err)?;
     coverage

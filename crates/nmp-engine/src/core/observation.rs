@@ -1,4 +1,4 @@
-use nmp_grammar::{AccessContext, ConcreteFilter, DescriptorHash, IdentityField, RelaySessionKey};
+use nmp_grammar::{ConcreteFilter, DescriptorHash, IdentityField, RelaySessionKey};
 use nmp_resolver::{HandleId, ResolutionNodeKind, ResolvedValue};
 use nmp_router::SubId;
 use nmp_store::CoverageInterval;
@@ -84,7 +84,7 @@ pub enum ObservationFact {
         path: String,
         filter_revision: u64,
         relay: RelayUrl,
-        access: AccessContext,
+        authenticate_as: Option<nostr::PublicKey>,
         transport_generation: u64,
         request_revision: u64,
         filter: Arc<ConcreteFilter>,
@@ -108,7 +108,7 @@ pub enum ObservationFact {
         path: String,
         filter_revision: u64,
         relay: RelayUrl,
-        access: AccessContext,
+        authenticate_as: Option<nostr::PublicKey>,
         transport_generation: u64,
         request_revision: u64,
         observed_at: Timestamp,
@@ -118,7 +118,7 @@ pub enum ObservationFact {
         path: String,
         filter_revision: u64,
         relay: RelayUrl,
-        access: AccessContext,
+        authenticate_as: Option<nostr::PublicKey>,
         transport_generation: u64,
         request_revision: Option<u64>,
         reason: String,
@@ -127,7 +127,7 @@ pub enum ObservationFact {
         path: String,
         filter_revision: u64,
         relay: RelayUrl,
-        access: AccessContext,
+        authenticate_as: Option<nostr::PublicKey>,
         request_revision: u64,
         retry_at: Timestamp,
         cause: LocalSendRefusal,
@@ -505,7 +505,7 @@ impl CoreState {
                             path: path.clone(),
                             filter_revision: *filter_revision,
                             relay: request.session.relay.clone(),
-                            access: request.session.access,
+                            authenticate_as: request.session.authenticate_as,
                             transport_generation: handle.generation,
                             request_revision: request.request_revision,
                             filter: shared_filter.clone(),
@@ -568,7 +568,7 @@ impl CoreState {
                             path,
                             filter_revision,
                             relay: request.session.relay.clone(),
-                            access: request.session.access,
+                            authenticate_as: request.session.authenticate_as,
                             request_revision: request.request_revision,
                             retry_at,
                             cause: cause.clone(),
@@ -612,7 +612,7 @@ impl CoreState {
                     path,
                     filter_revision,
                     relay: request.session.relay.clone(),
-                    access: request.session.access,
+                    authenticate_as: request.session.authenticate_as,
                     transport_generation: request.handle.generation,
                     request_revision: request.request_revision,
                     observed_at,
@@ -724,7 +724,7 @@ impl CoreState {
                         path,
                         filter_revision,
                         relay: request.session.relay.clone(),
-                        access: request.session.access,
+                        authenticate_as: request.session.authenticate_as,
                         transport_generation: handle.generation,
                         request_revision: Some(request.request_revision),
                         reason: reason.clone(),
@@ -775,7 +775,7 @@ impl CoreState {
                         path,
                         filter_revision,
                         relay: request.session.relay.clone(),
-                        access: request.session.access,
+                        authenticate_as: request.session.authenticate_as,
                         transport_generation: handle.generation,
                         request_revision: Some(request.request_revision),
                         reason: reason.clone(),
@@ -1236,10 +1236,10 @@ mod tests {
         };
         core.slot_to_relay.insert(
             handle.slot,
-            (handle, RelaySessionKey::public(relay.clone())),
+            (handle, RelaySessionKey::unauthenticated(relay.clone())),
         );
         core.connected_relays
-            .insert(RelaySessionKey::public(relay.clone()));
+            .insert(RelaySessionKey::unauthenticated(relay.clone()));
         let same_effective_set = EventBuilder::new(Kind::ContactList, "")
             .tag(Tag::public_key(followed_b.public_key()))
             .custom_created_at(Timestamp::from(30))
@@ -1247,7 +1247,7 @@ mod tests {
             .unwrap();
         let unchanged = core.handle(EngineMsg::RelayFrame(
             handle,
-            RelaySessionKey::public(relay.clone()),
+            RelaySessionKey::unauthenticated(relay.clone()),
             nmp_transport::RelayFrame::from(nostr::RelayMessage::event(
                 nostr::SubscriptionId::new("foreign"),
                 same_effective_set,
@@ -1265,7 +1265,7 @@ mod tests {
             .unwrap();
         let changed = core.handle(EngineMsg::RelayFrame(
             handle,
-            RelaySessionKey::public(relay),
+            RelaySessionKey::unauthenticated(relay),
             nmp_transport::RelayFrame::from(nostr::RelayMessage::event(
                 nostr::SubscriptionId::new("foreign"),
                 changed_contact,

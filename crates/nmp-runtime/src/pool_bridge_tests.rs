@@ -1,3 +1,4 @@
+use nmp_grammar::RelaySessionKey;
 use super::*;
 use nmp_transport::{ConnState, PoolEventSink, RelayFrame, RelayHandle, RelayHealth};
 use nostr::{EventBuilder, Keys, RelayMessage, SubscriptionId};
@@ -14,13 +15,13 @@ fn event_frame(text: &str) -> RelayFrame {
 }
 
 fn test_session() -> RelaySessionKey {
-    RelaySessionKey::public(RelayUrl::parse("wss://relay.example.com").unwrap())
+    RelaySessionKey::unauthenticated(RelayUrl::parse("wss://relay.example.com").unwrap())
 }
 
 fn protected_session() -> RelaySessionKey {
     RelaySessionKey::new(
         RelayUrl::parse("wss://relay.example.com").unwrap(),
-        nmp_grammar::AccessContext::Nip42(nostr::Keys::generate().public_key()),
+        Some(nostr::Keys::generate().public_key()),
     )
 }
 

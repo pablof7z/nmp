@@ -27,7 +27,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{AccessContext, ConcreteFilter, ContextualAtom, RelaySessionKey};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, RelaySessionKey};
 use nmp_router::{RelayPlan, SubId, WireReq};
 use nmp_store::{coverage_claim_atoms, coverage_key, PersistenceError, RedbStore};
 use nostr::{RelayUrl, Timestamp};
@@ -81,7 +81,7 @@ pub struct AcquisitionEvidence {
 pub struct SourceEvidence {
     pub relay: RelayUrl,
     /// Frozen access identity of the physical session producing this fact.
-    pub access: AccessContext,
+    pub authenticate_as: Option<nostr::PublicKey>,
     /// Durable per-(shape, relay) watermark evidence, min'd over the
     /// subtree atoms THIS source covers in THIS query, IFF every one of
     /// them has a coverage row whose `from` is at or before the query's own
@@ -150,7 +150,7 @@ pub enum SourceStatus {
     /// fact: rows already acquired through this source remain usable; this
     /// status alone never invalidates them.
     Disconnected,
-    /// #8: a PROTECTED (`AccessContext::Nip42`) session is connected, but
+    /// #8: an identity-bound session is connected, but
     /// its exact current connection generation has not yet completed AUTH —
     /// its planned REQs are parked, so it is honestly not `Requesting` yet.
     AwaitingAuth {
@@ -246,7 +246,7 @@ pub(crate) struct AcquisitionEvidenceContext<'a> {
 ///   IFF every atom it covers has a proven row (`from <= window floor`),
 ///   else `None`. A scope whose acquisition decision suppressed wire work is
 ///   [`SourceStatus::CoverageSatisfied`] independently of link state. For a
-///   Live connected Public session, any exact pending attempt/retry is
+///   Live connected session bound to no identity, any exact pending attempt/retry is
 ///   [`SourceStatus::AwaitingRequest`], every required accepted placement is
 ///   `Requesting`, and a planned request with neither owner is `Error`.
 ///   Connected PROTECTED sessions retain their exact AUTH phase until ready,
@@ -342,7 +342,7 @@ pub(crate) fn acquisition_evidence(
                 entry.2 &= finished;
                 entry.3 &= placed;
                 entry.4 |= awaiting;
-                match store.get_coverage(key, &session.relay)? {
+                match store.get_coverage(key, session)? {
                     Some(interval) if interval.from <= window_start => {
                         entry.1 = Some(match entry.1 {
                             None => interval.through,
@@ -367,7 +367,7 @@ pub(crate) fn acquisition_evidence(
                 let status = if acquisition == EvidenceAcquisition::CoverageSatisfied {
                     SourceStatus::CoverageSatisfied
                 } else if connected.contains(&session) {
-                    if session.access == AccessContext::Public {
+                    if session.authenticate_as.is_none() {
                         request_placement_status(all_placed, any_awaiting)
                     } else {
                         match auth_status.get(&session).copied().unwrap_or(
@@ -398,7 +398,7 @@ pub(crate) fn acquisition_evidence(
                 };
                 SourceEvidence {
                     relay: session.relay,
-                    access: session.access,
+                    authenticate_as: session.authenticate_as,
                     reconciled_through: if all_proven { through } else { None },
                     status,
                 }
@@ -461,12 +461,13 @@ fn merge_source_status(left: SourceStatus, right: SourceStatus) -> SourceStatus 
 pub(crate) fn merge_acquisition_evidence(
     parts: impl IntoIterator<Item = AcquisitionEvidence>,
 ) -> AcquisitionEvidence {
-    let mut sources: BTreeMap<(RelayUrl, AccessContext), SourceEvidence> = BTreeMap::new();
+    let mut sources: BTreeMap<(RelayUrl, Option<nostr::PublicKey>), SourceEvidence> =
+        BTreeMap::new();
     let mut shortfall = Vec::new();
 
     for part in parts {
         for source in part.sources {
-            let key = (source.relay.clone(), source.access);
+            let key = (source.relay.clone(), source.authenticate_as);
             match sources.entry(key) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(source);
@@ -498,7 +499,7 @@ pub(crate) fn merge_acquisition_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_grammar::{AccessContext, ReadRouting};
+    use nmp_grammar::{ReadRouting};
     use nmp_router::{DemandKey, SubId, WireReq};
     use nmp_store::RedbStore;
     use nostr::Keys;
@@ -511,7 +512,7 @@ mod tests {
                 ..ConcreteFilter::default()
             },
             routing: ReadRouting::Auto,
-            access: AccessContext::Public,
+            authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         }
     }
@@ -522,7 +523,7 @@ mod tests {
         let key = coverage_key(&atom);
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
         let req = WireReq {
-            sub_id: SubId::for_wire(relay.clone(), &atom.filter, &atom.routing, atom.access),
+            sub_id: SubId::for_wire(relay.clone(), &atom.filter, &atom.routing, atom.authenticate_as),
             filter: atom.filter.clone(),
             routing: atom.routing.clone(),
             provenance: BTreeSet::new(),
@@ -531,9 +532,9 @@ mod tests {
             coverage_assignments: BTreeSet::new(),
         };
         let plan = RelayPlan {
-            reqs: BTreeMap::from([(RelaySessionKey::public(relay.clone()), vec![req])]),
+            reqs: BTreeMap::from([(RelaySessionKey::unauthenticated(relay.clone()), vec![req])]),
             limited_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
-            refused_sessions: BTreeSet::from([RelaySessionKey::public(
+            refused_sessions: BTreeSet::from([RelaySessionKey::unauthenticated(
                 RelayUrl::parse("wss://refused.example").unwrap(),
             )]),
             ..RelayPlan::default()
@@ -569,7 +570,7 @@ mod tests {
         let atom = atom();
         let plan = RelayPlan {
             limited_demands: BTreeSet::from([DemandKey::for_atom(&atom)]),
-            refused_sessions: BTreeSet::from([RelaySessionKey::public(
+            refused_sessions: BTreeSet::from([RelaySessionKey::unauthenticated(
                 RelayUrl::parse("wss://refused.example").unwrap(),
             )]),
             ..RelayPlan::default()
@@ -603,7 +604,7 @@ mod tests {
     fn never_connected_open_failure_is_scoped_source_error() {
         let atom = atom();
         let relay = RelayUrl::parse("wss://unavailable.example").unwrap();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let plan = RelayPlan {
             reqs: BTreeMap::from([(
                 session.clone(),
@@ -612,7 +613,7 @@ mod tests {
                         relay.clone(),
                         &atom.filter,
                         &atom.routing,
-                        atom.access,
+                        atom.authenticate_as,
                     ),
                     filter: atom.filter.clone(),
                     routing: atom.routing.clone(),
@@ -650,15 +651,15 @@ mod tests {
     #[test]
     fn protected_source_reports_each_exact_auth_phase_and_terminal_truth() {
         let mut atom = atom();
-        atom.access = AccessContext::Nip42(Keys::generate().public_key());
+        atom.authenticate_as = Some(Keys::generate().public_key());
         let relay = RelayUrl::parse("wss://protected-evidence.example").unwrap();
-        let session = RelaySessionKey::new(relay.clone(), atom.access);
+        let session = RelaySessionKey::new(relay.clone(), atom.authenticate_as);
         let key = coverage_key(&atom);
         let plan = RelayPlan {
             reqs: BTreeMap::from([(
                 session.clone(),
                 vec![WireReq {
-                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.routing, atom.access),
+                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.routing, atom.authenticate_as),
                     filter: atom.filter.clone(),
                     routing: atom.routing.clone(),
                     provenance: BTreeSet::new(),
@@ -733,12 +734,12 @@ mod tests {
     fn coverage_satisfied_scope_never_borrows_request_placement_or_link_state() {
         let atom = atom();
         let relay = RelayUrl::parse("wss://coverage-satisfied.example").unwrap();
-        let session = RelaySessionKey::public(relay.clone());
+        let session = RelaySessionKey::unauthenticated(relay.clone());
         let plan = RelayPlan {
             reqs: BTreeMap::from([(
                 session,
                 vec![WireReq {
-                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.routing, atom.access),
+                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.routing, atom.authenticate_as),
                     filter: atom.filter.clone(),
                     routing: atom.routing.clone(),
                     provenance: BTreeSet::new(),
@@ -773,7 +774,7 @@ mod tests {
         let source = |status| AcquisitionEvidence {
             sources: vec![SourceEvidence {
                 relay: RelayUrl::parse("wss://phase-lattice.example").unwrap(),
-                access: AccessContext::Public,
+                authenticate_as: None,
                 reconciled_through: Some(Timestamp::from(5u64)),
                 status,
             }],
