@@ -34,7 +34,13 @@ pub(super) struct GovernedWrite {
 }
 
 impl GovernedWrite {
-    pub(super) fn begin(store: &RedbStore) -> Result<Self, PersistenceError> {
+    /// Takes `&mut RedbStore` although the body only reads the handle.
+    /// `Database::begin_write` takes `&self` and [`RedbStore::database`]
+    /// hands out a shared reference, so a `&RedbStore` signature here would
+    /// let any read-borrow entry point open the canonical write door. The
+    /// exclusive borrow is what makes "a shared borrow of the store cannot
+    /// mutate it" a compiler rule rather than a convention.
+    pub(super) fn begin(store: &mut RedbStore) -> Result<Self, PersistenceError> {
         let write_txn = store.database()?.begin_write().map_err(persist_err)?;
         #[cfg(feature = "bench-instrumentation")]
         let mut write_txn = write_txn;

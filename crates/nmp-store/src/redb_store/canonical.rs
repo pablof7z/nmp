@@ -102,7 +102,7 @@ pub(super) struct CanonicalWriteTables<'txn> {
     /// relay observations are columns of the same event key, so one handle
     /// serves all three — redb permits a table to be open once per write
     /// transaction.
-    pub(super) events: redb::Table<'txn, &'static [u8], &'static [u8]>,
+    events: redb::Table<'txn, &'static [u8], &'static [u8]>,
     pub(super) event_ids: redb::Table<'txn, &'static [u8; 32], EventKey>,
     /// The one durable-scalar tree. Both surrogate allocators live here, so
     /// one handle serves both — redb permits a table to be open once per
@@ -196,6 +196,18 @@ impl<'txn> CanonicalWriteTables<'txn> {
             local,
         };
         Ok(Some(StoredEvent { event, provenance }))
+    }
+
+    /// Read-only ordered scan of every canonical column row.
+    ///
+    /// The mutating door stays closed: `redb::Range` cannot insert or remove,
+    /// so a full-tree walk (gc's victim pass) is reachable without handing out
+    /// the write handle that would let a caller bypass the eight mutators
+    /// above.
+    pub(super) fn scan(
+        &self,
+    ) -> Result<redb::Range<'_, &'static [u8], &'static [u8]>, PersistenceError> {
+        self.events.iter().map_err(persist_err)
     }
 
     pub(super) fn load_local(
