@@ -51,10 +51,11 @@ fn install_successor_delivery_lanes(
     previous: &crate::SemanticGeneration,
     next: &crate::SemanticGeneration,
 ) -> Result<(), PersistenceError> {
-    let owner =
-        next.members.first().copied().ok_or_else(|| {
-            PersistenceError::invariant("semantic generation has no delivery owner")
-        })?;
+    let owner = next
+        .members
+        .first()
+        .copied()
+        .ok_or_else(|| PersistenceError::new("semantic generation has no delivery owner"))?;
     let mut route_revisions = write_txn
         .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
         .map_err(persist_err)?;
@@ -77,7 +78,7 @@ fn install_successor_delivery_lanes(
             let (key_intent, _) = parse_route_revision_key(key.value())
                 .map_err(|error| codec_error("route revision key", error))?;
             if key_intent != *member {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "successor route range escaped semantic member",
                 ));
             }
@@ -110,7 +111,7 @@ fn install_successor_delivery_lanes(
             let (event_id, revision, last_ordinal, _) =
                 decode_lane(&encoded).map_err(|error| codec_error("lane", error))?;
             if key_intent != *member || event_id != previous.materialization.event_id {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "successor predecessor lane does not name the prior generation",
                 ));
             }
@@ -135,7 +136,7 @@ fn install_successor_delivery_lanes(
         }
         let ordinal = last
             .checked_add(1)
-            .ok_or_else(|| PersistenceError::invariant("route revision ordinal exhausted"))?;
+            .ok_or_else(|| PersistenceError::new("route revision ordinal exhausted"))?;
         let encoded = encode_route(&relay_ids.iter().copied().collect::<Vec<_>>())
             .map_err(|error| codec_error("route revision", error))?;
         route_revisions
@@ -149,7 +150,7 @@ fn install_successor_delivery_lanes(
             .unwrap_or((0, 0));
         let revision = old_revision
             .checked_add(1)
-            .ok_or_else(|| PersistenceError::invariant("delivery lane revision exhausted"))?;
+            .ok_or_else(|| PersistenceError::new("delivery lane revision exhausted"))?;
         let encoded = encode_lane(
             next.materialization.event_id,
             revision,
@@ -245,7 +246,7 @@ fn load_member_records(
             .map_err(persist_err)?
             .map(|value| value.value().to_vec())
         else {
-            return Err(PersistenceError::invariant(format!(
+            return Err(PersistenceError::new(format!(
                 "semantic member intent {} is missing",
                 update.intent_id.0
             )));
@@ -259,7 +260,7 @@ fn load_member_records(
                 ..
             } if journal_coordinate == coordinate
         ) {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "semantic member journal has wrong work or coordinate",
             ));
         }
@@ -269,7 +270,7 @@ fn load_member_records(
             .get(&receipt_key)
             .map_err(persist_err)?
             .map(|value| value.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("semantic member receipt is missing"))?;
+            .ok_or_else(|| PersistenceError::new("semantic member receipt is missing"))?;
         let receipt = decode_receipt(&receipt)
             .map_err(|error| codec_error("semantic member receipt", error))?;
         if receipt.intent_id != Some(update.intent_id)
@@ -281,7 +282,7 @@ fn load_member_records(
                 } if receipt_coordinate == coordinate
             )
         {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "semantic member receipt does not match journal",
             ));
         }
@@ -319,7 +320,7 @@ fn apply_plan(
         Some(key) => Some((
             key,
             ingest.load_by_key(key)?.ok_or_else(|| {
-                PersistenceError::invariant(format!(
+                PersistenceError::new(format!(
                     "semantic address index points at missing canonical event {key}"
                 ))
             })?,
@@ -509,7 +510,7 @@ fn apply_plan(
                 materialization, ..
             } => materialization.clone(),
             PublishQueueIntentRecordWork::Event { .. } => {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "semantic member has ordinary event journal",
                 ))
             }
@@ -530,7 +531,7 @@ fn apply_plan(
         let acceptance = match receipt.payload {
             PublishQueueReceiptPayload::ReplaceableOperation { acceptance, .. } => acceptance,
             PublishQueueReceiptPayload::Event { .. } => {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "semantic member has ordinary event receipt",
                 ));
             }
@@ -720,7 +721,7 @@ pub(super) fn accept(
             } => (Some(installed), predecessor),
             SemanticInstallOutcome::Waiting(_) => (None, None),
             SemanticInstallOutcome::Resolved => {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "newly accepted replaceable operation cannot already be resolved",
                 ));
             }
@@ -810,9 +811,10 @@ pub(super) fn close_cohort(
         {
             return Ok(SemanticCohortCloseOutcome::Stale);
         }
-        let owner = *generation.members.first().ok_or_else(|| {
-            PersistenceError::invariant("semantic close generation has no members")
-        })?;
+        let owner = *generation
+            .members
+            .first()
+            .ok_or_else(|| PersistenceError::new("semantic close generation has no members"))?;
 
         let lanes = write_txn
             .open_table(PUBLISH_QUEUE_LANES)
@@ -878,7 +880,7 @@ pub(super) fn close_cohort(
                 .get(&intent_storage_key)
                 .map_err(persist_err)?
                 .map(|value| value.value().to_vec())
-                .ok_or_else(|| PersistenceError::invariant("semantic close member missing"))?;
+                .ok_or_else(|| PersistenceError::new("semantic close member missing"))?;
             let intent = decode_intent(&intent_bytes)
                 .map_err(|error| codec_error("semantic close member", error))?;
             let materialization = match &intent.work {
@@ -899,7 +901,7 @@ pub(super) fn close_cohort(
                 .get(&receipt_storage_key)
                 .map_err(persist_err)?
                 .map(|value| value.value().to_vec())
-                .ok_or_else(|| PersistenceError::invariant("semantic close receipt missing"))?;
+                .ok_or_else(|| PersistenceError::new("semantic close receipt missing"))?;
             let receipt = decode_receipt(&receipt_bytes)
                 .map_err(|error| codec_error("semantic close receipt", error))?;
             if receipt.intent_id != Some(*member)
@@ -1017,7 +1019,7 @@ pub(super) fn install(
             .map_err(persist_err)?
             .map(|value| crate::MaterializationId(value.value()));
         if previous.last_materialization_id != persisted_high_water {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "semantic materialization high-water diverged from resource",
             ));
         }
@@ -1078,7 +1080,7 @@ pub(super) fn install_source(
             .map_err(persist_err)?
             .map(|value| crate::MaterializationId(value.value()));
         if previous.last_materialization_id != persisted_high_water {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "semantic materialization high-water diverged from resource",
             ));
         }
@@ -1124,7 +1126,7 @@ pub(super) fn promote(
     verified: VerifiedSignature,
 ) -> Result<PromoteOutcome, PersistenceError> {
     if verified.event_id() != expected_event_id {
-        return Err(PersistenceError::invariant(format!(
+        return Err(PersistenceError::new(format!(
             "promotion evidence verifies {} but materialization expects {expected_event_id}",
             verified.event_id()
         )));
@@ -1164,7 +1166,7 @@ pub(super) fn promote(
             return Ok(PromoteOutcome::Stale);
         };
         let row = ingest.load_by_key(event_key)?.ok_or_else(|| {
-            PersistenceError::invariant(format!(
+            PersistenceError::new(format!(
                 "semantic address index points at missing canonical event {event_key}"
             ))
         })?;
@@ -1172,7 +1174,7 @@ pub(super) fn promote(
             return Ok(PromoteOutcome::Stale);
         }
         let Some(local) = row.provenance.local.as_ref() else {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "current materialization canonical row is not local",
             ));
         };
@@ -1180,7 +1182,7 @@ pub(super) fn promote(
             return Ok(PromoteOutcome::Stale);
         }
         if row.event.sig != crate::sentinel_signature() {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "pending materialization carries a non-sentinel signature",
             ));
         }
@@ -1193,7 +1195,7 @@ pub(super) fn promote(
                 .get(&key)
                 .map_err(persist_err)?
                 .map(|value| value.value().to_vec())
-                .ok_or_else(|| PersistenceError::invariant("materialization member missing"))?;
+                .ok_or_else(|| PersistenceError::new("materialization member missing"))?;
             let intent = decode_intent(&intent_bytes)
                 .map_err(|error| codec_error("materialization member", error))?;
             let work = match &intent.work {
@@ -1215,7 +1217,7 @@ pub(super) fn promote(
                 .get(&receipt_storage_key)
                 .map_err(persist_err)?
                 .map(|value| value.value().to_vec())
-                .ok_or_else(|| PersistenceError::invariant("materialization receipt missing"))?;
+                .ok_or_else(|| PersistenceError::new("materialization receipt missing"))?;
             let receipt = decode_receipt(&receipt_bytes)
                 .map_err(|error| codec_error("materialization receipt", error))?;
             if receipt.intent_id != Some(*member)

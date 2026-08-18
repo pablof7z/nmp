@@ -110,18 +110,16 @@ impl StoreSigReader {
 }
 
 pub struct RedbStore {
-    /// `None` is the closed half of the recovery state machine: the poisoned
-    /// redb handle has been dropped, while `_ownership` still fences this
-    /// canonical pathname. Only `reopen_after_failure` installs the next
-    /// generation.
+    /// `None` means the redb handle is gone while `_ownership` still fences
+    /// this canonical pathname. Nothing reopens it: every door reached
+    /// afterwards returns `Err`, and the durable rows are read back by the
+    /// next process that opens the file.
     pub(super) db: Option<Arc<Database>>,
-    /// The verify gate's durable-dedup read seam (#1677). A shared, updatable
-    /// cell of the live `Arc<Database>`, cloned into every `StoreSigReader`.
-    /// The store installs the handle here on open and replaces it on
-    /// [`Self::reopen_after_failure`]; the verifier reads through it under the
-    /// lock so a reopen cannot drop the old `Database` while a verify read is
-    /// in flight. On the hot path this Mutex is uncontended (the store touches
-    /// it only at open/reopen).
+    /// The verify gate's durable-dedup read seam (#1677). A shared cell of the
+    /// live `Arc<Database>`, cloned into every `StoreSigReader`. The store
+    /// installs the handle here on open; the verifier reads through it under
+    /// the lock. On the hot path this Mutex is uncontended (the store touches
+    /// it only at open).
     pub(super) shared_db: Arc<Mutex<Option<Arc<Database>>>>,
     // Field order is load-bearing: Rust drops `db` before this ownership
     // token, so no process can open or reset the target until this database
@@ -523,12 +521,9 @@ impl RedbStore {
     }
 
     pub(super) fn database(&self) -> Result<&Database, PersistenceError> {
-        self.db.as_deref().ok_or_else(|| {
-            PersistenceError::new(
-                crate::PersistenceFault::Latched,
-                "durable database handle is closed for reconstruction",
-            )
-        })
+        self.db
+            .as_deref()
+            .ok_or_else(|| PersistenceError::new("durable database handle is closed"))
     }
 
     /// Share the durable database handle with an out-of-band reader —
@@ -551,63 +546,6 @@ impl RedbStore {
             .expect("test inspected a store while its database handle was closed")
     }
 
-    /// Replace only redb's poisoned handle while retaining the sidecar owner
-    /// that fences this exact canonical target. No fresh store is initialized
-    /// here: a missing or non-current target is a refusal, never an empty
-    /// database silently substituted for the caller's durable obligations.
-    ///
-    /// This is a mechanism door for the engine supervisor, not permission to
-    /// retry the failed mutation. The caller must reconstruct every volatile
-    /// projection from the reopened store and resolve any
-    /// [`crate::DurabilityOutcome::Unknown`] operation through its stable
-    /// durable identity before issuing another mutation. The engine calls this
-    /// only after a fault whose [`crate::PersistenceFault::requires_reopen`] is
-    /// true.
-    pub fn reopen_after_failure(&mut self) -> Result<(), PersistenceError> {
-        let target = self._ownership.target().to_path_buf();
-
-        // `Option::take` is the lifecycle transition. The old Database must
-        // be fully dropped before its target-inode lock can be reacquired;
-        // `_ownership` deliberately stays live throughout, so another opener
-        // of the canonical pathname cannot enter between generations. A
-        // hard-link alias has a distinct sidecar; the required target-inode
-        // lock below makes that race resolve to one owner (and a typed reopen
-        // refusal for the other), never two live database generations.
-        //
-        // The verify gate's `StoreSigReader` reads through `shared_db` under
-        // its lock; taking the cell here blocks any in-flight verify read
-        // from keeping the old Database alive, so the drop below fully
-        // releases redb's handle before the reopen (#1677).
-        if let Ok(mut shared) = self.shared_db.lock() {
-            let _ = shared.take();
-        }
-        drop(self.db.take());
-
-        let backend =
-            RequiredLockedFileBackend::open_existing(&target).map_err(reopen_open_error)?;
-        let db = Database::builder()
-            .set_cache_size(REDB_CACHE_BYTES)
-            .create_with_backend(backend)
-            .map_err(persist_err)?;
-        validate_reopened_schema(&db, &target)?;
-
-        self.publish_queue_relays
-            .lock()
-            .map_err(|_| PersistenceError::invariant("delivery relay cache poisoned"))?
-            .clear();
-        let db = Arc::new(db);
-        if let Ok(mut shared) = self.shared_db.lock() {
-            *shared = Some(Arc::clone(&db));
-        }
-        self.db = Some(db);
-        super::publish_queue_ops::maintain_terminal_receipts_at(
-            self,
-            crate::terminal_retention::wall_clock_now(),
-            crate::terminal_retention::TerminalRetentionLimits::PRODUCTION,
-        )?;
-        Ok(())
-    }
-
     pub(super) fn publish_queue_relay_id(
         &self,
         relay: &RelayUrl,
@@ -615,7 +553,7 @@ impl RedbStore {
         if let Some(id) = self
             .publish_queue_relays
             .lock()
-            .map_err(|_| PersistenceError::invariant("delivery relay cache poisoned"))?
+            .map_err(|_| PersistenceError::new("delivery relay cache poisoned"))?
             .by_url
             .get(relay)
             .copied()
@@ -631,7 +569,7 @@ impl RedbStore {
             .get(relay.as_str().as_bytes())
             .map_err(persist_err)?
             .map(|guard| *guard.value())
-            .ok_or_else(|| PersistenceError::invariant("delivery relay is not interned"))?;
+            .ok_or_else(|| PersistenceError::new("delivery relay is not interned"))?;
         let id = u32::from_be_bytes(raw);
         let key = relay_key(id);
         let encoded = relays
@@ -639,12 +577,12 @@ impl RedbStore {
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
             .ok_or_else(|| {
-                PersistenceError::invariant(
+                PersistenceError::new(
                     "delivery relay reverse map points at missing dictionary row",
                 )
             })?;
         if decode_relay(&encoded).map_err(|error| codec_error("relay", error))? != *relay {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "delivery relay dictionary directions disagree",
             ));
         }
@@ -659,7 +597,7 @@ impl RedbStore {
         if let Some(relay) = self
             .publish_queue_relays
             .lock()
-            .map_err(|_| PersistenceError::invariant("delivery relay cache poisoned"))?
+            .map_err(|_| PersistenceError::new("delivery relay cache poisoned"))?
             .by_id
             .get(&id)
             .cloned()
@@ -677,7 +615,7 @@ impl RedbStore {
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
             .ok_or_else(|| {
-                PersistenceError::invariant(format!(
+                PersistenceError::new(format!(
                     "delivery row references missing relay surrogate {id}"
                 ))
             })?;
@@ -687,10 +625,10 @@ impl RedbStore {
             .map_err(persist_err)?
             .map(|guard| u32::from_be_bytes(*guard.value()))
             .ok_or_else(|| {
-                PersistenceError::invariant("delivery relay dictionary is missing reverse row")
+                PersistenceError::new("delivery relay dictionary is missing reverse row")
             })?;
         if reverse_id != id {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "delivery relay dictionary directions disagree",
             ));
         }
@@ -706,7 +644,7 @@ impl RedbStore {
         let mut cache = self
             .publish_queue_relays
             .lock()
-            .map_err(|_| PersistenceError::invariant("delivery relay cache poisoned"))?;
+            .map_err(|_| PersistenceError::new("delivery relay cache poisoned"))?;
         if cache
             .by_id
             .get(&id)
@@ -716,7 +654,7 @@ impl RedbStore {
                 .get(&relay)
                 .is_some_and(|existing| *existing != id)
         {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "delivery relay cache disagrees with durable dictionary",
             ));
         }
@@ -741,13 +679,13 @@ impl RedbStore {
                 .get(&intent_key(key.intent_id))
                 .map_err(persist_err)?
                 .map(|value| value.value().to_vec())
-                .ok_or_else(|| PersistenceError::invariant("lane intent is not open"))?;
+                .ok_or_else(|| PersistenceError::new("lane intent is not open"))?;
             let current_event_id = decode_intent(&intent)
                 .map_err(|error| codec_error("lane intent", error))?
                 .current_event_id()
-                .ok_or_else(|| PersistenceError::invariant("lane intent has no current event"))?;
+                .ok_or_else(|| PersistenceError::new("lane intent has no current event"))?;
             if current_event_id != key.event_id {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "delivery lane event is not the intent's current event",
                 ));
             }
@@ -1227,7 +1165,7 @@ impl RedbStore {
         let local = local_bytes
             .map(|bytes| {
                 binary_event::decode_local(bytes).map_err(|error| {
-                    PersistenceError::invariant(format!(
+                    PersistenceError::new(format!(
                         "decode canonical local state {event_key}: {error:?}"
                     ))
                 })
@@ -1245,13 +1183,13 @@ impl RedbStore {
                 relay.clone()
             } else {
                 let row = relays.get(relay_key).map_err(persist_err)?.ok_or_else(|| {
-                    PersistenceError::invariant(format!(
+                    PersistenceError::new(format!(
                         "observation points at missing relay {relay_key}"
                     ))
                 })?;
                 let (_refs, url) = decode_relay_row(relay_key, row.value())?;
                 let relay = RelayUrl::parse(url).map_err(|error| {
-                    PersistenceError::invariant(format!(
+                    PersistenceError::new(format!(
                         "decode interned relay URL {relay_key}: {error}"
                     ))
                 })?;
@@ -1277,7 +1215,7 @@ impl RedbStore {
         self.examined_rows.fetch_add(1, Ordering::Relaxed);
         Ok(StoredEvent {
             event: view.materialize_event().map_err(|error| {
-                PersistenceError::invariant(format!(
+                PersistenceError::new(format!(
                     "materialize canonical event {event_key}: {error:?}"
                 ))
             })?,
@@ -1319,7 +1257,7 @@ impl RedbStore {
                     .map_err(persist_err)?
                     .map(|guard| guard.value());
                 if canonical_key != Some(event_key) {
-                    return Err(PersistenceError::invariant(format!(
+                    return Err(PersistenceError::new(format!(
                         "ordered index disagrees with canonical id map for {event_id}"
                     )));
                 }
@@ -1332,19 +1270,19 @@ impl RedbStore {
                     .get(event_row_key(event_key).as_slice())
                     .map_err(persist_err)?
                 else {
-                    return Err(PersistenceError::invariant(format!(
+                    return Err(PersistenceError::new(format!(
                         "ordered index points at missing canonical event {event_key}"
                     )));
                 };
                 let view = StoredEventView::from_trusted(value.value()).map_err(|error| {
-                    PersistenceError::invariant(format!(
+                    PersistenceError::new(format!(
                         "decode canonical event view {event_key}: {error:?}"
                     ))
                 })?;
                 let matches = view
                     .matches_prepared_filter_after_index(&prepared_filter, plan.index.matched())
                     .map_err(|error| {
-                        PersistenceError::invariant(format!(
+                        PersistenceError::new(format!(
                             "match canonical event against filter {event_key}: {error:?}"
                         ))
                     })?;
@@ -1355,7 +1293,7 @@ impl RedbStore {
                     #[cfg(any(test, feature = "bench-instrumentation"))]
                     self.examined_rows.fetch_add(1, Ordering::Relaxed);
                     let event = view.materialize_event().map_err(|error| {
-                        PersistenceError::invariant(format!(
+                        PersistenceError::new(format!(
                             "materialize canonical event {event_key}: {error:?}"
                         ))
                     })?;
@@ -1466,19 +1404,19 @@ impl RedbStore {
                 .get(event_row_key(event_key).as_slice())
                 .map_err(persist_err)?
             else {
-                return Err(PersistenceError::invariant(format!(
+                return Err(PersistenceError::new(format!(
                     "ordered index points at missing canonical event {event_key}"
                 )));
             };
             let view = StoredEventView::from_trusted(value.value()).map_err(|error| {
-                PersistenceError::invariant(format!(
+                PersistenceError::new(format!(
                     "decode canonical event view {event_key}: {error:?}"
                 ))
             })?;
             let matches = view
                 .matches_prepared_filter_after_index(&prepared_filter, plan.index.matched())
                 .map_err(|error| {
-                    PersistenceError::invariant(format!(
+                    PersistenceError::new(format!(
                         "match canonical event against filter {event_key}: {error:?}"
                     ))
                 })?;
@@ -1521,95 +1459,6 @@ impl RedbStore {
             },
             &mut materialize_if_visible,
         )
-    }
-}
-
-impl PublishQueueRelayCache {
-    fn clear(&mut self) {
-        self.by_id.clear();
-        self.by_url.clear();
-    }
-}
-
-fn validate_reopened_schema(db: &Database, path: &Path) -> Result<(), PersistenceError> {
-    let read = db.begin_read().map_err(persist_err)?;
-    let tables = read.list_tables().map_err(persist_err)?;
-    if !tables
-        .into_iter()
-        .any(|table| table.name() == STORE_META.name())
-    {
-        return Err(PersistenceError::invariant(format!(
-            "reopened durable store at {} has no current schema marker",
-            path.display()
-        )));
-    }
-
-    let store_meta = read.open_table(STORE_META).map_err(persist_err)?;
-    let version = store_meta
-        .get(SCHEMA_VERSION_KEY)
-        .map_err(persist_err)?
-        .map(|guard| guard.value());
-    if version != Some(SCHEMA_VERSION) {
-        return Err(PersistenceError::invariant(format!(
-            "reopened durable store at {} has schema {version:?}, expected {SCHEMA_VERSION}",
-            path.display()
-        )));
-    }
-
-    let publish_queue_meta = read.open_table(PUBLISH_QUEUE_META).map_err(persist_err)?;
-    let codec_version = publish_queue_meta
-        .get(PUBLISH_QUEUE_CODEC_VERSION_KEY)
-        .map_err(persist_err)?
-        .map(|guard| decode_meta_u64(guard.value(), "delivery codec version"))
-        .transpose()?;
-    if codec_version != Some(PUBLISH_QUEUE_CODEC_VERSION) {
-        return Err(PersistenceError::invariant(format!(
-            "reopened durable store at {} has publish-queue codec {codec_version:?}, expected {PUBLISH_QUEUE_CODEC_VERSION}",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-fn reopen_open_error(error: RedbStoreOpenError) -> PersistenceError {
-    match error {
-        RedbStoreOpenError::TemporaryDirectoryFailed { source } => PersistenceError::new(
-            crate::PersistenceFault::Invariant,
-            format!("reconstruction unexpectedly tried to create a temporary directory: {source}"),
-        ),
-        RedbStoreOpenError::Database(error) => persist_err(error),
-        RedbStoreOpenError::StoreAlreadyOpen { path } => PersistenceError::new(
-            crate::PersistenceFault::Latched,
-            format!(
-                "durable store target remained locked during reconstruction: {}",
-                path.display()
-            ),
-        ),
-        RedbStoreOpenError::UnsupportedSchema {
-            path,
-            expected,
-            found,
-        } => PersistenceError::invariant(format!(
-            "durable store at {} has schema {found:?}, expected {expected}",
-            path.display()
-        )),
-        RedbStoreOpenError::PathResolutionFailed { path, source }
-        | RedbStoreOpenError::LockFileOpenFailed { path, source }
-        | RedbStoreOpenError::LockFailed { path, source } => PersistenceError::new(
-            crate::PersistenceFault::Io,
-            format!(
-                "could not reopen durable store at {}: {source}",
-                path.display()
-            ),
-        ),
-        RedbStoreOpenError::TargetChanged { expected, actual } => PersistenceError::new(
-            crate::PersistenceFault::UnknownBackend,
-            format!(
-                "durable store target changed during reconstruction: expected {}, found {}",
-                expected.display(),
-                actual.display()
-            ),
-        ),
     }
 }
 

@@ -141,7 +141,6 @@ Feature: A write publishes as the current account unless it names someone else
 
   # nmp:id=IDENTITY-WRITE-SELECTION-007
   # nmp:status=built
-  # nmp:evidence=rust:nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once
   # nmp:evidence=rust:nmp::removing_or_clearing_session_never_retargets_or_discards_accepted_writes
   # nmp:falsifier=Recover Identity.Active instead of its accepted public key; a different restored current account silently changes the write author.
   Scenario: A restart does not re-resolve an accepted write against the new session

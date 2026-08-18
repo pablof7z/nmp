@@ -757,10 +757,9 @@ impl CoreState {
             match self.resolver.accept_local(&mut self.store, accept) {
                 Ok(result) => result,
                 Err(error) => {
-                    let mut effects = self.refuse_publish(PublishError::PersistenceFailed {
+                    let effects = self.refuse_publish(PublishError::PersistenceFailed {
                         reason: error.to_string(),
                     });
-                    self.degrade_store(error, &mut effects);
                     return PublishPreparation::Complete(effects);
                 }
             };
@@ -853,8 +852,6 @@ impl CoreState {
                 previous.sign_generation = previous.sign_generation.saturating_add(1);
                 previous.event_id = None;
                 previous.pending_relays.clear();
-                previous.unstarted_relays.clear();
-                previous.route_blocked_relays.clear();
                 previous.attempt_ordinals.clear();
                 // `lane_projection` was already reset above.
                 previous.durable_routes.clear();
@@ -877,14 +874,11 @@ impl CoreState {
                         sign_generation: 0,
                         event_id: None,
                         pending_relays: BTreeSet::new(),
-                        unstarted_relays: BTreeSet::new(),
-                        route_blocked_relays: BTreeSet::new(),
                         attempt_ordinals: BTreeMap::new(),
                         lane_projection: LaneWorkerProjection::default(),
                         durable_routes: BTreeSet::new(),
                         route_complete: false,
                         destinations_reported: false,
-                        persistence_fault: None,
                         route_needs: BTreeSet::new(),
                     },
                 );

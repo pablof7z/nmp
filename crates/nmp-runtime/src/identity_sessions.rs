@@ -1,6 +1,6 @@
 //! The engine thread's one owner for identity-session membership and
 //! signing-capability availability (#1731). Moved out of `lib.rs` beside its
-//! sibling owners (`nip11_decision`, `store_recovery`, `wire_admission`) —
+//! sibling owners (`nip11_decision`, `wire_admission`) —
 //! same treatment already proven twice in the reducer (#1693, #1695): an
 //! owner module with private fields, not a crate. Nothing here has an
 //! independent dependency, consumer, or lifecycle; `engine_loop` still

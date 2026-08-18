@@ -62,8 +62,6 @@ mod history;
 mod history_lifecycle;
 #[cfg(test)]
 mod history_lifecycle_tests;
-#[cfg(test)]
-mod lane_bootstrap_retry_tests;
 mod lane_projection;
 #[cfg(test)]
 mod nip77_metadata_tests;
@@ -128,9 +126,9 @@ use nmp_signer::SignerError;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, AccessContextId,
     AuthDenial as StoredAuthDenial, AuthDenialSource as StoredAuthDenialSource, CloseIntentOutcome,
-    CompensateOutcome, CoverageInterval, CoverageKey, DurabilityOutcome, HandoffEvidence, IntentId,
+    CompensateOutcome, CoverageInterval, CoverageKey, HandoffEvidence, IntentId,
     IntentSigState, MaterializationCandidate, PendingMaterializationState, PersistenceError,
-    PersistenceFault, PromoteOutcome, PromotionTarget, PublishQueueAttemptHandoff,
+    PromoteOutcome, PromotionTarget, PublishQueueAttemptHandoff,
     PublishQueueAttemptOutcome, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
     PublishQueueLane, PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState,
     PublishQueueReceipt, PublishQueueReceiptPayload, PublishQueueTerminalOutcome,
@@ -377,11 +375,6 @@ const AUTH_MAX_FUTURE_SECS: u64 = 600;
 /// real epochs are distinct BY VALUE, not merely by phase.
 const AUTH_SEQUENCE_SENTINEL: u64 = u64::MAX;
 const MAX_GLOBAL_ATTEMPTS: usize = 32;
-/// The two shapes a local-persistence stall takes, kept as exact strings so
-/// an operator reading `RelayWaiting::PersistenceStalled` learns which one
-/// happened. They differ only in whether the resolved relay URL survives a
-/// crash — a recovery detail, not an app decision, which is why it rides
-/// `detail` rather than a second variant.
 /// Why an attempt was replaced without ever having been acknowledged or
 /// refused: nothing is left in this process that could deliver its transport
 /// handoff, so the attempt is abandoned in favour of a fresh one rather than
@@ -389,12 +382,6 @@ const MAX_GLOBAL_ATTEMPTS: usize = 32;
 const ORPHANED_HANDOFF_DETAIL: &str =
     "no transport handoff is outstanding for this attempt; the identical frozen event is \
      republished under a new attempt";
-const ATTEMPT_STALL_DETAIL: &str =
-    "the durable attempt fact could not be committed; no wire EVENT was emitted and recovery \
-     rediscovers this exact relay from its committed route revision";
-const ROUTE_STALL_DETAIL: &str =
-    "the append-only route revision could not be committed; this exact relay URL is not claimed \
-     to survive a crash";
 const DEADLINE_READ_BATCH: usize = 1_024;
 
 fn retry_delay_secs(key: &PublishQueueLaneKey, ordinal: u64) -> u64 {
@@ -512,9 +499,6 @@ struct ReceiptReplayCursorState {
     destinations: bool,
     attempts: BTreeMap<RelayUrl, ReceiptAttemptReplayKey>,
     lane_revisions: BTreeMap<RelayUrl, u64>,
-    /// The relays whose persistence stall has been replayed. Latched, never
-    /// cleared: a fault a later ack papered over is still the fault.
-    persistence_stalled: BTreeSet<(RelayUrl, write::PersistenceStallKind)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -540,7 +524,6 @@ impl ReceiptReplayCursor {
                 destinations: false,
                 attempts: BTreeMap::new(),
                 lane_revisions: BTreeMap::new(),
-                persistence_stalled: BTreeSet::new(),
             }),
         }
     }
@@ -1570,15 +1553,13 @@ struct QuarantinedWrite {
 /// Reducer-owned, rebuildable view of one intent's durable lane rows.
 ///
 /// The store remains authoritative. `persisted` supports exact reverse-index
-/// cleanup, `nonterminal` answers steady-state worker demand, and `uncertain`
-/// is a conservative superset used only when a commit may have landed but its
-/// post-state was not observable. Uncertainty may keep a worker alive; it may
-/// never cause a possibly durable lane to lose its worker.
+/// cleanup and `nonterminal` answers steady-state worker demand. Every entry
+/// here is an exact committed post-state: a transition that did not commit
+/// changes nothing, because the store is what recovery reads.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct LaneWorkerProjection {
     persisted: BTreeSet<RelayUrl>,
     nonterminal: BTreeSet<RelayUrl>,
-    uncertain: BTreeSet<RelayUrl>,
     /// Exact latest committed nonterminal row by relay. Scheduling is a
     /// reducer decision over this current state; the durable store remains
     /// the recovery authority, not a database that every heartbeat rereads.
@@ -1599,7 +1580,6 @@ impl LaneWorkerProjection {
     fn apply(&mut self, lane: &PublishQueueLane) -> bool {
         let relay = lane.key.relay.clone();
         let newly_persisted = self.persisted.insert(relay.clone());
-        self.uncertain.remove(&relay);
         if matches!(lane.state, PublishQueueLaneState::Terminal { .. }) {
             self.nonterminal.remove(&relay);
             self.current_nonterminal.remove(&relay);
@@ -1610,67 +1590,20 @@ impl LaneWorkerProjection {
         newly_persisted
     }
 
-    fn mark_uncertain(&mut self, relay: RelayUrl) -> bool {
-        self.current_nonterminal.remove(&relay);
-        self.uncertain.insert(relay.clone());
-        self.persisted.insert(relay)
-    }
-
     fn required_relays(&self) -> impl Iterator<Item = &RelayUrl> {
-        self.nonterminal.iter().chain(&self.uncertain)
+        self.nonterminal.iter()
     }
 
     fn can_close(&self) -> bool {
-        !self.persisted.is_empty() && self.nonterminal.is_empty() && self.uncertain.is_empty()
+        !self.persisted.is_empty() && self.nonterminal.is_empty()
     }
 }
 
-/// One intent's outstanding lane-bootstrap gap.
-///
-/// Bootstrap is both the create-if-missing lane mutation and the only
-/// complete read that establishes the projection, so a failure leaves the
-/// reducer unable to name this intent's durable lanes. Retention is handled
-/// conservatively at the moment of failure; this record is what makes that
-/// retention *temporary* rather than permanent.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct LaneBootstrapRetry {
-    /// The route candidates conservatively held in
-    /// `LaneWorkerProjection::uncertain` until bootstrap commits.
-    ///
-    /// `None` means the intent's durable route set could not itself be read,
-    /// so no per-relay `uncertain` marking can cover the gap and the whole
-    /// projection must report unavailable instead. Unknown is sticky: a
-    /// later failure that does know its candidates cannot upgrade an already
-    /// unknown route set into a covered one.
-    candidates: Option<BTreeSet<RelayUrl>>,
-    /// Wall-clock instant at which `tick` retries. `next_deadline` folds this
-    /// in, so the existing runtime timer drives the retry; nothing scans.
-    due: Timestamp,
-    /// Consecutive bootstrap failures, feeding the same capped exponential
-    /// backoff shape the durable lane retry schedule uses.
-    failures: u32,
-}
-
-impl LaneBootstrapRetry {
-    /// Whether the conservative marking taken at the moment of failure can
-    /// stand in for this intent's unknown durable lane set.
-    ///
-    /// An empty candidate set marks nothing, so it covers nothing: it is
-    /// exactly as blind as an unreadable route set and gets the same
-    /// retain-everything treatment.
-    fn covers_retention(&self) -> bool {
-        self.candidates
-            .as_ref()
-            .is_some_and(|candidates| !candidates.is_empty())
-    }
-}
-
-/// Capped exponential backoff for lane-bootstrap retries.
-///
-/// Deliberately the same shape as [`retry_delay_secs`] without its per-lane
-/// jitter: there is exactly one bootstrap in flight per intent, so there is
-/// no thundering herd across ordinals to spread.
-fn bootstrap_retry_delay_secs(failures: u32) -> u64 {
+/// Capped exponential backoff, the same shape as [`retry_delay_secs`]
+/// without its per-lane jitter: the callers below have exactly one attempt in
+/// flight per subject, so there is no thundering herd across ordinals to
+/// spread.
+fn unjittered_retry_delay_secs(failures: u32) -> u64 {
     RETRY_INITIAL_SECS
         .checked_shl(failures.saturating_sub(1).min(63))
         .unwrap_or(u64::MAX)
@@ -1739,14 +1672,6 @@ struct PendingWrite {
     /// dropped pending relay always resolves to `GaveUp`, never a retry
     /// `PublishEvent` (no blind retry, ledger's `AtMostOnce` amendment).
     pending_relays: BTreeSet<RelayUrl>,
-    /// Routed lanes for which `start_lane_attempt` failed. They remain
-    /// explicitly owned and nonterminal, but never enter `pending_relays`
-    /// because no Started fact exists and no wire EVENT was emitted.
-    unstarted_relays: BTreeSet<RelayUrl>,
-    /// Resolved URLs whose route revision did not persist. Owned only for
-    /// this process lifetime; crash recovery may re-resolve policy but cannot
-    /// claim these exact URLs durably.
-    route_blocked_relays: BTreeSet<RelayUrl>,
     /// The persisted started ordinal currently awaiting a terminal outcome
     /// for each relay.
     attempt_ordinals: BTreeMap<RelayUrl, u64>,
@@ -1778,10 +1703,6 @@ struct PendingWrite {
     /// are the same VALUE and a different FACT, and an app told nothing
     /// cannot tell them apart.
     destinations_reported: bool,
-    /// LATCHED local-persistence fault, if this write ever hit one. Set on
-    /// first observation and never cleared — a later ack does not mean the
-    /// disk recovered, and an operator must not lose the signal.
-    persistence_fault: Option<String>,
     /// The authors whose route provider this intent's last resolution still
     /// needs. This includes ordinary `Unknown` inputs and, when the complete
     /// answer has zero destinations, settled zero-route inputs that must keep
@@ -2101,25 +2022,6 @@ pub struct CoreState {
     /// `stalled_write_census.rs`, so the cache can never drift from the
     /// census it is a projection of.
     stalled_writes: StalledWriteCensus,
-    /// A lane-worker projection gap that NO in-process reconciliation can
-    /// close: a committed lane fact arrived for an intent this reducer does
-    /// not track, or boot could not read the pending set at all. There is
-    /// nothing to retry, so this stays latched until the next
-    /// `recover_on_boot` rebuilds `pending` from scratch. Unlike the pending
-    /// writes owner's own degraded lane index it never triggers a fallback
-    /// scan:
-    /// [`Self::relay_worker_requirements`] returns `None` and the runtime
-    /// retains every existing session.
-    lane_projection_unprovable: bool,
-    /// Intents whose durable lane bootstrap did not commit, keyed by their
-    /// receipt. Each entry is a *retryable* projection gap, and this map is
-    /// the only path out of the conservative retention that gap causes:
-    /// `tick` re-runs `bootstrap_projected_lanes` at `due`, and a committed
-    /// bootstrap removes the entry. Without it a single transient store
-    /// failure would pin the intent's relay workers -- and its receipt --
-    /// for the rest of the process (#1000), because `uncertain` is cleared
-    /// only by a committed lane fact that no other path can ever produce.
-    lane_bootstrap_retries: BTreeMap<ReceiptId, LaneBootstrapRetry>,
     /// The negentropy capability-probe cache (plan §6 E).
     prober: Prober,
     /// Latest provenance-bearing NIP-11 advertisement for relays in the
@@ -2158,33 +2060,6 @@ pub struct CoreState {
     /// removed the instant its one-and-only `HandoffResult` arrives — see
     /// `Self::on_event_handoff`.
     attempt_correlations: HashMap<AttemptCorrelation, AttemptCorrelationTarget>,
-    /// Degraded-store diagnostic retained from the first failed door in the
-    /// current storage generation.
-    ///
-    /// A failure whose typed fault requires a fresh backend handle also arms
-    /// `store_recovery_requested`. The runtime consumes that request and
-    /// supervises bounded reconstruction; only a complete reopen plus
-    /// store-derived reducer rebuild clears this diagnostic. Faults that do
-    /// not require reopen remain observable but never trigger blind retry.
-    ///
-    /// Originally this was a permanent read-only latch (issue #122): set once the first time an
-    /// ingest/read [`RedbStore`] door returns [`PersistenceError`] (disk
-    /// full, I/O error). The reducer NEVER panics on such a failure — it
-    /// records the error message here, skips the affected reactive step
-    /// (leaving already-delivered state untouched rather than fabricating a
-    /// phantom retraction), and surfaces it on the read-only diagnostics
-    /// snapshot. A minimal, honest "the local cache went read-only" signal;
-    /// #1362 closes that gap without making this string a control surface:
-    /// recovery branches only on [`PersistenceFault`].
-    store_degraded: Option<String>,
-    /// Monotonic evidence that some store door failed. Recovery snapshots it
-    /// before reducer reconstruction so a swallowed partial rebuild can never
-    /// clear the diagnostic merely because its fault did not require reopen.
-    store_failure_epoch: u64,
-    /// `Option::take` request from the reducer to the one runtime supervisor.
-    /// The fault is retained as typed evidence; its presence, never an
-    /// adjacent boolean or diagnostic string, owns the recovery transition.
-    store_recovery_requested: Option<PersistenceFault>,
     /// Runtime relay-worker open failures keyed by their exact current owner.
     /// Entries are pruned whenever demand/write ownership changes and cleared
     /// by a successful connection for that session.
@@ -2193,11 +2068,6 @@ pub struct CoreState {
     /// separate from open failures so clearing one recovered session cannot
     /// erase an independent transport-health fact.
     transport_degraded: Option<String>,
-    /// A failed durable-lane deadline transition is removed from the armed
-    /// deadline set until another real engine message retries the reducer.
-    /// This prevents a persistent I/O error from becoming recv_timeout(0)
-    /// busy-spin while retaining the due row durably for recovery.
-    retry_scheduler_blocked: bool,
     /// The attempt ceiling (#1031), from
     /// `nmp::EngineConfig::max_publish_attempts`. Counts
     /// observations, never wall-clock.
@@ -2407,8 +2277,6 @@ impl CoreState {
             pending: PendingWrites::default(),
             last_author_route_needs: BTreeSet::new(),
             stalled_writes: StalledWriteCensus::default(),
-            lane_projection_unprovable: false,
-            lane_bootstrap_retries: BTreeMap::new(),
             prober: Prober::new(),
             nip11_information: HashMap::new(),
             planned_read_sessions: BTreeSet::new(),
@@ -2418,12 +2286,8 @@ impl CoreState {
             events_by_session_kind: HashMap::new(),
             next_attempt_correlation: Some(0),
             attempt_correlations: HashMap::new(),
-            store_degraded: None,
-            store_failure_epoch: 0,
-            store_recovery_requested: None,
             relay_open_failures: BTreeMap::new(),
             transport_degraded: None,
-            retry_scheduler_blocked: false,
             max_publish_attempts: crate::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
             #[cfg(test)]
             turn_level_consistency_suppressed_for_named_exception: false,
@@ -2532,31 +2396,11 @@ impl CoreState {
     /// while reconciling ordinary worker ownership. ("Pure" would be the wrong
     /// word for anything in `CoreState`, which owns the store and commits
     /// through it -- see `docs/internals/architecture-boundaries.md`.)
-    /// Whether the reducer can prove its lane-worker projection is a
-    /// conservative superset of durable nonterminal lanes.
-    ///
-    /// Derived rather than latched, so every gap that CAN be reconciled
-    /// re-enables exact worker reconciliation the moment it is (#1000). A
-    /// bootstrap gap whose route candidates are known is already covered by
-    /// `LaneWorkerProjection::uncertain` and keeps the projection available;
-    /// one whose candidates are unknown has nothing to mark, so it must fall
-    /// back to retaining everything until its retry commits.
-    fn lane_worker_projection_available(&self) -> bool {
-        !self.lane_projection_unprovable
-            && self
-                .lane_bootstrap_retries
-                .values()
-                .all(LaneBootstrapRetry::covers_retention)
-    }
-
-    pub(in crate::core) fn relay_worker_requirements(&self) -> Option<RelayWorkerRequirements> {
-        if !self.lane_worker_projection_available() {
-            return None;
-        }
+    pub(in crate::core) fn relay_worker_requirements(&self) -> RelayWorkerRequirements {
         let writes = self.write_relay_workers();
         let mut all: BTreeSet<RelaySessionKey> = self.router.plan().reqs.keys().cloned().collect();
         all.extend(writes.iter().cloned());
-        Some(RelayWorkerRequirements { all, writes })
+        RelayWorkerRequirements { all, writes }
     }
 
     /// Exact physical sessions owned by nonterminal write work, excluding
@@ -2578,8 +2422,6 @@ impl CoreState {
                 pending
                     .pending_relays
                     .iter()
-                    .chain(&pending.unstarted_relays)
-                    .chain(&pending.route_blocked_relays)
                     .chain(pending.lane_projection.required_relays())
                     .cloned()
                     .map(|relay| RelaySessionKey::new(relay, access)),
@@ -2939,9 +2781,6 @@ impl CoreState {
         // unconditionally would present a snapshot whose coverage entries are
         // empty because the store could not be read as a healthy store with
         // nothing proven.
-        if self.store_degraded.is_some() {
-            snapshot.store_degraded = self.store_degraded.clone();
-        }
         snapshot.transport_degraded = self
             .relay_open_failures
             .iter()
@@ -3094,14 +2933,12 @@ impl CoreState {
         }
         self.clock = now;
         let mut effects = Vec::new();
-        self.retry_scheduler_blocked = false;
         self.retry_due_request_claim_transfers(now, &mut effects);
         self.retry_due_request_attempts(now, &mut effects);
         // Before the durable deadline sweep: a committed bootstrap mints the
         // very lanes the sweep and `schedule_ready` below then act on, so
         // retrying first lets one tick both close the projection gap and
         // make progress on it.
-        effects.extend(self.retry_lane_bootstraps(now));
         // Resolution moment THREE: every intent whose routing is not yet
         // complete is re-executed against the directory as it stands NOW.
         // This is the safety net behind moment four's latency path -- it
@@ -3129,11 +2966,11 @@ impl CoreState {
                     Ok(committed) => {
                         self.apply_committed_mutation(committed, &mut effects);
                     }
-                    Err(e) => self.degrade_store(e, &mut effects),
+                    Err(_e) => {},
                 }
             }
             Ok(_) => {}
-            Err(e) => self.degrade_store(e, &mut effects),
+            Err(_e) => {},
         }
         // `>=` against the EXACT `Timestamp` threshold `next_deadline()`
         // arms for (`started_at + NEG_LIVENESS_DEADLINE_SECS`) -- not the
@@ -3216,26 +3053,7 @@ impl CoreState {
         let neg_liveness = self
             .nip77
             .earliest_liveness_deadline(NEG_LIVENESS_DEADLINE_SECS);
-        // A persistence failure already latched by the write plane suppresses
-        // this term until real work arrives (`handle` clears the flag), which
-        // is a recorded decision rather than an erased read. The read itself
-        // still propagates.
-        let delivery = match (!self.retry_scheduler_blocked)
-            .then(|| self.store.next_publish_queue_deadline())
-        {
-            Some(read) => read?,
-            None => None,
-        };
-        // Lane-bootstrap retries carry their own capped backoff, so unlike
-        // the delivery deadline they are NOT suppressed by
-        // `retry_scheduler_blocked`: a failed bootstrap has no durable
-        // deadline row to rearm it, and suppressing it here would leave the
-        // intent's conservative retention with no way out (#1000).
-        let bootstrap = self
-            .lane_bootstrap_retries
-            .values()
-            .map(|retry| retry.due)
-            .min();
+        let delivery = self.store.next_publish_queue_deadline()?;
         let request_claim_transfer = self
             .pending_request_claim_transfers
             .values()
@@ -3246,7 +3064,6 @@ impl CoreState {
             expiry,
             neg_liveness,
             delivery,
-            bootstrap,
             request_claim_transfer,
             request_retry,
         ]
@@ -3256,11 +3073,6 @@ impl CoreState {
     }
 
     pub(in crate::core) fn handle(&mut self, msg: EngineMsg) -> Vec<Effect> {
-        // A prior persistence failure suppresses a due delivery deadline only
-        // until real work arrives. Re-expose it after this message so the
-        // runtime immediately drives a fresh Tick instead of either spinning
-        // on the failed transition or suppressing retry forever.
-        self.retry_scheduler_blocked = false;
         let effects = match msg {
             EngineMsg::Subscribe(query) => self.on_subscribe(query),
             EngineMsg::FlushWireAdmission(now) => self.flush_wire_admission(now),
@@ -3286,10 +3098,7 @@ impl CoreState {
                 self.on_relay_health(handle, session, health)
             }
             EngineMsg::RelayOpenFailed(session, reason) => {
-                if self
-                    .relay_worker_requirements()
-                    .is_some_and(|required| required.all.contains(&session))
-                {
+                if self.relay_worker_requirements().all.contains(&session) {
                     self.relay_open_failures.insert(session, reason);
                     let mut effects = vec![Effect::EmitDiagnostics(self.diagnostics_snapshot())];
                     self.refresh_all_observations(&mut effects);
@@ -3395,9 +3204,7 @@ impl CoreState {
         if self.relay_open_failures.is_empty() && self.auth_required_sessions.is_empty() {
             return false;
         }
-        let Some(required) = self.relay_worker_requirements() else {
-            return false;
-        };
+        let required = self.relay_worker_requirements();
         let before = self.relay_open_failures.len();
         self.relay_open_failures
             .retain(|session, _| required.all.contains(session));
@@ -3468,8 +3275,7 @@ impl CoreState {
         // Re-rooting reactive nodes can re-query the store (a `Derived`
         // binding over a reactive field). Degrade to read-only on a
         // persistence failure (issue #122) rather than panic.
-        if let Err(e) = self.resolver.set_active_pubkey(&self.store, pk) {
-            self.degrade_store(e, &mut effects);
+        if let Err(_e) = self.resolver.set_active_pubkey(&self.store, pk) {
             return effects;
         }
         let ids: Vec<_> = self.handles.keys().copied().collect();
@@ -3494,19 +3300,6 @@ impl CoreState {
 
 #[cfg(any(test, feature = "test-instrumentation"))]
 impl CoreState {
-    /// Execute the runtime's existing requested Redb reconstruction sequence
-    /// without exposing its two internal lifecycle doors independently.
-    #[doc(hidden)]
-    pub(in crate::core) fn recover_requested_redb_store_for_test(
-        &mut self,
-    ) -> Result<Option<(PersistenceFault, Vec<Effect>)>, PersistenceError> {
-        let Some(fault) = self.take_store_recovery_request() else {
-            return Ok(None);
-        };
-        self.recover_store_after_failure()
-            .map(|effects| Some((fault, effects)))
-    }
-
     /// Test-only access to the concrete store-door count used by the relay
     /// worker scheduling falsifiers.
     #[doc(hidden)]

@@ -19,7 +19,7 @@ use std::path::Path;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, CompensateOutcome,
     EventCursor, GcRetentionSet, HandoffEvidence, InsertOutcome, IntentSigState, LocalOrigin,
-    PersistenceFault, PromoteOutcome, PromotionTarget, PublishQueueAttemptHandoff,
+    PromoteOutcome, PromotionTarget, PublishQueueAttemptHandoff,
     PublishQueueAttemptOutcome, PublishQueueIntent, PublishQueuePostHandoffState,
     PublishQueueTransientCause,
     PublishQueueReceipt, PublishQueueReceiptPayload, PublishQueueWork, ReceiptState, RedbStore,
@@ -1242,7 +1242,6 @@ fn assert_route_recovery_refuses_broken_relay_dictionary(
     let error = store
         .recover_route_revisions(intent_id)
         .expect_err("recovery must refuse a non-bijective relay dictionary");
-    assert_eq!(error.fault(), PersistenceFault::Invariant);
     assert!(
         error.message().contains(expected_message),
         "unexpected recovery refusal: {error}"

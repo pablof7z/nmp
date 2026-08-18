@@ -1946,11 +1946,6 @@ pub fn relay_state_to_ffi(state: &GRelayState) -> FfiRelayState {
                     cause: retry_cause_to_ffi(*cause),
                     detail: detail.clone(),
                 },
-                GRelayWaiting::PersistenceStalled { detail } => {
-                    FfiRelayWaiting::PersistenceStalled {
-                        detail: detail.clone(),
-                    }
-                }
             },
         },
         GRelayState::Attempting {
@@ -2076,7 +2071,6 @@ pub fn publish_queue_entry_to_ffi(entry: &GPublishQueueEntry) -> FfiPublishQueue
         route_complete,
         relay_states,
         outcome,
-        persistence_fault,
     } = entry;
     FfiPublishQueueEntry {
         receipt_id: receipt_id.0,
@@ -2094,7 +2088,6 @@ pub fn publish_queue_entry_to_ffi(entry: &GPublishQueueEntry) -> FfiPublishQueue
             })
             .collect(),
         outcome: outcome.as_ref().map(write_outcome_to_ffi),
-        persistence_fault: persistence_fault.clone(),
     }
 }
 
@@ -2359,7 +2352,6 @@ pub fn diagnostics_snapshot_to_ffi(s: DiagnosticsSnapshot) -> FfiDiagnosticsSnap
         dropped_merge_rules,
         sessions_rejected_over_cap,
         sessions_refused_by_subscription_budget,
-        store_degraded,
         transport_degraded,
         stalled_writes,
         stalled_write_totals,
@@ -2377,7 +2369,6 @@ pub fn diagnostics_snapshot_to_ffi(s: DiagnosticsSnapshot) -> FfiDiagnosticsSnap
             .collect(),
         sessions_rejected_over_cap,
         sessions_refused_by_subscription_budget,
-        store_degraded,
         transport_degraded,
         stalled_writes: stalled_writes
             .into_iter()
@@ -2521,24 +2512,6 @@ mod write_fact_tests {
                             eligible_at: 99,
                             cause: FfiRetryCause::RelayRateLimited,
                             detail: Some("slow down".into()),
-                        },
-                    },
-                },
-            ),
-            (
-                GWriteStatus::Relay {
-                    event_id,
-                    relay: relay.clone(),
-                    state: GRelayState::Waiting(GRelayWaiting::PersistenceStalled {
-                        detail: "disk".into(),
-                    }),
-                },
-                FfiWriteFact::Relay {
-                    event_id: event_id.to_hex(),
-                    relay: relay.to_string(),
-                    state: FfiRelayState::Waiting {
-                        waiting: FfiRelayWaiting::PersistenceStalled {
-                            detail: "disk".into(),
                         },
                     },
                 },
@@ -3126,7 +3099,6 @@ mod tests {
             dropped_merge_rules: vec!["limit"],
             sessions_rejected_over_cap: 0,
             sessions_refused_by_subscription_budget: 2,
-            store_degraded: Some("read-only".to_string()),
             transport_degraded: Some("signature verification worker unavailable".to_string()),
             stalled_writes: vec![
                 StalledWrite {
@@ -3163,7 +3135,6 @@ mod tests {
         assert_eq!(ffi.relays[0].subid_length_limit, Some(16));
         assert!(ffi.relays[0].subid_length_rejects_our_ids);
         assert_eq!(ffi.sessions_refused_by_subscription_budget, 2);
-        assert_eq!(ffi.store_degraded.as_deref(), Some("read-only"));
         assert_eq!(
             ffi.relays[0].coverage[0].coverage,
             Some(FfiCoverageInterval {

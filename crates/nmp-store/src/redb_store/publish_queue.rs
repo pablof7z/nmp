@@ -65,7 +65,7 @@ pub(super) fn intent_deadline_keys(
         let (key_intent, relay_id) =
             parse_lane_key(key.value()).map_err(|error| codec_error("lane key", error))?;
         if key_intent != intent_id {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "lane deadline range escaped intent prefix",
             ));
         }
@@ -91,14 +91,14 @@ pub(super) fn replace_lane_in_txn(
         .get(&storage_key)
         .map_err(persist_err)?
         .map(|guard| guard.value().to_vec())
-        .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
+        .ok_or_else(|| PersistenceError::new("delivery lane not found"))?;
     let (event_id, revision, last_ordinal, current_state) =
         decode_lane(&encoded).map_err(|error| codec_error("lane", error))?;
     if event_id != key.event_id {
-        return Err(PersistenceError::invariant("stale delivery lane event"));
+        return Err(PersistenceError::new("stale delivery lane event"));
     }
     if revision != expected_revision {
-        return Err(PersistenceError::invariant("stale delivery lane revision"));
+        return Err(PersistenceError::new("stale delivery lane revision"));
     }
     let current = PublishQueueLane {
         key: key.clone(),
@@ -116,13 +116,13 @@ pub(super) fn replace_lane_in_txn(
         revision: current
             .revision
             .checked_add(1)
-            .ok_or_else(|| PersistenceError::invariant("delivery lane revision exhausted"))?,
+            .ok_or_else(|| PersistenceError::new("delivery lane revision exhausted"))?,
         last_ordinal: match &state {
             PublishQueueLaneState::InFlight { ordinal, .. }
             | PublishQueueLaneState::Transient { ordinal, .. }
             | PublishQueueLaneState::Terminal { ordinal, .. } => {
                 if *ordinal > current.last_ordinal.saturating_add(1) {
-                    return Err(PersistenceError::invariant(
+                    return Err(PersistenceError::new(
                         "delivery lane state skips an attempt ordinal",
                     ));
                 }
@@ -234,7 +234,7 @@ pub(super) fn alloc_receipt_id_in_txn(
 ) -> Result<u64, PersistenceError> {
     let id = alloc_counter_in_txn(publish_queue_meta, NEXT_RECEIPT_ID_KEY)?;
     if id >= (1u64 << 63) {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "durable receipt id namespace exhausted",
         ));
     }
@@ -257,7 +257,7 @@ pub(super) fn alloc_counter_in_txn(
         .unwrap_or(1);
     let next = current
         .checked_add(1)
-        .ok_or_else(|| PersistenceError::invariant("delivery id counter exhausted"))?;
+        .ok_or_else(|| PersistenceError::new("delivery id counter exhausted"))?;
     let encoded = encode_meta_u64(next);
     publish_queue_meta
         .insert(meta_key, encoded.as_slice())
@@ -296,14 +296,12 @@ pub(super) fn update_publish_queue_receipt(
     let existing = publish_queue_receipts.get(&key).map_err(persist_err)?;
     let encoded = existing
         .map(|guard| guard.value().to_vec())
-        .ok_or_else(|| {
-            PersistenceError::invariant(format!("missing delivery receipt {receipt_id}"))
-        })?;
+        .ok_or_else(|| PersistenceError::new(format!("missing delivery receipt {receipt_id}")))?;
     let mut record = decode_receipt(&encoded)
         .map_err(|error| codec_error(&format!("receipt {receipt_id}"), error))?;
     let crate::PublishQueueReceiptPayload::Event { state: current, .. } = &mut record.payload
     else {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "operation receipt cannot take an ordinary delivery state",
         ));
     };
@@ -327,7 +325,7 @@ pub(super) fn mark_terminal_receipt(
         .get(&receipt_storage_key)
         .map_err(persist_err)?
         .map(|guard| guard.value().to_vec())
-        .ok_or_else(|| PersistenceError::invariant("terminal receipt is missing"))?;
+        .ok_or_else(|| PersistenceError::new("terminal receipt is missing"))?;
     let mut record = decode_receipt(&existing)
         .map_err(|error| codec_error(&format!("receipt {receipt_id}"), error))?;
     if record.terminal_sequence.is_some()
@@ -340,7 +338,7 @@ pub(super) fn mark_terminal_receipt(
         {
             return Ok(());
         }
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "terminal receipt metadata is partial",
         ));
     }
@@ -357,14 +355,14 @@ pub(super) fn mark_terminal_receipt(
     record.terminal_at = Some(terminal_at);
     record.terminal_bytes = Some(0);
     let receipt_bytes = u64::try_from(receipt_storage_key.len() + encode_receipt(&record).len())
-        .map_err(|_| PersistenceError::invariant("terminal receipt size exceeds u64"))?;
+        .map_err(|_| PersistenceError::new("terminal receipt size exceeds u64"))?;
     let index_key = terminal_receipt_key(sequence, receipt_id);
     let index_bytes = u64::try_from(index_key.len())
-        .map_err(|_| PersistenceError::invariant("terminal receipt index size exceeds u64"))?;
+        .map_err(|_| PersistenceError::new("terminal receipt index size exceeds u64"))?;
     let terminal_bytes = exclusive_evidence_bytes
         .checked_add(receipt_bytes)
         .and_then(|bytes| bytes.checked_add(index_bytes))
-        .ok_or_else(|| PersistenceError::invariant("terminal receipt bytes overflow"))?;
+        .ok_or_else(|| PersistenceError::new("terminal receipt bytes overflow"))?;
     record.terminal_bytes = Some(terminal_bytes);
     let encoded = encode_receipt(&record);
     publish_queue_receipts
@@ -377,7 +375,7 @@ pub(super) fn mark_terminal_receipt(
         .map_err(persist_err)?
         .is_some()
     {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "terminal receipt already exists in its ordered index",
         ));
     }
@@ -418,7 +416,7 @@ pub(super) fn remove_terminal_receipt_index(
         .map_err(persist_err)?
         .is_none()
     {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "terminal receipt is absent from its ordered index",
         ));
     }
@@ -471,7 +469,7 @@ fn change_meta_u64(
     let next = current
         .checked_add(delta)
         .and_then(|value| u64::try_from(value).ok())
-        .ok_or_else(|| PersistenceError::invariant(format!("{name} overflow")))?;
+        .ok_or_else(|| PersistenceError::new(format!("{name} overflow")))?;
     write_meta_u64(publish_queue_meta, key, next)
 }
 

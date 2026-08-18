@@ -346,32 +346,6 @@ class EvidenceMappingTest {
         assertTrue(first != second)
     }
 
-    /** A stalled local disk owns the lane but has emitted nothing on the
-     * wire: it must never be read as the lane being finished with. */
-    @Test
-    fun persistenceStalledRelayStateMappingRemainsNonterminal() {
-        val eventId = "e".repeat(64)
-        val stalled =
-            WriteFact.from(
-                FfiWriteFact.Relay(
-                    eventId,
-                    "wss://blocked.example",
-                    FfiRelayState.Waiting(FfiRelayWaiting.PersistenceStalled("disk full")),
-                ),
-            )
-        assertEquals(
-            WriteFact.Relay(
-                eventId,
-                "wss://blocked.example",
-                RelayState.Waiting(RelayWaiting.PersistenceStalled("disk full")),
-            ),
-            stalled,
-        )
-        val state = (stalled as WriteFact.Relay).state
-        assertFalse(state.isTerminal)
-        assertTrue(state != RelayState.GaveUp)
-    }
-
     @Test
     fun tombstonedRefusalMapsThroughTheOutcome() {
         val refused =

@@ -732,7 +732,7 @@ this cluster eventually use.
 shape.** That is the whole force of the calibration: it is not an argument
 that the claim is unlikely, it is four counter-examples already compiled.
 
-#### The seventeen clusters not yet behind an owner
+#### The fifteen clusters not yet behind an owner
 
 | # | cluster | store | clock | router | resolver | what actually decides it |
 |---|---|---|---|---|---|---|
@@ -747,12 +747,10 @@ that the claim is unlikely, it is four counter-examples already compiled.
 | 9 | **NegentropySessions** (NIP-77, 10 fields) | root | fact | fact | root | 22 mutating functions, 2 touch router/clock. Its crate rejection was a **dependency** argument, not a coupling one: `negentropy` is already on the reducer's allowed list, so `nmp-nip77` gains a hop rather than removing an edge. **That rejection is overturned by #1806** — see the note under the rejection list. |
 | 10 | **ObservationBranches** (`observations`, `handles`) | root | — | — | **root** | 3 of 7 mutating functions call the resolver — all of them root subscribe/unsubscribe *around* the map update, the `HistorySessions` shape exactly. |
 | 11 | **RequestClaimTransfers** | root | fact | fact | root | Clock is a deadline; router reads are plan facts. |
-| 12 | **RetryScheduler** (`retry_scheduler_blocked`) | root | **fact** | — | root | 8 of 12 mutating functions read `clock`, all to compute a deadline — the exact shape `RequestAttempts` already converted to an argument. This is I8. |
-| 13 | **QuarantinedAuthReceipts** | root | fact | — | root | First read as **atomic**; re-reading it, the shape is get → orchestrate → remove, which is what the extracted owners already do. Recorded as the corrected classification. |
-| 14 | **StalledWriteCensus** | root | fact | — | root | A cached projection; the store calls are the root recomputing it. |
-| 15 | **StoreHealth** (`store_degraded`, `store_failure_epoch`, `store_recovery_requested`) | **fact** *about* the store | — | — | root | Flags describing the store, not mutations of it. The recovery *sequence* (I7) is root orchestration spanning both planes. |
-| 16 | **TransportHealth** | — | fact | fact | — | Barely a cluster: `relay_open_failures` is inserted inside the dispatcher arm in `mod.rs`, so it is already partly root-owned, and consumers read it by reference as pure fact. |
-| 17 | **PlannedReadSessions** | — | — | **fact** | — | One mutating function, one `router.plan()` read. |
+| 12 | **QuarantinedAuthReceipts** | root | fact | — | root | First read as **atomic**; re-reading it, the shape is get → orchestrate → remove, which is what the extracted owners already do. Recorded as the corrected classification. |
+| 13 | **StalledWriteCensus** | root | fact | — | root | A cached projection; the store calls are the root recomputing it. |
+| 14 | **TransportHealth** | — | fact | fact | — | Barely a cluster: `relay_open_failures` is inserted inside the dispatcher arm in `mod.rs`, so it is already partly root-owned, and consumers read it by reference as pure fact. |
+| 15 | **PlannedReadSessions** | — | — | **fact** | — | One mutating function, one `router.plan()` read. |
 
 #### Two axes, and the argument kept confusing them
 
@@ -779,13 +777,13 @@ extracting them.
 
 #### What survives
 
-**The blanket claim does not survive.** Fourteen of the seventeen clusters
+**The blanket claim does not survive.** Twelve of the fifteen clusters
 need only read-only facts and root orchestration; two of them (5, 6) touch
 none of the four in any mutating function at all. The two rejections this
 document leaned on hardest were not about the shared four in the first place
 — `CoordinateCoverage` failed on a **cross**-owner teardown call and
 `AttemptCorrelations` on the vocabularies its public type drags. "They all
-need the same four things" described neither, and described the other twelve
+need the same four things" described neither, and described the other ten
 wrongly.
 
 Taken one dependency at a time, the four are not one thing and never were:
@@ -801,7 +799,7 @@ Taken one dependency at a time, the four are not one thing and never were:
   all. Read-plane use is `plan()`/`admit()`/`admission_incomplete()` fact
   reads in `query.rs`; `router.compile()` has no production call site in the
   reducer.
-- **`resolver` — real for two clusters**, not seventeen.
+- **`resolver` — real for two clusters**, not fifteen.
 
 **A much stronger and much narrower claim does survive.** Where the coupling
 is real it is real for a nameable reason, and it is always the same reason:
@@ -816,15 +814,15 @@ is real it is real for a nameable reason, and it is always the same reason:
 - `SessionRegistry` genuinely interleaves — one call mutating resolver and
   store while session fields are in scope.
 
-And one genuine multi-cluster atomic transaction exists:
-`recover_store_after_failure` (`write.rs:275-327`) reopens the store,
-rebuilds the resolver, and clears five other clusters' raw fields in one
-function. That is I7, and it is the sharpest single argument against carving
-the reducer up. **It was challenged during this audit as possibly
-unreachable from production — and it is not:** `nmp-runtime/src/lib.rs:2258`
-calls it from the engine loop under `StoreRecoveryDriver`. A grep scoped to
-`nmp-engine` alone misses the caller, which is exactly how a load-bearing
-claim goes unchecked. It is recorded here verified rather than assumed.
+The audit found a third: one multi-cluster atomic transaction that reopened the
+store, rebuilt the resolver, and cleared five other clusters' raw fields in one
+function. That was I7, and it was the sharpest single argument against carving
+the reducer up. **It has since been deleted outright** — with it the whole
+store-reopen, latched-fault and continue-degraded model — so the sharpest
+argument against splitting the reducer no longer exists. What replaced it is
+weaker in exactly the way that helps: a store operation that fails returns
+`PersistenceError` and the caller propagates it, leaving every cluster's state
+where it was, so no cross-cluster reset has to be sequenced at all.
 
 One judgment call is left open rather than decided: `AttemptCorrelations`'
 minting logic is clean and owner-shaped, but its insert and remove sites sit
@@ -914,8 +912,8 @@ broken in the reducer — the maintaining line deleted — and
 | I4 | history session ↔ handle inversion | red, 2 |
 | I5 | request-attempt reverse indexes | red, 2 |
 | I6 | coverage/parked asymmetry | red, 1 |
-| **I7** | store recovery clears every derived projection | **green — one consequence covered, eleven mechanisms not** |
-| **I8** | per-turn `retry_scheduler_blocked` reset | **green — not caught** |
+| **I7** | store recovery clears every derived projection | **green — one consequence covered, eleven mechanisms not** *(retired: the machinery is deleted)* |
+| **I8** | per-turn reset of the scheduler-suppression flag | **green — not caught** *(retired: the flag is deleted)* |
 
 Re-measured 2026-08-16 against `cargo test -p nmp-engine --all-features`
 (423 tests), because the table above and #1742 disagreed. Both halves of I1
@@ -923,28 +921,33 @@ are now genuinely caught: deleting `intent_receipts.insert` is 20 failures,
 deleting `event_to_receipts.insert` is exactly one —
 `a_shared_events_ack_reaches_every_co_owner_after_a_restart`. That is a
 well-aimed falsifier: one break, one named failure, no collateral. I3 and I8
-reproduce as green exactly as recorded.
+reproduced as green exactly as recorded.
+
+I7 and I8 have since stopped existing rather than been closed. NMP's entire
+modelling of local store write failure — reopen, latched fault, fault
+classification, continue-degraded — was deleted: a store operation that fails
+returns an opaque `PersistenceError`, the caller propagates it, and the engine
+carries on. There is no recovery sequence for I7 to guard and no suppression
+flag for I8 to reset. Six named invariants remain, and the two that were
+uncovered by difficulty are now one.
 
 ### One falsifier retires one mechanism, not one invariant
 
 I7 is the row worth reading twice, because "not caught" understates it and
-"caught" would be false.
+"caught" would be false. The mechanism it describes has since been deleted;
+the measurement is kept because the rule it produced is what generalises.
 
-#1742 *did* add an I7 falsifier, and it is a good one: it asserts that a
+#1742 *did* add an I7 falsifier, and it was a good one: it asserted that a
 dispatched, unacknowledged write is re-armed from durable keys after a
-reopen-required store failure, which is a real observable consequence of
-clear-then-rebuild. But `recover_store_after_failure` maintains I7 with
-**eleven separate resets**, and each was deleted individually here:
-`quarantined_auth_receipts`, `pending`, `last_stalled_write_census`,
-`cached_stalled_writes`, `event_to_receipts`, `intent_receipts`,
-`receipts_by_lane_relay`, `lane_relay_index_degraded`,
-`lane_projection_unprovable`, `lane_bootstrap_retries`,
-`attempt_correlations`. **All eleven leave the corpus green** — including
-`pending.clear()`, the durable write-obligation map itself. Store recovery
-can skip rebuilding it and 423 tests do not notice.
+reopen-required store failure, a real observable consequence of
+clear-then-rebuild. But the recovery function maintained I7 with **eleven
+separate resets** — one per derived projection — and each was deleted
+individually here. **All eleven left the corpus green**, including the clear of
+the durable write-obligation map itself. Store recovery could skip rebuilding
+it and 423 tests did not notice.
 
-So the ledger row reads as covered while eleven independently-deletable lines
-sit unguarded. The rule this yields:
+So the ledger row read as covered while eleven independently-deletable lines
+sat unguarded. The rule this yields:
 
 > **When an invariant is maintained by more than one line, one falsifier
 > retires one line. Count mechanisms, not invariants.**
@@ -967,13 +970,16 @@ The line is not read-plane versus write-plane. It is:
 - **Uncovered invariants are GUARDS on abnormal paths.** They exist to
   *reject* something — a stale auth epoch, state surviving a store failure,
   a persistent I/O error becoming a `recv_timeout(0)` busy-spin. Every break
-  makes the code **more permissive**: I3 drops a conjunct, I8 drops a reset.
+  makes the code **more permissive**: I3 drops a conjunct, I8 dropped a reset.
   Nothing fails until a hostile or degraded input arrives, and the corpus
   never constructs one. (I1 was the exception that proved the rule: it is
   structural, but its only readers live one package up, so the reducer's own
-  tests did not observe it either — until #1742 wrote a test that does. I7 is
-  the exception that survives, and for a different reason: it is not one
-  guard but eleven, and it has a falsifier for one *consequence* of them.)
+  tests did not observe it either — until #1742 wrote a test that does. I7 was
+  the exception that survived, and for a different reason: it was not one
+  guard but eleven, with a falsifier for one *consequence* of them.) Two of
+  these three abnormal-path guards were later deleted along with the whole
+  store-failure model they guarded — which is the other way a fail-open guard
+  stops being a liability, and the cheaper one.
 
 **This is a habit, not a testing gap, and it is the same one that got an
 entire verification apparatus deleted on 2026-08-15.** Every check removed
@@ -986,9 +992,8 @@ why the rule generalises past the eight named invariants:
 **Any guard whose failure mode is fail-open is probably untested.** When you
 add one, the falsifier is not optional, and it must construct the input the
 guard exists to reject. See #1727, and #1736 for the fixture the corpus
-needs before I3 and I8 can be falsified at all. I7 needs no such fixture —
-its eleven resets are reachable from an ordinary store-failure recovery — so
-it is uncovered by omission rather than by difficulty.
+needs before I3 can be falsified at all. I7 and I8 needed no fixture and got
+no falsifier; the store-failure model they guarded was deleted instead.
 
 ### A red falsifier is only evidence if it is red for the right reason
 

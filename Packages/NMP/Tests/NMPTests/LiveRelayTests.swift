@@ -754,7 +754,6 @@ private final class DiagnosticsRaceState: @unchecked Sendable {
             droppedMergeRules: [],
             sessionsRejectedOverCap: 0,
             sessionsRefusedBySubscriptionBudget: 0,
-            storeDegraded: nil,
             transportDegraded: nil,
             stalledWrites: [],
             stalledWriteTotals: FfiStalledWriteTotals(

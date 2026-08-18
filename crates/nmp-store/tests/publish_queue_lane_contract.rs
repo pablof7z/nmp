@@ -6,11 +6,10 @@ use std::path::Path;
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, AuthDenial,
     AuthDenialSource, CloseIntentOutcome, HandoffEvidence, IntentId, IntentSigState,
-    PersistenceFault, PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome,
-    PublishQueueDeadline, PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane,
-    PublishQueueLaneKey, PublishQueueLaneState, PublishQueuePostHandoffState,
-    PublishQueueTerminalOutcome, PublishQueueTransientCause, RedbStore, RemoveQueueEntryOutcome,
-    VerifiedSignature,
+    PromotionTarget, PublishQueueAttemptHandoff, PublishQueueAttemptOutcome, PublishQueueDeadline,
+    PublishQueueDeadlineKind, PublishQueueInFlightPhase, PublishQueueLane, PublishQueueLaneKey,
+    PublishQueueLaneState, PublishQueuePostHandoffState, PublishQueueTerminalOutcome,
+    PublishQueueTransientCause, RedbStore, RemoveQueueEntryOutcome, VerifiedSignature,
 };
 use nostr::{Event, EventBuilder, EventId, Keys, Kind, RelayUrl, Timestamp};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
@@ -106,10 +105,9 @@ fn a_predecessor_event_key_cannot_advance_the_current_lane() {
         predecessor.event_id = EventId::from_byte_array([0x55; 32]);
         assert_ne!(predecessor.event_id, signed.id);
 
-        let error = store
+        store
             .set_lane_eligible(&predecessor, lane.revision, Timestamp::from(82))
             .expect_err("a predecessor event must not mutate the current lane");
-        assert_eq!(error.fault(), PersistenceFault::Invariant);
 
         let advanced = store
             .set_lane_eligible(&current, lane.revision, Timestamp::from(82))

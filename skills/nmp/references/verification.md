@@ -95,7 +95,7 @@ Exercise the product-relevant subset:
 - `SigningState::InFlight` and `AwaitingSigner` stay distinguishable end to end, since only the second is the app's cancel-and-remove obligation;
 - a correlation token persisted before publish reattaches the same write after simulated process loss;
 - process restart reattaches the same receipt and frozen intent;
-- restart replays the durable `WriteFact` history in finite pages — `RelayWaiting::NotConnected`/`NeedsAuth`/`BackingOff`/`PersistenceStalled`, `Sent`, and terminal relay states — and reports lag as the typed `FactStreamLagged` rather than dropping frames;
+- restart replays the durable `WriteFact` history in finite pages — `RelayWaiting::NotConnected`/`NeedsAuth`/`Eligible`/`BackingOff`, `Sent`, and terminal relay states — and reports lag as the typed `FactStreamLagged` rather than dropping frames;
 - old remote-signer close cannot detach its replacement;
 - app-stored whole-session payload is separate from event-store reset;
 - detaching a fact stream leaves the durable write intact, and is distinguishable in test from `cancel` ending the obligation; and
@@ -124,7 +124,7 @@ Drive a known demand through a scripted relay and assert semantic records:
 - query source evidence and shortfall; and
 - transport degradation when induced.
 
-Do not golden-test screenshots or health scores. Do not assert unprojected Rust-only fields from Swift/Kotlin — `store_degraded` is direct-Rust only, and the rejection counters stop at raw UniFFI. Do cover the surfaces that *are* projected: `authSessions` for AUTH lifecycle and `stalledWrites`/`stalledWriteTotals` for stuck obligations.
+Do not golden-test screenshots or health scores. Do not assert unprojected Rust-only fields from Swift/Kotlin — the rejection counters stop at raw UniFFI. Do not write a test for local-store degradation or recovery on any tier: there is no such state to observe, so any such test is asserting a surface that does not exist. Do cover the surfaces that *are* projected: `authSessions` for AUTH lifecycle and `stalledWrites`/`stalledWriteTotals` for stuck obligations.
 
 ## Boundedness
 

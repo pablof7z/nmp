@@ -364,10 +364,6 @@ pub struct DiagnosticsSnapshot {
     /// `sessions_rejected_over_cap`: one says the plan was too wide for the
     /// operator's ceiling, the other says this relay will hold nothing open.
     pub sessions_refused_by_subscription_budget: u64,
-    /// `Some(message)` once an ingest/read store door has degraded the local
-    /// cache to read-only (issue #122). Observer-visible only — never a
-    /// routing input.
-    pub store_degraded: Option<String>,
     /// Latest transport acceptance/verifier failure surfaced by the pool.
     /// Observational only; it never changes routing or trust policy.
     pub transport_degraded: Option<String>,
@@ -395,7 +391,6 @@ impl DiagnosticsSnapshot {
             dropped_merge_rules,
             sessions_rejected_over_cap,
             sessions_refused_by_subscription_budget,
-            store_degraded,
             transport_degraded,
             stalled_writes,
             stalled_write_totals,
@@ -413,7 +408,6 @@ impl DiagnosticsSnapshot {
             dropped_merge_rules,
             sessions_rejected_over_cap,
             sessions_refused_by_subscription_budget,
-            store_degraded,
             transport_degraded,
             stalled_writes: stalled_writes
                 .into_iter()
@@ -504,7 +498,6 @@ mod tests {
             dropped_merge_rules: vec!["limit"],
             sessions_rejected_over_cap: 6,
             sessions_refused_by_subscription_budget: 2,
-            store_degraded: Some("read-only".to_string()),
             transport_degraded: Some("verifier unavailable".to_string()),
             stalled_writes: vec![nmp_engine::core::StalledWrite {
                 id: "descriptor".to_string(),
@@ -569,7 +562,6 @@ mod tests {
         assert_eq!(facade.dropped_merge_rules, vec!["limit"]);
         assert_eq!(facade.sessions_rejected_over_cap, 6);
         assert_eq!(facade.sessions_refused_by_subscription_budget, 2);
-        assert_eq!(facade.store_degraded.as_deref(), Some("read-only"));
         assert_eq!(
             facade.transport_degraded.as_deref(),
             Some("verifier unavailable")

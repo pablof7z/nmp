@@ -17,9 +17,7 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use nmp::{
-    Engine, EngineConfig, EventBuilder, Filter, RelayState, RelayWaiting, SigningState, WriteFact,
-};
+use nmp::{Engine, EngineConfig, EventBuilder, Filter, RelayState, SigningState, WriteFact};
 use nmp_nip29 as nip29;
 use nmp_runtime::FifoReceiver;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -431,8 +429,7 @@ async fn a_moderation_rejection_is_a_host_fact_not_a_routing_failure() {
         !seen.iter().any(|s| matches!(
             s,
             WriteFact::Relay {
-                state: RelayState::GaveUp
-                    | RelayState::Waiting(RelayWaiting::PersistenceStalled { .. }),
+                state: RelayState::GaveUp,
                 ..
             } | WriteFact::Signing(SigningState::Refused { .. })
         )),

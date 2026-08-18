@@ -400,8 +400,6 @@ struct ComposeView: View {
         case .eligible: return "eligible"
         case .backingOff(let attempt, _, let cause, _):
             return "backing off (attempt \(attempt), \(cause))"
-        // Local disk, not a relay -- never quoted as something a relay said.
-        case .persistenceStalled(let detail): return "persistence stalled: \(detail)"
         }
     }
 

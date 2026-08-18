@@ -169,27 +169,6 @@ enum ReceiptReplayFactKey {
         relay: RelayUrl,
         revision: u64,
     },
-    /// A persistence stall, keyed by the relay AND which durable fact failed.
-    ///
-    /// Both halves are load-bearing. One relay can stall on BOTH its
-    /// append-only route revision and its attempt log, and those are two
-    /// different facts with two different recovery stories — whether the
-    /// resolved URL survives a crash. Keying on the relay alone silently
-    /// swallows whichever arrives second under paged reattachment, which is
-    /// exactly the class of loss a durable receipt exists to prevent.
-    PersistenceStalled(RelayUrl, PersistenceStallKind),
-}
-
-/// Which durable fact a persistence stall failed to commit. Not public
-/// vocabulary — the app-facing shape stays one `PersistenceStalled { detail }`
-/// per #1237 — purely the replay cursor's dedup discriminant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum PersistenceStallKind {
-    /// The attempt log: recovery still rediscovers this exact relay from its
-    /// committed route revision.
-    Attempt,
-    /// The route revision itself: this exact URL is not claimed to survive.
-    Route,
 }
 
 impl ReceiptReplayCursor {
@@ -210,10 +189,6 @@ impl ReceiptReplayCursor {
                 .lane_revisions
                 .get(relay)
                 .is_some_and(|delivered| delivered >= revision),
-            ReceiptReplayFactKey::PersistenceStalled(relay, kind) => self
-                .state
-                .persistence_stalled
-                .contains(&(relay.clone(), *kind)),
         }
     }
 
@@ -228,104 +203,11 @@ impl ReceiptReplayCursor {
             ReceiptReplayFactKey::Lane { relay, revision } => {
                 self.state.lane_revisions.insert(relay, revision);
             }
-            ReceiptReplayFactKey::PersistenceStalled(relay, kind) => {
-                self.state.persistence_stalled.insert((relay, kind));
-            }
         }
     }
 }
 
 impl CoreState {
-    /// Record an ingest/read persistence failure (issue #122) without
-    /// panicking: latch the first error message (read-only degrade) and push
-    /// a fresh diagnostics snapshot so an observer sees the degraded state
-    /// immediately. Idempotent — a later failure keeps the first message.
-    ///
-    /// `pub(crate)` because `runtime::engine_loop` owns one read this reducer
-    /// cannot: it asks for [`CoreState::next_deadline`] outside any message,
-    /// so a failing deadline peek has no reducer entry point to report
-    /// through and reports here directly (#763).
-    pub(in crate::core) fn degrade_store(
-        &mut self,
-        err: PersistenceError,
-        effects: &mut Vec<Effect>,
-    ) {
-        self.record_store_failure(&err);
-        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
-    }
-
-    /// Retain typed failure truth without requiring a call site to fabricate
-    /// an unrelated reducer effect. Boot reconstruction has several
-    /// per-intent reads whose established contract emits no receipt/wire fact;
-    /// this still lets the runtime detect an incomplete generation and decide
-    /// recovery from the fault type.
-    fn record_store_failure(&mut self, err: &PersistenceError) {
-        self.store_failure_epoch = self.store_failure_epoch.saturating_add(1);
-        if err.fault().requires_reopen() {
-            self.store_recovery_requested = Some(err.fault());
-        }
-        if self.store_degraded.is_none() {
-            self.store_degraded = Some(err.to_string());
-        }
-    }
-
-    /// Transfer one typed reopen request to the runtime supervisor. Repeated
-    /// failures coalesce into one active recovery generation; diagnostics
-    /// retain the first error independently.
-    pub(in crate::core) fn take_store_recovery_request(&mut self) -> Option<PersistenceFault> {
-        self.store_recovery_requested.take()
-    }
-
-    /// Replace the backend handle and rebuild every volatile projection whose
-    /// truth came from it, without replacing this reducer or any public
-    /// Engine-owned handle. The failed mutation is never retried here.
-    pub(in crate::core) fn recover_store_after_failure(
-        &mut self,
-    ) -> Result<Vec<Effect>, PersistenceError> {
-        self.store.reopen_after_failure()?;
-
-        // An I/O error may have committed even though redb returned `Err`.
-        // Recompute every store-derived binding before projecting rows, then
-        // rebuild the durable write plane from stable receipt/intent keys.
-        let resolver_delta = self.resolver.rebuild_after_store_reopen(&self.store)?;
-        self.consume_resolver_delta(resolver_delta);
-
-        self.quarantined_auth_receipts.clear();
-        self.pending.clear();
-        self.stalled_writes = StalledWriteCensus::default();
-        self.lane_projection_unprovable = false;
-        self.lane_bootstrap_retries.clear();
-        self.attempt_correlations.clear();
-        self.retry_scheduler_blocked = false;
-
-        let recovery_failure_epoch = self.store_failure_epoch;
-        let mut effects = self.recover_on_boot();
-        let branch_ids: Vec<_> = self.handles.keys().copied().collect();
-        for id in branch_ids {
-            self.reconcile_observation_resolution(
-                id,
-                ResolutionCause::DependencyChanged,
-                &mut effects,
-            );
-        }
-        self.recompile(&mut effects);
-
-        // `recover_on_boot` can itself discover a fresh backend failure. Only
-        // a generation that completed without rearming recovery is healthy.
-        if self.store_failure_epoch != recovery_failure_epoch {
-            let fault = self
-                .store_recovery_requested
-                .unwrap_or(PersistenceFault::Invariant);
-            return Err(PersistenceError::new(
-                fault,
-                "durable store failed again while reconstructing reducer state",
-            ));
-        }
-        self.store_degraded = None;
-        effects.push(Effect::EmitDiagnostics(self.diagnostics_snapshot()));
-        Ok(effects)
-    }
-
     /// Mint the next [`AttemptCorrelation`] (issue #93). Checked, typed
     /// exhaustion: no id is reused or fabricated.
     pub(in crate::core) fn alloc_attempt_correlation(
@@ -357,7 +239,6 @@ impl CoreState {
         // gap is closed by the removal. Leaving the entry would keep
         // rearming a deadline for a receipt that can never bootstrap again
         // and, for a blind gap, would suppress worker reconciliation forever.
-        self.lane_bootstrap_retries.remove(&id);
         self.release_all_coordinate_coverage(id);
     }
 
@@ -657,19 +538,6 @@ impl CoreState {
             }
             _ => BTreeSet::from([id]),
         };
-        if let WriteFact::Relay {
-            state: RelayState::Waiting(RelayWaiting::PersistenceStalled { detail }),
-            ..
-        } = &fact
-        {
-            for recipient in &recipients {
-                if let Some(pending) = self.pending.get_mut(recipient) {
-                    if pending.persistence_fault.is_none() {
-                        pending.persistence_fault = Some(detail.clone());
-                    }
-                }
-            }
-        }
         effects.extend(
             recipients
                 .into_iter()
@@ -805,9 +673,7 @@ impl CoreState {
                 // lane it has is trivially terminal, and closing on that
                 // would delete the exact obligation the queue rewriter is
                 // waiting to complete. Nothing auto-abandons.
-                pending.route_complete
-                    && pending.route_blocked_relays.is_empty()
-                    && pending.lane_projection.can_close()
+                pending.route_complete && pending.lane_projection.can_close()
             })
             .map(|pending| pending.intent_id)
         else {
@@ -851,8 +717,7 @@ impl CoreState {
         let snapshot = match self.store.replaceable_operation_snapshot(coordinate) {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => return,
-            Err(error) => {
-                self.degrade_store(error, effects);
+            Err(_error) => {
                 return;
             }
         };
@@ -868,10 +733,7 @@ impl CoreState {
         let Some(pending) = self.pending.get(&owner_receipt) else {
             return;
         };
-        if !pending.route_complete
-            || !pending.route_blocked_relays.is_empty()
-            || !pending.lane_projection.can_close()
-        {
+        if !pending.route_complete || !pending.lane_projection.can_close() {
             return;
         }
         let destination = if pending.durable_routes.is_empty() {
@@ -905,7 +767,7 @@ impl CoreState {
                 nmp_store::SemanticCohortCloseOutcome::DestinationOpen
                 | nmp_store::SemanticCohortCloseOutcome::Stale,
             ) => {}
-            Err(error) => self.degrade_store(error, effects),
+            Err(_error) => {},
         }
     }
 
@@ -1122,33 +984,21 @@ impl CoreState {
     /// Ordinary operation reads the exact committed nonterminal rows already
     /// owned by the reducer. A lane-less obligation costs nothing and a large
     /// durable backlog performs no database reads on each healthy publish.
-    /// Any uncertain projection, or the global degraded index, deliberately
-    /// falls back to the durable store rather than guessing.
     /// `wake_relay_lanes` narrows ordinary relay events through
-    /// `receipts_by_lane_relay`, except in its degraded fallback.
+    /// `receipts_by_lane_relay`.
     pub(in crate::core) fn recover_all_lanes(
         &self,
     ) -> Result<Vec<(ReceiptId, PublishQueueLane)>, PersistenceError> {
         let mut lanes = Vec::new();
-        let degraded = self.pending.lane_index_is_degraded();
         for (id, pending) in self.pending.iter() {
-            if degraded || !pending.lane_projection.uncertain.is_empty() {
-                lanes.extend(
-                    self.store
-                        .recover_publish_queue_lanes(pending.intent_id)?
-                        .into_iter()
-                        .map(|lane| (*id, lane)),
-                );
-            } else {
-                lanes.extend(
-                    pending
-                        .lane_projection
-                        .current_nonterminal
-                        .values()
-                        .cloned()
-                        .map(|lane| (*id, lane)),
-                );
-            }
+            lanes.extend(
+                pending
+                    .lane_projection
+                    .current_nonterminal
+                    .values()
+                    .cloned()
+                    .map(|lane| (*id, lane)),
+            );
         }
         lanes.sort_by(|(_, left), (_, right)| left.key.cmp(&right.key));
         Ok(lanes)
@@ -1202,7 +1052,7 @@ impl CoreState {
         now: Timestamp,
     ) -> bool {
         // The guard lives HERE, not at the call sites, because both of them
-        // can see a live attempt: `retry_lane_bootstrap` re-opens an intent's
+        // can see a live attempt: boot recovery re-opens an intent's
         // whole lane set mid-process, and that set may include a relay whose
         // attempt this process really did submit.
         if self.handoff_is_outstanding(lane.key.intent_id, ordinal) {
@@ -1219,8 +1069,7 @@ impl CoreState {
             )
             .is_err()
         {
-            self.retry_scheduler_blocked = true;
-            return false;
+                        return false;
         }
         self.remove_active_lane(id, &lane.key.relay);
         true
@@ -1232,8 +1081,7 @@ impl CoreState {
     pub(in crate::core) fn schedule_ready(&mut self, now: Timestamp) -> Vec<Effect> {
         let mut effects = Vec::new();
         let Ok(lanes) = self.recover_all_lanes() else {
-            self.retry_scheduler_blocked = true;
-            return effects;
+                        return effects;
         };
 
         let mut in_flight_relays = BTreeSet::new();
@@ -1334,8 +1182,7 @@ impl CoreState {
                         &mut effects,
                     );
                 } else {
-                    self.retry_scheduler_blocked = true;
-                }
+                                    }
                 continue;
             }
             if in_flight >= MAX_GLOBAL_ATTEMPTS || in_flight_relays.contains(&lane.key.relay) {
@@ -1394,23 +1241,11 @@ impl CoreState {
                 now,
             ) {
                 Ok(result) => result,
-                Err(_) => {
-                    if let Some(pending) = self.pending.get_mut(&id) {
-                        pending.unstarted_relays.insert(lane.key.relay.clone());
-                    }
-                    self.emit_write_fact(
-                        id,
-                        WriteFact::Relay {
-                            event_id: lane.key.event_id,
-                            relay: lane.key.relay,
-                            state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
-                                detail: ATTEMPT_STALL_DETAIL.to_string(),
-                            }),
-                        },
-                        &mut effects,
-                    );
-                    continue;
-                }
+                // The attempt did not commit, so this lane does not start on
+                // this pass. Nothing durable changed and nothing is reported:
+                // the write has not advanced, and the next scheduling pass
+                // tries again.
+                Err(_) => continue,
             };
             debug_assert_eq!(
                 advanced.state,
@@ -1420,7 +1255,6 @@ impl CoreState {
                 }
             );
             if let Some(pending) = self.pending.get_mut(&id) {
-                pending.unstarted_relays.remove(&lane.key.relay);
                 pending.pending_relays.insert(lane.key.relay.clone());
                 pending
                     .attempt_ordinals
@@ -1470,19 +1304,10 @@ impl CoreState {
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
 
-        if self.pending.lane_index_is_degraded() {
-            let Ok(lanes) = self.recover_all_lanes() else {
-                self.retry_scheduler_blocked = true;
-                return effects;
-            };
-            self.apply_relay_wake(session, auth_only, lanes, &mut effects);
-            effects.extend(self.schedule_ready(self.clock));
-            return effects;
-        }
 
         // Take the candidate receipt set by value first: the loop below needs
-        // a mutable borrow of `self` (store reads, `retry_scheduler_blocked`),
-        // so it cannot hold a live borrow of the lane index at the same time.
+        // a mutable borrow of `self` for its store reads, so it cannot hold a
+        // live borrow of the lane index at the same time.
         let candidates = self.pending.receipts_with_lane_on(&session.relay);
 
         let mut lanes: Vec<(ReceiptId, PublishQueueLane)> = Vec::new();
@@ -1497,14 +1322,10 @@ impl CoreState {
                         .filter(|lane| lane.key.relay == session.relay)
                         .map(|lane| (id, lane)),
                 ),
-                Err(_) => {
-                    // A transient read failure for this one receipt, not an
-                    // indexing gap -- the established `retry_scheduler_blocked`
-                    // idiom (a later engine message retries) applies exactly
-                    // as it does everywhere else this door is read, without
-                    // needing to distrust the whole index.
-                    self.retry_scheduler_blocked = true;
-                }
+                // A read failure for this one receipt costs this pass only:
+                // a later engine message retries it, and the durable lane rows
+                // are untouched.
+                Err(_) => {}
             }
         }
         // Same deterministic order `recover_all_lanes` produces (by
@@ -1575,8 +1396,7 @@ impl CoreState {
                 .commit_lane_eligible(&lane.key, lane.revision, self.clock)
                 .is_err()
             {
-                self.retry_scheduler_blocked = true;
-            } else if let Some((cause, detail)) = retry_detail {
+                            } else if let Some((cause, detail)) = retry_detail {
                 self.emit_write_fact(
                     id,
                     WriteFact::Relay {
@@ -1607,8 +1427,7 @@ impl CoreState {
             {
                 Ok(due) => due,
                 Err(_) => {
-                    self.retry_scheduler_blocked = true;
-                    break;
+                                        break;
                 }
             };
             if due.is_empty() {
@@ -1626,8 +1445,7 @@ impl CoreState {
                         })
                     });
                 let Some(lane) = lane else {
-                    self.retry_scheduler_blocked = true;
-                    continue;
+                                        continue;
                 };
                 match (deadline.kind, lane.state.clone()) {
                     (
@@ -1638,8 +1456,7 @@ impl CoreState {
                             .commit_lane_eligible(&lane.key, lane.revision, deadline.at)
                             .is_err()
                         {
-                            self.retry_scheduler_blocked = true;
-                        }
+                                                    }
                     }
                     (
                         PublishQueueDeadlineKind::AckTimeout,
@@ -1657,15 +1474,10 @@ impl CoreState {
                             PublishQueueTransientCause::AckTimeout,
                             "ack timeout".to_string(),
                             &mut effects,
-                        ) {
-                            self.retry_scheduler_blocked = true;
-                        }
+                        ) {}
                     }
-                    _ => self.retry_scheduler_blocked = true,
+                    _ => {}
                 }
-            }
-            if self.retry_scheduler_blocked {
-                break;
             }
         }
         effects.extend(self.schedule_ready(now));
@@ -1726,7 +1538,7 @@ impl CoreState {
             if snapshot.operations.iter().any(|operation| {
                 operation.program != first.program || operation.format != first.format
             }) {
-                return Err(nmp_store::PersistenceError::invariant(
+                return Err(nmp_store::PersistenceError::new(
                     "one semantic resource retained mixed capability identities",
                 ));
             }
@@ -1734,7 +1546,7 @@ impl CoreState {
                 .replaceable_materializers
                 .get(&(first.program.0, first.format.0))
                 .ok_or_else(|| {
-                    nmp_store::PersistenceError::invariant(
+                    nmp_store::PersistenceError::new(
                         "boot recovery is missing a preflighted replaceable capability",
                     )
                 })?;
@@ -1751,7 +1563,7 @@ impl CoreState {
             let builder = match self.run_replaceable_materialization(call) {
                 ReplaceableMaterializationOutcome::Materialized(builder) => builder,
                 ReplaceableMaterializationOutcome::Refused(reason) => {
-                    return Err(nmp_store::PersistenceError::invariant(format!(
+                    return Err(nmp_store::PersistenceError::new(format!(
                         "replaceable capability refused boot reconciliation: {reason}"
                     )))
                 }
@@ -1762,7 +1574,7 @@ impl CoreState {
                     .unwrap_or("")
                     != coordinate.identifier
             {
-                return Err(nmp_store::PersistenceError::invariant(
+                return Err(nmp_store::PersistenceError::new(
                     "replaceable capability changed its coordinate during boot reconciliation",
                 ));
             }
@@ -1779,7 +1591,7 @@ impl CoreState {
                 .as_secs()
                 .checked_add(1)
                 .ok_or_else(|| {
-                    nmp_store::PersistenceError::invariant(
+                    nmp_store::PersistenceError::new(
                         "source timestamp cannot advance during boot reconciliation",
                     )
                 })?;
@@ -1788,7 +1600,7 @@ impl CoreState {
                 .as_secs()
                 .checked_add(1)
                 .ok_or_else(|| {
-                    nmp_store::PersistenceError::invariant(
+                    nmp_store::PersistenceError::new(
                         "generation timestamp cannot advance during boot reconciliation",
                     )
                 })?;
@@ -1813,7 +1625,7 @@ impl CoreState {
                     _ => None,
                 })
                 .ok_or_else(|| {
-                    nmp_store::PersistenceError::invariant(
+                    nmp_store::PersistenceError::new(
                         "semantic boot reconciliation has no readable persisted routing",
                     )
                 })?;
@@ -1855,18 +1667,18 @@ impl CoreState {
             {
                 nmp_store::SemanticInstallOutcome::Installed { .. } => changed = true,
                 nmp_store::SemanticInstallOutcome::Stale => {
-                    return Err(nmp_store::PersistenceError::invariant(
+                    return Err(nmp_store::PersistenceError::new(
                         "boot source reconciliation lost its exact store fence",
                     ))
                 }
                 nmp_store::SemanticInstallOutcome::Refused(refusal) => {
-                    return Err(nmp_store::PersistenceError::invariant(format!(
+                    return Err(nmp_store::PersistenceError::new(format!(
                         "boot source reconciliation was refused: {refusal:?}"
                     )))
                 }
                 nmp_store::SemanticInstallOutcome::Waiting(_)
                 | nmp_store::SemanticInstallOutcome::Resolved => {
-                    return Err(nmp_store::PersistenceError::invariant(
+                    return Err(nmp_store::PersistenceError::new(
                         "boot source reconciliation returned no complete successor",
                     ))
                 }
@@ -1887,27 +1699,22 @@ impl CoreState {
         // #122 degradation is the whole visible outcome.
         let mut recovered = match self.store.recover_publish_queue() {
             Ok(recovered) => recovered,
-            Err(error) => {
-                self.pending.degrade_lane_index();
+            Err(_error) => {
                 // Nothing was rebuilt, so there is no intent to retry a
                 // bootstrap for. A later engine-supervised store
                 // reconstruction re-enters this whole recovery door.
-                self.lane_projection_unprovable = true;
-                self.degrade_store(error, &mut effects);
-                return effects;
+                        return effects;
             }
         };
         match self.reconcile_recovered_semantic_sources(&recovered) {
             Ok(true) => match self.store.recover_publish_queue() {
                 Ok(refreshed) => recovered = refreshed,
-                Err(error) => {
-                    self.degrade_store(error, &mut effects);
+                Err(_error) => {
                     return effects;
                 }
             },
             Ok(false) => {}
-            Err(error) => {
-                self.degrade_store(error, &mut effects);
+            Err(_error) => {
                 return effects;
             }
         }
@@ -1918,13 +1725,10 @@ impl CoreState {
         // (and, with it, every index derived from `pending`) -- the exact
         // moment the lane index can be trusted again regardless of what
         // happened in a prior process (epic #507 finding E5).
-        self.pending.begin_lane_index_rebuild();
-        self.lane_projection_unprovable = false;
         // Every gap recorded against the previous `pending` set refers to
         // receipt ids this rebuild is about to re-derive from the store.
         // Carrying them across would retry on behalf of a projection that no
         // longer exists; the rebuild below re-registers whatever still fails.
-        self.lane_bootstrap_retries.clear();
 
         for intent in recovered {
             if let nmp_store::PublishQueueWork::ReplaceableOperation {
@@ -1935,8 +1739,7 @@ impl CoreState {
                 let snapshot = match self.store.replaceable_operation_snapshot(coordinate) {
                     Ok(Some(snapshot)) => snapshot,
                     Ok(None) => continue,
-                    Err(error) => {
-                        self.degrade_store(error, &mut effects);
+                    Err(_error) => {
                         continue;
                     }
                 };
@@ -1953,8 +1756,7 @@ impl CoreState {
                     &nostr::Filter::new().id(materialization.receipt.materialization.event_id),
                 ) {
                     Ok(rows) => rows.into_iter().next(),
-                    Err(error) => {
-                        self.degrade_store(error, &mut effects);
+                    Err(_error) => {
                         continue;
                     }
                 };
@@ -1990,14 +1792,11 @@ impl CoreState {
                         sign_generation: 0,
                         event_id: already_signed.then_some(row.event.id),
                         pending_relays: BTreeSet::new(),
-                        unstarted_relays: BTreeSet::new(),
-                        route_blocked_relays: BTreeSet::new(),
                         attempt_ordinals: BTreeMap::new(),
                         lane_projection: LaneWorkerProjection::default(),
                         durable_routes: BTreeSet::new(),
                         route_complete: false,
                         destinations_reported: false,
-                        persistence_fault: None,
                         route_needs: BTreeSet::new(),
                     },
                 );
@@ -2061,7 +1860,6 @@ impl CoreState {
                     // side of a restart: nothing here is a process-local
                     // stopwatch that a reopen would reset to zero.
                     destinations_reported: false,
-                    persistence_fault: None,
                     accepted_at: intent.accepted_at,
                     signing_pubkey: intent.expected_pubkey,
                     frozen: frozen.clone(),
@@ -2070,8 +1868,6 @@ impl CoreState {
                     sign_generation: 0,
                     event_id: already_signed.then_some(frozen.id),
                     pending_relays: BTreeSet::new(),
-                    unstarted_relays: BTreeSet::new(),
-                    route_blocked_relays: BTreeSet::new(),
                     attempt_ordinals: BTreeMap::new(),
                     lane_projection: LaneWorkerProjection::default(),
                     durable_routes: BTreeSet::new(),
@@ -2089,22 +1885,19 @@ impl CoreState {
 
             let revisions = match self.store.recover_route_revisions(intent.intent_id) {
                 Ok(revisions) => revisions,
-                Err(error) => {
+                Err(_error) => {
                     // This intent may already own real persisted lanes from
                     // before this boot; skipping straight to the next intent
                     // (as below) means `bootstrap_publish_queue_lanes` never runs
                     // for it this boot, so the reverse index can never learn
                     // those lanes -- an unprovable gap, so degrade rather
                     // than silently under-index (epic #507 finding E5).
-                    self.pending.degrade_lane_index();
-                    self.record_store_failure(&error);
                     // The durable route set is exactly what could not be
                     // read, so nothing can be held as `uncertain` and the
                     // projection reports unavailable. Register the gap so a
                     // later tick can bootstrap this intent for real instead
                     // of disabling worker reconciliation for the whole
                     // process (#1000).
-                    self.schedule_lane_bootstrap_retry(intent.intent_id, None);
                     continue;
                 }
             };
@@ -2121,8 +1914,7 @@ impl CoreState {
             // left completely alone.
             if routing_valid {
                 let resolution = self.resolve_routes(&self.pending[&id].routing, &frozen);
-                if let Some(error) = resolution.parent_provenance_error {
-                    self.record_store_failure(&error);
+                if let Some(_error) = resolution.parent_provenance_error {
                 }
                 let answer = resolution.answer;
                 let new_routes = answer
@@ -2130,14 +1922,16 @@ impl CoreState {
                     .difference(&durable_relays)
                     .cloned()
                     .collect::<BTreeSet<_>>();
+                let mut route_persisted = true;
                 if !new_routes.is_empty() {
                     match self.commit_route_revision(intent.intent_id, answer.relays.clone()) {
-                        Err(error) => {
-                            self.record_store_failure(&error);
-                            if let Some(pending) = self.pending.get_mut(&id) {
-                                pending.route_blocked_relays.extend(new_routes);
-                            }
-                        }
+                        // These exact URLs are not claimed to survive a crash,
+                        // so routing is NOT complete: the answer exists but
+                        // nothing durable holds it, and the next pass resolves
+                        // and commits again. Reporting completeness here is
+                        // what would let an empty durable set be read as the
+                        // terminal `NoDestination` verdict.
+                        Err(_) => route_persisted = false,
                         Ok(_) => {
                             durable_relays.extend(answer.relays.iter().cloned());
                         }
@@ -2145,7 +1939,7 @@ impl CoreState {
                 }
                 if let Some(pending) = self.pending.get_mut(&id) {
                     pending.durable_routes = durable_relays.clone();
-                    pending.route_complete = answer.complete;
+                    pending.route_complete = answer.complete && route_persisted;
                     // Needs are STATELESS: nothing about them was recovered
                     // from the journal, they were simply re-derived by the
                     // resolution above. That is what makes a crash cost a
@@ -2155,9 +1949,9 @@ impl CoreState {
             }
 
             let lanes =
-                match self.bootstrap_projected_lanes(intent.intent_id, Some(&durable_relays)) {
+                match self.bootstrap_projected_lanes(intent.intent_id) {
                     Ok(lanes) => lanes,
-                    Err(error) => {
+                    Err(_error) => {
                         // Same reasoning as the `recover_route_revisions`
                         // error above: this is the sole call that teaches the
                         // reverse index this intent's lanes, so a failure
@@ -2166,9 +1960,7 @@ impl CoreState {
                         // The projection door has already recorded the
                         // retryable gap that gets this intent out of its
                         // conservative retention (#1000).
-                        self.pending.degrade_lane_index();
-                        self.record_store_failure(&error);
-                        continue;
+                            continue;
                     }
                 };
             self.open_bootstrapped_lanes(id, intent.expected_pubkey, lanes, &mut effects);
@@ -2183,9 +1975,7 @@ impl CoreState {
             // to bootstrap current lanes against predecessor attempt history.
             let revisions = match self.store.recover_route_revisions(intent_id) {
                 Ok(revisions) => revisions,
-                Err(error) => {
-                    self.record_store_failure(&error);
-                    self.schedule_lane_bootstrap_retry(intent_id, None);
+                Err(_error) => {
                     continue;
                 }
             };
@@ -2203,7 +1993,7 @@ impl CoreState {
                     Ok(lanes) => {
                         self.open_bootstrapped_lanes(id, signing_pubkey, lanes, &mut effects)
                     }
-                    Err(error) => self.record_store_failure(&error),
+                    Err(_) => {}
                 }
             } else if let Some(pending) = self.pending.get_mut(&id) {
                 pending.sign_request_in_flight = true;
@@ -2216,8 +2006,7 @@ impl CoreState {
             }
         }
 
-        self.retry_scheduler_blocked = false;
-        let due = self.consume_due_publish_queue_deadlines(self.clock);
+                let due = self.consume_due_publish_queue_deadlines(self.clock);
         effects.extend(due);
         for id in recovered_ids {
             self.close_if_all_lanes_terminal(id, &mut effects);
@@ -2310,10 +2099,8 @@ impl CoreState {
                     // cannot wake a still-`WaitingAuth` lane.
                     match self.commit_lane_waiting(&lane.key, lane.revision, false) {
                         Ok(_) => effects.push(Effect::EnsureWriteRelay(session)),
-                        Err(error) => {
-                            self.pending.degrade_lane_index();
-                            self.record_store_failure(&error);
-                        }
+                        Err(_error) => {
+                                }
                     }
                 }
                 PublishQueueLaneState::Terminal { .. } => {}
@@ -2321,77 +2108,8 @@ impl CoreState {
         }
     }
 
-    /// Re-run every due lane bootstrap that previously failed to commit.
-    ///
-    /// This is the whole way OUT of the conservative retention a failed
-    /// bootstrap takes (#1000). `uncertain` is cleared only by a committed
-    /// `PublishQueueLane` for that exact relay, and an intent whose bootstrap
-    /// failed owns NO lane rows — so `schedule_ready`, the deadline sweep and
-    /// the wake index all find nothing for it and no committed lane fact can
-    /// ever arrive on its own. Without this door a single transient store
-    /// error pins the intent's relay workers and parks its receipt in
-    /// `pending` for the life of the process.
-    ///
-    /// It is emphatically not a scan: `lane_bootstrap_retries` is empty in
-    /// steady state, so the ordinary tick pays one empty-map probe and
-    /// worker demand keeps reading zero lanes (#985).
-    pub(in crate::core) fn retry_lane_bootstraps(&mut self, now: Timestamp) -> Vec<Effect> {
-        let due: Vec<ReceiptId> = self
-            .lane_bootstrap_retries
-            .iter()
-            .filter(|(_, retry)| retry.due <= now)
-            .map(|(id, _)| *id)
-            .collect();
-        let mut effects = Vec::new();
-        for id in due {
-            self.retry_lane_bootstrap(id, &mut effects);
-        }
-        effects
-    }
-
-    fn retry_lane_bootstrap(&mut self, id: ReceiptId, effects: &mut Vec<Effect>) {
-        let Some((intent_id, signing_pubkey)) = self
-            .pending
-            .get(&id)
-            .map(|p| (p.intent_id, p.signing_pubkey))
-        else {
-            // The write left `pending` (closed, cancelled or compensated)
-            // while its gap was outstanding, so there is no projection left
-            // to reconcile and nothing retains a worker on its behalf.
-            self.lane_bootstrap_retries.remove(&id);
-            return;
-        };
-        let candidates = self
-            .lane_bootstrap_retries
-            .get(&id)
-            .and_then(|retry| retry.candidates.clone());
-        // On failure the projection door re-arms this entry with the next
-        // backoff, so the gap stays owned and retention stays conservative.
-        let Ok(lanes) = self.bootstrap_projected_lanes(intent_id, candidates.as_ref()) else {
-            return;
-        };
-        // Committed: the exact rebuild has replaced every conservative guess
-        // and the door has dropped the retry entry.
-        let connected: BTreeSet<RelaySessionKey> = lanes
-            .iter()
-            .map(|lane| {
-                RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey))
-            })
-            .filter(|session| self.connected_relays.contains(session))
-            .collect();
-        self.open_bootstrapped_lanes(id, signing_pubkey, lanes, effects);
-        // Boot can assume nothing is connected yet, but a retry runs
-        // mid-process: a lane whose session is ALREADY live would sit in
-        // `WaitingConnection` forever waiting for a `RelayConnected` that
-        // has already happened. Replay the exact wake that connection would
-        // have delivered.
-        for session in connected {
-            let woken = self.wake_relay_lanes(&session, false);
-            effects.extend(woken);
-        }
-    }
-
-    /// its retained facts. Unknown ids do not create state.
+    /// One durable receipt's retained fact, if it has one. Unknown ids do not
+    /// create state.
     pub(in crate::core) fn retained_receipt_fact(
         receipt: &nmp_store::PublishQueueReceipt,
     ) -> Option<WriteFact> {
@@ -2789,38 +2507,6 @@ impl CoreState {
                 }
             }
         }
-        if let Some(pending) = self.pending.get(&projection_id) {
-            for relay in &pending.unstarted_relays {
-                replay.push((
-                    ReceiptReplayFactKey::PersistenceStalled(
-                        relay.clone(),
-                        PersistenceStallKind::Attempt,
-                    ),
-                    WriteFact::Relay {
-                        event_id: pending.frozen.id,
-                        relay: relay.clone(),
-                        state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
-                            detail: ATTEMPT_STALL_DETAIL.to_string(),
-                        }),
-                    },
-                ));
-            }
-            for relay in &pending.route_blocked_relays {
-                replay.push((
-                    ReceiptReplayFactKey::PersistenceStalled(
-                        relay.clone(),
-                        PersistenceStallKind::Route,
-                    ),
-                    WriteFact::Relay {
-                        event_id: pending.frozen.id,
-                        relay: relay.clone(),
-                        state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
-                            detail: ROUTE_STALL_DETAIL.to_string(),
-                        }),
-                    },
-                ));
-            }
-        }
         if let Some(status) = terminal_status {
             replay.push((ReceiptReplayFactKey::ReceiptStatus, status));
         }
@@ -2927,8 +2613,7 @@ impl CoreState {
         let snapshot = match self.store.replaceable_operation_snapshot(&coordinate) {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => return false,
-            Err(error) => {
-                self.degrade_store(error, effects);
+            Err(_error) => {
                 return true;
             }
         };
@@ -2950,8 +2635,7 @@ impl CoreState {
             for member in &generation.members {
                 let attempts = match self.store.recover_attempts(*member) {
                     Ok(attempts) => attempts,
-                    Err(error) => {
-                        self.degrade_store(error, effects);
+                    Err(_error) => {
                         return true;
                     }
                 };
@@ -2973,30 +2657,12 @@ impl CoreState {
             .unwrap_or_default();
         for member in &members {
             let Some(receipt) = self.pending.receipt_for_intent(*member) else {
-                self.degrade_store(
-                    nmp_store::PersistenceError::invariant(
-                        "active semantic member is missing its runtime receipt",
-                    ),
-                    effects,
-                );
                 return true;
             };
             let Some(pending) = self.pending.get(&receipt) else {
-                self.degrade_store(
-                    nmp_store::PersistenceError::invariant(
-                        "active semantic member is missing its runtime pending write",
-                    ),
-                    effects,
-                );
                 return true;
             };
             if pending.intent_id != *member {
-                self.degrade_store(
-                    nmp_store::PersistenceError::invariant(
-                        "semantic runtime receipt points at another intent",
-                    ),
-                    effects,
-                );
                 return true;
             }
         }
@@ -3043,8 +2709,7 @@ impl CoreState {
                 self.ingest_ordinary_relay_observations(vec![input.observation], effects);
                 return;
             }
-            Err(error) => {
-                self.degrade_store(error, effects);
+            Err(_error) => {
                 return;
             }
         };
@@ -3082,30 +2747,12 @@ impl CoreState {
         let mut member_receipts = Vec::with_capacity(members.len());
         for member in &members {
             let Some(receipt) = self.pending.receipt_for_intent(*member) else {
-                self.degrade_store(
-                    nmp_store::PersistenceError::invariant(
-                        "active semantic member is missing its runtime receipt",
-                    ),
-                    effects,
-                );
                 return;
             };
             let Some(pending) = self.pending.get(&receipt) else {
-                self.degrade_store(
-                    nmp_store::PersistenceError::invariant(
-                        "active semantic member is missing its runtime pending write",
-                    ),
-                    effects,
-                );
                 return;
             };
             if pending.intent_id != *member {
-                self.degrade_store(
-                    nmp_store::PersistenceError::invariant(
-                        "semantic runtime receipt points at another intent",
-                    ),
-                    effects,
-                );
                 return;
             }
             member_receipts.push((*member, receipt));
@@ -3193,8 +2840,7 @@ impl CoreState {
             .install_replaceable_source_materialization(&mut self.store, install)
         {
             Ok(installed) => installed,
-            Err(error) => {
-                self.degrade_store(error, effects);
+            Err(_error) => {
                 return;
             }
         };
@@ -3215,12 +2861,6 @@ impl CoreState {
             generation.materialization,
             generation.members.iter().copied(),
         ) else {
-            self.degrade_store(
-                nmp_store::PersistenceError::invariant(
-                    "installed semantic generation has no delivery owner",
-                ),
-                effects,
-            );
             return;
         };
         debug_assert_eq!(delivery_owner.materialization(), generation.materialization);
@@ -3264,8 +2904,6 @@ impl CoreState {
             pending.sign_generation = pending.sign_generation.saturating_add(1);
             pending.event_id = None;
             pending.pending_relays.clear();
-            pending.unstarted_relays.clear();
-            pending.route_blocked_relays.clear();
             pending.attempt_ordinals.clear();
             // `lane_projection` was already reset above.
             self.pending
@@ -3451,10 +3089,9 @@ impl CoreState {
                     // Rule 1: recording anything at all needs the disk that just
                     // refused. There is no queue entry to fail into.
                     Err(err) => {
-                        let mut effects = self.refuse_publish(PublishError::PersistenceFailed {
+                        let effects = self.refuse_publish(PublishError::PersistenceFailed {
                             reason: err.to_string(),
                         });
-                        self.degrade_store(err, &mut effects);
                         return PublishPreparation::Complete(effects);
                     }
                 };
@@ -3553,7 +3190,6 @@ impl CoreState {
                 // boot rebuilds from `PublishQueueIntent` are the same instant.
                 accepted_at: self.clock,
                 destinations_reported: false,
-                persistence_fault: None,
                 signing_pubkey,
                 frozen: frozen.clone(),
                 already_signed,
@@ -3561,8 +3197,6 @@ impl CoreState {
                 sign_generation: 0,
                 event_id: None,
                 pending_relays: BTreeSet::new(),
-                unstarted_relays: BTreeSet::new(),
-                route_blocked_relays: BTreeSet::new(),
                 attempt_ordinals: BTreeMap::new(),
                 lane_projection: LaneWorkerProjection::default(),
                 durable_routes: BTreeSet::new(),
@@ -3846,7 +3480,7 @@ impl CoreState {
             .take(usize::from(limit))
             .map(|id| {
                 self.store.reattach_receipt(id.0)?.ok_or_else(|| {
-                    PersistenceError::invariant(format!(
+                    PersistenceError::new(format!(
                         "active event index names missing receipt {}",
                         id.0
                     ))
@@ -3906,8 +3540,6 @@ impl CoreState {
                         .transpose()?
                         .unwrap_or_default(),
                     outcome: None,
-                    persistence_fault: owner_pending
-                        .and_then(|pending| pending.persistence_fault.clone()),
                 });
                 continue;
             }
@@ -3934,14 +3566,13 @@ impl CoreState {
                     route_complete: true,
                     relay_states: Vec::new(),
                     outcome: Some(WriteOutcome::Settled),
-                    persistence_fault: None,
                 });
                 continue;
             }
             let (event_id, state) = match &receipt.payload {
                 PublishQueueReceiptPayload::Event { event_id, state } => (*event_id, *state),
                 PublishQueueReceiptPayload::ReplaceableOperation { .. } => {
-                    return Err(PersistenceError::invariant(
+                    return Err(PersistenceError::new(
                         "event publish-queue index names replaceable-operation receipt",
                     ));
                 }
@@ -3966,17 +3597,14 @@ impl CoreState {
                 ReceiptState::Refused(reason) => Some(WriteOutcome::Refused(reason)),
                 ReceiptState::NoDestination => Some(WriteOutcome::NoDestination),
                 ReceiptState::Accepted | ReceiptState::Signed => match pending {
-                    // A completed answer that truly named nobody is
-                    // terminal even when its close transaction failed and
-                    // left the open-work row available here. A route-revision
-                    // persistence failure also leaves the durable set empty,
-                    // but its named URLs stay owned in
-                    // `route_blocked_relays` and the obligation remains open
-                    // for recovery.
+                    // A completed answer that truly named nobody is terminal
+                    // even when its close transaction failed and left the
+                    // open-work row available here. A route revision that did
+                    // not persist is NOT that: it leaves `route_complete`
+                    // false, so the obligation stays open work instead of
+                    // reading as this verdict.
                     Some(pending)
-                        if pending.route_complete
-                            && pending.durable_routes.is_empty()
-                            && pending.route_blocked_relays.is_empty() =>
+                        if pending.route_complete && pending.durable_routes.is_empty() =>
                     {
                         Some(WriteOutcome::NoDestination)
                     }
@@ -4016,7 +3644,6 @@ impl CoreState {
                 route_complete: pending.is_none_or(|pending| pending.route_complete),
                 relay_states,
                 outcome,
-                persistence_fault: pending.and_then(|pending| pending.persistence_fault.clone()),
             });
         }
         Ok(entries)
@@ -4110,12 +3737,12 @@ impl CoreState {
                     // state to guess at.
                     PublishQueueLaneState::InFlight { ordinal, ref phase } => {
                         let detail = attempt_detail(&lane.key.relay, ordinal).ok_or_else(|| {
-                            PersistenceError::invariant("in-flight lane has no attempt detail row")
+                            PersistenceError::new("in-flight lane has no attempt detail row")
                         })?;
                         match phase {
                             PublishQueueInFlightPhase::AwaitingHandoff => {
                                 let started_at = detail.started_at.ok_or_else(|| {
-                                    PersistenceError::invariant("started attempt has no start time")
+                                    PersistenceError::new("started attempt has no start time")
                                 })?;
                                 RelayState::Attempting {
                                     attempt: ordinal,
@@ -4129,7 +3756,7 @@ impl CoreState {
                             // borrow it.
                             PublishQueueInFlightPhase::AwaitingAck { .. } => {
                                 let handoff = detail.handoff.as_ref().ok_or_else(|| {
-                                    PersistenceError::invariant(
+                                    PersistenceError::new(
                                         "acked-awaiting lane has no handoff evidence",
                                     )
                                 })?;
@@ -4140,7 +3767,7 @@ impl CoreState {
                                     },
                                     HandoffEvidence::Ambiguous | HandoffEvidence::NotHandedOff => {
                                         let started_at = detail.started_at.ok_or_else(|| {
-                                            PersistenceError::invariant(
+                                            PersistenceError::new(
                                                 "started attempt has no start time",
                                             )
                                         })?;
@@ -4243,7 +3870,7 @@ impl CoreState {
                             &outcome,
                         ) {
                             Ok(committed) => self.apply_committed_mutation(committed, &mut effects),
-                            Err(error) => self.degrade_store(error, &mut effects),
+                            Err(_error) => {},
                         }
                         self.quarantined_auth_receipts.remove(&id);
                         self.pending.unindex_receipt_from_event(event_id, id);
@@ -4322,7 +3949,7 @@ impl CoreState {
                         &outcome,
                     ) {
                         Ok(committed) => self.apply_committed_mutation(committed, &mut effects),
-                        Err(error) => self.degrade_store(error, &mut effects),
+                        Err(_error) => {},
                     }
                 }
                 Ok(CompensateOutcome::AlreadySigned) => {
@@ -4486,7 +4113,7 @@ impl CoreState {
                 // The store promotion is already committed. Preserve it and
                 // degrade the projection rather than compensating a validly
                 // signed obligation or manufacturing observer state.
-                Err(error) => self.degrade_store(error, effects),
+                Err(_error) => {},
             }
         }
 
@@ -4583,8 +4210,7 @@ impl CoreState {
         if semantic_promotion {
             self.reacquire_semantic_successor_lanes(id, effects);
         }
-        if let Some(error) = parent_provenance_error {
-            self.degrade_store(error, effects);
+        if let Some(_error) = parent_provenance_error {
         }
         self.resync_route_needs(effects);
     }
@@ -4618,8 +4244,7 @@ impl CoreState {
         let event_id = self.pending[&id].frozen.id;
         match self.recover_semantic_generation_lanes(intent_id, event_id) {
             Ok(lanes) => self.open_fresh_lanes(id, signing_pubkey, lanes, effects),
-            Err(error) => {
-                self.record_store_failure(&error);
+            Err(_error) => {
             }
         }
     }
@@ -4818,7 +4443,7 @@ impl CoreState {
                         Ok(committed) => {
                             self.apply_committed_mutation(committed, effects);
                         }
-                        Err(e) => self.degrade_store(e, effects),
+                        Err(_e) => {},
                     }
                 }
                 Ok(CompensateOutcome::AlreadySigned | CompensateOutcome::NotFound) => {
@@ -5229,8 +4854,7 @@ impl CoreState {
             self.resolve_routes(&pending.routing, &event)
         };
         self.apply_route_answer(id, intent_id, answer, effects);
-        if let Some(error) = parent_provenance_error {
-            self.degrade_store(error, effects);
+        if let Some(_error) = parent_provenance_error {
         }
     }
 
@@ -5253,7 +4877,7 @@ impl CoreState {
             return;
         };
         let signing_pubkey = pending.signing_pubkey;
-        let event_id = pending.frozen.id;
+        let _event_id = pending.frozen.id;
         // Diff-and-append: only relays absent from everything this intent has
         // ever durably resolved to are new, so an acked lane is never
         // re-minted and a resolver repeating itself writes nothing.
@@ -5275,17 +4899,18 @@ impl CoreState {
                 // claimed to survive a crash, so they are owned only for this
                 // process and no lane is minted for them.
                 blocked = new_relays.clone();
-                if let Some(pending) = self.pending.get_mut(&id) {
-                    pending
-                        .route_blocked_relays
-                        .extend(new_relays.iter().cloned());
-                }
             } else {
                 committed = true;
                 union.extend(answer.relays.iter().cloned());
             }
         }
 
+        // A route revision that did not commit leaves routing INCOMPLETE, not
+        // complete-with-nothing: the answer named relays, but nothing durable
+        // holds them, so the write is unfinished work and the next pass
+        // resolves again. Without this, an empty durable set would read as the
+        // terminal `NoDestination` verdict.
+        let route_complete = answer.complete && blocked.is_empty();
         let picture_changed = {
             let Some(pending) = self.pending.get_mut(&id) else {
                 return;
@@ -5298,11 +4923,11 @@ impl CoreState {
             // silent while the reason changed underneath the app.
             let changed = !pending.destinations_reported
                 || pending.durable_routes != union
-                || pending.route_complete != answer.complete
+                || pending.route_complete != route_complete
                 || pending.route_needs != answer.author_route_needs;
             pending.destinations_reported = true;
             pending.durable_routes = union.clone();
-            pending.route_complete = answer.complete;
+            pending.route_complete = route_complete;
             pending.route_needs = answer.author_route_needs.clone();
             changed
         };
@@ -5327,9 +4952,10 @@ impl CoreState {
             //   named zero relays. There is nowhere to publish, and saying so
             //   is a fact rather than a guess.
             // - a blocked URL — resolution DID name a relay, but its route
-            //   revision did not commit. The durable union is still empty,
-            //   but the write remains open and reports the persistence stall
-            //   below rather than inventing `NoDestination`.
+            //   revision did not commit. The durable union is still empty and
+            //   the write remains open rather than inventing
+            //   `NoDestination`; nothing is reported, and the next pass
+            //   re-resolves.
             // `picture_changed` is the ONE authority on whether this is news:
             // it was computed against the pending state BEFORE that state was
             // updated, so re-deriving it here would compare the new value
@@ -5341,12 +4967,12 @@ impl CoreState {
                     id,
                     WriteFact::Destinations {
                         relays: BTreeSet::new(),
-                        complete: answer.complete,
+                        complete: route_complete,
                         awaiting_author_routes: answer.author_route_needs.clone(),
                     },
                     effects,
                 );
-                if answer.complete && blocked.is_empty() {
+                if route_complete {
                     // Knowledge is exhausted and it named nobody. Terminal.
                     //
                     // The open-work row goes with it. This write owns no
@@ -5382,7 +5008,7 @@ impl CoreState {
                     id,
                     WriteFact::Destinations {
                         relays: union.clone(),
-                        complete: answer.complete,
+                        complete: route_complete,
                         awaiting_author_routes: answer.author_route_needs.clone(),
                     },
                     effects,
@@ -5390,42 +5016,14 @@ impl CoreState {
             }
         }
 
-        for relay in blocked {
-            self.emit_write_fact(
-                id,
-                WriteFact::Relay {
-                    event_id,
-                    relay,
-                    state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
-                        detail: ROUTE_STALL_DETAIL.to_string(),
-                    }),
-                },
-                effects,
-            );
-        }
-
         if committed {
-            match self.bootstrap_projected_lanes(intent_id, Some(&union)) {
+            match self.bootstrap_projected_lanes(intent_id) {
                 Ok(lanes) => self.open_fresh_lanes(id, signing_pubkey, lanes, effects),
                 Err(_) => {
                     // The sole call that teaches the reverse index this
                     // intent's lanes failed, so the index cannot learn what
                     // may or may not exist -- degrade rather than assume "no
                     // lanes" (epic #507 finding E5).
-                    self.pending.degrade_lane_index();
-                    for relay in &new_relays {
-                        self.emit_write_fact(
-                            id,
-                            WriteFact::Relay {
-                                event_id,
-                                relay: relay.clone(),
-                                state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
-                                    detail: ATTEMPT_STALL_DETAIL.to_string(),
-                                }),
-                            },
-                            effects,
-                        );
-                    }
                 }
             }
         }
@@ -5635,8 +5233,7 @@ impl CoreState {
         effects: &mut Vec<Effect>,
     ) {
         let Ok(lanes) = self.recover_all_lanes() else {
-            self.retry_scheduler_blocked = true;
-            return;
+                        return;
         };
         for (id, lane) in lanes {
             // Only lanes riding EXACTLY this session suspend (#8): a different
@@ -5742,12 +5339,12 @@ fn validate_publish_queue_page(
     for receipt_id in receipt_ids {
         count += 1;
         if count > usize::from(limit) {
-            return Err(PersistenceError::invariant(format!(
+            return Err(PersistenceError::new(format!(
                 "publish queue backend returned more than limit {limit}"
             )));
         }
         if previous.is_some_and(|previous| receipt_id <= previous) {
-            return Err(PersistenceError::invariant(format!(
+            return Err(PersistenceError::new(format!(
                 "publish queue backend returned receipt {receipt_id} after {previous:?}"
             )));
         }

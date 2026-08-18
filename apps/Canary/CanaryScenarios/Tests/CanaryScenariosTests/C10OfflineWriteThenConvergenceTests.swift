@@ -163,7 +163,6 @@ final class C10OfflineWriteThenConvergenceTests: XCTestCase {
             case .eligible: return "waiting(eligible)"
             case .backingOff(let attempt, _, let cause, _):
                 return "waiting(backingOff attempt=\(attempt) cause=\(cause))"
-            case .persistenceStalled(let detail): return "waiting(persistenceStalled \(detail))"
             }
         case .attempting(let attempt, _): return "attempting(attempt=\(attempt))"
         case .sent(let attempt, _): return "sent(attempt=\(attempt))"

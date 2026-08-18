@@ -412,7 +412,7 @@ pub(super) fn scan_packed<T>(
 }
 
 fn packed_err(error: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError::invariant(format!("packed postings: {error}"))
+    PersistenceError::new(format!("packed postings: {error}"))
 }
 
 /// Decode the whole packed run catalog and prove its relational invariants

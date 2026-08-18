@@ -16,9 +16,8 @@
 
 use nmp_store::{
     sentinel_signature, AcceptOutcome, AcceptWrite, AcceptWritePayload, InsertOutcome,
-    IntentSigState, PersistenceFault, PromoteOutcome, PromotionTarget, PublishQueueReceiptPayload,
-    PublishQueueWork, ReceiptState, RedbStore, RefuseReason, RelayObserved, SigState,
-    VerifiedSignature,
+    IntentSigState, PromoteOutcome, PromotionTarget, PublishQueueReceiptPayload, PublishQueueWork,
+    ReceiptState, RedbStore, RefuseReason, RelayObserved, SigState, VerifiedSignature,
 };
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag, Timestamp};
 
@@ -93,10 +92,9 @@ fn a_valid_signature_from_another_intent_is_refused() {
             .journaled_receipt_id()
             .expect("B journals a receipt");
 
-        let error = store
+        store
             .promote_signed(PromotionTarget::Event(intent_b), evidence(&signed_a))
             .expect_err("a signature over another intent's event must be refused");
-        assert_eq!(error.fault(), PersistenceFault::Invariant);
 
         let rows = store.query(&Filter::new().id(frozen_b_id)).unwrap();
         assert_eq!(rows.len(), 1);
@@ -219,13 +217,12 @@ fn a_foreign_signature_cannot_commit_a_pending_kind5_to_permanent_tombstones() {
         .journaled_intent_id()
         .expect("deletion journals an intent");
 
-        let error = store
+        store
             .promote_signed(
                 PromotionTarget::Event(deletion_intent),
                 evidence(&unrelated_signed),
             )
             .expect_err("a foreign signature must not commit the deletion");
-        assert_eq!(error.fault(), PersistenceFault::Invariant);
 
         // Still provisional: a redelivered target is accepted, not refused.
         let redelivered = EventBuilder::new(Kind::TextNote, "please delete me")

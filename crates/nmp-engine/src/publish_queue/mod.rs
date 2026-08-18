@@ -168,21 +168,6 @@ pub enum RelayWaiting {
         cause: RetryCause,
         detail: Option<String>,
     },
-    /// The lane is owned and nonterminal, but a durable fact about it could
-    /// not be committed — the local disk is refusing writes. No wire EVENT
-    /// was emitted.
-    ///
-    /// This is the only arm that is ALSO latched onto the queue entry
-    /// ([`PublishQueueEntry::persistence_fault`]). A blockage that arose and
-    /// resolved before the app looked would otherwise vanish, and an
-    /// operator would lose the only signal that the disk is failing. It is
-    /// emitted as a fact AND readable on the entry, and a later ack never
-    /// overwrites the latch.
-    ///
-    /// `detail` carries the recovery difference the two old spellings
-    /// encoded: whether the resolved relay URL itself survives a crash
-    /// (an attempt-log stall) or does not (a route-revision stall).
-    PersistenceStalled { detail: String },
 }
 
 /// What is true at ONE relay.
@@ -427,11 +412,6 @@ pub struct PublishQueueEntry {
     pub relay_states: Vec<(RelayUrl, RelayState)>,
     /// `Some` once the whole write ended; `None` while it is in progress.
     pub outcome: Option<WriteOutcome>,
-    /// LATCHED. Set the first time local persistence refused a durable fact
-    /// for this write, and never cleared by a later success — an operator
-    /// must not lose the only signal that the disk is failing because a
-    /// relay acked afterwards.
-    pub persistence_fault: Option<String>,
 }
 
 impl PublishQueueEntry {

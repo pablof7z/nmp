@@ -266,12 +266,6 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   does not select a database; the adapter stays blocked and production
   constructors stay redb-only. A later Fjall release needs a fresh source and
   fault audit; it cannot inherit this by semver.
-- **Native SDKs cannot branch on store-failure kind (#1762, #881).** The engine
-  classifies `PersistenceFault` and computes `requires_reopen()`, but that
-  classification does not cross `EngineError`/`FfiError`; native SDKs project
-  `store_degraded` as an unstructured string, so a native host can display the
-  degraded interval but cannot branch on the failure kind the way a Rust caller
-  can.
 - **Boot recovery still READS per intent (#889).** Reopening an engine
   rebuilds volatile write ownership before the first command, and two
   unnecessary durability barriers were removed (boot fell from 38.9s to 108ms),
@@ -330,11 +324,14 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
 
 ## Reducer invariants without falsifiers
 
-- **I3 and I8 have no reducer-level falsifier.** Both are fail-open guards on
-  abnormal paths: I3 is the exact-generation session conjunction, I8 the
-  per-turn `retry_scheduler_blocked` reset. Breaking either leaves the corpus
+- **I3 has no reducer-level falsifier.** It is a fail-open guard on an abnormal
+  path — the exact-generation session conjunction. Breaking it leaves the corpus
   green (a mutated reducer becomes strictly more permissive with no test
-  noticing). Blocked on the hostile/degraded-input fixture tracked in #1736.
+  noticing). Blocked on the hostile/degraded-input fixture tracked in #1736. I8,
+  the per-turn reset of the scheduler-suppression flag, was recorded here for the
+  same reason and is retired rather than closed: the flag existed only to keep a
+  latched store failure from becoming a busy-spin, and store failures are no
+  longer latched.
 - **The `attach_wire_handle` ordering change is unobservable.** Indexing a
   handle before retaining its atoms vs reversed gives the entire workspace
   green either way — no reachable input distinguishes the orders, because the

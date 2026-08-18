@@ -473,7 +473,7 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
     fn allocate_event_key(&mut self) -> Result<EventKey, PersistenceError> {
         let key = self.next_event_key;
         self.next_event_key = key.checked_add(1).ok_or_else(|| {
-            PersistenceError::invariant("canonical event key space exhausted".to_owned())
+            PersistenceError::new("canonical event key space exhausted".to_owned())
         })?;
         self.event_allocator_dirty = true;
         Ok(key)
@@ -483,7 +483,7 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
         let key = self.next_relay_key;
         self.next_relay_key = key
             .checked_add(1)
-            .ok_or_else(|| PersistenceError::invariant("relay key space exhausted".to_owned()))?;
+            .ok_or_else(|| PersistenceError::new("relay key space exhausted".to_owned()))?;
         self.relay_allocator_dirty = true;
         Ok(key)
     }
@@ -517,10 +517,8 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
         if let Some(value) = self.relay_ref_counts.get(&key) {
             return Ok(*value);
         }
-        let value =
-            get_u64(self.db.relay_refs, self.txn, &key.to_be_bytes())?.ok_or_else(|| {
-                PersistenceError::invariant("interned relay has no refcount".to_owned())
-            })?;
+        let value = get_u64(self.db.relay_refs, self.txn, &key.to_be_bytes())?
+            .ok_or_else(|| PersistenceError::new("interned relay has no refcount".to_owned()))?;
         self.relay_ref_counts.insert(key, value);
         Ok(value)
     }
@@ -533,7 +531,7 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
             current.checked_sub(delta.unsigned_abs())
         }
         .ok_or_else(|| {
-            PersistenceError::invariant("relay reference count overflow/underflow".to_owned())
+            PersistenceError::new("relay reference count overflow/underflow".to_owned())
         })?;
         self.relay_ref_counts.insert(key, next);
         Ok(())
@@ -555,9 +553,7 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
                 .relays
                 .get(self.txn, &relay_key.to_be_bytes())
                 .map_err(lmdb_err)?
-                .ok_or_else(|| {
-                    PersistenceError::invariant("observation relay is absent".to_owned())
-                })?;
+                .ok_or_else(|| PersistenceError::new("observation relay is absent".to_owned()))?;
             let relay = std::str::from_utf8(relay)
                 .map_err(lmdb_err)
                 .and_then(|value| RelayUrl::parse(value).map_err(lmdb_err))?;
@@ -592,7 +588,7 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
         let current = self.cardinality_deltas.entry(key).or_default();
         *current = current
             .checked_add(delta)
-            .ok_or_else(|| PersistenceError::invariant("cardinality delta overflow".to_owned()))?;
+            .ok_or_else(|| PersistenceError::new("cardinality delta overflow".to_owned()))?;
         Ok(())
     }
 
@@ -644,7 +640,7 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
         for (relay_key, effective) in std::mem::take(&mut self.relay_ref_counts) {
             let key = relay_key.to_be_bytes();
             let persisted = get_u64(self.db.relay_refs, self.txn, &key)?.ok_or_else(|| {
-                PersistenceError::invariant("interned relay has no refcount".to_owned())
+                PersistenceError::new("interned relay has no refcount".to_owned())
             })?;
             if effective > 0 {
                 if effective != persisted {
@@ -660,7 +656,7 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
                 .relays
                 .get(self.txn, &key)
                 .map_err(lmdb_err)?
-                .ok_or_else(|| PersistenceError::invariant("interned relay is absent".to_owned()))?
+                .ok_or_else(|| PersistenceError::new("interned relay is absent".to_owned()))?
                 .to_vec();
             self.db
                 .relay_refs
@@ -682,9 +678,7 @@ impl<'db, 'txn, 'batch> LmdbIngestTxn<'db, 'txn, 'batch> {
             } else {
                 persisted.checked_sub(delta.unsigned_abs())
             }
-            .ok_or_else(|| {
-                PersistenceError::invariant("cardinality overflow/underflow".to_owned())
-            })?;
+            .ok_or_else(|| PersistenceError::new("cardinality overflow/underflow".to_owned()))?;
             if effective == 0 {
                 self.db
                     .cardinality
@@ -1618,22 +1612,22 @@ fn decode_u64(bytes: &[u8]) -> Result<u64, PersistenceError> {
     bytes
         .try_into()
         .map(u64::from_be_bytes)
-        .map_err(|_| PersistenceError::invariant("invalid LMDB u64 width".to_owned()))
+        .map_err(|_| PersistenceError::new("invalid LMDB u64 width".to_owned()))
 }
 
 fn decode_u32(bytes: &[u8]) -> Result<u32, PersistenceError> {
     bytes
         .try_into()
         .map(u32::from_be_bytes)
-        .map_err(|_| PersistenceError::invariant("invalid LMDB u32 width".to_owned()))
+        .map_err(|_| PersistenceError::new("invalid LMDB u32 width".to_owned()))
 }
 
 fn lmdb_err(error: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError::invariant(format!("LMDB benchmark: {error}"))
+    PersistenceError::new(format!("LMDB benchmark: {error}"))
 }
 
 fn packed_err(error: impl std::fmt::Display) -> PersistenceError {
-    PersistenceError::invariant(format!("packed postings: {error}"))
+    PersistenceError::new(format!("packed postings: {error}"))
 }
 
 fn elapsed_ns(started: Instant) -> u64 {

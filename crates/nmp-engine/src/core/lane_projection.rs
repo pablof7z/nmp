@@ -21,105 +21,35 @@ impl CoreState {
 
     /// Apply one successful store mutation's exact post-state.
     fn apply_committed_lane(&mut self, lane: &PublishQueueLane) {
-        let owned = self
-            .pending
-            .receipt_for_intent(lane.key.intent_id)
-            .is_some_and(|id| self.pending.apply_committed_lane(id, lane));
-        if !owned {
-            self.lane_projection_unprovable = true;
-        }
-    }
-
-    /// Preserve a possible lane/transition after an indeterminate commit.
-    ///
-    /// This deliberately produces a superset. A false-positive worker can be
-    /// retired after explicit recovery; a false-negative can strand a durable
-    /// obligation forever.
-    fn mark_lane_projection_uncertain(&mut self, key: &PublishQueueLaneKey) {
-        let owned = self
-            .pending
-            .receipt_for_intent(key.intent_id)
-            .is_some_and(|id| self.pending.mark_lane_uncertain(id, key.relay.clone()));
-        if !owned {
-            self.lane_projection_unprovable = true;
+        if let Some(id) = self.pending.receipt_for_intent(lane.key.intent_id) {
+            self.pending.apply_committed_lane(id, lane);
         }
     }
 
     fn commit_lane_transition<T>(
         &mut self,
-        key: &PublishQueueLaneKey,
         operation: impl FnOnce(&mut RedbStore) -> Result<(T, PublishQueueLane), PersistenceError>,
     ) -> Result<(T, PublishQueueLane), PersistenceError> {
-        let result = operation(&mut self.store);
-        match result {
-            Ok((value, lane)) => {
-                self.apply_committed_lane(&lane);
-                Ok((value, lane))
-            }
-            Err(error) => {
-                if error.durability() == DurabilityOutcome::Unknown {
-                    self.mark_lane_projection_uncertain(key);
-                }
-                Err(error)
-            }
-        }
+        let (value, lane) = operation(&mut self.store)?;
+        self.apply_committed_lane(&lane);
+        Ok((value, lane))
     }
 
     /// Establish (or re-establish) one intent's projection from the durable
     /// lane set, creating the lanes its recorded route revisions imply.
     ///
-    /// `candidate_relays` is what the caller can prove about the intent's
-    /// durable route set. `None` means it could not be read at all — the
-    /// caller has nothing to hold conservatively, so the whole projection
-    /// reports unavailable until a retry commits.
+    /// A failure leaves the in-memory projection as it was and returns `Err`.
+    /// The durable lanes are untouched, so the next boot rebuilds them from
+    /// the store: what a failure here costs is progress, never the write.
     pub(in crate::core) fn bootstrap_projected_lanes(
         &mut self,
         intent_id: IntentId,
-        candidate_relays: Option<&BTreeSet<RelayUrl>>,
     ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
-        let result = self.store.bootstrap_publish_queue_lanes(intent_id);
-        match result {
-            Ok(lanes) => {
-                match self.pending.receipt_for_intent(intent_id) {
-                    Some(id) => {
-                        if !self.pending.replace_lane_projection(id, &lanes) {
-                            self.lane_projection_unprovable = true;
-                        }
-                        // The exact rebuild above supersedes every
-                        // conservative guess this gap was standing in for,
-                        // including any `uncertain` relay it left behind. This
-                        // is the one place a bootstrap gap is allowed to
-                        // close.
-                        self.lane_bootstrap_retries.remove(&id);
-                    }
-                    None => self.lane_projection_unprovable = true,
-                }
-                Ok(lanes)
-            }
-            Err(error) => {
-                // Bootstrap is both a create-if-missing mutation and the only
-                // complete read used to establish the projection. Even an
-                // Absent mutation outcome does not prove that older lanes were
-                // absent, so every route candidate remains conservatively
-                // owned until a retry commits.
-                for relay in candidate_relays.into_iter().flatten() {
-                    if let Some(event_id) = self
-                        .pending
-                        .receipt_for_intent(intent_id)
-                        .and_then(|receipt| self.pending.get(&receipt))
-                        .map(|pending| pending.frozen.id)
-                    {
-                        self.mark_lane_projection_uncertain(&PublishQueueLaneKey {
-                            intent_id,
-                            event_id,
-                            relay: relay.clone(),
-                        });
-                    }
-                }
-                self.schedule_lane_bootstrap_retry(intent_id, candidate_relays);
-                Err(error)
-            }
+        let lanes = self.store.bootstrap_publish_queue_lanes(intent_id)?;
+        if let Some(id) = self.pending.receipt_for_intent(intent_id) {
+            self.pending.replace_lane_projection(id, &lanes);
         }
+        Ok(lanes)
     }
 
     /// Rebuild one semantic owner's volatile projection from the exact lanes
@@ -134,66 +64,16 @@ impl CoreState {
         intent_id: IntentId,
         event_id: EventId,
     ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
-        let lanes = match self.store.recover_publish_queue_lanes(intent_id) {
-            Ok(lanes) => lanes,
-            Err(error) => {
-                self.lane_projection_unprovable = true;
-                return Err(error);
-            }
-        };
+        let lanes = self.store.recover_publish_queue_lanes(intent_id)?;
         if lanes.iter().any(|lane| lane.key.event_id != event_id) {
-            self.lane_projection_unprovable = true;
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "semantic lane recovery found a non-current event generation",
             ));
         }
-        let rebuilt = self
-            .pending
-            .receipt_for_intent(intent_id)
-            .is_some_and(|id| self.pending.replace_lane_projection(id, &lanes));
-        if !rebuilt {
-            self.lane_projection_unprovable = true;
+        if let Some(id) = self.pending.receipt_for_intent(intent_id) {
+            self.pending.replace_lane_projection(id, &lanes);
         }
         Ok(lanes)
-    }
-
-    /// Record (or re-arm) the retryable gap left by a failed bootstrap.
-    ///
-    /// The conservative retention taken at the failure is only safe because
-    /// this exists: `uncertain` can be cleared solely by a committed lane
-    /// fact for that exact relay, and for an intent with no lane rows no
-    /// other path in the reducer can ever produce one.
-    pub(in crate::core) fn schedule_lane_bootstrap_retry(
-        &mut self,
-        intent_id: IntentId,
-        candidates: Option<&BTreeSet<RelayUrl>>,
-    ) {
-        let Some(id) = self.pending.receipt_for_intent(intent_id) else {
-            // No receipt owns this intent, so there is no pending write to
-            // retry on behalf of and nothing that could later close the gap.
-            self.lane_projection_unprovable = true;
-            return;
-        };
-        let entry = self
-            .lane_bootstrap_retries
-            .entry(id)
-            .or_insert(LaneBootstrapRetry {
-                candidates: Some(BTreeSet::new()),
-                due: self.clock,
-                failures: 0,
-            });
-        // Unknown is sticky and unions are conservative: a later failure that
-        // happens to know its candidates must not shrink an earlier gap or
-        // upgrade an unreadable route set into a covered one.
-        entry.candidates = match (entry.candidates.take(), candidates) {
-            (Some(mut known), Some(more)) => {
-                known.extend(more.iter().cloned());
-                Some(known)
-            }
-            _ => None,
-        };
-        entry.failures = entry.failures.saturating_add(1);
-        entry.due = self.clock + bootstrap_retry_delay_secs(entry.failures);
     }
 
     pub(in crate::core) fn commit_lane_waiting(
@@ -202,7 +82,7 @@ impl CoreState {
         revision: u64,
         auth: bool,
     ) -> Result<PublishQueueLane, PersistenceError> {
-        self.commit_lane_transition(key, |store| {
+        self.commit_lane_transition(|store| {
             store
                 .set_lane_waiting(key, revision, auth)
                 .map(|lane| ((), lane))
@@ -216,7 +96,7 @@ impl CoreState {
         revision: u64,
         since: Timestamp,
     ) -> Result<PublishQueueLane, PersistenceError> {
-        self.commit_lane_transition(key, |store| {
+        self.commit_lane_transition(|store| {
             store
                 .set_lane_eligible(key, revision, since)
                 .map(|lane| ((), lane))
@@ -234,7 +114,7 @@ impl CoreState {
         cause: PublishQueueTransientCause,
         raw_reason: Option<String>,
     ) -> Result<PublishQueueLane, PersistenceError> {
-        self.commit_lane_transition(key, |store| {
+        self.commit_lane_transition(|store| {
             store
                 .set_lane_transient(key, revision, ordinal, eligible_at, cause, raw_reason)
                 .map(|lane| ((), lane))
@@ -253,7 +133,7 @@ impl CoreState {
         raw_reason: Option<String>,
         auth: bool,
     ) -> Result<PublishQueueLane, PersistenceError> {
-        self.commit_lane_transition(key, |store| {
+        self.commit_lane_transition(|store| {
             store
                 .suspend_lane_attempt(key, revision, ordinal, at, cause, raw_reason, auth)
                 .map(|lane| ((), lane))
@@ -268,7 +148,7 @@ impl CoreState {
         event: SignedEvent,
         started_at: Timestamp,
     ) -> Result<(nmp_store::PublishQueueAttempt, PublishQueueLane), PersistenceError> {
-        self.commit_lane_transition(key, |store| {
+        self.commit_lane_transition(|store| {
             store.start_lane_attempt(key, revision, event, started_at)
         })
     }
@@ -281,7 +161,7 @@ impl CoreState {
         detail: PublishQueueAttemptHandoff,
         next: PublishQueuePostHandoffState,
     ) -> Result<PublishQueueLane, PersistenceError> {
-        self.commit_lane_transition(key, |store| {
+        self.commit_lane_transition(|store| {
             store
                 .record_lane_handoff(key, revision, ordinal, detail, next)
                 .map(|lane| ((), lane))
@@ -297,7 +177,7 @@ impl CoreState {
         outcome: PublishQueueAttemptOutcome,
         finished_at: Timestamp,
     ) -> Result<PublishQueueLane, PersistenceError> {
-        self.commit_lane_transition(key, |store| {
+        self.commit_lane_transition(|store| {
             store
                 .finish_lane_attempt(key, revision, ordinal, outcome, finished_at)
                 .map(|lane| ((), lane))
@@ -311,7 +191,7 @@ impl CoreState {
         revision: u64,
         denial: StoredAuthDenial,
     ) -> Result<PublishQueueLane, PersistenceError> {
-        self.commit_lane_transition(key, |store| {
+        self.commit_lane_transition(|store| {
             store
                 .deny_lane_auth(key, revision, denial)
                 .map(|lane| ((), lane))
@@ -359,7 +239,7 @@ impl CoreState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_store::{PersistenceFault, RedbStore};
+    use nmp_store::RedbStore;
     use nostr::{Keys, Kind};
     use std::time::Instant;
 
@@ -433,8 +313,6 @@ mod tests {
                 pending
                     .pending_relays
                     .iter()
-                    .chain(&pending.unstarted_relays)
-                    .chain(&pending.route_blocked_relays)
                     .cloned()
                     .map(|relay| RelaySessionKey::new(relay, access)),
             );
@@ -451,10 +329,7 @@ mod tests {
     }
 
     fn assert_projection_matches_store(core: &CoreState) {
-        let actual = core
-            .relay_worker_requirements()
-            .expect("projection remains available")
-            .writes;
+        let actual = core.relay_worker_requirements().writes;
         assert_eq!(actual, durable_worker_oracle(core));
     }
 
@@ -514,7 +389,7 @@ mod tests {
         publish_waiting(&mut core, &author_b, &relay, 11);
         assert_projection_matches_store(&core);
 
-        let actual = core.relay_worker_requirements().unwrap().writes;
+        let actual = core.relay_worker_requirements().writes;
         assert_eq!(
             actual,
             BTreeSet::from([
@@ -542,14 +417,14 @@ mod tests {
             publish_waiting(&mut core, &author_a, &relay, 20);
             publish_waiting(&mut core, &author_b, &relay, 21);
             assert_projection_matches_store(&core);
-            assert_eq!(core.relay_worker_requirements().unwrap().writes, expected);
+            assert_eq!(core.relay_worker_requirements().writes, expected);
         }
 
         let mut recovered = CoreState::new(RedbStore::open(&path).unwrap(), 10);
         let effects = recovered.recover_on_boot();
         assert_projection_matches_store(&recovered);
         assert_eq!(
-            recovered.relay_worker_requirements().unwrap().writes,
+            recovered.relay_worker_requirements().writes,
             expected
         );
         for session in expected {
@@ -559,63 +434,25 @@ mod tests {
         }
     }
 
+    /// A lane transition that does not commit leaves the projection exactly
+    /// as it was. There is no third state between "committed" and "did not":
+    /// the store is authoritative, and a failure is simply progress this pass
+    /// did not make.
     #[test]
-    fn durability_unknown_marks_the_lane_uncertain_and_retains_its_worker() {
-        let author = Keys::generate();
-        let relay = RelayUrl::parse("wss://projection-unknown.example.com").unwrap();
-        let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 10);
-        let (receipt, _) = publish_waiting(&mut core, &author, &relay, 30);
-        let key = PublishQueueLaneKey {
-            intent_id: core.pending[&receipt].intent_id,
-            event_id: core.pending[&receipt].frozen.id,
-            relay: relay.clone(),
-        };
-
-        let result: Result<((), PublishQueueLane), PersistenceError> =
-            core.commit_lane_transition(&key, |_store| {
-                Err(PersistenceError::new(
-                    PersistenceFault::Io,
-                    "injected indeterminate commit",
-                ))
-            });
-        assert_eq!(result.unwrap_err().durability(), DurabilityOutcome::Unknown);
-        assert!(core.pending[&receipt]
-            .lane_projection
-            .uncertain
-            .contains(&relay));
-        assert!(core
-            .relay_worker_requirements()
-            .unwrap()
-            .writes
-            .contains(&RelaySessionKey::new(
-                relay,
-                Some(author.public_key())
-            )));
-    }
-
-    #[test]
-    fn durability_absent_leaves_the_exact_projection_unchanged() {
+    fn a_failed_lane_transition_leaves_the_exact_projection_unchanged() {
         let author = Keys::generate();
         let relay = RelayUrl::parse("wss://projection-absent.example.com").unwrap();
         let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 10);
         let (receipt, _) = publish_waiting(&mut core, &author, &relay, 31);
-        let key = PublishQueueLaneKey {
-            intent_id: core.pending[&receipt].intent_id,
-            event_id: core.pending[&receipt].frozen.id,
-            relay,
-        };
         let before = core.pending[&receipt].lane_projection.clone();
 
         let result: Result<((), PublishQueueLane), PersistenceError> =
-            core.commit_lane_transition(&key, |_store| {
-                Err(PersistenceError::invariant(
-                    "injected known-absent transition",
-                ))
+            core.commit_lane_transition(|_store| {
+                Err(PersistenceError::new("injected failed transition"))
             });
 
-        assert_eq!(result.unwrap_err().durability(), DurabilityOutcome::Absent);
+        result.expect_err("the injected transition must refuse");
         assert_eq!(core.pending[&receipt].lane_projection, before);
-        assert!(core.lane_worker_projection_available());
     }
 
     /// Reduce Rust source to what the census may match against: comments

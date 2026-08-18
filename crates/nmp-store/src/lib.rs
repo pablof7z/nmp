@@ -112,7 +112,7 @@ pub mod ingest_attribution;
 
 pub use coverage::{coverage_key, CoverageInterval, CoverageKey, GcReport, GcRetentionSet};
 pub use coverage_claims::coverage_claim_atoms;
-pub use persistence_failure::{DurabilityOutcome, PersistenceError, PersistenceFault};
+pub use persistence_failure::PersistenceError;
 pub use persistent_store_lifetime::{RedbStoreOpenError, RedbStoreResetError};
 #[cfg(any(test, feature = "test-instrumentation"))]
 pub use redb_store::testing;
@@ -1228,7 +1228,7 @@ pub enum PublishQueueTerminalOutcome {
 impl PublishQueueTerminalOutcome {
     fn from_attempt(outcome: PublishQueueAttemptOutcome) -> Result<Self, PersistenceError> {
         match outcome {
-            PublishQueueAttemptOutcome::Started => Err(PersistenceError::invariant(
+            PublishQueueAttemptOutcome::Started => Err(PersistenceError::new(
                 "Started is not a terminal lane outcome",
             )),
             PublishQueueAttemptOutcome::Acked => Ok(Self::Acked),

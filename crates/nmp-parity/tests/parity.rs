@@ -309,24 +309,6 @@ fn retry_lane_receipt_truth_projects_exactly_from_direct_rust_to_ffi() {
             WriteFact::Relay {
                 event_id: relay_event_id,
                 relay: relay.clone(),
-                state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
-                    detail: "attempt log stalled".into(),
-                }),
-            },
-            FfiWriteFact::Relay {
-                event_id: relay_event_id.to_hex(),
-                relay: relay.to_string(),
-                state: FfiRelayState::Waiting {
-                    waiting: FfiRelayWaiting::PersistenceStalled {
-                        detail: "attempt log stalled".into(),
-                    },
-                },
-            },
-        ),
-        (
-            WriteFact::Relay {
-                event_id: relay_event_id,
-                relay: relay.clone(),
                 state: RelayState::Sent {
                     attempt: 9,
                     written_at: Timestamp::from(125),
@@ -536,7 +518,6 @@ enum NormStatus {
     /// unreachable while the write is merely queued.
     WaitingEligible(String, u64),
     BackingOff(String, u64, u64, String, Option<String>),
-    PersistenceStalled(String, String),
     /// An attempt is running with nothing about the wire proved. Carried
     /// apart from `Sent`, whose whole content is the proof.
     Attempting(String, u64, u64),
@@ -1063,9 +1044,6 @@ fn normalize_direct_status(status: WriteFact, relay: &str) -> NormStatus {
                     retry_cause_name(cause).into(),
                     detail,
                 ),
-                RelayState::Waiting(RelayWaiting::PersistenceStalled { detail }) => {
-                    NormStatus::PersistenceStalled(url, detail)
-                }
                 RelayState::Attempting {
                     attempt,
                     started_at,
@@ -1153,9 +1131,6 @@ fn normalize_ffi_status(status: FfiWriteFact, relay: &str) -> NormStatus {
                     ffi_retry_cause_name(cause).into(),
                     detail,
                 ),
-                FfiRelayState::Waiting {
-                    waiting: FfiRelayWaiting::PersistenceStalled { detail },
-                } => NormStatus::PersistenceStalled(url, detail),
                 FfiRelayState::Attempting {
                     attempt,
                     started_at,
@@ -1471,7 +1446,6 @@ fn auth_diagnostics_phase_survives_the_ffi_boundary_intact() {
         dropped_merge_rules: Vec::new(),
         sessions_rejected_over_cap: 0,
         sessions_refused_by_subscription_budget: 0,
-        store_degraded: None,
         transport_degraded: None,
         stalled_writes: Vec::new(),
         stalled_write_totals: StalledWriteTotals::default(),
@@ -2263,7 +2237,6 @@ fn direct_relay_state_name(state: &RelayState) -> &'static str {
         RelayState::Waiting(RelayWaiting::NeedsAuth) => "awaiting_auth",
         RelayState::Waiting(RelayWaiting::Eligible { .. }) => "eligible",
         RelayState::Waiting(RelayWaiting::BackingOff { .. }) => "backing_off",
-        RelayState::Waiting(RelayWaiting::PersistenceStalled { .. }) => "persistence_stalled",
         RelayState::Attempting { .. } => "attempting",
         RelayState::Sent { .. } => "sent",
         RelayState::Published => "published",
@@ -2322,9 +2295,6 @@ fn ffi_relay_state_name(state: &FfiRelayState) -> &'static str {
         FfiRelayState::Waiting {
             waiting: FfiRelayWaiting::BackingOff { .. },
         } => "backing_off",
-        FfiRelayState::Waiting {
-            waiting: FfiRelayWaiting::PersistenceStalled { .. },
-        } => "persistence_stalled",
         FfiRelayState::Attempting { .. } => "attempting",
         FfiRelayState::Sent { .. } => "sent",
         FfiRelayState::Published => "published",

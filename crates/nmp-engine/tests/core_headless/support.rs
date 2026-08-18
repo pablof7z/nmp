@@ -29,7 +29,7 @@ use nmp_grammar::{Demand, LiveQuery};
 use nmp_router::{SubId, WireOp};
 use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::{
-    AcceptWrite, CoverageInterval, DurabilityOutcome, PersistenceFault, PublishQueueAttemptOutcome,
+    AcceptWrite, CoverageInterval, PublishQueueAttemptOutcome,
     RedbStore, RelayObserved,
 };
 use nmp_transport::{DisconnectReason, HandoffResult, RelayFrame, RelayHandle};
@@ -486,35 +486,16 @@ fn publish_explicit(
 /// and are told apart by `detail` alone, so the exact sentences are stated
 /// here: a silent change to either one must fail loudly rather than quietly
 /// erase the distinction the two old spellings carried in their names.
-const ATTEMPT_STALL_DETAIL: &str =
-    "the durable attempt fact could not be committed; no wire EVENT was emitted and recovery \
-     rediscovers this exact relay from its committed route revision";
-const ROUTE_STALL_DETAIL: &str =
-    "the append-only route revision could not be committed; this exact relay URL is not claimed \
-     to survive a crash";
-
-/// The attempt-log stall: the relay URL survives a crash, the attempt fact
-/// does not.
-fn attempt_stalled(event_id: nostr::EventId, relay: &RelayUrl) -> WriteFact {
-    WriteFact::Relay {
-        event_id,
-        relay: relay.clone(),
-        state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
-            detail: ATTEMPT_STALL_DETAIL.to_string(),
-        }),
-    }
-}
-
-/// The route-revision stall: not even the resolved relay URL is claimed to
-/// survive a crash.
-fn route_stalled(event_id: nostr::EventId, relay: &RelayUrl) -> WriteFact {
-    WriteFact::Relay {
-        event_id,
-        relay: relay.clone(),
-        state: RelayState::Waiting(RelayWaiting::PersistenceStalled {
-            detail: ROUTE_STALL_DETAIL.to_string(),
-        }),
-    }
+/// A post-acceptance store failure produces NO app-facing fact at all.
+///
+/// This is the whole reporting contract for a local disk that refused: the
+/// write does not advance, and nothing is said about the relay it did not
+/// advance to. Progress is what such a failure costs -- the accepted write
+/// itself is still on disk, and the next boot resumes it.
+fn no_relay_fact_for(facts: &[WriteFact], relay: &RelayUrl) -> bool {
+    !facts
+        .iter()
+        .any(|fact| matches!(fact, WriteFact::Relay { relay: r, .. } if r == relay))
 }
 
 fn receipt_statuses(effects: &[Effect]) -> Vec<WriteFact> {

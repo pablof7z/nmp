@@ -100,7 +100,6 @@ impl CoreState {
         effects: &mut Vec<Effect>,
     ) {
         let Ok(lanes) = self.recover_all_lanes() else {
-            self.retry_scheduler_blocked = true;
             return;
         };
         for (id, lane) in lanes {
@@ -140,7 +139,6 @@ impl CoreState {
                 }
             };
             if transitioned.is_err() {
-                self.retry_scheduler_blocked = true;
                 continue;
             }
             self.emit_write_fact(
@@ -328,7 +326,6 @@ impl CoreState {
         let lanes = match self.recover_all_lanes() {
             Ok(lanes) => lanes,
             Err(_) => {
-                self.retry_scheduler_blocked = true;
                 return;
             }
         };
@@ -376,7 +373,6 @@ impl CoreState {
                 Err(_) => {
                     // Commit-before-emit: the receipt must never claim a
                     // terminal fact the store did not establish.
-                    self.retry_scheduler_blocked = true;
                 }
             }
         }
@@ -1136,12 +1132,11 @@ impl CoreState {
                     // reducer still owns demand for exactly this session --
                     // a session no longer required must not be redialed
                     // merely because its old socket errored on the way out.
-                    if let Some(required) = self.relay_worker_requirements() {
-                        if required.writes.contains(&session) {
-                            effects.push(Effect::EnsureWriteRelay(session));
-                        } else if required.all.contains(&session) {
-                            effects.push(Effect::EnsureReadRelay(session));
-                        }
+                    let required = self.relay_worker_requirements();
+                    if required.writes.contains(&session) {
+                        effects.push(Effect::EnsureWriteRelay(session));
+                    } else if required.all.contains(&session) {
+                        effects.push(Effect::EnsureReadRelay(session));
                     }
                 }
             }
@@ -1431,15 +1426,13 @@ impl CoreState {
             crate::ingest_attribution::thread_cpu_time_ns().saturating_sub(resolver_cpu_started),
         );
         match resolver_result {
-            Err(RelayIngestError::EventCommit(error)) => {
+            Err(RelayIngestError::EventCommit(_error)) => {
                 for (session, wire_sub_id) in event_failure_attributions {
                     self.attribution
                         .poison_event_commit_failure(&session, &wire_sub_id);
                 }
-                self.degrade_store(error, effects);
             }
-            Err(RelayIngestError::PostCommitProjection(error)) => {
-                self.degrade_store(error, effects);
+            Err(RelayIngestError::PostCommitProjection(_error)) => {
             }
             Ok(ingest) => {
                 for (session, wire_sub_id, coordinate, witness) in witnessed {

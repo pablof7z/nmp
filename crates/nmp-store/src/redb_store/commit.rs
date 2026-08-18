@@ -3,8 +3,8 @@
 //! Callers must finish every fallible read, decode, validation, and return
 //! value construction before entering this function. Once redb reports a
 //! successful commit, returning the already-prepared value is an infallible
-//! move: no store callback can turn a durable mutation into an `Err` whose
-//! [`crate::DurabilityOutcome`] claims that mutation was absent.
+//! move: no store callback can turn a durable mutation into an `Err` after
+//! the fact.
 
 use super::schema::persist_err;
 use super::PersistenceError;

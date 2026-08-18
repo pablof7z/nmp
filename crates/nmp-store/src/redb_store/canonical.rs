@@ -59,7 +59,7 @@ pub(super) fn decode_observed_at(
     value: &[u8],
 ) -> Result<u64, PersistenceError> {
     let bytes: [u8; 8] = value.try_into().map_err(|_| {
-        PersistenceError::invariant(format!(
+        PersistenceError::new(format!(
             "observation for event {event_key} relay {relay_key} is {} bytes, expected 8",
             value.len()
         ))
@@ -136,7 +136,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
             .map(|guard| RelayKey::try_from(guard.value()))
             .transpose()
             .map_err(|_| {
-                PersistenceError::invariant("relay surrogate allocator overflows u32".to_owned())
+                PersistenceError::new("relay surrogate allocator overflows u32".to_owned())
             })?
             .unwrap_or(1);
         Ok(Self {
@@ -178,16 +178,16 @@ impl<'txn> CanonicalWriteTables<'txn> {
             .map_err(persist_err)?;
         let event = StoredEventView::from_trusted(event_bytes.value())
             .map_err(|error| {
-                PersistenceError::invariant(format!("decode canonical event view: {error:?}"))
+                PersistenceError::new(format!("decode canonical event view: {error:?}"))
             })?
             .materialize_event()
             .map_err(|error| {
-                PersistenceError::invariant(format!("materialize canonical event: {error:?}"))
+                PersistenceError::new(format!("materialize canonical event: {error:?}"))
             })?;
         let local = local_bytes
             .map(|bytes| {
                 binary_event::decode_local(bytes.value()).map_err(|error| {
-                    PersistenceError::invariant(format!("decode canonical local state: {error:?}"))
+                    PersistenceError::new(format!("decode canonical local state: {error:?}"))
                 })
             })
             .transpose()?;
@@ -207,7 +207,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
             .map_err(persist_err)?
             .map(|bytes| {
                 binary_event::decode_local(bytes.value()).map_err(|error| {
-                    PersistenceError::invariant(format!("decode canonical local state: {error:?}"))
+                    PersistenceError::new(format!("decode canonical local state: {error:?}"))
                 })
             })
             .transpose()
@@ -234,15 +234,13 @@ impl<'txn> CanonicalWriteTables<'txn> {
                 .get(relay_key)
                 .map_err(persist_err)?
                 .ok_or_else(|| {
-                    PersistenceError::invariant(format!(
+                    PersistenceError::new(format!(
                         "observation for event {event_key} points at missing relay {relay_key}"
                     ))
                 })?;
             let (_refs, url) = decode_relay_row(relay_key, row.value())?;
             let relay = RelayUrl::parse(url).map_err(|error| {
-                PersistenceError::invariant(format!(
-                    "decode interned relay URL {relay_key}: {error}"
-                ))
+                PersistenceError::new(format!("decode interned relay URL {relay_key}: {error}"))
             })?;
             let at = decode_observed_at(event_key, relay_key, at.value())?;
             fold_seen_at(&mut seen, relay, Timestamp::from(at));
@@ -263,7 +261,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
     pub(super) fn allocate_key(&mut self) -> Result<EventKey, PersistenceError> {
         let next = self.next_event_key;
         self.next_event_key = next.checked_add(1).ok_or_else(|| {
-            PersistenceError::invariant("canonical event key space exhausted".to_owned())
+            PersistenceError::new("canonical event key space exhausted".to_owned())
         })?;
         self.event_allocator_dirty = true;
         Ok(next)
@@ -273,7 +271,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
         let next = self.next_relay_key;
         self.next_relay_key = next
             .checked_add(1)
-            .ok_or_else(|| PersistenceError::invariant("relay key space exhausted".to_owned()))?;
+            .ok_or_else(|| PersistenceError::new("relay key space exhausted".to_owned()))?;
         self.relay_allocator_dirty = true;
         Ok(next)
     }
@@ -299,7 +297,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
             .get(relay_key)
             .map_err(persist_err)?
             .ok_or_else(|| {
-                PersistenceError::invariant(format!("interned relay {relay_key} has no row"))
+                PersistenceError::new(format!("interned relay {relay_key} has no row"))
             })?;
         let (refs, url) = decode_relay_row(relay_key, row.value())?;
         Ok((refs, url.to_owned()))
@@ -322,9 +320,9 @@ impl<'txn> CanonicalWriteTables<'txn> {
         relay_key: RelayKey,
     ) -> Result<(), PersistenceError> {
         let current = self.effective_relay_ref(relay_key)?;
-        let next = current.checked_add(1).ok_or_else(|| {
-            PersistenceError::invariant("relay reference count exhausted".to_owned())
-        })?;
+        let next = current
+            .checked_add(1)
+            .ok_or_else(|| PersistenceError::new("relay reference count exhausted".to_owned()))?;
         self.relay_ref_counts.insert(relay_key, next);
         Ok(())
     }
@@ -334,9 +332,9 @@ impl<'txn> CanonicalWriteTables<'txn> {
         relay_key: RelayKey,
     ) -> Result<(), PersistenceError> {
         let current = self.effective_relay_ref(relay_key)?;
-        let next = current.checked_sub(1).ok_or_else(|| {
-            PersistenceError::invariant("relay reference count underflow".to_owned())
-        })?;
+        let next = current
+            .checked_sub(1)
+            .ok_or_else(|| PersistenceError::new("relay reference count underflow".to_owned()))?;
         self.relay_ref_counts.insert(relay_key, next);
         Ok(())
     }
@@ -503,7 +501,7 @@ impl<'txn> CanonicalWriteTables<'txn> {
                     .get(relay.as_str())
                     .map_err(persist_err)?
                     .ok_or_else(|| {
-                        PersistenceError::invariant(format!(
+                        PersistenceError::new(format!(
                             "observed relay {relay} is no longer interned"
                         ))
                     })?

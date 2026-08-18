@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use nostr::{EventId, JsonUtil, RelayUrl, Timestamp};
 
-use nmp_grammar::{RelaySessionKey};
+use nmp_grammar::RelaySessionKey;
 use nmp_router::{Diagnostics, Lane, RelayPlan, WireReq};
 use nmp_store::{CoverageInterval, CoverageKey, PersistenceError};
 
@@ -37,13 +37,6 @@ pub struct FilterCoverageEntry {
     /// `Some(interval)` -- this relay has a proven `[from, through]` row for
     /// this exact filter's shape; `None` -- unproven ("no row = not
     /// covered", unchanged from the store's own rule).
-    ///
-    /// `None` is NOT self-standing evidence that nothing is proven: if the
-    /// store could not be read while this snapshot was built,
-    /// [`DiagnosticsSnapshot::store_degraded`] is `Some` and every entry
-    /// here is unknown rather than unproven (#763). Read the two together;
-    /// they are one fact reported in the one place an app already looks for
-    /// persistence health (#122/#745).
     pub coverage: Option<CoverageInterval>,
 }
 
@@ -298,12 +291,6 @@ pub struct DiagnosticsSnapshot {
     /// merely trimmed by its budget is NOT counted here: it is present in
     /// `relays` with a non-zero `subscriptions_refused`.
     pub sessions_refused_by_subscription_budget: u64,
-    /// `Some(message)` once an ingest/read [`nmp_store::RedbStore`] door has
-    /// returned a [`nmp_store::PersistenceError`] (issue #122): the local
-    /// cache has degraded to read-only and stopped accepting fresh
-    /// ingest/reads. `None` while persistence is healthy. Read-only, off the
-    /// data path — an observer-visible signal, never a routing input.
-    pub store_degraded: Option<String>,
     /// Latest transport acceptance/verifier failure surfaced by the pool.
     /// Observational only; it never changes routing or trust policy.
     pub transport_degraded: Option<String>,
@@ -327,24 +314,14 @@ pub struct DiagnosticsSnapshot {
 /// filter) coverage (`get_coverage`, read from the store) into one
 /// [`DiagnosticsSnapshot`]. Called by `CoreState::diagnostics_snapshot`.
 ///
-/// Total by construction, because `degrade_store` builds a snapshot in order
-/// to report a failure — so a failing coverage read cannot abort this. It
-/// lands in [`DiagnosticsSnapshot::store_degraded`] instead, which is what
-/// keeps the empty `coverage` entry beside it readable as "unknown" rather
-/// than "nothing proven" (#763).
+/// Total by construction: a coverage read that fails cannot abort this
+/// snapshot, it simply leaves that entry's `coverage` empty.
 pub(crate) fn build(
     diag: &Diagnostics,
     plan: &RelayPlan,
     events_by_session_kind: &HashMap<RelaySessionKey, BTreeMap<u16, u64>>,
     get_coverage: impl Fn(&RelaySessionKey, CoverageKey) -> Result<Option<CoverageInterval>, PersistenceError>,
 ) -> DiagnosticsSnapshot {
-    // A coverage read that could not answer is kept as the snapshot's own
-    // store-degradation fact rather than rendered as `coverage: None`
-    // (#763). This snapshot has to stay total -- `degrade_store` builds one
-    // to REPORT a failure -- so the read failure travels in the field an app
-    // already reads for exactly this (#122/#745), never as a second health
-    // noun and never as absent coverage.
-    let mut coverage_unreadable: Option<String> = None;
     let mut relays = Vec::new();
     for (session, rd) in &diag.per_session {
         let filters: Vec<String> = rd.filters.iter().map(|f| f.to_nostr().as_json()).collect();
@@ -364,10 +341,10 @@ pub(crate) fn build(
                 let text = req.filter.to_nostr().as_json();
                 let coverage = match request_coverage(session, req, &get_coverage) {
                     Ok(coverage) => coverage,
-                    Err(error) => {
-                        coverage_unreadable.get_or_insert_with(|| error.to_string());
-                        None
-                    }
+                    // A read that could not answer contributes nothing. It is
+                    // not reported: a local store failure has no app-facing
+                    // fact, and this surface is observational either way.
+                    Err(_) => None,
                 };
                 FilterCoverageEntry {
                     filter: text,
@@ -415,12 +392,6 @@ pub(crate) fn build(
             diag.sessions_refused_by_subscription_budget,
         )
         .unwrap_or(u64::MAX),
-        // A coverage read that failed WHILE building this snapshot is set
-        // here; `CoreState::diagnostics_snapshot` then lets the reducer's
-        // own latched #122 error win if it holds one. Either way the field
-        // is non-`None` whenever a `coverage` entry above is empty because
-        // the store could not be read.
-        store_degraded: coverage_unreadable,
         transport_degraded: None,
         // Filled in by `CoreState::diagnostics_snapshot` from the reducer's
         // own pending-obligation set: `build` sees only router/store read

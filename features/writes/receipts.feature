@@ -160,44 +160,16 @@ Feature: Publishing tells the truth, per relay
       Then the oldest completed receipt is removed regardless of its outcome
       And no app configures a per-kind or per-coordinate retention policy
 
-  Rule: A persistent Engine owns recovery from a transient storage failure
+  Rule: A storage failure costs progress, never an accepted write
 
-    # nmp:id=WRITES-STORE-RECOVERY-001
+    # nmp:id=WRITES-STORE-FAILURE-001
     # nmp:status=built
-    # nmp:evidence=rust:nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once
-    # nmp:evidence=rust:nmp-store::reopen_replaces_only_the_database_generation_and_preserves_durable_identity
-    # nmp:falsifier=Disable the runtime recovery driver; after an acceptance I/O closes the real Redb generation, the same Engine never reconstructs the committed row or accepts a later write.
+    # nmp:evidence=rust:nmp::persistent_engine_keeps_healthy_store_usable_after_invariant_fault
+    # nmp:falsifier=Let a failed store operation take the Engine with it; the next publish through the same handle no longer reaches the queue.
     @ledger-9 @ledger-15
-    Scenario: A transient storage failure does not require a new Engine
+    Scenario: A storage failure refuses that operation and nothing else
       Given an app is using one persistent Engine
-      And the durable store becomes temporarily unwritable
-      When the store becomes writable again
-      Then the same Engine reconstructs its durable state
-      And a later write can be accepted without app recovery orchestration
-
-    # nmp:id=WRITES-STORE-RECOVERY-002
-    # nmp:status=built
-    # nmp:evidence=rust:nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once
-    # nmp:falsifier=Expose the interrupted pre-signed acceptance as Signed, create a second receipt on exact retry, or let divergent or invalid bytes promote it; the recovered row lies or durable identity splits.
-    @ledger-9 @ledger-15
-    Scenario: An uncertain acceptance is resolved from durable identity
-      Given a write has an app-owned correlation token
-      And its acceptance transaction reports an uncertain storage failure
-      When the same Engine reconstructs its durable state
-      Then NMP reads the correlation token back before repeating acceptance
-      And the committed body remains pending without signature bytes
-      When the exact valid signed event is retried with that correlation token
-      Then that same receipt and row are promoted to signed
-      And divergent or invalid retry bytes cannot promote the row
-      And exactly one durable receipt owns the write
-
-    # nmp:id=WRITES-STORE-RECOVERY-003
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1644
-    @ledger-9
-    Scenario: A store that cannot be reconstructed never fabricates acceptance
-      Given the durable store remains unavailable
-      When the app publishes through the existing Engine
-      Then publishing does not report acceptance
-      And NMP keeps retrying internal recovery with bounded backoff
+      When one durable operation fails
+      Then that operation reports the failure and no acceptance
+      And the next write is accepted through the same Engine
+      And the app performs no recovery orchestration

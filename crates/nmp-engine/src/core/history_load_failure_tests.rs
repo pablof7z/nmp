@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use nmp_grammar::{Binding, Derived, Filter, IdentityField, Selector};
 use nmp_router_testkit::FixtureRoutingFacts;
-use nmp_store::{testing, CoverageInterval, PersistenceFault, RedbStore, RelayObserved};
+use nmp_store::{testing, CoverageInterval, RedbStore, RelayObserved};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag, Timestamp};
 
 use super::*;
@@ -109,10 +109,10 @@ fn a_union_branch_whose_graph_fails_withdraws_the_branches_opened_before_it() {
         ObservationOpen::Opened { .. } => panic!("corrupt later-branch row was ignored"),
     };
 
-    let store_error = reason
+    let _store_error = reason
         .strip_prefix("canonical query resolution failed: ")
         .expect("branch construction refusal names its store error");
-    assert_only_refusal_diagnostic(&effects, store_error);
+    assert_refusal_stages_nothing(&effects);
     assert_eq!(
         core.observation_ownership_census(),
         baseline,
@@ -369,19 +369,7 @@ fn routed_query(author: PublicKey, kind: u16) -> LiveQuery {
     })
 }
 
-fn assert_only_refusal_diagnostic(effects: &[Effect], expected: &str) {
-    assert_eq!(
-        effects
-            .iter()
-            .filter(|effect| matches!(
-                effect,
-                Effect::EmitDiagnostics(snapshot)
-                    if snapshot.store_degraded.as_deref() == Some(expected)
-            ))
-            .count(),
-        1,
-        "one durable-store degradation fact survives the rolled-back open"
-    );
+fn assert_refusal_stages_nothing(effects: &[Effect]) {
     assert!(
         effects
             .iter()
@@ -447,7 +435,7 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
         )
     };
 
-    let (effects, diagnostic) =
+    let (effects, _diagnostic) =
         match core.open_observation(routed_query(candidate_author, 2), Timestamp::from(0u64)) {
             ObservationOpen::Refused { reason, effects } => {
                 let store_error = reason
@@ -459,7 +447,7 @@ fn ordinary_projection_refusal_cannot_perturb_a_cap_sized_existing_plan() {
             ObservationOpen::Opened { .. } => panic!("corrupt candidate projection was ignored"),
         };
 
-    assert_only_refusal_diagnostic(&effects, &diagnostic);
+    assert_refusal_stages_nothing(&effects);
     assert_eq!(core.observation_ownership_census(), baseline_census);
     assert_eq!(core.active_demand(), baseline_demand);
     assert_eq!(core.router.plan(), &baseline_plan);
@@ -549,7 +537,7 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
     let baseline_compiles = core.router_compiles.get();
     let baseline_history = snapshot(&core, existing_id);
 
-    let (effects, diagnostic) = match core.open_history_observation(
+    let (effects, _diagnostic) = match core.open_history_observation(
         HistoryQuery::new(routed_query(candidate_author, 2), 1, 2),
         Timestamp::from(0u64),
     ) {
@@ -565,7 +553,7 @@ fn history_projection_refusal_cannot_perturb_a_cap_sized_existing_window() {
         }
     };
 
-    assert_only_refusal_diagnostic(&effects, &diagnostic);
+    assert_refusal_stages_nothing(&effects);
     assert_eq!(core.observation_ownership_census(), baseline_census);
     assert_eq!(core.active_demand(), baseline_demand);
     assert_eq!(core.router.plan(), &baseline_plan);
@@ -723,31 +711,25 @@ fn assert_failed_load(
     id: HistorySessionId,
     before: &HistorySnapshot,
     effects: &[Effect],
-    first_error: &str,
 ) {
-    let diagnostic_index = effects
-        .iter()
-        .position(|effect| {
-            matches!(effect, Effect::EmitDiagnostics(diagnostics)
-                if diagnostics.store_degraded.as_deref() == Some(first_error))
-        })
-        .expect("store failure must immediately emit the latched diagnostic");
-    let result_index = effects
-        .iter()
-        .position(|effect| {
+    assert!(
+        effects.iter().any(|effect| {
             matches!(effect,
                 Effect::HistoryLoadResult(session, Err(HistoryAdvanceError::StoreUnavailable))
                     if *session == id)
-        })
-        .expect("store failure must retain its typed load result");
-    assert!(diagnostic_index < result_index);
+        }),
+        "a store failure must retain its typed load result: {effects:?}"
+    );
     assert!(!effects
         .iter()
         .any(|effect| matches!(effect, Effect::EmitHistory(session, _) if *session == id)));
     assert_eq!(&snapshot(core, id), before, "rollback must be exact");
 }
 
-fn derived_fixture() -> (tempfile::TempDir, EngineCore, HistorySessionId) {
+/// A seeded derived-history session whose NEXT bounded read behind an exact
+/// cursor refuses once. The refusal is the read under test, so nothing else
+/// has to be made to fail first.
+fn derived_fixture() -> (EngineCore, HistorySessionId) {
     let me = Keys::generate();
     let followed = Keys::generate();
     let relay = RelayUrl::parse("wss://history-read-failure.example").unwrap();
@@ -757,82 +739,49 @@ fn derived_fixture() -> (tempfile::TempDir, EngineCore, HistorySessionId) {
         .sign_with_keys(&me)
         .unwrap();
     let rows = (100..106).map(|created_at| event(&followed, 1, created_at));
-    let directory = tempfile::tempdir().expect("persistent history-read failure directory");
-    let path = directory.path().join("history-read-failure.redb");
-    {
-        let mut store = RedbStore::open(&path).expect("create persistent history fixture");
-        store
-            .insert_batch(
-                std::iter::once(contact_list)
-                    .chain(rows)
-                    .map(|event| {
-                        (
-                            event,
-                            RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
-                        )
-                    })
-                    .collect(),
-            )
-            .expect("seed persistent history fixture");
-    }
-    let store = RedbStore::open_with_accept_write_precommit_io(&path)
-        .expect("reopen history fixture with one real precommit I/O failure");
+    // Seeding never touches `query_newest_before`, so the construction arm is
+    // still live when the history read below asks for it.
+    let mut store = RedbStore::temporary_with_failed_query_newest_before()
+        .expect("temporary Redb query-newest-before failure fixture");
+    store
+        .insert_batch(
+            std::iter::once(contact_list)
+                .chain(rows)
+                .map(|event| {
+                    (
+                        event,
+                        RelayObserved::new(relay.clone(), Timestamp::from(1_000u64)),
+                    )
+                })
+                .collect(),
+        )
+        .expect("seed history fixture");
     let (core, id) = open_history(store, derived_history_query(), Some(me.public_key()));
-    (directory, core, id)
+    (core, id)
 }
-
-fn latch_redb_generation_without_core_diagnostics(core: &mut EngineCore) {
-    let keys = Keys::generate();
-    let accepted = event(&keys, 1, 1_500);
-    let error = core.white_box("resolver.accept_local", |s| {
-        match s.resolver.accept_local(
-            &mut s.store,
-            nmp_resolver_testkit::accept_write_of(accepted, 1_501),
-        ) {
-            Ok(_) => panic!("construction-armed acceptance I/O must close the Redb generation"),
-            Err(error) => error,
-        }
-    });
-    assert_eq!(error.fault(), PersistenceFault::Io);
-    assert_eq!(error.message(), "injected acceptance failed before commit");
-    assert!(
-        core.store_degraded.is_none(),
-        "the direct resolver refusal must leave RequestRows as the first diagnostic owner"
-    );
-}
-
-const LATCHED_READ_ERROR: &str = "durable-store persistence failure [fault=latched durability=absent reopen=required]: durable database handle is closed for reconstruction";
 
 #[test]
-fn tie_second_read_failure_dispatches_diagnostics_and_exact_rollback() {
-    let (_directory, mut core, id) = derived_fixture();
+fn tie_second_read_failure_rolls_back_exactly() {
+    let (mut core, id) = derived_fixture();
     let before = snapshot(&core, id);
-    latch_redb_generation_without_core_diagnostics(&mut core);
 
     let effects = core.handle(EngineMsg::RequestRows(id, 4));
 
-    assert_failed_load(&core, id, &before, &effects, LATCHED_READ_ERROR);
-
-    // The real handle remains latched until reconstruction. A repeated load
-    // must therefore roll back just as exactly. The distinct-later-error
-    // first-diagnostic policy is proved at `degrade_store`'s owning test.
-    let repeated = core.handle(EngineMsg::RequestRows(id, 4));
-    assert_failed_load(&core, id, &before, &repeated, LATCHED_READ_ERROR);
+    assert_failed_load(&core, id, &before, &effects);
 }
 
 #[test]
-fn older_window_read_failure_dispatches_diagnostics_and_exact_rollback() {
-    let (_directory, mut core, id) = derived_fixture();
+fn older_window_read_failure_rolls_back_exactly() {
+    let (mut core, id) = derived_fixture();
     let boundary_secs = boundary_second(&core, id);
     core.white_box("history.force_tie_second_acquired", |s| {
         s.history.force_tie_second_acquired(id, boundary_secs)
     });
     let before = snapshot(&core, id);
-    latch_redb_generation_without_core_diagnostics(&mut core);
 
     let effects = core.handle(EngineMsg::RequestRows(id, 4));
 
-    assert_failed_load(&core, id, &before, &effects, LATCHED_READ_ERROR);
+    assert_failed_load(&core, id, &before, &effects);
 }
 
 #[test]
@@ -866,13 +815,7 @@ fn projection_advance_read_failure_dispatches_diagnostics_and_exact_rollback() {
 
     let effects = core.handle(EngineMsg::RequestRows(id, 4));
 
-    assert_failed_load(
-        &core,
-        id,
-        &before,
-        &effects,
-        "durable-store persistence failure: injected query-newest-before failure",
-    );
+    assert_failed_load(&core, id, &before, &effects);
 }
 
 #[test]

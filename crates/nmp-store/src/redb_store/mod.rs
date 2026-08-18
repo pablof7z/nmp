@@ -10,19 +10,16 @@
 //! remains typed JSON.
 //!
 //! Nothing here panics the embedding host over the contents of a file it
-//! did not write. `redb`'s own errors are classified and returned by
+//! did not write. `redb`'s own errors are returned by
 //! [`schema::persist_err`], and — since #790 — every production decoder of a
 //! store-owned row does the same: a malformed, truncated, or
 //! schema-incompatible persisted value, and a broken relational invariant
 //! such as an index naming a canonical row that is missing or will not
 //! decode, both surface as `PersistenceError` through the owning typed store
-//! door. They are classified [`crate::PersistenceFault::
-//! Invariant`] rather than `Corrupted`: the backend is healthy, and the
-//! decode happens before the enclosing write transaction commits, so
-//! `DurabilityOutcome::Absent` is provable rather than merely convenient
-//! (see that variant's doc). A decode failure is never allowed to become an
-//! empty result, a skipped row, or a defaulted value — a false miss is
-//! exactly the outcome the typed error exists to prevent.
+//! door. There is nothing to branch on and nothing to recover: a decode
+//! failure is simply never allowed to become an empty result, a skipped row,
+//! or a defaulted value — a false miss is exactly the outcome the typed
+//! error exists to prevent.
 //!
 //! Every read door on this backend is fallible, including the two deadline
 //! and coverage peeks that #763 widened last: an embedded host is the app
@@ -558,8 +555,8 @@ impl RedbStore {
     /// though this intent does not (or no longer) wins any local address.
     /// [`VerifiedSignature`] is the whole precondition, typed (#768): it
     /// cannot be built without one successful `nostr::Event::verify`, and
-    /// this door refuses — [`crate::PersistenceFault::Invariant`], before any
-    /// mutation of any table — unless [`VerifiedSignature::event_id`]
+    /// this door refuses — before any mutation of any table — unless
+    /// [`VerifiedSignature::event_id`]
     /// equals the intent's own durable frozen id. A signature that is
     /// perfectly valid for a DIFFERENT event is therefore refused here, not
     /// promoted. No implementation re-verifies: verification happened once,

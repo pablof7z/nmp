@@ -13,7 +13,7 @@ owns:
   - how publish queue lanes determine which relay sessions the write plane must keep alive
   - why the investigated implementation repeatedly read and decoded every lane
   - the rebuildable in-memory projection that removes those reads
-  - the projection's ordering, restart, and degraded-state requirements
+  - the projection's ordering, restart, and store-failure requirements
 related:
   - docs/bug-class-ledger.md
   - docs/known-gaps.md
@@ -198,14 +198,15 @@ must not be presented as current-master evidence.
 
 ## Built behavior: a rebuildable projection
 
-Each `PendingWrite` now owns a `LaneWorkerProjection` with three sets:
+Each `PendingWrite` now owns a `LaneWorkerProjection` with three members:
 
 - `persisted`: every persisted lane learned for the intent, including terminal
   lanes needed by the reverse wake index and exact removal cleanup;
 - `nonterminal`: durable lanes whose latest committed state still requires
   write-plane work;
-- `uncertain`: conservative ownership after an indeterminate commit outcome.
-  This set may temporarily over-retain a worker but may never under-retain one.
+- `current_nonterminal`: the exact latest committed nonterminal row by relay, so
+  scheduling is a reducer decision over current state rather than a store reread
+  on every heartbeat.
 
 The reducer populates the projection from the lanes returned by startup
 recovery and bootstrap. Every successful durable lane mutation then feeds its
@@ -219,8 +220,7 @@ committed lane state is terminal    -> remove relay
 `write_relay_workers` is now a pure in-memory union of:
 
 - the projected nonterminal lane relays;
-- unstarted or conservatively route-blocked relay ownership that has not yet
-  become a lane;
+- `pending_relays` — relays already sent to and not yet terminal;
 - sessions referenced by in-flight attempt correlations.
 
 It maps each relay to a `RelaySessionKey` using the write's signing identity and
@@ -283,9 +283,10 @@ Conversely, ordinary execution must not dispatch from stale pre-transition
 state after the store returned a committed post-state.
 
 Closing an intent is special only in shape, not authority.
-`close_if_all_lanes_terminal` now asks whether the projection has at least one
-persisted lane and no nonterminal, uncertain, or route-blocked ownership. It
-then calls `close_terminal_intent` without a preceding lane scan. The store
+`close_if_all_lanes_terminal` now asks whether routing is complete and the
+projection has at least one persisted lane and no nonterminal one
+(`LaneWorkerProjection::can_close`). It then calls `close_terminal_intent`
+without a preceding lane scan. The store
 still validates transactionally that every lane is terminal, so the projection
 only decides that a close attempt is plausible; the store remains the final
 authority and refuses an invalid close.
@@ -303,83 +304,23 @@ pre-close durable meaning.
 
 ### Persistence failures
 
-The projection wrappers use the durability classification introduced by #904:
+Only a committed post-state moves the projection. `commit_lane_transition`
+applies the returned `PublishQueueLane` after the store returns `Ok`; a store
+operation that fails propagates `PersistenceError` with the in-memory
+projection exactly as it was, and `bootstrap_projected_lanes` behaves the same
+way. There is no conservative superset, no uncertainty set, no degraded
+projection and no retryable-gap register — the reducer never has to guess
+whether a transition landed, because a failure is simply not applied.
 
-- `DurabilityOutcome::Absent` means the transition is known not to have
-  committed. Keep the old projection.
-- `DurabilityOutcome::Unknown` means the transition may be absent or durable.
-  The reducer cannot safely pretend either outcome is known.
-
-An unknown terminal transition retains the previously required worker until
-reconciliation. An unknown lane-creation transition is harder: retaining the
-old projection is insufficient because the possibly durable lane may be new.
-Bootstrap therefore records every candidate relay as `uncertain`; the
-individual transition wrapper records the exact lane key as uncertain.
-
-The degraded projection must be a conservative superset of possibly required
-sessions. It may temporarily keep an unnecessary worker. It must not drop a
-worker for a lane that may have committed.
+What a failure costs is progress, never the write. The durable lanes are
+untouched by a failed call, so the next `recover_on_boot` rebuilds the exact
+projection from the store, and the acceptance transaction that made `publish()`
+return `Ok` is a separate, already-committed fact.
 
 Falling back to a full lane scan on every dispatch would recreate the original
-problem and is not an acceptable degraded mode. When the reducer cannot prove
-even a conservative projection, worker reconciliation returns `None` and the
-runtime retains its existing workers.
-
-### The way out of retention
-
-Conservative retention is only safe if it is temporary. The first #985
-implementation had no exit:
-[#1000](https://github.com/pablof7z/nmp/issues/1000) found that `uncertain` is
-cleared solely by a committed `PublishQueueLane` for that exact relay, while an
-intent whose bootstrap failed owns no lane rows at all — so `schedule_ready`,
-the deadline sweep and the wake index all find nothing for it and no committed
-lane fact can ever arrive. Its relay workers stayed pinned and its receipt
-stayed in `pending` for the life of the process.
-
-A failed bootstrap therefore records a **retryable gap** for that intent
-(`EngineCore::lane_bootstrap_retries`). The gap:
-
-- carries the route candidates held as `uncertain`, or `None` when the
-  durable route set itself could not be read;
-- arms a deadline through the existing `next_deadline`/`Tick` machinery, with
-  the same capped exponential backoff shape as the lane retry schedule, so
-  nothing new scans and steady state pays one empty-map probe;
-- is closed by exactly one event — a committed `bootstrap_publish_queue_lanes`, whose
-  exact rebuild supersedes every conservative guess it stood in for — or by
-  the pending write leaving `pending`.
-
-Projection availability is derived from that state rather than latched:
-
-```text
-available = not unprovable
-            and every outstanding gap names at least one candidate relay
-```
-
-`lane_projection_unprovable` covers only gaps that no in-process
-reconciliation can close: a committed lane fact for an intent this reducer
-does not track, or a boot that could not read the pending set at all. Those
-still wait for the next `recover_on_boot`. A gap with known candidates is
-already covered by `uncertain` and keeps the projection available, so exact
-worker reconciliation — including #598's cap-refused worker retry — keeps
-working while the gap stands.
-
-A lane set established late is indistinguishable from one established at boot,
-so the retry drives it through the same door boot uses, and additionally
-replays the wake for any session that is already connected: mid-process, the
-`RelayConnected` a fresh `WaitingConnection` lane is waiting for may already
-have happened.
-
-[#771](https://github.com/pablof7z/nmp/issues/771) owns the broader contract for
-preserving durable lane-transition evidence when store operations fail. Its
-older premise that an error always means “committed none” is superseded for
-`DurabilityOutcome::Unknown`. #985 integrates only the worker-retention part of
-that contract; #771 still owns complete durable transition evidence and
-user-visible recovery policy.
-
-If startup cannot read enough durable state to construct even a conservative
-projection, there is no prior worker set to retain. The correct service-level
-behavior for that case remains an open recovery decision owned with #771 and
-#904; this document does not claim it is solved.
+problem and remains unacceptable. Worker reconciliation is therefore always
+answerable from in-memory state: `relay_worker_requirements` returns the exact
+set on every pass rather than reporting itself unprovable.
 
 ## Invariants
 
@@ -392,13 +333,10 @@ The implementation is correct only if all of these hold:
 3. Every committed lane creation or transition updates the projection before
    ordinary effect dispatch resumes.
 4. A relay is present in `LaneWorkerProjection::nonterminal` exactly when its
-   known committed lane is nonterminal; `uncertain` may only over-retain.
-5. A persistence outcome classified Unknown never causes a possibly required
-   relay worker to be dropped.
-5b. Every conservative retention has a path out of it that does not require
-   another process: a store that becomes usable again must return the
-   projection to what a canonical rebuild yields, without any per-dispatch
-   lane scan.
+   latest committed lane is nonterminal.
+5. A failed store operation leaves the projection byte-identical to what it was
+   before the call; nothing enters the projection that the store did not return
+   as committed.
 6. Public, NIP-42, account, and session identities do not alias merely because
    their relay URLs match.
 7. Future route revision must use the same lane-minting/projection boundary as
@@ -414,11 +352,11 @@ The implementation is correct only if all of these hold:
 
 The implementation carries these permanent falsifiers:
 
-- `unchanged_worker_demand_reads_zero_delivery_lanes` first failed on the base
-  revision with 6 recovery reads for 3 pending intents, then passed with 0.
+- `unchanged_worker_demand_reads_zero_publish_queue_lanes` first failed on the
+  base revision with 6 recovery reads for 3 pending intents, then passed with 0.
   It also proves that the required worker is still recognized; eliminating
   reads by forgetting demand would fail.
-- `projection_matches_durable_state_after_every_normal_delivery_transition`
+- `projection_matches_durable_state_after_every_normal_publish_queue_transition`
   compares projected worker sessions with an independent store reconstruction
   after bootstrap, connection/auth wake, attempt start, handoff, and terminal
   ACK.
@@ -427,29 +365,14 @@ The implementation carries these permanent falsifiers:
   session.
 - `close_reopen_rebuilds_the_same_exact_worker_projection` compares exact
   worker sets before close and after redb reopen/boot recovery.
-- `durability_unknown_marks_the_lane_uncertain_and_retains_its_worker` proves
-  an indeterminate transition cannot drop the possibly durable worker.
-- `durability_absent_leaves_the_exact_projection_unchanged` proves a rejected,
-  known-absent transition cannot fabricate projected state.
-- `every_core_lane_mutation_uses_the_projection_door` recursively scans the
-  production core source and rejects a raw lane-writing store call outside the
-  projection module.
-- `transient_redb_bootstrap_failure_is_fully_reversible` drives one
-  construction-armed Redb pre-commit refusal through recovery to a terminal
-  receipt and proves the worker set returns to the canonical durable oracle.
-- `an_unresolved_bootstrap_keeps_retaining_and_backs_off` proves the fix did
-  not buy that exit with under-retention: while a real persisted attempt row
-  remains undecodable, every route candidate stays owned and the retry backs
-  off instead of spinning.
+- `durability_absent_leaves_the_exact_projection_unchanged` proves a rejected
+  transition cannot fabricate projected state.
+- `every_lane_mutation_constructor_goes_through_the_projection_door`
+  recursively scans the production core source and rejects a raw lane-writing
+  store call outside the projection module.
 - `corrupt_route_lane_evidence_is_unreadable_not_absent` proves a real
   persisted route-revision schema violation refuses the boot projection,
   fabricates no receipt fact, and retains the parent durable obligation.
-- `persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once`
-  and `persistent_engine_recovers_after_precommit_acceptance_io_once`
-  separately prove the reopen-required case: a real Redb handle is closed,
-  the runtime supervisor installs a new generation, reconstructs the existing
-  public `Engine`, and accepts later work. They prove handle-generation
-  recovery, not a route-specific same-handle heal.
 
 Future #975 route-revision minting and #968 route-parking still require their
 own positive falsifiers when those states exist. The projection boundary is
@@ -513,32 +436,29 @@ removed and re-profiled.
 
 ## Source guide
 
-- `crates/nmp/src/core/mod.rs`
+- `crates/nmp-engine/src/core/mod.rs`
   - `PendingWrite`
   - `LaneWorkerProjection`
-  - `EngineCore::relay_worker_requirements`
-  - `EngineCore::write_relay_workers`
+  - `CoreState::relay_worker_requirements`
+  - `CoreState::write_relay_workers`
   - relay-state pruning and wake indexes
-- `crates/nmp/src/core/lane_projection.rs`
+- `crates/nmp-engine/src/core/lane_projection.rs`
   - the one projected bootstrap/transition boundary
-  - exact rebuild, uncertainty, retryable-gap registration, and the recursive
-    bypass falsifier
+  - exact rebuild and the recursive bypass falsifier
   - store-oracle, identity, restart, and failure tests
-- `crates/nmp/src/core/lane_bootstrap_retry_tests.rs`
-  - the retention-with-an-exit falsifiers
-- `crates/nmp/src/core/write.rs`
+- `crates/nmp-engine/src/core/write.rs`
   - durable lane lifecycle call sites using the projection boundary
-  - `retry_lane_bootstraps` and the shared post-bootstrap lane opening
+  - the shared post-bootstrap lane opening
   - store-validated terminal intent closure
-- `crates/nmp/src/runtime/mod.rs`
+- `crates/nmp-runtime/src/lib.rs`
   - `dispatch_core_effects`
   - worker retirement and retry
 - `crates/nmp-store/src/lib.rs`
   - concrete `RedbStore` lane transition and recovery API
-  - persistence-error durability classification
+  - `PersistenceError`, the opaque failure every store door returns
 - `crates/nmp-store/src/redb_store/schema.rs`
   - redb lane table representation
-- `crates/nmp-store/src/redb_store/delivery.rs`
+- `crates/nmp-store/src/redb_store/publish_queue.rs`
   - binary lane/deadline mutation helpers
 - `crates/nmp-store/src/redb_store/publish_queue_codec.rs`
   - explicit versioned values, bounds, and fixed-width key constructors
@@ -546,7 +466,7 @@ removed and re-profiled.
   - lane range scans, transition commits, and terminal closure
 - `crates/nmp-store/src/redb_store/canonical.rs`
   - binary canonical-event insertion
-- `crates/nmp/tests/core_headless/persistence_failures.rs`
+- `crates/nmp-engine/tests/core_headless/persistence_failures.rs`
   - the red/green zero-read falsifier
   - the repeatable redb before/after benchmark
 
@@ -554,7 +474,6 @@ removed and re-profiled.
 
 The following adjacent decisions remain without weakening the built invariants:
 
-- service behavior when startup cannot reconstruct durable lane state at all;
 - whether performance counters live only in tests or also appear in runtime
   diagnostics;
 - whether an O(pending) in-memory union remains sufficient once parked writes

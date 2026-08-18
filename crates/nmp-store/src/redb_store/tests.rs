@@ -1,7 +1,6 @@
 use nmp_grammar::RelaySessionKey;
 use super::publish_queue_codec::{NEXT_RELAY_ID_KEY, PUBLISH_QUEUE_CODEC_VERSION_KEY};
 use super::*;
-use crate::{DurabilityOutcome, PersistenceFault};
 
 /// The refcount half of one `relays` row, for falsifiers that assert
 /// reference counting rather than URL interning.
@@ -360,38 +359,6 @@ fn known_signature_returns_stored_sig_for_ingested_id_and_none_otherwise() {
 }
 
 #[test]
-fn known_signature_reader_survives_store_reopen() {
-    use nostr::{EventBuilder, Kind};
-
-    // The reader reads through a shared cell the store replaces on reopen,
-    // so it must NOT strand on a dead handle after a fault-recovery reopen.
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("reopen-sig.redb");
-    let keys = nostr::Keys::generate();
-    let event = EventBuilder::new(Kind::TextNote, "survives-reopen")
-        .custom_created_at(Timestamp::from(1u64))
-        .sign_with_keys(&keys)
-        .unwrap();
-    let relay = RelayUrl::parse("ws://127.0.0.1:2").unwrap();
-    let mut store = RedbStore::open(&path).unwrap();
-    store
-        .insert(
-            event.clone(),
-            RelayObserved::new(relay, Timestamp::from(2u64)),
-        )
-        .expect("insert fixture");
-    let reader = store.share_sig_reader().expect("cut sig reader");
-    assert_eq!(reader.known_signature(&event.id), Some(event.sig));
-
-    store
-        .reopen_after_failure()
-        .expect("reopen replaces the shared db handle");
-    // The committed event survives reopen, and the reader sees it through
-    // the NEW handle installed in the shared cell.
-    assert_eq!(reader.known_signature(&event.id), Some(event.sig));
-}
-
-#[test]
 fn surrogate_allocators_do_not_touch_hot_metadata_rows_until_one_flush() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("allocator-flush.redb");
@@ -747,7 +714,7 @@ fn corrupt_publish_queue_deadline_targets_exact_awaiting_ack_attempt() {
     wrong_attempt.ordinal += 1;
     let error = testing::corrupt_publish_queue_deadline(&path, &wrong_attempt)
         .expect_err("a different attempt ordinal must not name the deadline row");
-    assert_eq!(error.fault(), PersistenceFault::Invariant);
+    let _ = &error;
     {
         let store = RedbStore::open(&path).expect("wrong target leaves store readable");
         assert_eq!(store.next_expiration().unwrap(), None);
@@ -766,8 +733,6 @@ fn corrupt_publish_queue_deadline_targets_exact_awaiting_ack_attempt() {
     let error = store
         .next_publish_queue_deadline()
         .expect_err("the corrupt deadline value must not become false absence");
-    assert_eq!(error.fault(), PersistenceFault::Invariant);
-    assert_eq!(error.durability(), DurabilityOutcome::Absent);
     assert!(
         error.message().contains("decode publish queue deadline"),
         "the exact deadline codec owns the error: {}",
@@ -828,7 +793,7 @@ fn configured_query_newest_before_failure_is_consumed_once() {
 }
 
 #[test]
-fn observation_precommit_io_closes_reopens_and_retries_single_insert() {
+fn observation_precommit_io_rolls_back_and_is_consumed_once() {
     let keys = nostr::Keys::generate();
     let relay = RelayUrl::parse("wss://observation-single-io.example").unwrap();
     let event = nostr::EventBuilder::new(Kind::TextNote, "single observation")
@@ -839,20 +804,13 @@ fn observation_precommit_io_closes_reopens_and_retries_single_insert() {
     let mut store = RedbStore::temporary_with_observation_precommit_io()
         .expect("temporary Redb observation-I/O fixture");
 
-    let error = store
+    store
         .insert(event.clone(), observed.clone())
         .expect_err("the construction-armed observation must refuse once");
-    assert_eq!(error.fault(), PersistenceFault::Io);
-    assert_eq!(error.durability(), DurabilityOutcome::Unknown);
-    let latched = store
-        .query(&Filter::new().id(event.id))
-        .expect_err("the actual failed Redb generation must stay closed");
-    assert_eq!(latched.fault(), PersistenceFault::Latched);
-
-    store
-        .reopen_after_failure()
-        .expect("the existing reconstruction door reopens the same target");
+    // A refusal before the commit rolls the whole transaction back, so the
+    // store holds nothing the caller was told did not land.
     assert!(store.query(&Filter::new().id(event.id)).unwrap().is_empty());
+    // The arm is one-shot: the same store accepts the exact retry.
     assert!(matches!(
         store.insert(event.clone(), observed).unwrap(),
         InsertOutcome::Inserted
@@ -887,19 +845,10 @@ fn observation_precommit_io_preserves_empty_arm_and_rolls_back_whole_batch() {
         .expect("temporary Redb observation-I/O fixture");
 
     assert!(store.insert_batch(Vec::new()).unwrap().is_empty());
-    let error = store
+    store
         .insert_batch(batch.clone())
         .expect_err("the first nonempty batch must consume the construction arm");
-    assert_eq!(error.fault(), PersistenceFault::Io);
-    assert_eq!(error.durability(), DurabilityOutcome::Unknown);
-    let latched = store
-        .query(&Filter::new().ids(ids.clone()))
-        .expect_err("the actual failed Redb generation must stay closed");
-    assert_eq!(latched.fault(), PersistenceFault::Latched);
-
-    store
-        .reopen_after_failure()
-        .expect("the existing reconstruction door reopens the same target");
+    // The WHOLE batch rolled back -- not one of the two rows survived.
     assert!(store
         .query(&Filter::new().ids(ids.clone()))
         .unwrap()

@@ -303,12 +303,6 @@ sealed class RelayWaiting {
         val detail: String?,
     ) : RelayWaiting()
 
-    /** The lane is owned and nonterminal, but a durable fact about it could
-     * not be committed -- the local disk is refusing writes. No wire EVENT
-     * was emitted. Also latched onto the queue entry and never cleared by a
-     * later ack. */
-    data class PersistenceStalled(val detail: String) : RelayWaiting()
-
     companion object {
         internal fun from(ffi: FfiRelayWaiting): RelayWaiting =
             when (ffi) {
@@ -322,7 +316,6 @@ sealed class RelayWaiting {
                         RetryCause.from(ffi.cause),
                         ffi.detail,
                     )
-                is FfiRelayWaiting.PersistenceStalled -> PersistenceStalled(ffi.detail)
             }
     }
 }
@@ -536,11 +529,6 @@ data class PublishQueueEntry(
     val relayStates: List<Pair<String, RelayState>>,
     /** `null` while the write is still in progress. */
     val outcome: WriteOutcome?,
-    /** LATCHED. Set the first time local persistence refused a durable fact
-     * for this write, and never cleared by a later success -- an operator must
-     * not lose the only signal that the disk is failing because a relay acked
-     * afterwards. */
-    val persistenceFault: String?,
 ) {
     /** Whether this write will produce another fact. */
     val isTerminal: Boolean get() = outcome != null
@@ -557,7 +545,6 @@ data class PublishQueueEntry(
                 routeComplete = ffi.routeComplete,
                 relayStates = ffi.relayStates.map { it.relay to RelayState.from(it.state) },
                 outcome = ffi.outcome?.let { WriteOutcome.from(it) },
-                persistenceFault = ffi.persistenceFault,
             )
     }
 }

@@ -75,22 +75,6 @@ pub(super) struct PendingWrites {
     /// Exactly the union of every row's `lane_projection.persisted`, which is
     /// why every writer of that set lives in this file.
     receipts_by_lane_relay: HashMap<RelayUrl, BTreeSet<ReceiptId>>,
-    /// Safety valve for `receipts_by_lane_relay` (epic #507 finding E5): set
-    /// the moment ANY path could have created/learned lanes but the index
-    /// could not record them (a `bootstrap_publish_queue_lanes` or
-    /// `recover_route_revisions` error during `recover_on_boot`/`on_signed`).
-    /// [`Self::begin_lane_index_rebuild`] resets it at the start of the
-    /// one-shot, deterministic rebuild -- the same moment `pending` itself is
-    /// rebuilt from scratch -- and a later failure during that same rebuild (or
-    /// any post-boot lane-learning call) sets it back for the rest of this
-    /// process's life; nothing un-degrades it mid-process, on purpose.
-    ///
-    /// While set, `wake_relay_lanes` falls back to the full `recover_all_lanes`
-    /// scan unchanged: a missed wakeup permanently wedges a durable write lane
-    /// (the worst bug class here -- see the idle-barrier missed-wakeup fix,
-    /// d755f39, and #507's own missed-wakeup finding), so an unprovable index
-    /// is always treated as untrustworthy rather than guessed at.
-    lane_relay_index_degraded: bool,
 }
 
 /// The census contribution, so `bench_ownership_census` counts this owner's
@@ -169,16 +153,6 @@ impl PendingWrites {
     /// [`Self::insert`]; a real discard pairs with [`Self::forget_indexes`].
     pub(super) fn remove(&mut self, id: &ReceiptId) -> Option<PendingWrite> {
         self.pending.remove(id)
-    }
-
-    /// Forget every projection whose truth came from a store this reducer no
-    /// longer trusts, ahead of a full `recover_on_boot` rebuild.
-    pub(super) fn clear(&mut self) {
-        self.pending.clear();
-        self.intent_receipts.clear();
-        self.event_to_receipts.clear();
-        self.receipts_by_lane_relay.clear();
-        self.lane_relay_index_degraded = false;
     }
 
     // -- intent index -----------------------------------------------------
@@ -452,21 +426,6 @@ impl PendingWrites {
         true
     }
 
-    /// Preserve a possible lane/transition after an indeterminate commit.
-    ///
-    /// This deliberately produces a superset. A false-positive worker can be
-    /// retired after explicit recovery; a false-negative can strand a durable
-    /// obligation forever. Returns `false` when no row owns the receipt.
-    pub(super) fn mark_lane_uncertain(&mut self, id: ReceiptId, relay: RelayUrl) -> bool {
-        let Some(pending) = self.pending.get_mut(&id) else {
-            return false;
-        };
-        if pending.lane_projection.mark_uncertain(relay.clone()) {
-            self.update_lane_relay_index(id, &BTreeSet::new(), &BTreeSet::from([relay]));
-        }
-        true
-    }
-
     /// Which receipts have a lane on this relay, narrowing a wake to the
     /// intents worth re-reading. Never a source of truth -- the store's lane
     /// rows remain that.
@@ -475,25 +434,6 @@ impl PendingWrites {
             .get(relay)
             .map(|receipts| receipts.iter().copied().collect())
             .unwrap_or_default()
-    }
-
-    pub(super) fn lane_index_is_degraded(&self) -> bool {
-        self.lane_relay_index_degraded
-    }
-
-    /// A path that could have created or learned lanes could not record them.
-    /// Latches for the rest of this process, so every wake falls back to the
-    /// full scan rather than trusting an index that cannot prove itself.
-    pub(super) fn degrade_lane_index(&mut self) {
-        self.lane_relay_index_degraded = true;
-    }
-
-    /// The one-shot, deterministic boot rebuild is starting: the index is
-    /// about to be reconstructed from scratch alongside `pending` itself, so
-    /// the previous process-lifetime's doubt is answered. A failure DURING the
-    /// rebuild sets it again through [`Self::degrade_lane_index`].
-    pub(super) fn begin_lane_index_rebuild(&mut self) {
-        self.lane_relay_index_degraded = false;
     }
 
     // -- proofs -----------------------------------------------------------
@@ -634,14 +574,11 @@ mod tests {
             sign_generation: 0,
             event_id: None,
             pending_relays: BTreeSet::new(),
-            unstarted_relays: BTreeSet::new(),
-            route_blocked_relays: BTreeSet::new(),
             attempt_ordinals: Default::default(),
             lane_projection: LaneWorkerProjection::default(),
             durable_routes: BTreeSet::new(),
             route_complete: false,
             destinations_reported: false,
-            persistence_fault: None,
             route_needs: BTreeSet::new(),
         };
         (ReceiptId(n), IntentId(n), pending)
@@ -686,7 +623,14 @@ mod tests {
         let mut writes = PendingWrites::default();
         let id = admit(&mut writes, 1);
         let relay = RelayUrl::parse("wss://falsifier.example").expect("valid url");
-        assert!(writes.mark_lane_uncertain(id, relay.clone()));
+        writes
+            .pending
+            .get_mut(&id)
+            .expect("just admitted")
+            .lane_projection
+            .persisted
+            .insert(relay.clone());
+        writes.update_lane_relay_index(id, &BTreeSet::new(), &BTreeSet::from([relay.clone()]));
         writes.assert_consistent("precondition");
 
         writes

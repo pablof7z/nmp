@@ -1215,7 +1215,7 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
     });
     let backfill_wire = wire_sub_string(&backfill);
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
-    let failed = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -1223,11 +1223,6 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         public_session(&relay),
         event_frame(&backfill_wire, missing),
     ));
-    assert!(failed
-        .iter()
-        .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
-            if snapshot.store_degraded.is_some())));
-    let _ = super::persistence_failures::recover_after_observation_io(&mut core);
 
     let completed = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
