@@ -104,10 +104,11 @@ pub struct ResolvedOperation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartingSource {
-    Absent,
     Event(EventId),
-    /// Capability-owned local starting value. This is not qualified relay
-    /// absence and grants no source provenance.
+    /// Capability-owned local starting value. It grants no source
+    /// provenance, and it is not the same claim as a relay having been asked
+    /// and answered nothing -- see [`QualifiedSource`] for why that second
+    /// claim has no representation here.
     CapabilityDefault,
 }
 
@@ -125,10 +126,20 @@ pub enum OperationSourceRequirement {
     CapabilityDefault(StartingSourceRequirement),
 }
 
+/// Two states, not three: the engine has either selected a signed event for
+/// the coordinate or has not resolved one.
+///
+/// Qualified absence -- a source plan that finished its required initial
+/// query evidence and yielded nothing -- is specified in
+/// `docs/internals/writes/durable-replaceable-operations.md` §7.3 but has no
+/// representation here, because nothing ever built one. The `Absent` arm
+/// (and `StartingSource::Absent`, and both codec tags) was minted by no
+/// engine path, so no durable row could carry it and no reader could reach
+/// it; it was deleted rather than kept as scaffolding. Building §7.3 means
+/// reintroducing it with the evidence that makes absence qualified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QualifiedSource {
     Unresolved,
-    Absent,
     Event {
         event_id: EventId,
         created_at: Timestamp,
@@ -194,7 +205,7 @@ impl SourceRevision {
     pub fn event_id(&self) -> Option<EventId> {
         match self.evidence.qualified {
             QualifiedSource::Event { event_id, .. } => Some(event_id),
-            QualifiedSource::Unresolved | QualifiedSource::Absent => None,
+            QualifiedSource::Unresolved => None,
         }
     }
 
@@ -202,7 +213,7 @@ impl SourceRevision {
     pub fn created_at(&self) -> Option<Timestamp> {
         match self.evidence.qualified {
             QualifiedSource::Event { created_at, .. } => Some(created_at),
-            QualifiedSource::Unresolved | QualifiedSource::Absent => None,
+            QualifiedSource::Unresolved => None,
         }
     }
 }
@@ -789,7 +800,7 @@ pub(crate) fn plan_source_install(
                 || (install.source.event.created_at == created_at
                     && install.source.event.id < event_id)
         }
-        QualifiedSource::Absent | QualifiedSource::Unresolved => true,
+        QualifiedSource::Unresolved => true,
     };
     if !advances {
         return Err(SemanticRefusal::InvalidSourceRevision);
@@ -839,7 +850,7 @@ fn validate_source_event(
         {
             Ok(())
         }
-        (QualifiedSource::Absent | QualifiedSource::Unresolved, None) => Ok(()),
+        (QualifiedSource::Unresolved, None) => Ok(()),
         _ => Err(SemanticRefusal::InvalidSourceRevision),
     }
 }
@@ -857,7 +868,6 @@ fn source_qualifies(required: &StartingSourceRequirement, evidence: &SourceEvide
         return false;
     }
     match (&required.source, evidence.qualified) {
-        (StartingSource::Absent, QualifiedSource::Absent) => true,
         (StartingSource::Event(expected), QualifiedSource::Event { event_id, .. }) => {
             *expected == event_id
         }
@@ -1053,9 +1063,6 @@ pub(crate) fn semantic_program_digest(operations: &[SemanticOperation]) -> Seman
         hasher.update(&requirement.plan.0);
         hasher.update(&requirement.access.0);
         match requirement.source {
-            StartingSource::Absent => {
-                hasher.update(&[0]);
-            }
             StartingSource::Event(event_id) => {
                 hasher.update(&[1]);
                 hasher.update(event_id.as_bytes());

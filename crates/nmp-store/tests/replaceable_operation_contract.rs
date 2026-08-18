@@ -7,7 +7,7 @@ use nmp_store::{
     PublishQueueReceiptPayload, QualifiedSource, RedbStore, ReplaceableOperationReceiptState,
     ReplayFormatId, ReplayProgramId, SemanticAccept, SemanticInstallOutcome, SemanticPlan,
     SemanticRematerialize, SemanticSourceInstall, SourceEvidence, SourcePlanId, StartingSource,
-    StartingSourceRequirement, VerifiedSignature,
+    StartingSourceRequirement, StoredEvent, VerifiedSignature,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{EventBuilder, Filter, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
@@ -24,7 +24,7 @@ fn source() -> SourceEvidence {
     SourceEvidence {
         plan: SourcePlanId([3; 32]),
         access: AccessContextId([4; 32]),
-        qualified: QualifiedSource::Absent,
+        qualified: QualifiedSource::Unresolved,
     }
 }
 
@@ -32,8 +32,68 @@ fn starting_source() -> StartingSourceRequirement {
     StartingSourceRequirement {
         plan: SourcePlanId([3; 32]),
         access: AccessContextId([4; 32]),
-        source: StartingSource::Absent,
+        source: StartingSource::CapabilityDefault,
     }
+}
+
+/// Store a relay source for `coordinate` and hand back its canonical row.
+///
+/// `install_replaceable_materialization` refuses to rematerialize over an
+/// unresolved source, and `apply_plan` refuses a first candidate whose
+/// event-qualified source is not the address index's current winner. Both are
+/// the reason the shared-generation fixtures below anchor on a real event
+/// rather than the qualified absence they used to name -- a state no engine
+/// path produces, which is why `QualifiedSource::Absent` was deleted.
+fn seed_base(store: &mut RedbStore, keys: &Keys) -> StoredEvent {
+    let base = EventBuilder::new(Kind::ContactList, "base")
+        .custom_created_at(Timestamp::from(1))
+        .sign_with_keys(keys)
+        .expect("fixture signs the base source");
+    store
+        .insert(
+            base.clone(),
+            RelayObserved::new(
+                RelayUrl::parse("wss://base-contract.example").unwrap(),
+                Timestamp::from(1),
+            ),
+        )
+        .expect("the base source is canonical");
+    store
+        .query(&Filter::new().id(base.id))
+        .expect("read the base source back")
+        .pop()
+        .expect("the base source is retained")
+}
+
+fn qualified_source(base: &StoredEvent) -> SourceEvidence {
+    SourceEvidence {
+        plan: SourcePlanId([3; 32]),
+        access: AccessContextId([4; 32]),
+        qualified: QualifiedSource::Event {
+            event_id: base.event.id,
+            created_at: base.event.created_at,
+        },
+    }
+}
+
+/// [`bodyless_accept`] anchored on a real relay source instead of the
+/// capability default.
+fn qualified_bodyless_accept(
+    base: &StoredEvent,
+    coordinate: Coordinate,
+    snapshot: Option<&nmp_store::SemanticCurrentState>,
+    existing: Vec<nmp_store::IntentId>,
+    byte: u8,
+) -> SemanticAccept {
+    let mut accept = bodyless_accept(coordinate, snapshot, existing, byte);
+    accept.starting_source = StartingSourceRequirement {
+        plan: SourcePlanId([3; 32]),
+        access: AccessContextId([4; 32]),
+        source: StartingSource::Event(base.event.id),
+    };
+    accept.source = qualified_source(base);
+    accept.source_event = Some(base.clone());
+    accept
 }
 
 fn bodyless_accept(
@@ -181,6 +241,7 @@ fn install_shared_materialization(
     keys: &Keys,
     coordinate: &Coordinate,
     members: Vec<nmp_store::IntentId>,
+    base: &StoredEvent,
 ) -> nmp_store::SemanticCurrentState {
     let snapshot = store
         .replaceable_operation_snapshot(coordinate)
@@ -205,7 +266,7 @@ fn install_shared_materialization(
             expected_source_revision: snapshot.current.source_revision.clone(),
             expected_program_digest: snapshot.current.program_digest,
             expected_current_materialization: None,
-            source: source(),
+            source: qualified_source(base),
             evaluated_at: Timestamp::from(created_at),
             materialized: Some(MaterializationCandidate {
                 event,
@@ -225,11 +286,12 @@ fn install_shared_materialization(
 fn exercise_bodyless_shared_lifecycle(store: &mut RedbStore) {
     let keys = Keys::generate();
     let coordinate = coordinate(&keys);
+    let base = seed_base(store, &keys);
     let (first, first_receipt) = accept_operation(
         store,
         &keys,
         10,
-        bodyless_accept(coordinate.clone(), None, Vec::new(), 1),
+        qualified_bodyless_accept(&base, coordinate.clone(), None, Vec::new(), 1),
     );
     let before_second = store
         .replaceable_operation_snapshot(&coordinate)
@@ -239,14 +301,16 @@ fn exercise_bodyless_shared_lifecycle(store: &mut RedbStore) {
         store,
         &keys,
         11,
-        bodyless_accept(
+        qualified_bodyless_accept(
+            &base,
             coordinate.clone(),
             Some(&before_second.current),
             vec![first],
             2,
         ),
     );
-    let current = install_shared_materialization(store, &keys, &coordinate, vec![first, second]);
+    let current =
+        install_shared_materialization(store, &keys, &coordinate, vec![first, second], &base);
     let generation = current.generation.clone().unwrap();
     assert_eq!(
         generation.materialization.materialization_id,
@@ -330,14 +394,20 @@ fn redb_reopens_bodyless_operation_and_current_generation_without_body_copies() 
     let coordinate = coordinate(&keys);
     let (intent, receipt) = {
         let mut store = RedbStore::open(&path).unwrap();
+        let base = seed_base(&mut store, &keys);
         let accepted = accept_operation(
             &mut store,
             &keys,
             10,
-            bodyless_accept(coordinate.clone(), None, Vec::new(), 42),
+            qualified_bodyless_accept(&base, coordinate.clone(), None, Vec::new(), 42),
         );
-        let current =
-            install_shared_materialization(&mut store, &keys, &coordinate, vec![accepted.0]);
+        let current = install_shared_materialization(
+            &mut store,
+            &keys,
+            &coordinate,
+            vec![accepted.0],
+            &base,
+        );
         assert_eq!(
             current
                 .generation

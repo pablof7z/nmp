@@ -236,6 +236,20 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
 
 ## Store & persistence
 
+- **Qualified absence is specified but has no representation in the store.**
+  `docs/internals/writes/durable-replaceable-operations.md` §7.3 defines it —
+  the declared source plan completed its required initial query evidence
+  without yielding a surviving event at the coordinate — and §7.4 lists it as
+  one of the source revisions a replay must handle. Nothing builds it. The
+  engine's three semantic `SourceEvidence` constructors yield only
+  `Unresolved` or `Event`, so `QualifiedSource::Absent` and
+  `StartingSource::Absent` were never minted, never encoded, and were deleted
+  as unreachable rather than left as arms nothing could reach. A coordinate a
+  relay has finished answering with nothing is therefore indistinguishable
+  from one nobody has asked about yet. Whoever builds §7.3 reintroduces both
+  variants deliberately, with the EOSE-completion evidence that makes absence
+  *qualified* rather than merely unobserved.
+
 - **The engine ships no retention policy, and the owner ruled that it should
   (#1787, #1843).** On 2026-08-17: *"whatever, just ship a default policy;
   this is not a high priority."* Today canonical events are retained
