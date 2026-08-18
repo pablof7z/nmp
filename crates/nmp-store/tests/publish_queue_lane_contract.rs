@@ -663,6 +663,64 @@ fn bootstrap_cannot_hide_two_contradictory_live_ordinals() {
         .contains("contradictory live"));
 }
 
+/// The check that makes an attempt row safe to store as bare `event_id`.
+///
+/// `start_lane_attempt` refuses unless the bytes handed to it are the
+/// intent's own promoted signed event. That guard is the entire reason an
+/// attempt row can name its event instead of carrying it — and until this
+/// test it had no coverage at all: the only negative assertions anywhere near
+/// `start_lane_attempt` were an injected-failure probe and a bootstrap
+/// refusal.
+///
+/// The first case is the one that matters. A NIP-01 event id does not cover
+/// `sig`, so the forged event below is `signed`'s twin under any id
+/// comparison and its opposite under the full-byte comparison the store
+/// actually makes. If the guard ever weakened to comparing ids, this is the
+/// input that would slip through.
+#[test]
+fn an_attempt_body_that_is_not_the_promoted_bytes_is_refused() {
+    with_store(|store| {
+        let relay = RelayUrl::parse("wss://byte-identity.example").unwrap();
+        let (_, _, signed, key, lane) = seed(store, "byte identity", 900, relay);
+        let lane = store
+            .set_lane_eligible(&key, lane.revision, Timestamp::from(901))
+            .unwrap();
+
+        let forged = Event::new(
+            signed.id,
+            signed.pubkey,
+            signed.created_at,
+            signed.kind,
+            signed.tags.clone(),
+            signed.content.clone(),
+            sentinel_signature(),
+        );
+        assert_eq!(forged.id, signed.id, "same id");
+        assert_ne!(forged, signed, "different bytes");
+        assert!(store
+            .start_lane_attempt(&key, lane.revision, forged, Timestamp::from(902))
+            .unwrap_err()
+            .to_string()
+            .contains("not the intent's promoted signed bytes"));
+
+        let (unrelated, _) = signed_and_frozen(&Keys::generate(), "unrelated", 903);
+        assert!(store
+            .start_lane_attempt(&key, lane.revision, unrelated, Timestamp::from(904))
+            .unwrap_err()
+            .to_string()
+            .contains("not the intent's promoted signed bytes"));
+
+        // Both refusals ran before the write transaction opened, so the lane
+        // is untouched and the real bytes still start ordinal 1.
+        let (attempt, advanced) = store
+            .start_lane_attempt(&key, lane.revision, signed.clone(), Timestamp::from(905))
+            .unwrap();
+        assert_eq!(attempt.ordinal, 1);
+        assert_eq!(attempt.event_id, signed.id);
+        assert_eq!(advanced.last_ordinal, 1);
+    });
+}
+
 fn reopen(path: &Path) -> RedbStore {
     RedbStore::open(path).expect("reopen durable store")
 }

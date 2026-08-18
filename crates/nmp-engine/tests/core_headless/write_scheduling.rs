@@ -460,6 +460,12 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         vec![1, 2],
         "offline/AUTH time allocates nothing; explicit AUTH wake allocates the next ordinal"
     );
+    // Both attempts name the event this write published, not a neighbour's.
+    // This deliberately does NOT stand in for byte-identity: an attempt row
+    // holds the id, so comparing ids here proves attribution and nothing
+    // more. That the attempted bytes were the intent's own promoted signed
+    // event is enforced in the store and proved by
+    // `an_attempt_body_that_is_not_the_promoted_bytes_is_refused`.
     assert!(attempts.iter().all(|attempt| attempt.event_id == event.id));
 }
 
