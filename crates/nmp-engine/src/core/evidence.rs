@@ -342,7 +342,7 @@ pub(crate) fn acquisition_evidence(
                 entry.2 &= finished;
                 entry.3 &= placed;
                 entry.4 |= awaiting;
-                match store.get_coverage(key, session)? {
+                match store.get_coverage(key.clone(), session)? {
                     Some(interval) if interval.from <= window_start => {
                         entry.1 = Some(match entry.1 {
                             None => interval.through,
@@ -523,7 +523,7 @@ mod tests {
         let key = coverage_key(&atom);
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
         let req = WireReq {
-            sub_id: SubId::for_wire(relay.clone(), &atom.filter, &atom.routing, atom.authenticate_as),
+            sub_id: SubId::allocate(relay.clone(), &atom.routing, atom.authenticate_as, 1021),
             filter: atom.filter.clone(),
             routing: atom.routing.clone(),
             provenance: BTreeSet::new(),
@@ -609,12 +609,7 @@ mod tests {
             reqs: BTreeMap::from([(
                 session.clone(),
                 vec![WireReq {
-                    sub_id: SubId::for_wire(
-                        relay.clone(),
-                        &atom.filter,
-                        &atom.routing,
-                        atom.authenticate_as,
-                    ),
+                    sub_id: SubId::allocate(relay.clone(), &atom.routing, atom.authenticate_as, 1022),
                     filter: atom.filter.clone(),
                     routing: atom.routing.clone(),
                     provenance: BTreeSet::new(),
@@ -659,7 +654,7 @@ mod tests {
             reqs: BTreeMap::from([(
                 session.clone(),
                 vec![WireReq {
-                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.routing, atom.authenticate_as),
+                    sub_id: SubId::allocate(relay, &atom.routing, atom.authenticate_as, 1023),
                     filter: atom.filter.clone(),
                     routing: atom.routing.clone(),
                     provenance: BTreeSet::new(),
@@ -739,7 +734,7 @@ mod tests {
             reqs: BTreeMap::from([(
                 session,
                 vec![WireReq {
-                    sub_id: SubId::for_wire(relay, &atom.filter, &atom.routing, atom.authenticate_as),
+                    sub_id: SubId::allocate(relay, &atom.routing, atom.authenticate_as, 1024),
                     filter: atom.filter.clone(),
                     routing: atom.routing.clone(),
                     provenance: BTreeSet::new(),

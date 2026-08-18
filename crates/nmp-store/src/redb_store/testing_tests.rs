@@ -327,7 +327,7 @@ pub fn corrupt_coverage(
 ) -> Result<(), PersistenceError> {
     let db = Database::open(path).map_err(persist_err)?;
     let tx = db.begin_write().map_err(persist_err)?;
-    let row_key = RedbStore::coverage_row_key(key, &RelaySessionKey::unauthenticated(relay.clone()));
+    let row_key = RedbStore::coverage_row_key(&key, &RelaySessionKey::unauthenticated(relay.clone()));
     {
         let mut coverage = tx.open_table(COVERAGE).map_err(persist_err)?;
         if coverage

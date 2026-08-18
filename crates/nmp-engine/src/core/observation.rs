@@ -357,7 +357,7 @@ impl CoreState {
             .and_then(|queue| queue.back_mut())
             .filter(|request| request.filter.hash() == filter_hash)
         {
-            current.owner_demands.extend(owner_demands.iter().copied());
+            current.owner_demands.extend(owner_demands.iter().cloned());
         }
 
         let current_revision = self.live_wire_requests.get(&key).and_then(|request| {
@@ -373,7 +373,7 @@ impl CoreState {
         if let Some(request) =
             current_revision.and_then(|revision| self.active_request_evidence.get_mut(&revision))
         {
-            request.owner_demands.extend(owner_demands.iter().copied());
+            request.owner_demands.extend(owner_demands.iter().cloned());
         }
     }
 
@@ -481,7 +481,7 @@ impl CoreState {
         let mut evidence_demands = request.owner_demands.clone();
         if let Some(plan_sub_id) = attempt.purpose.plan_sub_id() {
             if let Some(metadata) = self.plan_execution_metadata.get(plan_sub_id) {
-                evidence_demands.extend(metadata.owner_demands.iter().copied());
+                evidence_demands.extend(metadata.owner_demands.iter().cloned());
             }
         }
         let evidence_sub_id = attempt.purpose.evidence_sub_id(&request.sub_id);

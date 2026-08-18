@@ -71,7 +71,7 @@ pub(super) fn rank_new_sessions(
             let requests = reqs.get(&session).into_iter().flatten();
             let coverage: BTreeSet<_> = requests
                 .clone()
-                .flat_map(|request| request.coverage_assignments.iter().copied())
+                .flat_map(|request| request.coverage_assignments.iter().cloned())
                 .collect();
             let secondary = requests
                 .into_iter()
@@ -189,7 +189,7 @@ impl Router {
             .filter_map(|demand| {
                 self.active_demands.get(demand).map(|atom| {
                     (
-                        *demand,
+                        demand.clone(),
                         Self::derive_request_owner_contribution(atom, request),
                     )
                 })
@@ -198,7 +198,7 @@ impl Router {
         let mut active = 0;
         for demand in &request.owner_demands {
             self.requests_by_demand
-                .entry(*demand)
+                .entry(demand.clone())
                 .or_default()
                 .insert(request_key.clone());
             active += usize::from(self.active_demands.contains_key(demand));
@@ -220,7 +220,7 @@ impl Router {
         }
         for assignment in &request.coverage_assignments {
             self.coverage_assignment_requests
-                .entry(*assignment)
+                .entry(assignment.clone())
                 .or_default()
                 .insert(request_key.clone());
         }
@@ -306,7 +306,7 @@ impl Router {
             .filter_map(|demand| {
                 self.active_demands.get(demand).map(|atom| {
                     (
-                        *demand,
+                        demand.clone(),
                         Self::derive_request_owner_contribution(atom, &candidate),
                     )
                 })
@@ -317,9 +317,9 @@ impl Router {
         let mut new_assignments = BTreeSet::new();
         let mut new_provenance = BTreeSet::new();
         for (demand, contribution) in contributions {
-            let delta = self.add_request_owner_contribution(&request_key, demand, contribution);
+            let delta = self.add_request_owner_contribution(&request_key, demand.clone(), contribution);
             if delta.owner_added {
-                new_demands.insert(demand);
+                new_demands.insert(demand.clone());
             }
             new_claims.extend(delta.coverage_claims);
             new_assignments.extend(delta.coverage_assignments);
@@ -329,7 +329,7 @@ impl Router {
 
         for demand in &new_demands {
             self.requests_by_demand
-                .entry(*demand)
+                .entry(demand.clone())
                 .or_default()
                 .insert(request_key.clone());
             if self.active_demands.contains_key(demand) {
@@ -348,7 +348,7 @@ impl Router {
         }
         for assignment in &new_assignments {
             self.coverage_assignment_requests
-                .entry(*assignment)
+                .entry(assignment.clone())
                 .or_default()
                 .insert(request_key.clone());
         }
@@ -377,11 +377,11 @@ impl Router {
 
         let diagnostics_changed = !new_provenance.is_empty();
         let incumbent = &mut self.prev_plan.reqs.get_mut(session).unwrap()[position];
-        incumbent.coverage_claims.extend(new_claims.iter().copied());
-        incumbent.owner_demands.extend(new_demands.iter().copied());
+        incumbent.coverage_claims.extend(new_claims.iter().cloned());
+        incumbent.owner_demands.extend(new_demands.iter().cloned());
         incumbent
             .coverage_assignments
-            .extend(new_assignments.iter().copied());
+            .extend(new_assignments.iter().cloned());
         incumbent.provenance.extend(new_provenance);
         let update = metadata_changed.then(|| RequestMetadataUpdate {
             session: session.clone(),

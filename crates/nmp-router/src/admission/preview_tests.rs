@@ -123,11 +123,11 @@ fn one_preview_never_visits_ten_thousand_unrelated_incumbent_demand_edges() {
         authenticate_as: None,
         routing_evidence: BTreeSet::new(),
     };
-    let sub_id = SubId::for_wire(
+    let sub_id = SubId::allocate(
         incumbent_relay,
-        &physical.filter,
         &physical.routing,
         physical.authenticate_as,
+        1,
     );
     let mut router = Router::new(RuleRegistry::default_widen_only());
     router.prev_plan.reqs.insert(

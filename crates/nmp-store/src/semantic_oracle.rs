@@ -47,170 +47,47 @@ struct Checkpoint {
 }
 
 const EXPECTED_SEMANTIC_TRACE: &[(&str, &str)] = &[
-    (
-        "insert",
-        "e4bfbc122f7096164bf8276d798535fcea08e34fb4386b8441bb845369862037",
-    ),
-    (
-        "duplicate provenance",
-        "87676751be853bf6c396b3e784533ee895ac29e56d09415b8f09233d73b3dea0",
-    ),
-    (
-        "replaceable first winner",
-        "58b1511d06bbaf7cbbc7941e4c18a3448d4e9869e0107acca423613e3c428cb1",
-    ),
-    (
-        "replaceable conflict",
-        "5164d12e4dcbf21050842ab106a5d27c17670a426c7daa5cab3e050cbe6fdfb5",
-    ),
-    (
-        "addressable first winner",
-        "56e102c0d15597d014eab487c1d09df00cbc53b84a2042b6052c3405d8686b62",
-    ),
-    (
-        "addressable conflict",
-        "5ae6bbe91419885fff9b5a95c15a2fc1ea1cd724d6bb6a64204c52d47c458bce",
-    ),
-    (
-        "deletion target",
-        "2e67e65dbdc862ff1d4e77659bc148a990e9c17d5085e0bfd4044dc892a3bc9c",
-    ),
-    (
-        "deletion",
-        "a8780a6f8cc858f3295f74f1e9f7a2a9416578570281c0497ea6a6f65114a2d6",
-    ),
-    (
-        "deletion before target",
-        "bed5462707a8d690fd0ed3d398ec3628459ccb1e011127a3ebb339dc08ef9a67",
-    ),
-    (
-        "tombstoned target refused",
-        "bed5462707a8d690fd0ed3d398ec3628459ccb1e011127a3ebb339dc08ef9a67",
-    ),
-    (
-        "expiry indexed",
-        "75e61755892db7047d219f34bcb56255dc9e9e5e366809246bbd543fb7cb2506",
-    ),
-    (
-        "expiry applied",
-        "bed5462707a8d690fd0ed3d398ec3628459ccb1e011127a3ebb339dc08ef9a67",
-    ),
-    (
-        "coverage fact persisted",
-        "4818fdab107f95654aa4087a2bbdd8d7ad24b2da02c963d2ce104bfd9bb15e5d",
-    ),
-    (
-        "coverage recorded after facts",
-        "a469e2ac775af3219f81acbd9037704aeca23db35bb5f9115eef0dc4214af806",
-    ),
-    (
-        "coverage-safe gc",
-        "696d871fe7b3490150b2fd38fd73940008171e0335fc0e026a2baa3bf20586bf",
-    ),
-    (
-        "maximum coverage fact and claim persisted",
-        "36a143a231011a2e10c6bf61091933c9228ada217fd4cbd970c16c6cadfa4ce6",
-    ),
-    (
-        "maximum coverage removed with fact",
-        "696d871fe7b3490150b2fd38fd73940008171e0335fc0e026a2baa3bf20586bf",
-    ),
-    (
-        "pending write accepted",
-        "d06d5f5b1e9221946c83790cbd39ed6e91700e39fcd4cc97c3c6b18174021b8f",
-    ),
-    (
-        "pending write signed",
-        "494cc1b7b347f00921ec73f37c64473970601bf210556ddf284923bd0acc9762",
-    ),
-    (
-        "cancellable write accepted",
-        "5e17931f507f7bd797f574f4b30cf0bfce0432db78194ff622e1971919b32176",
-    ),
-    (
-        "write cancelled",
-        "c1c825d65097e9b714f8ad83d4487c31c3fbc7f9f29c522d560ca9e6d4c7209a",
-    ),
-    (
-        "replaceable delivery accepted",
-        "6553128467db1df7a24a2d0ff2b76c0d7c081d5a76e6902cc160dda5a12b654e",
-    ),
-    (
-        "replaceable delivery superseded",
-        "dc72897ea6e4aeeca918c89dea5d4cceb9ac29340860e77ce667e324d0b4d704",
-    ),
-    (
-        "superseding delivery compensated",
-        "0c923c9697f4acb8881ec06411540ac9f69bba46d0677669b039eadc9b8de37e",
-    ),
-    (
-        "multi-relay delivery accepted",
-        "e5b67f6ff6f02a1010df04294431863b60405d4b1cca401767381bdb39bfb39a",
-    ),
-    (
-        "multi-relay lanes durable",
-        "f0f6ed8c77212385a7696060bfdbbbcbce48206fb93ae8f7e73830e060c7dcd8",
-    ),
-    (
-        "ambiguous handoff became outcome unknown",
-        "f53037c563191879e52ef99e225bb27b9358fbfddd7931532329c97b2eb52c93",
-    ),
-    (
-        "delivery attempt gave up",
-        "394e854b2ae889a65a4a4aac4b26303ffd149b4db8f424e700e655e31e2ecc88",
-    ),
-    (
-        "in-flight delivery interrupted",
-        "c536ee587ed4d89d926abaf27c92d54db7fa5decfd0a870d3bcc72946698593a",
-    ),
-    (
-        "retry ended in relay rejection",
-        "bd5ef285c7d409854b3d9233bcb39466124146300e5c7af9db7fe53b62662143",
-    ),
-    (
-        "multi-relay terminal obligation closed",
-        "bd5ef285c7d409854b3d9233bcb39466124146300e5c7af9db7fe53b62662143",
-    ),
-    (
-        "publication route durable",
-        "0c2c6063418e2738ba7c892c5e308962654587e5d2d5796368d414b103161989",
-    ),
-    (
-        "publication lanes bootstrapped",
-        "a046f70a50f06359286993024680790807866a9ec1457cde9fe6fc5c28c59578",
-    ),
-    (
-        "publication lane eligible",
-        "5514d85f8b2d91678287eb5825510ccceb5723840227bcdf48117fe81bcdff08",
-    ),
-    (
-        "publication attempt started",
-        "78c729fbe7b92be454e6a65b971847a66bcb977c175c213f85ef686d3704ec9d",
-    ),
-    (
-        "publication retry scheduled",
-        "d75b3d29ebe135103feb240dbdbec559cbb8ba34bbebafeec7f156aa27b96ddd",
-    ),
-    (
-        "publication retry eligible",
-        "b245df535fa79241707d38f5b74b32d95c36ec635c681b0c9f5438c7f33e0fc7",
-    ),
-    (
-        "publication retry started",
-        "96beac3ade63b22ed0a892b16bd4a8edc9fa80e868b3c786ee13d84b81f132c5",
-    ),
-    (
-        "publication handed off",
-        "9bfa80fc5b5468e58444adab0d2fff502ee6a0a6b701f69bc52d5a2897272320",
-    ),
-    (
-        "publication receipt acked",
-        "a21e687349a033d5af2a7f58aeeef1efc93e4fa0ece69e073b7f26e7fd6cf971",
-    ),
-    (
-        "publication obligation closed",
-        "a21e687349a033d5af2a7f58aeeef1efc93e4fa0ece69e073b7f26e7fd6cf971",
-    ),
+    ("insert", "8fe95e770b60bb6194bedaf20bbb4a3a5f1302b743cfdedb7f4756637f4a22d7"),
+    ("duplicate provenance", "05f979fddbdfed4bc3b15571ae87aa60149f3bb0ce9549050115b99abf9b6605"),
+    ("replaceable first winner", "60b6f2c9d17aa781c66fd6ff310ab0ec2057cba3c3dd47db0dc1631325c0c33b"),
+    ("replaceable conflict", "f0edf738fc7133e7b61434e00a0a3502ff7e08a60cdf73409c119c204693ba39"),
+    ("addressable first winner", "94d64f5f71fa7286a395352d23f9f8f169d800d16727e588467a6616ba574553"),
+    ("addressable conflict", "9942951fe3d86bb8a2b0695839b01936cf63492474d528995623d1ac34334adc"),
+    ("deletion target", "b56f93d14749f5bccf9f018064f50b6b9d020925f16ed9a66aea003a9bd596aa"),
+    ("deletion", "123ba6144f4edba6aa2544437d61002bb3e4f01af562d2a496e0c4ac072eeb90"),
+    ("deletion before target", "eba439b21190a60e9f2822ed79849d9c43afa91e6c65a4395daa5da73ce57190"),
+    ("tombstoned target refused", "eba439b21190a60e9f2822ed79849d9c43afa91e6c65a4395daa5da73ce57190"),
+    ("expiry indexed", "c911549251ee12ab980566ccd4e4020f91c0a9f345366afeef86058dccb21ec1"),
+    ("expiry applied", "eba439b21190a60e9f2822ed79849d9c43afa91e6c65a4395daa5da73ce57190"),
+    ("coverage fact persisted", "40c268a6118a60ce67b7eb07e0c6c1db7b126069470a6e68935e1d73cdcf8737"),
+    ("coverage recorded after facts", "4958a2e7b69b383384c451191d77fc0dd7d5944636fd9bae56e4f7bd29be5813"),
+    ("coverage-safe gc", "a2ea68b85f0baa837d8a590f94f8db969c3a91c40780d4245344cd2f8bb5102d"),
+    ("maximum coverage fact and claim persisted", "e4bbfb78ba450793678bdadf4f7c9ebb7e8a9548c0c24e507f36864df3a04507"),
+    ("maximum coverage removed with fact", "a2ea68b85f0baa837d8a590f94f8db969c3a91c40780d4245344cd2f8bb5102d"),
+    ("pending write accepted", "381fbfa5a9038fbeb97e4824dd4ad6a994dd9c87ee18a659c14b2c2886ebbfa2"),
+    ("pending write signed", "861ddd321293e0810d78318f9b68085bb7747bd6b13c81d0910fbddf1d6713f6"),
+    ("cancellable write accepted", "2c8b11895defe4166ba2c051564a98a5c200c802171f7810c6a5d8109d386e24"),
+    ("write cancelled", "9167708d00dbdfa6177181a83e42dc67b2bddf1f3972fb65ea9222accbeb79a3"),
+    ("replaceable delivery accepted", "35cdb477826289aebd57fe11d4b463abbab59811be021afacf61a2fd452383bc"),
+    ("replaceable delivery superseded", "ee2b61751a9366da7dacc58b6621ad69ce62ff8cdae50854023ae01678c023d7"),
+    ("superseding delivery compensated", "234a899c07ac2e96554acbe187c3bdc69e4ca52c19f2485ef1440bcd4ac0d3e4"),
+    ("multi-relay delivery accepted", "89a54e29ceda3a77b86d2cb9a8a741a573756483c3a1b6cab91ba13623fdd33f"),
+    ("multi-relay lanes durable", "5ce3089e76d30f35df45e7377e1d8970dc542c5c85e1569dc5aaf2e62ccf4d07"),
+    ("ambiguous handoff became outcome unknown", "3b1fbfb2870d54b04517fd6b4c1bded18eab2b276b25e377c18a497bdeda84f0"),
+    ("delivery attempt gave up", "822d99fc58664cb97576e5a386c5d22d8e8893c4d71d861ecc1e7b8ad8935929"),
+    ("in-flight delivery interrupted", "63d5bf0586e7246fdc90e7f7c17d0f78d89ad3f885451f7806a5fdcbb9f6c244"),
+    ("retry ended in relay rejection", "e29d07319978d77da151b7f5412ce17746a15317fd7f671a9a959cc6450a7bb5"),
+    ("multi-relay terminal obligation closed", "e29d07319978d77da151b7f5412ce17746a15317fd7f671a9a959cc6450a7bb5"),
+    ("publication route durable", "2f042e0f7ce6285fa1bc49f5c40183251b977cd077878405e08e7994024a41b7"),
+    ("publication lanes bootstrapped", "c7c50d4f9e927755a64f107faa6dfb73dbc2099bd03b07f955f64f8be1f77587"),
+    ("publication lane eligible", "b04194e8ed615edbccbf626c7c34c02c91874be8a8e90dce48a376f44fa6626f"),
+    ("publication attempt started", "1215654ab878ce428231bb6577c89b74692d0f24137aefb8230b7c6c67a8a4e8"),
+    ("publication retry scheduled", "5cf8a010d6263c284a506cd458eb7d75c9f78c52321a3a7f1a78b1b99618b2f2"),
+    ("publication retry eligible", "001c2bc15a5fda4559b4dac24fd262650c2992b0be19d172521fdcf23c6e2e62"),
+    ("publication retry started", "fa079d30e0de928a2700fdd12426d53ffedc07d52584e290c3b00f6c649746d8"),
+    ("publication handed off", "a8f279c1f76b650161118cf50ff88d459e4075cea3e8f9b2836eaebda7accbcb"),
+    ("publication receipt acked", "9115ea7a5e6b18474ccde7e1dac0927db6b1ff19586b61f099677bade79639b6"),
+    ("publication obligation closed", "9115ea7a5e6b18474ccde7e1dac0927db6b1ff19586b61f099677bade79639b6"),
 ];
 
 #[derive(Default)]
@@ -525,7 +402,10 @@ fn normalized_state(
                 .get_coverage(coverage_key(atom), &RelaySessionKey::unauthenticated(relay.clone()))
                 .expect("oracle coverage read");
             json!({
-                "key": blake3::hash(coverage_key(atom).as_bytes()).to_hex().to_string(),
+                "key": RedbStore::coverage_row_key(
+                    &coverage_key(atom),
+                    &RelaySessionKey::unauthenticated(relay.clone()),
+                ),
                 "relay": relay.as_str(),
                 "interval": interval.map(|value| [value.from.as_secs(), value.through.as_secs()]),
             })

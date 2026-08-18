@@ -45,19 +45,19 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
     });
 
     let open_piece = |core: &mut EngineCore, piece: &ContextualAtom| {
-        let sub_id = SubId::for_wire(relay.clone(), &piece.filter, &piece.routing, piece.authenticate_as);
+        let sub_id = SubId::allocate(relay.clone(), &piece.routing, piece.authenticate_as, 1017);
         let claim = coverage_key(piece);
         core.white_box("attribution.retain_live_request_claims", |s| {
             s.attribution
-                .retain_live_request_claims(&sub_id, BTreeSet::from([claim]))
+                .retain_live_request_claims(&sub_id, BTreeSet::from([claim.clone()]))
         });
         core.white_box("record_observed_request", |s| {
             s.record_observed_request(RequestSend {
                 session: &session,
                 sub_id: &sub_id,
                 filter: &piece.filter,
-                coverage_claims: BTreeSet::from([claim]),
-                owner_demands: BTreeSet::from([owner]),
+                coverage_claims: BTreeSet::from([claim.clone()]),
+                owner_demands: BTreeSet::from([owner.clone()]),
                 lanes: BTreeSet::new(),
                 replay: false,
                 event_failure_target: EventFailureTarget::ThisSend,
@@ -86,7 +86,7 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
             Timestamp::from(180)
         ))
     );
-    assert_eq!(core.store.get_coverage(whole_claim, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(), None);
+    assert_eq!(core.store.get_coverage(whole_claim.clone(), &RelaySessionKey::unauthenticated(relay.clone())).unwrap(), None);
 
     core.white_box("clock", |s| s.clock = Timestamp::from(200u64));
     core.white_box("on_relay_frame", |s| {
@@ -173,22 +173,17 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
                 )])
                 .expect("seed exact coverage row");
         }
-        testing::corrupt_coverage(&path, added_claim, &relay)
+        testing::corrupt_coverage(&path, added_claim.clone(), &relay)
             .expect("store-owned coverage corruption");
         let mut core = EngineCore::new(
             RedbStore::open(&path).expect("reopen corrupted Redb fixture"),
             20,
         );
         core.set_active_demand(&BTreeSet::from([incumbent.clone(), added.clone()]));
-        let sub_id = SubId::for_wire(
-            relay,
-            &incumbent.filter,
-            &incumbent.routing,
-            incumbent.authenticate_as,
-        );
+        let sub_id = SubId::allocate(relay, &incumbent.routing, incumbent.authenticate_as, 1018);
         core.white_box("attribution.retain_live_request_claims", |s| {
             s.attribution
-                .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]))
+                .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim.clone()]))
         });
         core.white_box("live_wire_requests.insert", |s| {
             s.live_wire_requests.insert(
@@ -217,7 +212,7 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
                     session: session.clone(),
                     sub_id: sub_id.clone(),
                     filter_hash: incumbent.filter.hash(),
-                    added_coverage_claims: BTreeSet::from([added_claim]),
+                    added_coverage_claims: BTreeSet::from([added_claim.clone()]),
                     added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
                 }],
                 &mut Vec::new(),
@@ -269,12 +264,7 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
         routing_evidence: BTreeSet::new(),
     };
     let incumbent_claim = coverage_key(&incumbent);
-    let sub_id = SubId::for_wire(
-        relay.clone(),
-        &incumbent.filter,
-        &incumbent.routing,
-        incumbent.authenticate_as,
-    );
+    let sub_id = SubId::allocate(relay.clone(), &incumbent.routing, incumbent.authenticate_as, 1019);
     let added_for_generation = |generation: u16| ContextualAtom {
         filter: ConcreteFilter {
             kinds: Some(BTreeSet::from([1_000 + generation])),
@@ -297,7 +287,7 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
     core.set_active_demand(&demand);
     core.white_box("attribution.retain_live_request_claims", |s| {
         s.attribution
-            .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]))
+            .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim.clone()]))
     });
     core.white_box("live_wire_requests.insert", |s| {
         s.live_wire_requests.insert(
@@ -344,7 +334,7 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
                     session: session.clone(),
                     sub_id: sub_id.clone(),
                     filter_hash: incumbent.filter.hash(),
-                    added_coverage_claims: BTreeSet::from([claim]),
+                    added_coverage_claims: BTreeSet::from([claim.clone()]),
                     added_owner_demands: BTreeSet::from([DemandKey::for_atom(added)]),
                 }],
                 &mut Vec::new(),

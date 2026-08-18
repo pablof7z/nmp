@@ -80,7 +80,7 @@ pub fn solve(input: &CoverageInput) -> Coverage {
         // still-needed (author, open-slot) pairs it would fill.
         let mut scores: BTreeMap<RelayUrl, usize> = BTreeMap::new();
         for (author, list) in &input.candidates {
-            if need.get(author).copied().unwrap_or(0) == 0 {
+            if need.get(author).cloned().unwrap_or(0) == 0 {
                 continue;
             }
             let already_covered = &assignment[author];
@@ -110,7 +110,7 @@ pub fn solve(input: &CoverageInput) -> Coverage {
 
         selected.insert(best_relay.clone());
         for (author, list) in &input.candidates {
-            if need.get(author).copied().unwrap_or(0) == 0 {
+            if need.get(author).cloned().unwrap_or(0) == 0 {
                 continue;
             }
             if list.iter().any(|lr| lr.url == best_relay) {

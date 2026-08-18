@@ -94,7 +94,7 @@ fn withdrawing_one_attached_owner_prunes_only_its_local_request_metadata() {
     assert_eq!(withdrawal.request_metadata_removals.len(), 1);
     assert_eq!(
         withdrawal.request_metadata_removals[0].removed_owner_demands,
-        BTreeSet::from([one_demand])
+        BTreeSet::from([one_demand.clone()])
     );
     assert_eq!(
         withdrawal.request_metadata_removals[0].removed_coverage_claims,
@@ -103,11 +103,11 @@ fn withdrawing_one_attached_owner_prunes_only_its_local_request_metadata() {
     let request = router.prev_plan.reqs.values().flatten().next().unwrap();
     assert_eq!(
         request.owner_demands,
-        BTreeSet::from([wide_demand, two_demand])
+        BTreeSet::from([wide_demand.clone(), two_demand.clone()])
     );
     assert_eq!(
         request.coverage_claims,
-        BTreeSet::from([wide_claim, two_claim])
+        BTreeSet::from([wide_claim, two_claim.clone()])
     );
     assert!(!router.requests_by_demand.contains_key(&one_demand));
     assert!(router.requests_by_demand.contains_key(&wide_demand));
@@ -117,7 +117,7 @@ fn withdrawing_one_attached_owner_prunes_only_its_local_request_metadata() {
     assert!(withdrawal.wire.ops.is_empty());
     let request = router.prev_plan.reqs.values().flatten().next().unwrap();
     assert_eq!(request.owner_demands, BTreeSet::from([two_demand]));
-    assert_eq!(request.coverage_claims, BTreeSet::from([two_claim]));
+    assert_eq!(request.coverage_claims, BTreeSet::from([two_claim.clone()]));
 
     let final_withdrawal = router.withdraw([two], 20);
     assert_eq!(
@@ -150,7 +150,7 @@ fn ten_thousand_local_owner_detaches_touch_only_the_departing_metadata() {
         atoms.push(atom);
     }
     let physical = pinned(&relay, kinds);
-    let sub_id = SubId::for_wire(relay, &physical.filter, &physical.routing, physical.authenticate_as);
+    let sub_id = SubId::allocate(relay, &physical.routing, physical.authenticate_as, 1);
     let mut router = Router::new(RuleRegistry::default_widen_only());
     router.prev_plan.reqs.insert(
         session,
@@ -208,7 +208,7 @@ fn aliased_claim_stays_until_its_last_distinct_demand_owner_leaves() {
     let first_demand = DemandKey::for_atom(&first);
     let second_demand = DemandKey::for_atom(&second);
     assert_ne!(first_demand, second_demand);
-    let sub_id = SubId::for_wire(relay, &first.filter, &first.routing, first.authenticate_as);
+    let sub_id = SubId::allocate(relay, &first.routing, first.authenticate_as, 1);
     let mut router = Router::new(RuleRegistry::default_widen_only());
     router.prev_plan.reqs.insert(
         session,
@@ -217,8 +217,8 @@ fn aliased_claim_stays_until_its_last_distinct_demand_owner_leaves() {
             filter: first.filter.clone(),
             routing: first.routing.clone(),
             provenance: BTreeSet::new(),
-            coverage_claims: BTreeSet::from([claim]),
-            owner_demands: BTreeSet::from([first_demand, second_demand]),
+            coverage_claims: BTreeSet::from([claim.clone()]),
+            owner_demands: BTreeSet::from([first_demand, second_demand.clone()]),
             coverage_assignments: BTreeSet::new(),
         }],
     );
@@ -231,8 +231,8 @@ fn aliased_claim_stays_until_its_last_distinct_demand_owner_leaves() {
         .removed_coverage_claims
         .is_empty());
     let request = router.prev_plan.reqs.values().flatten().next().unwrap();
-    assert_eq!(request.coverage_claims, BTreeSet::from([claim]));
-    assert_eq!(request.owner_demands, BTreeSet::from([second_demand]));
+    assert_eq!(request.coverage_claims, BTreeSet::from([claim.clone()]));
+    assert_eq!(request.owner_demands, BTreeSet::from([second_demand.clone()]));
 
     let final_outcome = router.withdraw([second], 20);
     assert_eq!(
@@ -259,11 +259,11 @@ fn full_compile_probes_only_the_one_surviving_request_out_of_ten_thousand_priors
         let stale_relay =
             RelayUrl::parse(&format!("wss://full-metadata-stale-{index:05}.example")).unwrap();
         let stale = pinned(&stale_relay, [((index % 50_000) + 2) as u16]);
-        let sub_id = SubId::for_wire(
+        let sub_id = SubId::allocate(
             stale_relay.clone(),
-            &stale.filter,
             &stale.routing,
             stale.authenticate_as,
+            index as u64,
         );
         let session = RelaySessionKey::unauthenticated(stale_relay);
         let request_key = (session.clone(), sub_id.clone());
@@ -319,9 +319,9 @@ fn full_compile_indexes_only_added_metadata_over_ten_thousand_incumbent_edges() 
         let historical = pinned(&relay, [kind]);
         let demand = DemandKey::for_atom(&historical);
         let author = Keys::generate().public_key();
-        incumbent.owner_demands.insert(demand);
+        incumbent.owner_demands.insert(demand.clone());
         incumbent.coverage_claims.insert(coverage_key(&historical));
-        incumbent.coverage_assignments.insert((demand, author));
+        incumbent.coverage_assignments.insert((demand.clone(), author));
         incumbent.provenance.insert(RouteProvenance {
             relay: relay.clone(),
             lane: Lane::Provenance,

@@ -229,7 +229,7 @@ fn exact_request_removal_keeps_plan_and_diagnostics_position_aligned_without_res
         .owner_demands
         .iter()
         .next()
-        .copied()
+        .cloned()
         .unwrap();
     let departing = demands
         .iter()

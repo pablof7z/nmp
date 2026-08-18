@@ -36,7 +36,7 @@
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
 
-use nmp_grammar::{ConcreteFilter, DescriptorHash};
+use nmp_grammar::ConcreteFilter;
 
 use crate::component::{sole_difference, Component};
 use crate::plan::SubId;
@@ -45,7 +45,7 @@ use crate::plan::SubId;
 /// continuation of the same new filter: most shared values on the differing
 /// component first, then a stable canonical tie-break so the choice never
 /// depends on iteration order.
-type TieBreak<'a> = (Reverse<usize>, u64, DescriptorHash, &'a SubId);
+type TieBreak<'a> = (Reverse<usize>, u64, &'a ConcreteFilter, &'a SubId);
 
 /// How strongly `a` and `b` are related ALONG the one component they differ
 /// in — the content-grounded tiebreak between several one-diff candidates.
@@ -113,8 +113,7 @@ pub(crate) fn assign(
     // survivors, so both the matching decisions and the order in which fresh
     // tokens are minted are reproducible.
     let mut order: Vec<usize> = (0..next.len()).collect();
-    let hashes: Vec<DescriptorHash> = next.iter().map(|f| f.hash()).collect();
-    order.sort_by(|&i, &j| hashes[i].cmp(&hashes[j]).then(i.cmp(&j)));
+    order.sort_by(|&i, &j| next[i].cmp(&next[j]).then(i.cmp(&j)));
 
     // Phase 1 — ZERO-DIFF, and it ranks first unconditionally: a filter that
     // did not change must keep its token, whatever else moved around it.
@@ -152,7 +151,7 @@ pub(crate) fn assign(
                 continue;
             };
             let (overlap, distance) = affinity(&component, prior_filter, &next[i]);
-            let key = (Reverse(overlap), distance, prior_filter.hash(), prior_sub);
+            let key = (Reverse(overlap), distance, prior_filter, prior_sub);
             if best.as_ref().is_none_or(|(_, best_key)| &key < best_key) {
                 best = Some((p, key));
             }
@@ -208,7 +207,6 @@ mod tests {
             nmp_router_testkit::test_relay(0),
             &ReadRouting::Auto,
             None,
-            ConcreteFilter::default().hash(),
             n,
         )
     }

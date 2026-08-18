@@ -45,7 +45,7 @@ fn strongest_shortfall<'a>(facts: impl IntoIterator<Item = &'a Shortfall>) -> Op
         crate::ShortfallReason::CapExhausted => 2,
         crate::ShortfallReason::FewerCandidatesThanK => 1,
     };
-    facts.into_iter().copied().max_by_key(|fact| {
+    facts.into_iter().cloned().max_by_key(|fact| {
         (
             fact.requested_k.saturating_sub(fact.achieved),
             reason_priority(fact),

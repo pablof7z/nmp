@@ -2001,11 +2001,16 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
         "a reopened repair REQ must never go back on the wire under a \
          subscription id a closed one already used"
     );
-    assert_eq!(
-        wire_sub_string(&reopened_backlog).len(),
-        64,
-        "reincarnation must fit INSIDE the digest -- 64 hex characters is \
-         exactly NIP-01's subscription_id cap and may never be exceeded"
+    // NIP-01 caps `subscription_id` at 64 characters. The id is an
+    // ALLOCATED token now, not a digest, so the constraint is a ceiling
+    // rather than an exact width -- and an allocated token plus its role
+    // and incarnation is far under it. What still may never happen is
+    // exceeding the cap.
+    assert!(
+        wire_sub_string(&reopened_backlog).len() <= 64,
+        "a reincarnated subscription id must stay within NIP-01's 64-character \
+         subscription_id cap, got {}",
+        wire_sub_string(&reopened_backlog).len()
     );
 
     // The straggler: the EOSE the relay finally sends for the request that

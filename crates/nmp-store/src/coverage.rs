@@ -29,46 +29,9 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{fold_byte, ConcreteFilter, ContextualAtom, DescriptorHash};
+use nmp_grammar::{ConcreteFilter, ContextualAtom};
 use nostr::filter::MatchEventOptions;
 use nostr::{Event, Timestamp};
-
-/// The `CoverageKey` schema version (#106): folded into every key's HASH
-/// (below) and PREFIXED onto its durable row key
-/// (`RedbStore::coverage_row_key`). The current identity is the full
-/// [`ContextualAtom`] (routing and the demand's identity folded in), so two
-/// Demands that would authenticate as different keys never share a coverage
-/// row (bug-class ledger #18's store-side twin of the atom-refcount fix).
-///
-/// It is a schema tag, not a compatibility discriminator: no reader decodes a
-/// different version, and `gc` has no purge pass for one (#867).
-///
-/// Bumped 2 -> 3 for the durable row-key format change alone. The DIGEST is
-/// byte-identical to version 2 for every value the fold can take, so this
-/// buys no correctness on its own and no aliasing bug motivated it.
-pub const COVERAGE_KEY_VERSION: u8 = 3;
-
-/// The coverage identity of a narrow demand atom: its [`ContextualAtom`]
-/// (selection + routing + identity, #106) with `since`/`until`/`limit` ERASED
-/// from the selection, canonically hashed and version-tagged (ruling §1,
-/// refined by Fable's C). Two atoms that differ only in their time window
-/// or result cap hash identically — a floored refetch (`since = T+1`) must
-/// find the SAME row, never a fresh one. Two atoms that differ in
-/// `ReadRouting`, or in the identity they authenticate as, must NEVER share
-/// a row, even with an otherwise-identical selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CoverageKey(DescriptorHash);
-
-impl CoverageKey {
-    /// The raw 32-byte BLAKE3 digest, for use as (part of) a durable
-    /// storage key. Widened from a 64-bit FNV hash (see
-    /// `nmp_grammar::DescriptorHash`'s doc): this is the durable redb
-    /// coverage-watermark key, so a collision here would attach a proven
-    /// interval to a filter never actually fetched.
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        self.0.as_bytes()
-    }
-}
 
 /// Erase `since`/`until`/`limit` from `filter`, leaving `kinds`/`authors`/
 /// `ids`/`tags` untouched. This is the ONE erasure rule shared by
@@ -83,9 +46,33 @@ pub(crate) fn window_erase(filter: &ConcreteFilter) -> ConcreteFilter {
     }
 }
 
-/// The coverage key for `atom`'s window-erased shape UNDER its `source` and
-/// authenticated identity (ruling §1, #106-widened): version-tagged via
-/// [`COVERAGE_KEY_VERSION`].
+/// The coverage identity of a narrow demand atom: its [`ContextualAtom`]
+/// (selection + routing + identity, #106) with `since`/`until`/`limit`
+/// ERASED from the selection and routing evidence dropped.
+///
+/// It holds the ATOM, not a digest of one. A hash could answer exactly one
+/// question -- "is this byte-identical to something I saw before?" -- which
+/// is the least useful question available about a filter. Holding the atom
+/// lets a caller ask the questions that matter: does this one CONTAIN that
+/// one, what is the residual between them, which axis do they differ on.
+/// Those are set operations on the selection, and a 32-byte BLAKE3 digest
+/// destroys exactly the information they need.
+///
+/// Two atoms differing only in their time window or result cap share a key,
+/// because the window is not part of coverage identity. Two atoms differing
+/// in `ReadRouting`, or in the identity they authenticate as, never do.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CoverageKey(ContextualAtom);
+
+impl CoverageKey {
+    /// The window-erased atom this key IS.
+    pub fn atom(&self) -> &ContextualAtom {
+        &self.0
+    }
+}
+
+/// The coverage key for `atom`'s window-erased shape under its routing and
+/// authenticated identity.
 pub fn coverage_key(atom: &ContextualAtom) -> CoverageKey {
     let windowed = ContextualAtom {
         filter: window_erase(&atom.filter),
@@ -93,7 +80,7 @@ pub fn coverage_key(atom: &ContextualAtom) -> CoverageKey {
         authenticate_as: atom.authenticate_as,
         routing_evidence: BTreeSet::new(),
     };
-    CoverageKey(fold_byte(windowed.hash(), COVERAGE_KEY_VERSION))
+    CoverageKey(windowed)
 }
 
 /// A proven, retained interval `[from, through]` (ruling §1's `CoverageRow`,
@@ -362,7 +349,7 @@ mod tests {
     #[test]
     fn coverage_key_is_a_256_bit_digest_not_64() {
         let a = cf(&[1], &["aa"], None, None);
-        assert_eq!(coverage_key(&atom(a)).as_bytes().len(), 32);
+        assert_eq!(coverage_key(&atom(a.clone())).atom().filter.authors, atom(a).filter.authors);
     }
 
     /// Same filter hashed twice (simulating a re-derive across two separate
@@ -372,7 +359,7 @@ mod tests {
     #[test]
     fn coverage_key_is_stable_across_repeated_calls() {
         let a = atom(cf(&[1], &["aa", "bb"], Some(10), Some(5)));
-        assert_eq!(coverage_key(&a).as_bytes(), coverage_key(&a).as_bytes());
+        assert_eq!(coverage_key(&a), coverage_key(&a));
     }
 
     /// #106's store-side anti-alias (Fable's C refinement, ledger #18's

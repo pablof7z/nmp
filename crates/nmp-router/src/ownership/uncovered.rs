@@ -24,7 +24,7 @@ impl Router {
                 self.uncovered_owners_by_author
                     .entry(*author)
                     .or_default()
-                    .insert(*demand, *fact);
+                    .insert(demand.clone(), *fact);
             }
         }
         self.refresh_uncovered_diagnostics();
@@ -42,7 +42,7 @@ impl Router {
         if unchanged {
             return false;
         }
-        let mut changed = self.remove_uncovered_demand(demand);
+        let mut changed = self.remove_uncovered_demand(demand.clone());
         if facts.is_empty() {
             return changed;
         }
@@ -50,10 +50,10 @@ impl Router {
             self.uncovered_owners_by_author
                 .entry(*author)
                 .or_default()
-                .insert(demand, *fact);
+                .insert(demand.clone(), *fact);
             changed |= self.refresh_uncovered_author(*author);
         }
-        self.uncovered_by_demand.insert(demand, facts);
+        self.uncovered_by_demand.insert(demand.clone(), facts);
         changed
     }
 
@@ -89,7 +89,7 @@ impl Router {
             .uncovered_owners_by_author
             .get(&author)
             .and_then(|owners| strongest_shortfall(owners.values()));
-        let previous = self.last_diag.uncovered_authors.get(&author).copied();
+        let previous = self.last_diag.uncovered_authors.get(&author).cloned();
         match next {
             Some(fact) => {
                 self.last_diag.uncovered_authors.insert(author, fact);
@@ -134,7 +134,7 @@ impl Router {
                     };
                     contributions.push((
                         (session.clone(), request.sub_id.clone()),
-                        *demand,
+                        demand.clone(),
                         Self::derive_request_owner_contribution(atom, request),
                     ));
                 }
@@ -150,7 +150,7 @@ impl Router {
                         .owner_edges_visited
                         .saturating_add(1);
                     self.requests_by_demand
-                        .entry(*demand)
+                        .entry(demand.clone())
                         .or_default()
                         .insert(request_key.clone());
                     active += usize::from(self.active_demands.contains_key(demand));
@@ -168,7 +168,7 @@ impl Router {
                     .insert(request_key.clone(), request.coverage_claims.clone());
                 for claim in &request.coverage_claims {
                     self.requests_by_physical_claim
-                        .entry(*claim)
+                        .entry(claim.clone())
                         .or_default()
                         .insert(request_key.clone());
                 }
@@ -187,14 +187,14 @@ impl Router {
                         .assignment_edges_visited
                         .saturating_add(1);
                     self.coverage_assignment_requests
-                        .entry(*assignment)
+                        .entry(assignment.clone())
                         .or_default()
                         .insert((session.clone(), request.sub_id.clone()));
                 }
                 for author in request
                     .provenance
                     .iter()
-                    .flat_map(|provenance| provenance.covers_authors.iter().copied())
+                    .flat_map(|provenance| provenance.covers_authors.iter().cloned())
                 {
                     self.full_metadata_work.provenance_author_edges_visited = self
                         .full_metadata_work
@@ -213,9 +213,9 @@ impl Router {
             self.physical_contributions_by_request
                 .entry(request_key.clone())
                 .or_default()
-                .insert(*demand, contribution.clone());
+                .insert(demand.clone(), contribution.clone());
             self.requests_by_physical_demand
-                .entry(*demand)
+                .entry(demand.clone())
                 .or_default()
                 .insert(request_key.clone());
         }

@@ -456,7 +456,7 @@ impl CoreState {
                         .physical_request_claims(&removal.session, &removal.sub_id)
                         .is_some_and(|physical| physical.contains(claim))
                 })
-                .copied()
+                .cloned()
                 .collect();
             self.remove_request_attempt_metadata(removal);
             if let Some(metadata) = self.plan_execution_metadata.get_mut(&removal.sub_id) {
@@ -547,10 +547,10 @@ impl CoreState {
             }
             metadata
                 .coverage_claims
-                .extend(update.added_coverage_claims.iter().copied());
+                .extend(update.added_coverage_claims.iter().cloned());
             metadata
                 .owner_demands
-                .extend(update.added_owner_demands.iter().copied());
+                .extend(update.added_owner_demands.iter().cloned());
             metadata.filter.clone()
         };
 
@@ -663,7 +663,7 @@ impl CoreState {
         };
         let Some(claims): Option<BTreeMap<_, _>> = added
             .iter()
-            .map(|key| self.attribution.claim_shape(*key).map(|atom| (*key, atom)))
+            .map(|key| self.attribution.claim_shape(key.clone()).map(|atom| (key.clone(), atom)))
             .collect()
         else {
             return BTreeSet::new();
@@ -741,7 +741,7 @@ impl CoreState {
         self.request_claim_transfer_commits
             .set(self.request_claim_transfer_commits.get().saturating_add(1));
 
-        let committed: BTreeSet<_> = pending.claims.keys().copied().collect();
+        let committed: BTreeSet<_> = pending.claims.keys().cloned().collect();
         let still_current = self
             .live_wire_requests
             .get(&(pending.session.clone(), pending.sub_id.clone()))
@@ -1192,10 +1192,10 @@ impl CoreState {
                 self.refresh_evidence_for_coverage_keys(&transferred, effects);
                 metadata_diagnostics_changed |= outcome.diagnostics_changed;
                 self.wire.clear_pending(&key);
-            } else if self.router.admission_incomplete(key) {
-                self.wire.mark_pending(key, effective_atom);
+            } else if self.router.admission_incomplete(key.clone()) {
+                self.wire.mark_pending(key.clone(), effective_atom);
             }
-        } else if (evidence_grew && self.router.admission_incomplete(key))
+        } else if (evidence_grew && self.router.admission_incomplete(key.clone()))
             || self.wire.is_pending(&key)
         {
             self.wire.mark_pending(key, effective_atom);
@@ -1313,7 +1313,7 @@ impl CoreState {
             };
             let mut released_owners = 0usize;
             for handle in stale_handles {
-                let removal = self.wire.unindex_handle_atom(handle, &atom, key);
+                let removal = self.wire.unindex_handle_atom(handle, &atom, key.clone());
                 if !removal.removed {
                     continue;
                 }
@@ -1325,12 +1325,12 @@ impl CoreState {
                 );
                 released_owners += 1;
                 if removal.demand_released {
-                    self.deactivate_request_targets_for_handle_demand(handle, key);
+                    self.deactivate_request_targets_for_handle_demand(handle, key.clone());
                 }
             }
             for _ in 0..released_owners {
                 if let Some(final_atom) = self.release_wire_atom_owner(&atom) {
-                    self.wire.defer_close(key, final_atom);
+                    self.wire.defer_close(key.clone(), final_atom);
                 }
             }
         }
@@ -1389,7 +1389,7 @@ impl CoreState {
         let pending: BTreeMap<_, _> = self
             .wire
             .live_demands()
-            .filter(|(key, _)| self.router.admission_incomplete(*key))
+            .filter(|(key, _)| self.router.admission_incomplete(key.clone()))
             .map(|(key, atom)| (key, atom.clone()))
             .collect();
         #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -2473,7 +2473,7 @@ impl CoreState {
         if still_current {
             self.attribution.retain_added_live_request_claims(
                 sub_id,
-                &pending.claims.keys().copied().collect(),
+                &pending.claims.keys().cloned().collect(),
             );
         }
     }

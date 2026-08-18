@@ -1185,21 +1185,26 @@ impl RedbStore {
     /// The identity is DISCOVERED (`RelaySessionKey::authenticate_as`),
     /// never the demand's override: the override says what was asked for,
     /// this says what was actually proven.
-    pub(super) fn coverage_row_key(key: CoverageKey, session: &RelaySessionKey) -> String {
+    pub(crate) fn coverage_row_key(key: &CoverageKey, session: &RelaySessionKey) -> String {
         use std::fmt::Write as _;
 
-        // Full 32-byte BLAKE3 digest, hex-encoded -- NOT truncated to 64
-        // bits (see `CoverageKey::as_bytes`'s doc): this is the durable
-        // redb watermark key, so the full collision-resistant width must
-        // survive into the key, not just exist in memory.
-        let mut hex = String::with_capacity(64);
-        for byte in key.as_bytes() {
+        // The atom's canonical encoding, hex-encoded. NOT a digest: the key
+        // is derived from the thing itself, so it can be decoded, compared
+        // and reasoned about rather than only equality-checked.
+        let encoded = nmp_grammar::canonical_encoding(&key.atom().filter);
+        let mut hex = String::with_capacity(encoded.len() * 2);
+        for byte in &encoded {
             let _ = write!(hex, "{byte:02x}");
         }
-        // The identity is appended after the relay, hex or empty. The relay
-        // URL cannot contain the `:` separator followed by 64 hex chars in a
-        // way that aliases a different (relay, identity) pair, because the
-        // identity field is fixed-width-or-empty and terminal.
+        // Routing is part of coverage identity (#106): the same selection
+        // fetched under different routing is a different acquisition.
+        let _ = write!(hex, ":{:?}", key.atom().routing);
+        // The atom's OWN declared identity is part of coverage identity too
+        // (#106): two demands naming different identities are different
+        // acquisitions even before a session discovers one.
+        if let Some(declared) = key.atom().authenticate_as {
+            let _ = write!(hex, ":{}", declared.to_hex());
+        }
         let identity = session
             .authenticate_as
             .map(|key| key.to_hex())

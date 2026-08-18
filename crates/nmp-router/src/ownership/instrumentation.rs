@@ -136,8 +136,8 @@ impl Router {
     /// Whether one exact demand still has relay work or routing shortfall
     /// eligible for a later pending-only admission cohort.
     pub fn admission_incomplete(&self, demand: DemandKey) -> bool {
-        !self.physically_covers(demand)
-            || self.prev_plan.limited_demands.contains(&demand)
+        !self.physically_covers(demand.clone())
+            || self.prev_plan.limited_demands.contains(&demand.clone())
             || self.uncovered_by_demand.contains_key(&demand)
     }
 
@@ -157,7 +157,7 @@ impl Router {
             .get(*position)?
             .coverage_claims;
         let physical = self.physical_claims_by_request.get(&request_key)?;
-        Some(current.union(physical).copied().collect())
+        Some(current.union(physical).cloned().collect())
     }
 
     /// Which lanes put this request on the wire — the "why" behind a REQ,

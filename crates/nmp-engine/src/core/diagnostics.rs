@@ -464,14 +464,14 @@ fn request_coverage(
     req: &WireReq,
     get_coverage: &impl Fn(&RelaySessionKey, CoverageKey) -> Result<Option<CoverageInterval>, PersistenceError>,
 ) -> Result<Option<CoverageInterval>, PersistenceError> {
-    let mut keys = req.coverage_claims.iter().copied();
+    let mut keys = req.coverage_claims.iter().cloned();
     let Some(first_key) = keys.next() else {
         return Ok(None);
     };
     let Some(mut common) = get_coverage(session, first_key)? else {
         return Ok(None);
     };
-    for key in keys {
+    for key in keys.clone() {
         let Some(next) = get_coverage(session, key)? else {
             return Ok(None);
         };

@@ -3,13 +3,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    fold_byte, fold_context, ConcreteFilter, ContextualAtom, DescriptorHash,
+    ConcreteFilter, ContextualAtom,
     ReadRouting, RelaySessionKey,
 };
 use nmp_store::{coverage_key, CoverageKey};
 
 use crate::facts::RelayUrl;
-use crate::route::{RouteProvenance, Skeleton};
+use crate::route::RouteProvenance;
 
 /// The 256-bit digest a [`SubId`] carries as its wire identity. `EngineCore`
 /// sends every REQ under this value's hex `Display` (64 characters — exactly
@@ -30,7 +30,45 @@ use crate::route::{RouteProvenance, Skeleton};
 /// The name is historical. It used to be exactly what it says: the hash of
 /// the filter's author-erased [`Skeleton`], which is precisely why two filters
 /// differing only in `authors` collided onto one subscription (#899).
-pub type SkeletonHash = DescriptorHash;
+/// A wire subscription token: the router's own monotonic mint counter.
+///
+/// NOT derived from the filter. NIP-01 lets `subscription_id` be any string
+/// up to 64 characters, and a token's job is to be a NAME the relay echoes
+/// back, not a fingerprint of what was asked. Deriving it from filter
+/// content bought nothing -- uniqueness came from the counter either way --
+/// while making every mint pay a canonical JSON encode plus a BLAKE3, and
+/// making the id move whenever the filter moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WireToken {
+    /// The router's monotonic mint counter. Sole source of uniqueness.
+    pub mint: u64,
+    /// NIP-77 role, 0 for an ordinary REQ. Carried as a FIELD rather than
+    /// folded into a digest, so the wire id can be read back.
+    pub role: u8,
+    /// NIP-77 reconciliation incarnation, 0 for an ordinary REQ.
+    pub incarnation: u64,
+}
+
+impl WireToken {
+    pub fn new(mint: u64) -> Self {
+        Self { mint, role: 0, incarnation: 0 }
+    }
+
+    /// A role-scoped sibling of this token. Same mint, distinct wire id.
+    pub fn with_role(self, role: u8, incarnation: u64) -> Self {
+        Self { mint: self.mint, role, incarnation }
+    }
+}
+
+impl std::fmt::Display for WireToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.role == 0 && self.incarnation == 0 {
+            write!(f, "{}", self.mint)
+        } else {
+            write!(f, "{}-{}-{}", self.mint, self.role, self.incarnation)
+        }
+    }
+}
 
 /// Exact application demand identity for relay admission and withdrawal.
 ///
@@ -39,7 +77,7 @@ pub type SkeletonHash = DescriptorHash;
 /// than a different durable selection. Relay lifecycle cannot erase them: an
 /// already-running live request does not backfill a newly-requested older
 /// page, and a bounded request is not interchangeable with an unbounded one.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct DemandKey {
     coverage: CoverageKey,
     since: Option<u64>,
@@ -61,8 +99,8 @@ impl DemandKey {
         }
     }
 
-    pub fn coverage(self) -> CoverageKey {
-        self.coverage
+    pub fn coverage(&self) -> CoverageKey {
+        self.coverage.clone()
     }
 }
 
@@ -70,82 +108,35 @@ impl DemandKey {
 /// id sharing this type. Folded in before the counter, so an allocated token
 /// can never coincide with a `Skeleton`-derived one ([`SubId::for_wire`], the
 /// prober's namespace) even in principle.
-const ALLOCATED_DOMAIN: u8 = 0xa1;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct SubId(pub RelayUrl, pub SkeletonHash, pub Option<nostr::PublicKey>);
+pub struct SubId(pub RelayUrl, pub WireToken, pub Option<nostr::PublicKey>);
 
 impl SubId {
-    /// Mint a FRESH, never-before-used wire token for `relay` under
-    /// `source` and authenticated identity.
+    /// Mint a FRESH, never-before-used wire token for `relay` under this
+    /// authenticated identity.
     ///
     /// `counter` is the router's own monotonic mint counter, so no token is
-    /// ever recycled within a `Router`'s lifetime — reuse would let a stale
+    /// ever recycled within a `Router`'s lifetime -- reuse would let a stale
     /// in-flight EOSE for a closed subscription land on a reopened one's
     /// attribution FIFO. A process restart is safe without any persistence:
     /// connections drop, and `nmp-engine`'s `AttributionState::clear_session`
     /// wipes every stale wire mapping for the session.
     ///
-    /// `root` is a caller-supplied chain root (the router hoists
-    /// `ConcreteFilter::default().hash()` once, rather than paying a JSON
-    /// encode plus BLAKE3 per mint). It carries no filter meaning: the token's
-    /// uniqueness comes entirely from `counter`, and `root` merely gives the
-    /// `fold_byte` chain a `DescriptorHash` to start from without this crate
-    /// taking a direct `blake3` dependency.
-    ///
-    /// `fold_context` is applied LAST, exactly as [`Self::for_wire`] does, so
-    /// the #106 anti-alias property survives allocation: identical relay +
-    /// filter under different [`ReadRouting`] can never share a token,
-    /// belt-and-braces on top of the assignment's own injectivity.
-    ///
-    /// Deliberately NOT derived from anything mutable the relay advertises:
-    /// no NIP-11 field (`max_subid_length` and friends) feeds this, so a relay
-    /// changing its advertisement can never move an established id.
-    pub(crate) fn allocate(
+    /// The token is the counter and nothing else. It carries no filter
+    /// meaning, no routing meaning and no identity meaning -- those live in
+    /// the `SubId`'s other two fields, where they can be READ rather than
+    /// recovered from a digest. The plan's injectivity comes from the
+    /// assignment in `wire_id::assign`, not from any property of the token.
+    pub fn allocate(
         relay: RelayUrl,
-        source: &ReadRouting,
+        _source: &ReadRouting,
         authenticate_as: Option<nostr::PublicKey>,
-        root: DescriptorHash,
         counter: u64,
     ) -> Self {
-        let mut hash = fold_byte(root, ALLOCATED_DOMAIN);
-        for byte in counter.to_be_bytes() {
-            hash = fold_byte(hash, byte);
-        }
-        SubId(relay, fold_context(hash, source, authenticate_as), authenticate_as)
+        SubId(relay, WireToken::new(counter), authenticate_as)
     }
 
-    /// DERIVE a sub-id for `filter` on `relay` from the filter's OWN skeleton
-    /// (authors erased) folded with its [`ReadRouting`] and authenticated identity
-    /// (#106, atlas's 3rd proof floor).
-    ///
-    /// **This is NO LONGER how planned subscriptions are identified.** The
-    /// plan allocates opaque tokens instead ([`Self::allocate`]), because
-    /// erasing `authors` from the identity is exactly what let two filters
-    /// the coalescer REFUSED to merge collide onto one subscription, with
-    /// `diff_plans` then silently dropping one of them (#899). Erasure bought
-    /// author-churn stability without previous-plan state; it paid for it
-    /// with injectivity, and injectivity is not optional.
-    ///
-    /// What still uses this: the negentropy PROBER
-    /// (`nmp-engine::negentropy::Prober::begin_probe`), which mints protocol-
-    /// support probe ids into its own `pending` map and never touches
-    /// coverage or attribution identity. That namespace is domain-separated
-    /// from allocated tokens by [`ALLOCATED_DOMAIN`]. Folding context in is
-    /// what keeps two DIFFERENT-context atoms sharing a relay+skeleton from
-    /// colliding onto the SAME sub-id — doing so would re-alias their
-    /// inflight attribution FIFO (`nmp-engine::core::attribution
-    /// ::AttributionState`) exactly the way the per-context `CoverageKey`
-    /// widening was built to prevent.
-    pub fn for_wire(
-        relay: RelayUrl,
-        filter: &ConcreteFilter,
-        source: &ReadRouting,
-        authenticate_as: Option<nostr::PublicKey>,
-    ) -> Self {
-        let (skeleton, _) = Skeleton::of(filter);
-        SubId(relay, fold_context(skeleton.hash(), source, authenticate_as), authenticate_as)
-    }
 }
 
 /// A single wire request: the (possibly coalesced/widened) filter plus why
@@ -334,13 +325,14 @@ mod tests {
         nmp_router_testkit::test_relay(n)
     }
 
-    fn plan_of(relay: RelayUrl, filter: ConcreteFilter) -> RelayPlan {
-        let sub_id = SubId::for_wire(
-            relay.clone(),
-            &filter,
-            &ReadRouting::Auto,
-            None,
-        );
+    /// `token` names WHICH subscription this plan holds. It is explicit
+    /// because a wire token is allocated, not derived: two plans share a
+    /// token when they are the same subscription whose filter changed, and
+    /// differ when one subscription went away and another appeared. That
+    /// distinction used to be implicit in whether two filters happened to
+    /// hash alike.
+    fn plan_of(relay: RelayUrl, filter: ConcreteFilter, token: u64) -> RelayPlan {
+        let sub_id = SubId::allocate(relay.clone(), &ReadRouting::Auto, None, token);
         let req = WireReq {
             sub_id,
             filter,
@@ -358,15 +350,15 @@ mod tests {
 
     #[test]
     fn identical_plans_diff_to_nothing() {
-        let plan = plan_of(relay(0), cf(1, &["aa"]));
+        let plan = plan_of(relay(0), cf(1, &["aa"]), 1);
         let delta = diff_plans(&plan, &plan.clone());
         assert!(delta.ops.is_empty());
     }
 
     #[test]
     fn author_churn_same_skeleton_emits_one_overwriting_req() {
-        let prev = plan_of(relay(0), cf(1, &["aa", "bb"]));
-        let next = plan_of(relay(0), cf(1, &["aa", "cc"]));
+        let prev = plan_of(relay(0), cf(1, &["aa", "bb"]), 1);
+        let next = plan_of(relay(0), cf(1, &["aa", "cc"]), 1);
         let delta = diff_plans(&prev, &next);
         assert_eq!(delta.ops.len(), 1);
         let (r, ops) = &delta.ops[0];
@@ -379,8 +371,8 @@ mod tests {
 
     #[test]
     fn vanished_sub_emits_close_new_sub_emits_req() {
-        let prev = plan_of(relay(0), cf(1, &["aa"]));
-        let next = plan_of(relay(0), cf(2, &["aa"]));
+        let prev = plan_of(relay(0), cf(1, &["aa"]), 1);
+        let next = plan_of(relay(0), cf(2, &["aa"]), 2);
         let delta = diff_plans(&prev, &next);
         assert_eq!(delta.ops.len(), 1);
         let (_, ops) = &delta.ops[0];
@@ -391,8 +383,8 @@ mod tests {
 
     #[test]
     fn untouched_relay_never_appears_in_delta() {
-        let mut prev = plan_of(relay(0), cf(1, &["aa"]));
-        let next_only = plan_of(relay(1), cf(1, &["bb"]));
+        let mut prev = plan_of(relay(0), cf(1, &["aa"]), 1);
+        let next_only = plan_of(relay(1), cf(1, &["bb"]), 2);
         prev.reqs.extend(next_only.reqs.clone());
 
         let mut next = prev.clone();
@@ -400,12 +392,7 @@ mod tests {
         next.reqs.insert(
             RelaySessionKey::unauthenticated(relay(1)),
             vec![WireReq {
-                sub_id: SubId::for_wire(
-                    relay(1),
-                    &cf(1, &["bb", "cc"]),
-                    &ReadRouting::Auto,
-                    None,
-                ),
+                sub_id: SubId::allocate(relay(1), &ReadRouting::Auto, None, 9),
                 filter: cf(1, &["bb", "cc"]),
                 routing: ReadRouting::Auto,
                 provenance: BTreeSet::new(),
@@ -420,61 +407,4 @@ mod tests {
         assert_eq!(delta.ops[0].0, RelaySessionKey::unauthenticated(relay(1)));
     }
 
-    /// #106/atlas's 3rd proof floor: the identical relay+filter under
-    /// DIFFERENT `ReadRouting` must mint DIFFERENT `SubId`s. Before this
-    /// fix, `SubId::for_filter` keyed purely on (relay, skeleton), so two
-    /// distinct-context atoms sharing a filter would collapse onto ONE
-    /// inflight attribution FIFO (`nmp-engine::core::attribution`),
-    /// crediting one context's EOSE to the other's `AcquisitionEvidence` --
-    /// the wire-layer twin of the store-side `CoverageKey` anti-alias.
-    #[test]
-    fn for_wire_distinguishes_identical_filters_under_different_read_routing() {
-        let filter = cf(1, &["aa"]);
-        let auto_sub =
-            SubId::for_wire(relay(0), &filter, &ReadRouting::Auto, None);
-        let explicit_sub = SubId::for_wire(
-            relay(0),
-            &filter,
-            &ReadRouting::Explicit(vec![relay(1)]),
-            None,
-        );
-        assert_ne!(
-            auto_sub, explicit_sub,
-            "identical relay+filter under different ReadRouting must never share a SubId"
-        );
-    }
-
-    /// Two `Explicit` routings naming DIFFERENT relay sets are different
-    /// contexts even when asked of the same relay: `wss://a` also-asked-of
-    /// `wss://b` is not the same demand as `wss://a` alone.
-    #[test]
-    fn for_wire_distinguishes_explicit_routings_with_different_relay_sets() {
-        let filter = cf(1, &["aa"]);
-        let one = SubId::for_wire(
-            relay(0),
-            &filter,
-            &ReadRouting::Explicit(vec![relay(0)]),
-            None,
-        );
-        let two = SubId::for_wire(
-            relay(0),
-            &filter,
-            &ReadRouting::Explicit(vec![relay(0), relay(1)]),
-            None,
-        );
-        assert_ne!(one, two);
-    }
-
-    /// Author churn under a FIXED context still reuses the same `SubId`
-    /// (the property `for_wire`'s doc promises is unchanged by folding in
-    /// context) -- context-folding widens WHAT distinguishes two subs, it
-    /// never narrows the existing skeleton-stability guarantee.
-    #[test]
-    fn for_wire_author_churn_same_context_reuses_sub_id() {
-        let a = cf(1, &["aa", "bb"]);
-        let b = cf(1, &["aa", "cc"]);
-        let sub_a = SubId::for_wire(relay(0), &a, &ReadRouting::Auto, None);
-        let sub_b = SubId::for_wire(relay(0), &b, &ReadRouting::Auto, None);
-        assert_eq!(sub_a, sub_b);
-    }
 }

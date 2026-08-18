@@ -81,7 +81,7 @@ fn coverage_claim_keys(atom: &ContextualAtom) -> BTreeSet<CoverageKey> {
 /// The key must be there. `is_some_and` used to turn "this handle's refcount
 /// for a key it demonstrably owns is missing" into a quiet "nothing was
 /// released", which is the mirror already being broken with nothing saying so.
-fn release_ref<K: Ord + Copy + std::fmt::Debug>(refs: &mut BTreeMap<K, usize>, key: K) -> bool {
+fn release_ref<K: Ord + Clone + std::fmt::Debug>(refs: &mut BTreeMap<K, usize>, key: K) -> bool {
     let count = refs
         .get_mut(&key)
         .unwrap_or_else(|| panic!("a handle owning {key:?} owns a refcount for it"));
@@ -205,7 +205,7 @@ impl WireOwnership {
     /// Add one owner of `atom`'s logical demand.
     pub(super) fn retain(&mut self, atom: &ContextualAtom) -> AtomRetained {
         let key = DemandKey::for_atom(atom);
-        let evidence = self.routing_evidence_owner_counts.entry(key).or_default();
+        let evidence = self.routing_evidence_owner_counts.entry(key.clone()).or_default();
         let mut evidence_grew = false;
         for fact in &atom.routing_evidence {
             let count = evidence.entry(fact.clone()).or_insert(0);
@@ -218,7 +218,7 @@ impl WireOwnership {
 
         let entry = self
             .owner_counts
-            .entry(key)
+            .entry(key.clone())
             .or_insert_with(|| (atom.clone(), 0));
         entry.1 = entry
             .1
@@ -322,12 +322,12 @@ impl WireOwnership {
         let mut coverage_refs: BTreeMap<CoverageKey, usize> = BTreeMap::new();
         for atom in &atoms {
             let demand = DemandKey::for_atom(atom);
-            *demand_refs.entry(demand).or_insert(0) += 1;
-            self.handles_by_demand.entry(demand).or_default().insert(id);
+            *demand_refs.entry(demand.clone()).or_insert(0) += 1;
+            self.handles_by_demand.entry(demand.clone()).or_default().insert(id);
             for claim_key in coverage_claim_keys(atom) {
-                *coverage_refs.entry(claim_key).or_insert(0) += 1;
+                *coverage_refs.entry(claim_key.clone()).or_insert(0) += 1;
                 self.handles_by_coverage
-                    .entry(claim_key)
+                    .entry(claim_key.clone())
                     .or_default()
                     .insert(id);
             }
@@ -391,11 +391,11 @@ impl WireOwnership {
             return HandleAtomRemoval::default();
         }
 
-        let demand_released = release_ref(
+        let demand_released = release_ref.clone()(
             self.demand_refs_by_handle
                 .get_mut(&handle)
                 .expect("a handle owning atoms owns per-demand refcounts"),
-            key,
+            key.clone(),
         );
         if demand_released {
             discard_edge(&mut self.handles_by_demand, &key, handle);
@@ -403,11 +403,11 @@ impl WireOwnership {
         #[cfg(any(test, feature = "bench-instrumentation"))]
         let claims_examined = departing_claims.len();
         for claim_key in departing_claims {
-            let released = release_ref(
+            let released = release_ref.clone()(
                 self.coverage_refs_by_handle
                     .get_mut(&handle)
                     .expect("a handle owning atoms owns per-claim refcounts"),
-                claim_key,
+                claim_key.clone(),
             );
             if released {
                 discard_edge(&mut self.handles_by_coverage, &claim_key, handle);
@@ -443,7 +443,7 @@ impl WireOwnership {
     pub(super) fn live_demands(&self) -> impl Iterator<Item = (DemandKey, &ContextualAtom)> {
         self.owner_counts
             .iter()
-            .map(|(key, (atom, _))| (*key, atom))
+            .map(|(key, (atom, _))| (key.clone(), atom))
     }
 
     /// Every live demand's effective atom and exact owner count.
@@ -609,9 +609,9 @@ impl WireOwnership {
             let coverage_refs = expected_coverage_refs.entry(*id).or_default();
             for atom in atoms {
                 let key = DemandKey::for_atom(atom);
-                *demand_refs.entry(key).or_insert(0) += 1;
-                *expected_owner_counts.entry(key).or_insert(0) += 1;
-                let evidence = expected_evidence.entry(key).or_default();
+                *demand_refs.entry(key.clone()).or_insert(0) += 1;
+                *expected_owner_counts.entry(key.clone()).or_insert(0) += 1;
+                let evidence = expected_evidence.entry(key.clone()).or_default();
                 for fact in &atom.routing_evidence {
                     *evidence.entry(fact.clone()).or_insert(0) += 1;
                 }
@@ -621,7 +621,7 @@ impl WireOwnership {
                     .insert(*id);
                 expected_by_demand.entry(key).or_default().insert(*id);
                 for claim_key in coverage_claim_keys(atom) {
-                    *coverage_refs.entry(claim_key).or_insert(0) += 1;
+                    *coverage_refs.entry(claim_key.clone()).or_insert(0) += 1;
                     expected_by_coverage
                         .entry(claim_key)
                         .or_default()
@@ -657,7 +657,7 @@ impl WireOwnership {
         let actual_owner_counts: BTreeMap<_, _> = self
             .owner_counts
             .iter()
-            .map(|(key, (_, count))| (*key, *count))
+            .map(|(key, (_, count))| (key.clone(), *count))
             .collect();
         assert_eq!(
             actual_owner_counts, expected_owner_counts,

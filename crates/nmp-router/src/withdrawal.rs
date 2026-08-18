@@ -97,7 +97,7 @@ impl Router {
             let Some(active_atom) = self.active_demands.remove(&key) else {
                 continue;
             };
-            uncovered_authors_changed |= self.remove_uncovered_demand(key);
+            uncovered_authors_changed |= self.remove_uncovered_demand(key.clone());
             for author in route::outbox_authors(&active_atom.filter, &active_atom.routing) {
                 let remove = self
                     .active_outbox_authors
@@ -112,7 +112,7 @@ impl Router {
             }
             for request in self
                 .requests_by_demand
-                .get(&key)
+                .get(&key.clone())
                 .cloned()
                 .unwrap_or_default()
             {
@@ -130,7 +130,7 @@ impl Router {
                     continue;
                 }
 
-                let contribution = self.remove_request_owner_contribution(&request, key);
+                let contribution = self.remove_request_owner_contribution(&request, key.clone());
                 debug_assert!(
                     contribution.owner_added,
                     "an active request edge must own exact local metadata"
@@ -152,7 +152,7 @@ impl Router {
                     .metadata_provenance_entries_touched
                     .saturating_add(contribution.provenance.len() as u64);
 
-                if let Some(requests) = self.requests_by_demand.get_mut(&key) {
+                if let Some(requests) = self.requests_by_demand.get_mut(&key.clone()) {
                     requests.remove(&request);
                     if requests.is_empty() {
                         self.requests_by_demand.remove(&key);
@@ -160,7 +160,7 @@ impl Router {
                 }
                 if !self
                     .request_demand_coverage_owner_counts
-                    .contains_key(&(request.clone(), key.coverage()))
+                    .contains_key(&(request.clone(), key.coverage().clone()))
                 {
                     if let Some(coverage) = self.request_coverage_by_key.get_mut(&request) {
                         coverage.remove(&key.coverage());
@@ -183,7 +183,7 @@ impl Router {
                 }
                 let position = self.request_position_by_key[&request];
                 let retained = &mut self.prev_plan.reqs.get_mut(&request.0).unwrap()[position];
-                retained.owner_demands.remove(&key);
+                retained.owner_demands.remove(&key.clone());
                 for claim in &contribution.coverage_claims {
                     retained.coverage_claims.remove(claim);
                 }
@@ -198,10 +198,10 @@ impl Router {
                     sub_id: request.1.clone(),
                     filter_hash: retained.filter.hash(),
                     removed_coverage_claims: contribution.coverage_claims,
-                    removed_owner_demands: BTreeSet::from([key]),
+                    removed_owner_demands: BTreeSet::from([key.clone()]),
                 });
             }
-            if self.remove_refusal_owners(key) {
+            if self.remove_refusal_owners(key.clone()) {
                 limited_changed = true;
                 changed_coverage.insert(key.coverage());
             }
@@ -259,7 +259,7 @@ impl Router {
                 .physical_coverage_edges_released
                 .saturating_add(self.remove_physical_request_claims(&request_key) as u64);
             for demand in &removed.owner_demands {
-                self.remove_request_owner_contribution(&request_key, *demand);
+                self.remove_request_owner_contribution(&request_key, demand.clone());
             }
             debug_assert!(!self.request_owner_contributions.contains_key(&request_key));
             for assignment in removed.coverage_assignments {

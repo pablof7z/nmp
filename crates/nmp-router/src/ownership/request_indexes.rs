@@ -25,12 +25,12 @@ impl Router {
                     .get(demand)
                     .map(|atom| Self::derive_request_owner_contribution(atom, request))
                     .unwrap_or_default();
-                (*demand, contribution)
+                (demand.clone(), contribution)
             })
             .collect();
         for demand in contributions.keys() {
             self.requests_by_physical_demand
-                .entry(*demand)
+                .entry(demand.clone())
                 .or_default()
                 .insert(request_key.clone());
         }
@@ -57,7 +57,7 @@ impl Router {
         );
         for claim in claims {
             self.requests_by_physical_claim
-                .entry(*claim)
+                .entry(claim.clone())
                 .or_default()
                 .insert(request_key.clone());
         }
@@ -216,7 +216,7 @@ impl Router {
         self.remove_physical_request_claims(&request_key);
         self.active_by_request.remove(&request_key);
         for demand in &request.owner_demands {
-            self.remove_request_owner_contribution(&request_key, *demand);
+            self.remove_request_owner_contribution(&request_key, demand.clone());
             self.full_metadata_work.owner_edges_visited = self
                 .full_metadata_work
                 .owner_edges_visited
@@ -258,7 +258,7 @@ impl Router {
             .filter_map(|demand| {
                 self.active_demands.get(demand).map(|atom| {
                     (
-                        *demand,
+                        demand.clone(),
                         Self::derive_request_owner_contribution(atom, request),
                     )
                 })
@@ -270,7 +270,7 @@ impl Router {
                 .owner_edges_visited
                 .saturating_add(1);
             self.requests_by_demand
-                .entry(*demand)
+                .entry(demand.clone())
                 .or_default()
                 .insert(request_key.clone());
             active += usize::from(self.active_demands.contains_key(demand));
@@ -297,7 +297,7 @@ impl Router {
                 .assignment_edges_visited
                 .saturating_add(1);
             self.coverage_assignment_requests
-                .entry(*assignment)
+                .entry(assignment.clone())
                 .or_default()
                 .insert(request_key.clone());
         }
@@ -317,7 +317,7 @@ impl Router {
                 .owner_edges_visited
                 .saturating_add(1);
             self.requests_by_demand
-                .entry(*demand)
+                .entry(demand.clone())
                 .or_default()
                 .insert(request_key.clone());
             if self.active_demands.contains_key(demand) {
@@ -337,7 +337,7 @@ impl Router {
                 .assignment_edges_visited
                 .saturating_add(1);
             self.coverage_assignment_requests
-                .entry(*assignment)
+                .entry(assignment.clone())
                 .or_default()
                 .insert(request_key.clone());
         }

@@ -137,6 +137,11 @@ pub struct Prober {
     /// [`probed`]: Self::probed
     states: HashMap<RelayUrl, ProbeState>,
     pending: HashMap<(RelayUrl, String), SubId>,
+    /// This prober's own monotonic mint counter. Probe ids are ALLOCATED,
+    /// never derived from the filter being probed: the id's job is to be a
+    /// name the relay echoes back on `NEG-MSG`/`NEG-ERR`, and it lives only
+    /// in `pending`, touching no coverage or attribution identity.
+    next_probe: u64,
 }
 
 impl Default for Prober {
@@ -150,6 +155,7 @@ impl Prober {
         Self {
             states: HashMap::new(),
             pending: HashMap::new(),
+            next_probe: 0,
         }
     }
 
@@ -201,12 +207,8 @@ impl Prober {
         // separate from `core::attribution`'s bookkeeping, so a fixed
         // context is harmless -- it never touches coverage/attribution
         // identity at all.
-        let sub_id = SubId::for_wire(
-            relay.clone(),
-            &filter,
-            &ReadRouting::Auto,
-            None,
-        );
+        self.next_probe = self.next_probe.saturating_add(1);
+        let sub_id = SubId::allocate(relay.clone(), &ReadRouting::Auto, None, self.next_probe);
         let wire_id = crate::core::wire_sub_id_string(&sub_id);
 
         // An empty, sealed storage: a probe measures PROTOCOL support, not

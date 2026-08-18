@@ -32,7 +32,7 @@ impl AttributionState {
         let send_id = AttributionSendId(self.next_send_id);
         self.next_send_id = self.next_send_id.wrapping_add(1);
         for key in &coverage_claims {
-            *self.inflight_shape_owner_counts.entry(*key).or_insert(0) += 1;
+            *self.inflight_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
         }
         let snapshot = AttributionSnapshot {
             send_id,
@@ -290,7 +290,7 @@ impl AttributionState {
         let claims = snapshot
             .coverage_claims
             .iter()
-            .copied()
+            .cloned()
             .map(|key| (key, interval))
             .collect();
         Some(self.complete_snapshot(sub_id, snapshot, coverage_authority, claims))
@@ -310,7 +310,7 @@ impl AttributionState {
                     .get(key)
                     .cloned()
                     .map(|atom| CompletedCoverageClaim {
-                        key: *key,
+                        key: key.clone(),
                         atom,
                         interval: *interval,
                     })
@@ -358,7 +358,7 @@ impl AttributionState {
                     self.inflight_shape_owner_counts.remove(key);
                 }
             }
-            self.remove_unowned_shape(*key);
+            self.remove_unowned_shape(key.clone());
         }
     }
 

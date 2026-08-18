@@ -26,7 +26,7 @@ impl Router {
             .coverage_assignments
             .iter()
             .filter(|(owner, _)| owner == &demand)
-            .copied()
+            .cloned()
             .collect();
         let authors = route::outbox_authors(&atom.filter, &atom.routing);
         let provenance = request
@@ -59,7 +59,7 @@ impl Router {
         self.request_owner_contributions
             .entry(request_key.clone())
             .or_default()
-            .entry(demand)
+            .entry(demand.clone())
             .or_default();
         let mut delta = RequestContributionDelta {
             owner_added,
@@ -73,16 +73,16 @@ impl Router {
                 .and_then(|owners| owners.get_mut(&demand))
                 .expect("request owner contribution was installed")
                 .coverage_claims
-                .insert(claim);
+                .insert(claim.clone());
             if !inserted {
                 continue;
             }
             let count = self
                 .request_claim_owner_counts
-                .entry((request_key.clone(), claim))
+                .entry((request_key.clone(), claim.clone()))
                 .or_insert(0);
             if *count == 0 {
-                delta.coverage_claims.insert(claim);
+                delta.coverage_claims.insert(claim.clone());
             }
             *count += 1;
         }
@@ -93,9 +93,9 @@ impl Router {
                 .and_then(|owners| owners.get_mut(&demand))
                 .expect("request owner contribution was installed")
                 .coverage_assignments
-                .insert(assignment)
+                .insert(assignment.clone())
             {
-                delta.coverage_assignments.insert(assignment);
+                delta.coverage_assignments.insert(assignment.clone());
             }
         }
         for provenance in contribution.provenance {
@@ -151,7 +151,7 @@ impl Router {
             ..RequestContributionDelta::default()
         };
         for claim in contribution.coverage_claims {
-            let count_key = (request_key.clone(), claim);
+            let count_key = (request_key.clone(), claim.clone());
             let remove = self
                 .request_claim_owner_counts
                 .get_mut(&count_key)
@@ -163,7 +163,7 @@ impl Router {
                 });
             if remove {
                 self.request_claim_owner_counts.remove(&count_key);
-                delta.coverage_claims.insert(claim);
+                delta.coverage_claims.insert(claim.clone());
             }
         }
         delta.coverage_assignments = contribution.coverage_assignments;
@@ -208,7 +208,7 @@ impl Router {
         // full `compile()` runs this against the real incumbent set. Either
         // way the count is exact, not a proxy.
         let mut removed = Vec::new();
-        for demand in self.active_demands.keys().copied() {
+        for demand in self.active_demands.keys().cloned() {
             self.admission_work.incumbent_active_entries_visited = self
                 .admission_work
                 .incumbent_active_entries_visited

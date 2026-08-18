@@ -104,7 +104,7 @@ fn apply_global_relay_cap(bag: &mut SessionBag, cap: usize) -> RelayCapOutcome {
             let coverage_assignments: BTreeSet<_> = by_source
                 .values()
                 .flatten()
-                .flat_map(|(_, _, ownership)| ownership.coverage_assignments.iter().copied())
+                .flat_map(|(_, _, ownership)| ownership.coverage_assignments.iter().cloned())
                 .collect();
             let secondary = by_source
                 .values()
@@ -142,12 +142,12 @@ fn apply_global_relay_cap(bag: &mut SessionBag, cap: usize) -> RelayCapOutcome {
     for session in &refused {
         if let Some(by_source) = bag.get(session) {
             for (_, _, ownership) in by_source.values().flatten() {
-                limited_demands.extend(ownership.owner_demands.iter().copied());
+                limited_demands.extend(ownership.owner_demands.iter().cloned());
                 refused_demands
                     .entry(session.clone())
                     .or_insert_with(BTreeSet::new)
-                    .extend(ownership.owner_demands.iter().copied());
-                refused_coverage_assignments.extend(ownership.coverage_assignments.iter().copied());
+                    .extend(ownership.owner_demands.iter().cloned());
+                refused_coverage_assignments.extend(ownership.coverage_assignments.iter().cloned());
             }
         }
     }
@@ -284,7 +284,7 @@ fn auto_ownership(
     let mut owner_demands: BTreeSet<_> = authors_by_demand
         .iter()
         .filter_map(|(demand, demand_authors)| {
-            (!authors.is_disjoint(demand_authors)).then_some(*demand)
+            (!authors.is_disjoint(demand_authors)).then_some(demand.clone())
         })
         .collect();
     if unbounded {
@@ -298,7 +298,7 @@ fn auto_ownership(
             authors_by_demand
                 .iter()
                 .filter_map(|(demand, demand_authors)| {
-                    demand_authors.is_empty().then_some(*demand)
+                    demand_authors.is_empty().then_some(demand.clone())
                 }),
         );
     }
@@ -307,7 +307,7 @@ fn auto_ownership(
         .flat_map(|(demand, demand_authors)| {
             coverage_authors
                 .intersection(demand_authors)
-                .map(|author| (*demand, *author))
+                .map(|author| (demand.clone(), *author))
         })
         .collect();
     EntryOwnership {
@@ -330,7 +330,6 @@ pub struct Router {
     /// Hoisted chain root for [`SubId::allocate`], so minting costs a handful
     /// of `fold_byte` calls rather than a JSON encode plus BLAKE3 each time.
     /// Carries no filter meaning -- see `SubId::allocate`.
-    mint_root: nmp_grammar::DescriptorHash,
     pub(crate) active_demands: BTreeMap<DemandKey, ContextualAtom>,
     pub(crate) requests_by_demand: BTreeMap<DemandKey, BTreeSet<RequestKey>>,
     pub(crate) active_by_request: BTreeMap<RequestKey, usize>,
@@ -371,7 +370,6 @@ impl Router {
             prev_plan: RelayPlan::default(),
             last_diag: Diagnostics::default(),
             next_token: 0,
-            mint_root: ConcreteFilter::default().hash(),
             active_demands: BTreeMap::new(),
             requests_by_demand: BTreeMap::new(),
             active_by_request: BTreeMap::new(),
@@ -447,10 +445,10 @@ impl Router {
                 AtomClass::Auto => {
                     let (skeleton, authors) = Skeleton::of(&atom.filter);
                     let demand = DemandKey::for_atom(atom);
-                    auto_authors_by_demand.insert(demand, authors.clone());
+                    auto_authors_by_demand.insert(demand.clone(), authors.clone());
                     let group = auto_groups.entry((skeleton, atom.authenticate_as)).or_default();
-                    group.demands.insert(demand);
-                    group.authors_by_demand.insert(demand, authors.clone());
+                    group.demands.insert(demand.clone());
+                    group.authors_by_demand.insert(demand.clone(), authors.clone());
                     group
                         .routing_evidence
                         .extend(atom.routing_evidence.iter().cloned());
@@ -556,12 +554,12 @@ impl Router {
                         coverage
                             .shortfall
                             .get(author)
-                            .copied()
+                            .cloned()
                             .map(|fact| (*author, fact))
                     })
                     .collect();
                 if !exact.is_empty() {
-                    uncovered_by_demand.insert(*demand, exact);
+                    uncovered_by_demand.insert(demand.clone(), exact);
                 }
             }
 
@@ -676,7 +674,7 @@ impl Router {
             // already recorded the shortfall regardless of whether this
             // lane fires — fallback is a lane, not coverage.
             let shortfall_authors: BTreeSet<PublicKey> =
-                coverage.shortfall.keys().copied().collect();
+                coverage.shortfall.keys().cloned().collect();
             let fallback = route::operator_fallback_routes(facts, &shortfall_authors);
             let fallback_ownership = auto_ownership(
                 skeleton,
@@ -745,7 +743,6 @@ impl Router {
         // byte-changing successor which request it replaces, but the
         // successor receives a fresh token and EngineCore offers it before
         // retiring the predecessor after the exact commit edge.
-        let mint_root = self.mint_root;
         let mut mint_counter = self.next_token;
         let mut reqs: BTreeMap<RelaySessionKey, Vec<WireReq>> = BTreeMap::new();
         let mut replacements: BTreeSet<RequestReplacement> = BTreeSet::new();
@@ -777,7 +774,7 @@ impl Router {
 
                 let assigned = wire_id::assign(&priors, &filters, || {
                     let sub_id =
-                        SubId::allocate(relay.clone(), &source, authenticate_as, mint_root, mint_counter);
+                        SubId::allocate(relay.clone(), &source, authenticate_as, mint_counter);
                     mint_counter += 1;
                     sub_id
                 });
@@ -826,7 +823,7 @@ impl Router {
                         self.prev_plan.reqs.get(&session),
                     );
                     for req in &refused {
-                        limited_demands.extend(req.owner_demands.iter().copied());
+                        limited_demands.extend(req.owner_demands.iter().cloned());
                     }
                     budget_refused_requests.extend(
                         refused
@@ -865,7 +862,7 @@ impl Router {
                     request
                         .coverage_assignments
                         .iter()
-                        .map(move |assignment| (*assignment, session.clone()))
+                        .map(move |assignment| (assignment.clone(), session.clone()))
                 })
             })
             .fold(BTreeMap::new(), |mut indexed, (assignment, session)| {
@@ -877,11 +874,11 @@ impl Router {
             });
         let refused_coverage_assignments: BTreeSet<_> = cap_refused_coverage_assignments
             .iter()
-            .copied()
+            .cloned()
             .chain(
                 budget_refused_requests
                     .iter()
-                    .flat_map(|(_, request)| request.coverage_assignments.iter().copied()),
+                    .flat_map(|(_, request)| request.coverage_assignments.iter().cloned()),
             )
             .collect();
         for (demand, authors) in &auto_authors_by_demand {
@@ -889,12 +886,12 @@ impl Router {
             let exact: BTreeMap<_, _> = authors
                 .iter()
                 .filter_map(|author| {
-                    let assignment = (*demand, *author);
+                    let assignment = (demand.clone(), *author);
                     let achieved = selected_assignments
                         .get(&assignment)
                         .map_or(0, BTreeSet::len);
                     reduce_outbox_shortfall(
-                        intrinsic.get(author).copied(),
+                        intrinsic.get(author).cloned(),
                         achieved,
                         refused_coverage_assignments.contains(&assignment),
                     )
@@ -902,7 +899,7 @@ impl Router {
                 })
                 .collect();
             if !exact.is_empty() {
-                uncovered_by_demand.insert(*demand, exact);
+                uncovered_by_demand.insert(demand.clone(), exact);
             }
         }
 
@@ -1016,7 +1013,7 @@ impl Router {
                     .filter_map(|demand| {
                         self.active_demands.get(demand).map(|atom| {
                             (
-                                *demand,
+                                demand.clone(),
                                 Self::derive_request_owner_contribution(atom, &candidate),
                             )
                         })
@@ -1033,20 +1030,20 @@ impl Router {
                     );
                 let mut added_coverage_claims = BTreeSet::new();
                 for claim in candidate.coverage_claims {
-                    if request.coverage_claims.insert(claim) {
-                        added_coverage_claims.insert(claim);
+                    if request.coverage_claims.insert(claim.clone()) {
+                        added_coverage_claims.insert(claim.clone());
                     }
                 }
                 let mut added_owner_demands = BTreeSet::new();
                 for demand in candidate.owner_demands {
-                    if request.owner_demands.insert(demand) {
-                        added_owner_demands.insert(demand);
+                    if request.owner_demands.insert(demand.clone()) {
+                        added_owner_demands.insert(demand.clone());
                     }
                 }
                 let mut added_assignments = BTreeSet::new();
                 for assignment in candidate.coverage_assignments {
-                    if request.coverage_assignments.insert(assignment) {
-                        added_assignments.insert(assignment);
+                    if request.coverage_assignments.insert(assignment.clone()) {
+                        added_assignments.insert(assignment.clone());
                     }
                 }
                 let mut added_provenance = BTreeSet::new();
