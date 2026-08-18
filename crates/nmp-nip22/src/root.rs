@@ -6,7 +6,8 @@
 //! never one variant per NIP-73 *namespace* (that restraint lives in
 //! [`Nip73`] instead).
 
-use nostr::{EventId, PublicKey};
+use nostr::nips::nip01::Coordinate;
+use nostr::{EventId, Kind, PublicKey};
 
 use nmp_nip73::Nip73;
 
@@ -47,7 +48,12 @@ impl CommentRoot {
     /// The address coordinate string (`<kind>:<pubkey-hex>:<identifier>`)
     /// for [`Self::Address`] -- NIP-01's canonical `a`-tag value shape.
     pub fn address_coordinate(kind: u16, author: &PublicKey, identifier: &str) -> String {
-        format!("{kind}:{}:{identifier}", author.to_hex())
+        Coordinate {
+            kind: Kind::from(kind),
+            public_key: *author,
+            identifier: identifier.to_string(),
+        }
+        .to_string()
     }
 }
 
