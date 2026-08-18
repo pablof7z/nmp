@@ -24,7 +24,7 @@ fn source() -> SourceEvidence {
     SourceEvidence {
         plan: SourcePlanId([3; 32]),
         access: AccessContextId([4; 32]),
-        qualified: QualifiedSource::Absent,
+        qualified: QualifiedSource::Unresolved,
     }
 }
 
@@ -32,7 +32,7 @@ fn starting_source() -> StartingSourceRequirement {
     StartingSourceRequirement {
         plan: SourcePlanId([3; 32]),
         access: AccessContextId([4; 32]),
-        source: StartingSource::Absent,
+        source: StartingSource::CapabilityDefault,
     }
 }
 

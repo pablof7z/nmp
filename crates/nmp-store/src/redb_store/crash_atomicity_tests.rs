@@ -134,7 +134,7 @@ fn semantic_source() -> crate::SourceEvidence {
     crate::SourceEvidence {
         plan: crate::SourcePlanId([3; 32]),
         access: crate::AccessContextId([4; 32]),
-        qualified: crate::QualifiedSource::Absent,
+        qualified: crate::QualifiedSource::Unresolved,
     }
 }
 
@@ -150,7 +150,7 @@ fn semantic_accept_write() -> AcceptWrite {
             starting_source: crate::StartingSourceRequirement {
                 plan: crate::SourcePlanId([3; 32]),
                 access: crate::AccessContextId([4; 32]),
-                source: crate::StartingSource::Absent,
+                source: crate::StartingSource::CapabilityDefault,
             },
             source: semantic_source(),
             source_event: None,
