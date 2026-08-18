@@ -595,7 +595,7 @@ pub(super) fn record_coverage(
         let mut coverage = write_txn.open_table(COVERAGE).map_err(persist_err)?;
         for (atom, session, proven) in claims {
             let key = compute_coverage_key(atom);
-            let row_key = RedbStore::coverage_row_key(key, session);
+            let row_key = RedbStore::coverage_row_key(&key, session);
             let existing = coverage
                 .get(row_key.as_str())
                 .map_err(persist_err)?
@@ -657,7 +657,7 @@ pub(super) fn get_coverage(
         feature = "test-instrumentation"
     ))]
     store.coverage_reads.fetch_add(1, Ordering::Relaxed);
-    let row_key = RedbStore::coverage_row_key(key, session);
+    let row_key = RedbStore::coverage_row_key(&key, session);
     let read_txn = store.database()?.begin_read().map_err(persist_err)?;
     let coverage = read_txn.open_table(COVERAGE).map_err(persist_err)?;
     coverage

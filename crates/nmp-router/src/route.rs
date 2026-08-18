@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nmp_grammar::{
-    ConcreteFilter, DescriptorHash, ReadRouting, RoutingEvidence, RoutingEvidenceKind,
+    ConcreteFilter, ReadRouting, RoutingEvidence, RoutingEvidenceKind,
 };
 
 use crate::facts::{AuthorRouteState, Lane, LanedRelay, PublicKey, RelayUrl, RoutingFacts};
@@ -58,9 +58,6 @@ impl Skeleton {
         filter
     }
 
-    pub fn hash(&self) -> DescriptorHash {
-        self.0.hash()
-    }
 }
 
 /// Which routing path an atom takes through `compile`. There are exactly

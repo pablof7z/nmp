@@ -48,8 +48,8 @@ impl Router {
         for author in route::outbox_authors(&atom.filter, &atom.routing) {
             *self.active_outbox_authors.entry(author).or_insert(0) += 1;
         }
-        self.active_demands.insert(key, atom);
-        for request in self.requests_by_demand.get(&key).into_iter().flatten() {
+        self.active_demands.insert(key.clone(), atom);
+        for request in self.requests_by_demand.get(&key.clone()).into_iter().flatten() {
             let count = self
                 .active_by_request
                 .get_mut(request)
@@ -98,7 +98,7 @@ impl Router {
         self.admission_work.cohort_compiles = self.admission_work.cohort_compiles.saturating_add(1);
         let mut changed_coverage = BTreeSet::new();
         for demand in pending.iter().map(DemandKey::for_atom) {
-            if self.remove_refusal_owners(demand) {
+            if self.remove_refusal_owners(demand.clone()) {
                 changed_coverage.insert(demand.coverage());
             }
         }
@@ -282,7 +282,7 @@ impl Router {
         }
 
         for (session, total) in candidate_request_totals {
-            let refused = budget_refused_counts.get(&session).copied().unwrap_or(0);
+            let refused = budget_refused_counts.get(&session).cloned().unwrap_or(0);
             if let Some(shortfall) = self.prev_plan.subscription_shortfalls.get_mut(&session) {
                 if let Some(current_budget) = budget.max_subscriptions(&session.relay) {
                     shortfall.budget = current_budget;
@@ -298,7 +298,7 @@ impl Router {
                             .expect("a subscription refusal requires an advertised budget"),
                         planned: existing_request_counts
                             .get(&session)
-                            .copied()
+                            .cloned()
                             .unwrap_or(0)
                             .saturating_add(total),
                         refused,
@@ -326,7 +326,7 @@ impl Router {
             refresh_refusal_diagnostics(
                 self,
                 session,
-                refusal_classes_before.get(session).copied().flatten(),
+                refusal_classes_before.get(session).cloned().flatten(),
             );
         }
         let mut uncovered_changed = false;
@@ -338,7 +338,7 @@ impl Router {
                 .unwrap_or_default();
             {
                 for author in route::outbox_authors(&atom.filter, &atom.routing) {
-                    let assignment = (demand, author);
+                    let assignment = (demand.clone(), author);
                     let achieved = self
                         .coverage_assignment_requests
                         .get(&assignment)
@@ -351,7 +351,7 @@ impl Router {
                         .refused_coverage_assignments_by_demand
                         .get(&demand)
                         .is_some_and(|authors| authors.contains(&author));
-                    match reduce_outbox_shortfall(facts.get(&author).copied(), achieved, refused) {
+                    match reduce_outbox_shortfall(facts.get(&author).cloned(), achieved, refused) {
                         Some(fact) => {
                             facts.insert(author, fact);
                         }
@@ -361,7 +361,7 @@ impl Router {
                     }
                 }
             }
-            uncovered_changed |= self.replace_uncovered_demand(demand, facts);
+            uncovered_changed |= self.replace_uncovered_demand(demand.clone(), facts);
         }
         let diagnostics_changed =
             !changed_coverage.is_empty() || uncovered_changed || metadata_diagnostics_changed;

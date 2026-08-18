@@ -11,7 +11,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use nmp_grammar::{ConcreteFilter, DescriptorHash};
+use nmp_grammar::ConcreteFilter;
 use nmp_store::CoverageKey;
 
 use crate::component::{sole_difference, Component};
@@ -146,7 +146,7 @@ impl MergeRule for StructuralUnion {
             Component::Kinds => {
                 let (a_kinds, b_kinds) = both_constrain(&a.kinds, &b.kinds)?;
                 let mut kinds = a_kinds.clone();
-                kinds.extend(b_kinds.iter().copied());
+                kinds.extend(b_kinds.iter().cloned());
                 merged.kinds = Some(kinds);
             }
             Component::Authors => {
@@ -369,19 +369,18 @@ impl RuleRegistry {
     /// filter's matches — the SAME real mechanism that already threads
     /// `provenance` through a merge.
     pub(crate) fn coalesce_with(&self, entries: Vec<Entry>) -> Vec<Entry> {
-        // 1. Exact-canonical dedup by hash (the trivially-correct floor).
-        let mut by_hash: BTreeMap<DescriptorHash, Entry> = BTreeMap::new();
+        // 1. Exact dedup by filter VALUE (the trivially-correct floor).
+        let mut by_filter: BTreeMap<ConcreteFilter, Entry> = BTreeMap::new();
         for (f, prov, ownership) in entries {
-            let h = f.hash();
-            by_hash
-                .entry(h)
+            by_filter
+                .entry(f.clone())
                 .and_modify(|(_, p, retained)| {
                     p.extend(prov.clone());
                     retained.extend(ownership.clone());
                 })
                 .or_insert((f, prov, ownership));
         }
-        let mut current: Vec<Entry> = by_hash.into_values().collect();
+        let mut current: Vec<Entry> = by_filter.into_values().collect();
 
         // 2. Fixed-point pairwise merge across every registered rule.
         self.merge_fixed_point(&mut current);
@@ -421,16 +420,16 @@ impl RuleRegistry {
     /// `provenance` and `coverage_claims`. See `coalesce_with` step 3 for why this
     /// exists and why it must preserve order.
     fn dedup_survivors(entries: &mut Vec<Entry>) {
-        let mut first_index: BTreeMap<DescriptorHash, usize> = BTreeMap::new();
+        let mut first_index: BTreeMap<ConcreteFilter, usize> = BTreeMap::new();
         let mut out: Vec<Entry> = Vec::with_capacity(entries.len());
         for (filter, provenance, ownership) in std::mem::take(entries) {
-            match first_index.get(&filter.hash()) {
+            match first_index.get(&filter) {
                 Some(&first) => {
                     out[first].1.extend(provenance);
                     out[first].2.extend(ownership);
                 }
                 None => {
-                    first_index.insert(filter.hash(), out.len());
+                    first_index.insert(filter.clone(), out.len());
                     out.push((filter, provenance, ownership));
                 }
             }
@@ -585,18 +584,17 @@ mod tests {
     /// successful merge (O(n^3) total). Kept ONLY as a differential-testing
     /// oracle -- never call this outside `#[cfg(test)]`.
     fn naive_coalesce_with(registry: &RuleRegistry, entries: Vec<Entry>) -> Vec<Entry> {
-        let mut by_hash: BTreeMap<DescriptorHash, Entry> = BTreeMap::new();
+        let mut by_filter: BTreeMap<ConcreteFilter, Entry> = BTreeMap::new();
         for (f, prov, ownership) in entries {
-            let h = f.hash();
-            by_hash
-                .entry(h)
+            by_filter
+                .entry(f.clone())
                 .and_modify(|(_, p, retained)| {
                     p.extend(prov.clone());
                     retained.extend(ownership.clone());
                 })
                 .or_insert((f, prov, ownership));
         }
-        let mut current: Vec<Entry> = by_hash.into_values().collect();
+        let mut current: Vec<Entry> = by_filter.into_values().collect();
 
         loop {
             let mut merged_once = false;
@@ -638,7 +636,7 @@ mod tests {
 
     fn cf(kinds: &[u16], authors: &[&str]) -> ConcreteFilter {
         ConcreteFilter {
-            kinds: Some(kinds.iter().copied().collect()),
+            kinds: Some(kinds.iter().cloned().collect()),
             authors: if authors.is_empty() {
                 None
             } else {
@@ -650,7 +648,7 @@ mod tests {
 
     fn cf_since(kinds: &[u16], since: u64) -> ConcreteFilter {
         ConcreteFilter {
-            kinds: Some(kinds.iter().copied().collect()),
+            kinds: Some(kinds.iter().cloned().collect()),
             since: Some(since),
             ..ConcreteFilter::default()
         }

@@ -39,19 +39,14 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
             .record_coverage(&[(added.clone(), RelaySessionKey::unauthenticated(relay.clone()), old)])
             .unwrap();
     }
-    let store = RedbStore::open_with_failed_coverage_write(&path, added_claim, relay.clone())
+    let store = RedbStore::open_with_failed_coverage_write(&path, added_claim.clone(), relay.clone())
         .expect("reopen exact coverage-write failure fixture");
     let mut core = EngineCore::new(store, 20);
     core.set_active_demand(&BTreeSet::from([incumbent.clone(), added.clone()]));
-    let sub_id = SubId::for_wire(
-        relay.clone(),
-        &incumbent.filter,
-        &incumbent.routing,
-        incumbent.authenticate_as,
-    );
+    let sub_id = SubId::allocate(relay.clone(), &incumbent.routing, incumbent.authenticate_as, 1008);
     core.white_box("attribution.retain_live_request_claims", |s| {
         s.attribution
-            .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]))
+            .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim.clone()]))
     });
     core.white_box("live_wire_requests.insert", |s| {
         s.live_wire_requests.insert(
@@ -79,7 +74,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
                 session: session.clone(),
                 sub_id: sub_id.clone(),
                 filter_hash: incumbent.filter.hash(),
-                added_coverage_claims: BTreeSet::from([added_claim]),
+                added_coverage_claims: BTreeSet::from([added_claim.clone()]),
                 added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
             }],
             &mut failed,
@@ -100,7 +95,7 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
         .iter()
         .any(|effect| matches!(effect, Effect::EmitObservationEvidence(..))));
     assert_eq!(
-        core.store.get_coverage(added_claim, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
+        core.store.get_coverage(added_claim.clone(), &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
         Some(old),
         "failure cannot mutate durable coverage or publish freshness"
     );
@@ -177,26 +172,21 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
     let added_claim = coverage_key(&added);
     let directory = tempfile::tempdir().expect("coverage supersession directory");
     let path = directory.path().join("post-eose-transfer-superseded.redb");
-    let store = RedbStore::open_with_failed_coverage_write(&path, added_claim, relay.clone())
+    let store = RedbStore::open_with_failed_coverage_write(&path, added_claim.clone(), relay.clone())
         .expect("persistent exact coverage-write failure fixture");
     let mut core = EngineCore::new(store, 20);
     core.set_active_demand(&BTreeSet::from([incumbent.clone(), added.clone()]));
-    let sub_id = SubId::for_wire(
-        relay.clone(),
-        &incumbent.filter,
-        &incumbent.routing,
-        incumbent.authenticate_as,
-    );
+    let sub_id = SubId::allocate(relay.clone(), &incumbent.routing, incumbent.authenticate_as, 1009);
     core.white_box("attribution.retain_live_request_claims", |s| {
         s.attribution
-            .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim]))
+            .retain_live_request_claims(&sub_id, BTreeSet::from([incumbent_claim.clone()]))
     });
     core.white_box("record_observed_request", |s| {
         s.record_observed_request(RequestSend {
             session: &session,
             sub_id: &sub_id,
             filter: &incumbent.filter,
-            coverage_claims: BTreeSet::from([incumbent_claim]),
+            coverage_claims: BTreeSet::from([incumbent_claim.clone()]),
             owner_demands: BTreeSet::from([DemandKey::for_atom(&incumbent)]),
             lanes: BTreeSet::new(),
             replay: false,
@@ -235,7 +225,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
                 session: session.clone(),
                 sub_id: sub_id.clone(),
                 filter_hash: incumbent.filter.hash(),
-                added_coverage_claims: BTreeSet::from([added_claim]),
+                added_coverage_claims: BTreeSet::from([added_claim.clone()]),
                 added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added)]),
             }],
             &mut Vec::new(),
@@ -249,7 +239,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
             session: &session,
             sub_id: &sub_id,
             filter: &incumbent.filter,
-            coverage_claims: BTreeSet::from([incumbent_claim, added_claim]),
+            coverage_claims: BTreeSet::from([incumbent_claim.clone(), added_claim.clone()]),
             owner_demands: BTreeSet::from([
                 DemandKey::for_atom(&incumbent),
                 DemandKey::for_atom(&added),
@@ -297,7 +287,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
     core.tick(Timestamp::from(300u64));
     assert_eq!(core.request_claim_transfer_attempts.get(), 1);
     assert_eq!(
-        core.store.get_coverage(added_claim, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
+        core.store.get_coverage(added_claim.clone(), &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
         Some(CoverageInterval::new(
             Timestamp::from(100),
             Timestamp::from(250)

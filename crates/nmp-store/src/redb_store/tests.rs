@@ -929,7 +929,7 @@ fn configured_coverage_write_failure_targets_one_row_rolls_back_and_is_consumed_
     let collateral_key = compute_coverage_key(&collateral);
     let unrelated_key = compute_coverage_key(&unrelated);
     let interval = CoverageInterval::new(Timestamp::from(100), Timestamp::from(200));
-    let mut store = RedbStore::open_with_failed_coverage_write(&path, target_key, relay.clone())
+    let mut store = RedbStore::open_with_failed_coverage_write(&path, target_key.clone(), relay.clone())
         .expect("persistent Redb coverage-write failure fixture");
 
     store
@@ -955,8 +955,8 @@ fn configured_coverage_write_failure_targets_one_row_rolls_back_and_is_consumed_
         error.to_string(),
         "durable-store persistence failure: injected coverage write failure"
     );
-    assert_eq!(store.get_coverage(target_key, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(), None);
-    assert_eq!(store.get_coverage(collateral_key, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(), None);
+    assert_eq!(store.get_coverage(target_key.clone(), &RelaySessionKey::unauthenticated(relay.clone())).unwrap(), None);
+    assert_eq!(store.get_coverage(collateral_key.clone(), &RelaySessionKey::unauthenticated(relay.clone())).unwrap(), None);
     assert_eq!(
         store.get_coverage(unrelated_key, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
         Some(interval),
@@ -967,11 +967,11 @@ fn configured_coverage_write_failure_targets_one_row_rolls_back_and_is_consumed_
         .record_coverage(&batch)
         .expect("the same store retries after consuming the one-shot refusal");
     assert_eq!(
-        store.get_coverage(target_key, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
+        store.get_coverage(target_key.clone(), &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
         Some(interval)
     );
     assert_eq!(
-        store.get_coverage(collateral_key, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
+        store.get_coverage(collateral_key.clone(), &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
         Some(interval)
     );
 }
@@ -1255,43 +1255,61 @@ fn publish_queue_ranges_visit_only_target_intent_and_exact_relay_rows() {
     assert_eq!(store.publish_queue_range_rows(), (2, 2));
 }
 
-/// The durable-key falsifier for this fix: `coverage_row_key` must
-/// carry the FULL 32-byte BLAKE3 digest (64 hex chars), not a
-/// truncated 8-byte (16 hex char) prefix -- truncating back down to
-/// 64 bits in the on-disk key would silently undo the whole point of
-/// widening `DescriptorHash`/`CoverageKey` (a forged collision only
-/// needs to defeat whatever width actually reaches the durable key).
+/// The durable-key falsifier: `coverage_row_key` must DISTINGUISH atoms
+/// that differ in any component of coverage identity.
+///
+/// It used to assert the key carried a full 64-hex-char BLAKE3 digest,
+/// guarding against truncation back to a forgeable width. There is no
+/// digest now -- the key is built from the atom's canonical encoding, so
+/// there is nothing to truncate and no collision to forge. What still has
+/// to hold is the property the width was protecting: two atoms that are
+/// not the same acquisition never share a row.
 #[test]
-fn coverage_row_key_carries_the_full_256_bit_digest() {
-    let filter = ConcreteFilter {
-        kinds: Some(std::collections::BTreeSet::from([1u16])),
-        authors: Some(std::collections::BTreeSet::from(["aa".to_string()])),
-        ..ConcreteFilter::default()
-    };
-    let atom = ContextualAtom {
-        filter,
-        routing: nmp_grammar::ReadRouting::Auto,
-        authenticate_as: None,
-        routing_evidence: BTreeSet::new(),
-    };
-    let key = compute_coverage_key(&atom);
+fn coverage_row_key_distinguishes_every_component_of_coverage_identity() {
+    fn atom_of(kinds: [u16; 1], author: &str) -> ContextualAtom {
+        ContextualAtom {
+            filter: ConcreteFilter {
+                kinds: Some(std::collections::BTreeSet::from(kinds)),
+                authors: Some(std::collections::BTreeSet::from([author.to_string()])),
+                ..ConcreteFilter::default()
+            },
+            routing: nmp_grammar::ReadRouting::Auto,
+            authenticate_as: None,
+            routing_evidence: BTreeSet::new(),
+        }
+    }
     let relay = RelayUrl::parse("wss://relay.example").unwrap();
-    let row_key = RedbStore::coverage_row_key(key, &nmp_grammar::RelaySessionKey::unauthenticated(relay.clone()));
+    let session = nmp_grammar::RelaySessionKey::unauthenticated(relay.clone());
+    let key_of = |atom: &ContextualAtom| {
+        RedbStore::coverage_row_key(&compute_coverage_key(atom), &session)
+    };
 
-    // Row key shape is now `<version-prefix><hex>:<relay>` (#106) --
-    // skip the version prefix before taking the hex segment.
-    let without_prefix = row_key
-        .strip_prefix(RedbStore::COVERAGE_ROW_KEY_PREFIX)
-        .expect("row key must carry the current schema-version prefix");
-    let hex_part = without_prefix
-        .split(':')
-        .next()
-        .expect("row key always has a hex-prefix:relay-url shape");
-    assert_eq!(
-        hex_part.len(),
-        64,
-        "expected 64 hex chars (32 bytes) in the durable key, got {} in {row_key:?}",
-        hex_part.len()
+    let base = atom_of([1], "aa");
+    let base_key = key_of(&base);
+
+    assert!(
+        base_key.starts_with(RedbStore::COVERAGE_ROW_KEY_PREFIX),
+        "row key must carry the schema-version prefix: {base_key:?}"
+    );
+    // Same atom, same key -- the row is findable again on a later read.
+    assert_eq!(base_key, key_of(&atom_of([1], "aa")));
+    // Every axis of coverage identity separates rows.
+    assert_ne!(base_key, key_of(&atom_of([2], "aa")), "kinds must separate");
+    assert_ne!(base_key, key_of(&atom_of([1], "bb")), "authors must separate");
+
+    let mut explicit = base.clone();
+    explicit.routing = nmp_grammar::ReadRouting::Explicit(vec![relay.clone()]);
+    assert_ne!(base_key, key_of(&explicit), "routing must separate");
+
+    // And a different DISCOVERED identity on the same atom is a different row.
+    let other = nostr::Keys::generate().public_key();
+    assert_ne!(
+        base_key,
+        RedbStore::coverage_row_key(
+            &compute_coverage_key(&base),
+            &nmp_grammar::RelaySessionKey::new(relay, Some(other)),
+        ),
+        "the discovered identity must separate"
     );
 }
 

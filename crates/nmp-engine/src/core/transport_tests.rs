@@ -30,7 +30,7 @@ mod relay_session_key_tests {
             routing_evidence: BTreeSet::new(),
         };
         let key = coverage_key(&atom);
-        let sub_id = SubId::for_wire(relay.clone(), &filter, &ReadRouting::Auto, access_a);
+        let sub_id = SubId::allocate(relay.clone(), &ReadRouting::Auto, access_a, 1000);
         let session_a = RelaySessionKey::new(relay.clone(), access_a);
         let session_b = RelaySessionKey::new(relay, Some(b));
         let mut attribution = AttributionState::new();
@@ -71,32 +71,27 @@ mod relay_session_key_tests {
             routing_evidence: BTreeSet::new(),
         };
         let key = coverage_key(&atom);
-        let sub_id = SubId::for_wire(relay, &filter, &ReadRouting::Auto, None);
+        let sub_id = SubId::allocate(relay, &ReadRouting::Auto, None, 1001);
         let mut attribution = AttributionState::new();
         attribution.observe_atom(&atom);
         let completed_send = attribution.record_send(
             &session,
             &sub_id,
             &filter,
-            BTreeSet::from([key]),
+            BTreeSet::from([key.clone()]),
             EventFailureTarget::ThisSend,
         );
         let replay_filter = ConcreteFilter {
             since: Some(100),
             ..filter.clone()
         };
-        let replay_sub_id = SubId::for_wire(
-            session.relay.clone(),
-            &replay_filter,
-            &ReadRouting::Auto,
-            None,
-        );
+        let replay_sub_id = SubId::allocate(session.relay.clone(), &ReadRouting::Auto, None, 1002);
         assert_ne!(sub_id, replay_sub_id, "changed bytes require a fresh id");
         attribution.record_send(
             &session,
             &replay_sub_id,
             &replay_filter,
-            BTreeSet::from([key]),
+            BTreeSet::from([key.clone()]),
             EventFailureTarget::ThisSend,
         );
 
@@ -112,7 +107,7 @@ mod relay_session_key_tests {
                 .eligible_claims()
                 .expect("eligible completion"),
             vec![(
-                key,
+                key.clone(),
                 nmp_store::CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(150u64),),
             )]
             .as_slice()
@@ -160,18 +155,8 @@ mod relay_session_key_tests {
         };
         let key_a = coverage_key(&atom_a);
         let key_b = coverage_key(&atom_b);
-        let sub_a = SubId::for_wire(
-            relay.clone(),
-            &filter_a,
-            &ReadRouting::Auto,
-            None,
-        );
-        let sub_b = SubId::for_wire(
-            relay,
-            &filter_b,
-            &ReadRouting::Auto,
-            protected_session.authenticate_as,
-        );
+        let sub_a = SubId::allocate(relay.clone(), &ReadRouting::Auto, None, 1003);
+        let sub_b = SubId::allocate(relay, &ReadRouting::Auto, protected_session.authenticate_as, 1004);
         let wire_a = wire_sub_id_string(&sub_a);
         let wire_b = wire_sub_id_string(&sub_b);
         let mut attribution = AttributionState::new();
@@ -182,7 +167,7 @@ mod relay_session_key_tests {
                 &public_session,
                 &sub_a,
                 &filter_a,
-                BTreeSet::from([key_a]),
+                BTreeSet::from([key_a.clone()]),
                 EventFailureTarget::ThisSend,
             );
         }
@@ -190,7 +175,7 @@ mod relay_session_key_tests {
             &protected_session,
             &sub_b,
             &filter_b,
-            BTreeSet::from([key_b]),
+            BTreeSet::from([key_b.clone()]),
             EventFailureTarget::ThisSend,
         );
 
@@ -199,7 +184,7 @@ mod relay_session_key_tests {
             &public_session,
             &sub_a,
             &filter_a,
-            BTreeSet::from([key_a]),
+            BTreeSet::from([key_a.clone()]),
             EventFailureTarget::ThisSend,
         );
 
@@ -217,7 +202,7 @@ mod relay_session_key_tests {
                 .eligible_claims()
                 .expect("later revision remains eligible"),
             vec![(
-                key_a,
+                key_a.clone(),
                 CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(10u64)),
             )]
             .as_slice()
@@ -239,7 +224,7 @@ mod relay_session_key_tests {
             &public_session,
             &sub_a,
             &filter_a,
-            BTreeSet::from([key_a]),
+            BTreeSet::from([key_a.clone()]),
             EventFailureTarget::ThisSend,
         );
         attribution.poison_event_commit_failure(&public_session, &wire_a);
@@ -276,22 +261,12 @@ mod relay_session_key_tests {
             routing_evidence: BTreeSet::new(),
         };
         let key = coverage_key(&atom);
-        let neg_sub = SubId::for_wire(
-            relay.clone(),
-            &filter,
-            &ReadRouting::Auto,
-            None,
-        );
+        let neg_sub = SubId::allocate(relay.clone(), &ReadRouting::Auto, None, 1005);
         let backfill_filter = ConcreteFilter {
             ids: Some(BTreeSet::from(["01".repeat(32)])),
             ..ConcreteFilter::default()
         };
-        let backfill_sub = SubId::for_wire(
-            relay,
-            &backfill_filter,
-            &ReadRouting::Auto,
-            None,
-        );
+        let backfill_sub = SubId::allocate(relay, &ReadRouting::Auto, None, 1006);
         let mut attribution = AttributionState::new();
         let neg_send = attribution.record_send(
             &session,

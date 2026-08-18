@@ -19,7 +19,7 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
         authenticate_as: session.authenticate_as,
         routing_evidence: BTreeSet::new(),
     };
-    let sub_id = SubId::for_wire(session.relay.clone(), &filter, &atom.routing, atom.authenticate_as);
+    let sub_id = SubId::allocate(session.relay.clone(), &atom.routing, atom.authenticate_as, 1007);
     let claims = BTreeSet::from([nmp_store::coverage_key(&atom)]);
     let owners = BTreeSet::from([nmp_router::DemandKey::for_atom(&atom)]);
     let first_handle = TransportRelayHandle {

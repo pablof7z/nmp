@@ -188,7 +188,7 @@ impl Router {
 
         for atom in cohort {
             let demand = DemandKey::for_atom(atom);
-            for request_key in self.demand_requests(demand) {
+            for request_key in self.demand_requests(demand.clone()) {
                 work.incumbent_demand_edges_visited =
                     work.incumbent_demand_edges_visited.saturating_add(1);
                 let Some(request) = self.request(&request_key) else {
@@ -199,12 +199,12 @@ impl Router {
                 let eligible = self
                     .request_claims(&request_key.0, &request_key.1)
                     .unwrap_or_default();
-                let scoped_claims = claims[&demand].intersection(&eligible).copied().collect();
+                let scoped_claims = claims[&demand].intersection(&eligible).cloned().collect();
                 extend_scoped_request(
                     &mut plan,
                     request_key.0,
                     request,
-                    BTreeSet::from([demand]),
+                    BTreeSet::from([demand.clone()]),
                     scoped_claims,
                 );
             }
@@ -247,7 +247,7 @@ impl Router {
 
                 request.owner_demands.retain(|demand| {
                     !self
-                        .demand_requests(*demand)
+                        .demand_requests(demand.clone())
                         .iter()
                         .any(|request_key| request_key.0 == session)
                 });
@@ -257,7 +257,7 @@ impl Router {
                 let retained_claims: BTreeSet<_> = request
                     .owner_demands
                     .iter()
-                    .flat_map(|demand| claims.get(demand).into_iter().flatten().copied())
+                    .flat_map(|demand| claims.get(demand).into_iter().flatten().cloned())
                     .collect();
                 request
                     .coverage_claims

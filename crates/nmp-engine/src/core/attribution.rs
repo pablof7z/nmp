@@ -136,7 +136,7 @@ impl CompletedAttribution {
         matches!(self.coverage_authority, CoverageAuthority::Eligible).then(|| {
             self.claims
                 .iter()
-                .map(|claim| (claim.key, claim.interval))
+                .map(|claim| (claim.key.clone(), claim.interval))
                 .collect()
         })
     }
@@ -211,8 +211,8 @@ impl AttributionState {
         }
         for claim in coverage_claim_atoms(atom) {
             let key = coverage_key(&claim);
-            self.shape_by_key.entry(key).or_insert(claim);
-            *self.active_shape_owner_counts.entry(key).or_insert(0) += 1;
+            self.shape_by_key.entry(key.clone()).or_insert(claim);
+            *self.active_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
         }
     }
 
@@ -279,8 +279,8 @@ impl AttributionState {
             active_demands.insert(demand);
             for claim in coverage_claim_atoms(atom) {
                 let key = coverage_key(&claim);
-                *active_shape_owner_counts.entry(key).or_insert(0) += 1;
-                self.shape_by_key.entry(key).or_insert(claim);
+                *active_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
+                self.shape_by_key.entry(key.clone()).or_insert(claim);
             }
         }
         self.active_demands = active_demands;
@@ -304,10 +304,10 @@ impl AttributionState {
             .insert(sub_id.clone(), claims.clone())
             .unwrap_or_default();
         for key in claims.difference(&previous) {
-            *self.live_shape_owner_counts.entry(*key).or_insert(0) += 1;
+            *self.live_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
         }
         for key in previous.difference(&claims) {
-            self.release_live_shape_owner(*key);
+            self.release_live_shape_owner(key.clone());
         }
     }
 
@@ -320,8 +320,8 @@ impl AttributionState {
     ) {
         let retained = self.live_request_claims.entry(sub_id.clone()).or_default();
         for key in added {
-            if retained.insert(*key) {
-                *self.live_shape_owner_counts.entry(*key).or_insert(0) += 1;
+            if retained.insert(key.clone()) {
+                *self.live_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
             }
         }
     }
@@ -340,7 +340,7 @@ impl AttributionState {
         if let Some(retained) = self.live_request_claims.get_mut(sub_id) {
             for key in removed {
                 if retained.remove(key) {
-                    released.push(*key);
+                    released.push(key.clone());
                 }
             }
             empty = retained.is_empty();
@@ -405,8 +405,8 @@ impl AttributionState {
             .and_then(VecDeque::back_mut)
             .expect("the matching current request snapshot remains live");
         for key in added {
-            if current.coverage_claims.insert(*key) {
-                *self.inflight_shape_owner_counts.entry(*key).or_insert(0) += 1;
+            if current.coverage_claims.insert(key.clone()) {
+                *self.inflight_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
             }
         }
         true
@@ -438,7 +438,7 @@ impl AttributionState {
             .expect("the matching current request snapshot remains live");
         let released: Vec<_> = removed
             .iter()
-            .copied()
+            .cloned()
             .filter(|key| current.coverage_claims.remove(key))
             .collect();
         for key in released {
@@ -539,7 +539,7 @@ impl AttributionState {
         let mut expected_live: HashMap<CoverageKey, usize> = HashMap::new();
         for claims in self.live_request_claims.values() {
             for key in claims {
-                *expected_live.entry(*key).or_insert(0) += 1;
+                *expected_live.entry(key.clone()).or_insert(0) += 1;
             }
         }
         assert_eq!(
@@ -557,7 +557,7 @@ impl AttributionState {
         for snapshots in self.inflight.values() {
             for snapshot in snapshots {
                 for key in &snapshot.coverage_claims {
-                    *expected_inflight.entry(*key).or_insert(0) += 1;
+                    *expected_inflight.entry(key.clone()).or_insert(0) += 1;
                 }
             }
         }
@@ -677,8 +677,20 @@ mod tests {
         }
     }
 
+    /// Allocate-and-remember, exactly as the router does: the same atom
+    /// always yields the same token, two different atoms never share one.
+    /// A fixture cannot DERIVE the id from the filter any more, because ids
+    /// are no longer derived from filters -- so it has to keep a table, and
+    /// keeping the table is the honest model of what the router keeps.
     fn sub_id_for(atom: &ContextualAtom) -> SubId {
-        SubId::for_wire(relay(), &atom.filter, &atom.routing, atom.authenticate_as)
+        use std::collections::BTreeMap;
+        use std::sync::{Mutex, OnceLock};
+        static MINTED: OnceLock<Mutex<BTreeMap<ContextualAtom, u64>>> = OnceLock::new();
+        let table = MINTED.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let mut table = table.lock().expect("fixture mint table");
+        let next = table.len() as u64 + 1;
+        let token = *table.entry(atom.clone()).or_insert(next);
+        SubId::allocate(relay(), &atom.routing, atom.authenticate_as, token)
     }
 
     /// The census counts `live_shape_owner_counts.len()` and its value sum.
@@ -697,8 +709,8 @@ mod tests {
 
         let mut attribution = AttributionState::new();
         attribution.set_active_demand([&shared]);
-        attribution.retain_live_request_claims(&first, BTreeSet::from([key]));
-        attribution.retain_live_request_claims(&second, BTreeSet::from([key]));
+        attribution.retain_live_request_claims(&first, BTreeSet::from([key.clone()]));
+        attribution.retain_live_request_claims(&second, BTreeSet::from([key.clone()]));
         attribution.assert_consistent("two requests retain one shape");
         assert_eq!(attribution.counts().live_shape_refs, 2);
 

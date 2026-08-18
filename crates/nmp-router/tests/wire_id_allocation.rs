@@ -704,18 +704,25 @@ fn a_withdrawn_token_is_never_recycled() {
 /// stays exactly 64 lowercase hex characters — no `+` prefix (65 characters
 /// would be a protocol violation), no truncation, >=64 bits of entropy.
 #[test]
-fn the_allocated_token_keeps_the_64_hex_wire_format() {
+fn the_allocated_token_stays_within_nip01s_subscription_id_cap() {
     let (dir, mut router) = router();
     let demand: BTreeSet<ContextualAtom> = (0..8u32).map(|n| atom(n, Some(10))).collect();
     router.compile(&demand, &dir, CAP);
 
     for sub_id in sub_ids(&router) {
         let wire = sub_id.1.to_string();
-        assert_eq!(wire.len(), 64, "NIP-01 caps subscription_id at 64 chars");
+        // NIP-01 caps `subscription_id` at 64 characters. The token is
+        // ALLOCATED, not a digest, so this is a CEILING rather than an exact
+        // width -- a mint counter with an optional role/incarnation suffix
+        // is nowhere near it. Asserting exactly 64 would only be asserting
+        // that the id is still a hex digest.
         assert!(
-            wire.chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-            "the wire id must stay lowercase hex, with no prefix: {wire}"
+            !wire.is_empty() && wire.len() <= 64,
+            "wire id must be non-empty and within NIP-01's 64-char cap: {wire}"
+        );
+        assert!(
+            wire.chars().all(|c| c.is_ascii_digit() || c == '-'),
+            "an allocated token is decimal digits with optional role/incarnation: {wire}"
         );
     }
 }

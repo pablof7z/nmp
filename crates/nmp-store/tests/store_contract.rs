@@ -1855,7 +1855,7 @@ fn coverage_remains_exact_across_all_retractions_and_only_gc_lowers_it() {
 
         let key = coverage_key(&atom(&s));
         let before = store
-            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
+            .get_coverage(key.clone(), &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .expect("row exists");
 
@@ -1866,7 +1866,7 @@ fn coverage_remains_exact_across_all_retractions_and_only_gc_lowers_it() {
             InsertOutcome::Superseded { .. }
         ));
         assert_eq!(
-            store.get_coverage(key, &RelaySessionKey::unauthenticated(r.clone())).expect("coverage peek"),
+            store.get_coverage(key.clone(), &RelaySessionKey::unauthenticated(r.clone())).expect("coverage peek"),
             Some(before),
             "supersession must not touch coverage"
         );
@@ -1874,14 +1874,14 @@ fn coverage_remains_exact_across_all_retractions_and_only_gc_lowers_it() {
         let deletion = deletion_event(&k, vec![Tag::event(deleted_target_id)], 200);
         store.insert(deletion, observed("wss://r1", 2)).unwrap();
         let after_delete = store
-            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
+            .get_coverage(key.clone(), &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .expect("row still exists");
         assert_eq!(before, after_delete, "delete must not touch coverage");
 
         store.expire_due(Timestamp::from(200u64)).unwrap();
         let after_expiry = store
-            .get_coverage(key, &RelaySessionKey::unauthenticated(r.clone()))
+            .get_coverage(key.clone(), &RelaySessionKey::unauthenticated(r.clone()))
             .expect("coverage peek")
             .expect("row still exists");
         assert_eq!(before, after_expiry, "expiry must not touch coverage");
@@ -1912,7 +1912,7 @@ fn coverage_remains_exact_across_all_retractions_and_only_gc_lowers_it() {
             .compensate_write(accepted.journaled_intent_id().expect("pending intent"))
             .expect("compensate pending row");
         assert_eq!(
-            store.get_coverage(key, &RelaySessionKey::unauthenticated(r.clone())).expect("coverage peek"),
+            store.get_coverage(key.clone(), &RelaySessionKey::unauthenticated(r.clone())).expect("coverage peek"),
             Some(before),
             "pre-signature termination must not touch coverage"
         );
@@ -1922,7 +1922,7 @@ fn coverage_remains_exact_across_all_retractions_and_only_gc_lowers_it() {
         let report = store.gc(&GcRetentionSet::new(vec![])).unwrap();
         assert!(report.coverage_rows_shrunk + report.coverage_rows_deleted > 0);
         assert_ne!(
-            store.get_coverage(key, &RelaySessionKey::unauthenticated(r.clone())).expect("coverage peek"),
+            store.get_coverage(key.clone(), &RelaySessionKey::unauthenticated(r.clone())).expect("coverage peek"),
             Some(before),
             "GC must remain the only operation in this matrix that lowers coverage"
         );

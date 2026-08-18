@@ -1445,11 +1445,11 @@ fn event_and_request_coverage_state(path: &Path) -> (bool, bool, bool) {
     (
         event_present,
         store
-            .get_coverage(key, &RelaySessionKey::unauthenticated(first.clone()))
+            .get_coverage(key.clone(), &RelaySessionKey::unauthenticated(first.clone()))
             .expect("coverage read after crash")
             .is_some(),
         store
-            .get_coverage(key, &RelaySessionKey::unauthenticated(second.clone()))
+            .get_coverage(key.clone(), &RelaySessionKey::unauthenticated(second.clone()))
             .expect("coverage read after crash")
             .is_some(),
     )
@@ -1644,7 +1644,7 @@ fn explicit_retention_eviction_and_coverage_lowering_are_atomic_across_process_d
             "retained provenance must roll back with its row"
         );
         assert_eq!(
-            store.get_coverage(key, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage read"),
+            store.get_coverage(key.clone(), &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage read"),
             Some(before),
             "coverage lowering must roll back with row deletion"
         );
@@ -1661,7 +1661,7 @@ fn explicit_retention_eviction_and_coverage_lowering_are_atomic_across_process_d
         .expect("query after explicit eviction")
         .is_empty());
     assert_eq!(
-        store.get_coverage(key, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage read"),
+        store.get_coverage(key.clone(), &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage read"),
         Some(CoverageInterval::new(
             Timestamp::from(1_001u64),
             Timestamp::from(1_100u64),

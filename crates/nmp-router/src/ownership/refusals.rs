@@ -111,7 +111,7 @@ impl Router {
         for (session, request) in budget_refused_requests {
             for (demand, author) in &request.coverage_assignments {
                 self.refused_coverage_assignments_by_demand
-                    .entry(*demand)
+                    .entry(demand.clone())
                     .or_default()
                     .insert(*author);
             }
@@ -213,7 +213,7 @@ impl Router {
     ) {
         for (demand, author) in &request.coverage_assignments {
             self.refused_coverage_assignments_by_demand
-                .entry(*demand)
+                .entry(demand.clone())
                 .or_default()
                 .insert(*author);
         }
@@ -228,7 +228,7 @@ impl Router {
         for demand in &request.owner_demands {
             let first_for_demand = !self.refusals_by_demand.contains_key(demand);
             self.index_refusal_owner(
-                *demand,
+                demand.clone(),
                 session.clone(),
                 RefusalOwner {
                     refusal_kind,
@@ -236,7 +236,7 @@ impl Router {
                 },
             );
             if first_for_demand {
-                self.prev_plan.limited_demands.insert(*demand);
+                self.prev_plan.limited_demands.insert(demand.clone());
             }
         }
     }

@@ -461,10 +461,10 @@ impl RequestAttempts {
         self.for_each_metadata_target(role_sub_ids, &mut |attempt| {
             attempt
                 .coverage_claims
-                .extend(update.added_coverage_claims.iter().copied());
+                .extend(update.added_coverage_claims.iter().cloned());
             attempt
                 .owner_demands
-                .extend(update.added_owner_demands.iter().copied());
+                .extend(update.added_owner_demands.iter().cloned());
         });
     }
 
@@ -753,12 +753,7 @@ mod tests {
         let session = RelaySessionKey::unauthenticated(relay.clone());
         let filter = filter(kind);
         let filter_hash = filter.hash();
-        let sub_id = SubId::for_wire(
-            relay.clone(),
-            &filter,
-            &ReadRouting::Auto,
-            None,
-        );
+        let sub_id = SubId::allocate(relay.clone(), &ReadRouting::Auto, None, u64::from(kind));
         let state = RequestAttemptState {
             session: session.clone(),
             sub_id: sub_id.clone(),

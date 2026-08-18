@@ -141,11 +141,12 @@ fn repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_
         .position(|effect| matches!(effect, Effect::Wire(_)))
         .expect("the admission flush emits its request");
     assert!(awaiting_index < wire_index);
-    let claim = *core.router.plan().reqs[&session][0]
+    let claim = core.router.plan().reqs[&session][0]
         .coverage_claims
         .iter()
         .next()
-        .expect("fixture request owns one durable claim");
+        .expect("fixture request owns one durable claim")
+        .clone();
     assert!(statuses(&flushed).contains(&SourceStatus::AwaitingRequest));
 
     let refused = core.on_wire_request_handoff(RequestHandoffOutcome::Refused {

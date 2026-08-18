@@ -155,13 +155,13 @@ impl RequestTargets {
                 revision: target.revision,
             };
             *active_by_demand
-                .entry(target.demand)
+                .entry(target.demand.clone())
                 .or_default()
                 .entry(reverse_target)
                 .or_insert(0) += count;
         }
         for (demand, targets) in &active_by_demand {
-            let indexed = self.by_demand.entry(*demand).or_default();
+            let indexed = self.by_demand.entry(demand.clone()).or_default();
             for (target, count) in targets {
                 *indexed.entry(target.clone()).or_insert(0) += count;
             }
@@ -332,7 +332,7 @@ impl RequestTargets {
                         "{at}: a live target claims more refs than its handle declared"
                     );
                     *expected_by_demand
-                        .entry(*demand)
+                        .entry(demand.clone())
                         .or_default()
                         .entry(target.clone())
                         .or_insert(0) += count;

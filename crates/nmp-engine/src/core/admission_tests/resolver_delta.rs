@@ -120,7 +120,7 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
             s.request_targets.declare_for_handle(
                 handle,
                 ActiveRequestTarget {
-                    demand: surviving_demand,
+                    demand: surviving_demand.clone(),
                     scope: departing_target.scope,
                     path: "$.surviving".to_string(),
                     revision: departing_target.revision,
@@ -159,19 +159,14 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
         assert!(!core.request_targets.has_live_demand(&departing_demand));
         assert_eq!(core.request_targets.live_target_count(&surviving_demand), 1);
 
-        let sub_id = SubId::for_wire(
-            relay,
-            &surviving.filter,
-            &surviving.routing,
-            surviving.authenticate_as,
-        );
+        let sub_id = SubId::allocate(relay, &surviving.routing, surviving.authenticate_as, 1013);
         core.white_box("record_observed_request", |s| {
             s.record_observed_request(RequestSend {
                 session: &session,
                 sub_id: &sub_id,
                 filter: &surviving.filter,
-                coverage_claims: BTreeSet::from([surviving_claim]),
-                owner_demands: BTreeSet::from([surviving_demand]),
+                coverage_claims: BTreeSet::from([surviving_claim.clone()]),
+                owner_demands: BTreeSet::from([surviving_demand.clone()]),
                 lanes: BTreeSet::new(),
                 replay: false,
                 event_failure_target: EventFailureTarget::ThisSend,
@@ -283,12 +278,7 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
     core.set_active_demand(&atoms.iter().cloned().collect());
 
     let request_atom = atoms[0].clone();
-    let sub_id = SubId::for_wire(
-        relay,
-        &request_atom.filter,
-        &request_atom.routing,
-        request_atom.authenticate_as,
-    );
+    let sub_id = SubId::allocate(relay, &request_atom.routing, request_atom.authenticate_as, 1014);
     core.white_box("attribution.retain_live_request_claims", |s| {
         s.attribution
             .retain_live_request_claims(&sub_id, incumbent_claims.clone())
@@ -315,7 +305,7 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
                 session,
                 sub_id: sub_id.clone(),
                 filter_hash: request_atom.filter.hash(),
-                added_coverage_claims: BTreeSet::from([added_claim]),
+                added_coverage_claims: BTreeSet::from([added_claim.clone()]),
                 added_owner_demands: BTreeSet::from([DemandKey::for_atom(&added_atom)]),
             }],
             &mut effects,

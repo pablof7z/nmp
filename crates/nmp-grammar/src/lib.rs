@@ -30,8 +30,8 @@ mod write;
 
 pub use binding::{Binding, Derived, Filter, SetAlgebra, SetOp};
 pub use concrete::{
-    fold_byte, fold_context, ConcreteFilter, ContextualAtom, DescriptorHash, RoutingEvidence,
-    RoutingEvidenceKind,
+    canonical_encoding, fold_byte, fold_context, ConcreteFilter, ContextualAtom, DescriptorHash,
+    RoutingEvidence, RoutingEvidenceKind,
 };
 pub use demand::{DemandDelta, DemandOp};
 pub use descriptor::{

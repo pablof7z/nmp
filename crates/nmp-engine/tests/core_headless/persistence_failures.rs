@@ -1740,7 +1740,7 @@ fn a_failing_post_admission_coverage_peek_keeps_the_immediate_seed() {
         PersistenceFault::Invariant
     );
     assert_eq!(
-        testing::corrupt_coverage(&path, key, &absent_relay)
+        testing::corrupt_coverage(&path, key.clone(), &absent_relay)
             .expect_err("an absent relay row must be refused")
             .fault(),
         PersistenceFault::Invariant
@@ -1748,7 +1748,7 @@ fn a_failing_post_admission_coverage_peek_keeps_the_immediate_seed() {
     {
         let store = RedbStore::open(&path).expect("inspect refused corruption controls");
         assert_eq!(
-            store.get_coverage(key, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
+            store.get_coverage(key.clone(), &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
             Some(CoverageInterval::new(
                 Timestamp::from(10u64),
                 Timestamp::from(20u64)

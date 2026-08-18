@@ -33,7 +33,7 @@ mod tests {
 
     fn atom_for(kinds: &[u16], author_hex: &str) -> ConcreteFilter {
         ConcreteFilter {
-            kinds: Some(kinds.iter().copied().collect()),
+            kinds: Some(kinds.iter().cloned().collect()),
             authors: Some(BTreeSet::from([author_hex.to_string()])),
             ..ConcreteFilter::default()
         }

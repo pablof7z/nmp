@@ -95,7 +95,11 @@ impl std::fmt::Display for DescriptorHash {
 /// colliding with `authors:["a"], ids:["bc"]`). Tag keys are rendered as
 /// single-character strings rather than via `IndexedTagName`'s own (non-`Serialize`)
 /// type -- no derive needed on `ConcreteFilter` itself.
-fn canonical_encoding(f: &ConcreteFilter) -> Vec<u8> {
+/// A canonical, order-normalised byte encoding of `f`, used to build
+/// durable keys. Deliberately NOT digested: a hash of this answers only
+/// "byte-identical?", the least useful question about a filter, and
+/// destroys what a containment or residual question needs.
+pub fn canonical_encoding(f: &ConcreteFilter) -> Vec<u8> {
     let tags: BTreeMap<String, &BTreeSet<String>> = f
         .tags
         .iter()

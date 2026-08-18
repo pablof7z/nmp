@@ -111,7 +111,7 @@ use nostr::{
 #[cfg(test)]
 use nmp_grammar::RoutingEvidence;
 use nmp_grammar::{
-    fold_byte, CacheMode, ConcreteFilter, ContextualAtom, DemandDelta, DemandOp,
+    CacheMode, ConcreteFilter, ContextualAtom, DemandDelta, DemandOp,
     DescriptorHash, Freshness, Identity, LiveQuery, ReadRouting, RelaySessionKey,
     ReplaceableMaterializerOperation, ReplaceableMaterializerRegistration, WriteIntent,
     WritePayload, WriteRouting,
@@ -354,17 +354,14 @@ mod routing_fact_store_tests {
 fn nip77_role_sub_id(
     plan_sub_id: &SubId,
     role: u8,
-    filter: &ConcreteFilter,
+    _filter: &ConcreteFilter,
     incarnation: u64,
 ) -> SubId {
-    let mut hash = fold_byte(plan_sub_id.1, role);
-    for byte in filter.hash().as_bytes() {
-        hash = fold_byte(hash, *byte);
-    }
-    for byte in incarnation.to_be_bytes() {
-        hash = fold_byte(hash, byte);
-    }
-    SubId(plan_sub_id.0.clone(), hash, plan_sub_id.2)
+    SubId(
+        plan_sub_id.0.clone(),
+        plan_sub_id.1.with_role(role, incarnation),
+        plan_sub_id.2,
+    )
 }
 
 const RETRY_INITIAL_SECS: u64 = 3;

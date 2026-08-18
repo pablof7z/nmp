@@ -55,7 +55,7 @@ fn authorless_unauthenticated_a_b_are_three_exact_session_plans() {
         .reqs
         .values()
         .flatten()
-        .flat_map(|req| req.coverage_claims.iter().copied())
+        .flat_map(|req| req.coverage_claims.iter().cloned())
         .collect::<BTreeSet<_>>();
     assert_eq!(coverage.len(), 3);
 
