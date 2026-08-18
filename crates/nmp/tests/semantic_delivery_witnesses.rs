@@ -33,11 +33,10 @@ struct CountingDefaultPeople {
 impl ReplaceableMaterializer for AddPeople {
     fn materialize(
         &self,
-        _source: &UnsignedEvent,
-        current: &UnsignedEvent,
+        source: &UnsignedEvent,
         operations: &[ReplaceableMaterializerOperation<'_>],
     ) -> Result<nmp::EventBuilder, ReplaceableMaterializerRefusal> {
-        let mut tags = current.tags.clone().to_vec();
+        let mut tags = source.tags.clone().to_vec();
         for operation in operations {
             let key = PublicKey::from_slice(operation.bytes()).map_err(|error| {
                 ReplaceableMaterializerRefusal {
@@ -52,9 +51,9 @@ impl ReplaceableMaterializer for AddPeople {
             }
         }
         Ok(nmp::EventBuilder {
-            kind: current.kind,
+            kind: source.kind,
             tags,
-            content: current.content.clone(),
+            content: source.content.clone(),
             created_at: None,
         })
     }
@@ -95,10 +94,9 @@ impl ReplaceableMaterializer for CountingDefaultPeople {
     fn materialize(
         &self,
         source: &UnsignedEvent,
-        current: &UnsignedEvent,
         operations: &[ReplaceableMaterializerOperation<'_>],
     ) -> Result<nmp::EventBuilder, ReplaceableMaterializerRefusal> {
-        AddPeople.materialize(source, current, operations)
+        AddPeople.materialize(source, operations)
     }
 
     fn materialize_default(
