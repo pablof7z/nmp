@@ -37,8 +37,8 @@ use nmp_engine::core::{
     ObservationId, RowDelta, ShortfallFact,
 };
 use nmp_grammar::{
-    Binding, CacheMode, ContextualAtom, Demand, Filter, Freshness, IdentityField,
-    LiveQuery, LiveQueryError, ReadRouting,
+    Binding, CacheMode, ContextualAtom, Demand, Filter, Freshness, IdentityField, LiveQuery,
+    LiveQueryError, ReadRouting,
 };
 use nmp_router::WireOp;
 use nmp_router_testkit::FixtureRoutingFacts;
@@ -98,7 +98,7 @@ fn host_branch(host: &RelayUrl) -> Demand {
 fn host_branch_of_kind(host: &RelayUrl, kind: u16) -> Demand {
     let mut demand = Demand::new(
         selection_of(kind),
-        ReadRouting::Explicit(vec![host.clone()])
+        ReadRouting::Explicit(vec![host.clone()]),
     )
     .expect("a one-relay pinned set is nonempty");
     demand.cache = CacheMode::Strict;
@@ -399,7 +399,7 @@ fn an_unplannable_branch_reports_its_own_shortfall() {
                 .to_hex()]))),
             ..Filter::default()
         },
-        ReadRouting::Auto
+        ReadRouting::Auto,
     )
     .expect("an author-bound outbox demand is constructible");
 
@@ -546,7 +546,7 @@ fn a_reactive_change_moves_every_branch_in_one_frame() {
                 authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![host.clone()])
+            ReadRouting::Explicit(vec![host.clone()]),
         )
         .expect("a reactive pinned demand is constructible")
     };
@@ -981,7 +981,7 @@ fn one_branchs_refresh_failure_retracts_no_sibling_row() {
             authors: Some(Binding::Reactive(IdentityField::ActivePubkey)),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![b.clone()])
+        ReadRouting::Explicit(vec![b.clone()]),
     )
     .expect("a reactive pinned demand is constructible");
 
@@ -1056,7 +1056,7 @@ fn max_age_branch(host: &RelayUrl, keys: &Keys) -> Demand {
                 .to_hex()]))),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![host.clone()])
+        ReadRouting::Explicit(vec![host.clone()]),
     )
     .expect("a one-relay pinned set is nonempty");
     demand.freshness = Freshness::MaxAge { seconds: 3_600 };

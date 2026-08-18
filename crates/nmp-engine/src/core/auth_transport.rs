@@ -4,8 +4,8 @@
 //! checks, inbound frame reduction, and the transition between authenticated
 //! sessions and ordinary query/write work.
 
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 
 impl CoreState {
     // ---- transport wiring (slot bookkeeping only — C owns the pool) -----
@@ -107,10 +107,8 @@ impl CoreState {
             let Some(pending) = self.pending.get(&id) else {
                 continue;
             };
-            let lane_session = RelaySessionKey::new(
-                lane.key.relay.clone(),
-                Some(pending.signing_pubkey),
-            );
+            let lane_session =
+                RelaySessionKey::new(lane.key.relay.clone(), Some(pending.signing_pubkey));
             if &lane_session != session {
                 continue;
             }
@@ -342,10 +340,7 @@ impl CoreState {
                 .pending
                 .get(&id)
                 .map(|pending| {
-                    RelaySessionKey::new(
-                        lane.key.relay.clone(),
-                        Some(pending.signing_pubkey),
-                    )
+                    RelaySessionKey::new(lane.key.relay.clone(), Some(pending.signing_pubkey))
                 })
                 .is_some_and(|candidate| candidate == *session);
             if !exact_session || !matches!(lane.state, PublishQueueLaneState::WaitingAuth) {
@@ -702,8 +697,7 @@ impl CoreState {
                     AuthCapability::Policy => state.policy_instance == Some(instance),
                     AuthCapability::Signer => state.signer_instance == Some(instance),
                 };
-                (session.authenticate_as == Some(pubkey) && owns_instance)
-                    .then(|| session.clone())
+                (session.authenticate_as == Some(pubkey) && owns_instance).then(|| session.clone())
             })
             .collect();
         let mut effects = Vec::new();

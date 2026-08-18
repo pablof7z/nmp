@@ -32,7 +32,10 @@ impl AttributionState {
         let send_id = AttributionSendId(self.next_send_id);
         self.next_send_id = self.next_send_id.wrapping_add(1);
         for key in &coverage_claims {
-            *self.inflight_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
+            *self
+                .inflight_shape_owner_counts
+                .entry(key.clone())
+                .or_insert(0) += 1;
         }
         let snapshot = AttributionSnapshot {
             send_id,

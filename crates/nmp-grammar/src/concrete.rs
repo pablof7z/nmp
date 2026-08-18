@@ -519,11 +519,8 @@ mod tests {
         let r1 = nostr::RelayUrl::parse("wss://r1.example").unwrap();
         let r2 = nostr::RelayUrl::parse("wss://r2.example").unwrap();
         let declare = |relays: Vec<nostr::RelayUrl>| {
-            Demand::new(
-                Filter::default(),
-                ReadRouting::Explicit(relays)
-            )
-            .expect("a nonempty explicit relay set is legal")
+            Demand::new(Filter::default(), ReadRouting::Explicit(relays))
+                .expect("a nonempty explicit relay set is legal")
         };
         let atom = |demand: Demand| ContextualAtom {
             filter: cf(vec!["aa"], vec![]),

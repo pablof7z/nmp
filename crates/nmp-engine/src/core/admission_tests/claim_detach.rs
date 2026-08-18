@@ -58,7 +58,10 @@ fn local_owner_detach_prunes_the_current_attribution_generation_before_eose() {
     let pending = core.pending_request_evidence[&(session.clone(), sub_id.clone())]
         .back()
         .unwrap();
-    assert_eq!(pending.owner_demands, BTreeSet::from([incumbent_demand.clone()]));
+    assert_eq!(
+        pending.owner_demands,
+        BTreeSet::from([incumbent_demand.clone()])
+    );
     let census = core.bench_ownership_census();
     assert_eq!(census.attribution_live_shape_keys, 1);
     assert_eq!(census.attribution_live_shape_refs, 1);

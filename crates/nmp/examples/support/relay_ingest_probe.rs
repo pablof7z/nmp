@@ -664,7 +664,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let selection = corpus.selection.clone();
     let demand = Demand::new(
         selection.clone(),
-        ReadRouting::Explicit(relay_urls.iter().cloned().collect())
+        ReadRouting::Explicit(relay_urls.iter().cloned().collect()),
     )?;
     #[cfg(feature = "bench-instrumentation")]
     nmp_engine::ingest_attribution::reset();

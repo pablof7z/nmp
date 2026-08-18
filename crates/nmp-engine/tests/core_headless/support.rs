@@ -22,8 +22,8 @@ use nmp_engine::publish_queue::{
     WriteFact, WriteOutcome,
 };
 use nmp_grammar::{
-    Binding, ConcreteFilter, ContextualAtom, Filter, Identity, ReadRouting,
-    RelaySessionKey, WriteIntent, WritePayload, WriteRouting,
+    Binding, ConcreteFilter, ContextualAtom, Filter, Identity, ReadRouting, RelaySessionKey,
+    WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_grammar::{Demand, LiveQuery};
 use nmp_router::{SubId, WireOp};
@@ -231,7 +231,8 @@ fn protected_pinned_query(relay: &RelayUrl, signer: nostr::PublicKey, kind: u16)
                 ..Filter::default()
             },
             ReadRouting::Explicit(vec![relay.clone()]),
-        ).expect("protected pinned demand is valid");
+        )
+        .expect("protected pinned demand is valid");
         demand.authenticate_as = Some(signer);
         LiveQuery::single(demand)
     }
@@ -448,8 +449,7 @@ fn mark_written(core: &mut EngineCore, effects: &[Effect], relay: &RelayUrl) -> 
         .iter()
         .find_map(|effect| match effect {
             Effect::PublishEvent(candidate, event, correlation)
-                if &candidate.relay == relay
-                    && candidate.authenticate_as == Some(event.pubkey) =>
+                if &candidate.relay == relay && candidate.authenticate_as == Some(event.pubkey) =>
             {
                 Some(*correlation)
             }

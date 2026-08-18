@@ -7,9 +7,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::time::{Duration, Instant};
 
 use nmp_engine::core::RowDelta;
-use nmp_grammar::{
-    Binding, ConcreteFilter, ContextualAtom, Filter as QueryFilter, ReadRouting,
-};
+use nmp_grammar::{Binding, ConcreteFilter, ContextualAtom, Filter as QueryFilter, ReadRouting};
 use nmp_grammar::{Demand, LiveQuery};
 use nmp_runtime::{EngineThread, RowsReceiver};
 use nmp_store::{coverage_key, CoverageInterval, RedbStore, RelayObserved};
@@ -101,7 +99,11 @@ fn bounded_runtime_working_sets_do_not_delete_default_durable_history() {
                 .expect("persist verified history");
         }
         store
-            .record_coverage(&[(atom.clone(), RelaySessionKey::unauthenticated(relay.clone()), coverage)])
+            .record_coverage(&[(
+                atom.clone(),
+                RelaySessionKey::unauthenticated(relay.clone()),
+                coverage,
+            )])
             .expect("persist acquisition evidence");
     }
 
@@ -141,7 +143,10 @@ fn bounded_runtime_working_sets_do_not_delete_default_durable_history() {
     assert_eq!(retained, all_ids.into_iter().collect());
     assert_eq!(
         reopened
-            .get_coverage(coverage_key(&atom), &RelaySessionKey::unauthenticated(relay.clone()))
+            .get_coverage(
+                coverage_key(&atom),
+                &RelaySessionKey::unauthenticated(relay.clone())
+            )
             .expect("coverage peek"),
         Some(coverage),
         "ordinary runtime pressure must not lower durable acquisition evidence"

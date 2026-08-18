@@ -10,8 +10,8 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use nmp::{
-    Binding, CacheMode, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery,
-    ReadRouting, RelayState, RowDelta, WriteFact, WriteIntent, WritePayload, WriteRouting,
+    Binding, CacheMode, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReadRouting,
+    RelayState, RowDelta, WriteFact, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_runtime::FifoReceiver;
 use nmp_test_support::relays::{RelayConfig, ScriptedRelay};
@@ -114,7 +114,7 @@ async fn verified_parent_provenance_becomes_a_real_lane_while_raw_hint_text_does
             ids: Some(Binding::Literal(BTreeSet::from([parent.id.to_hex()]))),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![parent_relay.url.clone()])
+        ReadRouting::Explicit(vec![parent_relay.url.clone()]),
     )
     .expect("one pinned parent query is valid");
     parent_demand.cache = CacheMode::Strict;

@@ -146,10 +146,7 @@ mod tests {
 
             // The composer's own uppercase root rows for this same root.
             let rows = root.root_rows(&TagOptions::default());
-            let emitted: Vec<Vec<String>> = rows
-                .iter()
-                .map(|row| row.clone().to_vec())
-                .collect();
+            let emitted: Vec<Vec<String>> = rows.iter().map(|row| row.clone().to_vec()).collect();
 
             let matched = emitted.iter().any(|row| {
                 row.first().map(|n| n.as_str()) == Some(name.to_string().as_str())

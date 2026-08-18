@@ -1,7 +1,7 @@
 //! lifecycle admission proofs.
 
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 
 #[test]
 fn outstanding_request_terminals_follow_current_exact_owners_after_attachment_churn() {
@@ -240,7 +240,13 @@ fn departing_shape_remains_owned_through_atomic_eose_persistence() {
     );
     for claim in &request.coverage_claims {
         assert!(
-            core.store.get_coverage(claim.clone(), &RelaySessionKey::unauthenticated(relay.clone())).unwrap().is_some(),
+            core.store
+                .get_coverage(
+                    claim.clone(),
+                    &RelaySessionKey::unauthenticated(relay.clone())
+                )
+                .unwrap()
+                .is_some(),
             "both coalesced claims commit even though one active owner departed"
         );
     }

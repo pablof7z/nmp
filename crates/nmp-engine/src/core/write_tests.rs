@@ -1,7 +1,7 @@
 //! Ownership-domain tests moved with the implementation they falsify.
 
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 
 #[cfg(test)]
 mod receipt_allocator_tests {
@@ -667,10 +667,7 @@ mod semantic_successor_tests {
             slot: 40,
             generation: 1,
         };
-        let write_session = RelaySessionKey::new(
-            destination.clone(),
-            Some(author.public_key()),
-        );
+        let write_session = RelaySessionKey::new(destination.clone(), Some(author.public_key()));
         let write_handle = TransportRelayHandle {
             slot: 1,
             generation: 1,
@@ -812,10 +809,7 @@ mod semantic_successor_tests {
             slot: 40,
             generation: 1,
         };
-        let write_session = RelaySessionKey::new(
-            destination.clone(),
-            Some(author.public_key()),
-        );
+        let write_session = RelaySessionKey::new(destination.clone(), Some(author.public_key()));
         let write_handle = TransportRelayHandle {
             slot: 1,
             generation: 1,
@@ -1129,10 +1123,7 @@ mod semantic_successor_tests {
             Ok(e1_signed.clone()),
         ));
         for (slot, destination) in [&destination_a, &destination_b].into_iter().enumerate() {
-            let session = RelaySessionKey::new(
-                destination.clone(),
-                Some(author.public_key()),
-            );
+            let session = RelaySessionKey::new(destination.clone(), Some(author.public_key()));
             let handle = TransportRelayHandle {
                 slot: u32::try_from(slot).unwrap(),
                 generation: 1,
@@ -1349,14 +1340,8 @@ mod semantic_successor_tests {
             Ok(first_successor_signed),
         ));
         let expected_first_successor_sessions = BTreeSet::from([
-            RelaySessionKey::new(
-                destination_a.clone(),
-                Some(author.public_key()),
-            ),
-            RelaySessionKey::new(
-                destination_b.clone(),
-                Some(author.public_key()),
-            ),
+            RelaySessionKey::new(destination_a.clone(), Some(author.public_key())),
+            RelaySessionKey::new(destination_b.clone(), Some(author.public_key())),
         ]);
         assert_eq!(
             first_successor_signed_effects

@@ -301,7 +301,7 @@ fn named(group_ids: &BTreeSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_grammar::{ReadRouting};
+    use nmp_grammar::ReadRouting;
     use nostr::{EventId, Keys, Kind, Timestamp, UnsignedEvent};
 
     const GROUP: &str = "photographers";

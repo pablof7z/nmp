@@ -5,7 +5,7 @@
 //! never depends on mechanism-crate types or reconstructs causality from
 //! engine-global diagnostics.
 
-use nmp_grammar::{IdentityField};
+use nmp_grammar::IdentityField;
 use nostr::JsonUtil;
 
 /// One ordered fact from a live observation's real execution.

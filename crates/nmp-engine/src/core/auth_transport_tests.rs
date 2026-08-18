@@ -38,7 +38,8 @@ fn protected_pinned_query(relay: &RelayUrl, signer: PublicKey, authors: Binding)
                 ..Filter::default()
             },
             ReadRouting::Explicit(vec![relay.clone()]),
-        ).expect("protected pinned demand is valid");
+        )
+        .expect("protected pinned demand is valid");
         demand.authenticate_as = Some(signer);
         LiveQuery::single(demand)
     }

@@ -1,7 +1,7 @@
 //! Ownership-domain tests moved with the implementation they falsify.
 
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 
 #[cfg(test)]
 mod relay_session_key_tests {
@@ -129,10 +129,8 @@ mod relay_session_key_tests {
     fn event_commit_poison_is_fifo_scoped_monotonic_and_retires_with_owners() {
         let relay = relay();
         let public_session = RelaySessionKey::unauthenticated(relay.clone());
-        let protected_session = RelaySessionKey::new(
-            relay.clone(),
-            Some(Keys::generate().public_key()),
-        );
+        let protected_session =
+            RelaySessionKey::new(relay.clone(), Some(Keys::generate().public_key()));
         let filter_a = ConcreteFilter {
             kinds: Some(BTreeSet::from([1])),
             ..ConcreteFilter::default()
@@ -156,7 +154,12 @@ mod relay_session_key_tests {
         let key_a = coverage_key(&atom_a);
         let key_b = coverage_key(&atom_b);
         let sub_a = SubId::allocate(relay.clone(), &ReadRouting::Auto, None, 1003);
-        let sub_b = SubId::allocate(relay, &ReadRouting::Auto, protected_session.authenticate_as, 1004);
+        let sub_b = SubId::allocate(
+            relay,
+            &ReadRouting::Auto,
+            protected_session.authenticate_as,
+            1004,
+        );
         let wire_a = wire_sub_id_string(&sub_a);
         let wire_b = wire_sub_id_string(&sub_b);
         let mut attribution = AttributionState::new();
@@ -320,7 +323,10 @@ mod relay_session_key_tests {
                 generation: 1,
             },
         ];
-        core.handle(EngineMsg::RelayConnected(handles[0], unauthenticated.clone()));
+        core.handle(EngineMsg::RelayConnected(
+            handles[0],
+            unauthenticated.clone(),
+        ));
         core.handle(EngineMsg::RelayConnected(handles[1], session_a.clone()));
         core.handle(EngineMsg::RelayConnected(handles[2], session_b.clone()));
 
@@ -339,10 +345,7 @@ mod relay_session_key_tests {
     fn protected_neg_frames_cannot_resolve_the_public_probe_or_inherit_its_diagnostics() {
         let relay = relay();
         let unauthenticated = RelaySessionKey::unauthenticated(relay.clone());
-        let protected = RelaySessionKey::new(
-            relay.clone(),
-            Some(Keys::generate().public_key()),
-        );
+        let protected = RelaySessionKey::new(relay.clone(), Some(Keys::generate().public_key()));
         let filter = ConcreteFilter {
             kinds: Some(BTreeSet::from([1])),
             ..ConcreteFilter::default()
@@ -373,7 +376,10 @@ mod relay_session_key_tests {
             slot: 6,
             generation: 1,
         };
-        core.handle(EngineMsg::RelayConnected(unauthenticated_handle, unauthenticated.clone()));
+        core.handle(EngineMsg::RelayConnected(
+            unauthenticated_handle,
+            unauthenticated.clone(),
+        ));
         core.handle(EngineMsg::RelayConnected(
             protected_handle,
             protected.clone(),
@@ -428,7 +434,11 @@ mod relay_session_key_tests {
             subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(wire_id)),
             message: std::borrow::Cow::Owned("6100".to_string()),
         });
-        core.handle(EngineMsg::RelayFrame(unauthenticated_handle, unauthenticated, public_neg_msg));
+        core.handle(EngineMsg::RelayFrame(
+            unauthenticated_handle,
+            unauthenticated,
+            public_neg_msg,
+        ));
         assert_eq!(
             core.prober.state(&relay),
             crate::negentropy::ProbeState::Supported
@@ -585,7 +595,8 @@ mod relay_health_tests {
             slot: 7,
             generation: 1,
         };
-        let session = RelaySessionKey::unauthenticated(RelayUrl::parse("wss://health.example.com").unwrap());
+        let session =
+            RelaySessionKey::unauthenticated(RelayUrl::parse("wss://health.example.com").unwrap());
         let health = RelayHealth {
             last_error: Some("signature verification worker unavailable".to_string()),
             invalid_signature_count: 0,

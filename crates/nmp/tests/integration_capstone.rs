@@ -30,8 +30,8 @@ use nmp_engine::core::{AcquisitionEvidence, RowDelta, SourceStatus};
 use nmp_engine::publish_queue::{RelayState, WriteFact};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{
-    Binding, CacheMode, Demand, Derived, Filter, Freshness, IdentityField,
-    ReadRouting, Selector, SetAlgebra, SetOp,
+    Binding, CacheMode, Demand, Derived, Filter, Freshness, IdentityField, ReadRouting, Selector,
+    SetAlgebra, SetOp,
 };
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
@@ -812,7 +812,7 @@ fn public_engine_nested_strict_cache_uses_independent_relay_witnesses_before_lim
             limit: Some(2),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![relay_a.clone()])
+        ReadRouting::Explicit(vec![relay_a.clone()]),
     )
     .unwrap();
     inner.cache = CacheMode::Strict;
@@ -826,7 +826,7 @@ fn public_engine_nested_strict_cache_uses_independent_relay_witnesses_before_lim
             }))),
             ..Filter::default()
         },
-        ReadRouting::Explicit(vec![relay_a])
+        ReadRouting::Explicit(vec![relay_a]),
     )
     .unwrap();
     outer.freshness = Freshness::CacheOnly;

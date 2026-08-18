@@ -208,9 +208,8 @@ pub use subscription::{
 // the invented category they named; see
 // `docs/internals/conventions/naming-no-invented-categories.md` section 3.
 pub use nmp_grammar::{
-    Binding, CacheMode, Demand, DemandError, Derived, Filter, Freshness,
-    IdentityField, IndexedTagName, LiveQuery, LiveQueryError, ReadRouting, Selector, SetAlgebra,
-    SetOp,
+    Binding, CacheMode, Demand, DemandError, Derived, Filter, Freshness, IdentityField,
+    IndexedTagName, LiveQuery, LiveQueryError, ReadRouting, Selector, SetAlgebra, SetOp,
 };
 
 // Bech32 nostr-entity DECODE (#116) -- npub/nprofile/note/nevent/naddr ->

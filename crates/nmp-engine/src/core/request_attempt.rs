@@ -734,7 +734,7 @@ impl CoreState {
 /// two drive the real `pub(super)` surface `CoreState` itself calls.
 #[cfg(test)]
 mod tests {
-    use nmp_grammar::{ReadRouting};
+    use nmp_grammar::ReadRouting;
     use nostr::RelayUrl;
 
     use super::*;

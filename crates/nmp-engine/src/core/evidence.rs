@@ -499,7 +499,7 @@ pub(crate) fn merge_acquisition_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nmp_grammar::{ReadRouting};
+    use nmp_grammar::ReadRouting;
     use nmp_router::{DemandKey, SubId, WireReq};
     use nmp_store::RedbStore;
     use nostr::Keys;
@@ -609,7 +609,12 @@ mod tests {
             reqs: BTreeMap::from([(
                 session.clone(),
                 vec![WireReq {
-                    sub_id: SubId::allocate(relay.clone(), &atom.routing, atom.authenticate_as, 1022),
+                    sub_id: SubId::allocate(
+                        relay.clone(),
+                        &atom.routing,
+                        atom.authenticate_as,
+                        1022,
+                    ),
                     filter: atom.filter.clone(),
                     routing: atom.routing.clone(),
                     provenance: BTreeSet::new(),

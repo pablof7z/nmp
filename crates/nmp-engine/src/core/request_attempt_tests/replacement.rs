@@ -1,7 +1,7 @@
 //! Fresh-id request replacement and NIP-77 transition ownership.
 
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 
 #[test]
 fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_accept() {
@@ -97,12 +97,18 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
     }
     assert!(core
         .store
-        .get_coverage(first_claim, &RelaySessionKey::unauthenticated(relay.clone()))
+        .get_coverage(
+            first_claim,
+            &RelaySessionKey::unauthenticated(relay.clone())
+        )
         .unwrap()
         .is_none());
     assert!(core
         .store
-        .get_coverage(second_claim, &RelaySessionKey::unauthenticated(relay.clone()))
+        .get_coverage(
+            second_claim,
+            &RelaySessionKey::unauthenticated(relay.clone())
+        )
         .unwrap()
         .is_some());
 

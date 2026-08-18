@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use nostr::{EventId, JsonUtil, RelayUrl, Timestamp};
 
-use nmp_grammar::{RelaySessionKey};
+use nmp_grammar::RelaySessionKey;
 use nmp_router::{Diagnostics, Lane, RelayPlan, WireReq};
 use nmp_store::{CoverageInterval, CoverageKey, PersistenceError};
 
@@ -336,7 +336,10 @@ pub(crate) fn build(
     diag: &Diagnostics,
     plan: &RelayPlan,
     events_by_session_kind: &HashMap<RelaySessionKey, BTreeMap<u16, u64>>,
-    get_coverage: impl Fn(&RelaySessionKey, CoverageKey) -> Result<Option<CoverageInterval>, PersistenceError>,
+    get_coverage: impl Fn(
+        &RelaySessionKey,
+        CoverageKey,
+    ) -> Result<Option<CoverageInterval>, PersistenceError>,
 ) -> DiagnosticsSnapshot {
     // A coverage read that could not answer is kept as the snapshot's own
     // store-degradation fact rather than rendered as `coverage: None`
@@ -462,7 +465,10 @@ pub(crate) fn stalled_write_id(intent_id: u64, frozen: &EventId) -> String {
 fn request_coverage(
     session: &RelaySessionKey,
     req: &WireReq,
-    get_coverage: &impl Fn(&RelaySessionKey, CoverageKey) -> Result<Option<CoverageInterval>, PersistenceError>,
+    get_coverage: &impl Fn(
+        &RelaySessionKey,
+        CoverageKey,
+    ) -> Result<Option<CoverageInterval>, PersistenceError>,
 ) -> Result<Option<CoverageInterval>, PersistenceError> {
     let mut keys = req.coverage_claims.iter().cloned();
     let Some(first_key) = keys.next() else {

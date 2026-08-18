@@ -1,5 +1,5 @@
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 use nmp_grammar::{Demand, Derived, Freshness, Selector};
 
 // ---- negentropy selection and fallback ---------------------------------
@@ -890,7 +890,8 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     );
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
     assert_eq!(
-        core.get_coverage(&atom_b, &RelaySessionKey::unauthenticated(relay0.clone())).expect("coverage peek"),
+        core.get_coverage(&atom_b, &RelaySessionKey::unauthenticated(relay0.clone()))
+            .expect("coverage peek"),
         None,
         "a limit:0 EOSE must never mint coverage even when the relay overdelivered"
     );
@@ -1244,11 +1245,13 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
     let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
     assert_eq!(
-        core.get_coverage(&atom_a, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage peek"),
+        core.get_coverage(&atom_a, &RelaySessionKey::unauthenticated(relay.clone()))
+            .expect("coverage peek"),
         None
     );
     assert_eq!(
-        core.get_coverage(&atom_b, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage peek"),
+        core.get_coverage(&atom_b, &RelaySessionKey::unauthenticated(relay.clone()))
+            .expect("coverage peek"),
         None
     );
 
@@ -1274,7 +1277,10 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
     ));
     let healthy_atom = ctx_atom(cf(&[2], &[&healthy.public_key().to_hex()]));
     assert!(core
-        .get_coverage(&healthy_atom, &RelaySessionKey::unauthenticated(healthy_relay.clone()))
+        .get_coverage(
+            &healthy_atom,
+            &RelaySessionKey::unauthenticated(healthy_relay.clone())
+        )
         .expect("coverage peek")
         .is_some());
 }
@@ -1836,7 +1842,8 @@ fn live_eose_timeout_fallback_then_full_withdrawal_closes_orphaned_candidate() {
     ));
     let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
     assert_eq!(
-        core.get_coverage(&atom_a, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage peek"),
+        core.get_coverage(&atom_a, &RelaySessionKey::unauthenticated(relay.clone()))
+            .expect("coverage peek"),
         None,
         "a late EOSE on a withdrawn, orphaned candidate must never mint phantom coverage"
     );
@@ -1914,7 +1921,8 @@ fn live_eose_timeout_withdrawal_closes_only_its_orphaned_candidate() {
     ));
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
     assert_eq!(
-        core.get_coverage(&atom_b, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage peek"),
+        core.get_coverage(&atom_b, &RelaySessionKey::unauthenticated(relay.clone()))
+            .expect("coverage peek"),
         None,
         "a late EOSE on a withdrawn, orphaned candidate must never mint phantom coverage"
     );
@@ -2026,11 +2034,13 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
     let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
     assert_eq!(
-        core.get_coverage(&atom_a, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage peek"),
+        core.get_coverage(&atom_a, &RelaySessionKey::unauthenticated(relay.clone()))
+            .expect("coverage peek"),
         None
     );
     assert_eq!(
-        core.get_coverage(&atom_b, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage peek"),
+        core.get_coverage(&atom_b, &RelaySessionKey::unauthenticated(relay.clone()))
+            .expect("coverage peek"),
         None
     );
 
@@ -2045,7 +2055,8 @@ fn a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose() {
         eose_frame(&wire_sub_string(&reopened_backlog)),
     ));
     assert_eq!(
-        core.get_coverage(&atom_a, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage peek"),
+        core.get_coverage(&atom_a, &RelaySessionKey::unauthenticated(relay.clone()))
+            .expect("coverage peek"),
         None,
         "b's independent backlog cannot credit a"
     );

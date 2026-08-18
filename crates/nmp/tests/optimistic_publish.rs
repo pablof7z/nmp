@@ -39,8 +39,8 @@ use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
 use nmp::{
-    CacheMode, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery,
-    ReadRouting, RelayState, Row, RowDelta, WriteFact, WriteIntent, WritePayload, WriteRouting,
+    CacheMode, Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReadRouting, RelayState,
+    Row, RowDelta, WriteFact, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_nip29 as nip29;
 use nmp_runtime::FifoReceiver;
@@ -124,7 +124,7 @@ fn pinned_strict_branch(hosts: &[RelayUrl], kind: u16) -> Demand {
             kinds: Some(BTreeSet::from([kind])),
             ..Filter::default()
         },
-        ReadRouting::Explicit(hosts.to_vec())
+        ReadRouting::Explicit(hosts.to_vec()),
     )
     .expect("a nonempty pinned set with a non-outbox source is constructible");
     demand.cache = CacheMode::Strict;

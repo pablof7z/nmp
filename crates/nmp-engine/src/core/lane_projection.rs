@@ -462,8 +462,7 @@ mod tests {
     fn projection_matches_durable_state_after_every_normal_publish_queue_transition() {
         let author = Keys::generate();
         let relay = RelayUrl::parse("wss://projection-lifecycle.example.com").unwrap();
-        let session =
-            RelaySessionKey::new(relay.clone(), Some(author.public_key()));
+        let session = RelaySessionKey::new(relay.clone(), Some(author.public_key()));
         let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 10);
 
         let (receipt, signed) = publish_waiting(&mut core, &author, &relay, 1);
@@ -587,10 +586,7 @@ mod tests {
             .relay_worker_requirements()
             .unwrap()
             .writes
-            .contains(&RelaySessionKey::new(
-                relay,
-                Some(author.public_key())
-            )));
+            .contains(&RelaySessionKey::new(relay, Some(author.public_key()))));
     }
 
     #[test]

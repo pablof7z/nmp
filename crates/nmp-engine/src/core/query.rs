@@ -3,10 +3,10 @@
 //! This module owns subscription lifetimes, router recompilation, discovery,
 //! NIP-77 handoff/repair, and committed-store mutations projected to observers.
 
-use nmp_grammar::RelaySessionKey;
 use super::attribution::CompletedCoverageClaim;
 use super::observation::StoredEvents;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 
 /// One observation's merged current row set plus its per-BRANCH acquisition
 /// evidence, indexed by canonical branch order (#1108). This is the internal
@@ -663,7 +663,11 @@ impl CoreState {
         };
         let Some(claims): Option<BTreeMap<_, _>> = added
             .iter()
-            .map(|key| self.attribution.claim_shape(key.clone()).map(|atom| (key.clone(), atom)))
+            .map(|key| {
+                self.attribution
+                    .claim_shape(key.clone())
+                    .map(|atom| (key.clone(), atom))
+            })
             .collect()
         else {
             return BTreeSet::new();
@@ -996,8 +1000,7 @@ impl CoreState {
             // `finish_auth_ok`, replays the full planned set on readiness,
             // so nothing is lost), and no CLOSE is needed pre-auth — nothing
             // was ever sent on that socket for this plan to withdraw.
-            if session.authenticate_as.is_some()
-                && !self.auth_ready_sessions.contains_key(session)
+            if session.authenticate_as.is_some() && !self.auth_ready_sessions.contains_key(session)
             {
                 continue;
             }
@@ -1701,7 +1704,10 @@ impl CoreState {
         let stale_closes = self.cancel_nip77_repair_for_plan(&plan_sub_id, effects);
         if !stale_closes.is_empty() {
             effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
-                ops: vec![(RelaySessionKey::unauthenticated(probed.url().clone()), stale_closes)],
+                ops: vec![(
+                    RelaySessionKey::unauthenticated(probed.url().clone()),
+                    stale_closes,
+                )],
             })));
         }
 

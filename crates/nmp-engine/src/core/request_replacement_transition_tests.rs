@@ -293,7 +293,10 @@ fn superseding_a_nip77_candidate_before_eose_cancels_it_and_late_eose_is_inert()
     assert!(fixture
         .core
         .store
-        .get_coverage(second_claim, &RelaySessionKey::unauthenticated(fixture.relay.clone()))
+        .get_coverage(
+            second_claim,
+            &RelaySessionKey::unauthenticated(fixture.relay.clone())
+        )
         .unwrap()
         .is_none());
     assert_eq!(

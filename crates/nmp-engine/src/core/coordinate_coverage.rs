@@ -686,11 +686,8 @@ mod tests {
         };
         let mut core = CoreState::new(RedbStore::temporary().expect("temporary Redb store"), 32);
         core.handle(EngineMsg::RelayConnected(handle, session.clone()));
-        let demand = Demand::new(
-            filter,
-            ReadRouting::Explicit(vec![relay])
-        )
-        .expect("a relay-pinned read is nonempty");
+        let demand = Demand::new(filter, ReadRouting::Explicit(vec![relay]))
+            .expect("a relay-pinned read is nonempty");
         core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));
         let admitted = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(1u64)));
         let (_, sub_id, _, attempt_id) = placed_requests(&admitted)
@@ -998,7 +995,7 @@ mod tests {
                 kinds: Some(BTreeSet::from([Kind::TextNote.as_u16()])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay()])
+            ReadRouting::Explicit(vec![relay()]),
         )
         .expect("a relay-pinned read is nonempty");
         fixture
@@ -1047,8 +1044,7 @@ mod tests {
         fixture.deliver(contact_list(&alice, 100));
         fixture.end_stored_events();
 
-        let protected =
-            RelaySessionKey::new(relay(), Some(Keys::generate().public_key()));
+        let protected = RelaySessionKey::new(relay(), Some(Keys::generate().public_key()));
         assert_eq!(
             fixture
                 .core

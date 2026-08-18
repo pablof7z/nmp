@@ -10,8 +10,8 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use nmp::{
-    Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReadRouting,
-    ReceiptReattachment, RelayState, ReplaceableMaterializer, ReplaceableMaterializerOperation,
+    Demand, Engine, EngineConfig, Filter, Identity, LiveQuery, ReadRouting, ReceiptReattachment,
+    RelayState, ReplaceableMaterializer, ReplaceableMaterializerOperation,
     ReplaceableMaterializerRefusal, ReplaceableMaterializerSpec, Row, RowDelta, RowSignature,
     SignerOp, SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
     SigningState, WriteFact, WriteIntent, WriteOutcome, WriteRouting,
@@ -175,7 +175,7 @@ fn pinned_contact_lists(
                 authors: Some(nmp::Binding::Literal(BTreeSet::from([author.to_hex()]))),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(relays.into_iter().collect())
+            ReadRouting::Explicit(relays.into_iter().collect()),
         )
         .expect("one pinned source is valid"),
     )
@@ -193,7 +193,7 @@ fn pinned_kind(
                 authors: Some(nmp::Binding::Literal(BTreeSet::from([author.to_hex()]))),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(relays.into_iter().collect())
+            ReadRouting::Explicit(relays.into_iter().collect()),
         )
         .expect("one pinned source is valid"),
     )

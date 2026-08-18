@@ -205,7 +205,10 @@ impl WireOwnership {
     /// Add one owner of `atom`'s logical demand.
     pub(super) fn retain(&mut self, atom: &ContextualAtom) -> AtomRetained {
         let key = DemandKey::for_atom(atom);
-        let evidence = self.routing_evidence_owner_counts.entry(key.clone()).or_default();
+        let evidence = self
+            .routing_evidence_owner_counts
+            .entry(key.clone())
+            .or_default();
         let mut evidence_grew = false;
         for fact in &atom.routing_evidence {
             let count = evidence.entry(fact.clone()).or_insert(0);
@@ -323,7 +326,10 @@ impl WireOwnership {
         for atom in &atoms {
             let demand = DemandKey::for_atom(atom);
             *demand_refs.entry(demand.clone()).or_insert(0) += 1;
-            self.handles_by_demand.entry(demand.clone()).or_default().insert(id);
+            self.handles_by_demand
+                .entry(demand.clone())
+                .or_default()
+                .insert(id);
             for claim_key in coverage_claim_keys(atom) {
                 *coverage_refs.entry(claim_key.clone()).or_insert(0) += 1;
                 self.handles_by_coverage

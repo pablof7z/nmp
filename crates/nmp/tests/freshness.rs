@@ -7,8 +7,8 @@ use nmp_engine::core::{
 use nmp_grammar::Derived;
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{
-    Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness,
-    ReadRouting, RelaySessionKey, Selector,
+    Binding, CacheMode, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness, ReadRouting,
+    RelaySessionKey, Selector,
 };
 use nmp_router::WireOp;
 use nmp_router_testkit::FixtureRoutingFacts;
@@ -85,7 +85,7 @@ fn nested_query(
 ) -> LiveQuery {
     let mut inner = Demand::new(
         filter(keys),
-        ReadRouting::Explicit(vec![inner_relay.clone()])
+        ReadRouting::Explicit(vec![inner_relay.clone()]),
     )
     .unwrap();
     inner.freshness = inner_freshness;
@@ -99,7 +99,7 @@ fn nested_query(
     };
     let mut outer = Demand::new(
         outer_selection,
-        ReadRouting::Explicit(vec![outer_relay.clone()])
+        ReadRouting::Explicit(vec![outer_relay.clone()]),
     )
     .unwrap();
     outer.freshness = outer_freshness;
@@ -107,11 +107,7 @@ fn nested_query(
 }
 
 fn pinned_query(keys: &Keys, relay: &RelayUrl, freshness: Freshness) -> LiveQuery {
-    let mut demand = Demand::new(
-        filter(keys),
-        ReadRouting::Explicit(vec![relay.clone()])
-    )
-    .unwrap();
+    let mut demand = Demand::new(filter(keys), ReadRouting::Explicit(vec![relay.clone()])).unwrap();
     demand.freshness = freshness;
     LiveQuery::single(demand)
 }
@@ -464,7 +460,7 @@ fn nested_strict_pins_do_not_contaminate_public_root_cache_projection() {
 
     let mut inner = Demand::new(
         filter(&inner_author),
-        ReadRouting::Explicit(vec![inner_relay])
+        ReadRouting::Explicit(vec![inner_relay]),
     )
     .unwrap();
     inner.cache = CacheMode::Strict;
@@ -478,7 +474,7 @@ fn nested_strict_pins_do_not_contaminate_public_root_cache_projection() {
             }))),
             ..Filter::default()
         },
-        ReadRouting::Auto
+        ReadRouting::Auto,
     )
     .unwrap();
     root.cache = CacheMode::Strict;
@@ -519,7 +515,10 @@ fn nested_live_opens_wire_under_cache_only_outer() {
 
     assert_eq!(
         requested_filters(&effects),
-        BTreeSet::from([(RelaySessionKey::unauthenticated(inner_relay), concrete(&keys),)]),
+        BTreeSet::from([(
+            RelaySessionKey::unauthenticated(inner_relay),
+            concrete(&keys),
+        )]),
         "the inner Live request remains, while the outer CacheOnly atom contributes no wire work"
     );
 }
@@ -634,7 +633,10 @@ fn nested_max_age_uses_inner_scoped_coverage_only() {
     assert_eq!(
         requested_filters(&stale_effects),
         BTreeSet::from([
-            (RelaySessionKey::unauthenticated(inner_relay), concrete(&keys)),
+            (
+                RelaySessionKey::unauthenticated(inner_relay),
+                concrete(&keys)
+            ),
             (
                 RelaySessionKey::unauthenticated(outer_relay),
                 ConcreteFilter {
@@ -847,10 +849,13 @@ fn stale_max_age_refreshes_coverage_once_and_remains_live() {
         "EOSE does not suppress the live tail"
     );
     assert_eq!(
-        core.get_coverage(&atom(&keys, ReadRouting::Auto), &RelaySessionKey::unauthenticated(relay.clone()))
-            .expect("coverage peek")
-            .expect("a proven row")
-            .through,
+        core.get_coverage(
+            &atom(&keys, ReadRouting::Auto),
+            &RelaySessionKey::unauthenticated(relay.clone())
+        )
+        .expect("coverage peek")
+        .expect("a proven row")
+        .through,
         Timestamp::from(100_000u64)
     );
     let aged = core.handle(EngineMsg::Tick(Timestamp::from(200_000u64)));
@@ -922,10 +927,13 @@ fn future_event_time_never_inflates_coverage_or_freshness() {
         ))),
     ));
     assert_eq!(
-        core.get_coverage(&atom(&keys, ReadRouting::Auto), &RelaySessionKey::unauthenticated(relay.clone()))
-            .expect("coverage peek")
-            .expect("a proven row")
-            .through,
+        core.get_coverage(
+            &atom(&keys, ReadRouting::Auto),
+            &RelaySessionKey::unauthenticated(relay.clone())
+        )
+        .expect("coverage peek")
+        .expect("a proven row")
+        .through,
         Timestamp::from(100_001u64)
     );
     let _ = core.handle(EngineMsg::Unsubscribe(live_id));

@@ -1,7 +1,7 @@
 //! Admission-window and surgical lifecycle falsifiers for #1341/#1342.
 
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 use nmp_grammar::{
     Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, IdentityField,
     IndexedTagName, Selector,
@@ -184,7 +184,7 @@ fn routeless_outbox_query(author: PublicKey) -> LiveQuery {
                 authors: Some(Binding::Literal(BTreeSet::from([author.to_hex()]))),
                 ..Filter::default()
             },
-            ReadRouting::Auto
+            ReadRouting::Auto,
         )
         .unwrap(),
     )

@@ -31,8 +31,8 @@ use nmp_ffi::facade::{NmpDiagnosticsStream, NmpEngine, NmpEngineConfig, NmpRowSt
 use nmp_ffi::nip02::NmpFollowStream;
 use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
-    FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiIdentity,
-    FfiLiveQuery, FfiReadRouting, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
+    FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiIdentity, FfiLiveQuery,
+    FfiReadRouting, FfiWriteIntent, FfiWritePayload, FfiWriteRouting,
 };
 
 const TEST_SECRET_KEY_HEX: &str =

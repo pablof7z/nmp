@@ -1,7 +1,7 @@
 //! execution targets admission proofs.
 
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 
 #[test]
 fn incompatible_requests_visit_only_their_exact_execution_targets() {

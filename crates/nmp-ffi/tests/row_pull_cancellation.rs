@@ -16,9 +16,9 @@ use nmp_ffi::convert::FfiRowPullError;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowPull, NmpRowStream};
 use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
-    FfiCacheMode, FfiDemand, FfiEventBuilder, FfiFilter, FfiFrame, FfiFreshness,
-    FfiIdentity, FfiLiveQuery, FfiReadRouting, FfiRowDelta, FfiWindow, FfiWriteIntent,
-    FfiWritePayload, FfiWriteRouting,
+    FfiCacheMode, FfiDemand, FfiEventBuilder, FfiFilter, FfiFrame, FfiFreshness, FfiIdentity,
+    FfiLiveQuery, FfiReadRouting, FfiRowDelta, FfiWindow, FfiWriteIntent, FfiWritePayload,
+    FfiWriteRouting,
 };
 
 const TEST_SECRET_KEY_HEX: &str =

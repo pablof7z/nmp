@@ -3,9 +3,9 @@
 //! This module owns acceptance through signing, route snapshots, per-relay
 //! attempts and acknowledgements, cancellation/compensation, and boot recovery.
 
-use nmp_grammar::RelaySessionKey;
 use super::coordinate_coverage::CoordinateCoverage;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 use nmp_grammar::ThreadPosition;
 use nostr::nips::nip01::Coordinate;
 
@@ -1276,10 +1276,8 @@ impl CoreState {
             let Some(pending) = self.pending.get(&id) else {
                 continue;
             };
-            let session = RelaySessionKey::new(
-                lane.key.relay.clone(),
-                Some(pending.signing_pubkey),
-            );
+            let session =
+                RelaySessionKey::new(lane.key.relay.clone(), Some(pending.signing_pubkey));
             // Connectivity is process-local, so re-parking the lane records
             // NOTHING durable (#889): an `Eligible` lane WITHOUT this session
             // and a `WaitingConnection` lane already project to the identical
@@ -1543,9 +1541,7 @@ impl CoreState {
             else {
                 continue;
             };
-            if RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey))
-                != *session
-            {
+            if RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey)) != *session {
                 continue;
             }
             let should_wake = if auth_only {
@@ -2263,8 +2259,7 @@ impl CoreState {
             // redials exactly the session the lane will publish on. The
             // signing identity was frozen at acceptance, never re-read from
             // the mutable current account.
-            let session =
-                RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey));
+            let session = RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey));
             match lane.state {
                 PublishQueueLaneState::InFlight {
                     ordinal,
@@ -2375,9 +2370,7 @@ impl CoreState {
         // and the door has dropped the retry entry.
         let connected: BTreeSet<RelaySessionKey> = lanes
             .iter()
-            .map(|lane| {
-                RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey))
-            })
+            .map(|lane| RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey)))
             .filter(|session| self.connected_relays.contains(session))
             .collect();
         self.open_bootstrapped_lanes(id, signing_pubkey, lanes, effects);
@@ -2605,7 +2598,7 @@ impl CoreState {
             let mut awaiting_auth = BTreeSet::new();
             let mut retry_eligible = BTreeSet::new();
             for attempt in attempts {
-                let event_id = attempt.event.id;
+                let event_id = attempt.event_id;
                 let replay_relay = attempt.relay.clone();
                 let replay_ordinal = attempt.ordinal;
                 let replay_key = |phase| ReceiptReplayFactKey::Attempt {
@@ -2956,7 +2949,7 @@ impl CoreState {
                         return true;
                     }
                 };
-                if attempts.iter().any(|attempt| attempt.event.id == source.id) {
+                if attempts.iter().any(|attempt| attempt.event_id == source.id) {
                     // Successor lanes retain predecessor attempts as immutable
                     // delivery history. A relay may replay one of those
                     // previously published materializations after the public
@@ -4097,10 +4090,8 @@ impl CoreState {
                     // reporting both as merely queued would hide a real one
                     // for the second.
                     PublishQueueLaneState::Eligible { since } => {
-                        let session = RelaySessionKey::new(
-                            lane.key.relay.clone(),
-                            Some(signing_pubkey),
-                        );
+                        let session =
+                            RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey));
                         if self.connected_relays.contains(&session) {
                             RelayState::Waiting(RelayWaiting::Eligible { since })
                         } else {
@@ -5511,10 +5502,8 @@ impl CoreState {
             // session, frozen at acceptance). An ack arriving on any other
             // context's session for the same URL — including the Public read
             // session — must never advance this write lane.
-            let expected_session = RelaySessionKey::new(
-                session.relay.clone(),
-                Some(pending.signing_pubkey),
-            );
+            let expected_session =
+                RelaySessionKey::new(session.relay.clone(), Some(pending.signing_pubkey));
             if &expected_session != session {
                 continue;
             }
@@ -5654,9 +5643,7 @@ impl CoreState {
             else {
                 continue;
             };
-            if RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey))
-                != *session
-            {
+            if RelaySessionKey::new(lane.key.relay.clone(), Some(signing_pubkey)) != *session {
                 continue;
             }
             let relay = &session.relay;

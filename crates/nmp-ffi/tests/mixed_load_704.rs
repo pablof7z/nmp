@@ -37,9 +37,9 @@ use std::time::Duration;
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::session::FfiPrivateKey;
 use nmp_ffi::types::{
-    FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiIdentity, FfiLiveQuery,
-    FfiReadRouting, FfiRelayInformationCachePolicy, FfiSignEventRequest, FfiWriteIntent,
-    FfiWritePayload, FfiWriteRouting,
+    FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiIdentity, FfiLiveQuery, FfiReadRouting,
+    FfiRelayInformationCachePolicy, FfiSignEventRequest, FfiWriteIntent, FfiWritePayload,
+    FfiWriteRouting,
 };
 
 const TEST_SECRET_KEY_HEX: &str =

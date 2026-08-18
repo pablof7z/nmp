@@ -250,11 +250,7 @@ mod tests {
     #[test]
     fn equal_selections_with_different_source_or_access_remain_distinct() {
         let relay = nostr::RelayUrl::parse("wss://a.example").unwrap();
-        let pinned = Demand::new(
-            demand(1).selection,
-            ReadRouting::Explicit(vec![relay])
-        )
-        .unwrap();
+        let pinned = Demand::new(demand(1).selection, ReadRouting::Explicit(vec![relay])).unwrap();
         let query = LiveQuery::union(
             [LiveQuery::single(demand(1)), LiveQuery::single(pinned)],
             None,

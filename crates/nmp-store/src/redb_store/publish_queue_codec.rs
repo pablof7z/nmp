@@ -449,18 +449,6 @@ pub(super) fn deadline_key(
     key
 }
 
-pub(super) fn deadline_by_intent_key(
-    intent_id: IntentId,
-    at: Timestamp,
-    relay_id: PublishQueueRelayId,
-) -> [u8; 20] {
-    let mut key = [0; 20];
-    key[..8].copy_from_slice(&intent_id.0.to_be_bytes());
-    key[8..16].copy_from_slice(&at.as_secs().to_be_bytes());
-    key[16..].copy_from_slice(&relay_id.to_be_bytes());
-    key
-}
-
 pub(super) fn parse_deadline_key(
     key: &[u8],
 ) -> Result<(Timestamp, IntentId, PublishQueueRelayId), PublishQueueCodecError> {
@@ -478,40 +466,10 @@ pub(super) fn parse_deadline_key(
     ))
 }
 
-pub(super) fn parse_deadline_by_intent_key(
-    key: &[u8],
-) -> Result<(IntentId, Timestamp, PublishQueueRelayId), PublishQueueCodecError> {
-    if key.len() != 20 {
-        return Err(PublishQueueCodecError::InvalidValue(
-            "deadline-by-intent key length",
-        ));
-    }
-    Ok((
-        IntentId(u64::from_be_bytes(
-            key[..8].try_into().expect("length checked"),
-        )),
-        Timestamp::from(u64::from_be_bytes(
-            key[8..16].try_into().expect("length checked"),
-        )),
-        u32::from_be_bytes(key[16..].try_into().expect("length checked")),
-    ))
-}
-
 pub(super) fn deadline_due_range(now: Timestamp) -> ([u8; 20], [u8; 20]) {
     (
         deadline_key(Timestamp::from(0), IntentId(0), 0),
         deadline_key(now, IntentId(u64::MAX), PublishQueueRelayId::MAX),
-    )
-}
-
-pub(super) fn deadline_intent_range(intent_id: IntentId) -> ([u8; 20], [u8; 20]) {
-    (
-        deadline_by_intent_key(intent_id, Timestamp::from(0), 0),
-        deadline_by_intent_key(
-            intent_id,
-            Timestamp::from(u64::MAX),
-            PublishQueueRelayId::MAX,
-        ),
     )
 }
 
@@ -1020,30 +978,33 @@ fn decode_attempt_outcome(
 }
 
 pub(crate) fn encode_attempt(
-    event: &Event,
+    event_id: &EventId,
     outcome: &PublishQueueAttemptOutcome,
 ) -> Result<Vec<u8>, PublishQueueCodecError> {
     let mut encoder = Encoder::new(ATTEMPT_MAGIC);
-    encoder.event(event)?;
+    encoder.fixed(event_id.as_bytes());
     encode_attempt_outcome(&mut encoder, outcome)?;
     Ok(encoder.finish())
 }
 
-/// Decode one attempt row. NO signature check: these bytes were written by
-/// `start_lane_attempt`, which refuses unless the intent's stored verdict is
-/// already `IntentSigState::Signed` AND the attempt body is byte-identical
-/// to the intent's own promoted event — so the only way a schnorr check here
-/// could fail is a store that has already corrupted its own tables, which a
-/// signature check is the wrong detector for. It used to run on every
-/// attempt row of every open intent on every boot (#1782).
+/// Decode one attempt row. The row names the event it sent; the body lives
+/// once, on the intent that promoted it. `start_lane_attempt` refuses unless
+/// the attempt bytes are byte-identical to that promoted body, so a per-row
+/// copy was the same note written once per `(intent, relay, ordinal)`.
+///
+/// NO signature check either: the intent's stored verdict is already
+/// `IntentSigState::Signed`, so the only way a schnorr check here could fail
+/// is a store that has already corrupted its own tables, which a signature
+/// check is the wrong detector for. It used to run on every attempt row of
+/// every open intent on every boot (#1782).
 pub(super) fn decode_attempt(
     bytes: &[u8],
-) -> Result<(Event, PublishQueueAttemptOutcome), PublishQueueCodecError> {
+) -> Result<(EventId, PublishQueueAttemptOutcome), PublishQueueCodecError> {
     let mut decoder = Decoder::new(bytes, ATTEMPT_MAGIC)?;
-    let event = decoder.event()?;
+    let event_id = decoder.event_id()?;
     let outcome = decode_attempt_outcome(&mut decoder)?;
     decoder.finish()?;
-    Ok((event, outcome))
+    Ok((event_id, outcome))
 }
 
 fn encode_auth_source(encoder: &mut Encoder, source: AuthDenialSource) {
@@ -1448,7 +1409,6 @@ pub(super) fn decode_attempt_details(
 ) -> Result<PublishQueueAttemptDetails, PublishQueueCodecError> {
     let (started_at, handoff, transient, finished_at, terminal) = decode_attempt_detail(bytes)?;
     Ok(PublishQueueAttemptDetails {
-        version: 1,
         intent_id,
         relay,
         ordinal,
@@ -1734,7 +1694,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             encode_attempt(
-                &event,
+                &event.id,
                 &PublishQueueAttemptOutcome::Rejected("x".repeat(MAX_REASON_BYTES + 1))
             ),
             Err(PublishQueueCodecError::BoundExceeded("rejection reason"))
@@ -1742,13 +1702,13 @@ mod tests {
     }
 
     #[test]
-    fn attempt_event_round_trip_is_exact() {
+    fn attempt_event_id_round_trip_is_exact() {
         let keys = Keys::generate();
         let event = EventBuilder::new(Kind::TextNote, "binary delivery")
             .sign_with_keys(&keys)
             .unwrap();
         let encoded = encode_attempt(
-            &event,
+            &event.id,
             &PublishQueueAttemptOutcome::Rejected("blocked".to_owned()),
         )
         .unwrap();
@@ -1756,9 +1716,12 @@ mod tests {
         assert_eq!(
             decoded,
             (
-                event,
+                event.id,
                 PublishQueueAttemptOutcome::Rejected("blocked".to_owned())
             )
         );
+        // The row is the id and the outcome, nothing else: an attempt that
+        // still carried the body would be at least the note's own length.
+        assert_eq!(encoded.len(), 8 + 32 + 1 + 4 + "blocked".len());
     }
 }

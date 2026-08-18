@@ -2,8 +2,7 @@ use nmp_grammar::RelaySessionKey;
 use std::collections::BTreeSet;
 
 use nmp_grammar::{
-    Binding, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness, LiveQuery,
-    ReadRouting,
+    Binding, ConcreteFilter, ContextualAtom, Demand, Filter, Freshness, LiveQuery, ReadRouting,
 };
 use nmp_store::{CoverageInterval, RedbStore};
 use nostr::{Keys, RelayUrl, Timestamp};
@@ -43,11 +42,7 @@ fn fresh_max_age_reads_each_coverage_row_once() {
     core.handle(EngineMsg::Tick(Timestamp::from(100_000u64)));
     core.store.reset_coverage_reads();
 
-    let mut demand = Demand::new(
-        filter,
-        ReadRouting::Explicit(vec![relay])
-    )
-    .unwrap();
+    let mut demand = Demand::new(filter, ReadRouting::Explicit(vec![relay])).unwrap();
     demand.freshness = Freshness::MaxAge { seconds: 3_600 };
     let effects = core.handle(EngineMsg::Subscribe(LiveQuery::single(demand)));
 
@@ -80,11 +75,7 @@ fn pinned_profile_query(author: &str, relay: RelayUrl, freshness: Freshness) -> 
         authors: Some(Binding::Literal(BTreeSet::from([author.to_owned()]))),
         ..Filter::default()
     };
-    let mut demand = Demand::new(
-        filter,
-        ReadRouting::Explicit(vec![relay])
-    )
-    .unwrap();
+    let mut demand = Demand::new(filter, ReadRouting::Explicit(vec![relay])).unwrap();
     demand.freshness = freshness;
     LiveQuery::single(demand)
 }

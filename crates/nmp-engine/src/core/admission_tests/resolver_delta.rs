@@ -1,7 +1,7 @@
 //! resolver delta admission proofs.
 
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 
 #[test]
 fn one_handle_partial_resolver_closes_touch_only_departing_refcounts_in_both_orders() {
@@ -278,7 +278,12 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
     core.set_active_demand(&atoms.iter().cloned().collect());
 
     let request_atom = atoms[0].clone();
-    let sub_id = SubId::allocate(relay, &request_atom.routing, request_atom.authenticate_as, 1014);
+    let sub_id = SubId::allocate(
+        relay,
+        &request_atom.routing,
+        request_atom.authenticate_as,
+        1014,
+    );
     core.white_box("attribution.retain_live_request_claims", |s| {
         s.attribution
             .retain_live_request_claims(&sub_id, incumbent_claims.clone())

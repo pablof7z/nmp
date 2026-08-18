@@ -1,7 +1,7 @@
 //! diagnostics scale admission proofs.
 
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 use nmp_store::testing;
 
 /// #763 falsifier: diagnostics keeps an unreadable coverage entry coupled to

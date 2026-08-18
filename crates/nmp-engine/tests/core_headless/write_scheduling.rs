@@ -460,7 +460,7 @@ fn offline_and_auth_waits_consume_no_attempts_and_auth_wake_uses_a_new_ordinal()
         vec![1, 2],
         "offline/AUTH time allocates nothing; explicit AUTH wake allocates the next ordinal"
     );
-    assert!(attempts.iter().all(|attempt| attempt.event == event));
+    assert!(attempts.iter().all(|attempt| attempt.event_id == event.id));
 }
 
 /// A durable write parked `WaitingAuth` (the relay demanded auth in response

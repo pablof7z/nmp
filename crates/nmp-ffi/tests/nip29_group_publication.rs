@@ -23,9 +23,7 @@ use nmp_ffi::nip29::{
     admin_list_includes, groups_whose_record_matches, member_list_includes, FfiGroupPredicate,
     FfiGroupRecord, FfiRelayScope,
 };
-use nmp_ffi::types::{
-    FfiBinding, FfiEventBuilder, FfiFilter, FfiIdentityField, FfiReadRouting,
-};
+use nmp_ffi::types::{FfiBinding, FfiEventBuilder, FfiFilter, FfiIdentityField, FfiReadRouting};
 
 fn host(n: u16) -> String {
     format!("wss://host-{n}.example.com")

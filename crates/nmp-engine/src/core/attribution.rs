@@ -212,7 +212,10 @@ impl AttributionState {
         for claim in coverage_claim_atoms(atom) {
             let key = coverage_key(&claim);
             self.shape_by_key.entry(key.clone()).or_insert(claim);
-            *self.active_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
+            *self
+                .active_shape_owner_counts
+                .entry(key.clone())
+                .or_insert(0) += 1;
         }
     }
 
@@ -406,7 +409,10 @@ impl AttributionState {
             .expect("the matching current request snapshot remains live");
         for key in added {
             if current.coverage_claims.insert(key.clone()) {
-                *self.inflight_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
+                *self
+                    .inflight_shape_owner_counts
+                    .entry(key.clone())
+                    .or_insert(0) += 1;
             }
         }
         true

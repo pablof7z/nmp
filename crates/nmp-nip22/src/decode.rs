@@ -1162,7 +1162,10 @@ mod coordinate_parity {
         let (parsed_kind, parsed_author, parsed_identifier) =
             parse_address_coordinate(&built).expect("build->parse must round-trip");
         assert_eq!(parsed_kind, kind, "kind mismatch for built {built:?}");
-        assert_eq!(parsed_author, *author, "author mismatch for built {built:?}");
+        assert_eq!(
+            parsed_author, *author,
+            "author mismatch for built {built:?}"
+        );
         assert_eq!(
             parsed_identifier, identifier,
             "identifier mismatch for built {built:?}"

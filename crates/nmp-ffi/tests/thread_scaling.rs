@@ -26,8 +26,7 @@ use std::time::Duration;
 
 use nmp_ffi::facade::{NmpEngine, NmpEngineConfig, NmpRowStream};
 use nmp_ffi::types::{
-    FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiLiveQuery,
-    FfiReadRouting,
+    FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiLiveQuery, FfiReadRouting,
 };
 
 fn text_note_query() -> FfiLiveQuery {

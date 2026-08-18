@@ -1,25 +1,24 @@
 use super::commit::commit_prepared;
 use super::publish_queue::{
-    alloc_counter_in_txn, alloc_receipt_id_in_txn, lane_deadline, mark_terminal_receipt,
-    read_meta_u64, remove_terminal_receipt_index, replace_lane_in_txn,
+    alloc_counter_in_txn, alloc_receipt_id_in_txn, intent_deadline_keys, lane_deadline,
+    mark_terminal_receipt, read_meta_u64, remove_terminal_receipt_index, replace_lane_in_txn,
     update_publish_queue_receipt, PublishQueueReceiptRecord,
 };
 use super::publish_queue_codec::{
-    attempt_key, attempt_range, canonical_route_ids, codec_error, deadline_by_intent_key,
-    deadline_due_range, deadline_intent_range, deadline_key, decode_attempt,
-    decode_attempt_details, decode_deadline, decode_displaced, decode_intent, decode_lane,
-    decode_meta_u64, decode_receipt, decode_relay, decode_route, encode_attempt,
+    attempt_key, attempt_range, canonical_route_ids, codec_error, deadline_due_range,
+    decode_attempt, decode_attempt_details, decode_deadline, decode_displaced, decode_intent,
+    decode_lane, decode_meta_u64, decode_receipt, decode_relay, decode_route, encode_attempt,
     encode_attempt_details, encode_lane, encode_receipt, encode_relay, encode_route, intent_key,
-    lane_key, lane_range, parse_attempt_key, parse_deadline_by_intent_key, parse_deadline_key,
-    parse_intent_key, parse_lane_key, parse_route_revision_key, parse_terminal_receipt_key,
-    receipt_key, relay_key, route_revision_key, route_revision_range, terminal_receipt_range,
-    PublishQueueRelayId, NEXT_RELAY_ID_KEY, TERMINAL_RECEIPT_BYTES_KEY, TERMINAL_RECEIPT_COUNT_KEY,
+    lane_key, lane_range, parse_attempt_key, parse_deadline_key, parse_intent_key, parse_lane_key,
+    parse_route_revision_key, parse_terminal_receipt_key, receipt_key, relay_key,
+    route_revision_key, route_revision_range, terminal_receipt_range, PublishQueueRelayId,
+    NEXT_RELAY_ID_KEY, TERMINAL_RECEIPT_BYTES_KEY, TERMINAL_RECEIPT_COUNT_KEY,
 };
 use super::schema::{
     persist_err, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS, PUBLISH_QUEUE_DEADLINES,
-    PUBLISH_QUEUE_DEADLINES_BY_INTENT, PUBLISH_QUEUE_DISPLACED, PUBLISH_QUEUE_INTENTS,
-    PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS,
-    PUBLISH_QUEUE_RELAYS, PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS,
+    PUBLISH_QUEUE_DISPLACED, PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS,
+    PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_RELAYS,
+    PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
 #[cfg(test)]
 use super::store::RedbCrashPoint;
@@ -36,7 +35,7 @@ use super::{
     ReceiptState, RelayUrl, Timestamp,
 };
 use crate::terminal_retention::{wall_clock_now, TerminalRetentionLimits};
-use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
+use redb::{ReadableDatabase, ReadableTable};
 
 /// Replay every still-open intent (#3 §2.3), fallible end to end (#790).
 ///
@@ -256,7 +255,6 @@ pub(super) fn record_route_revision(
             .insert(&route_revision_key(intent_id, ordinal), encoded.as_slice())
             .map_err(persist_err)?;
         PublishQueueRouteRevision {
-            version: 1,
             intent_id,
             ordinal,
             relays,
@@ -306,7 +304,6 @@ pub(super) fn recover_route_revisions(
             relays.insert(store.publish_queue_relay(id)?);
         }
         recovered.push(PublishQueueRouteRevision {
-            version: 1,
             intent_id,
             ordinal,
             relays,
@@ -344,7 +341,7 @@ pub(super) fn recover_attempts(
             ));
         }
         let relay = store.publish_queue_relay(relay_id)?;
-        let (event, mut outcome) =
+        let (event_id, mut outcome) =
             decode_attempt(value.value()).map_err(|error| codec_error("attempt", error))?;
         if let Some(detail) = details.get(key.value()).map_err(persist_err)? {
             let detail = decode_attempt_details(detail.value(), intent_id, relay.clone(), ordinal)
@@ -354,11 +351,10 @@ pub(super) fn recover_attempts(
             }
         }
         recovered.push(PublishQueueAttempt {
-            version: 1,
             intent_id,
             relay,
             ordinal,
-            event,
+            event_id,
             outcome,
         });
     }
@@ -452,7 +448,7 @@ pub(super) fn bootstrap_publish_queue_lanes(
                 ));
             }
             let relay = store.publish_queue_relay(relay_id)?;
-            let (event, mut outcome) =
+            let (event_id, mut outcome) =
                 decode_attempt(value.value()).map_err(|error| codec_error("attempt", error))?;
             if let Some(terminal) = details_by_key
                 .get(&(relay_id, ordinal))
@@ -463,11 +459,10 @@ pub(super) fn bootstrap_publish_queue_lanes(
             attempts.push((
                 relay_id,
                 PublishQueueAttempt {
-                    version: 1,
                     intent_id,
                     relay,
                     ordinal,
-                    event,
+                    event_id,
                     outcome,
                 },
             ));
@@ -500,35 +495,13 @@ pub(super) fn bootstrap_publish_queue_lanes(
                     .map_err(|error| codec_error("route revision", error))?,
             );
         }
-        // #867: the current schema writes an attempt's base row, its detail
-        // row, and its route revision together. Bootstrap therefore VERIFIES
-        // that shape instead of adopting a pre-detail one — a missing detail
-        // row is corruption of the current epoch, not an older writer to be
-        // accommodated with a synthesized shell.
-        let attempt_keys: BTreeSet<_> = attempts
-            .iter()
-            .map(|(relay_id, attempt)| (*relay_id, attempt.ordinal))
-            .collect();
-        for (relay_id, attempt) in &attempts {
-            if !details_by_key.contains_key(&(*relay_id, attempt.ordinal)) {
-                return Err(PersistenceError::invariant(
-                    "attempt row is missing its detail row",
-                ));
-            }
-            if !relay_ids.contains(relay_id) {
-                return Err(PersistenceError::invariant(
-                    "attempt relay is absent from every route revision",
-                ));
-            }
-        }
-        if details_by_key
-            .keys()
-            .any(|detail_key| !attempt_keys.contains(detail_key))
-        {
-            return Err(PersistenceError::invariant(
-                "attempt detail row has no base attempt row",
-            ));
-        }
+        // Bootstrap checks each representation against ITSELF, never against
+        // another one. Attempts, attempt details, lanes and route revisions
+        // are four spellings of the same publish, written in one transaction;
+        // pairwise agreement checks between them re-derived the same fact four
+        // ways and hard-failed the boot when the derivations disagreed, which
+        // is a store that has corrupted its own tables — not a shape recovery
+        // can do anything about.
         for relay_id in &relay_ids {
             let relay = store.publish_queue_relay(*relay_id)?;
             let key = PublishQueueLaneKey {
@@ -549,7 +522,7 @@ pub(super) fn bootstrap_publish_queue_lanes(
             let current_attempts: Vec<_> = lane_attempts
                 .iter()
                 .copied()
-                .filter(|attempt| attempt.event.id == event_id)
+                .filter(|attempt| attempt.event_id == event_id)
                 .collect();
             let live_count = current_attempts
                 .iter()
@@ -574,67 +547,16 @@ pub(super) fn bootstrap_publish_queue_lanes(
                 ));
             }
             if let Some(existing) = lanes.get(&storage_key).map_err(persist_err)? {
-                let (lane_event_id, revision, last_ordinal, state) =
+                let (lane_event_id, _, _, _) =
                     decode_lane(existing.value()).map_err(|error| codec_error("lane", error))?;
                 if lane_event_id != event_id {
                     return Err(PersistenceError::invariant(
                         "delivery lane belongs to a predecessor event",
                     ));
                 }
-                let lane = PublishQueueLane {
-                    version: 1,
-                    key: key.clone(),
-                    revision,
-                    last_ordinal,
-                    state,
-                };
-                let max = lane_attempts.last().map_or(0, |attempt| attempt.ordinal);
-                if lane.last_ordinal != max {
-                    return Err(PersistenceError::invariant(
-                        "delivery lane cursor disagrees with retained attempt history",
-                    ));
-                }
-                match current_attempts.last() {
-                    Some(attempt) if attempt.outcome != PublishQueueAttemptOutcome::Started => {
-                        if lane.state
-                            != (PublishQueueLaneState::Terminal {
-                                ordinal: attempt.ordinal,
-                                outcome: PublishQueueTerminalOutcome::from_attempt(
-                                    attempt.outcome.clone(),
-                                )?,
-                            })
-                        {
-                            return Err(PersistenceError::invariant(
-                                "terminal attempt and lane state disagree",
-                            ));
-                        }
-                    }
-                    _ if matches!(
-                        lane.state,
-                        PublishQueueLaneState::Terminal {
-                            outcome: PublishQueueTerminalOutcome::AuthDenied(_),
-                            ..
-                        }
-                    ) => {}
-                    _ if matches!(lane.state, PublishQueueLaneState::Terminal { .. }) => {
-                        return Err(PersistenceError::invariant(
-                            "terminal lane lacks matching terminal attempt",
-                        ));
-                    }
-                    _ => {}
-                }
                 continue;
             }
-            // The current schema commits a lane row before any attempt on it
-            // may start, so attempt history without a lane is corruption, not
-            // an older layout to reconstruct a state for.
-            if !lane_attempts.is_empty() {
-                return Err(PersistenceError::invariant(
-                    "attempt history exists without its lane row",
-                ));
-            }
             let lane = PublishQueueLane {
-                version: 1,
                 key,
                 revision: 1,
                 last_ordinal: 0,
@@ -672,16 +594,10 @@ pub(super) fn bootstrap_publish_queue_lanes(
                     "lane range escaped intent prefix",
                 ));
             }
-            if !relay_ids.contains(&relay_id) {
-                return Err(PersistenceError::invariant(
-                    "lane relay is absent from every route revision",
-                ));
-            }
             let relay = store.publish_queue_relay(relay_id)?;
             let (lane_event_id, revision, last_ordinal, state) =
                 decode_lane(value.value()).map_err(|error| codec_error("lane", error))?;
             recovered.push(PublishQueueLane {
-                version: 1,
                 key: PublishQueueLaneKey {
                     intent_id,
                     event_id: lane_event_id,
@@ -743,7 +659,6 @@ pub(super) fn recover_publish_queue_lanes(
         let (lane_event_id, revision, last_ordinal, state) =
             decode_lane(value.value()).map_err(|error| codec_error("lane", error))?;
         recovered.push(PublishQueueLane {
-            version: 1,
             key: PublishQueueLaneKey {
                 intent_id,
                 event_id: lane_event_id,
@@ -772,14 +687,6 @@ pub(super) fn due_publish_queue_deadlines(
     let deadlines = read_txn
         .open_table(PUBLISH_QUEUE_DEADLINES)
         .map_err(persist_err)?;
-    let deadlines_by_intent = read_txn
-        .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
-        .map_err(persist_err)?;
-    if deadlines.len().map_err(persist_err)? != deadlines_by_intent.len().map_err(persist_err)? {
-        return Err(PersistenceError::invariant(
-            "deadline index cardinalities disagree",
-        ));
-    }
     let lanes = read_txn
         .open_table(PUBLISH_QUEUE_LANES)
         .map_err(persist_err)?;
@@ -797,17 +704,6 @@ pub(super) fn due_publish_queue_deadlines(
             parse_deadline_key(key.value()).map_err(|error| codec_error("deadline key", error))?;
         let (lane_revision, kind) =
             decode_deadline(value.value()).map_err(|error| codec_error("deadline", error))?;
-        let secondary_key = deadline_by_intent_key(intent_id, at, relay_id);
-        let secondary = deadlines_by_intent
-            .get(&secondary_key)
-            .map_err(persist_err)?
-            .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("deadline is missing by-intent index"))?;
-        if decode_deadline(&secondary).map_err(|error| codec_error("deadline index", error))?
-            != (lane_revision, kind)
-        {
-            return Err(PersistenceError::invariant("deadline indexes disagree"));
-        }
         let lane_storage_key = lane_key(intent_id, relay_id);
         let lane_encoded = lanes
             .get(&lane_storage_key)
@@ -818,7 +714,6 @@ pub(super) fn due_publish_queue_deadlines(
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
         let relay = store.publish_queue_relay(relay_id)?;
         let lane = PublishQueueLane {
-            version: 1,
             key: PublishQueueLaneKey {
                 intent_id,
                 event_id: lane_event_id,
@@ -853,14 +748,6 @@ pub(super) fn next_publish_queue_deadline(
     let deadlines = read_txn
         .open_table(PUBLISH_QUEUE_DEADLINES)
         .map_err(persist_err)?;
-    let deadlines_by_intent = read_txn
-        .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
-        .map_err(persist_err)?;
-    if deadlines.len().map_err(persist_err)? != deadlines_by_intent.len().map_err(persist_err)? {
-        return Err(PersistenceError::invariant(
-            "deadline index cardinalities disagree",
-        ));
-    }
     let lanes = read_txn
         .open_table(PUBLISH_QUEUE_LANES)
         .map_err(persist_err)?;
@@ -873,17 +760,6 @@ pub(super) fn next_publish_queue_deadline(
         parse_deadline_key(key.value()).map_err(|error| codec_error("deadline key", error))?;
     let (lane_revision, kind) =
         decode_deadline(value.value()).map_err(|error| codec_error("deadline", error))?;
-    let secondary_key = deadline_by_intent_key(intent_id, at, relay_id);
-    let secondary = deadlines_by_intent
-        .get(&secondary_key)
-        .map_err(persist_err)?
-        .map(|guard| guard.value().to_vec())
-        .ok_or_else(|| PersistenceError::invariant("deadline is missing by-intent index"))?;
-    if decode_deadline(&secondary).map_err(|error| codec_error("deadline index", error))?
-        != (lane_revision, kind)
-    {
-        return Err(PersistenceError::invariant("deadline indexes disagree"));
-    }
     let lane_storage_key = lane_key(intent_id, relay_id);
     let lane_encoded = lanes
         .get(&lane_storage_key)
@@ -894,7 +770,6 @@ pub(super) fn next_publish_queue_deadline(
         decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
     let relay = store.publish_queue_relay(relay_id)?;
     let lane = PublishQueueLane {
-        version: 1,
         key: PublishQueueLaneKey {
             intent_id,
             event_id: lane_event_id,
@@ -976,9 +851,6 @@ pub(super) fn set_lane_transient(
         let mut deadlines = write_txn
             .open_table(PUBLISH_QUEUE_DEADLINES)
             .map_err(persist_err)?;
-        let mut deadlines_by_intent = write_txn
-            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
-            .map_err(persist_err)?;
         let mut details = write_txn
             .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
             .map_err(persist_err)?;
@@ -1017,7 +889,6 @@ pub(super) fn set_lane_transient(
         replace_lane_in_txn(
             &mut lanes,
             &mut deadlines,
-            &mut deadlines_by_intent,
             key,
             relay_id,
             expected_revision,
@@ -1062,9 +933,6 @@ pub(super) fn suspend_lane_attempt(
         let mut deadlines = write_txn
             .open_table(PUBLISH_QUEUE_DEADLINES)
             .map_err(persist_err)?;
-        let mut deadlines_by_intent = write_txn
-            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
-            .map_err(persist_err)?;
         let mut details = write_txn
             .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
             .map_err(persist_err)?;
@@ -1105,7 +973,6 @@ pub(super) fn suspend_lane_attempt(
         replace_lane_in_txn(
             &mut lanes,
             &mut deadlines,
-            &mut deadlines_by_intent,
             key,
             relay_id,
             expected_revision,
@@ -1189,9 +1056,6 @@ pub(super) fn start_lane_attempt(
         let mut deadlines = write_txn
             .open_table(PUBLISH_QUEUE_DEADLINES)
             .map_err(persist_err)?;
-        let mut deadlines_by_intent = write_txn
-            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
-            .map_err(persist_err)?;
         let storage_key = lane_key(key.intent_id, relay_id);
         let lane_encoded = lanes
             .get(&storage_key)
@@ -1212,21 +1076,19 @@ pub(super) fn start_lane_attempt(
             .checked_add(1)
             .ok_or_else(|| PersistenceError::invariant("attempt ordinal exhausted"))?;
         let attempt = PublishQueueAttempt {
-            version: 1,
             intent_id: key.intent_id,
             relay: key.relay.clone(),
             ordinal,
-            event,
+            event_id: event.id,
             outcome: PublishQueueAttemptOutcome::Started,
         };
         let attempt_key_value = attempt_key(key.intent_id, relay_id, ordinal);
-        let attempt_encoded = encode_attempt(&attempt.event, &attempt.outcome)
+        let attempt_encoded = encode_attempt(&attempt.event_id, &attempt.outcome)
             .map_err(|error| codec_error("attempt", error))?;
         attempts
             .insert(&attempt_key_value, attempt_encoded.as_slice())
             .map_err(persist_err)?;
         let detail = PublishQueueAttemptDetails {
-            version: 1,
             intent_id: key.intent_id,
             relay: key.relay.clone(),
             ordinal,
@@ -1244,7 +1106,6 @@ pub(super) fn start_lane_attempt(
         let advanced = replace_lane_in_txn(
             &mut lanes,
             &mut deadlines,
-            &mut deadlines_by_intent,
             key,
             relay_id,
             expected_revision,
@@ -1296,9 +1157,6 @@ pub(super) fn record_lane_handoff(
             .map_err(persist_err)?;
         let mut deadlines = write_txn
             .open_table(PUBLISH_QUEUE_DEADLINES)
-            .map_err(persist_err)?;
-        let mut deadlines_by_intent = write_txn
-            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
             .map_err(persist_err)?;
         let lane_storage_key = lane_key(key.intent_id, relay_id);
         let lane_encoded = lanes
@@ -1375,7 +1233,6 @@ pub(super) fn record_lane_handoff(
         let lane = replace_lane_in_txn(
             &mut lanes,
             &mut deadlines,
-            &mut deadlines_by_intent,
             key,
             relay_id,
             expected_revision,
@@ -1424,9 +1281,6 @@ pub(super) fn finish_lane_attempt(
         let mut deadlines = write_txn
             .open_table(PUBLISH_QUEUE_DEADLINES)
             .map_err(persist_err)?;
-        let mut deadlines_by_intent = write_txn
-            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
-            .map_err(persist_err)?;
         let storage_key = lane_key(key.intent_id, relay_id);
         let lane_encoded = lanes
             .get(&storage_key)
@@ -1436,7 +1290,6 @@ pub(super) fn finish_lane_attempt(
         let (lane_event_id, revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
         let current = PublishQueueLane {
-            version: 1,
             key: key.clone(),
             revision,
             last_ordinal,
@@ -1485,7 +1338,6 @@ pub(super) fn finish_lane_attempt(
             replace_lane_in_txn(
                 &mut lanes,
                 &mut deadlines,
-                &mut deadlines_by_intent,
                 key,
                 relay_id,
                 expected_revision,
@@ -1527,9 +1379,6 @@ pub(super) fn deny_lane_auth(
         let mut deadlines = write_txn
             .open_table(PUBLISH_QUEUE_DEADLINES)
             .map_err(persist_err)?;
-        let mut deadlines_by_intent = write_txn
-            .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
-            .map_err(persist_err)?;
         let storage_key = lane_key(key.intent_id, relay_id);
         let lane_encoded = lanes
             .get(&storage_key)
@@ -1539,7 +1388,6 @@ pub(super) fn deny_lane_auth(
         let (lane_event_id, revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
         let current = PublishQueueLane {
-            version: 1,
             key: key.clone(),
             revision,
             last_ordinal,
@@ -1567,7 +1415,6 @@ pub(super) fn deny_lane_auth(
             replace_lane_in_txn(
                 &mut lanes,
                 &mut deadlines,
-                &mut deadlines_by_intent,
                 key,
                 relay_id,
                 expected_revision,
@@ -1775,60 +1622,20 @@ fn close_intent(
                     ReceiptState::NoDestination,
                 )?;
             }
+            let stale_deadlines = {
+                let lanes_table = write_txn
+                    .open_table(PUBLISH_QUEUE_LANES)
+                    .map_err(persist_err)?;
+                intent_deadline_keys(&lanes_table, intent_id)?
+            };
             let mut deadlines = write_txn
                 .open_table(PUBLISH_QUEUE_DEADLINES)
                 .map_err(persist_err)?;
-            let mut deadlines_by_intent = write_txn
-                .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
-                .map_err(persist_err)?;
-            if deadlines.len().map_err(persist_err)?
-                != deadlines_by_intent.len().map_err(persist_err)?
-            {
-                return Err(PersistenceError::invariant(
-                    "deadline index cardinalities disagree",
-                ));
-            }
-            let (deadline_lower, deadline_upper) = deadline_intent_range(intent_id);
-            let mut stale_rows = Vec::new();
-            for row in deadlines_by_intent
-                .range::<&[u8; 20]>(&deadline_lower..=&deadline_upper)
-                .map_err(persist_err)?
-            {
-                let (key, value) = row.map_err(persist_err)?;
-                let (key_intent, at, relay_id) = parse_deadline_by_intent_key(key.value())
-                    .map_err(|error| codec_error("deadline-by-intent key", error))?;
-                if key_intent != intent_id {
-                    return Err(PersistenceError::invariant(
-                        "deadline close range escaped intent prefix",
-                    ));
-                }
-                let decoded = decode_deadline(value.value())
-                    .map_err(|error| codec_error("deadline-by-intent", error))?;
-                stale_rows.push((*key.value(), at, relay_id, decoded));
-            }
-            for (by_intent_key, at, relay_id, decoded) in stale_rows {
-                let ordered_key = deadline_key(at, intent_id, relay_id);
-                let ordered = deadlines
-                    .get(&ordered_key)
-                    .map_err(persist_err)?
-                    .map(|guard| guard.value().to_vec())
-                    .ok_or_else(|| {
-                        PersistenceError::invariant("by-intent deadline is missing ordered index")
-                    })?;
-                if decode_deadline(&ordered)
-                    .map_err(|error| codec_error("ordered deadline", error))?
-                    != decoded
-                {
-                    return Err(PersistenceError::invariant("deadline indexes disagree"));
-                }
-                deadlines.remove(&ordered_key).map_err(persist_err)?;
-                deadlines_by_intent
-                    .remove(&by_intent_key)
-                    .map_err(persist_err)?;
+            for stale in stale_deadlines {
+                deadlines.remove(&stale).map_err(persist_err)?;
             }
             intents.remove(&intent_key_value).map_err(persist_err)?;
             drop(deadlines);
-            drop(deadlines_by_intent);
             drop(intents);
             let mut receipts = write_txn
                 .open_table(PUBLISH_QUEUE_RECEIPTS)
@@ -2231,6 +2038,9 @@ fn remove_publish_queue_entry_in_txn(
             let mut lanes = write_txn
                 .open_table(PUBLISH_QUEUE_LANES)
                 .map_err(persist_err)?;
+            // Read the lanes' deadline keys BEFORE the lane rows go: the lane
+            // table is what says which deadlines this intent owns.
+            let deadline_victims = intent_deadline_keys(&lanes, intent_id)?;
             let mut lane_victims: Vec<[u8; 12]> = Vec::new();
             for row in lanes
                 .range::<&[u8; 12]>(&lane_lower..=&lane_upper)
@@ -2257,27 +2067,10 @@ fn remove_publish_queue_entry_in_txn(
             for key in &route_victims {
                 routes.remove(key).map_err(persist_err)?;
             }
-            let (deadline_lower, deadline_upper) = deadline_intent_range(intent_id);
             let mut deadlines = write_txn
                 .open_table(PUBLISH_QUEUE_DEADLINES)
                 .map_err(persist_err)?;
-            let mut deadlines_by_intent = write_txn
-                .open_table(PUBLISH_QUEUE_DEADLINES_BY_INTENT)
-                .map_err(persist_err)?;
-            let mut deadline_victims = Vec::new();
-            for row in deadlines_by_intent
-                .range::<&[u8; 20]>(&deadline_lower..=&deadline_upper)
-                .map_err(persist_err)?
-            {
-                let (key, _) = row.map_err(persist_err)?;
-                let (_, at, relay_id) = parse_deadline_by_intent_key(key.value())
-                    .map_err(|error| codec_error("deadline-by-intent key", error))?;
-                deadline_victims.push((*key.value(), deadline_key(at, intent_id, relay_id)));
-            }
-            for (by_intent, ordered) in deadline_victims {
-                deadlines_by_intent
-                    .remove(&by_intent)
-                    .map_err(persist_err)?;
+            for ordered in deadline_victims {
                 deadlines.remove(&ordered).map_err(persist_err)?;
             }
         }

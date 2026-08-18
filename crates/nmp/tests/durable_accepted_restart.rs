@@ -13,8 +13,8 @@ use nmp_engine::publish_queue::{
     NotSentReason, RelayState, RelayWaiting, SigningState, WriteFact, WriteOutcome,
 };
 use nmp_grammar::{
-    EventBuilder as NmpEventBuilder, Identity, RelaySessionKey, WriteIntent,
-    WritePayload, WriteRouting,
+    EventBuilder as NmpEventBuilder, Identity, RelaySessionKey, WriteIntent, WritePayload,
+    WriteRouting,
 };
 use nmp_router_testkit::FixtureRoutingFacts;
 use nmp_store::{

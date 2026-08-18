@@ -1,5 +1,5 @@
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 
 // ---- live query delivery and evidence ----------------------------------
 
@@ -578,8 +578,11 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
         event_frame(&wire, e),
     ));
     assert_eq!(
-        core.get_coverage(&ctx_atom(atom.clone()), &RelaySessionKey::unauthenticated(relay0.clone()))
-            .expect("coverage peek"),
+        core.get_coverage(
+            &ctx_atom(atom.clone()),
+            &RelaySessionKey::unauthenticated(relay0.clone())
+        )
+        .expect("coverage peek"),
         None,
         "presence != coverage"
     );
@@ -596,7 +599,10 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
     ));
 
     let interval = core
-        .get_coverage(&ctx_atom(atom.clone()), &RelaySessionKey::unauthenticated(relay0.clone()))
+        .get_coverage(
+            &ctx_atom(atom.clone()),
+            &RelaySessionKey::unauthenticated(relay0.clone()),
+        )
         .expect("EOSE must record a coverage row");
     let interval = interval.expect("a proven coverage row");
     assert_eq!(interval.from, Timestamp::from(0u64));
@@ -655,9 +661,12 @@ fn get_coverage_distinguishes_auto_from_an_explicit_relay_set() {
     ));
 
     assert!(
-        core.get_coverage(&ctx_atom_with(filter.clone(), ReadRouting::Auto), &RelaySessionKey::unauthenticated(relay0.clone()))
-            .expect("coverage peek")
-            .is_some(),
+        core.get_coverage(
+            &ctx_atom_with(filter.clone(), ReadRouting::Auto),
+            &RelaySessionKey::unauthenticated(relay0.clone())
+        )
+        .expect("coverage peek")
+        .is_some(),
         "the TRUE declared routing (Auto) must find the recorded coverage"
     );
     assert!(
@@ -728,7 +737,7 @@ fn agnostic_and_strict_pinned_handles_project_distinct_rows_from_one_shared_wire
     let pinned_relays = BTreeSet::from([relay_pinned.clone()]);
     let agnostic_demand = nmp_grammar::Demand::new(
         filter,
-        ReadRouting::Explicit(pinned_relays.into_iter().collect())
+        ReadRouting::Explicit(pinned_relays.into_iter().collect()),
     )
     .expect("a nonempty pinned relay set is legal (#107)");
     let mut strict_demand = agnostic_demand.clone();
@@ -833,16 +842,11 @@ fn identical_filter_pinned_to_different_relays_stays_fully_independent() {
         authors: Some(Binding::Literal(BTreeSet::from([a.public_key().to_hex()]))),
         ..Filter::default()
     };
-    let demand1 = nmp_grammar::Demand::new(
-        filter.clone(),
-        ReadRouting::Explicit(vec![relay1.clone()])
-    )
-    .expect("nonempty pinned relay set is legal");
-    let demand2 = nmp_grammar::Demand::new(
-        filter,
-        ReadRouting::Explicit(vec![relay2.clone()])
-    )
-    .expect("nonempty pinned relay set is legal");
+    let demand1 =
+        nmp_grammar::Demand::new(filter.clone(), ReadRouting::Explicit(vec![relay1.clone()]))
+            .expect("nonempty pinned relay set is legal");
+    let demand2 = nmp_grammar::Demand::new(filter, ReadRouting::Explicit(vec![relay2.clone()]))
+        .expect("nonempty pinned relay set is legal");
 
     let effects1 = core.handle_and_flush(EngineMsg::Subscribe(LiveQuery::single(demand1)));
     let id1 = effects1
@@ -982,15 +986,21 @@ fn eose_for_one_immutable_request_credits_only_that_requests_demand() {
     let atom_a = cf(&[1], &[&a.public_key().to_hex()]);
     let atom_e = cf(&[1], &[&e_key.public_key().to_hex()]);
     assert!(
-        core.get_coverage(&ctx_atom(atom_a.clone()), &RelaySessionKey::unauthenticated(relay0.clone()))
-            .expect("coverage peek")
-            .is_some(),
+        core.get_coverage(
+            &ctx_atom(atom_a.clone()),
+            &RelaySessionKey::unauthenticated(relay0.clone())
+        )
+        .expect("coverage peek")
+        .is_some(),
         "the first request proves a"
     );
     assert!(
-        core.get_coverage(&ctx_atom(atom_e.clone()), &RelaySessionKey::unauthenticated(relay0.clone()))
-            .expect("coverage peek")
-            .is_none(),
+        core.get_coverage(
+            &ctx_atom(atom_e.clone()),
+            &RelaySessionKey::unauthenticated(relay0.clone())
+        )
+        .expect("coverage peek")
+        .is_none(),
         "the first request cannot credit the independent e request"
     );
 
@@ -1005,9 +1015,12 @@ fn eose_for_one_immutable_request_credits_only_that_requests_demand() {
         eose_frame(&wire_sub_string(sub_id2)),
     ));
     assert!(
-        core.get_coverage(&ctx_atom(atom_e.clone()), &RelaySessionKey::unauthenticated(relay0.clone()))
-            .expect("coverage peek")
-            .is_some(),
+        core.get_coverage(
+            &ctx_atom(atom_e.clone()),
+            &RelaySessionKey::unauthenticated(relay0.clone())
+        )
+        .expect("coverage peek")
+        .is_some(),
         "the second request's EOSE must credit its own atom"
     );
 }
@@ -1048,8 +1061,11 @@ fn limited_fetch_never_records_coverage() {
 
     let atom = cf(&[1], &[&a.public_key().to_hex()]);
     assert_eq!(
-        core.get_coverage(&ctx_atom(atom.clone()), &RelaySessionKey::unauthenticated(relay0.clone()))
-            .expect("coverage peek"),
+        core.get_coverage(
+            &ctx_atom(atom.clone()),
+            &RelaySessionKey::unauthenticated(relay0.clone())
+        )
+        .expect("coverage peek"),
         None,
         "a limited REQ's EOSE must poison -- never record a watermark"
     );
@@ -1113,7 +1129,8 @@ fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
         eose_frame(&wire_sub_string(&closed_sub_id)),
     ));
     assert_eq!(
-        core.get_coverage(&atom, &RelaySessionKey::unauthenticated(relay0.clone())).expect("coverage peek"),
+        core.get_coverage(&atom, &RelaySessionKey::unauthenticated(relay0.clone()))
+            .expect("coverage peek"),
         None
     );
 

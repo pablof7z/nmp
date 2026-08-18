@@ -32,8 +32,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use nmp::{
-    Binding, Demand, Engine, EngineConfig, Filter, IndexedTagName, LiveQuery,
-    ReadRouting, RelayUrl, Subscription,
+    Binding, Demand, Engine, EngineConfig, Filter, IndexedTagName, LiveQuery, ReadRouting,
+    RelayUrl, Subscription,
 };
 
 fn hex32(i: usize) -> String {
@@ -65,11 +65,8 @@ fn author_query(relay: &RelayUrl, i: usize) -> LiveQuery {
 
 fn pinned(relay: &RelayUrl, filter: Filter) -> LiveQuery {
     LiveQuery::single(
-        Demand::new(
-            filter,
-            ReadRouting::Explicit(vec![relay.clone()])
-        )
-        .expect("pinned demand with a nonempty relay set"),
+        Demand::new(filter, ReadRouting::Explicit(vec![relay.clone()]))
+            .expect("pinned demand with a nonempty relay set"),
     )
 }
 

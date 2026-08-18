@@ -229,7 +229,7 @@ pub fn corrupt_publish_queue_deadline(
             .ok_or_else(|| PersistenceError::invariant("deadline fixture lane is missing"))?;
         let (event_id, revision, last_ordinal, state) =
             decode_lane(&encoded).map_err(|error| codec_error("deadline fixture lane", error))?;
-        if event_id != attempt.event.id || last_ordinal != attempt.ordinal {
+        if event_id != attempt.event_id || last_ordinal != attempt.ordinal {
             return Err(PersistenceError::invariant(
                 "deadline fixture attempt does not own the current lane",
             ));
@@ -327,7 +327,8 @@ pub fn corrupt_coverage(
 ) -> Result<(), PersistenceError> {
     let db = Database::open(path).map_err(persist_err)?;
     let tx = db.begin_write().map_err(persist_err)?;
-    let row_key = RedbStore::coverage_row_key(&key, &RelaySessionKey::unauthenticated(relay.clone()));
+    let row_key =
+        RedbStore::coverage_row_key(&key, &RelaySessionKey::unauthenticated(relay.clone()));
     {
         let mut coverage = tx.open_table(COVERAGE).map_err(persist_err)?;
         if coverage

@@ -111,10 +111,9 @@ use nostr::{
 #[cfg(test)]
 use nmp_grammar::RoutingEvidence;
 use nmp_grammar::{
-    CacheMode, ConcreteFilter, ContextualAtom, DemandDelta, DemandOp,
-    DescriptorHash, Freshness, Identity, LiveQuery, ReadRouting, RelaySessionKey,
-    ReplaceableMaterializerOperation, ReplaceableMaterializerRegistration, WriteIntent,
-    WritePayload, WriteRouting,
+    CacheMode, ConcreteFilter, ContextualAtom, DemandDelta, DemandOp, DescriptorHash, Freshness,
+    Identity, LiveQuery, ReadRouting, RelaySessionKey, ReplaceableMaterializerOperation,
+    ReplaceableMaterializerRegistration, WriteIntent, WritePayload, WriteRouting,
 };
 use nmp_resolver::{
     CommittedCurrentRow, CommittedMutationResult, CommittedRowChanges, Engine as ResolverEngine,

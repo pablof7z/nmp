@@ -457,8 +457,7 @@ fn auth_denial_isolated_by_exact_identity_leaves_same_url_peer_live() {
     let alice = Keys::generate();
     let bob = Keys::generate();
     let relay = RelayUrl::parse("wss://shared-auth.example.com").unwrap();
-    let alice_session =
-        RelaySessionKey::new(relay.clone(), Some(alice.public_key()));
+    let alice_session = RelaySessionKey::new(relay.clone(), Some(alice.public_key()));
     let bob_session = RelaySessionKey::new(relay.clone(), Some(bob.public_key()));
     let alice_handle = RelayHandle {
         slot: 20,
@@ -554,14 +553,8 @@ fn one_auth_denied_lane_does_not_stop_other_lanes_on_the_same_receipt() {
     let keys = Keys::generate();
     let denied_relay = RelayUrl::parse("wss://denied-lane.example.com").unwrap();
     let ordinary_relay = RelayUrl::parse("wss://ordinary-lane.example.com").unwrap();
-    let denied_session = RelaySessionKey::new(
-        denied_relay.clone(),
-        Some(keys.public_key()),
-    );
-    let ordinary_session = RelaySessionKey::new(
-        ordinary_relay.clone(),
-        Some(keys.public_key()),
-    );
+    let denied_session = RelaySessionKey::new(denied_relay.clone(), Some(keys.public_key()));
+    let ordinary_session = RelaySessionKey::new(ordinary_relay.clone(), Some(keys.public_key()));
     let denied_handle = RelayHandle {
         slot: 30,
         generation: 1,
@@ -677,7 +670,10 @@ fn exact_success_replays_once_and_only_then_allows_eose_credit() {
     assert_eq!(
         fixture
             .core
-            .get_coverage(&fixture.atom, &RelaySessionKey::unauthenticated(fixture.session.relay.clone()))
+            .get_coverage(
+                &fixture.atom,
+                &RelaySessionKey::unauthenticated(fixture.session.relay.clone())
+            )
             .expect("coverage peek"),
         None
     );
@@ -719,7 +715,10 @@ fn exact_success_replays_once_and_only_then_allows_eose_credit() {
     ));
     assert!(fixture
         .core
-        .get_coverage(&fixture.atom, &RelaySessionKey::unauthenticated(fixture.session.relay.clone()))
+        .get_coverage(
+            &fixture.atom,
+            &RelaySessionKey::unauthenticated(fixture.session.relay.clone())
+        )
         .expect("coverage peek")
         .is_some());
 }

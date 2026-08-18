@@ -1,7 +1,7 @@
 use super::*;
 use crate::types::{
-    FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFrame, FfiFreshness,
-    FfiIdentity, FfiLiveQuery, FfiNotSentReason, FfiReadRouting, FfiRowDelta, FfiSignEventRequest,
+    FfiBinding, FfiCacheMode, FfiDemand, FfiFilter, FfiFrame, FfiFreshness, FfiIdentity,
+    FfiLiveQuery, FfiNotSentReason, FfiReadRouting, FfiRowDelta, FfiSignEventRequest,
     FfiSigningState, FfiWindow, FfiWindowLoad, FfiWriteFact, FfiWriteOutcome, FfiWritePayload,
     FfiWriteRouting,
 };

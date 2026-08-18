@@ -25,7 +25,6 @@
 //! `AwaitingRelayAck`, so a direct-Rust app and a native app read different
 //! phases for the same session.
 
-
 use nmp_engine::core::AuthDiagnosticsPhase;
 use nmp_router::Lane;
 use nmp_store::CoverageInterval;

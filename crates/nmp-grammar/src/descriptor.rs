@@ -83,10 +83,7 @@ pub struct RelaySessionKey {
 
 impl RelaySessionKey {
     #[must_use]
-    pub const fn new(
-        relay: nostr::RelayUrl,
-        authenticate_as: Option<nostr::PublicKey>,
-    ) -> Self {
+    pub const fn new(relay: nostr::RelayUrl, authenticate_as: Option<nostr::PublicKey>) -> Self {
         Self {
             relay,
             authenticate_as,
@@ -313,7 +310,7 @@ mod tests {
                 kinds: Some(BTreeSet::from([1u16])),
                 ..Filter::default()
             },
-            ReadRouting::Auto
+            ReadRouting::Auto,
         )
         .expect("Auto is total");
         let author_bearing = Demand::new(
@@ -322,7 +319,7 @@ mod tests {
                 authors: Some(Binding::Literal(BTreeSet::from(["a".repeat(64)]))),
                 ..Filter::default()
             },
-            ReadRouting::Auto
+            ReadRouting::Auto,
         )
         .expect("Auto is total");
         assert_eq!(authorless.routing, ReadRouting::Auto);
@@ -374,7 +371,7 @@ mod tests {
         };
         let explicit = Demand::new(
             selection.clone(),
-            ReadRouting::Explicit(vec![relay("relay.example")])
+            ReadRouting::Explicit(vec![relay("relay.example")]),
         )
         .expect("a nonempty explicit relay set is legal");
 
@@ -392,7 +389,7 @@ mod tests {
                 kinds: Some(BTreeSet::from([1u16])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(Vec::new())
+            ReadRouting::Explicit(Vec::new()),
         )
         .unwrap_err();
         assert_eq!(err, DemandError::ExplicitRequiresNonemptyRelaySet);
@@ -405,7 +402,7 @@ mod tests {
                 kinds: Some(BTreeSet::from([1u16])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay("relay.example")])
+            ReadRouting::Explicit(vec![relay("relay.example")]),
         )
         .expect("a nonempty explicit relay set is legal");
         assert_eq!(
@@ -430,12 +427,12 @@ mod tests {
                 relay("b.example"),
                 relay("a.example"),
                 relay("b.example"),
-            ])
+            ]),
         )
         .expect("a nonempty explicit relay set is legal");
         let canonical = Demand::new(
             selection,
-            ReadRouting::Explicit(vec![relay("a.example"), relay("b.example")])
+            ReadRouting::Explicit(vec![relay("a.example"), relay("b.example")]),
         )
         .expect("a nonempty explicit relay set is legal");
 
@@ -459,10 +456,7 @@ mod tests {
         let context = demand.atom_context();
         demand.cache = CacheMode::Strict;
         demand.freshness = Freshness::MaxAge { seconds: 14_400 };
-        assert_eq!(
-            demand.atom_context(),
-            (ReadRouting::Auto, None)
-        );
+        assert_eq!(demand.atom_context(), (ReadRouting::Auto, None));
         assert_eq!(demand.atom_context(), context);
     }
 }

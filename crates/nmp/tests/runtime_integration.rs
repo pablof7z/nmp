@@ -28,8 +28,8 @@ use nmp_engine::core::{ObservationFact, RowDelta};
 use nmp_engine::publish_queue::{RelayState, SigningState, WriteFact};
 use nmp_grammar::LiveQuery;
 use nmp_grammar::{
-    Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness,
-    IdentityField, IndexedTagName, ReadRouting, Selector,
+    Binding, ConcreteFilter, ContextualAtom, Demand, Derived, Filter, Freshness, IdentityField,
+    IndexedTagName, ReadRouting, Selector,
 };
 use nmp_grammar::{Identity, WriteIntent, WritePayload, WriteRouting};
 use nmp_local_signer::LocalKeySigner;
@@ -125,7 +125,7 @@ fn pinned_tag_value(relay: &RelayUrl, value: &str) -> LiveQuery {
                 )]),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay.clone()])
+            ReadRouting::Explicit(vec![relay.clone()]),
         )
         .expect("a pinned demand over one relay is constructible"),
     )

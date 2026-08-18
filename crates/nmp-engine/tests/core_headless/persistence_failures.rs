@@ -1,5 +1,5 @@
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 use nmp_store::testing;
 
 // ---- fallible persistence doors and recovery indexing ------------------
@@ -244,7 +244,8 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
     );
     let atom = ctx_atom(cf(&[1], &[&author.public_key().to_hex()]));
     assert_eq!(
-        core.get_coverage(&atom, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage peek"),
+        core.get_coverage(&atom, &RelaySessionKey::unauthenticated(relay.clone()))
+            .expect("coverage peek"),
         None
     );
 
@@ -286,7 +287,10 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
     );
     let healthy_atom = ctx_atom(cf(&[2], &[&healthy_author.public_key().to_hex()]));
     assert!(core
-        .get_coverage(&healthy_atom, &RelaySessionKey::unauthenticated(healthy_relay.clone()))
+        .get_coverage(
+            &healthy_atom,
+            &RelaySessionKey::unauthenticated(healthy_relay.clone())
+        )
         .expect("coverage peek")
         .is_some());
 }
@@ -305,12 +309,11 @@ fn failed_event_commit_isolated_by_session_identity_on_the_same_relay() {
         ..Filter::default()
     };
     let public_query = LiveQuery::single(
-        nmp_grammar::Demand::new(selection.clone(), source.clone())
-            .expect("public pinned demand"),
+        nmp_grammar::Demand::new(selection.clone(), source.clone()).expect("public pinned demand"),
     );
     let protected_query = {
-        let mut demand = nmp_grammar::Demand::new(selection, source.clone())
-            .expect("protected pinned demand");
+        let mut demand =
+            nmp_grammar::Demand::new(selection, source.clone()).expect("protected pinned demand");
         demand.authenticate_as = Some(protected_author.public_key());
         LiveQuery::single(demand)
     };
@@ -433,12 +436,18 @@ fn failed_event_commit_isolated_by_session_identity_on_the_same_relay() {
         routing_evidence: BTreeSet::new(),
     };
     assert_eq!(
-        core.get_coverage(&public_atom, &RelaySessionKey::unauthenticated(relay.clone()))
-            .expect("coverage peek"),
+        core.get_coverage(
+            &public_atom,
+            &RelaySessionKey::unauthenticated(relay.clone())
+        )
+        .expect("coverage peek"),
         None
     );
     assert!(core
-        .get_coverage(&protected_atom, &RelaySessionKey::unauthenticated(relay.clone()))
+        .get_coverage(
+            &protected_atom,
+            &RelaySessionKey::unauthenticated(relay.clone())
+        )
         .expect("coverage peek")
         .is_some());
 }
@@ -527,7 +536,8 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
     );
     for atom in [&atom_a, &atom_b, &atom_c] {
         assert_eq!(
-            core.get_coverage(atom, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage peek"),
+            core.get_coverage(atom, &RelaySessionKey::unauthenticated(relay.clone()))
+                .expect("coverage peek"),
             None,
             "stale EOSE must not mint coverage after reconstruction"
         );
@@ -636,7 +646,7 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
                 kinds: Some(BTreeSet::from([5u16])),
                 ..Filter::default()
             },
-            ReadRouting::Explicit(vec![relay.clone()])
+            ReadRouting::Explicit(vec![relay.clone()]),
         )
         .expect("a literal kind:5 request can be pinned to the fixture relay"),
     );
@@ -823,7 +833,10 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         eose_frame(&wire_sub_string(&failed_request.sub_id)),
     ));
     let corrupt_error = core
-        .get_coverage(&atom_a, &RelaySessionKey::unauthenticated(failed_relay.clone()))
+        .get_coverage(
+            &atom_a,
+            &RelaySessionKey::unauthenticated(failed_relay.clone()),
+        )
         .expect_err("the corrupt coverage row must remain unreadable");
     assert_eq!(
         corrupt_error.fault(),
@@ -836,8 +849,11 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
         corrupt_error.message()
     );
     assert_eq!(
-        core.get_coverage(&atom_b, &RelaySessionKey::unauthenticated(failed_relay.clone()))
-            .expect("coverage peek"),
+        core.get_coverage(
+            &atom_b,
+            &RelaySessionKey::unauthenticated(failed_relay.clone())
+        )
+        .expect("coverage peek"),
         None
     );
 
@@ -851,7 +867,10 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
     ));
     let healthy_atom = ctx_atom(cf(&[1], &[&healthy.public_key().to_hex()]));
     assert!(core
-        .get_coverage(&healthy_atom, &RelaySessionKey::unauthenticated(healthy_relay.clone()))
+        .get_coverage(
+            &healthy_atom,
+            &RelaySessionKey::unauthenticated(healthy_relay.clone())
+        )
         .expect("coverage peek")
         .is_some());
 }
@@ -1748,7 +1767,12 @@ fn a_failing_post_admission_coverage_peek_keeps_the_immediate_seed() {
     {
         let store = RedbStore::open(&path).expect("inspect refused corruption controls");
         assert_eq!(
-            store.get_coverage(key.clone(), &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
+            store
+                .get_coverage(
+                    key.clone(),
+                    &RelaySessionKey::unauthenticated(relay.clone())
+                )
+                .unwrap(),
             Some(CoverageInterval::new(
                 Timestamp::from(10u64),
                 Timestamp::from(20u64)

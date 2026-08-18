@@ -12,8 +12,7 @@ use nmp_ffi::session::FfiPrivateKey;
 #[cfg(feature = "nip02")]
 use nmp_ffi::types::FfiFrame;
 use nmp_ffi::types::{
-    FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiLiveQuery,
-    FfiReadRouting,
+    FfiCacheMode, FfiDemand, FfiFilter, FfiFreshness, FfiLiveQuery, FfiReadRouting,
 };
 
 /// Consume every immediately-available frame (an observation delivers its

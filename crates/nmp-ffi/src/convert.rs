@@ -12,10 +12,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 
 use nmp::{
-    AcquisitionEvidence, AuthDenialSource as GAuthDenialSource,
-    AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, AuthPhase, Binding as GBinding,
-    CacheMode as GCacheMode, CancelWriteError, CancelWriteOutcome, CoverageInterval,
-    Demand as GDemand, DemandError as GDemandError, Derived as GDerived, DiagnosticsSnapshot,
+    AcquisitionEvidence, AuthDenialSource as GAuthDenialSource, AuthDiagnosticsPhase,
+    AuthDiagnosticsSnapshot, AuthPhase, Binding as GBinding, CacheMode as GCacheMode,
+    CancelWriteError, CancelWriteOutcome, CoverageInterval, Demand as GDemand,
+    DemandError as GDemandError, Derived as GDerived, DiagnosticsSnapshot,
     EventBuilder as GEventBuilder, Filter as GFilter, FilterCoverageEntry, Frame,
     Freshness as GFreshness, Identity as GIdentity, IdentityField as GIdentityField,
     IndexedTagName, Lane, NotSentReason as GNotSentReason, PublishQueueEntry as GPublishQueueEntry,
@@ -32,18 +32,18 @@ use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event as SignedEvent, EventId, JsonUtil, PublicKey, RelayUrl, Tag, Timestamp};
 
 use crate::types::{
-    FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthDiagnostics,
-    FfiAuthPhase, FfiBinding, FfiCacheMode, FfiCancelWriteError, FfiCancelWriteOutcome,
-    FfiCoverageInterval, FfiDemand, FfiDerived, FfiDiagnosticsSnapshot, FfiEventBuilder, FfiFilter,
-    FfiFilterCoverage, FfiFrame, FfiFreshness, FfiIdentity, FfiIdentityField, FfiKindCount,
-    FfiLaneCount, FfiLiveQuery, FfiNotSentReason, FfiPublishQueueEntry, FfiPublishQueueError,
-    FfiQueueRelayState, FfiReadRouting, FfiReceiptRelayResult, FfiReceiptResult, FfiRefuseReason,
-    FfiRelayDiagnostics, FfiRelayInformationErrorKind, FfiRelayState, FfiRelayWaiting,
-    FfiRemoveQueueEntryError, FfiRetryCause, FfiRow, FfiRowDelta, FfiRowSignature, FfiSelector,
-    FfiSetAlgebra, FfiSetOp, FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest,
-    FfiSignedEvent, FfiSigningState, FfiSourceEvidence, FfiSourceStatus, FfiStalledWrite,
-    FfiStalledWriteStage, FfiStalledWriteTotals, FfiWindow, FfiWindowContents, FfiWindowLoad,
-    FfiWriteFact, FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
+    FfiAcquisitionEvidence, FfiAuthDenialSource, FfiAuthDiagnostics, FfiAuthPhase, FfiBinding,
+    FfiCacheMode, FfiCancelWriteError, FfiCancelWriteOutcome, FfiCoverageInterval, FfiDemand,
+    FfiDerived, FfiDiagnosticsSnapshot, FfiEventBuilder, FfiFilter, FfiFilterCoverage, FfiFrame,
+    FfiFreshness, FfiIdentity, FfiIdentityField, FfiKindCount, FfiLaneCount, FfiLiveQuery,
+    FfiNotSentReason, FfiPublishQueueEntry, FfiPublishQueueError, FfiQueueRelayState,
+    FfiReadRouting, FfiReceiptRelayResult, FfiReceiptResult, FfiRefuseReason, FfiRelayDiagnostics,
+    FfiRelayInformationErrorKind, FfiRelayState, FfiRelayWaiting, FfiRemoveQueueEntryError,
+    FfiRetryCause, FfiRow, FfiRowDelta, FfiRowSignature, FfiSelector, FfiSetAlgebra, FfiSetOp,
+    FfiShortfallFact, FfiSignEventFailure, FfiSignEventRequest, FfiSignedEvent, FfiSigningState,
+    FfiSourceEvidence, FfiSourceStatus, FfiStalledWrite, FfiStalledWriteStage,
+    FfiStalledWriteTotals, FfiWindow, FfiWindowContents, FfiWindowLoad, FfiWriteFact,
+    FfiWriteIntent, FfiWriteOutcome, FfiWritePayload, FfiWriteRouting,
 };
 
 /// Every typed failure crossing this boundary -- parse, lifecycle, storage,
@@ -3240,10 +3240,7 @@ mod tests {
             .collect();
         assert_eq!(distinct.len(), auth_phases.len());
         assert_eq!(ffi.auth_sessions[0].relay, relay.to_string());
-        assert_eq!(
-            ffi.auth_sessions[0].authenticate_as,
-            Some(pk_hex())
-        );
+        assert_eq!(ffi.auth_sessions[0].authenticate_as, Some(pk_hex()));
         assert_eq!(ffi.auth_sessions[0].transport_generation, 40);
         assert_eq!(ffi.auth_sessions[0].epoch_sequence, Some(80));
         assert_eq!(

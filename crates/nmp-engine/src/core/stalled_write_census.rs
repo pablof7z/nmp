@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use nmp_grammar::{RelaySessionKey};
+use nmp_grammar::RelaySessionKey;
 
 use super::diagnostics::{stalled_write_id, STALLED_WRITE_DETAIL_LIMIT};
 use super::pending_writes::PendingWrites;

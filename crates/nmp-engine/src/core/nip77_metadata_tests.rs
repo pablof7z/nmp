@@ -1,7 +1,7 @@
 //! Exact plan-to-NIP-77 child metadata ownership (#1350).
 
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 
 use nmp_grammar::{ConcreteFilter, ContextualAtom};
 use nmp_router::{DemandKey, RequestMetadataUpdate, SubId};
@@ -41,7 +41,12 @@ impl Fixture {
             authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
-        let plan_sub_id = SubId::allocate(relay.clone(), &incumbent.routing, incumbent.authenticate_as, 1015);
+        let plan_sub_id = SubId::allocate(
+            relay.clone(),
+            &incumbent.routing,
+            incumbent.authenticate_as,
+            1015,
+        );
         let incumbent_claims = BTreeSet::from([coverage_key(&incumbent)]);
         let incumbent_demands = BTreeSet::from([DemandKey::for_atom(&incumbent)]);
         let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
@@ -375,7 +380,12 @@ fn assert_consistent_catches_a_cardinality_preserving_swap_between_plans() {
             authenticate_as: None,
             routing_evidence: BTreeSet::new(),
         };
-        let plan_sub_id = SubId::allocate(relay.clone(), &atom.routing, atom.authenticate_as, u64::from(kind));
+        let plan_sub_id = SubId::allocate(
+            relay.clone(),
+            &atom.routing,
+            atom.authenticate_as,
+            u64::from(kind),
+        );
         core.set_active_demand(&BTreeSet::from([atom.clone()]));
         core.white_box("attribution.retain_live_request_claims", |s| {
             s.attribution

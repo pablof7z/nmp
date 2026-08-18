@@ -34,9 +34,7 @@ pub use concrete::{
     RoutingEvidence, RoutingEvidenceKind,
 };
 pub use demand::{DemandDelta, DemandOp};
-pub use descriptor::{
-    CacheMode, Demand, DemandError, Freshness, ReadRouting, RelaySessionKey,
-};
+pub use descriptor::{CacheMode, Demand, DemandError, Freshness, ReadRouting, RelaySessionKey};
 pub use indexed_tag_name::IndexedTagName;
 pub use live_query::{LiveQuery, LiveQueryError};
 pub use nip19::{decode as decode_nostr_entity, NostrEntity, NostrEntityError};

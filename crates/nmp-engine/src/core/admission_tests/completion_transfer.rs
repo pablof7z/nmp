@@ -1,7 +1,7 @@
 //! completion transfer admission proofs.
 
-use nmp_grammar::RelaySessionKey;
 use super::*;
+use nmp_grammar::RelaySessionKey;
 use nmp_store::testing;
 
 #[test]
@@ -80,13 +80,26 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
         )
     });
     assert_eq!(
-        core.store.get_coverage(incumbent_claim, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
+        core.store
+            .get_coverage(
+                incumbent_claim,
+                &RelaySessionKey::unauthenticated(relay.clone())
+            )
+            .unwrap(),
         Some(CoverageInterval::new(
             Timestamp::from(0),
             Timestamp::from(180)
         ))
     );
-    assert_eq!(core.store.get_coverage(whole_claim.clone(), &RelaySessionKey::unauthenticated(relay.clone())).unwrap(), None);
+    assert_eq!(
+        core.store
+            .get_coverage(
+                whole_claim.clone(),
+                &RelaySessionKey::unauthenticated(relay.clone())
+            )
+            .unwrap(),
+        None
+    );
 
     core.white_box("clock", |s| s.clock = Timestamp::from(200u64));
     core.white_box("on_relay_frame", |s| {
@@ -99,14 +112,24 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
         )
     });
     assert_eq!(
-        core.store.get_coverage(residual_claim, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
+        core.store
+            .get_coverage(
+                residual_claim,
+                &RelaySessionKey::unauthenticated(relay.clone())
+            )
+            .unwrap(),
         Some(CoverageInterval::new(
             Timestamp::from(0),
             Timestamp::from(200)
         ))
     );
     assert_eq!(
-        core.store.get_coverage(whole_claim, &RelaySessionKey::unauthenticated(relay.clone())).unwrap(),
+        core.store
+            .get_coverage(
+                whole_claim,
+                &RelaySessionKey::unauthenticated(relay.clone())
+            )
+            .unwrap(),
         Some(CoverageInterval::new(
             Timestamp::from(0),
             Timestamp::from(180)
@@ -264,7 +287,12 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
         routing_evidence: BTreeSet::new(),
     };
     let incumbent_claim = coverage_key(&incumbent);
-    let sub_id = SubId::allocate(relay.clone(), &incumbent.routing, incumbent.authenticate_as, 1019);
+    let sub_id = SubId::allocate(
+        relay.clone(),
+        &incumbent.routing,
+        incumbent.authenticate_as,
+        1019,
+    );
     let added_for_generation = |generation: u16| ContextualAtom {
         filter: ConcreteFilter {
             kinds: Some(BTreeSet::from([1_000 + generation])),
