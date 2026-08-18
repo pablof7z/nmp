@@ -701,9 +701,15 @@ fn non_widening_rule_is_dropped_and_ships_separately() {
         RuleRegistry::default_widen_only().register(Box::new(DiscardSecondOperand), false);
     assert_eq!(registry.dropped_rules(), &["DiscardSecondOperand"]);
 
-    // Same `kinds`, different `since` -- outside StructuralUnion's domain (a
-    // differing scalar is a refusal), but squarely inside
-    // DiscardSecondOperand's unsound applicability predicate.
+    // Same `kinds`, one bounded BELOW and one bounded ABOVE -- outside
+    // StructuralUnion's domain (differing scalars are a refusal) AND outside
+    // Containment's (neither window contains the other: each admits events
+    // the other rejects), but squarely inside DiscardSecondOperand's unsound
+    // applicability predicate, which asks only that `kinds` match.
+    //
+    // Deliberately NOT two `since` bounds: `since:100` CONTAINS `since:200`,
+    // so Containment would legitimately collapse that pair and this test
+    // would pass for a reason unrelated to the drop mechanism it proves.
     let a = ConcreteFilter {
         kinds: Some(BTreeSet::from([1u16])),
         since: Some(100),
@@ -711,7 +717,7 @@ fn non_widening_rule_is_dropped_and_ships_separately() {
     };
     let b = ConcreteFilter {
         kinds: Some(BTreeSet::from([1u16])),
-        since: Some(200),
+        until: Some(100),
         ..ConcreteFilter::default()
     };
 
