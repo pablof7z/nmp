@@ -207,34 +207,21 @@ this section:
   (`crates/nmp-router/tests/admission/coverage_behavior.rs:83`). The wanted
   behaviour — send exactly `{kinds:[1], authors:[c]}` and own both pieces —
   sits in an `#[ignore]`d test at `:132` naming issue #1341.
-- **Containment is consulted both against sent work and between two
-  candidates inside one cohort (#1907).** It was once sent-work only, so a
-  superset/subset pair arriving together that differed in more than one
-  component shipped BOTH REQs — measured at the time:
+- **Containment is consulted against sent work only, never between two
+  candidates inside one cohort.** Collapsing within a cohort is still
+  `StructuralUnion`, so a superset/subset pair arriving together that differs
+  in more than one component ships BOTH REQs — measured:
   `{kinds:[0,1], authors:[a,b]}` and `{kinds:[1], authors:[a]}` in one cohort
-  produced two REQs, one wholly contained in the other. `Containment` now
-  fires on exactly that pair and keeps the container alone; the case is
-  pinned by `a_wholly_contained_candidate_ships_no_req_of_its_own`
-  (`crates/nmp-router/src/coalesce.rs`), which asserts up front that
-  `StructuralUnion` is silent on it, so the test cannot pass for the wrong
-  reason.
+  produce two REQs, one wholly contained in the other. A one-component pair
+  does merge, because the union of a set and its subset is the superset.
 
 ### 3.3 The rule as shipped
 
-`RuleRegistry::default_widen_only()` = `[Containment, StructuralUnion]`.
-
-`StructuralUnion` is derived from the filter's shape rather than named after a
-field (§7.1). It requires that **exactly one array component differs** and
-everything else is equal. That single-component restriction is deliberate:
-merging two at once over-widens into cartesian corners.
-
-`Containment` asks the other question — is one operand's match set already a
-subset of the other's? — and returns the container unchanged. The
-single-component restriction does not apply to it, because it forms no union:
-`matches(merged) = matches(container)`, so the widening contract holds with
-EQUALITY and there are no cartesian corners to over-widen into. Shape and
-containment are different questions, and `StructuralUnion` alone answered the
-second one only where it happened to coincide with the first (#1907).
+`RuleRegistry::default_widen_only()` = `[StructuralUnion]` — ONE rule, derived
+from the filter's shape rather than named after a field (§7.1). It requires
+that **exactly one array component differs** and everything else is equal.
+That single-component restriction is deliberate: merging two at once
+over-widens into cartesian corners.
 
 Until 2026-07-27 this was three rules — `AuthorUnion`, `KindUnion`, `IdUnion` —
 each hard-coding one field, with `tags` required equal by all three. §3.4
