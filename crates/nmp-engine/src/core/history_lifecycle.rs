@@ -76,6 +76,178 @@ impl HandleSet for Vec<HandleId> {
     }
 }
 
+/// One window's bounded canonical row set: which rows the window projects,
+/// and their canonical newest-first order, as ONE fact.
+///
+/// Fields are PRIVATE, so I5 -- `rows` and `order` name exactly the same
+/// event ids, and every `order` key carries its row's own `created_at` -- is
+/// maintained here or not at all (#1921).
+///
+/// Before this owner existed the two collections were separate
+/// `HistoryState` fields whose doc comment claimed they had "same
+/// membership", and `CoreState` mutated them by hand at THIRTEEN sites
+/// across four methods, in four spellings: remove-the-row-then-rebuild-and-
+/// remove-its-key (five, one of which read `order`'s tail to choose the row
+/// and carried `.expect("history order and membership stay identical")` --
+/// an invariant named in a panic message because no type held it),
+/// insert-the-key-then-insert-the-row (five), assign-both-whole-sets (one),
+/// and two that overwrote a row in place through `last_rows`' `get_mut` and
+/// never touched `order` at all.
+///
+/// All thirteen were correct, and those last two are worth naming for why:
+/// NIP-01 commits `created_at` into the event id, so a same-id overwrite
+/// cannot move the order key -- a fact that lives two crates away from the
+/// lines relying on it, and that nothing near them stated.
+/// [`Self::insert`] re-keys from the row it displaces, unconditionally, so
+/// the fact stops being load-bearing.
+///
+/// Every mutating door returns the value it displaced. The committed-batch
+/// path has to remember each touched row's pre-state to roll back a failed
+/// backfill, and it built that journal by reading each row before writing
+/// it; returning the displaced value makes the journal fall out of the
+/// mutation instead.
+///
+/// It holds state and its invariant, and nothing else: no `store`, no
+/// `resolver`, no `Effect`. This owner takes no store parameter on any door
+/// -- not `&RedbStore`, not `&mut RedbStore` -- because the reads that fill a
+/// window are the caller's transaction, and what crosses back is a `Row`.
+#[derive(Default)]
+pub(super) struct HistoryRows {
+    /// The bounded canonical payload set. History delivery is latest-wins,
+    /// so every emitted frame must be able to stand alone after intermediate
+    /// deltas are overwritten.
+    rows: BTreeMap<EventId, Row>,
+    /// The same membership, ordered canonically newest-first. This makes
+    /// top/bottom rebalance O(log max_rows), never an O(total) sort after
+    /// every committed row mutation.
+    order: BTreeSet<(Reverse<u64>, EventId)>,
+}
+
+impl HistoryRows {
+    /// This row's canonical order key.
+    fn key(row: &Row) -> (Reverse<u64>, EventId) {
+        (Reverse(row.created_at().as_secs()), row.id())
+    }
+
+    /// Project `row`, displacing and returning whatever this window held
+    /// under the same id. Re-keys `order` from the displaced row's OWN
+    /// `created_at`, so a replacement whose timestamp moved cannot orphan
+    /// the key it replaced.
+    pub(super) fn insert(&mut self, row: Row) -> Option<Row> {
+        let key = Self::key(&row);
+        let previous = self.rows.insert(row.id(), row);
+        if let Some(previous) = previous.as_ref() {
+            self.order.remove(&Self::key(previous));
+        }
+        self.order.insert(key);
+        previous
+    }
+
+    /// Stop projecting `id`, returning the row the window held.
+    pub(super) fn remove(&mut self, id: &EventId) -> Option<Row> {
+        let removed = self.rows.remove(id);
+        if let Some(removed) = removed.as_ref() {
+            self.order.remove(&Self::key(removed));
+        }
+        removed
+    }
+
+    /// Replace the whole projection, the full-refresh oracle's door. The
+    /// order index is derived here rather than passed in, so a caller cannot
+    /// hand over a membership and an order that disagree.
+    pub(super) fn replace_all(&mut self, rows: BTreeMap<EventId, Row>) {
+        self.order = rows.values().map(Self::key).collect();
+        self.rows = rows;
+    }
+
+    /// Evict from the oldest end until the window projects at most `target`
+    /// rows, returning what was evicted, oldest first.
+    pub(super) fn truncate_to(&mut self, target: usize) -> Vec<Row> {
+        let mut evicted = Vec::new();
+        while self.rows.len() > target {
+            let Some((_, event_id)) = self.order.iter().next_back().copied() else {
+                break;
+            };
+            let row = self
+                .remove(&event_id)
+                .expect("the order index and the row set name one membership");
+            evicted.push(row);
+        }
+        evicted
+    }
+
+    pub(super) fn get(&self, id: &EventId) -> Option<&Row> {
+        self.rows.get(id)
+    }
+
+    pub(super) fn contains(&self, id: &EventId) -> bool {
+        self.rows.contains_key(id)
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// Every projected event id, in id order -- the removed-delta scan,
+    /// which compares membership and never consults position.
+    pub(super) fn ids(&self) -> impl Iterator<Item = &EventId> + '_ {
+        self.rows.keys()
+    }
+
+    /// The projection as the app receives it: every row, canonical
+    /// newest-first. Fusing the two collections HERE is what makes the walk
+    /// total -- the open-coded version was a `filter_map` over `order` that
+    /// silently dropped any row `order` named and `rows` had lost, so the
+    /// one corruption it could have reported was the one it swallowed.
+    pub(super) fn newest_first(&self) -> impl Iterator<Item = &Row> + '_ {
+        self.order.iter().map(|(_, event_id)| {
+            self.rows
+                .get(event_id)
+                .expect("the order index and the row set name one membership")
+        })
+    }
+
+    /// The oldest projected row's cursor: the window's current canonical
+    /// boundary, and the point a backfill reads below.
+    pub(super) fn boundary(&self) -> Option<nmp_store::EventCursor> {
+        self.order
+            .iter()
+            .next_back()
+            .map(|(Reverse(created_at), event_id)| {
+                nmp_store::EventCursor::new(Timestamp::from(*created_at), *event_id)
+            })
+    }
+
+    /// I5, checked: one membership, and every key carrying its own row's
+    /// timestamp. Lives with the fields it constrains rather than in the
+    /// session owner above, which cannot see them.
+    #[cfg(any(test, feature = "bench-instrumentation"))]
+    fn assert_consistent(&self, at: &str, id: HistorySessionId) {
+        assert_eq!(
+            self.rows.len(),
+            self.order.len(),
+            "{at}: history session {id:?} holds {} rows but orders {}",
+            self.rows.len(),
+            self.order.len()
+        );
+        for (Reverse(created_at), event_id) in &self.order {
+            let row = self.rows.get(event_id).unwrap_or_else(|| {
+                panic!("{at}: history session {id:?} orders row {event_id}, which it does not hold")
+            });
+            assert_eq!(
+                row.created_at().as_secs(),
+                *created_at,
+                "{at}: history session {id:?} orders row {event_id} at {created_at}, but the row itself is at {}",
+                row.created_at().as_secs()
+            );
+        }
+    }
+}
+
 impl HistorySessions {
     pub(super) fn new() -> Self {
         Self {
@@ -223,37 +395,13 @@ impl HistorySessions {
     /// every count it reports (same reasoning as `OwnerIndexed::
     /// assert_consistent` and `RequestAttempts::assert_consistent`).
     ///
-    /// Membership/order: `HistoryState::order` documents itself as "same
-    /// membership as `last_rows`, ordered canonically newest-first", and
-    /// until #1850 nothing checked it. It has to be checked here because
-    /// [`Self::projection`] answers "which rows, in what order" as ONE
-    /// value derived by walking `order` and looking rows up in `last_rows`
-    /// -- exactly what `history_batch` does on the production path, where
-    /// its `filter_map` silently drops a row `order` names and `last_rows`
-    /// has lost. Without this assertion that fusion would be lossy in both
-    /// directions and the falsifiers reading it would go quiet on the one
-    /// corruption they exist to catch.
+    /// Membership/order is I5 and lives on [`HistoryRows`], which owns both
+    /// collections; this walk delegates to it per session rather than
+    /// restating it, because the fields it constrains are private there.
     #[cfg(any(test, feature = "bench-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (id, state) in &self.sessions {
-            assert_eq!(
-                state.last_rows.len(),
-                state.order.len(),
-                "{at}: history session {id:?} holds {} rows but orders {}",
-                state.last_rows.len(),
-                state.order.len()
-            );
-            for (Reverse(created_at), event_id) in &state.order {
-                let row = state.last_rows.get(event_id).unwrap_or_else(|| {
-                    panic!("{at}: history session {id:?} orders row {event_id}, which it does not hold")
-                });
-                assert_eq!(
-                    row.created_at().as_secs(),
-                    *created_at,
-                    "{at}: history session {id:?} orders row {event_id} at {created_at}, but the row itself is at {}",
-                    row.created_at().as_secs()
-                );
-            }
+            state.rows.assert_consistent(at, *id);
             for handle_id in &state.handle_ids {
                 let owner = self.by_handle.get(handle_id).unwrap_or_else(|| {
                     panic!(
@@ -349,11 +497,11 @@ impl HistorySessions {
 /// of them were reconstructed from two fields apiece and are stated as facts
 /// instead:
 ///
-/// - `rows` fuses `last_rows` (membership) and `order` (canonical position)
-///   into the one list a `HistoryBatch` would carry. A test that asked
+/// - `rows` is the one list a `HistoryBatch` would carry. A test that asked
 ///   "which rows, newest-first" used to walk `order` and index `last_rows`
-///   by hand; the two agreeing is now [`HistorySessions::assert_consistent`]'s
-///   business, not each caller's.
+///   by hand; both collections and their agreement are now
+///   [`HistoryRows`]' business, and this reads its
+///   [`newest_first`](HistoryRows::newest_first) door like production does.
 /// - `advance_staged` is `pending_load.is_some()` -- the only thing any
 ///   falsifier ever asked that `Option` -- so no test holds a
 ///   `PendingHistoryLoad`, whose eight rollback-bookkeeping fields are the
@@ -423,17 +571,7 @@ impl HistorySessions {
     pub(super) fn projection(&self, id: HistorySessionId) -> WindowProjection {
         let state = self.expect_live(id);
         WindowProjection {
-            rows: state
-                .order
-                .iter()
-                .map(|(_, event_id)| {
-                    state
-                        .last_rows
-                        .get(event_id)
-                        .expect("history order and membership stay identical")
-                        .clone()
-                })
-                .collect(),
+            rows: state.rows.newest_first().cloned().collect(),
             evidence: state.last_evidence.clone(),
             load: state.load,
             target_rows: state.target_rows,
@@ -572,8 +710,7 @@ impl CoreState {
                 branch_of,
                 acquisitions: BTreeMap::new(),
                 acquired_tie_seconds: BTreeSet::new(),
-                last_rows: BTreeMap::new(),
-                order: BTreeSet::new(),
+                rows: HistoryRows::default(),
                 last_evidence: None,
                 projection_complete: false,
                 load: WindowLoad::Idle,
@@ -727,17 +864,7 @@ impl CoreState {
         &self,
         id: HistorySessionId,
     ) -> Option<nmp_store::EventCursor> {
-        let state = self.history.get(id)?;
-        state
-            .last_rows
-            .iter()
-            .max_by(|(a_id, a), (b_id, b)| {
-                nip01_newest_first(
-                    (a.created_at().as_secs(), a_id),
-                    (b.created_at().as_secs(), b_id),
-                )
-            })
-            .map(|(event_id, row)| nmp_store::EventCursor::new(row.created_at(), *event_id))
+        Some(self.history.get(id)?.rows.boundary()?)
     }
 
     /// Stage one bounded advance toward `new_target`, opening the tie-second
@@ -774,7 +901,7 @@ impl CoreState {
                 .get(id)
                 .expect("advance requires a live session");
             let prior_target = state.target_rows;
-            let old_len = state.last_rows.len();
+            let old_len = state.rows.len();
             let effective_target = new_target.max(prior_target);
             let needed = effective_target.saturating_sub(old_len);
             let needs_tie = boundary.as_ref().is_some_and(|cursor| {
@@ -1105,8 +1232,8 @@ impl CoreState {
             (
                 made_progress,
                 state.target_rows,
-                state.last_rows.len(),
-                !state.order.is_empty(),
+                state.rows.len(),
+                !state.rows.is_empty(),
             )
         };
 
@@ -1156,11 +1283,7 @@ impl CoreState {
             state.acquired_tie_seconds.remove(&second);
         }
         for event_id in pending.added_row_ids {
-            if let Some(row) = state.last_rows.remove(&event_id) {
-                state
-                    .order
-                    .remove(&(Reverse(row.created_at().as_secs()), event_id));
-            }
+            state.rows.remove(&event_id);
         }
         state.target_rows = pending.prior_target_rows;
         state.load = pending.prior_load;
@@ -1250,11 +1373,7 @@ impl CoreState {
             .get_mut(id)
             .expect("history batch requires a live session");
         state.load = load;
-        let rows = state
-            .order
-            .iter()
-            .filter_map(|(_, event_id)| state.last_rows.get(event_id).cloned())
-            .collect();
+        let rows = state.rows.newest_first().cloned().collect();
         HistoryBatch {
             rows,
             deltas,
@@ -1295,13 +1414,9 @@ impl CoreState {
     ) -> Option<HistoryBatch> {
         let state = self.history.get_mut(id)?;
         let current_rows = current.clone();
-        let current_order = current_rows
-            .iter()
-            .map(|(event_id, row)| (Reverse(row.created_at().as_secs()), *event_id))
-            .collect();
         let mut deltas = Vec::new();
         for (event_id, row) in current {
-            match state.last_rows.get(&event_id) {
+            match state.rows.get(&event_id) {
                 None => deltas.push(RowDelta::Added(row)),
                 Some(previous) if previous.signature() != row.signature() => {
                     deltas.push(RowDelta::Updated(row));
@@ -1315,7 +1430,7 @@ impl CoreState {
                 Some(_) => {}
             }
         }
-        for event_id in state.last_rows.keys() {
+        for event_id in state.rows.ids() {
             if !current_rows.contains_key(event_id) {
                 deltas.push(RowDelta::Removed(*event_id));
             }
@@ -1323,8 +1438,7 @@ impl CoreState {
         let changed = !deltas.is_empty()
             || state.last_evidence.as_ref() != Some(&evidence)
             || state.load != load;
-        state.last_rows = current_rows;
-        state.order = current_order;
+        state.rows.replace_all(current_rows);
         state.last_evidence = Some(evidence);
         state.projection_complete = true;
         if changed {
@@ -1518,7 +1632,7 @@ impl CoreState {
             .history
             .get(id)
             .expect("history advance requires a live session");
-        let needed = state.target_rows.saturating_sub(state.last_rows.len());
+        let needed = state.target_rows.saturating_sub(state.rows.len());
         let mut candidates = BTreeMap::<EventId, Row>::new();
         for (branch, live) in state.live_handle_ids.iter().enumerate() {
             let declaration = &state.query.live_query().branches()[branch];
@@ -1596,16 +1710,12 @@ impl CoreState {
             .expect("history remains live during synchronous projection");
         let mut deltas = Vec::with_capacity(ordered.len());
         for row in ordered {
-            let event_id = row.id();
-            state.last_rows.insert(event_id, row.clone());
-            state
-                .order
-                .insert((Reverse(row.created_at().as_secs()), event_id));
+            state.rows.insert(row.clone());
             deltas.push(RowDelta::Added(row));
         }
         state.last_evidence = Some(evidence);
         state.projection_complete = true;
-        let added = state.last_rows.len().saturating_sub(old_len);
+        let added = state.rows.len().saturating_sub(old_len);
         let batch = self.history_batch(id, deltas, WindowLoad::Returned { added });
         Ok((batch, added))
     }
@@ -1644,7 +1754,7 @@ impl CoreState {
             return false;
         }
         if root_atoms.is_empty() {
-            return state.last_rows.is_empty();
+            return state.rows.is_empty();
         }
         let filters: Vec<_> = root_atoms
             .into_iter()
@@ -1677,14 +1787,7 @@ impl CoreState {
             })
         };
         let target_rows = state.target_rows;
-        let original_boundary =
-            state
-                .order
-                .iter()
-                .next_back()
-                .map(|(Reverse(created_at), event_id)| {
-                    nmp_store::EventCursor::new(Timestamp::from(*created_at), *event_id)
-                });
+        let original_boundary = state.rows.boundary();
         let mut before = BTreeMap::<EventId, Option<Row>>::new();
         let mut visible_removals = 0usize;
         let mut strict_promotions = BTreeMap::<EventId, Row>::new();
@@ -1692,7 +1795,7 @@ impl CoreState {
             for changed in &changes.provenance_grew {
                 if !matches(&changed.event)
                     || !visible_under_pin(changed)
-                    || state.last_rows.contains_key(&changed.event.id)
+                    || state.rows.contains(&changed.event.id)
                 {
                     continue;
                 }
@@ -1748,24 +1851,9 @@ impl CoreState {
                 .history
                 .get_mut(id)
                 .expect("history remained live during committed mutation");
-            let remember =
-                |event_id: EventId,
-                 state: &HistoryState,
-                 before: &mut BTreeMap<EventId, Option<Row>>| {
-                    before
-                        .entry(event_id)
-                        .or_insert_with(|| state.last_rows.get(&event_id).cloned());
-                };
-
             for event in &changes.removed {
-                if !state.last_rows.contains_key(&event.id) {
-                    continue;
-                }
-                remember(event.id, state, &mut before);
-                if let Some(row) = state.last_rows.remove(&event.id) {
-                    state
-                        .order
-                        .remove(&(Reverse(row.created_at().as_secs()), event.id));
+                if let Some(row) = state.rows.remove(&event.id) {
+                    before.entry(event.id).or_insert(Some(row));
                     visible_removals = visible_removals.saturating_add(1);
                 }
             }
@@ -1774,12 +1862,6 @@ impl CoreState {
                     continue;
                 }
                 let event_id = row.event.id;
-                remember(event_id, state, &mut before);
-                if let Some(previous) = state.last_rows.remove(&event_id) {
-                    state
-                        .order
-                        .remove(&(Reverse(previous.created_at().as_secs()), event_id));
-                }
                 let remembered = row_from_stored_event(
                     {
                         #[cfg(feature = "bench-instrumentation")]
@@ -1789,28 +1871,21 @@ impl CoreState {
                     row.signature_state,
                     row.observed_relays.clone(),
                 );
-                state
-                    .order
-                    .insert((Reverse(remembered.created_at().as_secs()), event_id));
-                state.last_rows.insert(event_id, remembered);
+                let previous = state.rows.insert(remembered);
+                before.entry(event_id).or_insert(previous);
             }
             for row in &changes.provenance_grew {
                 if !matches(&row.event) {
                     continue;
                 }
-                if state.last_rows.contains_key(&row.event.id) {
-                    remember(row.event.id, state, &mut before);
-                    let remembered = state
-                        .last_rows
-                        .get_mut(&row.event.id)
-                        .expect("provenance target was checked above");
-                    remembered
-                        .sources
-                        .extend(row.observed_relays.iter().cloned());
-                    remembered.set_signature(row_signature_from_store_state(
+                if let Some(mut grown) = state.rows.get(&row.event.id).cloned() {
+                    grown.sources.extend(row.observed_relays.iter().cloned());
+                    grown.set_signature(row_signature_from_store_state(
                         &row.event,
                         row.signature_state,
                     ));
+                    let previous = state.rows.insert(grown);
+                    before.entry(row.event.id).or_insert(previous);
                 } else if pinned_relays.is_some() && visible_under_pin(row) {
                     // An event already cached from an unpinned relay can
                     // enter a Strict projection when this committed duplicate
@@ -1818,31 +1893,24 @@ impl CoreState {
                     // transition as an affected-row insertion, then let the
                     // same bounded order rebalance decide whether it belongs
                     // in top-N.
-                    remember(row.event.id, state, &mut before);
                     let projected = strict_promotions
                         .remove(&row.event.id)
                         .expect("a Strict promotion visible under the pin was prefetched");
-                    state
-                        .order
-                        .insert((Reverse(projected.created_at().as_secs()), projected.id()));
-                    state.last_rows.insert(projected.id(), projected);
+                    let previous = state.rows.insert(projected);
+                    before.entry(row.event.id).or_insert(previous);
                 }
             }
             for row in &changes.updated {
                 if !matches(&row.event) || !visible_under_pin(row) {
                     continue;
                 }
-                if state.last_rows.contains_key(&row.event.id) {
-                    remember(row.event.id, state, &mut before);
-                    let remembered = state
-                        .last_rows
-                        .get_mut(&row.event.id)
-                        .expect("same-id update target was checked above");
-                    *remembered = row_from_stored_event(
+                if state.rows.contains(&row.event.id) {
+                    let previous = state.rows.insert(row_from_stored_event(
                         row.event.clone(),
                         row.signature_state,
                         row.observed_relays.clone(),
-                    );
+                    ));
+                    before.entry(row.event.id).or_insert(previous);
                 }
             }
         }
@@ -1877,17 +1945,10 @@ impl CoreState {
                         .get_mut(id)
                         .expect("history remained live after failed backfill");
                     for (event_id, prior) in before {
-                        if let Some(current) = state.last_rows.remove(&event_id) {
-                            state
-                                .order
-                                .remove(&(Reverse(current.created_at().as_secs()), event_id));
-                        }
-                        if let Some(prior) = prior {
-                            state
-                                .order
-                                .insert((Reverse(prior.created_at().as_secs()), event_id));
-                            state.last_rows.insert(event_id, prior);
-                        }
+                        match prior {
+                            Some(prior) => state.rows.insert(prior),
+                            None => state.rows.remove(&event_id),
+                        };
                     }
                     state.projection_complete = false;
                     self.degrade_store(error, effects);
@@ -1906,12 +1967,10 @@ impl CoreState {
                 .expect("history remained live during exact backfill");
             for stored in rows {
                 let event_id = stored.event.id;
-                if state.last_rows.contains_key(&event_id) {
+                if state.rows.contains(&event_id) {
                     continue;
                 }
-                before
-                    .entry(event_id)
-                    .or_insert_with(|| state.last_rows.get(&event_id).cloned());
+                before.entry(event_id).or_insert(None);
                 let sources: BTreeSet<_> = stored.provenance.seen.into_keys().collect();
                 let signature_state = stored
                     .provenance
@@ -1920,10 +1979,7 @@ impl CoreState {
                     .map_or(SigState::Signed, |local| local.sig_state);
                 let row = row_from_stored_event(stored.event, signature_state, sources.clone());
                 let remembered = row.clone();
-                state
-                    .order
-                    .insert((Reverse(remembered.created_at().as_secs()), event_id));
-                state.last_rows.insert(event_id, remembered);
+                state.rows.insert(remembered);
             }
         }
 
@@ -1932,26 +1988,8 @@ impl CoreState {
                 .history
                 .get_mut(id)
                 .expect("history remained live during canonical truncation");
-            let remember =
-                |event_id: EventId,
-                 state: &HistoryState,
-                 before: &mut BTreeMap<EventId, Option<Row>>| {
-                    before
-                        .entry(event_id)
-                        .or_insert_with(|| state.last_rows.get(&event_id).cloned());
-                };
-            while state.last_rows.len() > target_rows {
-                let Some((_, event_id)) = state.order.iter().next_back().copied() else {
-                    break;
-                };
-                remember(event_id, state, &mut before);
-                let row = state
-                    .last_rows
-                    .remove(&event_id)
-                    .expect("history order and membership stay identical");
-                state
-                    .order
-                    .remove(&(Reverse(row.created_at().as_secs()), event_id));
+            for evicted in state.rows.truncate_to(target_rows) {
+                before.entry(evicted.id()).or_insert(Some(evicted));
             }
         }
 
@@ -1966,7 +2004,7 @@ impl CoreState {
             .expect("history remained live after committed rebalance");
         let mut deltas = Vec::new();
         for (event_id, prior) in &before {
-            match (prior, state.last_rows.get(event_id)) {
+            match (prior, state.rows.get(event_id)) {
                 (None, Some(current)) => deltas.push(RowDelta::Added(current.clone())),
                 (Some(_), None) => deltas.push(RowDelta::Removed(*event_id)),
                 (Some(prior), Some(current)) if prior.signature() != current.signature() => {
@@ -2012,6 +2050,114 @@ mod tests {
     use nmp_store::RedbStore;
 
     use super::*;
+
+    /// A row-shaped value with an id and a timestamp chosen by the caller.
+    /// NIP-01 commits `created_at` into the id, so a real same-id pair can
+    /// never disagree about it; that is exactly why the hand-paired
+    /// `last_rows`/`order` sites got away with never re-keying a same-id
+    /// overwrite, and exactly why the guarantee has to be proven against a
+    /// value the protocol cannot produce. `Row::from_parts` is the raw
+    /// composition door and asserts no provenance.
+    fn row_at(id_byte: u8, created_at: u64) -> Row {
+        Row::from_parts(
+            EventId::from_byte_array([id_byte; 32]),
+            nostr::Keys::generate().public_key(),
+            Timestamp::from(created_at),
+            nostr::Kind::TextNote,
+            nostr::Tags::new(),
+            String::new(),
+            nmp_grammar::RowSignature::Pending,
+            BTreeSet::new(),
+        )
+    }
+
+    /// I5's falsifier: one membership, and every order key carrying its own
+    /// row's timestamp.
+    ///
+    /// The break this catches is the one the open-coded sites could not: a
+    /// same-id replacement whose `created_at` moved. The hand-written sites
+    /// rebuilt the order key from the row they were about to write, never
+    /// from the row they were displacing, so a moved timestamp would have
+    /// orphaned the old key and left the window ordering a row it no longer
+    /// held. Delete the `order.remove(&Self::key(previous))` line in
+    /// [`HistoryRows::insert`] and this reddens with the window delivering
+    /// that row TWICE: `[(1, 80), (2, 90), (1, 80)]`.
+    #[test]
+    fn a_replacement_whose_timestamp_moved_leaves_exactly_one_ordered_row() {
+        let mut rows = HistoryRows::default();
+        rows.insert(row_at(1, 100));
+        rows.insert(row_at(2, 90));
+
+        let displaced = rows.insert(row_at(1, 80));
+
+        assert_eq!(
+            displaced.map(|row| row.created_at().as_secs()),
+            Some(100),
+            "insert returns the row it displaced, which is what the committed \
+             batch's rollback journal records"
+        );
+        assert_eq!(rows.len(), 2, "one id is still one row");
+        assert_eq!(
+            rows.newest_first()
+                .map(|row| (row.id().to_bytes()[0], row.created_at().as_secs()))
+                .collect::<Vec<_>>(),
+            vec![(2, 90), (1, 80)],
+            "the moved row re-sorts under its NEW timestamp and appears once"
+        );
+        rows.assert_consistent("after a moved-timestamp replacement", HistorySessionId(0));
+    }
+
+    /// `newest_first` is TOTAL. The open-coded walk was a `filter_map` over
+    /// `order` indexing `last_rows`, so the one corruption it could have
+    /// reported -- an ordered id the row set had lost -- was the one it
+    /// silently swallowed. Fusing the two collections behind one door makes
+    /// the drop unrepresentable rather than invisible.
+    #[test]
+    fn every_ordered_row_is_delivered() {
+        let mut rows = HistoryRows::default();
+        for (id, created_at) in [(1u8, 100u64), (2, 100), (3, 90)] {
+            rows.insert(row_at(id, created_at));
+        }
+        rows.remove(&EventId::from_byte_array([2; 32]));
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.newest_first().count(), rows.len());
+        assert_eq!(
+            rows.newest_first()
+                .map(|row| row.id().to_bytes()[0])
+                .collect::<Vec<_>>(),
+            vec![1, 3],
+            "NIP-01 newest-first: created_at DESC, ties by id ASC"
+        );
+    }
+
+    /// `truncate_to` evicts from the OLDEST end and hands back what it
+    /// dropped, so the committed batch's rollback journal is a return value
+    /// rather than a second read the caller has to remember to take.
+    #[test]
+    fn truncation_evicts_the_oldest_and_returns_it() {
+        let mut rows = HistoryRows::default();
+        for (id, created_at) in [(1u8, 100u64), (2, 90), (3, 80)] {
+            rows.insert(row_at(id, created_at));
+        }
+
+        let evicted = rows.truncate_to(1);
+
+        assert_eq!(
+            evicted
+                .iter()
+                .map(|row| row.id().to_bytes()[0])
+                .collect::<Vec<_>>(),
+            vec![3, 2],
+            "oldest first"
+        );
+        assert_eq!(
+            rows.boundary().map(|cursor| cursor.created_at.as_secs()),
+            Some(100),
+            "the surviving row is the window's new canonical boundary"
+        );
+        rows.assert_consistent("after truncation", HistorySessionId(0));
+    }
 
     /// Two live, independent history sessions over an empty store, each with
     /// exactly one open handle.
@@ -2172,8 +2318,7 @@ mod tests {
             branch_of: BTreeMap::new(),
             acquisitions: BTreeMap::new(),
             acquired_tie_seconds: BTreeSet::new(),
-            last_rows: BTreeMap::new(),
-            order: BTreeSet::new(),
+            rows: HistoryRows::default(),
             last_evidence: None,
             projection_complete: false,
             load: WindowLoad::Idle,
