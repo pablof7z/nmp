@@ -1138,3 +1138,54 @@ mod tests {
         }
     }
 }
+
+/// #1913: the build helper (`CommentRoot::address_coordinate`, now backed by
+/// `nostr::Coordinate`'s `Display`) and the decode parse path
+/// (`parse_address_coordinate`, a `splitn(3, ':')` split) must be EXACT
+/// inverses. The parse side is deliberately NOT switched to `Coordinate::parse`
+/// yet: `Coordinate::from_kpi_format` uses `split(':')` (not `splitn(3, ':')`),
+/// which silently truncates an identifier that itself contains colons -- a
+/// legal `d`-tag value and load-bearing for NIP-22 thread placement. That
+/// switch is tracked in a separate follow-up blocked on the `nostr` crate.
+/// These tests pin the invariant the kept pair must hold.
+#[cfg(test)]
+mod coordinate_parity {
+    use super::*;
+    use crate::root::CommentRoot;
+
+    fn pk() -> PublicKey {
+        PublicKey::from_hex("aa".repeat(32).as_str()).unwrap()
+    }
+
+    fn round_trips(kind: u16, author: &PublicKey, identifier: &str) {
+        let built = CommentRoot::address_coordinate(kind, author, identifier);
+        let (parsed_kind, parsed_author, parsed_identifier) =
+            parse_address_coordinate(&built).expect("build->parse must round-trip");
+        assert_eq!(parsed_kind, kind, "kind mismatch for built {built:?}");
+        assert_eq!(parsed_author, *author, "author mismatch for built {built:?}");
+        assert_eq!(
+            parsed_identifier, identifier,
+            "identifier mismatch for built {built:?}"
+        );
+    }
+
+    /// Build then parse round-trips for valid coordinates, including the
+    /// empty-identifier (replaceable) edge case.
+    #[test]
+    fn build_then_parse_round_trips_valid_coordinates() {
+        let author = pk();
+        round_trips(30023, &author, "my-article");
+        round_trips(30023, &author, ""); // empty identifier (replaceable)
+    }
+
+    /// Build then parse round-trips an identifier that itself contains colons
+    /// -- a legal `d`-tag value per NIP-01, and load-bearing for NIP-22 thread
+    /// placement. `splitn(3, ':')` preserves colons in the third segment; this
+    /// pins that the build path (now `Coordinate::Display`) agrees.
+    #[test]
+    fn build_then_parse_round_trips_colon_in_identifier() {
+        let author = pk();
+        round_trips(30023, &author, "my:article");
+        round_trips(30023, &author, "a:b:c:d");
+    }
+}
