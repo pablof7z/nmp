@@ -707,7 +707,7 @@ mod affected_handle_invalidation_tests {
         let expired = core.white_box("store.expire_due", |s| s.store.expire_due(now).unwrap());
         let removed = expired.into_iter().map(|row| row.event).collect();
         let committed = core.white_box("resolver.retract", |s| {
-            s.resolver.retract(&s.store, removed).unwrap()
+            s.resolver.retract(&s.store, Vec::new(), removed).unwrap()
         });
         let mut effects = Vec::new();
         if direct {

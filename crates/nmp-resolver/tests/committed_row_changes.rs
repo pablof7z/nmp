@@ -292,7 +292,7 @@ fn expiry_retraction_carries_the_exact_removed_row() {
 
     let expired = store.expire_due(Timestamp::from(100u64)).unwrap();
     let removed: Vec<_> = expired.into_iter().map(|row| row.event).collect();
-    let retracted = engine.retract(&store, removed).unwrap();
+    let retracted = engine.retract(&store, Vec::new(), removed).unwrap();
 
     assert!(retracted.row_changes.inserted.is_empty());
     assert_eq!(retracted.row_changes.removed, vec![expiring]);

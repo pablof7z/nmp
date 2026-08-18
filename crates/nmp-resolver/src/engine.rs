@@ -1115,7 +1115,6 @@ impl Engine {
         store: &mut RedbStore,
         accept: AcceptWrite,
     ) -> Result<LocalAcceptResult, PersistenceError> {
-        let before_shapes = self.projection_shapes();
         let outcome = store.accept_write(accept)?;
         let mut inserted_rows: Vec<StoredEvent> = Vec::new();
         let mut removed_rows: Vec<nostr::Event> = Vec::new();
@@ -1146,23 +1145,8 @@ impl Engine {
             | AcceptOutcome::Refused(_)
             | AcceptOutcome::ReplaceableOperationRefused(_) => {}
         }
-        let inserted_events: Vec<_> = inserted_rows.iter().map(|row| row.event.clone()).collect();
-        let changed_events: Vec<_> = inserted_events
-            .iter()
-            .chain(removed_rows.iter())
-            .cloned()
-            .collect();
-        let row_changes = committed_row_changes(inserted_rows, removed_rows.clone());
-        let delta = self.react(store, inserted_events, removed_rows)?;
-        let affected_handles = self.affected_handles(&before_shapes, &changed_events);
-        Ok(LocalAcceptResult {
-            outcome,
-            committed: CommittedMutationResult {
-                delta,
-                affected_handles,
-                row_changes,
-            },
-        })
+        let committed = self.retract(store, inserted_rows, removed_rows)?;
+        Ok(LocalAcceptResult { outcome, committed })
     }
 
     /// Install one already-composed semantic successor and project the exact
@@ -1172,7 +1156,6 @@ impl Engine {
         store: &mut RedbStore,
         install: SemanticSourceInstall,
     ) -> Result<SemanticInstallResult, PersistenceError> {
-        let before_shapes = self.projection_shapes();
         let outcome = store.install_replaceable_source_materialization(install)?;
         let (inserted_rows, removed_rows) = match &outcome {
             SemanticInstallOutcome::Installed {
@@ -1191,26 +1174,8 @@ impl Engine {
             | SemanticInstallOutcome::Stale
             | SemanticInstallOutcome::Refused(_) => (Vec::new(), Vec::new()),
         };
-        let inserted_events = inserted_rows
-            .iter()
-            .map(|row| row.event.clone())
-            .collect::<Vec<_>>();
-        let changed_events = inserted_events
-            .iter()
-            .chain(removed_rows.iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        let row_changes = committed_row_changes(inserted_rows, removed_rows.clone());
-        let delta = self.react(store, inserted_events, removed_rows)?;
-        let affected_handles = self.affected_handles(&before_shapes, &changed_events);
-        Ok(SemanticInstallResult {
-            outcome,
-            committed: CommittedMutationResult {
-                delta,
-                affected_handles,
-                row_changes,
-            },
-        })
+        let committed = self.retract(store, inserted_rows, removed_rows)?;
+        Ok(SemanticInstallResult { outcome, committed })
     }
 
     /// Project an already-committed signature promotion through the same
@@ -1267,25 +1232,13 @@ impl Engine {
         removed_pending: nostr::Event,
         outcome: &CompensateOutcome,
     ) -> Result<CommittedMutationResult, PersistenceError> {
-        let before_shapes = self.projection_shapes();
         match outcome {
             CompensateOutcome::Compensated { restored, revealed } => {
                 let mut inserted_rows: Vec<StoredEvent> = revealed.clone();
                 if let Some(restored) = restored {
                     inserted_rows.push((**restored).clone());
                 }
-                let inserted_events: Vec<_> =
-                    inserted_rows.iter().map(|row| row.event.clone()).collect();
-                let mut changed_events = inserted_events.clone();
-                changed_events.push(removed_pending.clone());
-                let row_changes = committed_row_changes(inserted_rows, [removed_pending.clone()]);
-                let delta = self.react(store, inserted_events, vec![removed_pending])?;
-                let affected_handles = self.affected_handles(&before_shapes, &changed_events);
-                Ok(CommittedMutationResult {
-                    delta,
-                    affected_handles,
-                    row_changes,
-                })
+                self.retract(store, inserted_rows, vec![removed_pending])
             }
             CompensateOutcome::AlreadySigned | CompensateOutcome::NotFound => {
                 Ok(CommittedMutationResult {
@@ -1297,23 +1250,30 @@ impl Engine {
         }
     }
 
-    /// Seed dirty-marks from removals that arrive with NO inbound event at
-    /// all (retraction-and-negative-deltas.md §1.2/§1.4: NIP-40 expiry,
-    /// optimistic-write rejection) — feeds `removed` into the SAME `react`
-    /// `ingest_observed` uses, on the removed side only. The caller (M3's
-    /// `EngineCore`) is responsible for having already removed these rows
-    /// from the store itself (`RedbStore::expire_due`/`remove`) before
-    /// calling this: `retract` only re-evaluates the graph, it never
-    /// touches the store door.
+    /// Seed dirty-marks and canonical-row facts from a mutation the caller
+    /// already committed — inserted rows, removed events, or both in one
+    /// call (retraction-and-negative-deltas.md §1.2/§1.4: NIP-40 expiry,
+    /// optimistic-write rejection, local acceptance, replaceable-source
+    /// materialization). The caller is responsible for having already
+    /// applied this mutation to the store itself (`RedbStore::accept_write`/
+    /// `expire_due`/`remove`/etc.) before calling this: `retract` only
+    /// re-evaluates the graph, it never touches the store's write door
+    /// (`store: &RedbStore` is read-only).
     pub fn retract(
         &mut self,
         store: &RedbStore,
+        inserted: Vec<StoredEvent>,
         removed: Vec<nostr::Event>,
     ) -> Result<CommittedMutationResult, PersistenceError> {
         let before_shapes = self.projection_shapes();
-        let changed_events = removed.clone();
-        let row_changes = committed_row_changes(Vec::<StoredEvent>::new(), removed.clone());
-        let delta = self.react(store, Vec::new(), removed)?;
+        let inserted_events: Vec<_> = inserted.iter().map(|row| row.event.clone()).collect();
+        let changed_events: Vec<_> = inserted_events
+            .iter()
+            .chain(removed.iter())
+            .cloned()
+            .collect();
+        let row_changes = committed_row_changes(inserted, removed.clone());
+        let delta = self.react(store, inserted_events, removed)?;
         let affected_handles = self.affected_handles(&before_shapes, &changed_events);
         Ok(CommittedMutationResult {
             delta,
