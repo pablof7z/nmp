@@ -1049,7 +1049,7 @@ impl CoreState {
             // Releasing it here rather than waiting for the publish
             // scheduler to notice is what keeps a lane from parking forever
             // on a request that can no longer be answered.
-            self.release_coordinate_coverage_for_relay(&session.relay);
+            self.release_coordinate_coverage_for_relay(&session.relay, &mut effects);
             // AUTH truth is a property of the exact connection generation
             // that earned it (#8) — it dies with the socket, unconditionally,
             // for every disconnect reason: the epoch is cancelled, protected

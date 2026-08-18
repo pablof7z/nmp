@@ -233,13 +233,14 @@ impl CoreState {
         &mut self,
         id: ReceiptId,
         pending: &PendingWrite,
+        effects: &mut Vec<Effect>,
     ) {
         self.pending.forget_indexes(id, pending);
         // A removed write owns no projection to reconcile, so its bootstrap
         // gap is closed by the removal. Leaving the entry would keep
         // rearming a deadline for a receipt that can never bootstrap again
         // and, for a blind gap, would suppress worker reconciliation forever.
-        self.release_all_coordinate_coverage(id);
+        self.release_all_coordinate_coverage(id, effects);
     }
 
     /// Ask the ordinary query owner whether this relay's current value for
@@ -293,7 +294,7 @@ impl CoreState {
                 // moment, and holding the observation open to reuse a
                 // verdict earned before a reconnect would be reading a
                 // stale one.
-                self.release_coordinate_coverage(receipt, relay);
+                self.release_coordinate_coverage(receipt, relay, effects);
                 true
             }
             // Both mean the question is asked and the answer is coming, so
@@ -365,7 +366,7 @@ impl CoreState {
             // remains open.
             CoordinateCoverage::Uncovered => {
                 if already_asked && !self.wire_admission_needed() {
-                    self.release_coordinate_coverage(receipt, relay);
+                    self.release_coordinate_coverage(receipt, relay, effects);
                     return true;
                 }
                 self.semantic_publish_coverage_parked.insert(key);
@@ -376,19 +377,26 @@ impl CoreState {
 
     /// Close one lane's coordinate question and withdraw the observation it
     /// opened, if any.
-    fn release_coordinate_coverage(&mut self, receipt: ReceiptId, relay: &RelayUrl) {
+    fn release_coordinate_coverage(
+        &mut self,
+        receipt: ReceiptId,
+        relay: &RelayUrl,
+        effects: &mut Vec<Effect>,
+    ) {
         let key = (receipt, relay.clone());
         self.semantic_publish_coverage_parked.remove(&key);
         if let Some(observation) = self.semantic_publish_coverage.remove(&key) {
             self.retired_coverage_observations.insert(observation);
-            // The withdrawal's own effects are private to this observation
-            // and are dropped by the same drain that drops its rows.
-            let _ = self.on_unsubscribe(observation);
+            effects.extend(self.on_unsubscribe(observation));
         }
     }
 
     /// Close every coordinate question outstanding at one relay.
-    pub(in crate::core) fn release_coordinate_coverage_for_relay(&mut self, relay: &RelayUrl) {
+    pub(in crate::core) fn release_coordinate_coverage_for_relay(
+        &mut self,
+        relay: &RelayUrl,
+        effects: &mut Vec<Effect>,
+    ) {
         let owned: Vec<_> = self
             .semantic_publish_coverage
             .keys()
@@ -397,7 +405,7 @@ impl CoreState {
             .cloned()
             .collect();
         for (receipt, relay) in owned {
-            self.release_coordinate_coverage(receipt, &relay);
+            self.release_coordinate_coverage(receipt, &relay, effects);
         }
     }
 
@@ -407,7 +415,7 @@ impl CoreState {
     /// app subscription, so nothing else would ever withdraw it. Dropping
     /// the id without unsubscribing leaks a live REQ for the lifetime of
     /// the process.
-    fn release_all_coordinate_coverage(&mut self, receipt: ReceiptId) {
+    fn release_all_coordinate_coverage(&mut self, receipt: ReceiptId, effects: &mut Vec<Effect>) {
         self.semantic_publish_coverage_parked
             .retain(|(owner, _)| *owner != receipt);
         let owned: Vec<_> = self
@@ -417,7 +425,7 @@ impl CoreState {
             .cloned()
             .collect();
         for (_, relay) in owned {
-            self.release_coordinate_coverage(receipt, &relay);
+            self.release_coordinate_coverage(receipt, &relay, effects);
         }
     }
 
@@ -685,7 +693,7 @@ impl CoreState {
             return;
         };
         if let Some(pending) = self.pending.remove(&id) {
-            self.forget_pending_indexes(id, &pending);
+            self.forget_pending_indexes(id, &pending, effects);
         }
         effects.push(Effect::EmitReceipt(
             id,
@@ -755,7 +763,7 @@ impl CoreState {
                         continue;
                     };
                     if let Some(pending) = self.pending.remove(&receipt) {
-                        self.forget_pending_indexes(receipt, &pending);
+                        self.forget_pending_indexes(receipt, &pending, effects);
                     }
                     effects.push(Effect::EmitReceipt(
                         receipt,
@@ -1148,7 +1156,7 @@ impl CoreState {
                 // session this lane needs is gone, so whatever it learned
                 // about that relay's current value died with it and the lane
                 // asks again on the session that replaces it.
-                self.release_coordinate_coverage(id, &lane.key.relay);
+                self.release_coordinate_coverage(id, &lane.key.relay, &mut effects);
                 effects.push(Effect::EnsureWriteRelay(session));
                 continue;
             }
@@ -3215,7 +3223,7 @@ impl CoreState {
             };
             self.emit_write_fact(retired_id, WriteFact::Outcome(outcome), &mut effects);
             if let Some(retired_pending) = self.pending.remove(&retired_id) {
-                self.forget_pending_indexes(retired_id, &retired_pending);
+                self.forget_pending_indexes(retired_id, &retired_pending, &mut effects);
             } else {
                 self.pending.forget_intent(retired.intent_id);
             }
@@ -4004,7 +4012,7 @@ impl CoreState {
             }
         }
 
-        self.forget_pending_indexes(id, &pending);
+        self.forget_pending_indexes(id, &pending, &mut effects);
         effects.push(Effect::EmitReceipt(
             id,
             WriteFact::Outcome(WriteOutcome::NotSent(NotSentReason::Cancelled)),
@@ -4473,7 +4481,7 @@ impl CoreState {
         // permanent removal): both `NotFound`/`Err` arms above reinsert
         // `pending` untouched and return early, so the indexes must stay
         // untouched for those (epic #507 finding E5).
-        self.forget_pending_indexes(id, &pending);
+        self.forget_pending_indexes(id, &pending, effects);
         effects.push(Effect::EmitReceipt(
             id,
             WriteFact::Signing(SigningState::Refused { reason }),
@@ -4997,7 +5005,7 @@ impl CoreState {
                     );
                     if closed {
                         if let Some(pending) = self.pending.remove(&id) {
-                            self.forget_pending_indexes(id, &pending);
+                            self.forget_pending_indexes(id, &pending, effects);
                         }
                     }
                 }
