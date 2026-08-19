@@ -181,7 +181,7 @@ impl EngineCore {
         self.state.active_demand()
     }
 
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub fn assert_owner_consistency(&self, at: &str) {
         self.state.assert_owner_consistency(at)
     }

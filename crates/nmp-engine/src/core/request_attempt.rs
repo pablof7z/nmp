@@ -365,7 +365,7 @@ impl RequestAttempts {
     /// `assert_consistent` doc makes the same point). Four mirrors are
     /// checked in both directions: `by_sub`, `by_session`,
     /// `retry_by_sub`, `retries_by_session`.
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (attempt_id, attempt) in &self.attempts {
             let ids = self.by_sub.get(&attempt.sub_id).unwrap_or_else(|| {

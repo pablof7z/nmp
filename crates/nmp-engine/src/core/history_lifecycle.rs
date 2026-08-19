@@ -212,7 +212,7 @@ impl HistoryRows {
     /// I5, checked: one membership, and every key carrying its own row's
     /// timestamp. Lives with the fields it constrains rather than in the
     /// session owner above, which cannot see them.
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     fn assert_consistent(&self, at: &str, id: HistorySessionId) {
         assert_eq!(
             self.rows.len(),
@@ -384,7 +384,7 @@ impl HistorySessions {
     /// Membership/order is I5 and lives on [`HistoryRows`], which owns both
     /// collections; this walk delegates to it per session rather than
     /// restating it, because the fields it constrains are private there.
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (id, state) in &self.sessions {
             state.rows.assert_consistent(at, *id);

@@ -1823,7 +1823,7 @@ impl CoreState {
     /// owner with the most test reach-through in the crate was the one owner
     /// with no consistency proof at all, and its absence was not written down
     /// here either.
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(in crate::core) fn assert_owner_consistency(&self, at: &str) {
         self.attribution.assert_consistent(at);
         self.wire.assert_consistent(at);

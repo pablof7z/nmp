@@ -237,7 +237,7 @@ impl StalledWriteCensus {
     /// equality against the cached ones, which is why it takes the reducer's
     /// own state as an argument rather than the zero-argument shape the
     /// other owners use.
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str, inputs: StalledWriteInputs<'_>) {
         let expected_census = full_census(&inputs);
         assert_eq!(

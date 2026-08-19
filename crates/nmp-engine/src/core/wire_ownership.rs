@@ -513,7 +513,7 @@ impl WireOwnership {
 ///   pending key is a live demand).
 /// - `pending_resolver_closes` names demands that became ownerless, so its
 ///   keys must be disjoint from the live ones.
-#[cfg(feature = "bench-instrumentation")]
+#[cfg(any(test, feature = "test-instrumentation"))]
 impl WireOwnership {
     pub(super) fn assert_consistent(&self, at: &str) {
         let mut expected_demand_refs: HashMap<HandleId, BTreeMap<DemandKey, usize>> =

@@ -90,7 +90,7 @@ impl RequestReplacements {
         self.pending.take_owner(session)
     }
 
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
         self.pending.assert_consistent(at);
     }

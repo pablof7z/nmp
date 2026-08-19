@@ -182,7 +182,7 @@ impl AuthorRouteNeeds {
     /// is recorded as needing a provider (same `needs.len()`, wrong member)
     /// fails the second assertion even though every count and every set size
     /// stays right.
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (author, count) in &self.wire_owner_counts {
             assert!(

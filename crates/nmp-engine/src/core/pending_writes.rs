@@ -445,7 +445,7 @@ impl PendingWrites {
     ///   live work on those bytes. Only what it can still get wrong is
     ///   checked -- naming a receipt that is not live, or keeping an empty set
     ///   that claims unowned bytes are owned.
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (id, pending) in &self.pending {
             let owner = self

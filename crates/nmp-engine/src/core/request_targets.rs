@@ -241,7 +241,7 @@ impl RequestTargets {
 /// is a freshness answer supplied from outside — so the check verifies that
 /// every live target traces back to a declaration, and that the reverse index
 /// is exactly the merge, rather than merely the same size as it.
-#[cfg(feature = "bench-instrumentation")]
+#[cfg(any(test, feature = "test-instrumentation"))]
 impl RequestTargets {
     pub(super) fn assert_consistent(&self, at: &str) {
         let mut expected_by_demand: BTreeMap<DemandKey, BTreeMap<RequestTarget, usize>> =

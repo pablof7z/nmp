@@ -131,7 +131,7 @@ where
 /// Both directions, by identity rather than by count. `owner_edges == len` is
 /// necessary and nowhere near sufficient: one child indexed under the wrong
 /// owner preserves both numbers exactly.
-#[cfg(feature = "bench-instrumentation")]
+#[cfg(any(test, feature = "test-instrumentation"))]
 impl<Owner, Child, V> OwnerIndexed<Owner, Child, V>
 where
     Owner: Clone + Eq + Hash + std::fmt::Debug,

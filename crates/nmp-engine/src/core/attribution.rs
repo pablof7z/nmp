@@ -333,7 +333,7 @@ impl AttributionState {
     /// only exact while every mapping is filed under the session its own
     /// `SubId` names. Nothing checked that; a mapping filed under any other
     /// session leaks forever and the count is identical either way.
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (sub_id, claims) in &self.live_request_claims {
             assert!(
