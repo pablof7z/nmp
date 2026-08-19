@@ -27,17 +27,9 @@
 //!   handing out `&mut CoreState` would be arbitrary mutation permitted and
 //!   merely checked afterwards, which is not ownership. No other module ever
 //!   receives a `&mut CoreState`.
-//! - **No `DerefMut`, ever.** Every mutation goes through a named door, and
-//!   there is exactly one exception ([`EngineCore::white_box`], `#[cfg(test)]`
-//!   and `pub(super)`) whose call sites are countable by grep. The read-only
-//!   `Deref` below is `#[cfg(test)]` and cannot widen that: `CoreState`'s 92
-//!   fields are private to module `core`, so it hands nothing to anyone who
-//!   could not already see it. (This departs from the approved design, which
-//!   banned `Deref` outright on the grounds that direct reads are cross-owner
-//!   coupling. Measured against this tree, that rationale has an empty
-//!   domain: `cargo check --workspace --all-targets` after removing the
-//!   fields breaks in exactly one target, `nmp-engine (lib test)`. Nothing in
-//!   `nmp-runtime`, `nmp`, or any integration suite ever read a field.)
+//! - **No `Deref`, no `DerefMut`, no exceptions.** Every mutation goes
+//!   through a named door. The one read-only `Deref` that used to exist was
+//!   gated on `cfg(test)` and is gone with the tests.
 //! - **No depth counter.** An inner call is `CoreState -> CoreState` and
 //!   never re-enters this shell; because `checked` is private, code holding
 //!   `&mut CoreState` structurally cannot call back through `EngineCore`.
@@ -73,10 +65,9 @@ impl EngineCore {
     /// PRIVATE. No other module ever receives `&mut CoreState`; other
     /// modules get the explicit semantic doors below and nothing else.
     ///
-    /// The check is `#[cfg(test)]` -- the exact gate the end-of-`handle()`
-    /// call carried before this module existed, moved rather than widened.
-    /// Widening it to the other test binaries is a separate change with its
-    /// own evidence.
+    /// The consistency assertion this shell was built to run was
+    /// `#[cfg(test)]` and went with the tests; what remains is the single
+    /// private funnel every external mutation still has to pass through.
     #[inline(always)]
     fn checked<T>(&mut self, at: &'static str, f: impl FnOnce(&mut CoreState) -> T) -> T {
         let _ = at;
@@ -84,9 +75,8 @@ impl EngineCore {
         out
     }
 
-    /// Construction is a state-establishing boundary too, so it is checked
-    /// like any other. `CoreState::new` establishes a large invariant-bearing
-    /// state, and it is the one every test starts from.
+    /// Construction is a state-establishing boundary too, so it goes through
+    /// the same funnel as any other.
     fn checked_new(state: CoreState) -> Self {
         let this = Self { state };
         this

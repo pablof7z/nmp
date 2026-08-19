@@ -19,5 +19,3 @@ nmp-router.workspace = true
 # The kind:10002 vocabulary: winner selection, `r`-tag parsing, settlement.
 # This crate is where that vocabulary meets the engine's neutral seam.
 nmp-nip65.workspace = true
-
-[dev-dependencies]

@@ -20,9 +20,3 @@ publish.workspace = true
 nostr.workspace = true
 nmp.workspace = true
 nmp-grammar.workspace = true
-
-[dev-dependencies]
-nmp-store.workspace = true
-nmp-outbox.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
-tempfile = "3"

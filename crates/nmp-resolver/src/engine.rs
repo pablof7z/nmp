@@ -735,10 +735,8 @@ impl Engine {
     // ---- ingest: the real path (M1 plan §3.3) ---------------------------
 
     /// `Engine::ingest` predates per-relay provenance (M1) and has no relay
-    /// identity of its own to attribute an insert to. This resolver-level
-    /// path is exercised by the M1 contract-test harness
-    /// (`testkit::Harness::deliver`, which has no relay concept either), so
-    /// it attributes every ingested event to a single fixture relay identity
+    /// identity of its own to attribute an insert to. It therefore
+    /// attributes every ingested event to a single fixture relay identity
     /// at the event's own `created_at` — sufficient to satisfy the new
     /// `RedbStore::insert` door without inventing resolver-owned routing.
     /// `EngineCore` (M3 step B), which DOES know the real relay a frame

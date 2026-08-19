@@ -9,6 +9,3 @@ publish.workspace = true
 nmp-grammar.workspace = true
 pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1.11"
-
-[dev-dependencies]
-proptest.workspace = true

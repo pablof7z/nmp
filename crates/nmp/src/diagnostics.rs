@@ -5,8 +5,8 @@
 //! supported `nmp` read-out self-contained instead of re-exporting
 //! mechanism-crate types through the public facade. Field names, field
 //! types, and variant names deliberately match the engine originals so an
-//! app honoring the "depend on `nmp` alone" contract (proved by
-//! `nmp-consumer-check`) compiles unchanged; every value is converted
+//! app honoring the "depend on `nmp` alone" contract compiles
+//! unchanged; every value is converted
 //! exactly once, at the [`crate::DiagnosticsSubscription`] delivery
 //! boundary, and is never recomputed or estimated at this layer.
 //!

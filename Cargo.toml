@@ -62,31 +62,6 @@ members = [
     "crates/nmp-bookmarks",
 ]
 
-default-members = [
-    "crates/nmp-grammar",
-    "crates/nmp-store",
-    "crates/nmp-resolver",
-    "crates/nmp-router",
-    "crates/nmp-transport",
-    "crates/nmp-engine",
-    "crates/nmp-runtime",
-    "crates/nmp-nip11",
-    "crates/nmp-signer",
-    "crates/nmp-local-signer",
-    "crates/nmp",
-    "crates/nmp-nip02",
-    "crates/nmp-nip65",
-    "crates/nmp-outbox",
-    "crates/nmp-nip29",
-    "crates/nmp-nipc7",
-    "crates/nmp-content",
-    "crates/nmp-nip22",
-    "crates/nmp-nip73",
-    "crates/nmp-nip18",
-    "crates/nmp-nip25",
-    "crates/nmp-bookmarks",
-]
-
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
@@ -126,8 +101,6 @@ nmp-nip73 = { path = "crates/nmp-nip73" }
 nmp-nip18 = { path = "crates/nmp-nip18" }
 nmp-nip25 = { path = "crates/nmp-nip25" }
 nmp-bookmarks = { path = "crates/nmp-bookmarks" }
-proptest = "1"
-uniffi = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-webpki-roots"] }
@@ -135,12 +108,8 @@ reqwest = { version = "0.12.28", default-features = false, features = ["rustls-t
 # zeroizing local-key path (#765), which cannot route through `nostr`'s own
 # hashing. Already at 0.10.9 in Cargo.lock via transitive resolution.
 sha2 = "0.10"
-clap = { version = "4", features = ["derive", "env"] }
 regex = "1"
 tempfile = "3"
-thiserror = "2"
-toml = "0.8"
-walkdir = "2"
 
 # Measured, not guessed (#1808). On a live 21 GB `target/debug` built with Rust
 # dev defaults, **over 80% was incremental-compilation byproduct rather than

@@ -2832,8 +2832,7 @@ impl CoreState {
     /// A `Signed` payload is verified here, at the acceptance boundary,
     /// BEFORE `WriteFact::Accepted` is ever emitted (#52 Q2). This is the
     /// only publish path in the crate — `Handle::publish` is the sole entry
-    /// point regardless of caller (FFI, direct-Rust, `nmp-bdd`'s
-    /// `EngineThread`) — so verifying here, rather than at each caller,
+    /// point regardless of caller — so verifying here, rather than at each caller,
     /// makes "a forged `Signed` event can never be published" true
     /// unconditionally instead of entry-point-dependent. A failed verify is
     /// a whole-intent terminal (`WriteFact::Failed`): no `Accepted`, no

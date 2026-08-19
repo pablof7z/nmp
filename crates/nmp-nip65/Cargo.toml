@@ -8,5 +8,3 @@ publish.workspace = true
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
-
-[dev-dependencies]

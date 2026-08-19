@@ -2,17 +2,14 @@
 //! and metrics that resolve the reactive filter-binding grammar
 //! (`nmp-grammar`) into abstract demand-set deltas against a borrowed
 //! `RedbStore` (`nmp-store`). See the M1 grammar-engine plan (git history)
-//! §2.3-§6 for the full spec this crate implements; `src/testkit.rs` is the
-//! scripted fake-relay harness, and `tests/` holds the M1 contract tests (the
-//! pass criteria).
+//! §2.3-§6 for the full spec this crate implements.
 //!
 //! Module layout:
 //! - `types` — the small shared vocabulary (`NodeId`, `Element`,
 //!   `FieldSlot`, `ParentLink`).
 //! - `eval` — pure leaf computations (projection, set algebra, identity
 //!   resolution, element merging). No kind-literal branching anywhere in
-//!   this crate (excluding `testkit`/`tests`) — see the M1 plan's kill
-//!   guard (§3.3 step 2, §6) and contract test 10.
+//!   this crate — see the M1 plan's kill guard (§3.3 step 2, §6).
 //! - `graph` — the node graph: data + pure, store-independent algorithm
 //!   (atom computation, wide-query-filter computation, structural
 //!   traversal).

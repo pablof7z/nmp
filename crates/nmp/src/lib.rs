@@ -31,21 +31,13 @@
 //! separate deployment concern.
 //!
 //! Everything below `Engine` -- `EngineThread`, `Handle`,
-//! `RedbStore`, `PoolConfig`, `LocalKeySigner` -- is no longer
-//! an app contract (#52's "internal or explicitly unstable"). Two things
-//! stay behind the `unstable-mechanism` cargo feature, off by default and
-//! `#[doc(hidden)]` where applicable -- enabling either is a greppable,
-//! reviewable line, not a silent bypass:
-//!
-//! - `Engine::from_parts`, an in-workspace/test hatch for `nmp-bdd`'s
-//!   scripted-relay harness (may freely need mechanism-crate types; it is
-//!   not expected to be usable from an `nmp`-only dependency).
+//! `RedbStore`, `LocalKeySigner` -- is not an app contract (#52's
+//! "internal or explicitly unstable"), and there is no longer any feature
+//! that hands one out.
 //!
 //! This crate re-exports every value type an app needs to drive the two
 //! nouns, and to name every `DiagnosticsSnapshot` field, without reaching
-//! past it -- that re-export list below IS the public API. It is
-//! proved by `nmp-consumer-check`, a separate crate whose `Cargo.toml`
-//! depends on `nmp` alone.
+//! past it -- that re-export list below IS the public API.
 
 mod auth;
 mod config;
@@ -76,11 +68,8 @@ mod subscription;
 // The `#[doc(hidden)] pub mod mechanism` basement is DELETED with them. It
 // existed to let in-workspace harnesses reach `core`/`runtime` while those
 // were private modules here, and it did that by publicly re-exporting the
-// whole mechanism through a door rustdoc merely hides. `nmp-bdd` and
-// `nmp/tests` name `nmp-engine`/`nmp-runtime` directly now, which is both
-// honest and narrower: what they reach is those packages' own APIs, not a
-// glob of this one's internals. `nmp`'s public API is now exactly the
-// re-export list below — visible, and the whole of it.
+// whole mechanism through a door rustdoc merely hides. `nmp`'s public API is
+// now exactly the re-export list below — visible, and the whole of it.
 
 // #1707 deleted `nip22`/`nip25`/`nip18`/`nipc7`/`content`/`nip65`: each was
 // a pure re-export door over its own engine-free mechanism crate -- no
@@ -338,8 +327,3 @@ pub use nmp_signer::{
     CryptoCapability, PendingSignerResolveError, PendingSignerSender, SignerError, SignerOp,
     SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent, SigningCapability,
 };
-
-// The concrete mechanism types are internal by default (#52's "internal or
-// explicitly unstable"). `Engine::from_parts` needs `PoolConfig` in a
-// caller's signature. This is an in-workspace/test exception (`nmp-bdd`), not
-// a supported application extension point.

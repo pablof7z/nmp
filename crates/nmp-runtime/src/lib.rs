@@ -2922,11 +2922,9 @@ impl std::error::Error for AddSignerError {}
 /// an alternate command surface.
 ///
 /// #827: the facade's own retention falsifier used to reach this across the
-/// `nmp-engine` crate boundary, which is why the feature exists at all. Now
-/// that the caller is in THIS crate's `#[cfg(test)]` build, `test` is added
-/// to the gate -- the same `#[cfg(feature = "test-instrumentation")]`
-/// spelling the NIP-11 service itself already uses. Production builds are
-/// unchanged: neither cfg is on.
+/// `nmp-engine` crate boundary, which is why the feature exists at all. The
+/// gate is the same `#[cfg(feature = "test-instrumentation")]` spelling the
+/// NIP-11 service itself uses; production builds are unchanged.
 #[cfg(feature = "test-instrumentation")]
 #[doc(hidden)]
 pub fn relay_information_retention_census(
