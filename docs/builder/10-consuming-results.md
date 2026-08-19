@@ -6,17 +6,8 @@ Nostr completeness.
 
 ## Snapshot shape
 
-Illustrative target spelling:
-
-```swift
-struct NMPQuerySnapshot {
-    let revision: UInt64
-    let rows: [NMPRow]
-    let cache: CacheEvidence
-    let acquisition: [SourceEvidence]
-    let shortfall: [Shortfall]
-}
-```
+Illustrative target shape: a snapshot carries a revision, rows, cache
+evidence, acquisition evidence, and shortfall.
 
 - `rows` are current canonical store winners matching the selection.
 - `cache` identifies the local revision and retained provenance represented.
@@ -30,23 +21,9 @@ Exact wire filters, counters, compiler lanes, and history remain in diagnostics.
 
 ## Rows are store values, including local pending writes
 
-```swift
-struct NMPRow {
-    let id: String
-    let pubkey: String
-    let createdAt: UInt64
-    let kind: UInt16
-    let tags: [[String]]
-    let content: String
-    let signature: RowSignature
-    let sources: [String]
-}
-
-enum RowSignature {
-    case pending
-    case signed(signature: String)
-}
-```
+A row carries the ordinary Nostr fields (id, pubkey, created-at, kind, tags,
+content) plus its signature state — pending or signed — and its source
+provenance.
 
 A durable accepted draft appears here through the same store query as a relay-
 observed event. The app does not merge a second optimistic collection.
@@ -61,11 +38,8 @@ A slow observer may skip intermediate frames. The next frame must contain every
 local mutation incorporated through its revision and the evidence/shortfall for
 that same revision.
 
-That permits bounded newest-value delivery:
-
-- Swift can frame-coalesce and buffer the newest snapshot;
-- Kotlin can expose a conflated cold `Flow`; and
-- Rust can use a bounded latest-state receiver/stream.
+That permits bounded newest-value delivery: the facade uses a bounded
+latest-state receiver/stream.
 
 Skipping an intermediate rendered state is safe. Losing a durable receipt fact
 is not; receipts use persistence and reattachment rather than an unbounded
@@ -73,24 +47,13 @@ observer queue.
 
 ## Fold into app state
 
-```swift
-for await snapshot in try engine.observe(.single(demand)) {
-    model.rows = snapshot.rows
-    model.sourceFacts = snapshot.acquisition
-    model.shortfall = snapshot.shortfall
-}
-```
+Each delivered snapshot's rows, acquisition evidence, and shortfall fold into
+app state.
 
 The app may sort, group, rank, filter for presentation, or join rows with
-non-Nostr state after delivery:
+non-Nostr state after delivery.
 
-```swift
-model.visibleRows = snapshot.rows
-    .filter(productPolicy.admits)
-    .sorted(using: productPolicy.order)
-```
-
-Those closures see already-delivered rows. They do not parameterize engine
+Those transforms see already-delivered rows. They do not parameterize engine
 demand, source selection, or cursor correctness.
 
 ## Raw event meaning versus protocol modules
@@ -105,11 +68,8 @@ app still chooses layout, labels, ordering, and failure presentation.
 
 ## Observation lifetime
 
-The native handle owns demand lifetime:
-
-- ending a Swift `for await` loop releases its observation;
-- cancelling a Kotlin collector closes its `Flow` bridge; and
-- dropping a Rust handle decrements demand.
+The native handle owns demand lifetime: dropping a Rust handle decrements
+demand.
 
 The engine refcounts shared demand and closes only work no remaining descriptor
 requires. The app never mirrors Nostr `REQ` ids or sends `CLOSE` itself.
@@ -117,15 +77,7 @@ requires. The app never mirrors Nostr `REQ` ids or sends `CLOSE` itself.
 ## Replacing a descriptor
 
 If ordinary app state changes a non-reactive part of the demand, construct a new
-value and observe it using the UI/runtime lifecycle you already have:
-
-```swift
-.task(id: demand) {
-    for await snapshot in try engine.observe(.single(demand)) {
-        model.apply(snapshot)
-    }
-}
-```
+value and observe it using the runtime lifecycle you already have.
 
 Bindings are for dependencies NMP must own and maintain from Nostr/current-
 pubkey state. They are not a requirement to route every app input through an

@@ -8,13 +8,8 @@ app code inside routing, demand, persistence, or admission.
 One whole session owns every account, its optional persistable signer provider,
 and the current selection. A public-key-only account is a valid account whose
 signing capability is `unsupported`; a local-private-key account has the
-`localKey` provider and reports its current operational availability. For
-example, Swift adds and selects a decoded private key in one transition:
-
-```swift
-let account = try engine.session.add(privateKey: privateKey, makeCurrent: true)
-let receipt = try engine.publish(intent)
-```
+`localKey` provider and reports its current operational availability. Adding
+and selecting a decoded private key is one transition on the session.
 
 A per-write explicit identity selects another session account without changing
 the current account.
@@ -26,11 +21,8 @@ identity reference. The provider receives exactly that signing request.
 
 Browser/NIP-07 hosts sometimes need to authorize an external client's exact
 event while retaining origin and publication policy themselves. Use the
-engine's sign-only operation for that case:
-
-- Rust: `Engine::sign_event(unsigned)` returns a cancellable operation.
-- Swift: `try await engine.signEvent(unsigned)`.
-- Kotlin: `engine.signEvent(unsigned)` from a coroutine.
+engine's sign-only operation for that case: `Engine::sign_event(unsigned)`
+returns a cancellable operation.
 
 The unsigned value names its author explicitly. NMP requires that author to be
 the current account with an available signing provider, freezes the exact body,

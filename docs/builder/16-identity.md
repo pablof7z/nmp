@@ -18,9 +18,7 @@ the runtime availability used when a write needs signing.
 
 ## Current account has two ergonomic roles
 
-```swift
-let selected = try engine.session.add(publicKey: publicKey, makeCurrent: true)
-```
+Adding an account and marking it current serves two roles:
 
 1. `Reactive(CurrentPubkey)` bindings re-root to the new value.
 2. A write using `Identity::Active` selects that account's signing provider.
@@ -41,26 +39,17 @@ A current account may be public-key-only. Its signing capability is
 `unsupported`, and read-only browsing remains valid.
 
 An app that watches all of its accounts writes the literal demand it actually
-wants:
-
-```swift
-let mentions = NMPFilter(
-    kinds: .literal([appKind]),
-    tags: ["p": .literal(allAccountPubkeys)]
-)
-```
+wants: a filter naming the caller-selected kind with a `p` tag binding to the
+literal set of all local account pubkeys.
 
 That query stays unchanged when the selected/current account changes. App state
 can annotate each row with which local account was tagged.
 
 ## Accounts carry optional persistable providers
 
-Ordinary writes should not force the app to pass a signer repeatedly:
-
-```swift
-let account = try engine.session.add(privateKey: privateKey, makeCurrent: true)
-let receipt = try engine.publish(intent)
-```
+Ordinary writes should not force the app to pass a signer repeatedly. Adding a
+private-key account once as current is enough for a later `publish` call to
+resolve a signer automatically.
 
 The current implementation persists and reconstructs the local-key provider.
 NMP asks the configured provider to sign one exact frozen body when needed and
@@ -95,11 +84,7 @@ awaitingSigner(pubkey)
 The unsigned pending row remains visible to matching queries. When the
 configured provider becomes available, NMP resumes the existing obligation.
 For a local-key account, restoring the whole session or adding that decoded
-private key again reconstructs the provider:
-
-```swift
-try engine.session.add(privateKey: privateKey)
-```
+private key again reconstructs the provider.
 
 The app does not recreate the intent or mutate the pending row. Provider
 availability is runtime capability state, not permission to discard accepted
@@ -121,15 +106,8 @@ current-account change must never pretend to provide either boundary.
 ## AUTH identity is query context
 
 Relay AUTH may change what a source returns. A demand therefore carries access
-context independently of the app's selected account:
-
-```swift
-let demand = NMPDemand(
-    selection: selection,
-    routing: group.readRouting,
-    access: .auth(identityRef)
-)
-```
+context independently of the app's selected account — for example, a
+selection paired with a module-minted routing and an explicit AUTH identity.
 
 The protocol module mints `group.readRouting` from typed NIP-29 group
 context. The app may supply the public group host through that semantic

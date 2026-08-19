@@ -53,8 +53,8 @@ They may not register callbacks that later decide demand, routing, signer
 selection, ordering, or admission.
 
 If a module needs a new grammar node, propose a public closed vocabulary change
-with defined hashing, equality, persistence, diagnostics, and Rust/Swift/Kotlin
-projection. Do not hide the missing concept in an opaque extension payload.
+with defined hashing, equality, persistence, and diagnostics. Do not hide the
+missing concept in an opaque extension payload.
 
 ## Keep engine-free composition off Engine
 
@@ -66,8 +66,8 @@ because another protocol currently has an engine-bound operation.
 
 NIP-22 is the reference shape. Comment composition takes the root, parent,
 author, timestamp, content, and optional correlation; it returns the ordinary
-write intent. Swift and Kotlin use the matching top-level `commentIntent`
-function, then pass that value to generic `publish`. No `CommentIntent`
+write intent. `comment_intent` is a top-level function whose result is passed
+to generic `publish`. No `CommentIntent`
 wrapper, take-once lifecycle, or NIP-22 `publishComposed` overload exists.
 
 That is about `Engine`'s own surface, and it is unchanged. A module still
@@ -137,8 +137,8 @@ vocabulary any more than it depends on concrete module crates.
 Modules perform no startup work and require no navigation, scene, or application
 lifecycle hooks.
 
-Rust crates/features and SwiftPM/Gradle products may differ mechanically, but
-they project one semantic module over the canonical facade. Disabling the module
+Each module is one Cargo feature and one semantic API over the canonical
+facade. Disabling the module
 removes its code and semantic API while leaving the raw core facade usable.
 
 ---

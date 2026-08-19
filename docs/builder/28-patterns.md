@@ -238,8 +238,7 @@ Protocol-owned composition returns the ordinary core noun — NIP-22's comment
 builder returns a `WriteIntent` — so generic facades keep only observation,
 publication, and lifecycle verbs. The boundary is physical rather than stylistic:
 a core-only build contains no protocol crate, API, or symbol, and each selected
-capability arrives through one Cargo feature and one catalog record. See
-[Packaging and distribution](08-packaging.md).
+capability arrives through one Cargo feature and one catalog record.
 
 ### #25: an authorization names the identity it speaks for
 

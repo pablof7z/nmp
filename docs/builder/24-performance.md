@@ -67,7 +67,7 @@ queries, operations, and context facts defined by that protocol. It does not
 bring a preferred timeline or broad content category into core. A minimal app
 that enables no protocol module still has raw live query and write intent.
 
-The exact Cargo, SwiftPM, and Kotlin packaging is provisional. Whatever shape
+The exact Cargo packaging is provisional. Whatever shape
 lands must preserve one invariant-enforcing facade and pay-for-what-you-enable
 without a module-registration lifecycle in the app.
 
@@ -77,7 +77,7 @@ without a module-registration lifecycle in the app.
 |---|---|
 | Observe compatible demand twice | shared resolution/wire work; two native observers |
 | Drop the final observer | demand withdrawal and debounced wire close |
-| Receive a large replay in Swift | every delta incorporated; newest snapshots frame-delivered |
+| Receive a large replay | every delta incorporated; newest snapshots frame-delivered |
 | Hit a router/graph/result cap | explicit shortfall, exact chunking, or typed rejection |
 | Enable a protocol module | only that protocol's semantic surface and dependencies |
 | Detach from a target receipt | no write cancellation; persisted facts remain reattachable |
@@ -86,7 +86,7 @@ The performance rule is the correctness rule: bound work explicitly, coalesce
 only superseded state, and expose every semantic shortfall.
 
 See [Current implementation status](03-status-map.md) for the bounds proven by
-the shipping projections today.
+the shipping facade today.
 
 ---
 

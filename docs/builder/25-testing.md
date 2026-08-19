@@ -1,57 +1,27 @@
 # Testing an app that embeds NMP
 
-Most application tests should not start a relay or reach through NMP's FFI
-layer. Test app-owned state transitions with plain public snapshot, row,
-receipt, and diagnostic values; reserve a smaller integration tier for the real
-engine.
+Most application tests should not start a relay or reach through NMP's
+internal mechanism crates. Test app-owned state transitions with plain public
+snapshot, row, receipt, and diagnostic values; reserve a smaller integration
+tier for the real engine.
 
 The public test-support package is still provisional. Do not build application
-tests around `@testable import`, generated FFI observer protocols, or mechanism
-crates.
+tests around internal-only imports or mechanism crates.
 
 ## Test the app's fold as app code
 
 NMP snapshots are values. A reducer or view model can consume a scripted
-sequence without knowing how the engine produced it:
+sequence without knowing how the engine produced it: feed it two successive
+`QuerySnapshot` values with different rows and per-relay acquisition status,
+then assert on the app's own derived state (visible ids, unavailable sources).
 
-```swift
-let first = QuerySnapshot(
-    rows: [row(id: "a", kind: 9999)],
-    cache: .persistent,
-    acquisition: [
-        .init(relay: relayA, reconciledThrough: nil, status: .connecting)
-    ],
-    shortfall: [])
-
-let second = QuerySnapshot(
-    rows: [row(id: "a", kind: 9999), row(id: "b", kind: 9999)],
-    cache: .persistent,
-    acquisition: [
-        .init(relay: relayA, reconciledThrough: timestamp, status: .requesting),
-        .init(relay: relayB, reconciledThrough: nil, status: .disconnected)
-    ],
-    shortfall: [])
-
-model.apply(first)
-model.apply(second)
-
-XCTAssertEqual(model.visibleIDs, ["a", "b"])
-XCTAssertEqual(model.unavailableSources, [relayB])
-```
-
-The spelling is illustrative. The important boundary is that the test asserts
+The important boundary is that the test asserts
 the app's interpretation of local rows and scoped evidence. It never fabricates
 `synced`, `healthy`, or global completeness.
 
 If a feature directly consumes an asynchronous observation, the app may inject
-its own narrow interface or async sequence. That is an ordinary application
-testing decision, not an NMP container:
-
-```swift
-protocol LibrarySnapshots {
-    func snapshots() -> AsyncStream<QuerySnapshot>
-}
-```
+its own narrow interface over a stream of `QuerySnapshot` values. That is an
+ordinary application testing decision, not an NMP container.
 
 Keep this interface shaped around the feature's needs. Do not mirror the entire
 NMP facade merely to make a large mock.
@@ -95,7 +65,7 @@ with:
 
 That surface must remain a test harness, not a public mechanism-assembly API.
 Apps should be able to drive relay frames, signer results, disconnects, AUTH
-challenges, and clock advances without importing FFI records or constructing an
+challenges, and clock advances without constructing an
 `EngineCore` themselves.
 
 Until this target surface lands, treat internal SDK fakes as repository tests,
@@ -142,7 +112,6 @@ and crash-recovery falsifiers.
 | Scripted async | Observation and receipt UI behavior | none |
 | Facade integration | Real store, graph, routing, signing, and cancellation | deterministic harness |
 | Crash/restart | Atomicity and durable recovery | local process/database |
-| Platform parity | Rust behavior projects identically to Swift and Kotlin | none |
 | Live smoke | Packaging through a real relay | bounded, optional |
 
 The testing rule matches the architecture rule: test through the narrow public

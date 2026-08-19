@@ -114,7 +114,7 @@ truth.
 
 ## The practical test
 
-An existing Swift, Kotlin, or Rust app should be able to hold one engine as an
+An existing Rust app should be able to hold one engine as an
 ordinary dependency, declare demand, publish intents, and fold returned values
 into its own state. If correct use requires an NMP-shaped application, manual
 subscription lifecycle, app-owned relay expansion, or a second optimistic

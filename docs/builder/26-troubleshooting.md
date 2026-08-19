@@ -51,7 +51,7 @@ fact/module/compiler rule rather than hard-coding another relay downstream.
 
 ## High CPU or memory
 
-Swift query and diagnostics streams already frame-coalesce and buffer newest
+Query and diagnostics streams already frame-coalesce and buffer newest
 state. Check:
 
 - expensive app work performed for every delivered snapshot;
@@ -73,9 +73,7 @@ Remember the three distinct questions:
 One engine has one shared cache; changing current pubkey is not a privacy wipe.
 Use explicit destructive reset before handing the engine to an untrusted local
 user. Shut down every engine using the path first, then call
-`Engine::reset_persistent_store(path)` in Rust,
-`NMPEngine.resetPersistentStore(at:)` in Swift, or
-`NMPEngine.resetPersistentStore(path)` in Kotlin. The operation destroys the
+`Engine::reset_persistent_store(path)`. The operation destroys the
 canonical store but does not change an opaque session payload the app stores
 separately.
 

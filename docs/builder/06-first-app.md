@@ -1,10 +1,9 @@
-# One semantic API, native platform shapes
+# Embedding NMP in an app
 
-> **Provisional target API.** Rust owns the semantic facade. Swift and Kotlin
-> project it into their native observation and lifetime primitives. Names below
-> are intentionally coherent, not frozen.
+> **Provisional target API.** Names below are intentionally coherent, not
+> frozen.
 
-The same five moves exist everywhere:
+The same five moves apply:
 
 1. construct one engine;
 2. populate the whole session and choose its current account;
@@ -12,89 +11,7 @@ The same five moves exist everywhere:
 4. fold snapshots into app state; and
 5. publish intents and observe receipts.
 
-## Swift
-
-Swift uses `AsyncSequence` and ARC:
-
-```swift
-let engine = try NMPEngine(config: configuration)
-try engine.session.add(publicKey: selectedPubkey, makeCurrent: true)
-
-let demand = NMPDemand(
-    selection: NMPFilter(
-        kinds: .literal([appKind]),
-        authors: .literal(selectedAuthors)
-    ),
-    access: .public
-)
-
-for await snapshot in try engine.observe(.single(demand)) {
-    model.rows = snapshot.rows
-    model.acquisition = snapshot.acquisition
-    model.shortfall = snapshot.shortfall
-}
-```
-
-Publishing uses the same engine and a native async receipt:
-
-```swift
-let receipt = try engine.publish(WriteIntent(
-    payload: .event(kind: appKind, content: content),
-    routing: .auto
-))
-
-for await fact in receipt.facts {
-    model.apply(fact)
-}
-```
-
-A SwiftUI `.task` or app-owned model task supplies observation scope. Optional
-`@Observable` conveniences may fold the sequence, but `AsyncSequence` remains
-the primitive API. NMP does not require an environment key or scene hook.
-
-## Kotlin
-
-Kotlin uses cold `Flow` and coroutine cancellation:
-
-```kotlin
-val engine = NMPEngine(configuration)
-engine.session.add(publicKey = selectedPubkey, makeCurrent = true)
-
-val demand = Demand(
-    selection = Filter(
-        kinds = Binding.literal(setOf(appKind)),
-        authors = Binding.literal(selectedAuthors)
-    ),
-    authenticateAs = null
-)
-
-engine.observe(NMPLiveQuery.single(demand)).collect { snapshot ->
-    state.update {
-        it.copy(
-            rows = snapshot.rows,
-            acquisition = snapshot.acquisition,
-            shortfall = snapshot.shortfall
-        )
-    }
-}
-```
-
-```kotlin
-engine.publish(
-    WriteIntent(
-        payload = WritePayload.Event(kind = appKind, content = content),
-        routing = WriteRouting.Auto
-    )
-).facts.collect(receiptModel::apply)
-```
-
-The app chooses `stateIn`, `shareIn`, and coroutine scope. NMP supplies bounded
-newest-state delivery and deterministic cancellation; it does not supply a
-ViewModel base class or Compose provider.
-
-## Rust
-
-Direct Rust uses the same canonical facade that FFI projects. Applications do
+The `nmp` facade owns construction. Applications do
 not assemble store, router, resolver, signer, and transport crates themselves:
 
 ```rust
@@ -122,11 +39,11 @@ while let Some(fact) = receipt.recv() {
 ```
 
 The exact Rust stream/receiver spelling may change. The boundary may not: one
-facade owns construction and every safety invariant inherited by FFI.
+facade owns construction and every safety invariant.
 
-## Semantic parity
+## What the facade owes
 
-Native syntax may differ, but these values and outcomes must agree:
+Regardless of the exact spelling, the facade guarantees:
 
 - descriptor identity and printed binding expansion;
 - rows plus cache/acquisition/shortfall evidence;
@@ -137,14 +54,12 @@ Native syntax may differ, but these values and outcomes must agree:
 - per-relay receipt facts; and
 - diagnostics and bounded-delivery behavior.
 
-Generated bindings compiling is not parity. Behavioral falsifiers across the
-three entry points are the gate.
-
 ## Platforms not promised
 
-Serializability does not imply a TypeScript/web SDK commitment. New projections
-are added only when their native lifetime, persistence, secure-capability, and
-bounded-delivery behavior can preserve the same contract.
+Serializability does not imply a TypeScript/web SDK commitment. New platform
+integrations are added only when their native lifetime, persistence,
+secure-capability, and bounded-delivery behavior can preserve the same
+contract.
 
 ---
 
