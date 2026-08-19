@@ -234,7 +234,7 @@ fn departing_shape_remains_owned_through_atomic_eose_persistence() {
     let mut effects = Vec::new();
     assert!(
         core.white_box("persist_attributed_completion", |s| s
-            .persist_attributed_completion(completed, &relay, &mut effects)
+            .persist_attributed_completion(completed, &mut effects)
             .is_some()),
         "completion must carry both shapes through the atomic store door"
     );

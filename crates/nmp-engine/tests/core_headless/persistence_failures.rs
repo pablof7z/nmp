@@ -381,10 +381,21 @@ fn failed_event_commit_isolated_by_session_identity_on_the_same_relay() {
             .expect("coverage peek"),
         None
     );
-    assert!(core
-        .get_coverage(&protected_atom, &RelaySessionKey::unauthenticated(relay.clone()))
+    assert!(
+        core.get_coverage(
+            &protected_atom,
+            &signer_session(&relay, protected_author.public_key())
+        )
         .expect("coverage peek")
-        .is_some());
+        .is_some(),
+        "the identity that proved this coverage is the session it is filed under"
+    );
+    assert_eq!(
+        core.get_coverage(&protected_atom, &RelaySessionKey::unauthenticated(relay.clone()))
+            .expect("coverage peek"),
+        None,
+        "and the anonymous view of the same relay proved nothing"
+    );
 }
 
 /// A failed EVENT commit poisons only the immutable request that delivered

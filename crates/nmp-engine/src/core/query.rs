@@ -1575,13 +1575,22 @@ impl CoreState {
     pub(in crate::core) fn persist_attributed_completion(
         &mut self,
         completed: CompletedAttribution,
-        relay: &RelayUrl,
         _effects: &mut Vec<Effect>,
     ) -> Option<BTreeSet<CoverageKey>> {
         let completed_sub_id = completed.sub_id().clone();
         let completed_send = completed.send_id();
         let completed_filter_hash = completed.filter_hash();
         let committed_interval = completed.eligible_generation_interval();
+        // The session that actually proved this coverage, identity included.
+        // A `SubId` names its own relay AND its own identity (`plan.rs`), and
+        // attribution asserts the wire mapping was filed under exactly that
+        // pair -- so this IS the session the EOSE arrived on, not a
+        // reconstruction. It has to be: the only reader of a coverage row is
+        // `evidence.rs`, which looks it up at the key the router files a
+        // planned REQ under, `RelaySessionKey::new(relay, authenticate_as)`.
+        // Filing an authenticated completion under the anonymous key writes a
+        // row no reader can ever address.
+        let session = RelaySessionKey::new(completed_sub_id.0.clone(), completed_sub_id.2);
         let claims = completed.into_eligible_claims()?;
         if claims.is_empty() {
             return Some(BTreeSet::new());
@@ -1589,18 +1598,13 @@ impl CoreState {
 
         let mut batch = Vec::with_capacity(claims.len());
         for claim in &claims {
-            batch.push((
-                claim.atom.clone(),
-                RelaySessionKey::unauthenticated(relay.clone()),
-                claim.interval,
-            ));
+            batch.push((claim.atom.clone(), session.clone(), claim.interval));
         }
 
         if let Err(_error) = self.record_request_coverage_batch(&batch) {
             return None;
         }
 
-        let session = RelaySessionKey::new(completed_sub_id.0.clone(), completed_sub_id.2);
         self.retire_request_claim_transfer_covered_by_completion(
             &session,
             &completed_sub_id,

@@ -677,7 +677,7 @@ fn exact_success_replays_once_and_only_then_allows_eose_credit() {
     assert_eq!(
         fixture
             .core
-            .get_coverage(&fixture.atom, &RelaySessionKey::unauthenticated(fixture.session.relay.clone()))
+            .get_coverage(&fixture.atom, &fixture.session)
             .expect("coverage peek"),
         None
     );
@@ -719,9 +719,62 @@ fn exact_success_replays_once_and_only_then_allows_eose_credit() {
     ));
     assert!(fixture
         .core
-        .get_coverage(&fixture.atom, &RelaySessionKey::unauthenticated(fixture.session.relay.clone()))
+        .get_coverage(&fixture.atom, &fixture.session)
         .expect("coverage peek")
         .is_some());
+}
+
+/// The durable coverage an EOSE proves is filed under the session that
+/// actually proved it -- identity included.
+///
+/// A row is only ever read back at the key the router files a planned REQ
+/// under (`RelaySessionKey::new(relay, authenticate_as)`, `plan.rs`), so a
+/// write that drops the identity segment writes somewhere no reader can
+/// reach: every authenticated read re-requests everything forever while
+/// laying down a fresh unreachable row each time. The negative half of this
+/// assertion is the whole test -- writing to BOTH keys would satisfy the
+/// positive half and still be wrong, because coverage proven under an
+/// identity was never proven for the anonymous view of that relay.
+#[test]
+fn eose_on_an_authenticated_session_files_coverage_under_that_identity() {
+    let mut fixture = Fixture::new();
+    let (_, policy) = fixture.challenge("identity-scoped-coverage");
+    let (sign_token, unsigned) = fixture.allow(policy.unwrap());
+    let (send_token, event) = fixture.sign(sign_token, unsigned);
+    fixture.send_accepted(send_token);
+    let _ = fixture.ok(event.id, true);
+    assert!(matches!(
+        auth_phase(&fixture),
+        AuthSessionPhase::Ready { .. }
+    ));
+
+    let _ = fixture.core.handle(EngineMsg::RelayFrame(
+        fixture.handle,
+        fixture.session.clone(),
+        RelayFrame::from(RelayMessage::eose(SubscriptionId::new(wire_sub_id_string(
+            &fixture.sub_id,
+        )))),
+    ));
+
+    assert!(
+        fixture
+            .core
+            .get_coverage(&fixture.atom, &fixture.session)
+            .expect("coverage peek")
+            .is_some(),
+        "the authenticated session that took the EOSE must be able to read its own coverage"
+    );
+    assert_eq!(
+        fixture
+            .core
+            .get_coverage(
+                &fixture.atom,
+                &RelaySessionKey::unauthenticated(fixture.session.relay.clone())
+            )
+            .expect("coverage peek"),
+        None,
+        "an identity's proof is not the anonymous view's proof"
+    );
 }
 
 #[test]
