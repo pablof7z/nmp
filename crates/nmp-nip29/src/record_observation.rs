@@ -420,7 +420,7 @@ fn availability_at(host: &RelayUrl, evidence: &[AcquisitionEvidence]) -> GroupAv
             .flat_map(|branch| branch.sources.iter())
             .filter(|fact| &fact.relay == host)
     };
-    if reported().any(|fact| matches!(fact.status, SourceStatus::AuthDenied | SourceStatus::Error))
+    if reported().any(|fact| matches!(fact.status, SourceStatus::AuthDenied { .. } | SourceStatus::Error))
     {
         return GroupAvailability::SourceUnavailable;
     }

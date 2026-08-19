@@ -348,6 +348,24 @@ pub const FINDINGS: &[Finding] = &[
         needs: "nothing; the gaps around it are the generic ones above",
         site: "crates/nmp-canary/src/room.rs",
     },
+    Finding {
+        rank: 36,
+        weight: Weight::Subsystem,
+        title: "FIXED: reads from a relay that gates reads behind NIP-42 could never authenticate",
+        wanted: "pin Demand::authenticate_as, register the signer, allow in the policy, read",
+        wrote: "authgate::run against gated_relay -- a strfry-shaped relay that answers a REQ with [\"AUTH\", challenge] then CLOSED auth-required. Measured before the fix: Connecting -> AwaitingChallenge -> AwaitingPolicy -> AwaitingSignature -> AuthDenied, twice, with NO [\"AUTH\", <event>] ever on the socket. on_auth_restricted treated the relay's DEMAND for auth as a denial and invalidated the epoch the relay's own challenge had just opened, so the signed kind:22242 was discarded on arrival",
+        needs: "done -- on_auth_restricted leaves an in-flight negotiation alone; a restricted close is a real refusal only on a session already Ready",
+        site: "crates/nmp-canary/src/authgate.rs",
+    },
+    Finding {
+        rank: 37,
+        weight: Weight::Pattern,
+        title: "FIXED: AuthDenied named three unrelated causes with one value",
+        wanted: "tell the app whether its own policy, its own signer, or the relay refused",
+        wrote: "authgate::Observed reads SourceStatus::AuthDenied { source } off the query surface and AuthDiagnosticsSnapshot::denial_reason off diagnostics. Measured: Policy + 'the user declined to identify to this relay', and Relay + 'restricted: this identity is not on the allow list'. Before, both read AuthDenied with no reason anywhere, while the write plane had carried AuthDenialSource since #756",
+        needs: "done -- the read plane now carries the same vocabulary the write plane always had",
+        site: "crates/nmp-canary/src/authgate.rs",
+    },
 ];
 
 /// Print the catalogue.

@@ -171,6 +171,13 @@ pub struct AuthDiagnosticsSnapshot {
     pub signer_bound: bool,
     /// The frozen kind:22242 event id awaiting/holding relay correlation.
     pub auth_event_id: Option<EventId>,
+    /// WHO refused, when `phase` is [`AuthDiagnosticsPhase::Denied`].
+    /// [`AuthDiagnosticsPhase::Denied`]'s own doc names three unrelated
+    /// causes, and an app whose reads are blocked acts differently on each:
+    /// its own policy refused, its own signer refused, or the relay refused.
+    pub denial_source: Option<crate::AuthDenialSource>,
+    /// The refusing party's own words, verbatim.
+    pub denial_reason: Option<String>,
 }
 
 impl AuthDiagnosticsSnapshot {
@@ -194,6 +201,8 @@ impl AuthDiagnosticsSnapshot {
             policy_bound,
             signer_bound,
             auth_event_id,
+            denial_source,
+            denial_reason,
         } = value;
         Self {
             relay,
@@ -205,6 +214,8 @@ impl AuthDiagnosticsSnapshot {
             policy_bound,
             signer_bound,
             auth_event_id,
+            denial_source,
+            denial_reason,
         }
     }
 }

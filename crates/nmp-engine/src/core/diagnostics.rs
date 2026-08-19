@@ -109,6 +109,15 @@ pub struct AuthDiagnosticsSnapshot {
     pub policy_bound: bool,
     pub signer_bound: bool,
     pub auth_event_id: Option<EventId>,
+    /// WHO refused, when `phase` is [`AuthDiagnosticsPhase::Denied`]. The
+    /// phase alone names three unrelated causes with one word, and an app
+    /// whose reads are blocked acts differently on each: its own policy
+    /// refused, its own signer refused, or the relay refused.
+    pub denial_source: Option<crate::publish_queue::AuthDenialSource>,
+    /// The refusing party's own words. `AuthPolicyDecision::Deny`'s reason,
+    /// `SignerError::Rejected`'s reason, or the relay's `OK false` /
+    /// `CLOSED` message -- carried verbatim, never summarized.
+    pub denial_reason: Option<String>,
 }
 
 /// Where one protected session currently sits in its AUTH lifecycle (#8's
@@ -139,7 +148,12 @@ pub enum AuthDiagnosticsPhase {
     AwaitingRelayAck,
     /// The relay accepted the AUTH event: this session is authenticated.
     Ready,
-    /// The relay rejected the AUTH event, or the policy refused.
+    /// AUTH is terminally refused. WHICH of the three parties refused --
+    /// the app's policy, the app's signer, or the relay -- is
+    /// [`AuthDiagnosticsSnapshot::denial_source`], and their own words are
+    /// [`AuthDiagnosticsSnapshot::denial_reason`]. This member deliberately
+    /// does not split: the phase is the lifecycle position, and an app that
+    /// only needs "is this session usable" reads one value for it.
     Denied,
     /// The negotiation failed for a reason that is neither a relay refusal
     /// nor a policy refusal.

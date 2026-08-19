@@ -59,6 +59,7 @@ mod semantic_delivery;
 mod stalled_write_census;
 mod wire_ownership;
 mod write;
+use write::public_auth_denial_source;
 pub use write::{PreparedReplaceableMaterialization, PublishPreparation};
 
 #[cfg(feature = "bench-instrumentation")]
@@ -1539,7 +1540,17 @@ enum AuthSessionPhase {
     Ready {
         event_id: EventId,
     },
-    Denied,
+    /// AUTH is terminally refused for this epoch. The refusal CARRIES who
+    /// refused and why: an app whose reads are blocked cannot act on
+    /// "denied", and the three causes want three different actions -- its
+    /// own policy said no, its own signer said no, or the relay said no.
+    /// The write plane has told applications these apart since #756
+    /// ([`crate::publish_queue::AuthDenialSource`]); this is the read plane
+    /// carrying the same fact.
+    Denied {
+        source: StoredAuthDenialSource,
+        reason: String,
+    },
     Error,
 }
 
@@ -2428,6 +2439,8 @@ impl CoreState {
                     policy_bound: false,
                     signer_bound: false,
                     auth_event_id: None,
+                    denial_source: None,
+                    denial_reason: None,
                 },
             );
         }
@@ -2448,8 +2461,14 @@ impl CoreState {
                 AuthSessionPhase::Ready { event_id } => {
                     (AuthDiagnosticsPhase::Ready, Some(*event_id))
                 }
-                AuthSessionPhase::Denied => (AuthDiagnosticsPhase::Denied, None),
+                AuthSessionPhase::Denied { .. } => (AuthDiagnosticsPhase::Denied, None),
                 AuthSessionPhase::Error => (AuthDiagnosticsPhase::Error, None),
+            };
+            let denial = match &state.phase {
+                AuthSessionPhase::Denied { source, reason } => {
+                    Some((public_auth_denial_source(*source), reason.clone()))
+                }
+                _ => None,
             };
             auth_sessions.insert(
                 session.clone(),
@@ -2468,6 +2487,8 @@ impl CoreState {
                     policy_bound: state.policy_instance.is_some(),
                     signer_bound: state.signer_instance.is_some(),
                     auth_event_id,
+                    denial_source: denial.as_ref().map(|(source, _)| *source),
+                    denial_reason: denial.map(|(_, reason)| reason),
                 },
             );
         }

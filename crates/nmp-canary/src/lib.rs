@@ -45,10 +45,12 @@
 #![deny(unsafe_code)]
 
 pub mod app;
+pub mod authgate;
 pub mod composer;
 pub mod deletions;
 pub mod feed;
 pub mod findings;
+pub mod gated_relay;
 pub mod notifications;
 pub mod people;
 pub mod process;

@@ -22,8 +22,8 @@
 //!
 //! Run: `cargo run -p nmp-canary --bin canary [scenario]`
 //!
-//! Scenarios: `all` (default), `surfaces`, `deletions`, `routing`, `restart`,
-//! `crash`, `contend`, `teardown`, `findings`. The `child-*` forms are spawned
+//! Scenarios: `all` (default), `surfaces`, `deletions`, `routing`, `authgate`,
+//! `restart`, `crash`, `contend`, `teardown`, `findings`. The `child-*` forms are spawned
 //! by the supervisors and are not meant to be typed.
 
 use std::time::Duration;
@@ -390,6 +390,7 @@ fn main() {
         "surfaces" => surfaces(),
         "deletions" => deletions_scenario(),
         "routing" => routing_scenario(),
+        "authgate" => authgate_scenario(),
         "restart" => restart_scenario(),
         "crash" => crash_scenario(),
         "contend" => contend_scenario(),
@@ -403,6 +404,7 @@ fn main() {
             surfaces();
             deletions_scenario();
             routing_scenario();
+            authgate_scenario();
             restart_scenario();
             crash_scenario();
             contend_scenario();
@@ -521,6 +523,24 @@ fn routing_scenario() {
         match nmp_canary::routing::run(&probe, Duration::from_millis(700)) {
             Ok(observed) => println!("  {observed}"),
             Err(error) => println!("  {:<28} engine would not start: {error}", probe.label),
+        }
+    }
+}
+
+// ===========================================================================
+// Reading from a relay that gates reads behind NIP-42
+// ===========================================================================
+
+fn authgate_scenario() {
+    banner("a read against a relay that gates reads behind NIP-42");
+    println!(
+        "claim under test: 'pinning authenticate_as + a registered signer + an\n\
+         allowing AuthPolicy is enough to read from an auth-gated relay'\n"
+    );
+    for case in nmp_canary::authgate::matrix() {
+        match nmp_canary::authgate::run(&case, Duration::from_secs(8)) {
+            Ok(observed) => println!("{observed}"),
+            Err(error) => println!("  {:<28} engine would not start: {error}", case.label),
         }
     }
 }

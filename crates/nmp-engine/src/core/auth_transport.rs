@@ -272,10 +272,30 @@ impl CoreState {
         effects
     }
 
+    /// A `CLOSED <sub> "auth-required: ..."` / `"restricted: ..."`.
+    ///
+    /// NIP-42 makes this a DEMAND for authentication, not a refusal of one.
+    /// It is the second half of the exchange `on_relay_connected` already
+    /// describes (#1889): a relay that only challenges in response to a
+    /// request answers the REQ with `["AUTH", challenge]` and this close, in
+    /// that order, and the client is expected to authenticate and have its
+    /// requests replayed.
+    ///
+    /// So this door is deliberately NOT terminal. It used to install
+    /// `Denied` unconditionally, which destroyed the negotiation the relay's
+    /// own challenge had just started: the challenge arrived first and moved
+    /// the session to `AwaitingPolicy`/`AwaitingSignature`, and this close
+    /// then invalidated that epoch, so the signed kind:22242 the signer was
+    /// already producing was discarded on arrival by
+    /// `exact_current_auth_epoch` and NO `["AUTH", <event>]` ever reached the
+    /// socket. Reads from every relay that gates reads the way `strfry` does
+    /// were unreachable, and the app saw a bare `AuthDenied` nobody had
+    /// issued. See the `authgate` scenario in `nmp-canary`.
     pub(in crate::core) fn on_auth_restricted(
         &mut self,
         handle: TransportRelayHandle,
         session: RelaySessionKey,
+        message: String,
     ) -> Vec<Effect> {
         if session.authenticate_as.is_none() {
             return Vec::new();
@@ -283,28 +303,62 @@ impl CoreState {
         self.auth_probe_sessions.remove(&session);
         self.auth_required_sessions.insert(session.clone());
         let mut effects = Vec::new();
-        let previous = self.invalidate_auth_epoch(&session, true, &mut effects);
-        let last_created_at = previous.as_ref().and_then(|state| state.last_created_at);
-        let fallback_epoch = previous.map(|state| state.epoch);
-        let epoch = self
-            .mint_auth_epoch(handle, &session)
-            .or(fallback_epoch)
-            .unwrap_or(AuthEpoch {
-                handle,
-                session: session.clone(),
-                sequence: AUTH_SEQUENCE_SENTINEL,
-            });
-        self.auth_sessions.insert(
-            session,
-            AuthSessionState {
-                epoch,
-                challenge: String::new(),
-                last_created_at,
-                policy_instance: None,
-                signer_instance: None,
-                phase: AuthSessionPhase::Denied,
-            },
-        );
+
+        // The relay refused a request on a session it had ALREADY
+        // authenticated. That is a real refusal — authentication succeeded
+        // and this identity still may not read here — and it is the only
+        // shape of this frame that is one.
+        if matches!(
+            self.auth_sessions.get(&session).map(|state| &state.phase),
+            Some(AuthSessionPhase::Ready { .. })
+        ) {
+            let previous = self.invalidate_auth_epoch(&session, true, &mut effects);
+            let last_created_at = previous.as_ref().and_then(|state| state.last_created_at);
+            let fallback_epoch = previous.map(|state| state.epoch);
+            let epoch = self
+                .mint_auth_epoch(handle, &session)
+                .or(fallback_epoch)
+                .unwrap_or(AuthEpoch {
+                    handle,
+                    session: session.clone(),
+                    sequence: AUTH_SEQUENCE_SENTINEL,
+                });
+            self.auth_sessions.insert(
+                session.clone(),
+                AuthSessionState {
+                    epoch,
+                    challenge: String::new(),
+                    last_created_at,
+                    policy_instance: None,
+                    signer_instance: None,
+                    phase: AuthSessionPhase::Denied {
+                        source: StoredAuthDenialSource::Relay,
+                        reason: message.clone(),
+                    },
+                },
+            );
+            self.deny_write_lanes_for_auth(
+                &session,
+                StoredAuthDenialSource::Relay,
+                message,
+                &mut effects,
+            );
+            effects.push(Effect::DiagnosticsChanged);
+            self.refresh_all_observation_evidence(&mut effects);
+            return effects;
+        }
+
+        // Otherwise the demand stands and the answer to it is either already
+        // in flight or about to arrive with the relay's challenge. The
+        // subscription this close named is gone from the relay either way,
+        // so its attribution goes with it and durable write lanes park on
+        // AUTH; `finish_auth_ok` replays the full planned set for this exact
+        // generation once it is authenticated. No phase is installed: a
+        // session with no AUTH row reads `AwaitingChallenge`, which is
+        // exactly what is true.
+        self.abandon_session_subs(&session);
+        self.park_relay_lanes_for_auth(&session, &mut effects);
+        effects.push(Effect::DiagnosticsChanged);
         self.refresh_all_observation_evidence(&mut effects);
         effects
     }
@@ -329,11 +383,7 @@ impl CoreState {
                 return;
             }
         };
-        let public_source = match source {
-            StoredAuthDenialSource::Policy => AuthDenialSource::Policy,
-            StoredAuthDenialSource::Signer => AuthDenialSource::Signer,
-            StoredAuthDenialSource::Relay => AuthDenialSource::Relay,
-        };
+        let public_source = public_auth_denial_source(source);
         for (id, lane) in lanes {
             let exact_session = self
                 .pending
@@ -464,7 +514,10 @@ impl CoreState {
                 None
             }
             AuthPolicyOutcome::Deny { reason } => {
-                state.phase = AuthSessionPhase::Denied;
+                state.phase = AuthSessionPhase::Denied {
+                    source: StoredAuthDenialSource::Policy,
+                    reason: reason.clone(),
+                };
                 Some((StoredAuthDenialSource::Policy, reason))
             }
             AuthPolicyOutcome::Unavailable | AuthPolicyOutcome::Error { reason: _ } => {
@@ -515,7 +568,9 @@ impl CoreState {
                 }
             }
             AuthSessionPhase::Ready { .. } => SourceStatus::Requesting,
-            AuthSessionPhase::Denied => SourceStatus::AuthDenied,
+            AuthSessionPhase::Denied { source, .. } => SourceStatus::AuthDenied {
+                source: public_auth_denial_source(*source),
+            },
             AuthSessionPhase::Error => SourceStatus::Error,
         }
     }
@@ -585,7 +640,10 @@ impl CoreState {
                 None
             }
             AuthSignerOutcome::Rejected { reason } => {
-                state.phase = AuthSessionPhase::Denied;
+                state.phase = AuthSessionPhase::Denied {
+                    source: StoredAuthDenialSource::Signer,
+                    reason: reason.clone(),
+                };
                 Some((StoredAuthDenialSource::Signer, reason))
             }
             AuthSignerOutcome::Signed(_)
@@ -1088,7 +1146,10 @@ impl CoreState {
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
         if !status {
-            state.phase = AuthSessionPhase::Denied;
+            state.phase = AuthSessionPhase::Denied {
+                source: StoredAuthDenialSource::Relay,
+                reason: message.clone(),
+            };
             self.auth_sessions.insert(session.clone(), state);
             self.deny_write_lanes_for_auth(
                 session,
@@ -1707,7 +1768,7 @@ impl CoreState {
                     Some("auth-required" | "restricted")
                 ) =>
             {
-                effects.extend(self.on_auth_restricted(handle, session));
+                effects.extend(self.on_auth_restricted(handle, session, message.into_owned()));
             }
             RelayMessage::Closed {
                 subscription_id,

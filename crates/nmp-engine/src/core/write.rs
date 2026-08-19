@@ -28,7 +28,9 @@ fn public_retry_cause(cause: PublishQueueTransientCause) -> Option<RetryCause> {
     }
 }
 
-fn public_auth_denial_source(source: StoredAuthDenialSource) -> AuthDenialSource {
+pub(in crate::core) fn public_auth_denial_source(
+    source: StoredAuthDenialSource,
+) -> AuthDenialSource {
     match source {
         StoredAuthDenialSource::Policy => AuthDenialSource::Policy,
         StoredAuthDenialSource::Signer => AuthDenialSource::Signer,
