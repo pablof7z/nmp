@@ -2,23 +2,25 @@
 //! contract recorded in issue #816 and
 //! `docs/design/query-demand-and-evidence.md`: the per-`SubId` FIFO of
 //! send-time snapshots, the wire subscription-id -> `SubId` reverse lookup,
-//! and the `CoverageKey` -> retained window-erased shape registry
-//! `record_coverage` needs (the store only ever sees whatever
-//! `ConcreteFilter` it is handed; `CoreState` is the one place that knows
-//! which shape a given key came from). This registry is in-memory and
-//! request-scoped — no filter is ever stored in the database (#1849): a
-//! durable coverage row is key + `from` + `through`, nothing more.
+//! and the per-request claim sets those two are reconciled against.
+//!
+//! A `CoverageKey` is the whole coverage identity, at every layer: the router
+//! puts keys on a `WireReq`, this module carries keys through the FIFO, and
+//! `RedbStore::record_coverage` takes keys. Nothing between the demand and
+//! the durable row needs the `ContextualAtom` a key was hashed from, and no
+//! filter is ever stored in the database (#1849): a durable coverage row is
+//! key + `from` + `through`, nothing more.
 //!
 //! This is a plain data structure with no I/O and no access to the store or
 //! router — `CoreState` (`core/mod.rs`) is the one place both exist
 //! together, and it is the one that actually calls
-//! `RedbStore::record_coverage` with the shape this module hands back.
+//! `RedbStore::record_coverage` with the claims this module hands back.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use nmp_grammar::{ContextualAtom, DescriptorHash, RelaySessionKey};
-use nmp_router::{DemandKey, SubId};
-use nmp_store::{coverage_claim_atoms, coverage_key, CoverageInterval, CoverageKey};
+use nmp_grammar::{DescriptorHash, RelaySessionKey};
+use nmp_router::SubId;
+use nmp_store::{CoverageInterval, CoverageKey};
 use nostr::Timestamp;
 
 mod completion;
@@ -61,7 +63,6 @@ enum CoverageAuthority {
 pub(crate) enum CoveragePoison {
     LimitedRequest,
     EventCommitFailed,
-    MissingShape,
 }
 
 impl CoverageAuthority {
@@ -87,7 +88,6 @@ pub(crate) struct CompletedAttribution {
 #[derive(Debug)]
 pub(crate) struct CompletedCoverageClaim {
     pub(crate) key: CoverageKey,
-    pub(crate) atom: ContextualAtom,
     pub(crate) interval: CoverageInterval,
 }
 
@@ -148,125 +148,16 @@ pub(crate) struct AttributionState {
     /// DIFFERENT access context is a different physical session's sub and
     /// must never resolve to this one.
     sub_id_by_wire: HashMap<(RelaySessionKey, String), SubId>,
-    /// `CoverageKey -> the ContextualAtom it came from (#106 -- widened
-    /// from a bare `ConcreteFilter`: the store's `record_coverage` now
-    /// takes a `&ContextualAtom`, since `CoverageKey` itself is a
-    /// context-inclusive hash, so retaining only the selection shape would
-    /// no longer be enough to reconstruct the right key at EOSE time).
-    /// `CoreState` only ever has a `CoverageKey` at attribution time (from
-    /// `WireReq::coverage_claims`), so it must retain the FULL atom separately to
-    /// be able to call that door at all. Pruned each recompile by
-    /// [`Self::prune_shapes`] (mirroring `CoreState`'s own
-    /// `nip11_information` pruning in `core/mod.rs::recompile`) against the
-    /// union of the current `active_demand()` and every `CoverageKey` still
-    /// `coverage_claims` by an outstanding `inflight` snapshot — see that method's
-    /// doc for why both sets are required.
-    shape_by_key: HashMap<CoverageKey, ContextualAtom>,
-    /// Exact logical demand identities currently retaining each shape.
-    /// Multiple windowed DemandKeys may share one window-erased CoverageKey.
-    active_demands: BTreeSet<DemandKey>,
-    active_shape_owner_counts: HashMap<CoverageKey, usize>,
-    /// Immutable router-plan requests retain every claim shape until their
-    /// exact physical CLOSE, independently of active logical owners and
-    /// transport-generation snapshots.
+    /// The claim set each immutable router-plan request owns until its exact
+    /// physical CLOSE, independently of active logical owners and
+    /// transport-generation snapshots. This is the engine's mirror of the
+    /// router plan, and the set `release_live_request_claims_delta` shrinks.
     live_request_claims: HashMap<SubId, BTreeSet<CoverageKey>>,
-    live_shape_owner_counts: HashMap<CoverageKey, usize>,
-    /// Outstanding send-time snapshots retaining each shape after its active
-    /// demand has left. Counts make completion/discard an exact-key update.
-    inflight_shape_owner_counts: HashMap<CoverageKey, usize>,
 }
 
 impl AttributionState {
     pub(crate) fn new() -> Self {
         Self::default()
-    }
-
-    pub(crate) fn observe_atom(&mut self, atom: &ContextualAtom) {
-        let demand = DemandKey::for_atom(atom);
-        if !self.active_demands.insert(demand) {
-            return;
-        }
-        for claim in coverage_claim_atoms(atom) {
-            let key = coverage_key(&claim);
-            self.shape_by_key.entry(key.clone()).or_insert(claim);
-            *self.active_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
-        }
-    }
-
-    pub(crate) fn release_atom(&mut self, atom: &ContextualAtom) {
-        let demand = DemandKey::for_atom(atom);
-        if !self.active_demands.remove(&demand) {
-            return;
-        }
-        for claim in coverage_claim_atoms(atom) {
-            self.release_active_shape_owner(coverage_key(&claim));
-        }
-    }
-
-    /// The current logical demand is now exactly `demand`: install it, learn
-    /// the `ContextualAtom` behind every atom in it, and prune the retained
-    /// shape registry down to keys still reachable from SOMEWHERE (finding
-    /// E3, epic #507).
-    ///
-    /// `demand` carries each atom's full `ContextualAtom` identity (#106) so
-    /// the retained value is keyed AND populated the SAME way
-    /// `record_send`/`attribute_eose`'s `CoverageKey`s already are. Without
-    /// the prune, `shape_by_key` grows once per distinct atom shape ever
-    /// demanded for the life of the process, which for a long-running client
-    /// visiting many distinct profiles/queries over a session is unbounded.
-    ///
-    /// This is ONE call because it is one fact. It used to be two —
-    /// `observe_demand(demand)` followed nine lines later by
-    /// `prune_shapes(demand)` in `core/mod.rs::recompile`, over the same
-    /// argument. The first was dead work: everything it wrote to
-    /// `active_demands`, `active_shape_owner_counts` and `shape_by_key` the
-    /// second rebuilt from scratch, and the only statement between them
-    /// (`flush_author_outbox_route_need_changes`) neither reads nor writes
-    /// attribution. Every in-crate falsifier hand-wrote only the first half
-    /// of that pair, so nothing could ever have caught the two drifting
-    /// apart (#1850).
-    ///
-    /// A key is still reachable, and MUST be retained, if EITHER:
-    /// - it is `coverage_key(atom)` for some atom in the CURRENT `demand`, or
-    /// - it is still `coverage_claims` by some snapshot outstanding in `inflight`.
-    ///
-    /// The second clause is load-bearing, not defensive: `attribute_eose`
-    /// intersects EVERY still-outstanding snapshot on a sub (ruling §2,
-    /// see its own doc), and a sub's outstanding snapshots can span
-    /// multiple recompiles -- an atom can leave `active_demand()` (the
-    /// resolver moves on) while its already-sent REQ is still awaiting
-    /// EOSE, and that REQ's `coverage_claims` keys must keep resolving via
-    /// `shape_of` whenever that EOSE (or NEG-MSG completion) finally
-    /// arrives, arbitrarily many recompiles later. Pruning against
-    /// `demand` alone would silently turn that later `shape_of` lookup
-    /// into `None` and drop a coverage credit that was legitimately
-    /// earned -- over-pruning, a correctness bug. Retaining a key that
-    /// satisfies neither clause is merely a stale entry: still harmless,
-    /// per this struct's own doc, exactly as it was before this method
-    /// existed -- so under-pruning here is the acceptable failure mode,
-    /// never over-pruning.
-    pub(crate) fn set_active_demand<'a>(
-        &mut self,
-        demand: impl IntoIterator<Item = &'a ContextualAtom>,
-    ) {
-        let mut active_demands = BTreeSet::new();
-        let mut active_shape_owner_counts = HashMap::new();
-        for atom in demand {
-            let demand = DemandKey::for_atom(atom);
-            active_demands.insert(demand);
-            for claim in coverage_claim_atoms(atom) {
-                let key = coverage_key(&claim);
-                *active_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
-                self.shape_by_key.entry(key.clone()).or_insert(claim);
-            }
-        }
-        self.active_demands = active_demands;
-        self.active_shape_owner_counts = active_shape_owner_counts;
-        self.shape_by_key.retain(|key, _| {
-            self.active_shape_owner_counts.contains_key(key)
-                || self.live_shape_owner_counts.contains_key(key)
-                || self.inflight_shape_owner_counts.contains_key(key)
-        });
     }
 
     /// Install or replace the immutable claim set retained by one planned
@@ -276,16 +167,7 @@ impl AttributionState {
         sub_id: &SubId,
         claims: BTreeSet<CoverageKey>,
     ) {
-        let previous = self
-            .live_request_claims
-            .insert(sub_id.clone(), claims.clone())
-            .unwrap_or_default();
-        for key in claims.difference(&previous) {
-            *self.live_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
-        }
-        for key in previous.difference(&claims) {
-            self.release_live_shape_owner(key.clone());
-        }
+        self.live_request_claims.insert(sub_id.clone(), claims);
     }
 
     /// Add exact claim owners to an existing immutable request without
@@ -296,11 +178,7 @@ impl AttributionState {
         added: &BTreeSet<CoverageKey>,
     ) {
         let retained = self.live_request_claims.entry(sub_id.clone()).or_default();
-        for key in added {
-            if retained.insert(key.clone()) {
-                *self.live_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
-            }
-        }
+        retained.extend(added.iter().cloned());
     }
 
     /// Release exact local claim ownership from a still-running immutable
@@ -313,20 +191,14 @@ impl AttributionState {
         removed: &BTreeSet<CoverageKey>,
     ) {
         let mut empty = false;
-        let mut released = Vec::new();
         if let Some(retained) = self.live_request_claims.get_mut(sub_id) {
             for key in removed {
-                if retained.remove(key) {
-                    released.push(key.clone());
-                }
+                retained.remove(key);
             }
             empty = retained.is_empty();
         }
         if empty {
             self.live_request_claims.remove(sub_id);
-        }
-        for key in released {
-            self.release_live_shape_owner(key);
         }
     }
 
@@ -379,9 +251,7 @@ impl AttributionState {
             .and_then(VecDeque::back_mut)
             .expect("the matching current request snapshot remains live");
         for key in added {
-            if current.coverage_claims.insert(key.clone()) {
-                *self.inflight_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
-            }
+            current.coverage_claims.insert(key.clone());
         }
         true
     }
@@ -410,29 +280,10 @@ impl AttributionState {
             .get_mut(sub_id)
             .and_then(VecDeque::back_mut)
             .expect("the matching current request snapshot remains live");
-        let released: Vec<_> = removed
-            .iter()
-            .cloned()
-            .filter(|key| current.coverage_claims.remove(key))
-            .collect();
-        for key in released {
-            let count = self
-                .inflight_shape_owner_counts
-                .get_mut(&key)
-                .expect("every current request claim owns an inflight shape ref");
-            *count = count
-                .checked_sub(1)
-                .expect("an inflight request claim refcount cannot be zero");
-            if *count == 0 {
-                self.inflight_shape_owner_counts.remove(&key);
-            }
-            self.remove_unowned_shape(key);
+        for key in removed {
+            current.coverage_claims.remove(key);
         }
         true
-    }
-
-    pub(crate) fn claim_shape(&self, key: CoverageKey) -> Option<ContextualAtom> {
-        self.shape_by_key.get(&key).cloned()
     }
 
     pub(crate) fn discard_send_revision(&mut self, sub_id: &SubId, revision: u64) {
@@ -445,11 +296,10 @@ impl AttributionState {
         else {
             return;
         };
-        let snapshot = fifo.remove(position).unwrap();
+        fifo.remove(position);
         if fifo.is_empty() {
             self.inflight.remove(sub_id);
         }
-        self.release_snapshot(&snapshot);
     }
 
     /// Whether any send on `sub_id` is still outstanding. An entry exists in
@@ -466,28 +316,16 @@ impl AttributionState {
     }
 
     pub(crate) fn release_live_request_claims(&mut self, sub_id: &SubId) {
-        let Some(claims) = self.live_request_claims.remove(sub_id) else {
-            return;
-        };
-        for key in claims {
-            self.release_live_shape_owner(key);
-        }
+        self.live_request_claims.remove(sub_id);
     }
 
     /// Exact structural consistency for every mirror this owner keeps, by
     /// identity rather than by count.
     ///
     /// [`Self::counts`] next to this counts things — the right instrument for
-    /// leaks and boundedness, and the wrong one for structure. Two of the
-    /// three refcount maps here are pure derived data with an authoritative
-    /// source in the same struct (`live_shape_owner_counts` from
-    /// `live_request_claims`, `inflight_shape_owner_counts` from `inflight`),
-    /// and both are maintained by `saturating_sub`. A refcount that
-    /// underflows saturates to zero, drops its key, and takes the retained
-    /// shape with it via [`Self::remove_unowned_shape`] — after which the
-    /// census reports a SMALLER number, and every falsifier that ends by
-    /// asserting an all-zero census passes. That is precisely the failure the
-    /// count cannot see, so it is recomputed from the source here instead.
+    /// leaks and boundedness, and the wrong one for structure. An empty claim
+    /// set or an empty FIFO left filed under its key is a leak the count
+    /// cannot see, because the entry itself is what leaked.
     ///
     /// The `sub_id_by_wire` clause is the same shape of unchecked assumption:
     /// [`Self::discard_sub`] reconstructs a mapping's session key from the
@@ -495,13 +333,6 @@ impl AttributionState {
     /// only exact while every mapping is filed under the session its own
     /// `SubId` names. Nothing checked that; a mapping filed under any other
     /// session leaks forever and the count is identical either way.
-    ///
-    /// Deliberately NOT asserted, and known: `active_shape_owner_counts`
-    /// cannot be recomputed from `active_demands`, because a `DemandKey` is a
-    /// hash and does not carry the `ContextualAtom` its claim shapes come
-    /// from. Only the structural clauses (no zero counts, no counts without
-    /// demand) apply to it. Recomputing it would require retaining the atoms,
-    /// which is state added to prove state.
     #[cfg(feature = "bench-instrumentation")]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (sub_id, claims) in &self.live_request_claims {
@@ -510,54 +341,11 @@ impl AttributionState {
                 "{at}: attribution kept an empty live-request claim set for {sub_id:?}"
             );
         }
-        let mut expected_live: HashMap<CoverageKey, usize> = HashMap::new();
-        for claims in self.live_request_claims.values() {
-            for key in claims {
-                *expected_live.entry(key.clone()).or_insert(0) += 1;
-            }
-        }
-        assert_eq!(
-            self.live_shape_owner_counts, expected_live,
-            "{at}: attribution's live shape refcounts disagree with the claim sets they count"
-        );
 
         for (sub_id, snapshots) in &self.inflight {
             assert!(
                 !snapshots.is_empty(),
                 "{at}: attribution kept an empty in-flight FIFO for {sub_id:?}"
-            );
-        }
-        let mut expected_inflight: HashMap<CoverageKey, usize> = HashMap::new();
-        for snapshots in self.inflight.values() {
-            for snapshot in snapshots {
-                for key in &snapshot.coverage_claims {
-                    *expected_inflight.entry(key.clone()).or_insert(0) += 1;
-                }
-            }
-        }
-        assert_eq!(
-            self.inflight_shape_owner_counts, expected_inflight,
-            "{at}: attribution's in-flight shape refcounts disagree with the send-time \
-             snapshots they count"
-        );
-
-        for (key, count) in &self.active_shape_owner_counts {
-            assert_ne!(
-                *count, 0,
-                "{at}: attribution kept a zero active shape refcount for {key:?}"
-            );
-        }
-        assert!(
-            self.active_shape_owner_counts.is_empty() || !self.active_demands.is_empty(),
-            "{at}: attribution retains active shape owners with no active demand at all"
-        );
-
-        for key in self.shape_by_key.keys() {
-            assert!(
-                self.active_shape_owner_counts.contains_key(key)
-                    || self.live_shape_owner_counts.contains_key(key)
-                    || self.inflight_shape_owner_counts.contains_key(key),
-                "{at}: attribution retains the shape for {key:?} with no owner of any kind"
             );
         }
 
@@ -582,39 +370,23 @@ impl AttributionState {
         AttributionCounts {
             inflight_subs: self.inflight.len(),
             wire_keys: self.sub_id_by_wire.len(),
-            shape_keys: self.shape_by_key.len(),
-            active_demands: self.active_demands.len(),
-            active_shape_keys: self.active_shape_owner_counts.len(),
-            active_shape_refs: self.active_shape_owner_counts.values().sum(),
             live_request_keys: self.live_request_claims.len(),
-            live_shape_keys: self.live_shape_owner_counts.len(),
-            live_shape_refs: self.live_shape_owner_counts.values().sum(),
-            inflight_shape_keys: self.inflight_shape_owner_counts.len(),
-            inflight_shape_refs: self.inflight_shape_owner_counts.values().sum(),
         }
     }
 }
 
-/// The eleven numbers `CoreOwnershipCensus` carries for this owner, named.
+/// The three numbers `CoreOwnershipCensus` carries for this owner, named.
 ///
 /// It replaces an eleven-element `(usize, ..., usize)` tuple destructured
 /// positionally at the one call site. Every sibling owner (`RequestAttempts`,
 /// `WireOwnership`, `HistorySessions`, `RequestReplacements`)
 /// already returns a named struct; attribution was the one that did not, and
 /// eleven interchangeable positional `usize`s mean any adjacent pair could be
-/// transposed with the whole suite still green.
+/// transposed with the whole suite still green. Eight of the eleven counted
+/// the shape registry and its three refcount mirrors, all deleted with it.
 #[cfg(feature = "bench-instrumentation")]
 pub(super) struct AttributionCounts {
     pub(super) inflight_subs: usize,
     pub(super) wire_keys: usize,
-    pub(super) shape_keys: usize,
-    pub(super) active_demands: usize,
-    pub(super) active_shape_keys: usize,
-    pub(super) active_shape_refs: usize,
     pub(super) live_request_keys: usize,
-    pub(super) live_shape_keys: usize,
-    pub(super) live_shape_refs: usize,
-    pub(super) inflight_shape_keys: usize,
-    pub(super) inflight_shape_refs: usize,
 }
-

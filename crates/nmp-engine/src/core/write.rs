@@ -319,7 +319,7 @@ impl CoreState {
             // What is left here is the residual state, and its cause IS now
             // established (measured, not guessed): a covering REQ can reach
             // `Finished` with its coverage authority POISONED --
-            // `CoveragePoison::{LimitedRequest,EventCommitFailed,MissingShape}`
+            // `CoveragePoison::{LimitedRequest,EventCommitFailed}`
             // (`core/attribution.rs`) -- so `persist_attributed_completion`
             // retires it with `committed_interval: None`
             // (`core/query.rs::persist_attributed_completion`). A poisoned

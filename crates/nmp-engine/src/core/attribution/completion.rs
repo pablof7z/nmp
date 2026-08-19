@@ -27,9 +27,6 @@ impl AttributionState {
     ) -> AttributionSendId {
         let send_id = AttributionSendId(self.next_send_id);
         self.next_send_id = self.next_send_id.wrapping_add(1);
-        for key in &coverage_claims {
-            *self.inflight_shape_owner_counts.entry(key.clone()).or_insert(0) += 1;
-        }
         let snapshot = AttributionSnapshot {
             send_id,
             coverage_claims,
@@ -116,13 +113,8 @@ impl AttributionState {
             .iter()
             .filter_map(|((key, _), sub_id)| (key == session).then_some(sub_id.clone()))
             .collect();
-        let removed: Vec<_> = stale
-            .iter()
-            .filter_map(|sub_id| self.inflight.remove(sub_id))
-            .flatten()
-            .collect();
-        for snapshot in removed {
-            self.release_snapshot(&snapshot);
+        for sub_id in &stale {
+            self.inflight.remove(sub_id);
         }
         self.sub_id_by_wire.retain(|(key, _), _| key != session);
     }
@@ -141,11 +133,7 @@ impl AttributionState {
     /// straggler EOSE belonging to the request that was closed -- crediting
     /// durable coverage for a request the relay has not finished serving.
     pub(crate) fn discard_sub(&mut self, sub_id: &SubId) {
-        if let Some(removed) = self.inflight.remove(sub_id) {
-            for snapshot in removed {
-                self.release_snapshot(&snapshot);
-            }
-        }
+        self.inflight.remove(sub_id);
         let session = RelaySessionKey::new(sub_id.0.clone(), sub_id.2);
         self.sub_id_by_wire
             .remove(&(session, wire_sub_id_string(sub_id)));
@@ -198,81 +186,28 @@ impl AttributionState {
         if drained {
             self.inflight.remove(&sub_id);
         }
-        Some(self.complete_snapshot(sub_id, completed, coverage_authority, result))
+        Some(complete_snapshot(sub_id, completed, coverage_authority, result))
     }
+}
 
-    fn complete_snapshot(
-        &mut self,
-        sub_id: SubId,
-        snapshot: AttributionSnapshot,
-        mut coverage_authority: CoverageAuthority,
-        claims: Vec<(CoverageKey, CoverageInterval)>,
-    ) -> CompletedAttribution {
-        let completed_claims: Option<Vec<_>> = claims
-            .iter()
-            .map(|(key, interval)| {
-                self.shape_by_key
-                    .get(key)
-                    .cloned()
-                    .map(|atom| CompletedCoverageClaim {
-                        key: key.clone(),
-                        atom,
-                        interval: *interval,
-                    })
-            })
-            .collect();
-        let claims = completed_claims.unwrap_or_else(|| {
-            coverage_authority.poison(CoveragePoison::MissingShape);
-            Vec::new()
-        });
-        self.release_snapshot(&snapshot);
-        CompletedAttribution {
-            sub_id,
-            send_id: snapshot.send_id,
-            filter_hash: snapshot.filter_hash,
-            coverage_authority,
-            claims,
-        }
-    }
-
-    pub(super) fn release_active_shape_owner(&mut self, key: CoverageKey) {
-        if let Some(count) = self.active_shape_owner_counts.get_mut(&key) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.active_shape_owner_counts.remove(&key);
-            }
-        }
-        self.remove_unowned_shape(key);
-    }
-
-    pub(super) fn release_live_shape_owner(&mut self, key: CoverageKey) {
-        if let Some(count) = self.live_shape_owner_counts.get_mut(&key) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.live_shape_owner_counts.remove(&key);
-            }
-        }
-        self.remove_unowned_shape(key);
-    }
-
-    pub(super) fn release_snapshot(&mut self, snapshot: &AttributionSnapshot) {
-        for key in &snapshot.coverage_claims {
-            if let Some(count) = self.inflight_shape_owner_counts.get_mut(key) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    self.inflight_shape_owner_counts.remove(key);
-                }
-            }
-            self.remove_unowned_shape(key.clone());
-        }
-    }
-
-    pub(super) fn remove_unowned_shape(&mut self, key: CoverageKey) {
-        if !self.active_shape_owner_counts.contains_key(&key)
-            && !self.live_shape_owner_counts.contains_key(&key)
-            && !self.inflight_shape_owner_counts.contains_key(&key)
-        {
-            self.shape_by_key.remove(&key);
-        }
+/// Turn the intersected claim set into the completion the persistence door
+/// takes. Free-standing rather than a method because it reads no attribution
+/// state: a `CoverageKey` IS the coverage identity `record_coverage` wants,
+/// so there is nothing left to look up.
+fn complete_snapshot(
+    sub_id: SubId,
+    snapshot: AttributionSnapshot,
+    coverage_authority: CoverageAuthority,
+    claims: Vec<(CoverageKey, CoverageInterval)>,
+) -> CompletedAttribution {
+    CompletedAttribution {
+        sub_id,
+        send_id: snapshot.send_id,
+        filter_hash: snapshot.filter_hash,
+        coverage_authority,
+        claims: claims
+            .into_iter()
+            .map(|(key, interval)| CompletedCoverageClaim { key, interval })
+            .collect(),
     }
 }
