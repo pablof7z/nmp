@@ -7,7 +7,7 @@ use nmp_store::{
     PublishQueueReceiptPayload, QualifiedSource, RedbStore, ReplaceableOperationReceiptState,
     ReplayFormatId, ReplayProgramId, SemanticAccept, SemanticInstallOutcome, SemanticPlan,
     SemanticRematerialize, SemanticSourceInstall, SourceEvidence, SourcePlanId, StartingSource,
-    StartingSourceRequirement, VerifiedSignature,
+    StartingSourceRequirement, StoredEvent, VerifiedSignature,
 };
 use nostr::nips::nip01::Coordinate;
 use nostr::{EventBuilder, Filter, Keys, Kind, RelayUrl, Timestamp, UnsignedEvent};
@@ -65,7 +65,7 @@ fn bodyless_accept(
 /// `coordinate`. `apply_plan`'s first-materialization match (#1692)
 /// requires an installed `QualifiedSource::Event` to name the exact event
 /// that already won the coordinate's address index, so any test that goes
-/// on to materialize through `install_shared_materialization` needs its
+/// on to materialize through `accept_shared_materialization` needs its
 /// operations `Qualified` against a real event, not the capability-default
 /// `source()`/`starting_source()` above.
 fn seed_qualified_source(
@@ -243,58 +243,62 @@ fn assert_receipt_current(
     }
 }
 
-fn install_shared_materialization(
+/// Close a run of bodyless operations by accepting the last one
+/// body-complete, which is the only door the engine installs a FIRST
+/// generation through.
+///
+/// This used to call `install_replaceable_materialization`, a store door
+/// with no production caller. `install_replaceable_source_materialization`
+/// is not a substitute here: `apply_plan`'s first-materialization match
+/// requires the installed `QualifiedSource::Event` to name the row that
+/// already won the coordinate's address index, and a source-install by
+/// definition brings a newer event that has not won anything yet. That door
+/// installs SUCCESSOR generations; `plan_accept` installs first ones.
+fn accept_shared_materialization(
     store: &mut RedbStore,
     keys: &Keys,
     coordinate: &Coordinate,
-    members: Vec<nmp_store::IntentId>,
-) -> nmp_store::SemanticCurrentState {
-    let snapshot = store
-        .replaceable_operation_snapshot(coordinate)
-        .unwrap()
-        .unwrap();
-    let created_at = snapshot
-        .operations
-        .iter()
-        .map(|operation| operation.accepted_at.as_secs())
-        .max()
-        .unwrap();
-    let event = UnsignedEvent::new(
-        keys.public_key(),
-        Timestamp::from(created_at),
-        Kind::ContactList,
-        Vec::new(),
-        "materialized",
+    contributing: Vec<nmp_store::IntentId>,
+    byte: u8,
+    accepted_at: u64,
+    source_event: &nmp_store::StoredEvent,
+) -> (nmp_store::IntentId, u64, nmp_store::SemanticCurrentState) {
+    let snapshot = store.replaceable_operation_snapshot(coordinate).unwrap();
+    let mut accept = qualified_accept(
+        coordinate.clone(),
+        snapshot.as_ref().map(|state| &state.current),
+        contributing,
+        byte,
+        source_event,
     );
-    // `apply_plan`'s first-materialization match (#1692) requires the
-    // installed `QualifiedSource::Event` to name the exact event that
-    // already won the coordinate's address index, and re-qualifying the
-    // coordinate against a DIFFERENT event here (rather than the one the
-    // accepts below already established) would advance `source_revision`
-    // without updating the resource's retained `source` pointer, which
-    // `validate_resource_state` correctly refuses on reopen. So reuse the
-    // exact evidence the snapshot already carries -- a true no-op
-    // reconciliation -- rather than qualifying against a fresh event here.
+    accept.materialized = Some(MaterializationCandidate {
+        event: UnsignedEvent::new(
+            coordinate.public_key,
+            Timestamp::from(accepted_at),
+            coordinate.kind,
+            Vec::new(),
+            "materialized",
+        ),
+        routing: "test-route".into(),
+        sig_state: PendingMaterializationState::Pending,
+    });
     let outcome = store
-        .install_replaceable_materialization(SemanticRematerialize {
-            coordinate: coordinate.clone(),
-            expected_source_revision: snapshot.current.source_revision.clone(),
-            expected_program_digest: snapshot.current.program_digest,
-            expected_current_materialization: None,
-            source: snapshot.current.source_revision.evidence().clone(),
-            evaluated_at: Timestamp::from(created_at),
-            materialized: Some(MaterializationCandidate {
-                event,
-                routing: "test-route".into(),
-                sig_state: PendingMaterializationState::Pending,
-            }),
-            contributing_operations: members,
-            resolved_operations: Vec::new(),
+        .accept_write(AcceptWrite {
+            payload: AcceptWritePayload::ReplaceableOperation(Box::new(accept)),
+            expected_pubkey: keys.public_key(),
+            signing_identity_ref: "test-key".into(),
+            accepted_at: Timestamp::from(accepted_at),
         })
         .unwrap();
     match outcome {
-        SemanticInstallOutcome::Installed { current, .. } => current,
-        other => panic!("expected installed materialization, got {other:?}"),
+        AcceptOutcome::ReplaceableOperation {
+            intent_id,
+            receipt_id,
+            current,
+            installed: Some(_),
+            ..
+        } => (intent_id, receipt_id, current),
+        other => panic!("expected an installed shared generation, got {other:?}"),
     }
 }
 
@@ -312,19 +316,16 @@ fn exercise_bodyless_shared_lifecycle(store: &mut RedbStore) {
         .replaceable_operation_snapshot(&coordinate)
         .unwrap()
         .unwrap();
-    let (second, second_receipt) = accept_operation(
+    let _ = &before_second;
+    let (second, second_receipt, current) = accept_shared_materialization(
         store,
         &keys,
+        &coordinate,
+        vec![first],
+        2,
         11,
-        qualified_accept(
-            coordinate.clone(),
-            Some(&before_second.current),
-            vec![first],
-            2,
-            &source_event,
-        ),
+        &source_event,
     );
-    let current = install_shared_materialization(store, &keys, &coordinate, vec![first, second]);
     let generation = current.generation.clone().unwrap();
     assert_eq!(
         generation.materialization.materialization_id,
@@ -409,14 +410,16 @@ fn redb_reopens_bodyless_operation_and_current_generation_without_body_copies() 
     let (intent, receipt) = {
         let mut store = RedbStore::open(&path).unwrap();
         let source_event = seed_qualified_source(&mut store, &keys, &coordinate);
-        let accepted = accept_operation(
+        let (intent_id, receipt_id, current) = accept_shared_materialization(
             &mut store,
             &keys,
+            &coordinate,
+            Vec::new(),
+            42,
             10,
-            qualified_accept(coordinate.clone(), None, Vec::new(), 42, &source_event),
+            &source_event,
         );
-        let current =
-            install_shared_materialization(&mut store, &keys, &coordinate, vec![accepted.0]);
+        let accepted = (intent_id, receipt_id);
         assert_eq!(
             current
                 .generation

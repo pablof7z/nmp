@@ -134,11 +134,11 @@ fn semantic_coordinate() -> Coordinate {
 /// semantic fixtures below. `apply_plan`'s first-materialization match
 /// requires an installed `QualifiedSource::Event` to name the exact event
 /// that already won the coordinate's address index, so every fixture below
-/// that materializes through `install_replaceable_materialization` needs
-/// this actually `insert`ed, not merely signed. `seed_semantic_source` does
-/// that once, durably, before any crash point runs; `semantic_source` and
-/// `semantic_accept_write` below all reference the same deterministic event
-/// by content/timestamp, so every call names the identical id.
+/// that materializes needs this actually `insert`ed, not merely signed.
+/// `seed_semantic_source` does that once, durably, before any crash point
+/// runs; `semantic_source` and `semantic_accept_write` below all reference
+/// the same deterministic event by content/timestamp, so every call names
+/// the identical id.
 fn semantic_source_event() -> Event {
     qualified_source("u5-semantic-source", 1)
 }
@@ -198,32 +198,51 @@ fn semantic_accept_write(store: &RedbStore) -> AcceptWrite {
     }
 }
 
-fn semantic_rematerialize(store: &RedbStore) -> crate::SemanticRematerialize {
+/// The production shape for installing a generation: an accept that carries
+/// the candidate for itself plus every operation already contributing.
+///
+/// `plan_accept` is the only door the engine ever installs a first
+/// generation through -- `install_replaceable_materialization` was deleted
+/// for having no production caller -- so the fixtures below reach a shared
+/// generation the way the engine does rather than through a store door that
+/// existed only for them.
+fn semantic_body_complete_accept_write(
+    store: &RedbStore,
+    contributing: Vec<IntentId>,
+    plan_byte: u8,
+    accepted_at: u64,
+    content: &str,
+) -> AcceptWrite {
     let snapshot = store
         .replaceable_operation_snapshot(&semantic_coordinate())
-        .unwrap()
         .unwrap();
-    crate::SemanticRematerialize {
-        coordinate: semantic_coordinate(),
-        expected_source_revision: snapshot.current.source_revision.clone(),
-        expected_program_digest: snapshot.current.program_digest,
-        expected_current_materialization: None,
-        source: semantic_source(),
-        evaluated_at: Timestamp::from(1_000),
-        materialized: Some(crate::MaterializationCandidate {
-            event: UnsignedEvent::new(
-                keys().public_key(),
-                Timestamp::from(1_000),
-                Kind::ContactList,
-                Vec::new(),
-                "semantic-u5-body",
-            ),
-            routing: "semantic-u5-route".into(),
-            sig_state: crate::PendingMaterializationState::Pending,
-        }),
-        contributing_operations: vec![snapshot.operations[0].intent_id],
-        resolved_operations: Vec::new(),
-    }
+    let mut write = semantic_accept_write(store);
+    write.accepted_at = Timestamp::from(accepted_at);
+    let crate::AcceptWritePayload::ReplaceableOperation(accept) = &mut write.payload else {
+        unreachable!("semantic_accept_write builds a replaceable operation")
+    };
+    accept.expected_source_revision = snapshot
+        .as_ref()
+        .map(|state| state.current.source_revision.clone());
+    accept.expected_program_digest = snapshot.as_ref().map(|state| state.current.program_digest);
+    accept.expected_current_materialization = snapshot
+        .as_ref()
+        .and_then(|state| state.current.generation.as_ref())
+        .map(|generation| generation.materialization.materialization_id);
+    accept.plan = crate::SemanticPlan::new(1, vec![plan_byte]).unwrap();
+    accept.contributing_operations = contributing;
+    accept.materialized = Some(crate::MaterializationCandidate {
+        event: UnsignedEvent::new(
+            keys().public_key(),
+            Timestamp::from(accepted_at),
+            Kind::ContactList,
+            Vec::new(),
+            content,
+        ),
+        routing: "semantic-u5-route".into(),
+        sig_state: crate::PendingMaterializationState::Pending,
+    });
+    write
 }
 
 fn qualified_source(content: &str, created_at: u64) -> Event {
@@ -510,14 +529,23 @@ fn redb_crash_worker() {
             let accept = semantic_accept_write(&store);
             let _ = store.accept_write(accept);
         }
-        "semantic-install-before-commit" => {
-            let mut store = RedbStore::open_with_crash_point(
-                path,
-                RedbCrashPoint::SemanticRematerializeBeforeCommit,
-            )
-            .expect("open semantic install worker store");
-            let rematerialize = semantic_rematerialize(&store);
-            let _ = store.install_replaceable_materialization(rematerialize);
+        // The candidate-carrying half of acceptance: this commit writes a
+        // materialization, the high-water mark and the delivery lanes, not
+        // just an operation row. It used to crash a store door with no
+        // production caller; it now crashes the door the engine actually
+        // uses to install a first generation.
+        "semantic-body-complete-accept-before-commit" => {
+            let mut store =
+                RedbStore::open_with_crash_point(path, RedbCrashPoint::SemanticAcceptBeforeCommit)
+                    .expect("open semantic body-complete accept worker store");
+            let accept = semantic_body_complete_accept_write(
+                &store,
+                vec![IntentId(1)],
+                43,
+                1_001,
+                "semantic-u5-body",
+            );
+            let _ = store.accept_write(accept);
         }
         "semantic-source-install-before-commit" => {
             let mut store = RedbStore::open_with_crash_point(
@@ -858,7 +886,7 @@ fn semantic_accept_and_materialization_are_crash_atomic() {
         assert_eq!(accepted.journaled_receipt_id(), Some(1));
     }
 
-    crash(&path, "semantic-install-before-commit");
+    crash(&path, "semantic-body-complete-accept-before-commit");
     {
         let mut store = RedbStore::open(&path).expect("reopen semantic install crash");
         let snapshot = store
@@ -888,13 +916,19 @@ fn semantic_accept_and_materialization_are_crash_atomic() {
             }
         ));
 
-        let rematerialize = semantic_rematerialize(&store);
+        let accept = semantic_body_complete_accept_write(
+            &store,
+            vec![IntentId(1)],
+            43,
+            1_001,
+            "semantic-u5-body",
+        );
         let installed = store
-            .install_replaceable_materialization(rematerialize)
-            .expect("install after rollback");
+            .accept_write(accept)
+            .expect("body-complete accept after rollback");
         assert!(matches!(
             installed,
-            SemanticInstallOutcome::Installed {
+            AcceptOutcome::ReplaceableOperation {
                 current: SemanticCurrentState {
                     generation: Some(SemanticGeneration {
                         materialization: MaterializationRef {
@@ -1027,55 +1061,25 @@ fn semantic_shared_promotion_is_crash_atomic() {
         let first = store.accept_write(first_accept).unwrap();
         let first_intent = first.journaled_intent_id().unwrap();
         let first_receipt = first.journaled_receipt_id().unwrap();
-        let snapshot = store
-            .replaceable_operation_snapshot(&semantic_coordinate())
-            .unwrap()
-            .unwrap();
-        let mut second_write = semantic_accept_write(&store);
-        let crate::AcceptWritePayload::ReplaceableOperation(second) = &mut second_write.payload
-        else {
-            unreachable!()
-        };
-        second.expected_source_revision = Some(snapshot.current.source_revision.clone());
-        second.expected_program_digest = Some(snapshot.current.program_digest);
-        second.contributing_operations = vec![first_intent];
-        second.plan = crate::SemanticPlan::new(1, vec![43]).unwrap();
-        second_write.accepted_at = Timestamp::from(1_001);
+        // The second operation carries the shared candidate, which is how
+        // the engine installs a generation covering both: one accept, both
+        // members.
+        let second_write = semantic_body_complete_accept_write(
+            &store,
+            vec![first_intent],
+            43,
+            1_001,
+            "semantic-u5-shared",
+        );
         let second = store.accept_write(second_write).unwrap();
-        let second_intent = second.journaled_intent_id().unwrap();
-        let second_receipt = second.journaled_receipt_id().unwrap();
-        let snapshot = store
-            .replaceable_operation_snapshot(&semantic_coordinate())
-            .unwrap()
-            .unwrap();
-        let mut rematerialize = crate::SemanticRematerialize {
-            coordinate: semantic_coordinate(),
-            expected_source_revision: snapshot.current.source_revision.clone(),
-            expected_program_digest: snapshot.current.program_digest,
-            expected_current_materialization: None,
-            source: semantic_source(),
-            evaluated_at: Timestamp::from(1_001),
-            materialized: Some(crate::MaterializationCandidate {
-                event: UnsignedEvent::new(
-                    keys().public_key(),
-                    Timestamp::from(1_001),
-                    Kind::ContactList,
-                    Vec::new(),
-                    "semantic-u5-shared",
-                ),
-                routing: "semantic-u5-route".into(),
-                sig_state: crate::PendingMaterializationState::Pending,
-            }),
-            contributing_operations: vec![first_intent, second_intent],
-            resolved_operations: Vec::new(),
-        };
-        rematerialize.contributing_operations.sort();
         assert!(matches!(
-            store
-                .install_replaceable_materialization(rematerialize)
-                .unwrap(),
-            SemanticInstallOutcome::Installed { .. }
+            second,
+            AcceptOutcome::ReplaceableOperation {
+                installed: Some(_),
+                ..
+            }
         ));
+        let second_receipt = second.journaled_receipt_id().unwrap();
         (first_receipt, second_receipt)
     };
 
@@ -1145,54 +1149,24 @@ fn terminal_destinations_close_every_semantic_receipt_and_compact_the_program() 
         let intent_a = first.journaled_intent_id().unwrap();
         let receipt_a = first.journaled_receipt_id().unwrap();
 
-        let snapshot = store
-            .replaceable_operation_snapshot(&semantic_coordinate())
-            .unwrap()
-            .unwrap();
-        let mut second_write = semantic_accept_write(&store);
-        let crate::AcceptWritePayload::ReplaceableOperation(second) = &mut second_write.payload
-        else {
-            unreachable!()
-        };
-        second.expected_source_revision = Some(snapshot.current.source_revision.clone());
-        second.expected_program_digest = Some(snapshot.current.program_digest);
-        second.contributing_operations = vec![intent_a];
-        second.plan = crate::SemanticPlan::new(1, vec![43]).unwrap();
-        second_write.accepted_at = Timestamp::from(1_001);
+        // One accept carrying the shared candidate for both operations --
+        // the engine's own shape for installing a generation.
+        let second_write = semantic_body_complete_accept_write(
+            &store,
+            vec![intent_a],
+            43,
+            1_001,
+            "finite-round",
+        );
         let second = store.accept_write(second_write).unwrap();
         let intent_b = second.journaled_intent_id().unwrap();
         let receipt_b = second.journaled_receipt_id().unwrap();
-
-        let snapshot = store
-            .replaceable_operation_snapshot(&semantic_coordinate())
-            .unwrap()
-            .unwrap();
-        let installed = store
-            .install_replaceable_materialization(crate::SemanticRematerialize {
-                coordinate: semantic_coordinate(),
-                expected_source_revision: snapshot.current.source_revision.clone(),
-                expected_program_digest: snapshot.current.program_digest,
-                expected_current_materialization: None,
-                source: semantic_source(),
-                evaluated_at: Timestamp::from(1_001),
-                materialized: Some(crate::MaterializationCandidate {
-                    event: UnsignedEvent::new(
-                        keys().public_key(),
-                        Timestamp::from(1_001),
-                        Kind::ContactList,
-                        Vec::new(),
-                        "finite-round",
-                    ),
-                    routing: "finite-round-route".into(),
-                    sig_state: crate::PendingMaterializationState::Pending,
-                }),
-                contributing_operations: vec![intent_a, intent_b],
-                resolved_operations: Vec::new(),
-            })
-            .unwrap();
         assert!(matches!(
-            installed,
-            SemanticInstallOutcome::Installed { .. }
+            second,
+            AcceptOutcome::ReplaceableOperation {
+                installed: Some(_),
+                ..
+            }
         ));
         let (target, verified) = semantic_promotion_target(&store);
         store.promote_signed(target, verified).unwrap();

@@ -496,15 +496,6 @@ impl RedbStore {
         semantic_edit_ops::snapshot(self, coordinate)
     }
 
-    /// Atomically install a materializer result computed outside store locks,
-    /// or report a typed stale/refusal outcome without mutation.
-    pub fn install_replaceable_materialization(
-        &mut self,
-        rematerialize: crate::SemanticRematerialize,
-    ) -> Result<crate::SemanticInstallOutcome, PersistenceError> {
-        semantic_edit_ops::install(self, rematerialize)
-    }
-
     /// Atomically adopt a newer verified relay source and install the complete
     /// semantic successor prepared from it. The raw source is never exposed as
     /// the effective canonical value between commits.
