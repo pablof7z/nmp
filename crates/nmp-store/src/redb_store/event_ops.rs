@@ -710,7 +710,7 @@ pub(super) fn gc(
                 }
                 Ok(())
             };
-        for entry in txn.canonical.events.iter().map_err(persist_err)? {
+        for entry in txn.canonical.scan()? {
             let (key, value) = entry.map_err(persist_err)?;
             let key = key.value();
             let event_key = EventKey::from_be_bytes(
