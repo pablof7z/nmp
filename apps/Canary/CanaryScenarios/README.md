@@ -68,17 +68,20 @@ clean machine it also needs several Homebrew packages installed first
 zstd libuv perl`), which is real, sometimes multi-minute cost that
 `swift test` should not silently pay as a side effect of running.
 
-## Two scenarios are red on purpose
+## Two scenarios were red on purpose
 
-A full `swift test` is **not** all-green, and that is the honest state
-rather than a broken checkout. Two scenarios fail because the defect they
-protect against is currently present, and neither has been weakened to make
-it pass (`docs/internals/canary.md`: a threshold is not raised, a scenario is
-not reshaped):
+A full `swift test` was **not** all-green, and that was the honest state
+rather than a broken checkout: two scenarios failed because the defect they
+protect against was present, and neither has been weakened to make it pass
+(`docs/internals/canary.md`: a threshold is not raised, a scenario is not
+reshaped):
 
-- `C6DeepWindowingTests` -- an `.expandable` window's first advance can
-  rewrite rows already delivered instead of only extending the page, and
-  `WindowLoad.returned(added:)` is not a usable progress signal (#1886).
+- `C6DeepWindowingTests` -- `WindowLoad.returned(added:)` is not a usable
+  progress signal, so the scenario waits on the delivered row count instead.
+  The first-advance drop this scenario also caught (#1886) is FIXED in Rust
+  and proven by `crates/nmp/tests/expandable_window_first_advance.rs`, but C6
+  itself has not been re-run since (no strfry in the environment that fix was
+  made in), so whether it is now green is unverified rather than known.
 - `C17RepeatedLifecycleChurnTests.testThreeHundredDistinctObservations...`
   -- engine-lifetime memory grows linearly in distinct filters observed
   (#1846).

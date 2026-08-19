@@ -1086,6 +1086,20 @@ impl CoreState {
             }
         };
         debug_assert!(added <= needed);
+        // #1886: attaching a handle only marks its atoms PENDING. Admission
+        // is the transition that compiles a pending atom into a wire REQ, and
+        // the runtime runs it only from the deadline this effect arms. Every
+        // other `attach_wire_handle` caller arms here; the staged advance did
+        // not, so the tie-second and older-range REQs it built sat pending
+        // until some unrelated demand change happened to arm admission --
+        // which, on a plain scroll, is the NEXT advance's commit withdrawing
+        // this one's superseded handles. Hence "the first advance does
+        // nothing". Armed on the success path only: both failure paths above
+        // return through `on_rollback_history_load`, whose
+        // `withdraw_wire_demand` arms for whatever the detach left pending.
+        if self.wire_admission_needed() {
+            effects.push(Effect::ArmWireAdmission);
+        }
         effects.push(Effect::HistoryLoadResult(id, Ok(())));
         effects
     }
