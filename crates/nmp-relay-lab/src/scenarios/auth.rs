@@ -33,15 +33,23 @@ use crate::{ReadGate, RelayLab, Script};
 /// ```
 ///
 /// No `["AUTH", <event>]` ever reaches the socket. The policy ALLOWED, so the
-/// denial is downstream of it; `AuthSignerOutcome::Rejected` is the only path
-/// from `AwaitingSignature` to `Denied`.
+/// denial is downstream of it. The path is now traced end to end:
+/// `AwaitingSignature -> Denied` has exactly one route,
+/// `AuthSignerOutcome::Rejected` (`auth_transport.rs:587`), constructed in
+/// exactly one place (`runtime/auth.rs:1007`) out of
+/// `SignerError::Rejected(reason)`. The signer refuses to sign the AUTH
+/// event, and it says why.
 ///
-/// **The second half is that the first half was this hard to establish.**
-/// `SourceStatus::AuthDenied` is a unit variant. `AuthDiagnosticsPhase::Denied`'s
-/// own doc says it means "the relay rejected the AUTH event, or the policy
-/// refused" -- two unrelated causes, one value -- and `AuthDiagnosticsSnapshot`
-/// carries no reason either. An app whose read is blocked cannot tell a policy
-/// denial from a signer rejection from a relay refusal.
+/// **The second half stands on its own, whatever the root cause turns out to
+/// be: the reason exists and the app never sees it.** It is carried in
+/// `SignerError::Rejected(reason)` at the point of refusal and then collapses
+/// into a unit `SourceStatus::AuthDenied` before anything an app can read.
+/// `AuthDiagnosticsPhase::Denied`'s own doc says it means "the relay rejected
+/// the AUTH event, or the policy refused" -- two unrelated causes, one value
+/// -- and `AuthDiagnosticsSnapshot` carries `policy_bound`, `signer_bound`
+/// and `auth_event_id` but no reason. So an app whose read is blocked here
+/// cannot tell a policy denial from a signer rejection from a relay refusal,
+/// and neither could this scenario without reading NMP's source.
 ///
 /// This asserts the CURRENT behaviour on purpose. If NMP starts
 /// authenticating, this goes red -- and the right response is to rewrite it to

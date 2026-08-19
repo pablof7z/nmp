@@ -56,7 +56,19 @@
 //! is how the mid-frame truncation case was caught being structurally immune,
 //! its truncated frame naming a subscription the client had never opened.
 //! Add `--features external-relay` for the two that need a real third-party
-//! relay binary.
+//! relay binary. That binary is discovered, never vendored: `$NMP_RELAY_LAB_RELAY_BIN`
+//! if set, otherwise `nostr-rs-relay` on `$PATH`. Install it with
+//!
+//! ```text
+//! cargo install nostr-rs-relay      # NOT --locked
+//! ```
+//!
+//! **Omit `--locked` deliberately.** The published lockfile pins `ahash 0.7`,
+//! whose `#![cfg_attr(feature = "stdsimd", feature(stdsimd))]` no longer
+//! compiles on a current toolchain; an unlocked resolve picks a version that
+//! does. This note is here rather than only in [`external`] because that
+//! module is behind the feature, so `cargo doc` without it would hide the one
+//! sentence that saves the next person the same hour.
 //!
 //! # A scenario, as a caller writes one
 //!
