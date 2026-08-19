@@ -1,0 +1,48 @@
+[package]
+name = "nmp-relay-lab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "A scriptable in-process NIP-01 relay: the test writes the downstream frames."
+
+# Deliberately NOT built on `nostr-relay-builder`. Three reasons, in order of
+# weight -- the crate's own module doc carries the full statement:
+#
+# 1. The whole mechanism here is "the scenario authors the relay-to-client
+#    frames". A relay library exists precisely to author them for you, and
+#    every knob it exposes is a hole punched back through that. Its inability
+#    to express accept-but-never-EOSE is one symptom, not the disease.
+# 2. Byte-level control -- a frame truncated mid-payload, injected octets, an
+#    HTTP 200 login page answering the upgrade -- requires owning the socket.
+#    Nothing layered above a library that owns it can reach that.
+# 3. `nostr-relay-builder` 0.45.0-alpha.3 re-exports a DIFFERENT `nostr` than
+#    this workspace's pinned 0.44.4, so every keypair and every seeded event
+#    crossed the boundary by hex/JSON round-trip. Speaking the wire directly
+#    against the pinned `nostr` deletes that bridge outright: a scenario hands
+#    this crate the same `nostr::Event` value the engine will observe.
+[features]
+default = []
+# A real third-party relay (`nostr-rs-relay`) as a CHILD PROCESS, for the one
+# question an in-process fixture cannot answer: does NMP interoperate with a
+# relay nobody here wrote? Non-default because it needs a binary on the
+# machine -- and a cargo feature rather than a runtime skip, because a test
+# that silently no-ops when a binary is missing is a green run that proves
+# nothing. Install with `cargo install nostr-rs-relay` (NOT --locked).
+external-relay = []
+
+[dependencies]
+nostr.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+# The scenarios ARE this crate's product, so the engine they drive is a real
+# dependency rather than a dev one. There is no test target here to hide it in.
+nmp.workspace = true
+# The websocket server handshake is `base64(sha1(key + RFC6455 GUID))` and
+# nothing else. Both are already resolved at these exact versions through
+# `tungstenite` (which `nmp-transport`'s production client links); naming them
+# here adds no new resolution, and pulling a whole websocket library back in
+# would re-take the socket ownership reason 2 above exists to keep.
+sha1 = "0.10"
+base64 = "0.22"
+

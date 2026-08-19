@@ -61,6 +61,12 @@ members = [
     # proof of goal, exercising the reversed architecture end to end. See
     # this crate's own doc comment for the measured claim.
     "crates/nmp-bookmarks",
+    # The scriptable NIP-01 relay. Replaces `nmp-test-support`'s
+    # `ScriptedRelay`, whose six-knob config could describe six misbehaviours
+    # and whose tap could only see the client-to-relay direction -- which left
+    # most of what a real client must survive undescribable as a test. Here
+    # the scenario authors the downstream frames.
+    "crates/nmp-relay-lab",
 ]
 
 [workspace.package]
