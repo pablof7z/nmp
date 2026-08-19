@@ -211,7 +211,7 @@ Ordinary snapshots stay compact. The permanent diagnostics stream retains:
 
 - current source plan and its revision;
 - exact per-relay wire filters and subscription counts;
-- connection, AUTH, EOSE, negentropy, error, and watermark facts;
+- connection, AUTH, EOSE, error, and watermark facts;
 - events received per relay and kind;
 - lane counts, authors served, reverse coverage, and coalescing decisions;
 - binding expansion and local limit/shortfall reasons.

@@ -175,8 +175,8 @@ impl RedbStore {
     /// rows survive — not a display ordering: the app receives an unordered,
     /// `EventId`-keyed `RowDelta` stream and sorts it itself, so #9's
     /// display-sort fork stays open and the two compose. This store door
-    /// deliberately stays uncapped so unlimited reactive recompute and
-    /// negentropy still see every match. A `Derived` node carrying an explicit
+    /// deliberately stays uncapped so unlimited reactive recompute still
+    /// sees every match. A `Derived` node carrying an explicit
     /// limit uses [`Self::query_newest`] instead: its projection is
     /// defined over the selected newest `N`, not over the complete history.
     pub fn query(&self, filter: &Filter) -> Result<Vec<StoredEvent>, PersistenceError> {
@@ -187,8 +187,8 @@ impl RedbStore {
     /// selection order: `created_at` descending, then event id ascending.
     ///
     /// This is a distinct door from [`Self::query`], whose deliberately
-    /// complete result is required by unlimited reactive recompute and
-    /// negentropy. Handle root projections and explicitly limited `Derived`
+    /// complete result is required by unlimited reactive recompute.
+    /// Handle root projections and explicitly limited `Derived`
     /// nodes use this bounded door. Redb uses an ordered index scan that stops
     /// as soon as `limit` accepted rows have been found.
     pub fn query_newest(

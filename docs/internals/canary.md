@@ -58,28 +58,26 @@ reading its documentation. Verified on macOS/arm64 on 2026-08-16:
   frame, `kill -9` the process, restart against the same LMDB directory, query
   it back: the event survives, with `data.mdb`/`lock.mdb` on disk. This is the
   proof no in-process relay can pass.
-- **NIP-77 negentropy is genuinely implemented.** Two independent strfry
-  processes seeded with different events reconciled bidirectionally — real
-  negentropy log output, both sides converging. Not a stub.
 - **NIP-42 write denial is real**, with a machine-readable
   `auth-required: this relay requires NIP-42 auth for writes`. Fresh challenge
   per connection confirmed in `RelayIngester.cpp`: a new `challengeGenerator`
   is minted per connection id, which is exactly the reconnect property the AUTH
   scenario needs.
 
-Rejected alternatives: **nostr-rs-relay** has real NIP-42 but no NIP-77 at all
-— its NIP support table never mentions it — so it cannot serve the
-reconciliation scenario. **khatru** is a library rather than a relay binary
-(you write your own `main.go` and wire up storage yourself), and its NIP-77
-completeness is unverified; more integration work for no proven advantage.
+Rejected alternatives: **khatru** is a library rather than a relay binary
+(you write your own `main.go` and wire up storage yourself); more integration
+work for no proven advantage. **nostr-rs-relay** was rejected when the suite
+still needed a NIP-77 relay; that requirement is gone with NIP-77 itself, and
+strfry was retained on the restart/AUTH properties above, which stand on
+their own.
 
 ### Why `ScriptedRelay` cannot be the system under test
 
 This one matters, because `crates/nmp-test-support`'s `ScriptedRelay` looks
 like a candidate and is not.
 
-It is a real WebSocket on a real port, and its `nostr-relay-builder` backend
-is a genuinely real negentropy implementation. But it runs **inside the same
+It is a real WebSocket on a real port with a real `nostr-relay-builder`
+backend. But it runs **inside the same
 OS process** as its caller and has **no database file**: its "restart" is a
 fresh in-memory instance on the same port. It cannot prove that anything
 survives a restart, because there is nothing on disk to fail to read back.
@@ -137,7 +135,7 @@ actual errno (`.refused`/`.timedOut`/`.failed(errno:)`) and elapsed time,
 because `isReachable` cannot tell a refused port from a black-holed one and
 costs its full timeout for both (C8's finding, below) — plus an optional
 shared `dataDir` so a second relay process can write into a stopped relay's
-durable store on its own port — C13's and C14's outage window — and
+durable store on its own port — C13's outage window — and
 `probeRead`, one plain NMP-free `REQ` on one fresh connection that reports what
 the relay did about it (challenge, refusal text, events served), optionally
 completing a NIP-42 handshake as a caller-supplied key first. That last one
@@ -226,7 +224,7 @@ dedup and provenance; C4 reactive derived query; C5 replaceable, deletion and
 stale redelivery; C6 deep windowing; C7 normal publish; C8 publish while
 relays fail; C9 crash/restart during publication; C10 offline write then
 convergence; C11 capability end to end (NIP-22 comments); C12 identity
-freeze; C13 relay disconnect/reconnect; C14 NIP-77 reconciliation; C15
+freeze; C13 relay disconnect/reconnect; C15
 NIP-42 AUTH; C16 slow consumer and backpressure; C17 repeated lifecycle
 churn; C18 clean shutdown.
 
@@ -1228,76 +1226,24 @@ finding above). That is a Canary-lab defect rather than an NMP one, and it is
 fixed by `RelayHandle.probe` rather than by changing `isReachable`, whose
 boolean is still the right tool for the waits C2 and C13 use it for.
 
-**C14 is proven live** (#1888), and the thing it proves is not "the events
-arrived" — that is equally true of a refetch — but that NMP **transferred the
-difference instead of the whole set**.
-`apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C14Nip77ReconciliationTests.swift`
-holds ONE feed open across a real strfry outage during which the relay's LMDB
-store gains ten events the local Redb store does not have. The two stores are
-named plainly: NMP's own durable store is one, the relay's is the other. There
-is no app-visible "reconcile these peers" call anywhere in the public API, so
-the scenario is written the way an app actually meets NIP-77 — it doesn't.
+**C14 is deleted, with the feature it measured.** It held one feed open across
+a real strfry outage during which the relay's LMDB store gained ten events the
+local Redb store did not have, and proved that NMP transferred the *difference*
+rather than the whole set: `RelayDiagnostics.eventsByKind` went 60 → 70 with
+`relay.negentropy.enabled = true` against 60 → 130 with it off. That is the
+only measurement NMP ever had that reconciliation was actually being used, and
+it is gone because NIP-77 is gone.
 
-The divergence is deterministic by construction, not a race won: the ten
-outage-window events are written by a SECOND strfry process on its own
-ephemeral port over the SAME LMDB directory (C13's `RelayHandle(dataDir:)`)
-while the port the app is dialing provably refuses a real TCP connection, and
-the scenario checks that the app is holding exactly the sixty overlap events at
-that moment.
-
-**The oracle is `RelayDiagnostics.eventsByKind`** — "events actually RECEIVED
-from a relay, counted by kind" — sampled before the outage and again after
-convergence. Measured, with `relay.negentropy.enabled = true`: 60 → 70, a
-delta of **10** for a 10-event difference, with `nip77Handoff` walking
-`none → awaiting_live_eose → backfilling → live` and `nip77Behavior` reaching
-`behaviorally_proven`. The identical flow against the identical relay with
-`relay.negentropy.enabled = false` also converges on all 70 rows — over a
-delta of **70**, 60 → 130, with `nip77Advertisement` at
-`advertised_unsupported`, `nip77Behavior` never leaving `unknown`, and
-`nip77Handoff` never leaving `none`. Both runs are committed; neither half is
-asserted alone, because "converged" without the count proves nothing about
-NIP-77 and the count without the negentropy-off control is not evidence that
-the count is caused by NIP-77.
-
-**A real finding, found by writing the scenario, and the reason it has the
-shape it has.** The first draft primed the store, shut the engine down, seeded
-the divergence and restarted — the obvious shape. It converged **while
-receiving all 70 events**, with NMP simultaneously reporting
-`nip77Behavior = behaviorally_proven` and `nip77Handoff = none`. The NIP-77
-capability probe is asynchronous: a fresh engine places its query's REQ as soon
-as the socket is up, and `begin_neg_handoff` is only reachable when
-`prober.probed(&relay)` already holds a verdict at the moment a request is
-placed. The verdict lands afterwards, and nothing re-plans the in-flight
-request. **A cold start therefore never reconciles — it always refetches, and
-learns the relay supports NIP-77 just too late to use it.** Reconciliation is
-reachable on a LATER request: a reconnect replay, or a new filter. So the
-committed scenario establishes the probe verdict first and asserts it as a
-precondition, which is exactly what makes the measurement afterwards a
-measurement of reconciliation being used rather than of it still being
-discovered.
-
-Falsified three ways, each restored and re-confirmed green. Seeding the
-divergence BEFORE the outage instead of during it left convergence trivially
-true and was caught only by the divergence precondition ("the app already held
-10 outage-window events before the outage ended") — C13's fourth falsifier,
-same shape, same lesson. Inverting the efficiency assertion failed on the real
-captured `10` against a deliberately wrong `60`. Pointing the negentropy
-scenario at the negentropy-disabled relay failed on all four NIP-77 assertions
-at once with real values: `advertised_unsupported`, `unknown`, handoff
-`["none"]`, and 70 events transferred.
-
-**C14's API finding.** Reconciliation is invisible to the app that benefits
-from it. There is no `sync()`/`reconcile()` call, no demand option, and — more
-consequentially — no PER-QUERY fact distinguishing "this coverage came from a
-completed negentropy round" from "this came from a plain REQ": NIP-77 coverage
-is attributed through the exact same `attribute_eose` path as EOSE, so
-`SourceEvidence.reconciledThrough` and `SourceStatus` are identical either way.
-The only public distinguisher is the per-RELAY, engine-global
-`RelayDiagnostics.nip77Advertisement`/`nip77Behavior`/`nip77Handoff` triple,
-and `nip77Handoff` is a transient — a snapshot read after reconciliation
-finished says `live` and nothing about how it got there, so an app must hold
-`observeDiagnostics()` open and accumulate. This scenario does exactly that,
-and would have measured nothing without it.
+Two findings from it are worth keeping, because both were reasons NIP-77 was
+deleted. First, **a cold start never reconciled**: the capability probe is
+asynchronous, a fresh engine places its query's REQ as soon as the socket is
+up, and the handoff was only reachable when a verdict already existed at the
+moment a request was placed — so the first run always refetched in full while
+simultaneously reporting `behaviorally_proven`. Second, **reconciliation was
+invisible to the app that benefited from it**: no `sync()`/`reconcile()` call,
+no demand option, and no per-query fact distinguishing "this coverage came
+from a completed negentropy round" from "this came from a plain REQ", because
+NIP-77 coverage was attributed through the exact same `attribute_eose` path.
 
 **C15 is proven live**, against a real strfry child process, and it is the
 scenario that found and closed #1889. An earlier revision of this section

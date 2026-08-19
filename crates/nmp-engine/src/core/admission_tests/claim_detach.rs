@@ -28,7 +28,6 @@ fn local_owner_detach_prunes_the_current_attribution_generation_before_eose() {
             owner_demands: BTreeSet::from([incumbent_demand.clone()]),
             lanes: BTreeSet::new(),
             replay: false,
-            event_failure_target: EventFailureTarget::ThisSend,
         })
     });
     core.white_box("apply_request_metadata_updates", |s| {
@@ -133,7 +132,6 @@ fn aliased_current_claim_stays_until_its_last_owner_and_can_reattach_before_eose
             owner_demands: BTreeSet::from([incumbent_demand.clone()]),
             lanes: BTreeSet::new(),
             replay: false,
-            event_failure_target: EventFailureTarget::ThisSend,
         })
     });
     core.white_box("apply_request_metadata_updates", |s| {

@@ -8,7 +8,7 @@ use nmp_store::CoverageKey;
 use nostr::Timestamp;
 
 use super::{
-    unjittered_retry_delay_secs, CoreState, Effect, EventFailureTarget, TransportRelayHandle,
+    unjittered_retry_delay_secs, CoreState, Effect, TransportRelayHandle,
 };
 
 /// Reducer-minted identity of one exact local request-send attempt.
@@ -43,17 +43,6 @@ impl RequestHandoffOutcome {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum RequestAttemptPurpose {
-    Ordinary,
-    Nip77LiveCandidate { plan_sub_id: SubId },
-    Nip77Open { plan_sub_id: SubId },
-    Nip77MissingIds { plan_sub_id: SubId },
-    Nip77Backlog { plan_sub_id: SubId },
-    Nip77Probe,
-    Nip77Continue,
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct RequestAttemptState {
     pub(super) session: RelaySessionKey,
@@ -64,13 +53,11 @@ pub(super) struct RequestAttemptState {
     pub(super) owner_demands: std::collections::BTreeSet<nmp_router::DemandKey>,
     pub(super) lanes: std::collections::BTreeSet<nmp_router::Lane>,
     pub(super) replay: bool,
-    pub(super) event_failure_target: EventFailureTarget,
     pub(super) request_revision: Option<u64>,
     /// Refusals already observed for this one semantic retry goal.
     /// Carried through Attempting so backoff never resets when the retry
     /// record leaves the deadline map for dispatch.
     pub(super) retry_failures: u32,
-    pub(super) purpose: RequestAttemptPurpose,
 }
 
 pub(super) struct RequestSend<'a> {
@@ -83,16 +70,10 @@ pub(super) struct RequestSend<'a> {
     /// resulting `ObservationFact::RelayRequest`.
     pub(super) lanes: BTreeSet<nmp_router::Lane>,
     pub(super) replay: bool,
-    pub(super) event_failure_target: EventFailureTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum RequestRetryKey {
-    Ordinary(RelaySessionKey, SubId),
-    Nip77LiveCandidate(SubId),
-    Nip77MissingIds(SubId),
-    Nip77Backlog(SubId),
-}
+pub(super) struct RequestRetryKey(pub(super) RelaySessionKey, pub(super) SubId);
 
 #[derive(Debug, Clone)]
 pub(super) struct PendingRequestRetry {
@@ -103,42 +84,7 @@ pub(super) struct PendingRequestRetry {
 
 impl RequestAttemptState {
     pub(super) fn retry_key(&self) -> Option<RequestRetryKey> {
-        match &self.purpose {
-            RequestAttemptPurpose::Ordinary => Some(RequestRetryKey::Ordinary(
-                self.session.clone(),
-                self.sub_id.clone(),
-            )),
-            RequestAttemptPurpose::Nip77LiveCandidate { plan_sub_id } => {
-                Some(RequestRetryKey::Nip77LiveCandidate(plan_sub_id.clone()))
-            }
-            RequestAttemptPurpose::Nip77MissingIds { plan_sub_id } => {
-                Some(RequestRetryKey::Nip77MissingIds(plan_sub_id.clone()))
-            }
-            RequestAttemptPurpose::Nip77Backlog { plan_sub_id } => {
-                Some(RequestRetryKey::Nip77Backlog(plan_sub_id.clone()))
-            }
-            RequestAttemptPurpose::Nip77Open { .. }
-            | RequestAttemptPurpose::Nip77Probe
-            | RequestAttemptPurpose::Nip77Continue => None,
-        }
-    }
-}
-
-impl RequestAttemptPurpose {
-    pub(super) fn plan_sub_id(&self) -> Option<&SubId> {
-        match self {
-            Self::Nip77LiveCandidate { plan_sub_id }
-            | Self::Nip77Open { plan_sub_id }
-            | Self::Nip77MissingIds { plan_sub_id }
-            | Self::Nip77Backlog { plan_sub_id } => Some(plan_sub_id),
-            Self::Ordinary | Self::Nip77Probe | Self::Nip77Continue => None,
-        }
-    }
-
-    pub(super) fn evidence_sub_id(&self, physical_sub_id: &SubId) -> SubId {
-        self.plan_sub_id()
-            .cloned()
-            .unwrap_or_else(|| physical_sub_id.clone())
+        Some(RequestRetryKey(self.session.clone(), self.sub_id.clone()))
     }
 }
 
@@ -192,6 +138,7 @@ impl RequestAttempts {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn get(&self, attempt_id: RequestAttemptId) -> Option<&RequestAttemptState> {
         self.attempts.get(&attempt_id)
     }
@@ -399,12 +346,7 @@ impl RequestAttempts {
         self.attempts
             .values()
             .chain(self.retries.values().map(|retry| &retry.attempt))
-            .map(|attempt| {
-                (
-                    attempt.session.clone(),
-                    attempt.purpose.evidence_sub_id(&attempt.sub_id),
-                )
-            })
+            .map(|attempt| (attempt.session.clone(), attempt.sub_id.clone()))
             .collect()
     }
 
@@ -445,70 +387,6 @@ impl RequestAttempts {
             .get_mut(&attempt_id)
             .expect("the retry dispatch just minted its exact attempt")
             .retry_failures = failures;
-    }
-
-    /// Widen the coverage/owner metadata of every attempt and parked retry
-    /// under `role_sub_ids`.
-    ///
-    /// The fan-out is an ARGUMENT, not a read: computing which role
-    /// subscriptions belong to a plan needs NIP-77 state this owner has no
-    /// business seeing, so the root computes it and hands the answer in.
-    pub(super) fn extend_metadata(
-        &mut self,
-        role_sub_ids: &BTreeSet<SubId>,
-        update: &nmp_router::RequestMetadataUpdate,
-    ) {
-        self.for_each_metadata_target(role_sub_ids, &mut |attempt| {
-            attempt
-                .coverage_claims
-                .extend(update.added_coverage_claims.iter().cloned());
-            attempt
-                .owner_demands
-                .extend(update.added_owner_demands.iter().cloned());
-        });
-    }
-
-    pub(super) fn remove_metadata(
-        &mut self,
-        role_sub_ids: &BTreeSet<SubId>,
-        removal: &nmp_router::RequestMetadataRemoval,
-    ) {
-        self.for_each_metadata_target(role_sub_ids, &mut |attempt| {
-            attempt
-                .coverage_claims
-                .retain(|claim| !removal.removed_coverage_claims.contains(claim));
-            attempt
-                .owner_demands
-                .retain(|demand| !removal.removed_owner_demands.contains(demand));
-        });
-    }
-
-    /// I5, in one place: both reverse indexes are exact, and both `expect`s
-    /// that say so are internal to the owner that maintains them.
-    fn for_each_metadata_target(
-        &mut self,
-        role_sub_ids: &BTreeSet<SubId>,
-        apply: &mut dyn FnMut(&mut RequestAttemptState),
-    ) {
-        for role_sub_id in role_sub_ids {
-            let attempt_ids = self.by_sub.get(role_sub_id).cloned().unwrap_or_default();
-            for attempt_id in attempt_ids {
-                apply(
-                    self.attempts
-                        .get_mut(&attempt_id)
-                        .expect("request attempt reverse index is exact"),
-                );
-            }
-            if let Some(retry_key) = self.retry_by_sub.get(role_sub_id).cloned() {
-                apply(
-                    &mut self
-                        .retries
-                        .get_mut(&retry_key)
-                        .expect("request retry reverse index is exact")
-                        .attempt,
-                );
-            }
-        }
     }
 
     #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -639,32 +517,6 @@ impl RequestAttempts {
 }
 
 impl CoreState {
-    /// Which role subscriptions one plan's metadata update applies to.
-    ///
-    /// The NIP-77 fan-out the attempt owner deliberately cannot see. It used
-    /// to be computed here by reaching into four of the repair owner's maps;
-    /// it now comes from that owner directly, as the comment here always
-    /// said it eventually would.
-    fn role_sub_ids_for_plan(&self, plan_sub_id: &SubId) -> BTreeSet<SubId> {
-        self.nip77.role_sub_ids_for_plan(plan_sub_id)
-    }
-
-    pub(in crate::core) fn extend_request_attempt_metadata(
-        &mut self,
-        update: &nmp_router::RequestMetadataUpdate,
-    ) {
-        let role_sub_ids = self.role_sub_ids_for_plan(&update.sub_id);
-        self.attempts.extend_metadata(&role_sub_ids, update);
-    }
-
-    pub(in crate::core) fn remove_request_attempt_metadata(
-        &mut self,
-        removal: &nmp_router::RequestMetadataRemoval,
-    ) {
-        let role_sub_ids = self.role_sub_ids_for_plan(&removal.sub_id);
-        self.attempts.remove_metadata(&role_sub_ids, removal);
-    }
-
     /// Dispatch every retry whose deadline has passed.
     ///
     /// Selection and bookkeeping are the owner's; re-sending is not — it
@@ -686,7 +538,7 @@ impl CoreState {
             let session = attempt.session.clone();
             let sub_id = attempt.sub_id.clone();
             let filter = attempt.filter.clone();
-            let (_, attempt_id) = self.record_observed_request_with_purpose(
+            let attempt_id = self.record_observed_request_attempt(
                 RequestSend {
                     session: &session,
                     sub_id: &sub_id,
@@ -695,10 +547,7 @@ impl CoreState {
                     owner_demands: attempt.owner_demands,
                     lanes: attempt.lanes,
                     replay: attempt.replay,
-                    event_failure_target: attempt.event_failure_target,
-                },
-                attempt.purpose,
-            );
+                });
             self.attempts
                 .set_retry_failures(attempt_id, pending.failures);
             effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
@@ -708,22 +557,9 @@ impl CoreState {
     }
 
     fn request_retry_is_current(&self, attempt: &RequestAttemptState) -> bool {
-        match &attempt.purpose {
-            RequestAttemptPurpose::Ordinary => self
-                .plan_execution_metadata
-                .get(&attempt.sub_id)
-                .is_some_and(|metadata| metadata.filter == attempt.filter),
-            RequestAttemptPurpose::Nip77LiveCandidate { plan_sub_id } => {
-                self.nip77.is_handoff_child_of(plan_sub_id, &attempt.sub_id)
-            }
-            RequestAttemptPurpose::Nip77MissingIds { plan_sub_id }
-            | RequestAttemptPurpose::Nip77Backlog { plan_sub_id } => self
-                .nip77
-                .is_backfill_child_of(plan_sub_id, &attempt.sub_id),
-            RequestAttemptPurpose::Nip77Open { .. }
-            | RequestAttemptPurpose::Nip77Probe
-            | RequestAttemptPurpose::Nip77Continue => false,
-        }
+        self.plan_execution_metadata
+            .get(&attempt.sub_id)
+            .is_some_and(|metadata| metadata.filter == attempt.filter)
     }
 }
 
@@ -763,10 +599,8 @@ mod tests {
             owner_demands: BTreeSet::new(),
             lanes: BTreeSet::new(),
             replay: false,
-            event_failure_target: EventFailureTarget::ThisSend,
             request_revision: None,
             retry_failures: 0,
-            purpose: RequestAttemptPurpose::Ordinary,
         };
         (session, sub_id, state)
     }

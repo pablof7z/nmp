@@ -1,7 +1,7 @@
 //! Live-query planning, relay repair, and row projection.
 //!
 //! This module owns subscription lifetimes, router recompilation, discovery,
-//! NIP-77 handoff/repair, and committed-store mutations projected to observers.
+//! and committed-store mutations projected to observers.
 
 use nmp_grammar::RelaySessionKey;
 use super::attribution::CompletedCoverageClaim;
@@ -20,25 +20,6 @@ pub(super) enum PlanDeltaMode {
     Incremental,
 }
 
-/// Which NIP-77 frame the runtime attempted to hand to a relay worker, for
-/// [`CoreState::on_nip77_handoff`] (issue #775).
-///
-/// Closed and exhaustive: each variant names the exact reducer state that
-/// advanced before the frame existed, and therefore the exact state a
-/// transport refusal has to consume.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Nip77Frame {
-    /// `Effect::StartProbe` -- a capability probe's throwaway `NEG-OPEN`.
-    /// The prober moved the relay to `Probing` and recorded a pending wire id.
-    Probe,
-    /// `Effect::NegOpen` -- a real reconciliation's opening `NEG-OPEN`. A
-    /// `NegSession` and a pending request-evidence record exist.
-    Open,
-    /// `Effect::NegMsg` -- the next round of an already-open reconciliation.
-    /// The reconciler has already consumed the relay's message and advanced.
-    Continue,
-}
-
 impl CoreState {
     /// The sole CoreState authority crossing the durable coverage-write
     /// boundary. Callers own completion or retry policy, but every path
@@ -48,24 +29,6 @@ impl CoreState {
         batch: &[(ContextualAtom, RelaySessionKey, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
         self.store.record_coverage(batch)
-    }
-
-    /// Mint a NIP-77 role wire id nobody has ever been handed before (#932).
-    ///
-    /// Every call advances [`Self::next_nip77_incarnation`], so re-deriving a
-    /// role subscription for the same plan id, role, and filter after the
-    /// previous one was closed and discarded yields a DIFFERENT 64-hex wire
-    /// string. A straggler EOSE addressed to the closed incarnation therefore
-    /// resolves to nothing instead of popping the reopened request's fresh
-    /// attribution FIFO -- see [`nip77_role_sub_id`] for the full reasoning.
-    fn mint_nip77_role_sub_id(
-        &mut self,
-        plan_sub_id: &SubId,
-        role: u8,
-        filter: &ConcreteFilter,
-    ) -> SubId {
-        let incarnation = self.nip77.mint_incarnation();
-        nip77_role_sub_id(plan_sub_id, role, filter, incarnation)
     }
 
     // ---- subscribe / unsubscribe / re-root ------------------------------
@@ -283,12 +246,7 @@ impl CoreState {
 
     /// Recompile the router from the resolver's CURRENT demand, record any
     /// newly-sent REQs' attribution snapshots, and push `Effect::Wire` for
-    /// whatever op actually changed on the wire. A broad request for a
-    /// behaviorally-proven NIP-77 relay becomes a gap-free handoff: first a
-    /// distinct live candidate REQ with `limit:0`, then (only after that
-    /// candidate's exact EOSE) Negentropy while the live REQ stays open.
-    /// Guarantee #8 remains structural: only a `ProbedRelay` token can enter
-    /// [`Self::begin_neg_handoff`].
+    /// whatever op actually changed on the wire.
     pub(in crate::core) fn recompile(&mut self, effects: &mut Vec<Effect>) {
         #[cfg(any(test, feature = "bench-instrumentation"))]
         self.router_compiles
@@ -345,9 +303,8 @@ impl CoreState {
     /// cohort. Existing plan requests are coverage inputs, never merge or
     /// identity candidates, so this transition cannot rewrite them.
     pub(in crate::core) fn flush_wire_admission(&mut self, now: Timestamp) -> Vec<Effect> {
-        // Admission is the exact transition that may mint a NIP-77 handoff
-        // and its liveness deadline. Carry runtime wall truth into that stamp
-        // without turning admission into a maintenance sweep.
+        // Carry runtime wall truth into this transition's stamps without
+        // turning admission into a maintenance sweep.
         self.advance_clock(now);
         let pending: BTreeSet<_> = self.wire.pending_atoms().cloned().collect();
         if pending.is_empty() {
@@ -398,7 +355,6 @@ impl CoreState {
     ) -> BTreeSet<CoverageKey> {
         let mut transferred_claims = BTreeSet::new();
         for update in updates {
-            self.extend_request_attempt_metadata(update);
             self.extend_plan_execution_metadata(update);
             #[cfg(any(test, feature = "bench-instrumentation"))]
             self.request_owner_entries_examined.set(
@@ -454,7 +410,6 @@ impl CoreState {
                 })
                 .cloned()
                 .collect();
-            self.remove_request_attempt_metadata(removal);
             if let Some(metadata) = self.plan_execution_metadata.get_mut(&removal.sub_id) {
                 if metadata.filter.hash() == removal.filter_hash {
                     metadata
@@ -499,7 +454,6 @@ impl CoreState {
         filter: ConcreteFilter,
         coverage_claims: BTreeSet<CoverageKey>,
         owner_demands: BTreeSet<nmp_router::DemandKey>,
-        lanes: BTreeSet<nmp_router::Lane>,
     ) {
         self.plan_execution_metadata.insert(
             sub_id,
@@ -507,7 +461,6 @@ impl CoreState {
                 filter,
                 coverage_claims,
                 owner_demands,
-                lanes,
             },
         );
     }
@@ -534,98 +487,18 @@ impl CoreState {
     }
 
     fn extend_plan_execution_metadata(&mut self, update: &nmp_router::RequestMetadataUpdate) {
-        let filter = {
-            let Some(metadata) = self.plan_execution_metadata.get_mut(&update.sub_id) else {
-                return;
-            };
-            if metadata.filter.hash() != update.filter_hash {
-                return;
-            }
-            metadata
-                .coverage_claims
-                .extend(update.added_coverage_claims.iter().cloned());
-            metadata
-                .owner_demands
-                .extend(update.added_owner_demands.iter().cloned());
-            metadata.filter.clone()
+        let Some(metadata) = self.plan_execution_metadata.get_mut(&update.sub_id) else {
+            return;
         };
-
-        // One traversal across every cluster (`Nip77Sessions::roles_for_plan`)
-        // rather than three independent `children_of`/`get` pairs each
-        // computing its own answer -- collected into owned targets before any
-        // `&mut self` call below, since the traversal itself borrows
-        // `self.nip77`.
-        let targets: Vec<(SubId, DescriptorHash)> = self
-            .nip77
-            .roles_for_plan(&update.sub_id)
-            .into_iter()
-            .flat_map(|(child, role)| match role {
-                PlanRole::Handoff(handoff) => {
-                    let filter_hash = ConcreteFilter {
-                        limit: Some(0),
-                        ..handoff.filter.clone()
-                    }
-                    .hash();
-                    vec![(child, filter_hash)]
-                }
-                PlanRole::Session(session) => vec![(child, session.filter.hash())],
-                PlanRole::Backfill(request) => {
-                    let erased_hash = ConcreteFilter {
-                        since: None,
-                        until: None,
-                        limit: None,
-                        ..filter.clone()
-                    }
-                    .hash();
-                    match request {
-                        TemporaryReq::MissingIds { neg_sub_id, .. } => {
-                            vec![(neg_sub_id.clone(), erased_hash)]
-                        }
-                        TemporaryReq::Backlog { .. } => vec![(child, erased_hash)],
-                        TemporaryReq::BacklogActivatesLive { live_sub_id, .. } => {
-                            let live_filter_hash = ConcreteFilter {
-                                limit: Some(0),
-                                ..filter.clone()
-                            }
-                            .hash();
-                            vec![
-                                (live_sub_id.clone(), live_filter_hash),
-                                (child, erased_hash),
-                            ]
-                        }
-                    }
-                }
-            })
-            .collect();
-
-        for (target, filter_hash) in &targets {
-            self.extend_nip77_role_generation(&update.session, target, *filter_hash, update);
+        if metadata.filter.hash() != update.filter_hash {
+            return;
         }
-
-        if self.nip77.has_repair_state(&update.sub_id) {
-            self.attribution
-                .retain_added_live_request_claims(&update.sub_id, &update.added_coverage_claims);
-        }
-    }
-
-    fn extend_nip77_role_generation(
-        &mut self,
-        session: &RelaySessionKey,
-        sub_id: &SubId,
-        filter_hash: DescriptorHash,
-        update: &nmp_router::RequestMetadataUpdate,
-    ) {
-        self.extend_current_request_owner_demands(
-            session,
-            sub_id,
-            filter_hash,
-            &update.added_owner_demands,
-        );
-        self.attribution.extend_current_send_claims(
-            sub_id,
-            filter_hash,
-            &update.added_coverage_claims,
-        );
+        metadata
+            .coverage_claims
+            .extend(update.added_coverage_claims.iter().cloned());
+        metadata
+            .owner_demands
+            .extend(update.added_owner_demands.iter().cloned());
     }
 
     fn transfer_finished_request_claims(
@@ -965,9 +838,6 @@ impl CoreState {
                             filter.clone(),
                             claims.clone(),
                             owner_demands,
-                            self.router
-                                .request_lanes(session, sub_id)
-                                .unwrap_or_default(),
                         );
                         self.attribution.retain_live_request_claims(sub_id, claims);
                     }
@@ -1003,52 +873,16 @@ impl CoreState {
                             .request_lanes(session, sub_id)
                             .unwrap_or_default();
 
-                        // "Small exact result" (a `limit`) always stays REQ
-                        // -- a bounded, terminating fetch is not what
-                        // negentropy set-reconciliation is for, and `limit`
-                        // poisons coverage attribution regardless (ruling
-                        // §3), so there is nothing reconciliation would buy
-                        // it. The live-first NIP-77 handoff is additionally PUBLIC-
-                        // session-only (#8): the probe verdict was earned on
-                        // the unauthenticated socket and proves nothing
-                        // about an authenticated session's view.
-                        let broad = filter.limit.is_none();
-                        match (
-                            broad && session.authenticate_as.is_none(),
-                            self.prober.probed(&session.relay),
-                        ) {
-                            (true, Some(probed)) => {
-                                let prior_live_sub_id = self
-                                    .request_replacements
-                                    .get(sub_id)
-                                    .and_then(|transition| {
-                                        self.nip77.live_for_plan(&transition.prior_sub_id).cloned()
-                                    });
-                                self.begin_neg_handoff(
-                                    probed,
-                                    sub_id.clone(),
-                                    prior_live_sub_id,
-                                    filter.clone(),
-                                    effects,
-                                );
-                            }
-                            _ => {
-                                self.record_observed_request_with_purpose(
-                                    RequestSend {
-                                        session,
-                                        sub_id,
-                                        filter,
-                                        coverage_claims,
-                                        owner_demands,
-                                        lanes,
-                                        replay: false,
-                                        event_failure_target: EventFailureTarget::ThisSend,
-                                    },
-                                    RequestAttemptPurpose::Ordinary,
-                                );
-                                kept_ops.push(op.clone());
-                            }
-                        }
+                        self.record_observed_request(RequestSend {
+                            session,
+                            sub_id,
+                            filter,
+                            coverage_claims,
+                            owner_demands,
+                            lanes,
+                            replay: false,
+                        });
+                        kept_ops.push(op.clone());
                     }
                     WireOp::Close(sub_id) => {
                         if transition_priors.contains(&(session.clone(), sub_id.clone())) {
@@ -1057,7 +891,8 @@ impl CoreState {
                         if self.request_replacements.contains(sub_id) {
                             self.cancel_request_replacement(sub_id, effects);
                         } else {
-                            kept_ops.extend(self.close_nip77_plan(sub_id, effects));
+                            self.abandon_sub(sub_id);
+                            kept_ops.push(op.clone());
                         }
                     }
                 }
@@ -1669,188 +1504,6 @@ impl CoreState {
             .any(|((candidate, _), live)| candidate == session && live.handle == handle)
     }
 
-    /// Start the gap-free NIP-77 handoff (#563). This function can only be
-    /// called with a behaviorally-minted [`ProbedRelay`]. It sends a distinct
-    /// candidate live REQ with `limit:0`, keeps the prior live REQ open, and
-    /// records a typed pending state. `open_neg_session` is reachable only
-    /// when the candidate's exact EOSE arrives.
-    pub(in crate::core) fn begin_neg_handoff(
-        &mut self,
-        probed: ProbedRelay,
-        plan_sub_id: SubId,
-        prior_live_sub_id: Option<SubId>,
-        filter: ConcreteFilter,
-        effects: &mut Vec<Effect>,
-    ) {
-        let stale_closes = self.cancel_nip77_repair_for_plan(&plan_sub_id, effects);
-        if !stale_closes.is_empty() {
-            effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
-                ops: vec![(RelaySessionKey::unauthenticated(probed.url().clone()), stale_closes)],
-            })));
-        }
-
-        let live_filter = ConcreteFilter {
-            limit: Some(0),
-            ..filter.clone()
-        };
-        let live_sub_id = self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_LIVE_ROLE, &live_filter);
-        let public_session = RelaySessionKey::unauthenticated(probed.url().clone());
-        let metadata = self
-            .plan_execution_metadata
-            .get(&plan_sub_id)
-            .cloned()
-            .expect("a NIP-77 role is derived from an installed plan request");
-        self.record_observed_request_with_purpose(
-            RequestSend {
-                session: &public_session,
-                sub_id: &live_sub_id,
-                filter: &live_filter,
-                coverage_claims: metadata.coverage_claims,
-                owner_demands: metadata.owner_demands,
-                lanes: metadata.lanes,
-                replay: false,
-                event_failure_target: EventFailureTarget::ThisSend,
-            },
-            RequestAttemptPurpose::Nip77LiveCandidate {
-                plan_sub_id: plan_sub_id.clone(),
-            },
-        );
-        self.nip77.insert_handoff(
-            live_sub_id.clone(),
-            PendingNegHandoff {
-                probed,
-                plan_sub_id,
-                live_sub_id: live_sub_id.clone(),
-                prior_live_sub_id,
-                filter,
-                started_at: self.clock,
-            },
-        );
-        effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
-            ops: vec![(public_session, vec![WireOp::Req(live_sub_id, live_filter)])],
-        })));
-        effects.push(Effect::DiagnosticsChanged);
-    }
-
-    /// Withdraw every pending/repair phase belonging to one semantic router
-    /// subscription while deliberately leaving its currently-active live REQ
-    /// alone. Used before a replacement handoff; [`Self::close_nip77_plan`]
-    /// additionally withdraws the active live owner on demand removal.
-    pub(in crate::core) fn cancel_nip77_repair_for_plan(
-        &mut self,
-        plan_sub_id: &SubId,
-        effects: &mut Vec<Effect>,
-    ) -> Vec<WireOp> {
-        let withdrawal = self.nip77.cancel_repair_for_plan(plan_sub_id);
-        self.apply_nip77_repair_withdrawal(withdrawal, effects)
-            .into_iter()
-            .map(WireOp::Close)
-            .collect()
-    }
-
-    /// Withdraw every temporary repair REQ owned by `plan_sub_id`, adding
-    /// each subscription that must leave the wire to `closes`.
-    ///
-    /// Shared by [`Self::cancel_nip77_repair_for_plan`] and
-    /// [`Self::start_backlog_req`] rather than written twice, because a
-    /// `BacklogActivatesLive` entry owns a NESTED live candidate (and
-    /// sometimes its predecessor) that lives in no other map at all -- a
-    /// second, hand-rolled teardown that forgot that nesting would leak the
-    /// candidate on the wire forever and leave a wire id a late EOSE could
-    /// still resolve through.
-    fn retire_temporary_reqs_for_plan(
-        &mut self,
-        plan_sub_id: &SubId,
-        closes: &mut BTreeSet<SubId>,
-    ) {
-        let withdrawal = self.nip77.retire_backfills_for_plan(plan_sub_id);
-        debug_assert!(
-            withdrawal.neg_closes.is_empty(),
-            "a backfill retirement owns no reconciliation session to NEG-CLOSE"
-        );
-        let mut effects = Vec::new();
-        closes.extend(self.apply_nip77_repair_withdrawal(withdrawal, &mut effects));
-        debug_assert!(
-            effects.is_empty(),
-            "a backfill retirement produces no effects of its own"
-        );
-    }
-
-    /// Carry out every consequence a NIP-77 repair-state withdrawal owes
-    /// owners other than [`Nip77Sessions`]: release each wire id's
-    /// cross-owner bookkeeping (attempts, attribution, pending request
-    /// evidence, live wire requests -- none of which that owner holds), emit
-    /// each reconciliation's NEG-CLOSE, and bump the plan-children-touched
-    /// counter by the exact total the owner reports, once, rather than at
-    /// every call site that used to remember to add its own map's count in.
-    fn apply_nip77_repair_withdrawal(
-        &mut self,
-        withdrawal: PlanRepairWithdrawal,
-        effects: &mut Vec<Effect>,
-    ) -> BTreeSet<SubId> {
-        #[cfg(any(test, feature = "bench-instrumentation"))]
-        self.nip77_plan_children_touched.set(
-            self.nip77_plan_children_touched
-                .get()
-                .saturating_add(withdrawal.children_touched),
-        );
-        for sub_id in &withdrawal.abandon_only {
-            self.abandon_sub(sub_id);
-        }
-        let mut closes = BTreeSet::new();
-        for sub_id in withdrawal.abandon_and_close {
-            self.abandon_sub(&sub_id);
-            closes.insert(sub_id);
-        }
-        for (neg_id, relay) in withdrawal.neg_closes {
-            self.abandon_sub(&neg_id);
-            effects.push(Effect::NegClose(relay, neg_id));
-        }
-        closes
-    }
-
-    pub(in crate::core) fn close_nip77_plan(
-        &mut self,
-        plan_sub_id: &SubId,
-        effects: &mut Vec<Effect>,
-    ) -> Vec<WireOp> {
-        let mut closes: BTreeSet<SubId> = self
-            .cancel_nip77_repair_for_plan(plan_sub_id, effects)
-            .into_iter()
-            .filter_map(|op| match op {
-                WireOp::Close(sub_id) => Some(sub_id),
-                WireOp::Req(..) => None,
-            })
-            .collect();
-        let active = self
-            .nip77
-            .take_live(plan_sub_id)
-            .unwrap_or_else(|| plan_sub_id.clone());
-        self.abandon_sub(&active);
-        closes.insert(active);
-        closes.into_iter().map(WireOp::Close).collect()
-    }
-
-    fn retire_nip77_roles_for_replacement(
-        &mut self,
-        plan_sub_id: &SubId,
-        effects: &mut Vec<Effect>,
-    ) -> Vec<WireOp> {
-        let mut closes: BTreeSet<_> = self
-            .cancel_nip77_repair_for_plan(plan_sub_id, effects)
-            .into_iter()
-            .filter_map(|op| match op {
-                WireOp::Close(sub_id) => Some(sub_id),
-                WireOp::Req(..) => None,
-            })
-            .collect();
-        if let Some(active) = self.nip77.take_live(plan_sub_id) {
-            self.abandon_sub(&active);
-            closes.insert(active);
-        }
-        closes.into_iter().map(WireOp::Close).collect()
-    }
-
     fn insert_request_replacement(&mut self, replacement: nmp_router::RequestReplacement) {
         self.request_replacements.insert(replacement);
     }
@@ -1862,17 +1515,11 @@ impl CoreState {
         self.request_replacements.take(successor)
     }
 
-    fn cancel_replacement_successor_work(&mut self, successor: &SubId, effects: &mut Vec<Effect>) {
+    fn cancel_replacement_successor_work(&mut self, successor: &SubId, _effects: &mut Vec<Effect>) {
         let session = RelaySessionKey::new(successor.0.clone(), successor.2);
-        let closes = self.cancel_nip77_repair_for_plan(successor, effects);
         self.abandon_sub(successor);
         self.retire_plan_execution_metadata(successor);
         self.cancel_request_claim_transfers(&session, successor, None);
-        if !closes.is_empty() {
-            effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
-                ops: vec![(session, closes)],
-            })));
-        }
     }
 
     fn retire_replacement_predecessor(
@@ -1880,29 +1527,15 @@ impl CoreState {
         replacement: nmp_router::RequestReplacement,
         effects: &mut Vec<Effect>,
     ) {
-        let had_nip77_roles = self.nip77.has_repair_state(&replacement.prior_sub_id);
-        let mut closes: BTreeSet<_> = self
-            .retire_nip77_roles_for_replacement(&replacement.prior_sub_id, effects)
-            .into_iter()
-            .filter_map(|op| match op {
-                WireOp::Close(sub_id) => Some(sub_id),
-                WireOp::Req(..) => None,
-            })
-            .collect();
-        if !had_nip77_roles {
-            closes.insert(replacement.prior_sub_id.clone());
-        }
         self.abandon_sub(&replacement.prior_sub_id);
         self.retire_plan_execution_metadata(&replacement.prior_sub_id);
         self.cancel_request_claim_transfers(&replacement.session, &replacement.prior_sub_id, None);
-        if !closes.is_empty() {
-            effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
-                ops: vec![(
-                    replacement.session,
-                    closes.into_iter().map(WireOp::Close).collect(),
-                )],
-            })));
-        }
+        effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
+            ops: vec![(
+                replacement.session,
+                vec![WireOp::Close(replacement.prior_sub_id)],
+            )],
+        })));
     }
 
     pub(in crate::core) fn complete_request_replacement(
@@ -1934,426 +1567,8 @@ impl CoreState {
         }
     }
 
-    /// The candidate live REQ's EOSE is the handoff barrier. Promote it to
-    /// the only active live owner, retire the overlapped predecessor, then
-    /// and only then snapshot local holdings and open Negentropy.
-    pub(in crate::core) fn activate_live_and_open_neg(
-        &mut self,
-        handoff: PendingNegHandoff,
-        effects: &mut Vec<Effect>,
-    ) {
-        self.nip77
-            .set_live(handoff.plan_sub_id.clone(), handoff.live_sub_id.clone());
-        if self.request_replacements.contains(&handoff.plan_sub_id) {
-            self.complete_request_replacement(&handoff.plan_sub_id, effects);
-        } else if let Some(prior) = handoff.prior_live_sub_id.as_ref() {
-            if prior != &handoff.live_sub_id {
-                self.abandon_sub(prior);
-                effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
-                    ops: vec![(
-                        RelaySessionKey::unauthenticated(handoff.probed.url().clone()),
-                        vec![WireOp::Close(prior.clone())],
-                    )],
-                })));
-            }
-        }
-        self.open_neg_session(handoff, effects);
-    }
-
-    /// Open a real reconciliation only after the candidate live REQ is
-    /// active. NIP-01 and NIP-77 use separate subscription namespaces; the
-    /// role-derived `neg_sub_id` makes that separation explicit in reducer
-    /// state and permits both protocols to remain open concurrently.
-    pub(in crate::core) fn open_neg_session(
-        &mut self,
-        handoff: PendingNegHandoff,
-        effects: &mut Vec<Effect>,
-    ) {
-        let PendingNegHandoff {
-            probed,
-            plan_sub_id,
-            filter,
-            ..
-        } = handoff;
-
-        let neg_filter = ConcreteFilter {
-            since: None,
-            until: None,
-            limit: None,
-            ..filter
-        };
-        // Seeding the reconciler reads only holdings already observed from
-        // THIS relay. A row learned from relay A is locally available, but
-        // advertising it to relay B would make a shared id compare equal and
-        // suppress B's backfill before NMP has ever verified B's copy. That
-        // permanently loses B provenance. On an I/O failure (issue #122)
-        // degrade to read-only and do not open the session rather than panic
-        // — the `Close` pushed above still stands, so the sub-id is simply
-        // released.
-        let local_rows = match self.store.query(&neg_filter.to_nostr()) {
-            Ok(rows) => rows,
-            Err(_e) => {
-                let owner = plan_sub_id.clone();
-                self.start_backlog_req(
-                    plan_sub_id,
-                    neg_filter,
-                    TemporaryReq::Backlog { plan_sub_id: owner },
-                    effects,
-                );
-                return;
-            }
-        };
-        let local_ids: Vec<(u64, EventId)> = local_rows
-            .into_iter()
-            .filter(|stored| stored.provenance.seen.contains_key(probed.url()))
-            .map(|se| (se.event.created_at.as_secs(), se.event.id))
-            .collect();
-        let (reconciler, initial_hex) = Reconciler::open(&local_ids);
-
-        let neg_sub_id = self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_NEG_ROLE, &neg_filter);
-
-        let public_session = RelaySessionKey::unauthenticated(probed.url().clone());
-        let metadata = self
-            .plan_execution_metadata
-            .get(&plan_sub_id)
-            .cloned()
-            .expect("a NEG role is derived from an installed plan request");
-        let (attribution_send, attempt_id) = self.record_observed_request_with_purpose(
-            RequestSend {
-                session: &public_session,
-                sub_id: &neg_sub_id,
-                filter: &neg_filter,
-                coverage_claims: metadata.coverage_claims,
-                owner_demands: metadata.owner_demands,
-                lanes: metadata.lanes,
-                replay: false,
-                event_failure_target: EventFailureTarget::ThisSend,
-            },
-            RequestAttemptPurpose::Nip77Open {
-                plan_sub_id: plan_sub_id.clone(),
-            },
-        );
-        // The request-evidence record stays PENDING here (issue #775). This
-        // door proves the exact current connected generation -- it is opened
-        // synchronously from that generation's live-candidate EOSE -- but a
-        // connected generation is not an accepted frame: the worker's finite
-        // outbound envelope (#506/#1331) refuses at admission, and that
-        // refusal is materially reachable. Activating the evidence here would
-        // claim NMP had placed a question it may never place. The runtime
-        // reports the real outcome through `on_nip77_handoff`, which either
-        // activates this same record or consumes it as refused.
-        self.nip77.insert_session(
-            neg_sub_id.clone(),
-            NegSession {
-                plan_sub_id,
-                relay: probed.url().clone(),
-                filter: neg_filter.clone(),
-                attribution_send,
-                started_at: self.clock,
-                reconciler,
-            },
-        );
-        effects.push(Effect::NegOpen(
-            attempt_id,
-            probed,
-            neg_sub_id,
-            neg_filter,
-            initial_hex,
-        ));
-    }
-
-    /// The one door every NIP-77 outbound frame's transport outcome returns
-    /// through (issue #775).
-    ///
-    /// `Pool::send`'s `false` is local backpressure and nothing else: the
-    /// worker's finite outbound envelope refused the frame at admission, the
-    /// handle is stale, or no session could be opened at all. It is never a
-    /// statement about the relay. Before this door the runtime discarded it
-    /// (`let _ = pool.send(..)`) at all three NIP-77 effects, so reducer state
-    /// that had already advanced past the send stayed advanced: a probe sat in
-    /// `Probing` for the engine's lifetime, and a reconciliation waited out the
-    /// 30-second silent-relay deadline for a frame that never left the process.
-    ///
-    /// `handle` is the exact Public generation the frame was attempted on, or
-    /// `None` when no session could be opened. It is read only on acceptance.
-    ///
-    /// Public only through the doc-hidden mechanism surface, exactly like
-    /// [`Self::on_wire_request_handoff`], so headless reducer falsifiers drive
-    /// the same edge the runtime does.
-    #[doc(hidden)]
-    pub(in crate::core) fn on_nip77_handoff(
-        &mut self,
-        frame: Nip77Frame,
-        outcome: RequestHandoffOutcome,
-    ) -> Vec<Effect> {
-        let Some(attempt) = self.attempts.get(outcome.attempt_id()).cloned() else {
-            return Vec::new();
-        };
-        let relay = attempt.session.relay.clone();
-        let sub_id = attempt.sub_id.clone();
-        let accepted = matches!(outcome, RequestHandoffOutcome::Accepted { .. });
-        let mut effects = Vec::new();
-        match (frame, accepted) {
-            // Acceptance means the worker owns the bytes. A probe and a
-            // continuing round have no further reducer state to advance --
-            // they already advanced, and now honestly.
-            (Nip77Frame::Probe, true) | (Nip77Frame::Continue, true) => {
-                self.attempts.take(&outcome);
-            }
-            (Nip77Frame::Open, true) => {
-                let Some(_session) = self.nip77.get_session(&sub_id) else {
-                    return effects;
-                };
-                effects.extend(self.on_wire_request_handoff(outcome));
-            }
-            (Nip77Frame::Probe, false) => {
-                self.attempts.take(&outcome);
-                if self
-                    .prober
-                    .refuse_probe(&relay, &crate::core::wire_sub_id_string(&sub_id))
-                {
-                    // The projected capability verdict just moved back to
-                    // `unknown`; it is observable state, so publish it rather
-                    // than waiting for an unrelated recompile.
-                    effects.push(Effect::DiagnosticsChanged);
-                }
-            }
-            (Nip77Frame::Open, false) => {
-                let Some(session) = self.nip77.take_session(&sub_id) else {
-                    return effects;
-                };
-                // Consume the still-pending request evidence as refused. This
-                // is the one place an app can learn that a NIP-77 question was
-                // never placed, and it is emitted instead of -- never beside --
-                // the `RelayRequest` an accepted handoff would have produced.
-                let (handoff_effects, _) = self.consume_wire_request_handoff(outcome);
-                effects.extend(handoff_effects);
-                // No `NEG-CLOSE`: the relay never saw a `NEG-OPEN`, so closing
-                // would be a frame about a session that does not exist -- and
-                // would compete for the very envelope room that was just
-                // refused.
-                let mut fallback_effects = Vec::new();
-                self.neg_session_backlog_fallback(&sub_id, session, &mut fallback_effects);
-                effects.extend(fallback_effects);
-            }
-            (Nip77Frame::Continue, false) => {
-                self.attempts.take(&outcome);
-                let Some(session) = self.nip77.take_session(&sub_id) else {
-                    return effects;
-                };
-                // The open WAS accepted, so this reconciliation exists on the
-                // relay and its best-effort `NEG-CLOSE` is warranted -- the
-                // same terminal the `NEG-ERR`, malformed-payload and
-                // liveness-deadline paths take, reached immediately rather
-                // than 30 seconds after a frame that never left the process.
-                //
-                // `reason` has no consumer here on purpose: this request's
-                // evidence is already ACTIVE (its open was accepted), so it is
-                // retired by `abandon_sub` rather than refused, exactly as the
-                // other three abandonment paths retire it. The app-visible
-                // consequence is the fallback REQ's own fresh evidence.
-                self.neg_session_fallback_to_req(sub_id, session, &mut effects);
-            }
-        }
-        effects
-    }
-
-    /// Drive one inbound `NEG-MSG` round for `sub_id`'s live session, if any
-    /// (a frame for a sub this reducer isn't tracking is an untrusted-
-    /// network fact, silently ignored -- same discipline as
-    /// `handle_write_ack`'s unknown-`OK` case).
-    pub(in crate::core) fn step_neg_session(
-        &mut self,
-        sub_id: SubId,
-        relay: RelayUrl,
-        message_hex: &str,
-        effects: &mut Vec<Effect>,
-    ) {
-        let Some(session) = self.nip77.get_session_mut(&sub_id) else {
-            return;
-        };
-        let filter = session.filter.clone();
-        let filter_hash = filter.hash();
-        let step = session.reconciler.step(message_hex);
-        match step {
-            Ok(NegStep::Continue(next_hex)) => {
-                let attempt_id = self.attempts.mint(RequestAttemptState {
-                    session: RelaySessionKey::unauthenticated(relay.clone()),
-                    sub_id: sub_id.clone(),
-                    filter_hash,
-                    filter,
-                    coverage_claims: BTreeSet::new(),
-                    owner_demands: BTreeSet::new(),
-                    // A reconciliation step carries no REQ of its own, so
-                    // no lane asked for it.
-                    lanes: BTreeSet::new(),
-                    replay: false,
-                    event_failure_target: EventFailureTarget::ThisSend,
-                    request_revision: None,
-                    retry_failures: 0,
-                    purpose: RequestAttemptPurpose::Nip77Continue,
-                });
-                effects.push(Effect::NegMsg(attempt_id, relay, sub_id, next_hex));
-            }
-            Ok(NegStep::Done(need_ids)) => {
-                let session = self
-                    .nip77
-                    .take_session(&sub_id)
-                    .expect("just matched via get_mut above -- still present");
-                self.finish_neg_session(sub_id, relay, session, need_ids, effects);
-            }
-            Err(_) => {
-                // A malformed/unexpected reconcile payload from an
-                // untrusted relay: abandon this reconciliation and fall
-                // back to a plain REQ for the same filter -- the same
-                // recovery path as the liveness-deadline/NEG-ERR cases,
-                // never a silent read-gap.
-                if let Some(session) = self.nip77.take_session(&sub_id) {
-                    self.neg_session_fallback_to_req(sub_id, session, effects);
-                }
-            }
-        }
-    }
-
-    /// Reconciliation completed. Close only the NIP-77 namespace and
-    /// backfill whatever ids Negentropy proved we are missing through the
-    /// ordinary REQ/EOSE/ingest pipeline. The live NIP-01 subscription was
-    /// opened before reconciliation and deliberately remains untouched.
-    ///
-    /// Evidence crediting (guarantee #7) is NOT immediate when a backfill is
-    /// needed: recording a reconciled watermark before the backfilled events
-    /// are actually ingested would attach evidence to a store
-    /// that is still, transiently, missing precisely the events negentropy
-    /// just proved are missing.
-    /// `TemporaryReq::MissingIds` defers credit to the backfill sub's OWN
-    /// EOSE, by which point the events are already ingested (EVENT precedes
-    /// EOSE, NIP-01). An empty `need_ids` credits immediately.
-    pub(in crate::core) fn finish_neg_session(
-        &mut self,
-        sub_id: SubId,
-        relay: RelayUrl,
-        session: NegSession,
-        need_ids: BTreeSet<EventId>,
-        effects: &mut Vec<Effect>,
-    ) {
-        let NegSession {
-            plan_sub_id,
-            attribution_send,
-            ..
-        } = session;
-        let completed_at = self.clock;
-        effects.push(Effect::NegClose(relay.clone(), sub_id.clone()));
-
-        if need_ids.is_empty() {
-            let committed_coverage =
-                self.credit_neg_coverage(&sub_id, attribution_send, completed_at, &relay, effects);
-            let terminal_demands = if committed_coverage.is_some() {
-                self.emit_request_settled(
-                    attribution_send,
-                    completed_at,
-                    RequestTerminal::Nip77,
-                    effects,
-                )
-            } else {
-                self.retire_request_evidence(attribution_send)
-            };
-            let committed_coverage = committed_coverage.unwrap_or_default();
-            self.refresh_evidence_for_coverage_and_demand_keys(
-                &committed_coverage,
-                &terminal_demands,
-                effects,
-            );
-            self.abandon_sub(&sub_id);
-        } else {
-            let backfill = ConcreteFilter {
-                ids: Some(need_ids.iter().map(|id| id.to_hex()).collect()),
-                ..ConcreteFilter::default()
-            };
-            // An id-targeted one-shot backfill fetch, not itself tied to
-            // any live Demand (#106): ids name their own rows, so
-            // `Public`/`Public` is the honest context for it -- and this
-            // sub carries no coverage credit of its own anyway (`coverage_claims`
-            // is empty below; its typed `TemporaryReq::MissingIds` owner
-            // unlocks `sub_id`'s credit at EOSE).
-            let backfill_sub =
-                self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_MISSING_ROLE, &backfill);
-            let missing_plan = plan_sub_id.clone();
-            let evidence_demands = self
-                .plan_execution_metadata
-                .get(&missing_plan)
-                .map(|metadata| metadata.owner_demands.clone())
-                .expect("a missing-id role is derived from an installed plan request");
-            self.nip77.insert_backfill(
-                backfill_sub.clone(),
-                TemporaryReq::MissingIds {
-                    plan_sub_id,
-                    neg_sub_id: sub_id.clone(),
-                    attribution_send,
-                    completed_at,
-                },
-            );
-            // No coverage credit of its OWN for this one-shot id-set fetch
-            // -- `coverage_claims` is deliberately empty; it targets exactly the
-            // ids negentropy already proved, it is not itself a proof over
-            // any atom's shape (the credit it unlocks is `sub_id`'s).
-            let public_session = RelaySessionKey::unauthenticated(relay.clone());
-            self.record_observed_request_with_purpose(
-                RequestSend {
-                    session: &public_session,
-                    sub_id: &backfill_sub,
-                    filter: &backfill,
-                    coverage_claims: BTreeSet::new(),
-                    owner_demands: BTreeSet::new(),
-                    lanes: BTreeSet::new(),
-                    replay: false,
-                    event_failure_target: EventFailureTarget::Correlated(attribution_send),
-                },
-                RequestAttemptPurpose::Nip77MissingIds {
-                    plan_sub_id: missing_plan,
-                },
-            );
-            self.refresh_evidence_for_coverage_and_demand_keys(
-                &BTreeSet::new(),
-                &evidence_demands,
-                effects,
-            );
-            effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
-                ops: vec![(
-                    RelaySessionKey::unauthenticated(relay.clone()),
-                    vec![WireOp::Req(backfill_sub, backfill)],
-                )],
-            })));
-        }
-        effects.push(Effect::DiagnosticsChanged);
-    }
-
-    /// Attribute the exact NEG send-time snapshot that completed. Unlike an
-    /// ordinary REQ's ambiguous EOSE, NEG-DONE is structurally correlated to
-    /// its live `NegSession`. Credit may wait for a backfill EOSE, but
-    /// `completed_at` remains the NEG completion time.
-    pub(in crate::core) fn credit_neg_coverage(
-        &mut self,
-        sub_id: &SubId,
-        attribution_send: AttributionSendId,
-        completed_at: Timestamp,
-        relay: &RelayUrl,
-        effects: &mut Vec<Effect>,
-    ) -> Option<BTreeSet<CoverageKey>> {
-        // Negentropy sessions are opened exclusively on the session bound to no identity
-        // (#8), so their credit resolves through the same Public-session
-        // attribution key `open_neg_session` recorded under.
-        let attributed = self.attribution.attribute_correlated_completion(
-            &RelaySessionKey::unauthenticated(relay.clone()),
-            &wire_sub_id_string(sub_id),
-            attribution_send,
-            completed_at,
-        );
-        attributed
-            .and_then(|completed| self.persist_attributed_completion(completed, relay, effects))
-    }
-
-    /// The one facts-before-claims persistence door shared by ordinary EOSE
-    /// and NEG completion. A poisoned completion performs no store I/O.
+    /// The one facts-before-claims persistence door every completed request's
+    /// EOSE takes. A poisoned completion performs no store I/O.
     /// Every retained shape is resolved before one atomic request-level
     /// coverage transaction starts. Only after that whole transaction commits
     /// does this return the committed keys for evidence refresh.
@@ -2374,8 +1589,6 @@ impl CoreState {
 
         let mut batch = Vec::with_capacity(claims.len());
         for claim in &claims {
-            // Negentropy runs only on the connection bound to nobody (#8),
-            // the same session `open_neg_session` recorded attribution under.
             batch.push((
                 claim.atom.clone(),
                 RelaySessionKey::unauthenticated(relay.clone()),
@@ -2458,141 +1671,6 @@ impl CoreState {
                 &pending.claims.keys().cloned().collect(),
             );
         }
-    }
-
-    /// Start one unlimited one-shot backlog REQ under a role-separated id.
-    /// It never aliases the live NIP-01 id or the NIP-77 session id.
-    pub(in crate::core) fn start_backlog_req(
-        &mut self,
-        plan_sub_id: SubId,
-        filter: ConcreteFilter,
-        request: TemporaryReq,
-        effects: &mut Vec<Effect>,
-    ) {
-        let filter = ConcreteFilter {
-            since: None,
-            until: None,
-            limit: None,
-            ..filter
-        };
-        let relay = plan_sub_id.0.clone();
-        // Displace any repair REQ this plan subscription still owns before
-        // opening a new one. It used to be enough to notice that the newly
-        // derived id COLLIDED with a pending entry's, but role ids are now
-        // reincarnated per mint (#932), so an identical shape no longer
-        // yields an identical key and a key collision can never be observed
-        // again. A plan carries at most one repair phase at a time -- every
-        // route into here first removes its own phase, and every route into a
-        // NEW phase goes through `cancel_nip77_repair_for_plan` -- so this
-        // sweep is expected to find nothing; it exists so that if that
-        // invariant is ever broken the stale repair is retired (nested live
-        // candidate included) instead of leaking on the wire.
-        let mut displaced = BTreeSet::new();
-        self.retire_temporary_reqs_for_plan(&plan_sub_id, &mut displaced);
-        let mut ops: Vec<WireOp> = displaced.into_iter().map(WireOp::Close).collect();
-        let backlog_sub_id =
-            self.mint_nip77_role_sub_id(&plan_sub_id, NIP77_FALLBACK_ROLE, &filter);
-        self.nip77.insert_backfill(backlog_sub_id.clone(), request);
-        let metadata = self
-            .plan_execution_metadata
-            .get(&plan_sub_id)
-            .cloned()
-            .expect("a fallback role is derived from an installed plan request");
-        let evidence_demands = metadata.owner_demands.clone();
-        let public_session = RelaySessionKey::unauthenticated(relay.clone());
-        self.record_observed_request_with_purpose(
-            RequestSend {
-                session: &public_session,
-                sub_id: &backlog_sub_id,
-                filter: &filter,
-                coverage_claims: metadata.coverage_claims,
-                owner_demands: metadata.owner_demands,
-                lanes: metadata.lanes,
-                replay: false,
-                event_failure_target: EventFailureTarget::ThisSend,
-            },
-            RequestAttemptPurpose::Nip77Backlog {
-                plan_sub_id: plan_sub_id.clone(),
-            },
-        );
-        self.refresh_evidence_for_coverage_and_demand_keys(
-            &BTreeSet::new(),
-            &evidence_demands,
-            effects,
-        );
-        ops.push(WireOp::Req(backlog_sub_id, filter));
-        effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
-            ops: vec![(RelaySessionKey::unauthenticated(relay), ops)],
-        })));
-        effects.push(Effect::DiagnosticsChanged);
-    }
-
-    /// A relay that accepted `limit:0` but never sent its barrier EOSE must
-    /// not strand acquisition. Keep that candidate (and any prior live
-    /// owner) open while a distinct unlimited backlog REQ supplies a safe
-    /// fallback. Its EOSE promotes the already-sent candidate and retires
-    /// the predecessor; no Negentropy is attempted on this path.
-    pub(in crate::core) fn handoff_fallback_to_req(
-        &mut self,
-        handoff: PendingNegHandoff,
-        effects: &mut Vec<Effect>,
-    ) {
-        let PendingNegHandoff {
-            plan_sub_id,
-            live_sub_id,
-            prior_live_sub_id,
-            filter,
-            ..
-        } = handoff;
-        let owner = plan_sub_id.clone();
-        self.start_backlog_req(
-            plan_sub_id,
-            filter,
-            TemporaryReq::BacklogActivatesLive {
-                plan_sub_id: owner,
-                live_sub_id,
-                prior_live_sub_id,
-            },
-            effects,
-        );
-    }
-
-    /// Abandon a live reconciliation and fall back to a distinct plain REQ
-    /// for the same unfloored/unlimited filter. The already-active live REQ
-    /// remains open throughout timeout, NEG-ERR, malformed-message, and
-    /// store-failure recovery.
-    pub(in crate::core) fn neg_session_fallback_to_req(
-        &mut self,
-        sub_id: SubId,
-        session: NegSession,
-        effects: &mut Vec<Effect>,
-    ) {
-        effects.push(Effect::NegClose(session.relay.clone(), sub_id.clone()));
-        self.neg_session_backlog_fallback(&sub_id, session, effects);
-    }
-
-    /// The fallback itself, without the best-effort `NEG-CLOSE`: retire the
-    /// reconciliation's own subscription and take the ordinary unlimited
-    /// backlog REQ.
-    ///
-    /// Split out because a reconciliation whose `NEG-OPEN` transport REFUSED
-    /// has no session on the relay to close (issue #775) -- every other caller
-    /// is abandoning a reconciliation the relay really did open, and keeps the
-    /// `NEG-CLOSE`.
-    fn neg_session_backlog_fallback(
-        &mut self,
-        sub_id: &SubId,
-        session: NegSession,
-        effects: &mut Vec<Effect>,
-    ) {
-        self.abandon_sub(sub_id);
-        let owner = session.plan_sub_id.clone();
-        self.start_backlog_req(
-            session.plan_sub_id,
-            session.filter,
-            TemporaryReq::Backlog { plan_sub_id: owner },
-            effects,
-        );
     }
 
     pub(in crate::core) fn refresh_all_observations(&mut self, effects: &mut Vec<Effect>) {
@@ -3355,8 +2433,8 @@ impl CoreState {
     /// `id` ASC (bytewise), the NIP-01 canonical newest-first order -- NOT
     /// every cached match. The authoritative cap lives HERE, at the handle
     /// projection, deliberately NOT in `RedbStore::query` (which must keep
-    /// returning every current match: unlimited Derived-node recompute,
-    /// negentropy, and ingest callers rely on its FULL match set. Explicitly
+    /// returning every current match: unlimited Derived-node recompute and
+    /// ingest callers rely on its FULL match set. Explicitly
     /// limited Derived nodes use `query_newest` at their own projection seam;
     /// that is a separate NIP-01 event-selection operation, not a mutation of
     /// `query()`'s complete-set contract.

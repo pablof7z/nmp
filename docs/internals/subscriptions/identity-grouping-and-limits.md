@@ -23,6 +23,14 @@ issues:
   - "#1731 nmp-runtime coordinator split — where the 10ms window's constant now lives (crates/nmp-runtime/src/wire_admission.rs)"
 ---
 
+> **NIP-77 was deleted from NMP.** Every mention of negentropy, the capability
+> prober, the four `nip77_role_sub_id` roles, and the live-first handoff below
+> is HISTORY: the code, its falsifiers, and the reincarnation counter those
+> roles needed are all gone, and no engine path mints a derived wire id any
+> more. The reasoning is kept because the identity failure modes it records
+> apply to any future derived-id namespace, not because any of it is currently
+> reachable. §7.2's planned-subscription rule is the part that is still live.
+
 # Subscription identity, grouping, and relay limits
 
 This is the full account of how a query becomes REQ frames on a socket: how many
@@ -365,7 +373,8 @@ allocated plan identity and a monotonic mint counter. NIP-01 requires only that
 ids are unique per connection; exact zero-diff retention is local bookkeeping,
 not a protocol requirement that byte changes reuse an id.
 
-Verified: nothing in reconnect/replay, `clear_session`, NIP-77 role ids,
+Verified: nothing in reconnect/replay, `clear_session`, the (since deleted)
+NIP-77 role ids,
 persistence, or the #106 anti-alias tests depends on the derivation. Coverage is
 consulted only by the `MaxAge` freshness gate and by diagnostics — **never
 during filter construction**.
@@ -684,7 +693,8 @@ nothing.
 **What it costs:** the router holds matching state (bounded — it is `prev_plan`,
 already held and pruned every compile, not the unbounded-map class); ids stop
 being recomputable from filters, so a log line needs the plan to interpret; ~12
-test fixtures that predict ids need rework; the negentropy prober must be
+test fixtures that predict ids need rework; the (since deleted) negentropy
+prober had to be
 domain-separated from the allocated namespace.
 
 ### 7.3 The relationship between the halves
@@ -735,7 +745,7 @@ fresh-id successor carrying the survivor set. EngineCore offers that successor
 before closing its predecessor and keeps the predecessor live if local
 placement is refused. Demand that is genuinely gone still closes directly.
 
-### 8.1c PARTIAL (#1004) — ordinary-plan assertions raced NIP-77 capability proof
+### 8.1c PARTIAL (#1004) — ordinary-plan assertions raced NIP-77 capability proof (moot: NIP-77 deleted)
 
 Found while un-`@wip`ing the BDD scenarios and originally attributed to an
 indeterminate live-engine recompile boundary. Issue #1004 captured the
@@ -785,8 +795,8 @@ had happened by then.
 
 Making those steps poll (`nmp_bdd::world::wire_record_when`) was tried. It
 exposed two effects which the original investigation conflated. The ordinary
-tag/author CLOSEs were NIP-77 handoffs, now deterministically excluded by
-#1004. The derived-group scenario still crosses an inbound pipeline for which
+tag/author CLOSEs were NIP-77 handoffs (NIP-77 is now deleted, so that source
+of CLOSEs is gone entirely; #1004 had already excluded it deterministically). The derived-group scenario still crosses an inbound pipeline for which
 the harness cannot name a completed plan generation. Measured over eight
 consecutive suite runs against real in-process relays:
 
@@ -794,7 +804,8 @@ consecutive suite runs against real in-process relays:
 - the derived five-groups-then-one `#d` sequence closed **one**, and in another
   run opened a second subscription instead of widening;
 - the pre-existing author-axis regression guards also showed a CLOSE; #1004's
-  complete record later proved that CLOSE was a NIP-77 handoff, not the
+  complete record later proved that CLOSE was a NIP-77 handoff (since
+  deleted), not the
   derived recompile-boundary residue.
 
 The end state was correct every time: one subscription carrying every value,
@@ -907,7 +918,8 @@ survives to be repeated.
 Same allocated token, and it appends to the SAME FIFO rather than a fresh one —
 that is the ruling's intersection rule operating normally, not a reincarnation.
 
-**NIP-77 live candidate**, `nip77_role_sub_id(plan, 0x71, filter)`. WAS THE
+**NIP-77 live candidate**, `nip77_role_sub_id(plan, 0x71, filter)` — *deleted
+with NIP-77*. WAS THE
 RESIDUE. Content-derived from a plan token that structural-signature matching
 deliberately CARRIES FORWARD across recompiles, so a filter that churns away
 and back re-derives an identical string after the first was closed and
@@ -915,22 +927,25 @@ discarded. `limit:0` poisons its coverage, so the observable is the handoff
 barrier itself: a straggler tripped `activate_live_and_open_neg` for a
 candidate the relay never acknowledged.
 
-**NIP-77 NEG session**, `nip77_role_sub_id(plan, 0x72, filter)`. WAS THE
+**NIP-77 NEG session**, `nip77_role_sub_id(plan, 0x72, filter)` — *deleted
+with NIP-77*. WAS THE
 RESIDUE, same mechanism. Unlimited and carrying the demand's real absorbed
 keys, so a straggler EOSE on a repeated string mints coverage directly.
 
-**NIP-77 missing-ids backfill**, `nip77_role_sub_id(plan, 0x73, ids)`. WAS THE
+**NIP-77 missing-ids backfill**, `nip77_role_sub_id(plan, 0x73, ids)` —
+*deleted with NIP-77*. WAS THE
 RESIDUE, same mechanism. Its own `absorbed` is empty, but its EOSE is what
 unlocks the deferred NEG credit, so a straggler released that credit early.
 
-**NIP-77 fallback backlog**, `nip77_role_sub_id(plan, 0x74, filter)`. WAS THE
+**NIP-77 fallback backlog**, `nip77_role_sub_id(plan, 0x74, filter)` —
+*deleted with NIP-77*. WAS THE
 RESIDUE and the sharpest instance: unlimited (nothing poisons it) and carrying
 the demand's real absorbed keys. The falsifier drives exactly this one and
 watches durable `RecordCoverage` intervals appear for a request the relay had
 not finished serving.
 
 **Negentropy prober**, `SubId::for_wire(relay, probe_filter(), Public,
-Public)`. SAFE, and worth stating explicitly because the string is maximally
+Public)` — *deleted with NIP-77*. SAFE, and worth stating explicitly because the string is maximally
 reproducible — a fixed filter makes it constant per relay. It is never
 registered in attribution at all: `Prober::begin_probe` keys it into the
 prober's own `pending` map, and no probe ever calls `record_send`. It measures
@@ -939,9 +954,9 @@ protocol support and touches no coverage identity.
 **`SubId::for_wire` in `core/evidence.rs`**. SAFE. Test fixtures only, inside
 `#[cfg(test)]`.
 
-#### 8.2.2 The fix
+#### 8.2.2 The fix (deleted with NIP-77)
 
-`nip77_role_sub_id` takes a monotonic incarnation minted by `EngineCore`
+`nip77_role_sub_id` took a monotonic incarnation minted by `EngineCore`
 (`next_nip77_incarnation`), folded into the digest after the role byte and the
 filter hash. Every derivation therefore yields a string nobody has been handed
 before, and a straggler for a closed role subscription resolves to nothing —
@@ -1018,7 +1033,7 @@ Everything asserted above is measured, not reasoned. Reproduce with:
 | author-axis limits under `AuthorUnion` (the pre-existing twin) | `crates/nmp-router/tests/kill_measurement.rs` |
 | live REQ frames against a real relay | `crates/nmp/examples/tag_fanout_live.rs` |
 | intended behaviour, `@wip` | `features/routing/subscription-collapse.feature` |
-| §8.2 the Close/reopen straggler, role path: durable coverage minted by a straggler, plus the positive leg | `crates/nmp-engine/tests/core_headless/negentropy.rs` (`a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose`, `a_reopened_live_candidate_never_inherits_a_closed_incarnations_eose`) |
+| §8.2 the Close/reopen straggler, role path: durable coverage minted by a straggler, plus the positive leg | *deleted with NIP-77* (was `crates/nmp-engine/tests/core_headless/negentropy.rs`) |
 | §8.2 the same race on the plan path, green by §7.2 alone | `crates/nmp-engine/tests/core_headless/live_queries.rs` (`a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose`) |
 | §8.2 observed at the relay, in the product's own voice | `features/coverage/reopened-requests.feature` |
 | §11 what a widening subscription costs a relay, versus asking only for the new values | `crates/nmp/examples/reserve_cost_live.rs` |
@@ -1179,12 +1194,11 @@ never-widened REQ per value, paying the subscription cost and none of the
 bandwidth cost. #933 is a proposal to move unlimited queries to where limited
 queries already sit.
 
-**The relay must not be NIP-77-capable on a Public session**, or the
-overwrite the design attacks never reaches the wire. `crates/nmp-engine/src/
-core/query.rs:1021` is `let broad = filter.limit.is_none();` and the arm below
-it diverts every broad Public REQ on a probed relay into `begin_neg_handoff`
-— the plan's op is **never pushed to `kept_ops`**. So the whole benefit set is
-`unlimited AND mergeable AND (non-Public OR unprobed) AND multi-step growth`.
+**This conjunct used to have a second half** — the relay had to not be
+NIP-77-capable on a Public session, because a broad Public REQ on a probed
+relay was diverted into the live-first handoff and the plan's op never reached
+`kept_ops`. NIP-77 is deleted, so it no longer applies and the benefit set is
+`unlimited AND mergeable AND multi-step growth`.
 
 ### 11.3 The four recorded problems, answered
 
@@ -1234,23 +1248,18 @@ Two precisions, both of which cut AGAINST treating this as a blocker:
 and `attribute_eose_detailed` poisons on `fifo.iter().any(|s| s.limited)` —
 one limited snapshot voids every key that EOSE could have proven. Unlimited is
 the `broad` predicate above. Emitting outside the plan path IS possible; the
-four NIP-77 role ids do exactly that. What that costs is stated in §8.2.2 and
-in the issue's own closing note: such ids must be engine-minted and
-engine-stored, they are invisible to `diag.rs` (which projects `RelayPlan`
+four (now deleted) NIP-77 role ids did exactly that. What that costs is stated
+in §8.2.2 and in the issue's own closing note: such ids must be engine-minted
+and engine-stored, they are invisible to `diag.rs` (which projects `RelayPlan`
 only), and they are not replayed by `on_relay_connected`, so a reconnect
 mid-backfill loses them silently.
 
-**#4 — on a NIP-77 relay the premise is false, and more so than stated.** The
-plan Req is not overwritten on the wire; it is dropped. What actually happens
-is a fresh `0x71` live candidate, then `open_neg_session`
-(`crates/nmp-engine/src/core/query.rs:1971`) stripping `since`/`until`/`limit`
-and re-querying the **entire local store** for the shape to seed
-`Reconciler::open`. Scoping that reconciliation to the delta values would mean
-seeding the reconciler with a deliberately partial view of what we hold, which
-inverts negentropy's contract — the seed IS the claim. **The honest answer is
-that NIP-77 relays are out of scope and negentropy is the delta mechanism
-there.** Suppressing the tiers on probed relays is the only variant that does
-not ship two unreconciled loops.
+**#4 — MOOT: NIP-77 is deleted.** This answered a premise about probed
+relays: the plan REQ was not overwritten on the wire, it was dropped in favour
+of a live candidate and a reconciliation seeded from the entire local store,
+and the recorded answer was that NIP-77 relays were out of the delta design's
+scope. Nothing diverts a broad Public REQ any more, so the design's premise
+now holds uniformly and this exception is retired rather than answered.
 
 ### 11.4 The real cost: every survivable variant converges on the same bill
 
@@ -1378,8 +1387,6 @@ order:
 - **compound churn becomes the steady state**, because value-set growth plus
   a floor advance is a 2-diff under §7.2 — the exact workload §8.1 forbade
   designing around (§11.4 B);
-- **suppression on probed NIP-77 Public sessions** (§11.3 #4), which is a
-  scope decision rather than a mechanism, and is already the accepted answer;
 - **a floor discipline proven never to produce a disjoint coverage merge**
   (§11.3 #2) — satisfiable, but it must be proven rather than assumed.
 

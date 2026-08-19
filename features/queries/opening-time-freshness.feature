@@ -1,7 +1,7 @@
 Feature: Opening-time freshness is separate from deadline maintenance
   Freshness is a one-time policy decision for the exact query an app opens.
   NMP owns scoped relay coverage and the current-time comparison. Expiry,
-  publication retry, and reconciliation liveness are scheduled engine work;
+  and publication retry are scheduled engine work;
   opening an unrelated query is not their timer.
 
   Rule: Only max-age freshness compares coverage with current wall time
@@ -15,7 +15,7 @@ Feature: Opening-time freshness is separate from deadline maintenance
       And its persisted relay coverage is sixty seconds old
       When the app opens that query
       Then the query contributes its ordinary live relay request
-      And opening it does not run expiry, retry, or liveness maintenance
+      And opening it does not run expiry or retry maintenance
 
     # nmp:id=QUERIES-FRESHNESS-CLOCK-002
     # nmp:status=built
@@ -25,7 +25,7 @@ Feature: Opening-time freshness is separate from deadline maintenance
       Given no engine deadline is due
       When the app opens many live and cache-only queries
       Then no store expiration sweep runs
-      And no publication retry or reconciliation liveness sweep runs
+      And no publication retry sweep runs
 
     # nmp:id=QUERIES-FRESHNESS-CLOCK-011
     # nmp:status=built
@@ -64,28 +64,6 @@ Feature: Opening-time freshness is separate from deadline maintenance
       And the deadline is consumed exactly once
 
   Rule: Delayed work owns the current time it stamps
-
-    # nmp:id=QUERIES-FRESHNESS-CLOCK-008
-    # nmp:status=built
-    # nmp:evidence=rust:nmp::nip77_liveness_is_anchored_to_admission_time_without_maintenance
-    # nmp:falsifier=Let delayed admission reuse old clock truth; its new NIP-77 handoff deadline is already stale.
-    Scenario: A delayed NIP-77 handoff gets a full liveness window
-      Given the reducer's last maintenance time is old
-      And a broad live query is waiting for admission on a proven NIP-77 relay
-      When the pending cohort is admitted at the current wall time
-      Then the handoff deadline is one full liveness window after admission
-      And stamping the admission time runs no deadline maintenance
-
-    # nmp:id=QUERIES-FRESHNESS-CLOCK-009
-    # nmp:status=built
-    # nmp:evidence=rust:nmp::nip77_reconnect_liveness_is_anchored_to_connect_time_without_maintenance
-    # nmp:falsifier=Reconnect after a long idle without cheap clock advance; the new generation inherits an already-stale deadline.
-    Scenario: A reconnected NIP-77 relay gets a fresh liveness window
-      Given a planned broad request belongs to a proven NIP-77 relay
-      And the reducer's last maintenance time is old
-      When a fresh relay generation connects at the current wall time
-      Then its handoff deadline is one full liveness window after connection
-      And stamping the connection time runs no deadline maintenance
 
     # nmp:id=QUERIES-FRESHNESS-CLOCK-010
     # nmp:status=built

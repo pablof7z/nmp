@@ -33,13 +33,12 @@ Feature: Diagnostics changes are delivered without rebuilding every close
 
   # nmp:id=DIAG-LAZY-003
   # nmp:status=built
-  # nmp:evidence=rust:nmp::nip77_barrier_lifecycle_is_lazy_without_a_diagnostics_observer
   # nmp:evidence=rust:nmp::eose_refreshes_live_evidence_without_event_index_query
   # nmp:evidence=rust:nmp::no_observer_arms_no_work_and_the_first_observed_change_anchors_the_window
-  # nmp:falsifier=Materialize diagnostics inside ordinary EOSE, the NIP-77 live-first barrier, or fallback transitions without an observer; lifecycle work builds snapshots even though nobody can receive them, or later observation delivers more than one coalesced latest state.
+  # nmp:falsifier=Materialize diagnostics inside an ordinary EOSE transition without an observer; lifecycle work builds snapshots even though nobody can receive them, or later observation delivers more than one coalesced latest state.
   Scenario: Unobserved request terminals update state without building diagnostics
     Given no diagnostics observer is attached
-    When ordinary EOSE, the NIP-77 live-first barrier, or a reconciliation fallback changes diagnostic state
+    When an ordinary EOSE changes diagnostic state
     Then the reducer updates its truthful state immediately
     And it marks diagnostics dirty without materializing a snapshot
     And repeated changes arm no delivery work while there are no observers

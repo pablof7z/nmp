@@ -17,7 +17,7 @@ observe facts such as:
 - blocked on AUTH or access policy;
 - request sent with a known filter;
 - EOSE observed for that request;
-- a negentropy/watermark interval reconciled;
+- a watermark interval covered;
 - error or forced disconnect;
 - limited by a local cap; or
 - not planned because required routing facts are missing.
@@ -231,7 +231,7 @@ proof trail:
 - exact descriptor and graph expansion;
 - source-plan revision and lane reasons;
 - exact per-relay wire filter JSON;
-- connection generation, AUTH, EOSE, negentropy, and errors;
+- connection generation, AUTH, EOSE, and errors;
 - events received per relay/kind;
 - watermarks, caps, and queue pressure; and
 - the local reason for each shortfall.

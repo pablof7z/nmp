@@ -3,53 +3,6 @@
 use super::*;
 
 #[test]
-fn probed_nip77_plan_closes_touch_only_their_exact_children() {
-    const PLANS: u16 = 64;
-    let relay = RelayUrl::parse("wss://nip77-exact-close.example").unwrap();
-    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);
-    core.white_box("prober.force_supported_for_test", |s| {
-        s.prober.force_supported_for_test(relay.clone())
-    });
-    let mut observations = Vec::with_capacity(PLANS as usize);
-    for index in 0..PLANS {
-        observations.push(observation_id(&core.handle(EngineMsg::Subscribe(
-            unbounded_incompatible_query(&relay, index),
-        ))));
-    }
-
-    let admitted = flush(&mut core);
-    assert_eq!(
-        wire_ops(&admitted)
-            .into_iter()
-            .filter(|op| matches!(op, WireOp::Req(_, _)))
-            .count(),
-        PLANS as usize
-    );
-    assert_eq!(core.nip77.counts().handoffs, PLANS as usize);
-    assert_eq!(core.nip77.counts().handoff_plan_keys, PLANS as usize);
-
-    core.nip77_plan_children_touched.set(0);
-    core.white_box("router.reset_withdrawal_work", |s| {
-        s.router.reset_withdrawal_work()
-    });
-    for observation in observations {
-        let effects = core.handle(EngineMsg::Unsubscribe(observation));
-        assert!(!wire_ops(&effects).is_empty());
-    }
-
-    let work = core.router.withdrawal_work();
-    assert_eq!(work.dropped_atoms, PLANS as u64);
-    assert_eq!(work.request_edges_touched, PLANS as u64);
-    assert_eq!(work.plan_request_entries_visited, PLANS as u64);
-    assert_eq!(work.requests_closed, PLANS as u64);
-    assert_eq!(core.nip77_plan_children_touched.get(), PLANS as u64);
-    assert_eq!(
-        core.bench_ownership_census(),
-        CoreOwnershipCensus::default()
-    );
-}
-
-#[test]
 fn a_large_open_and_close_burst_never_reprojects_sibling_rows() {
     let relay = RelayUrl::parse("wss://admission-scale.example").unwrap();
     let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 20);

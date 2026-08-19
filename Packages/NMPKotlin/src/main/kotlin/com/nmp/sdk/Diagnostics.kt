@@ -84,9 +84,6 @@ data class RelayDiagnostics(
     val nip11DocumentRevision: String?,
     val nip11Freshness: String?,
     val nip11LastError: String?,
-    val nip77Advertisement: String,
-    val nip77Behavior: String,
-    val nip77Handoff: String,
 ) {
     companion object {
         fun from(ffi: FfiRelayDiagnostics): RelayDiagnostics =
@@ -107,9 +104,6 @@ data class RelayDiagnostics(
                 nip11DocumentRevision = ffi.nip11DocumentRevision,
                 nip11Freshness = ffi.nip11Freshness,
                 nip11LastError = ffi.nip11LastError,
-                nip77Advertisement = ffi.nip77Advertisement,
-                nip77Behavior = ffi.nip77Behavior,
-                nip77Handoff = ffi.nip77Handoff,
             )
     }
 }

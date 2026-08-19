@@ -311,10 +311,9 @@ impl CoreState {
             // session that replaces it.
             //
             // #1683 narrowed this and did not close it. The measured cause
-            // of the original window was NIP-77: the coordinate read
-            // compiles to a live-first `limit: 0` barrier that answers
-            // nothing on its own, and the door could not tell that from
-            // "nothing ever asked". That case is now `Reconciling` and is
+            // of the original window was a `limit: 0` request that answers
+            // nothing on its own, which the door could not tell from
+            // "nothing ever asked". That case is `Reconciling` and is
             // handled above.
             //
             // What is left here is the residual state, and its cause IS now
@@ -342,9 +341,8 @@ impl CoreState {
             // `relay_source_successors_resume_current_delivery_and_stay_open_after_restart`
             // and `source_session_replacement_wakes_every_signed_successor_destination`
             // -- not by hanging forever, but by never letting an in-flight
-            // NIP-77 barrier/reconciliation reach its own `Reconciling`
-            // credit before this door's retry tears it down and restarts
-            // the handshake, repeating indefinitely. Simply always parking
+            // request reach its own credit before this door's retry tears it
+            // down and restarts, repeating indefinitely. Simply always parking
             // has the same failure shape in the other direction (the
             // original "follow that can never leave" defect). Neither
             // alternative was made safe within this pass.

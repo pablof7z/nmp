@@ -32,7 +32,7 @@ For every relay, show:
 - exact wire filter JSON and subscription id/count;
 - coalescing rule and participating descriptors;
 - AUTH challenge, identity/policy reference, result, and error;
-- EOSE and negentropy session facts;
+- EOSE facts;
 - per-filter watermark intervals;
 - events received by kind; and
 - backpressure or forced-disconnect reason.

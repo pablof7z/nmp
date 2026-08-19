@@ -209,7 +209,6 @@ Feature: Relay work waits briefly for compatible pending demand
     # nmp:evidence=rust:nmp::window_distinct_requests_target_only_their_exact_demand_owners_on_send_and_replay
     # nmp:evidence=rust:nmp::nested_same_demand_boundaries_target_only_wire_participating_scopes
     # nmp:evidence=rust:nmp::reactive_nested_same_demand_replaces_only_the_live_scope_target_revision
-    # nmp:evidence=rust:nmp::nip77_candidate_and_fallback_target_only_the_current_wire_participating_scope
     # nmp:evidence=rust:nmp-resolver::snapshot_scopes_are_per_traversal_occurrence_even_when_a_filter_node_is_shared
     # nmp:evidence=rust:nmp::changed_filter_revisions_replace_stale_request_targets_before_send
     # nmp:falsifier=Discover each request's observation evidence by scanning every observation, collapse distinct limits/windows or nested acquisition scopes into one target, target a CacheOnly or coverage-satisfied path, or retain an earlier filter revision after reactive resolution changes; incompatible admissions perform quadratic owner work or deliver a relay lifecycle fact to a sibling, non-wire scope, or stale revision.
@@ -223,7 +222,6 @@ Feature: Relay work waits briefly for compatible pending demand
       And no cache-only or unrelated sibling receives a relay-request fact
       And each window-distinct request reports only to its exact logical owner on send and replay
       And each nested request reports only to its wire-participating structural occurrence
-      And a NIP-77 candidate, reconciliation, refusal, and fallback retain that same occurrence distinction
       And either close order and a later live reopen preserve that distinction
       And a changed filter revision replaces the earlier target before active relay work reattaches
       And final cancellation releases every execution-evidence owner
@@ -233,24 +231,19 @@ Feature: Relay work waits briefly for compatible pending demand
     # nmp:evidence=rust:nmp::eose_refreshes_live_evidence_without_event_index_query
     # nmp:evidence=rust:nmp::coalesced_eose_refreshes_its_two_current_owners_once_each
     # nmp:evidence=rust:nmp::limited_eose_refreshes_only_its_ordinary_and_history_request_phase
-    # nmp:evidence=rust:nmp::neg_completion_refreshes_only_its_exact_current_owners
-    # nmp:falsifier=Refresh every observation or history when one EOSE or NEG completion changes coverage or request phase; sibling candidates, coverage reads, or frames grow with unrelated owners, or a bounded completion never reports finished stored events.
+    # nmp:falsifier=Refresh every observation or history when one EOSE changes coverage or request phase; sibling candidates, coverage reads, or frames grow with unrelated owners, or a bounded completion never reports finished stored events.
     Scenario: Request terminals refresh only exact current owners
       Given many unrelated ordinary observations and histories remain active
-      When one ordinary EOSE or correlated NEG completion becomes trustworthy
+      When one ordinary EOSE becomes trustworthy
       Then NMP visits only handles attached to its exact coverage keys and logical demands
       And one handle affected by both dimensions is refreshed only once
       And a bounded or poisoned EOSE records no false coverage while its current owner still reports finished stored events
-      And a limit:0 NIP-77 barrier remains nonterminal
       And no sibling coverage read, evidence frame, or eager diagnostics snapshot is produced
 
     # nmp:id=ROUTING-PENDING-017
     # nmp:status=built
     # nmp:evidence=rust:nmp::repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_only_on_accept
     # nmp:evidence=rust:nmp::dynamic_full_recompile_publishes_awaiting_request_before_wire_dispatch
-    # nmp:evidence=rust:nmp::empty_neg_completion_projects_finished_status_through_the_plan_request
-    # nmp:evidence=rust:nmp::refused_neg_open_publishes_awaiting_before_its_fallback_request
-    # nmp:evidence=rust:nmp::missing_id_backfill_publishes_awaiting_before_its_request
     # nmp:falsifier=Report a planned or locally refused send as Requesting or RelayRefused, emit wire before its AwaitingRequest evidence, retain more than one retry goal, or leave the goal alive after withdrawal.
     Scenario: Local placement stays awaiting until exact transport acceptance
       Given a connected source has one planned local request that is not yet accepted
@@ -260,7 +253,6 @@ Feature: Relay work waits briefly for compatible pending demand
       And exactly one engine-owned retry and deadline remain
       When the exact retry handoff is accepted
       Then the source status becomes Requesting
-      And candidate, reconciliation, and repair role ids report through their plan source
       And withdrawal cancels the attempt or retry ownership
 
     # nmp:id=ROUTING-PENDING-018

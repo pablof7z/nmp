@@ -934,9 +934,6 @@ pub struct FfiRelayDiagnostics {
     pub nip11_document_revision: Option<String>,
     pub nip11_freshness: Option<String>,
     pub nip11_last_error: Option<String>,
-    pub nip77_advertisement: String,
-    pub nip77_behavior: String,
-    pub nip77_handoff: String,
 }
 
 /// One bounded exact-session AUTH diagnostics record. `relay + access`

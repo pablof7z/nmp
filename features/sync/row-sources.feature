@@ -1,11 +1,8 @@
 # A row's source set answers "which relays in this read are known to hold this
-# event", never "which relay happened to answer first". Reconciliation is where
-# that distinction is easiest to lose: NIP-77 compares an id set against the
-# relay it is talking to, so whatever NMP claims to already hold is what that
-# relay will decline to send back. Claiming another relay's holdings buys a
-# saved round trip and pays for it with a permanently wrong source set, because
-# an id excluded from the comparison is never requested, never delivered, and
-# therefore never attributed. Nothing revisits it afterwards.
+# event", never "which relay happened to answer first". Any mechanism that
+# suppresses a request because NMP already holds the event locally loses that
+# distinction: an id never requested is never delivered and therefore never
+# attributed, and nothing revisits it afterwards.
 #
 # The cost of getting this right is deliberate: an event that two relays both
 # hold is fetched from both. A source set is a claim about relays, and the only
@@ -14,9 +11,8 @@ Feature: Which relays hold a row does not depend on which one answered first
 
   # nmp:id=SYNC-ROWSOURCES-001
   # nmp:status=built
-  # nmp:evidence=rust:nmp::negentropy_local_snapshot_is_scoped_to_the_reconciling_relay
   # nmp:evidence=rust:nmp::same_event_id_from_two_relays_unions_into_one_row_with_both_sources
-  # nmp:falsifier=Seed reconciliation from the relay-agnostic local store; a relay that holds an event another relay delivered first is never recorded as a source for it.
+  # nmp:falsifier=Suppress a request for an event the local store already holds; a relay that holds an event another relay delivered first is never recorded as a source for it.
   Scenario: A relay that also holds an already-delivered event still becomes one of its sources
     Given relays "north" and "south" both hold the same note
     And "north" has already delivered that note, so it is in the local cache

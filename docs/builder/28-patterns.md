@@ -70,14 +70,6 @@ The snapshot carries rows plus compact per-planned-source acquisition and
 shortfall facts. Apps interpret those facts; NMP exposes no
 `synced`, `syncHealth`, global `complete`, or `authoritativeEmpty` state.
 
-### #8: negentropy requires a proved capability
-
-**Excludes:** sending NIP-77 messages to an unprobed relay.
-
-Only the prober can mint `ProbedRelay`; the negentropy effect requires that
-token. A relay's NIP-11 advertisement is separate evidence and can never mint
-it. Other relays use REQ.
-
 ### #9: durable acceptance is not convergence
 
 **Excludes:** a publish return value being mistaken for relay success.

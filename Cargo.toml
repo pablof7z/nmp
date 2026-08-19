@@ -34,7 +34,7 @@ members = [
     # Explicit in-process local-key provider used by `nmp::Engine::add_account`.
     "crates/nmp-local-signer",
     # #827: the M3 engine (reducer `core`, async `runtime`, `outbox` write
-    # plane, `negentropy` reconciler) is no longer a separate crate -- it is
+    # plane) is no longer a separate crate -- it is
     # folded into `crates/nmp` as private/doc-hidden modules behind the one
     # canonical product facade.
     "crates/nmp",

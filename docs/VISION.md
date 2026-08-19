@@ -126,7 +126,7 @@ A query snapshot contains:
 - explicit local shortfall or limit evidence when applicable.
 
 NMP never reports `synced`, `syncHealth`, global `complete`, or an
-"authoritative empty" interpretation. EOSE, negentropy reconciliation, cached
+"authoritative empty" interpretation. EOSE, cached
 watermarks, connection failures, and AUTH challenges are facts about particular
 planned sources. They cannot prove that no unknown or private relay has more
 matching events.

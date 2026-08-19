@@ -98,7 +98,7 @@ mod subscription;
 //
 // Read that word exactly: an event-kind capability is one that owns the
 // meaning of some kinds, and the facade names none of them. A protocol
-// MECHANISM -- NIP-11 relay information, NIP-42 AUTH, NIP-77 negentropy --
+// MECHANISM -- NIP-11 relay information, NIP-42 AUTH --
 // is wire/session machinery every app rides whether or not it knows the
 // number, has no per-app extension surface, and MAY be named here. Owner
 // ruling 2026-08-17, closing #1791, which found this comment and the NIP-11

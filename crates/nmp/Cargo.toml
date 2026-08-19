@@ -47,7 +47,7 @@ unstable-mechanism = [
 # meaning, re-export door or not.
 
 # #827: both instrumentation features came in with the folded engine modules
-# (`core`, `runtime`, `outbox`, `negentropy`). They stay non-default.
+# (`core`, `runtime`, `outbox`). They stay non-default.
 bench-instrumentation = [
     "nmp-engine/bench-instrumentation",
     "nmp-runtime/bench-instrumentation",
@@ -136,15 +136,13 @@ nmp-runtime = { workspace = true, features = ["test-instrumentation", "unstable-
 nmp-nip29.workspace = true
 nmp-test-support.workspace = true
 nmp-resolver-testkit.workspace = true
-# #1731: these four were declared as production dependencies with zero uses in
+# #1731: these were declared as production dependencies with zero uses in
 # `crates/nmp/src`. They are real, and test-only: the relay-ingest probe under
-# `examples/support/` names `nmp-resolver`, `serde_json` and `libc`, and the
-# negentropy live test names `negentropy`.
+# `examples/support/` names `nmp-resolver`, `serde_json` and `libc`.
 # A manifest that claims a production edge it does not have is
 # corrosive precisely because manifest-as-proof is what the crate split rests
 # on.
 nmp-resolver.workspace = true
-negentropy = { version = "0.5", default-features = false, features = ["std"] }
 serde_json.workspace = true
 nmp-router-testkit.workspace = true
 nmp-store = { workspace = true, features = ["test-instrumentation"] }
@@ -169,14 +167,10 @@ tempfile = "3"
 # transitively (mio/tokio/etc.) at the SAME pinned version -- this just names
 # it directly for the code that calls it.
 libc = "0.2"
-# `neg_liveness_deadline_does_not_busy_spin` (runtime_integration.rs, #39
-# fix-up) needs a genuinely uncooperative NIP-77 peer held open for the real
-# ~30s liveness window -- `LocalRelay`/`nostr-relay-builder` is a fully
-# compliant relay and would converge a real reconciliation long before that,
-# so this drives a minimal raw `tungstenite` stub instead (see that test's
-# doc). Same version `nmp-transport`'s own production `Pool` speaks on the
-# wire (already resolved workspace-wide); this just names it directly for
-# the one test that needs to speak it from the SERVER side.
+# `integration_capstone.rs` and the `examples/` probes speak the WebSocket
+# wire directly. Same version `nmp-transport`'s own production `Pool` speaks
+# (already resolved workspace-wide); this just names it directly for the
+# tests that need to speak it from the SERVER side.
 tungstenite = "0.29"
 serde = { version = "1", features = ["derive"] }
 url = "2"

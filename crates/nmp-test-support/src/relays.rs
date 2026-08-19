@@ -335,21 +335,6 @@ pub struct WireReq {
 }
 
 impl WireReq {
-    /// True iff this REQ has the exact wire shape of NMP's NIP-77 live
-    /// candidate: every filter carries `limit:0`.
-    ///
-    /// The candidate deliberately overlaps an ordinary live REQ before the
-    /// predecessor is closed. Tests about NIP-01 plan replacement must keep
-    /// that protocol-role handoff out of their oracle instead of sometimes
-    /// misclassifying its required CLOSE as router churn.
-    pub fn is_nip77_live_candidate(&self) -> bool {
-        !self.filters.is_empty()
-            && self
-                .filters
-                .iter()
-                .all(|filter| filter.get("limit").and_then(serde_json::Value::as_u64) == Some(0))
-    }
-
     /// Every value this REQ asks for under single-letter tag `tag` (`#p`,
     /// `#d`, ...), unioned across its filters.
     pub fn tag_values(&self, tag: char) -> BTreeSet<String> {
@@ -1487,7 +1472,7 @@ mod tests {
         );
         assert!(
             response.contains("\"supported_nips\":[1,11]"),
-            "the default scripted document explicitly excludes NIP-77: {response}"
+            "the default scripted document advertises exactly NIP-01 and NIP-11: {response}"
         );
         assert!(response.contains("\"max_subscriptions\":20"), "{response}");
         assert!(response.contains("\"max_subid_length\":71"), "{response}");
@@ -1552,33 +1537,6 @@ mod tests {
         assert_eq!(record.live_subscription_ids(), vec!["sub-a"]);
         assert_eq!(record.reqs[2].tag_names(), BTreeSet::from(['t']));
         assert!(!record.reqs[0].narrows_by_kind_alone());
-        assert!(
-            !record.reqs.iter().any(|req| req.is_nip77_live_candidate()),
-            "ordinary NIP-01 fixtures must not look like a NIP-77 live candidate"
-        );
-    }
-
-    #[test]
-    fn identifies_the_nip77_live_candidate_by_its_exact_wire_shape() {
-        let log = Arc::new(WireLog::default());
-        let mut frames = ClientFrames::new(Arc::clone(&log));
-
-        let mut stream = Vec::new();
-        stream
-            .extend_from_slice(b"GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\r\n");
-        stream.extend(masked_text_frame(
-            r##"["REQ","ordinary",{"authors":["aa"],"kinds":[1]}]"##,
-        ));
-        stream.extend(masked_text_frame(
-            r##"["REQ","nip77-live",{"authors":["aa","bb"],"kinds":[1],"limit":0}]"##,
-        ));
-        for byte in stream {
-            frames.push(&[byte]);
-        }
-
-        let record = log.snapshot();
-        assert!(!record.reqs[0].is_nip77_live_candidate());
-        assert!(record.reqs[1].is_nip77_live_candidate());
     }
 
     /// A REQ this decoder could not account for must POISON every later

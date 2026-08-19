@@ -6,7 +6,7 @@ status: built
 date: 2026-07-29
 owns:
   - the neutral three-state author-route fact
-  - exact request settlement across NIP-01 and NIP-77
+  - exact request settlement for NIP-01
   - the private fact-writer boundary
   - optional protocol assembly
 related:
@@ -61,8 +61,6 @@ filter revision, relay, authenticated identity, transport generation, request
 revision, observed time, and terminal:
 
 - `Eose` after the exact ordinary NIP-01 request reaches EOSE.
-- `Nip77` after successful reconciliation, immediately when no ids are
-  missing or only after the missing-id backfill reaches EOSE.
 
 Timeout, refusal, disconnect, cancellation, and abandoned requests never
 settle. Neither does a terminal whose exact #816 request-scoped

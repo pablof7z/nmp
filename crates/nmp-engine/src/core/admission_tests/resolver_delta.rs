@@ -169,7 +169,6 @@ fn one_handle_partial_close_preserves_only_the_distinct_surviving_request_target
                 owner_demands: BTreeSet::from([surviving_demand.clone()]),
                 lanes: BTreeSet::new(),
                 replay: false,
-                event_failure_target: EventFailureTarget::ThisSend,
             })
         });
         let handoff = if terminal == "refused" {
@@ -292,7 +291,6 @@ fn one_added_request_claim_never_revisits_ten_thousand_incumbent_live_claims() {
             owner_demands: BTreeSet::from([DemandKey::for_atom(&request_atom)]),
             lanes: BTreeSet::new(),
             replay: false,
-            event_failure_target: EventFailureTarget::ThisSend,
         })
     });
 

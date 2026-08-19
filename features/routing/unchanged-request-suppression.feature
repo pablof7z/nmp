@@ -7,11 +7,6 @@ Feature: An accepted unchanged request is not sent twice
   Background:
     Given I am logged in as my own account
     And relay "hub" is the relay I watch directly
-    # This feature isolates the ordinary NIP-01 router plan. A behaviorally
-    # proven NIP-77 relay deliberately opens a distinct `limit:0` live
-    # candidate, waits for its EOSE, and only then overlap-closes the prior
-    # REQ.
-    And relay "hub" advertises that NIP-77 is unsupported
 
   # nmp:id=ROUTING-SUBSCRIPTIONCOLLAPSE-020
   # nmp:status=built

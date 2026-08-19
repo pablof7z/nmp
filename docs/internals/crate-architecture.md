@@ -70,7 +70,7 @@ sides declare the same dependencies.
      capability N+1 is a new crate, and `nmp` must not name it.
    - a **protocol mechanism** is wire or session machinery every app rides
      whether or not it knows the number — NIP-11 relay information, NIP-42
-     AUTH, NIP-77 negentropy. There is no per-app extension surface here;
+     AUTH. There is no per-app extension surface here;
      `nmp` and `nmp-runtime` need these internally regardless.
 
    So the facade may re-export NIP-11's values, and an app reaches relay
@@ -87,8 +87,9 @@ sides declare the same dependencies.
    Two things the ruling does **not** settle, and neither is licence to widen
    it. `nmp-nip11` being a non-optional dependency of both `nmp` and
    `nmp-runtime` is still the one inverted edge in the workspace, and #1806
-   still owns extracting AUTH, negentropy and relay-info out of the core. A
-   permitted re-export is not a permitted dependency direction.
+   still owns extracting AUTH and relay-info out of the core (its third
+   subject, negentropy, was deleted rather than extracted). A permitted
+   re-export is not a permitted dependency direction.
 
 A crate earns its existence by a real reason — a genuine ownership
 boundary, an independent lifecycle, an independently consumed artifact, a
@@ -160,7 +161,7 @@ The reducer and the async edge left `crates/nmp` as **two crates**:
 
 | crate | owns | must never depend on | status |
 |---|---|---|---|
-| `nmp-engine` | the deterministic reducer: `EngineCore`, `handle(EngineMsg) → Vec<Effect>` / `tick()`, plus its reducer-coupled satellites (the negentropy FSM it drives turn-by-turn, the publish-queue fact vocabulary, bench hooks) | **`tokio`, `reqwest`, `nmp-nip11`,** the runtime, the facade, any capability crate. Allowed: grammar, store, resolver, router, transport (nine value and observation types — see the fence), signer, `negentropy`, `nostr` | runtime seam correct today; internals open |
+| `nmp-engine` | the deterministic reducer: `EngineCore`, `handle(EngineMsg) → Vec<Effect>` / `tick()`, plus its reducer-coupled satellites (the publish-queue fact vocabulary, bench hooks) | **`tokio`, `reqwest`, `nmp-nip11`,** the runtime, the facade, any capability crate. Allowed: grammar, store, resolver, router, transport (nine value and observation types — see the fence), signer, `nostr` | runtime seam correct today; internals open |
 | `nmp-runtime` | the async edge that interprets effects: `EngineThread`, `Handle`, channels/mailboxes, the AUTH driver, sign-event completion, signer registry, pool bridge, the opaque session payload, NIP-11 service wiring, and driving whichever `AuthorRouteProvider` the application constructed | the facade, any capability crate, **any routing protocol** (`nmp-nip11` is its ONE declared protocol edge; author-route discovery is a contract it drives, not a crate it names) | correct today |
 
 `session.rs` went with the runtime rather than staying in the facade:
@@ -344,7 +345,9 @@ conjunction gates both planes' sends. A write/read crate seam would put
 shared mutable state on the wrong side of any line drawn. Four owner-shaped
 candidates were then measured one at a time and each failed for its own
 reason — `SessionRegistry`, `AttemptCorrelations`, `CoordinateCoverage`, and
-`nmp-nip77`, all below.
+`nmp-nip77`, all below. (The `nmp-nip77` case is now moot: NIP-77 was deleted
+outright rather than extracted. It is kept because the reasoning about how a
+boundary is judged is what the section is for.)
 
 *What is NOT measured, and must not be inferred from it.* That no package
 seam exists. **Four rejected proposals bound the proposals, not the space.**
@@ -388,7 +391,8 @@ things" below is where that is measured properly and comes out differently.
 ### Owners extracted so far
 
 `RequestAttempts` (#1693), `HistorySessions` (#1695), `WireOwnership` and
-`RequestTargets` (#1746), and `Nip77Sessions` (#1747) all came out of the
+`RequestTargets` (#1746), and `Nip77Sessions` (#1747, since deleted with
+NIP-77) all came out of the
 ≥85%-concentration band. `EngineCore` is **114 → 96 fields** across the last
 three. What they proved:
 
@@ -423,7 +427,8 @@ Activation had also been reaching into `self.handles` to derive which scopes
 contribute wire; that is a freshness decision the branch owns, so it now
 arrives as a passed-in fact.
 
-**`Nip77Sessions` — eight fields.** The candidate signal here was not
+**`Nip77Sessions` — eight fields (deleted with NIP-77; kept here for the
+method).** The candidate signal here was not
 concentration but *repetition*: three clusters with the identical
 `(map, reverse-index-by-plan)` shape, each carrying its own hand-written insert
 and take. Six functions, verbatim copies, differing only in the value type and
@@ -556,17 +561,18 @@ sentence that made "a module is as good as a crate" sound proven:
   crate-global: any module may `use` any dependency the package declares, and
   no amount of module privacy narrows that.**
 
-The demonstration is in this crate, not hypothetical. `hex` is declared once
-in `crates/nmp-engine/Cargo.toml` and used by two modules that share nothing:
-`negentropy/mod.rs` frames NEG-OPEN/NEG-MSG payloads with it, and
-`core/write.rs:4956`/`:4988` encodes and decodes durable `explicit-hex:`
-routing snapshots with it. The manifest comment names both concerns — and
-**that comment is the only thing scoping the dependency.** Module privacy has
-no opinion on it: `write.rs` did not have to ask anyone, and if a third
-module reaches for `hex` tomorrow the comment simply goes stale with nothing
-red. Contrast the package answer: were the NIP-77 FSM its own crate declaring
-`hex`, `write.rs` reaching for it would be `E0433` and would have to add its
-own reviewable manifest line. `libc` shows the same shape from the other end
+The demonstration was in this crate, not hypothetical. `hex` is declared once
+in `crates/nmp-engine/Cargo.toml` and used to be reached by two modules that
+share nothing: the deleted `negentropy/mod.rs` framed NEG-OPEN/NEG-MSG
+payloads with it, and `core/write.rs` encodes and decodes durable
+`explicit-hex:` routing snapshots with it. The manifest comment named both
+concerns — and **that comment was the only thing scoping the dependency.**
+Module privacy had no opinion on it: `write.rs` did not have to ask anyone,
+and if a third module reaches for `hex` tomorrow the comment simply goes
+stale with nothing red. Contrast the package answer: were the second consumer
+its own crate declaring `hex`, `write.rs` reaching for it would be `E0433`
+and would have to add its own reviewable manifest line. `libc` shows the same
+shape from the other end
 — declared for exactly one file's bench counters (`ingest_attribution.rs`),
 and reachable from all 57 files in the crate whenever the feature is on.
 
@@ -612,7 +618,10 @@ each in a different way, and the failures are the useful part:
   `self.on_unsubscribe(..)`. Teardown reaches into the query plane, which is
   I6 stated as a call graph.
 
-`nmp-nip77` was a fourth rejection, on a different failure again: the reducer
+`nmp-nip77` was a fourth rejection, on a different failure again — and the
+subject of it no longer exists, since NIP-77 was deleted outright rather than
+extracted. The record stands as reasoning about boundaries, not as a live
+question: the reducer
 holds `Prober` and `Reconciler` as its own fields and matches `NegStep`
 directly, so `nmp-engine` would name `nmp-nip77` and `nmp-nip77` would name
 `negentropy` — the dependency gains a hop rather than leaving the manifest,
@@ -622,8 +631,10 @@ reducer saw only a value `core` defines itself, which is what let the crate
 line remove `reqwest` from the reducer's future manifest. Ask which side owns
 the state before asking whether the cluster is self-contained.
 
-> **OVERTURNED by #1806 (Pablo, 2026-08-17).** NIP-77 — with NIP-42 AUTH and
-> NIP-11 — must come out of the core. The rejection above is not retracted as
+> **OVERTURNED by #1806 (Pablo, 2026-08-17), then made moot by NIP-77's
+> deletion.** NIP-77 — with NIP-42 AUTH and
+> NIP-11 — must come out of the core. NIP-77 came out by being deleted; AUTH
+> and NIP-11 remain #1806's live subjects. The rejection above is not retracted as
 > an *observation*: the dependency really does gain a hop, and "ask which side
 > owns the state" is still the right question. What it got wrong is treating
 > the answer as a verdict on the boundary. The reducer holding `Prober` and
@@ -743,7 +754,7 @@ that the claim is unlikely, it is four counter-examples already compiled.
 | 6 | **AuthorOutboxRouteNeeds** | — | — | — | — | 0 of 5 mutating functions touch any of the four — but it emits `Effect::AuthorRouteNeedsChanged` from its own method instead of returning an outcome. **Axis 2**, not axis 1. |
 | 7 | **AttemptCorrelations** | root | fact | — | root | Rejected on **appears**, not coupling: `AttemptCorrelationTarget` names `ReceiptId`, `RelaySessionKey` and `PublishQueueLaneKey` — a ~50-line crate whose public type drags three vocabularies. |
 | 8 | **LiveWireOwnership** (9 fields) | root | root | **fact** | root | 4 of 8 mutating functions read `self.router.plan()`; none calls store or resolver. One genuinely foreign reader (`observation.rs`, a membership predicate). |
-| 9 | **NegentropySessions** (NIP-77, 10 fields) | root | fact | fact | root | 22 mutating functions, 2 touch router/clock. Its crate rejection was a **dependency** argument, not a coupling one: `negentropy` is already on the reducer's allowed list, so `nmp-nip77` gains a hop rather than removing an edge. **That rejection is overturned by #1806** — see the note under the rejection list. |
+| 9 | **NegentropySessions** (NIP-77, 10 fields) — *deleted with NIP-77* | root | fact | fact | root | 22 mutating functions, 2 touch router/clock. Its crate rejection was a **dependency** argument, not a coupling one. Overturned by #1806, then made moot: the cluster is gone. Row kept so the census's own numbers stay readable. |
 | 10 | **ObservationBranches** (`observations`, `handles`) | root | — | — | **root** | 3 of 7 mutating functions call the resolver — all of them root subscribe/unsubscribe *around* the map update, the `HistorySessions` shape exactly. |
 | 11 | **RequestClaimTransfers** | root | fact | fact | root | Clock is a deadline; router reads are plan facts. |
 | 12 | **QuarantinedAuthReceipts** | root | fact | — | root | First read as **atomic**; re-reading it, the shape is get → orchestrate → remove, which is what the extracted owners already do. Recorded as the corrected classification. |
