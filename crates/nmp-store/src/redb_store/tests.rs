@@ -1204,6 +1204,89 @@ fn publish_queue_ranges_visit_only_target_intent_and_exact_relay_rows() {
     assert_eq!(store.publish_queue_range_rows(), (2, 2));
 }
 
+/// The durable coverage row key is PINNED, byte for byte.
+///
+/// `coverage_row_key`'s output IS the key of a durable `COVERAGE` row. A
+/// change to its spelling orphans every row already written: a lookup under
+/// the new spelling finds nothing, "no row" reads as "not covered", and the
+/// engine silently refetches everything it already had. There is no error to
+/// notice, which is why the encoding needs a test that fails loudly rather
+/// than a reviewer who happens to be paying attention.
+///
+/// The routing segment is the reason this test exists. It used to be
+/// `format!("{:?}", routing)` -- the DERIVED `Debug` of `ReadRouting`, a
+/// public `nmp-grammar` enum that apps and protocol crates match on. Renaming
+/// `Auto`, reordering the variants, or giving `Explicit` a named field is an
+/// ordinary refactor nobody would file as a schema change, and every one of
+/// them re-keyed the whole table. It is now an exhaustive match writing a
+/// fixed tag, so a NEW variant is a compile error in `coverage_row_key` and a
+/// RENAMED one changes nothing at all.
+///
+/// Changing any expected string below is a `SCHEMA_VERSION` bump, not a test
+/// fix.
+#[test]
+fn coverage_row_key_encoding_is_pinned() {
+    // A fixed filter, so the hex prefix is a constant rather than whatever
+    // `canonical_encoding` happens to produce for a generated key.
+    fn atom(routing: nmp_grammar::ReadRouting) -> ContextualAtom {
+        ContextualAtom {
+            filter: ConcreteFilter {
+                kinds: Some(std::collections::BTreeSet::from([1u16])),
+                ..ConcreteFilter::default()
+            },
+            routing,
+            authenticate_as: None,
+            routing_evidence: BTreeSet::new(),
+        }
+    }
+    let relay = RelayUrl::parse("wss://relay.example").unwrap();
+    let session = RelaySessionKey::unauthenticated(relay.clone());
+    let key_of = |atom: &ContextualAtom| {
+        RedbStore::coverage_row_key(&compute_coverage_key(atom), &session)
+    };
+
+    // The canonical encoding of `{kinds: [1]}`, hex-encoded -- shared by
+    // every case below, so a filter-encoding change reddens all of them at
+    // once and a routing change reddens only the tail.
+    const FILTER_HEX: &str = "7b22617574686f7273223a6e756c6c2c22696473223a6e756c6c2c226b696e6473\
+         223a5b315d2c226c696d6974223a6e756c6c2c2273696e6365223a6e756c6c2c2274616773223a7b7d2c22756e\
+         74696c223a6e756c6c7d";
+
+    assert_eq!(
+        key_of(&atom(nmp_grammar::ReadRouting::Auto)),
+        format!("d3:{FILTER_HEX}:r0:wss://relay.example:"),
+    );
+
+    let one = RelayUrl::parse("wss://one.example").unwrap();
+    let two = RelayUrl::parse("wss://two.example").unwrap();
+    assert_eq!(
+        key_of(&atom(nmp_grammar::ReadRouting::Explicit(vec![one.clone()]))),
+        format!("d3:{FILTER_HEX}:r1,17:wss://one.example:wss://relay.example:"),
+    );
+    assert_eq!(
+        key_of(&atom(nmp_grammar::ReadRouting::Explicit(vec![one, two]))),
+        format!("d3:{FILTER_HEX}:r1,17:wss://one.example,17:wss://two.example:wss://relay.example:"),
+    );
+
+    // The declared identity and the DISCOVERED session identity are separate
+    // trailing segments, and both are pinned.
+    let declared = nostr::Keys::generate().public_key();
+    let discovered = nostr::Keys::generate().public_key();
+    let mut named = atom(nmp_grammar::ReadRouting::Auto);
+    named.authenticate_as = Some(declared);
+    assert_eq!(
+        RedbStore::coverage_row_key(
+            &compute_coverage_key(&named),
+            &RelaySessionKey::new(relay, Some(discovered)),
+        ),
+        format!(
+            "d3:{FILTER_HEX}:r0:{}:wss://relay.example:{}",
+            declared.to_hex(),
+            discovered.to_hex()
+        ),
+    );
+}
+
 /// The durable-key falsifier: `coverage_row_key` must DISTINGUISH atoms
 /// that differ in any component of coverage identity.
 ///
