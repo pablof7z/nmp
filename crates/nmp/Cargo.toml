@@ -33,17 +33,17 @@ unstable-mechanism = [
 # as every capability. The feature, and the whole cfg-shape break class that
 # came with it, are deleted.
 
-# #1707 deleted the `nip29`/`nip22`/`nip25`/`nip18`/`nipc7`/`content`/`asset`/
-# `blossom`/`nip68` features and their `dep:nmp-*` optional dependencies
-# below. `nip22`/`nip25`/`nip18`/`nipc7`/`content`/`asset`/`blossom`/`nip68`
+# #1707 deleted the `nip29`/`nip22`/`nip25`/`nip18`/`nipc7`/`content`
+# features and their `dep:nmp-*` optional dependencies below.
+# `nip22`/`nip25`/`nip18`/`nipc7`/`content`
 # were pure re-export doors with no engine coupling at all. `nip29` was not a
 # bare re-export door -- its Group/Groups/group-list-write door genuinely
 # needed `nmp`'s engine surface -- but that need runs the OTHER way: the
 # capability crate composes the engine it runs against, not the reverse, so
 # `nmp-nip29` now depends on `nmp` instead of the facade re-exporting
 # `nmp-nip29`. A direct-Rust app names the mechanism crate directly, same as
-# `nmp-ffi`/Swift/Kotlin already do and same as `nmp-media`/`nmp-nip02`
-# already work. `nmp` must not contain a single line of any capability's
+# `nmp-ffi`/Swift/Kotlin already do and same as `nmp-nip02`
+# already works. `nmp` must not contain a single line of any capability's
 # meaning, re-export door or not.
 
 # #827: both instrumentation features came in with the folded engine modules

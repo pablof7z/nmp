@@ -140,7 +140,7 @@ Durable cursor resume and a global end verdict are deliberately not offered.
 protocol publishes that draft in a context.
 
 A NIP module owns only its exact schemas. NIP-29 may add its `h` tag and group
-host context to a NIP-68 photo draft without owning the photo kind. Core
+host context to a NIP-C7 chat draft without owning kind:9. Core
 validates the immutable composition and signs once.
 
 ### #15: pending writes use ordinary query semantics

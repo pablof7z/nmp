@@ -1613,13 +1613,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nmp-asset"
-version = "0.1.0"
-dependencies = [
- "sha2",
-]
-
-[[package]]
 name = "nmp-bdd"
 version = "0.1.0"
 dependencies = [
@@ -1640,19 +1633,6 @@ dependencies = [
  "nmp-transport",
  "nostr 0.44.4",
  "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "nmp-blossom"
-version = "0.1.0"
-dependencies = [
- "base64",
- "nmp-asset",
- "nostr 0.44.4",
- "reqwest",
- "serde",
- "serde_json",
  "tokio",
 ]
 
@@ -1687,8 +1667,6 @@ name = "nmp-consumer-check"
 version = "0.1.0"
 dependencies = [
  "nmp",
- "nmp-asset",
- "nmp-blossom",
  "nmp-content",
  "nmp-nip02",
  "nmp-nip18",
@@ -1737,11 +1715,8 @@ version = "0.1.0"
 dependencies = [
  "k256",
  "nmp",
- "nmp-asset",
- "nmp-blossom",
  "nmp-content",
  "nmp-grammar",
- "nmp-media",
  "nmp-nip02",
  "nmp-nip18",
  "nmp-nip22",
@@ -1752,7 +1727,6 @@ dependencies = [
  "nmp-store",
  "nmp-test-support",
  "nostr 0.44.4",
- "serde_json",
  "tempfile",
  "tokio",
  "tungstenite 0.29.0",
@@ -1781,17 +1755,6 @@ dependencies = [
  "nostr 0.44.4",
  "sha2",
  "zeroize",
-]
-
-[[package]]
-name = "nmp-media"
-version = "0.1.0"
-dependencies = [
- "nmp-asset",
- "nmp-blossom",
- "nmp-nip68",
- "nostr 0.44.4",
- "tokio",
 ]
 
 [[package]]
@@ -1879,14 +1842,6 @@ version = "0.1.0"
 dependencies = [
  "nmp",
  "nmp-nip65",
-]
-
-[[package]]
-name = "nmp-nip68"
-version = "0.1.0"
-dependencies = [
- "nmp-asset",
- "nostr 0.44.4",
 ]
 
 [[package]]

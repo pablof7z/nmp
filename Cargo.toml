@@ -54,20 +54,6 @@ members = [
     # NIP-C7 kind:9 chat schema owner (#838): pure draft construction and
     # `q`-tag replies, with no NIP-29 group or client notification policy.
     "crates/nmp-nipc7",
-    # Protocol-neutral exact-byte asset identity/proof (#884): the ONE owner of
-    # `Sha256Hash` and the `VerifiedAsset` witness, shared by the storage
-    # protocol crates without dragging any protocol vocabulary along.
-    "crates/nmp-asset",
-    # Blossom (BUD-01/02/11) blob-upload core (#545, epic #216 T15-A-BLOSSOM).
-    "crates/nmp-blossom",
-    # NIP-68 picture-first (kind:20) schema owner (#558, epic #216 T15-B-NIP68-IMETA).
-    "crates/nmp-nip68",
-    # The staged media composition seam (prepare -> upload -> compose, #559,
-    # epic #216 T15-C-MEDIA-COMPOSITION): sequences nmp-asset/nmp-blossom/
-    # nmp-nip68 without owning any schema of its own. #1563 absorbed this
-    # into `nmp::media`; #1707 reverses that -- `nmp` must not contain any
-    # capability's implementation, reachable or not.
-    "crates/nmp-media",
     "crates/nmp-content",
     "crates/nmp-test-support",
     # Typed NIP-22 comments over NIP-73 external content ids (#572),
@@ -120,10 +106,6 @@ default-members = [
     "crates/nmp-outbox",
     "crates/nmp-nip29",
     "crates/nmp-nipc7",
-    "crates/nmp-asset",
-    "crates/nmp-blossom",
-    "crates/nmp-nip68",
-    "crates/nmp-media",
     "crates/nmp-content",
     "crates/nmp-nip22",
     "crates/nmp-nip73",
@@ -169,10 +151,6 @@ nmp-nip65 = { path = "crates/nmp-nip65" }
 nmp-outbox = { path = "crates/nmp-outbox" }
 nmp-nip29 = { path = "crates/nmp-nip29" }
 nmp-nipc7 = { path = "crates/nmp-nipc7" }
-nmp-asset = { path = "crates/nmp-asset" }
-nmp-blossom = { path = "crates/nmp-blossom" }
-nmp-nip68 = { path = "crates/nmp-nip68" }
-nmp-media = { path = "crates/nmp-media" }
 nmp-content = { path = "crates/nmp-content" }
 nmp-test-support = { path = "crates/nmp-test-support" }
 nmp-nip22 = { path = "crates/nmp-nip22" }
@@ -185,15 +163,9 @@ uniffi = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-webpki-roots"] }
-# BUD-11 `Authorization: Nostr <base64url-no-padding(event JSON)>` encoding
-# (#545); already at 0.22.1 in Cargo.lock via transitive resolution.
-base64 = "0.22"
-# `nmp-asset`'s exact-byte digest (#884). A protocol-neutral identity crate
-# cannot reach for `nostr::hashes`, so the hash comes from the RustCrypto
-# implementation directly. Also the BIP-340 tagged hashing and NIP-44
-# HKDF/HMAC inside `nmp-signer`'s zeroizing local-key path (#765), which for
-# the same reason cannot route through `nostr`'s own hashing. Already at
-# 0.10.9 in Cargo.lock via transitive resolution.
+# The BIP-340 tagged hashing and NIP-44 HKDF/HMAC inside `nmp-signer`'s
+# zeroizing local-key path (#765), which cannot route through `nostr`'s own
+# hashing. Already at 0.10.9 in Cargo.lock via transitive resolution.
 sha2 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 regex = "1"

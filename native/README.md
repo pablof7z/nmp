@@ -81,8 +81,8 @@ The filtering mechanism validates marker keys against the catalog; it has no
 knowledge of any particular family.
 
 The checked examples cover the linear build shapes: `core.toml`, the
-NIP-65-selected `normal-client.toml`, `representative-mix.toml` (independent
-families plus the real `blossom` to `asset` Cargo feature dependency), and
+NIP-65-selected `normal-client.toml`, `representative-mix.toml` (several
+independent families selected together), and
 `all.toml`; Android-specific examples select the same four shapes without a
 second capability graph. `fixtures/native-cli-app/.nmp.toml` is the clean
 application declaration selecting groups plus outbox routing.

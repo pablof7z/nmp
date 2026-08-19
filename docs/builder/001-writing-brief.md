@@ -64,12 +64,11 @@ Use an immutable unsigned draft for a caller-owned kind. Show:
 Use the agreed cross-owner example:
 
 ```text
-asset   = Blossom.upload(file)
-photo   = Nip68.buildPhoto(asset)
-receipt = nip29.group(groupId, hostRelay).publish(photo)
+message = NipC7.chat(text)
+receipt = nip29.group(groupId, hostRelay).publish(message)
 ```
 
-Spell out that Blossom owns bytes, NIP-68 owns the photo draft, NIP-29 owns
+Spell out that NIP-C7 owns the kind:9 chat draft, NIP-29 owns
 only group context (`h` plus host authority), and core signs once.
 
 ## Reader journey

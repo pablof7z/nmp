@@ -82,20 +82,19 @@ mod subscription;
 // glob of this one's internals. `nmp`'s public API is now exactly the
 // re-export list below — visible, and the whole of it.
 
-// #1707 deleted `nip22`/`nip25`/`nip18`/`nipc7`/`content`/`asset`/`blossom`/
-// `nip68`/`nip65`: each was a pure re-export door over its own engine-free
-// mechanism crate -- no `WriteIntent`/`Engine`/`Row` construction, nothing
-// the engine needed to execute, just vocabulary a caller could equally well
-// reach by naming `nmp-nip22`/`nmp-nip25`/`nmp-nip18`/`nmp-nipc7`/
-// `nmp-content`/`nmp-asset`/`nmp-blossom`/`nmp-nip68`/`nmp-nip65` directly.
+// #1707 deleted `nip22`/`nip25`/`nip18`/`nipc7`/`content`/`nip65`: each was
+// a pure re-export door over its own engine-free mechanism crate -- no
+// `WriteIntent`/`Engine`/`Row` construction, nothing the engine needed to
+// execute, just vocabulary a caller could equally well reach by naming
+// `nmp-nip22`/`nmp-nip25`/`nmp-nip18`/`nmp-nipc7`/`nmp-content`/`nmp-nip65`
+// directly.
 // `nip65`'s door was `impl Engine { publish_relay_list_bootstrap }`, one
 // line of capability convenience (`engine.publish(request.into_write_intent())`)
 // wearing an engine-bound signature -- not routing mechanism, so it went
-// the same way the other eight did: deleted, not relocated. `nmp` must not
+// the same way the others did: deleted, not relocated. `nmp` must not
 // contain a single line of any EVENT-KIND CAPABILITY's meaning, re-export
 // door or not; a direct-Rust app now names the mechanism crate directly, the
-// same way `nmp-ffi`/Swift/Kotlin already do and the same way `nmp-media`
-// already works.
+// same way `nmp-ffi`/Swift/Kotlin already do.
 //
 // Read that word exactly: an event-kind capability is one that owns the
 // meaning of some kinds, and the facade names none of them. A protocol

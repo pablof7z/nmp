@@ -110,30 +110,6 @@ kotlin_sources = [
 ]
 
 [[features]]
-key = "asset"
-capability = "verified assets"
-cargo_feature = "asset"
-ffi_sources = ["crates/nmp-ffi/src/asset.rs"]
-swift_sources = [
-  { path = "Packages/NMP/Sources/NMP/Asset.swift", target = "NMP", destination = "Asset.swift" },
-]
-kotlin_sources = [
-  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Asset.kt", destination = "com/nmp/sdk/Asset.kt" },
-]
-
-[[features]]
-key = "blossom"
-capability = "Blossom uploads"
-cargo_feature = "blossom"
-ffi_sources = ["crates/nmp-ffi/src/blossom.rs"]
-swift_sources = [
-  { path = "Packages/NMP/Sources/NMP/Blossom.swift", target = "NMP", destination = "Blossom.swift" },
-]
-kotlin_sources = [
-  { path = "Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Blossom.kt", destination = "com/nmp/sdk/Blossom.kt" },
-]
-
-[[features]]
 key = "content"
 capability = "rich content"
 cargo_feature = "content"

@@ -90,8 +90,6 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp/src/nip65.rs`
 - Source: `crates/nmp/src/nipc7.rs`
 - Source: `crates/nmp/src/content.rs`
-- Source: `crates/nmp/src/asset.rs`
-- Source: `crates/nmp/src/blossom.rs`
 
 ## FFI and native wrappers
 
@@ -105,8 +103,6 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `crates/nmp-ffi/src/nip29_simple_groups.rs`
 - Source: `crates/nmp-ffi/src/tagging.rs`
 - Source: `crates/nmp-ffi/src/content.rs`
-- Source: `crates/nmp-ffi/src/asset.rs`
-- Source: `crates/nmp-ffi/src/blossom.rs`
 - Source: `Packages/NMP/Sources/NMP/Engine.swift`
 - Source: `Packages/NMP/Sources/NMP/NMPError.swift`
 - Source: `Packages/NMP/Sources/NMP/Query.swift`
@@ -121,7 +117,6 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMP/Sources/NMP/Diagnostics.swift`
 - Source: `Packages/NMP/Sources/NMP/NostrEntity.swift`
 - Source: `Packages/NMP/Sources/NMP/Signing.swift`
-- Source: `Packages/NMP/Sources/NMP/Asset.swift`
 - Source: `Packages/NMP/Sources/NMP/AuthPolicy.swift`
 - Source: `Packages/NMP/Sources/NMP/RelayInformation.swift`
 - Source: `Packages/NMP/Tests/NMPTests/DiagnosticsTests.swift`
@@ -142,7 +137,6 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Diagnostics.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NostrEntity.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Signing.kt`
-- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Asset.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/RelayInformation.kt`
 - Source: `Packages/NMPKotlin/src/test/kotlin/com/nmp/sdk/DiagnosticsConcurrencyTest.kt`
 - Source: `Packages/NMPKotlin/src/test/kotlin/com/nmp/sdk/SigningTest.kt`
@@ -163,7 +157,6 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMP/Sources/NMP/NIP22.swift`
 - Source: `Packages/NMP/Sources/NMP/NIP29.swift`
 - Source: `Packages/NMP/Sources/NMP/NIP29SimpleGroups.swift`
-- Source: `Packages/NMP/Sources/NMP/Blossom.swift`
 - Source: `Packages/NMP/Sources/NMPContent`
 - Source: `Packages/NMP/Sources/NMPContent/ContentDocument.swift`
 - Source: `Packages/NMP/Sources/NMPUI`
@@ -178,7 +171,6 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP22.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt`
 - Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29SimpleGroups.kt`
-- Source: `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/Blossom.kt`
 - Source: `Packages/NMPAndroid/README.md`
 - Source: `Packages/NMPAndroid/build.gradle.kts`
 - Source: `scripts/build-swift-xcframework.sh`

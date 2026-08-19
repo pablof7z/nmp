@@ -416,7 +416,7 @@ Resource lifecycle is extensible by construction:
 - link-preview HTTP work;
 - invoice/wallet interaction;
 - product purchase/contact flows;
-- file download or Blossom upload.
+- file download.
 
 A styled component may supply a conservative default, but the primitive accepts
 a replacement. No canonical renderer constructs a new media player during body

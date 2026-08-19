@@ -1,8 +1,7 @@
 //! Fallible NIP-22 kind:1111 decode (#572). Malformed or mismatched tag
 //! sets are TYPED REJECTIONS -- they stay raw rows, they never become a
-//! [`DecodedComment`]. Unlike `nmp_nip68::decode_picture`'s tolerant
-//! decode (diagnostics attached to a still-returned value), a NIP-22
-//! comment's root/parent identity is load-bearing for thread placement, so
+//! [`DecodedComment`]. A NIP-22 comment's root/parent identity is
+//! load-bearing for thread placement, so
 //! there is no "decode with diagnostics" middle ground here -- it decodes
 //! completely or it is rejected completely.
 

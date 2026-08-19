@@ -151,7 +151,7 @@ composed with the canonical facade:
 ```text
 nmp core
 nmp-nip29
-nmp-nip68
+nmp-nipc7
 nmp-nip17
 ...
 ```
@@ -160,8 +160,8 @@ Names are illustrative. The invariant is not.
 
 A module owns only its exact schemas, reconstruction, validation, semantic
 operations, and protocol authority. Enabling NIP-29 may add group operations and
-group-host context. It must not pull a preferred timeline into core or own a
-foreign NIP-68 photo schema merely because a group can publish one.
+group-host context. It must not pull a preferred timeline into core or own the
+NIP-C7 kind:9 chat schema merely because a group can publish one.
 
 Protocol ownership and package placement are different. NIP-51 defines kind
 `10009`; `nmp-nip29` exposes its tolerant Simple-groups decode beside the

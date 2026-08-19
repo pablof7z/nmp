@@ -113,7 +113,6 @@ open-questions section.
 | `nmp-grammar` | the value vocabulary both sides speak: `Filter`/`Binding`/`Demand`/`LiveQuery`, `WriteIntent`/`WritePayload`/`ReplaceableOperation`, tagging, NIP-19 codec — plus (in flight, #1707 steps 1–2) `Row`/`RowSignature` and the `ReplaceableMaterializer` contract | any other NMP crate. Deps stay `nostr` + `blake3` + `serde_json`. 16 consumers; the hub | correct today + in flight additions |
 | `nmp-signer` | the signing contract | anything but `zeroize` — that manifest is what keeps the contract crypto-agnostic | correct today |
 | `nmp-local-signer` | the one in-process key provider | — | correct today |
-| `nmp-asset` | exact-byte asset identity (`Sha256Hash`, `VerifiedAsset`) | any protocol or NMP crate; `sha2` only | correct today |
 
 ### Mechanism primitives
 
@@ -1088,7 +1087,7 @@ above it without one new public item.
 |---|---|---|
 | `nmp-nip02` (kind:3 + follow door) | yes — depends on `nmp` | in flight (#1707 step 3) |
 | `nmp-nip29` (groups + `RelayScope` door) | yes — depends on `nmp` | in flight (#1707 step 4) |
-| `nmp-nip18`, `nmp-nip22` (→ `nmp-nip73`), `nmp-nip25`, `nmp-nipc7`, `nmp-content`, `nmp-nip68`, `nmp-blossom`, `nmp-media` | no — engine-free composition | correct today |
+| `nmp-nip18`, `nmp-nip22` (→ `nmp-nip73`), `nmp-nip25`, `nmp-nipc7`, `nmp-content`, `nmp-bookmarks` | no — engine-free composition | correct today |
 | future families (bookmarks, mute lists, …) | as needed | one crate each, when the behavior arrives |
 
 The direction of the capability edge is the load-bearing fact:
@@ -1101,8 +1100,9 @@ level down.
 
 **The facade's re-export inventory is a reliable single point of truth for
 what is reachable, and the architecture depends on it.** Five reversals have
-now run the same census before moving anything — `nmp-media`,
-`Row`/materializer, NIP-02, the eight pure re-export doors, NIP-29 — and the
+now run the same census before moving anything — the media seam (since
+deleted), `Row`/materializer, NIP-02, the eight pure re-export doors,
+NIP-29 — and the
 property held every time: **every external consumer reaches these types
 through `nmp`'s crate-root re-export, never by naming a lower crate directly
 for something `nmp` re-exports.** Every downstream fix across all five was a
@@ -1151,8 +1151,8 @@ crates must not be folded into tests; the proof is the manifest.
 Mechanical, no checker required:
 
 1. **Protocol-named entries directly under `crates/nmp/src`** — **0**
-   (steps 0–4 moved `media/`, `nip02/`, `nip29/`, `nip18.rs`, `nip22.rs`,
-   `nip25.rs`, `nip68.rs`, `nipc7.rs`, `blossom.rs`, `asset.rs`,
+   (steps 0–4 moved eleven of them out, including `nip02/`, `nip29/`,
+   `nip18.rs`, `nip22.rs`, `nip25.rs`, `nipc7.rs` and
    `content.rs`; the NIP-65 split then deleted the last one, `nip65.rs` --
    one line of capability convenience, `engine.publish(request.into_
    write_intent())`, wearing an engine-bound signature, not routing

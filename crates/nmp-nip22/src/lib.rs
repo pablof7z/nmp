@@ -1,12 +1,12 @@
 //! `nmp-nip22` -- the opt-in NIP-22 typed-comments-over-NIP-73-ids
-//! protocol crate (#572), on the `nmp-nip68`/`nmp-nip29` template: zero
+//! protocol crate (#572), on the `nmp-nip29` template: zero
 //! core/engine/store changes.
 //! Core stays content-agnostic; this module owns kind:1111's exact
 //! schema, semantic root/parent validation, immutable draft construction,
 //! and root-thread demand -- never a UI, ranking, moderation, or product
 //! policy.
 //!
-//! Same discipline as `nmp-nip29`/`nmp-nip68`/`nmp-blossom`: this crate
+//! Same discipline as `nmp-nip29`: this crate
 //! NEVER signs (`build`/`intent` emit an [`nostr::UnsignedEvent`]/
 //! `WriteIntent` for the caller's own signer machinery) and NEVER touches
 //! the engine -- `author`/`created_at` are explicit caller-supplied

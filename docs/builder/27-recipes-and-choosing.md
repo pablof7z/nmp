@@ -12,7 +12,7 @@ Enabling a module adds protocol knowledge around the same engine:
 ```swift
 import NMP
 import NMPNip29
-import NMPNip68
+import NMPNipC7
 ```
 
 It does not add an NMP app container, register scene lifecycle, create another
@@ -112,19 +112,17 @@ still uses core write receipts.
 ## Compose foreign drafts without stealing ownership
 
 ```swift
-let asset = try await blossom.upload(file)
-let photo = try Nip68.buildPhoto(asset)
-let receipt = try group.publish(photo, using: engine)
+let message = NipC7.chat(text)
+let receipt = try group.publish(message, using: engine)
 ```
 
-- Blossom owns upload and asset verification.
-- NIP-68 owns the photo event schema.
+- NIP-C7 owns the kind:9 chat event schema.
 - NIP-29 adds only validated group context, including the `h` tag and the
   relay-scope authority the group's write routes to.
 - Core freezes the final body, selects one signer, maintains one canonical row,
   and publishes one intent.
 
-NIP-29 does not own the photo kind merely because a group can contain it.
+NIP-29 does not own kind:9 merely because a group can contain it.
 
 ## App policy remains app policy
 

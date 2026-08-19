@@ -277,18 +277,12 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   `nmp-nip65` ships engine-free plus an installable routing provider and native
   facade assembly, but the explicit kind:10002 bootstrap-publication helper has
   no native projection; native apps must not hand-roll that separate operation.
-- **`nmp-blossom` covers the BUD verbs and their FFI/Swift/Kotlin projection,
-  but not the composition layers (epic #216).** The `get`/`media` endpoints,
-  NIP-68 `imeta` picture events, and the upload-then-publish composition seam
-  are tracked follow-ups (#545/#551/#555).
-- **`nmp-nip68` owns kind:20 build/decode with `imeta` provenance, but not the
-  composition, FFI/Swift/Kotlin projection, or richer tag layers (#558, epic
-  #216).**
-- **`nmp-media` provides the standalone staged composition seam
-  (prepare → upload → compose) with separated failure domains, but not the
-  durable upload, the FFI projection, or BUD-03 server-list placement (#559,
-  #562, epic #216).** The upload half is not crash-durable; the
-  engine-integrated durable-upload obligation is the additive #562.
+- **No blob-storage or media-composition capability.** Blossom blob upload
+  (`nmp-blossom`), NIP-68 kind:20 picture events (`nmp-nip68`), the staged
+  upload-then-publish seam (`nmp-media`) and the exact-byte asset identity
+  they shared (`nmp-asset`) were all deleted on the owner's instruction: none
+  had an application consumer. NMP has no media door on any surface, and epic
+  #216 is not being pursued.
 - **No general protocol-composer catalog; no kind:1-first core catalog.**
   Composition is selectively built: modules claim only exact NIP-defined
   schemas and typed contextual operations may add their own tags/route facts
