@@ -1,43 +1,14 @@
 # Protocol modules and contextual composition
 
-- **Status:** TARGET CONTRACT - opt-in module packaging and contextual
-  publication are not yet implemented as one cross-platform API.
-- **Owns:** the content-agnostic core boundary, protocol schema ownership,
-  derived helpers, immutable draft composition, and contextual routing.
-
-## 1. Core versus module
-
-The engine core owns universal mechanism: canonical events, demand, store,
-routing, sync, signing orchestration, receipts, and diagnostics. It does not
-ship a preferred timeline, kind:1 helper catalog, or blessed content model.
-
-An opt-in protocol module may own:
-
-- the exact event schemas and kind values defined by its NIP;
-- typed builders and parsers for those schemas;
-- protocol validation and state reconstruction;
-- reusable derived demand fragments;
-- typed protocol queries and semantic operations;
-- typed routing/access facts that the protocol itself defines.
-
-The module mechanism must be opt-in and pay-for-what-you-enable. Exact Cargo,
-SwiftPM, and Kotlin packaging remains provisional; packaging cannot create a
-second, less-safe way to assemble the engine.
-
-## 2. Ownership is exact
-
-Schema ownership is neither content-category ownership nor a blanket routing
-monopoly. A module claims only the exact event schemas its protocol defines.
-Broad ranges used for convenience are not acceptable when the NIP defines a
-sparse set.
-
-NIP-29 therefore owns its group metadata, administrator, membership, and
-moderation event schemas. It does not own a photo, article, podcast episode, or
-other foreign event kind published in a group.
-
-Core remains ignorant of those schema meanings unless the app enables the
-module. Ownership collisions are errors, but contextual use of a foreign-owned
-draft is not an ownership collision.
+- **Status:** NIP-29 group publication is the one module-composition door that
+  is actually built: `nip29::Group` in the `nmp` facade mints both a read
+  `Demand` and a complete `WriteIntent` for a group, appends the `h` tag,
+  pins routing to the group's host, and hands the intent to the same
+  `Engine::publish` door every other write uses (§3; #977, #1011). Generalized,
+  cross-platform opt-in module packaging beyond that one door -- a general
+  core/module boundary, a packaging mechanism for arbitrary protocols,
+  contextual-routing-contribution rules, and reusable derived-demand helpers
+  -- is not built anywhere in the tree.
 
 ## 3. Immutable unsigned drafts
 
@@ -76,37 +47,9 @@ Upload failure and Nostr publication failure are distinct results. NIP-29's
 contextual publication does not transfer schema ownership of the photo to
 NIP-29.
 
-## 4. Contextual routing contribution
-
-The routing model distinguishes:
-
-1. **Schema-owned policy:** rules inherently attached to an event schema owned
-   by the module.
-2. **Context contribution:** a closed typed value attached by an operation such
-   as group publication, for example `HostRelay(group, relay)`.
-3. **Operator/source policy:** app configuration such as indexer lanes.
-
-Raw arbitrary relay arrays do not become a general publish escape hatch.
-Context contributions are inspectable, validated against the operation that
-created them, carried into diagnostics, and combined by core policy. A module
-does not register a route closure.
-
-If contributions conflict or would violate a private/narrow route, composition
-fails with a typed error before acceptance. Core signs only the validated final
-body and route context.
-
-## 5. Reusable demand without privileged content
-
-A lightweight helper may return a public `Filter`/`Binding` graph. Its expansion
-must be printable and equivalent to writing the graph directly. This is the
-right shape for a commonly reused derived set.
-
-A richer module query may return typed protocol values assembled from one or
-more ordinary live demands. It still may not introduce an alternate
-subscription lifecycle, cache, app callback, or hidden relay expansion.
-
-The core documentation and acceptance suite must use kind-diverse examples.
-No initial module roadmap may make kind:1 the assumed center of the product.
+NIP-29 therefore owns its group metadata, administrator, membership, and
+moderation event schemas. It does not own a photo, article, podcast episode, or
+other foreign event kind published in a group.
 
 ## 6. Facade and platform projection
 
@@ -189,21 +132,3 @@ and a complete `WriteIntent`, and hands the intent to the same
 `Engine::publish` door every other write uses. That single-host publication
 route is complete: no forgeable raw relay override, no parallel write noun,
 and no second publication lifecycle.
-
-## 7. Falsification
-
-Required proofs include:
-
-- enabling no protocol module retains a useful raw two-noun engine;
-- a module cannot claim a kind it does not define without an ownership failure;
-- NIP-29 preserves a foreign-owned draft while adding only `h` and retaining
-  its selected host; the later engine publication proof must preserve that
-  same ownership boundary;
-- composition is deterministic and the core signs once;
-- a reusable fragment prints the same graph as its raw construction;
-- disabling a module removes its code and semantic API without changing core;
-- Swift, Kotlin, and direct Rust produce byte-identical final unsigned bodies
-  for the same composed operation;
-- an engine-free module composer remains absent from every generic Engine
-  facade while its protocol-owned free functions remain available; and
-- no module callback or hidden subscription lifecycle enters engine decisions.

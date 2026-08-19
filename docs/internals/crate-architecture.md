@@ -26,18 +26,12 @@ or state machine, durable authority, independently consumable capability,
 external-resource owner, or composition/artifact boundary. Dependency
 isolation is one powerful way a crate can enforce that responsibility, but it
 is neither necessary nor sufficient. Identical dependency lists do not imply
-identical responsibilities.
-
-Do not ask "what dependency does this split remove?" before establishing
-whether the candidate owns a coherent responsibility. A package may be
-justified even when both sides use the same lower-level mechanisms.
+identical responsibilities. A package may be justified even when both sides
+use the same lower-level mechanisms.
 
 Enforcement here is structural, and deliberately does not depend on a checker.
-That is a property of the mechanisms below, not a statement about CI: CI
-returns once local commands are deterministic and known flakes are fixed or
-honestly excluded with an owning issue, and when it does, each gate must
-protect one named failure mode and fail when the mechanism it protects is
-reverted. None of the boundaries below become weaker or stronger for it.
+That is a property of the mechanisms below, not a statement about CI — none
+of the boundaries below become weaker or stronger for whether CI exists.
 Manifest exclusion is one mechanism: a
 crate that does not declare a dependency cannot use it. Many important
 boundaries are enforced by other structural means — private fields, opaque
@@ -732,26 +726,6 @@ this cluster eventually use.
 shape.** That is the whole force of the calibration: it is not an argument
 that the claim is unlikely, it is four counter-examples already compiled.
 
-#### The fifteen clusters not yet behind an owner
-
-| # | cluster | store | clock | router | resolver | what actually decides it |
-|---|---|---|---|---|---|---|
-| 1 | **PendingWrites** (`pending`, `intent_receipts`, `event_to_receipts`) | **atomic** | fact | — | root | The in-memory map is a *mirror of a durable transaction*. `write.rs:4427-4502` removes the entry, calls `store.cancel_write`, and **re-inserts on store failure**; `write.rs:5012-5050` does the same around `compensate_write`. 10 of 24 mutating functions call the store. This is I1, and it is real coupling. |
-| 2 | **LaneProjection** | **atomic** | fact | — | root | The lanes *are* store rows; the projection mirrors them. `lane_projection.rs:95` `operation(&mut self.store)`, `:122` `bootstrap_publish_queue_lanes`, `:377` `record_route_revision`. Clock is a deadline (`:218 due: self.clock`, `:232`) — fact-shaped. |
-| 3 | **SessionRegistry** | **atomic** | fact | fact | **atomic** | `auth_transport.rs:1435-1437` — `self.resolver.ingest_observed_detailed(&mut self.store, observed_events)` mutates resolver and store in one call, inside a function that also reads `slot_to_relay`. 29 `Effect::` emissions in the file: it emits directly rather than returning an outcome. |
-| 4 | **RequestEvidence** / request targets | root | fact | — | root | 16 mutating functions; **one** reads `clock`, **zero** call store, router or resolver. The cleanest cluster measured. |
-| 5 | **CoordinateCoverage** | — | — | — | — | 0 of 4 mutating functions touch any of the four. Its rejection was never about the shared four: `release_coordinate_coverage` calls `self.on_unsubscribe(..)` — **cross**, I6 as a call graph. |
-| 6 | **AuthorOutboxRouteNeeds** | — | — | — | — | 0 of 5 mutating functions touch any of the four — but it emits `Effect::AuthorRouteNeedsChanged` from its own method instead of returning an outcome. **Axis 2**, not axis 1. |
-| 7 | **AttemptCorrelations** | root | fact | — | root | Rejected on **appears**, not coupling: `AttemptCorrelationTarget` names `ReceiptId`, `RelaySessionKey` and `PublishQueueLaneKey` — a ~50-line crate whose public type drags three vocabularies. |
-| 8 | **LiveWireOwnership** (9 fields) | root | root | **fact** | root | 4 of 8 mutating functions read `self.router.plan()`; none calls store or resolver. One genuinely foreign reader (`observation.rs`, a membership predicate). |
-| 9 | **NegentropySessions** (NIP-77, 10 fields) | root | fact | fact | root | 22 mutating functions, 2 touch router/clock. Its crate rejection was a **dependency** argument, not a coupling one: `negentropy` is already on the reducer's allowed list, so `nmp-nip77` gains a hop rather than removing an edge. **That rejection is overturned by #1806** — see the note under the rejection list. |
-| 10 | **ObservationBranches** (`observations`, `handles`) | root | — | — | **root** | 3 of 7 mutating functions call the resolver — all of them root subscribe/unsubscribe *around* the map update, the `HistorySessions` shape exactly. |
-| 11 | **RequestClaimTransfers** | root | fact | fact | root | Clock is a deadline; router reads are plan facts. |
-| 12 | **QuarantinedAuthReceipts** | root | fact | — | root | First read as **atomic**; re-reading it, the shape is get → orchestrate → remove, which is what the extracted owners already do. Recorded as the corrected classification. |
-| 13 | **StalledWriteCensus** | root | fact | — | root | A cached projection; the store calls are the root recomputing it. |
-| 14 | **TransportHealth** | — | fact | fact | — | Barely a cluster: `relay_open_failures` is inserted inside the dispatcher arm in `mod.rs`, so it is already partly root-owned, and consumers read it by reference as pure fact. |
-| 15 | **PlannedReadSessions** | — | — | **fact** | — | One mutating function, one `router.plan()` read. |
-
 #### Two axes, and the argument kept confusing them
 
 Before the verdict, one distinction the original claim collapsed and that
@@ -778,8 +752,11 @@ extracting them.
 #### What survives
 
 **The blanket claim does not survive.** Twelve of the fifteen clusters
-need only read-only facts and root orchestration; two of them (5, 6) touch
-none of the four in any mutating function at all. The two rejections this
+measured — every one except `PendingWrites`, `LaneProjection`, and
+`SessionRegistry`, the three with real store/resolver coupling below — need
+only read-only facts and root orchestration; two of them,
+`CoordinateCoverage` and `AuthorOutboxRouteNeeds`, touch none of the four in
+any mutating function at all. The two rejections this
 document leaned on hardest were not about the shared four in the first place
 — `CoordinateCoverage` failed on a **cross**-owner teardown call and
 `AttemptCorrelations` on the vocabularies its public type drags. "They all
@@ -989,11 +966,10 @@ assertions of the form `x == x`. All green while the thing they protected was
 violated. The reducer's guards are the same class one level down — which is
 why the rule generalises past the eight named invariants:
 
-**Any guard whose failure mode is fail-open is probably untested.** When you
-add one, the falsifier is not optional, and it must construct the input the
-guard exists to reject. See #1727, and #1736 for the fixture the corpus
-needs before I3 can be falsified at all. I7 and I8 needed no fixture and got
-no falsifier; the store-failure model they guarded was deleted instead.
+**Any guard whose failure mode is fail-open is probably untested.** See
+#1727, and #1736 for the fixture the corpus needs before I3 can be
+falsified at all. I7 and I8 needed no fixture and got no falsifier; the
+store-failure model they guarded was deleted instead.
 
 ### A red falsifier is only evidence if it is red for the right reason
 
@@ -1278,8 +1254,7 @@ Marked open on purpose; do not infer answers.
    Swift/Kotlin projection does not scale to hundreds of kinds; the likely
    direction is a generic FFI surface (the two nouns + registered-payload
    minting) with typed capability vocabulary in native packages, but nobody
-   has designed it. Do not treat today's per-NIP FFI modules as the pattern
-   to extend indefinitely.
+   has designed it.
 2. **What constitutes the deterministic engine, and whether any owner
    inside it earns a package.**
    The engine/runtime boundary is settled. The internal package
@@ -1288,13 +1263,8 @@ Marked open on purpose; do not infer answers.
    not earn a package on *their* evidence. That bounds those proposals, not
    the space.
 
-   Evaluate Query, publication, synchronization, AUTH, session state, and
-   other owners by responsibility, lifecycle coherence, and the facts that
-   must cross. Ask what state each exclusively owns, what causes that
-   responsibility to change, and whether it can be reasoned about through an
-   independent interface. A distinct dependency list is not required. #1627
-   already names this distinction: query/publication lifecycle owners may
-   become packages while related protocol vocabularies with identical
+   #1627 already names this distinction: query/publication lifecycle owners
+   may become packages while related protocol vocabularies with identical
    dependency/artifact shapes remain feature-gated modules.
 
    #1606 continues through private concrete owners regardless. A package

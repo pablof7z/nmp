@@ -39,7 +39,7 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
 
 ## Routing & limits
 
-- **There is no indexer write lane, and the owner ruled there must be one.**
+- **There is no indexer write lane.**
   The 2026-08-17 routing ruling (`docs/internals/routing/outbox.md`) is that
   indexers always receive kind:0, kind:3 and kind:1xxxx events. Nothing
   publishes to an indexer today: the built-in `Auto` write resolver
@@ -232,8 +232,8 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
 
 ## Store & persistence
 
-- **The engine ships no retention policy, and the owner ruled that it should
-  (#1787, #1843).** On 2026-08-17: *"whatever, just ship a default policy;
+- **The engine ships no retention policy (#1787, #1843).**
+  The owner ruled on 2026-08-17 that it should have one: *"whatever, just ship a default policy;
   this is not a high priority."* Today canonical events are retained
   unconditionally — `RedbStore::gc` exists but no crate outside `nmp-store`
   ever calls it, and neither `GcRetentionSet` nor `GcReport` appears in `nmp`
@@ -255,8 +255,8 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   remains the production baseline, and as of #1941 it is the only backend the
   tree contains: the Fjall and LMDB ceiling-ingest harnesses, and the
   `heed`/`fjall` dependencies that carried them, are deleted. Re-evaluating a
-  candidate starts from `docs/design/storage-semantic-oracle.md`'s replacement
-  sequence and a fresh adapter, not from a harness that is still here.
+  candidate would start from `docs/design/storage-semantic-oracle.md`'s
+  semantic trace and a fresh adapter, not from a harness that is still here.
 - **Fjall is only partially qualified (#818, under #701).** A real
   `RLIMIT_FSIZE`/`SIGXFSZ` journal-write failure was proven to behave correctly
   on pinned Fjall 3.1.7/3.1.8 (3.1.6 silently lost the transaction); that
