@@ -247,16 +247,21 @@ fn subscribed_handle(effects: &[Effect]) -> ObservationId {
         .expect("subscribe emits its initial row snapshot")
 }
 
-fn assert_no_protected_req(effects: &[Effect], session: &RelaySessionKey) {
+/// #1889: a read session's REQs reach the wire whether or not it names an
+/// identity. Withholding a protected session's REQ until AUTH completed
+/// deadlocked against every relay that challenges IN RESPONSE to a request
+/// (strfry, and so most deployed relays): the relay waits for a request
+/// before challenging, and NMP waited for a challenge before requesting.
+fn assert_req_reaches_the_wire(effects: &[Effect], session: &RelaySessionKey) {
     assert!(
-        !effects.iter().any(|effect| match effect {
+        effects.iter().any(|effect| match effect {
             Effect::Replay(candidate, reqs) => candidate == session && !reqs.is_empty(),
             Effect::Wire(delta) => delta.ops.iter().any(|(candidate, ops)| {
                 candidate == session && ops.iter().any(|op| matches!(op, WireOp::Req(..)))
             }),
             _ => false,
         }),
-        "protected REQs must remain parked before current AUTH readiness: {effects:?}"
+        "a read session's REQ must reach the wire before AUTH, not after (#1889): {effects:?}"
     );
 }
 

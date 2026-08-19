@@ -284,7 +284,7 @@ fn failed_event_commit_isolated_by_session_identity_on_the_same_relay() {
 
     let protected_session = signer_session(&relay, protected_author.public_key());
     let protected_connected = connect_signer(&mut core, 1, &relay, protected_author.public_key());
-    assert_no_protected_req(&protected_connected, &protected_session);
+    assert_req_reaches_the_wire(&protected_connected, &protected_session);
     let protected_ready = authenticate_signer(&mut core, 1, &relay, &protected_author);
     let protected_request = protected_ready
         .iter()

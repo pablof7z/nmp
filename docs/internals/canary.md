@@ -1269,24 +1269,22 @@ finished says `live` and nothing about how it got there, so an app must hold
 `observeDiagnostics()` open and accumulate. This scenario does exactly that,
 and would have measured nothing without it.
 
-**C15's relay lab is qualified; C15 itself is NOT proven** — and it is now
-proven not to work, which is a stronger and more useful result than "not
-executed". The distinction between lab and subject is the whole point of the
-paragraphs below, and an earlier revision of this section got it wrong by
-calling C15 "proven live".
+**C15 is proven live**, against a real strfry child process, and it is the
+scenario that found and closed #1889. An earlier revision of this section
+called C15 "proven live" on the strength of a run that drove the handshake from
+the LAB CONTROLLER; that proved strfry can be authenticated against and proved
+nothing about NMP. What is claimed here is the other half: every AUTH frame is
+minted, signed and sent by `NMPEngine`.
 
-**C15 is committed and RED, on purpose** (#1887), with the failure diagnosed:
-**NMP's NIP-42 deadlocks against any relay that challenges in response to a
-request, which is to say against strfry (#1889).**
 `apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C15NIP42AuthTests.swift`
 uses strfry's real native read trigger, `relay.auth.restrictedReadKinds`, and
 leaves `restrictReadToInvolvedPubkey` on, so the seeded events are `p`-tagged
 to NMP's own account and the relay serves them ONLY to a connection
-authenticated as exactly that key. "The row arrived" would therefore have meant
-"NMP authenticated as its own account", not merely "some AUTH happened".
+authenticated as exactly that key. "The row arrived" therefore means "NMP
+authenticated as its own account", not merely "some AUTH happened".
 
 **Every precondition passes, and each is proven by an NMP-free client**
-(`RelayHandle.probeRead`, new in `RelayLabKit`): an unauthenticated plain
+(`RelayHandle.probeRead`, in `RelayLabKit`): an unauthenticated plain
 client issuing the identical filter receives a real `["AUTH", <challenge>]`
 frame plus `CLOSED ... auth-required: requested filter requires
 authentication` and zero events; a client that authenticates as a DIFFERENT key
@@ -1295,70 +1293,89 @@ events; a client that authenticates as an involved pubkey is served the row. So
 the relay demands AUTH, the challenge is real, the identity scoping is live,
 and the data is retrievable.
 
-**Then NMP does nothing.** It opens the `.nip42` session, reports it under
-exactly the requested access identity, reaches
-`awaitingAuth(phase: .awaitingChallenge)` and stays there indefinitely. It
-transmits nothing at all — not the AUTH proof, not even the REQ. The installed
-`NMPAuthPolicy` is never consulted. `AuthDiagnostics` shows
-`policyBound=false`, `signerBound=false`, `challengeDescriptor=nil`,
-`transportGeneration` incrementing across reconnects and nothing else moving.
+**Then NMP does the round trip itself**: `connecting ->
+awaitingAuth(awaitingChallenge) -> awaitingAuth(awaitingPolicy) ->
+awaitingAuth(awaitingSignature) -> requesting -> finishedStoredEvents`, with
+the app's `NMPAuthPolicy` consulted about the relay the demand pinned, for the
+account the demand named, with the raw challenge strfry minted for that exact
+connection, and an `AuthDiagnostics` row reaching `phase=ready` with a real
+`challengeDescriptor`, `policyBound`, `signerBound` and signed kind:22242
+`authEventID`. Killing the relay and restarting it produces a SECOND distinct
+challenge, a second policy consultation and a second `ready` epoch, which is
+what separates "authenticated once" from "re-authenticates". Scenario B proves
+the other direction: the app DENIES, the query reports `authDenied` through its
+own acquisition evidence, no rows arrive, the engine reports a `denied` AUTH
+row — and a later `.allow` on a fresh connection gets in without rebuilding the
+engine or reopening the query.
 
-**The scenario pins the cause through the public API alone**, with a control
-phase: the SAME relay and SAME filter observed under `.public` instead of
-`.nip42`. One field different, two outcomes —
+**What it found: #1889, and it was a real deadlock.** As committed, C15 was RED
+on purpose (#1887). NMP dropped a protected session's ops from the wire delta
+until that session had completed AUTH (`crates/nmp-engine/src/core/query.rs`),
+replayed planned REQs at connect only for a session bound to no identity
+(`core/auth_transport.rs`), and constructed an `AuthSessionState` in exactly one
+place — on an INBOUND `["AUTH", challenge]` frame. strfry only emits that frame
+in response to a request it wants to gate; both of its genuine triggers are
+challenge-driven. So NMP waited for a challenge the relay would only send once
+NMP sent the request NMP was withholding until it was challenged. Neither side
+was wrong alone; together they never exchanged a byte.
+
+The scenario pinned the cause through the public API alone, with a control
+phase: the SAME relay and SAME filter observed with `authenticateAs: nil`
+instead of the account. One field different, two outcomes —
 
 ```
-CONTROL (.public):  status=error                           history=["connecting", "error"]
-SUBJECT (.nip42):   status=awaitingAuth(awaitingChallenge)  history=["connecting", "awaitingAuth(awaitingChallenge)"]
+CONTROL (unbound):  status=error                           history=["connecting", "error"]
+SUBJECT (bound):    status=awaitingAuth(awaitingChallenge)  history=["connecting", "awaitingAuth(awaitingChallenge)"]
 ```
 
-The `.public` session's REQ reaches the relay and is answered (with the
-auth-required refusal, hence `error`). The protected session is the one that
-never transmits. Recorded, not asserted — a diagnosis printed alongside a
+The unbound session's REQ reached the relay and was answered (with the
+auth-required refusal, hence `error`). The protected session was the one that
+never transmitted. Recorded, not asserted — a diagnosis printed alongside a
 failure, never promoted to a contract, the same treatment C13 gave
-`wireSubCount`.
+`wireSubCount`. The control is still there, and the negotiation assertions are
+now SCOPED to the subject session (correlated through the engine's own
+`AuthDiagnostics.authenticateAs` and epoch coordinates) so they cannot be
+satisfied by the control's request instead.
 
-The mechanism, confirmed in the engine: NMP drops a protected session's ops
-from the wire delta until that session has completed AUTH
-(`crates/nmp-engine/src/core/query.rs`), replays planned REQs at connect only
-for a `Public` session (`core/auth_transport.rs`), and constructs an
-`AuthSessionState` in exactly one place — on an INBOUND `["AUTH", challenge]`
-frame. strfry only emits that frame in response to a request it wants to gate;
-`canary.md` already records both of its genuine triggers as challenge-driven.
-So NMP waits for a challenge the relay will only send once NMP sends the
-request NMP is withholding until it is challenged. Neither side is wrong
-alone; together they never exchange a byte.
+**The fix was a deletion.** A read session now sends its planned REQs whether
+or not it names an identity, and the transport's per-generation initial-read
+gate is released for every fresh bound generation rather than only the first —
+three conditionals removed, none added. Everything after the first send already
+existed and was already exercised on the write path.
 
-**Why no existing test caught this.** Every green NIP-42 test uses a relay
-shape that challenges unsolicited, or fabricates the challenge outright:
+**Why no existing test caught it.** Every green NIP-42 test used a relay
+shape that challenges unsolicited, or fabricated the challenge outright:
 `auth_core_headless.rs` injects a synthetic `RelayMessage::Auth` directly into
 the reducer; `nmp-parity`'s scenarios use `ScriptedRelay`'s
 `auth_required_writes`, whose own doc says it does not challenge on connect and
-does not gate reads, so no protected-READ demand is exercised anywhere; and
+does not gate reads, so no protected-READ demand was exercised anywhere; and
 `crates/nmp/tests/integration_capstone.rs` had to hand-build a relay that
 sends AUTH "immediately after the WebSocket handshake, before the client has a
 chance to send a REQ or EVENT". That bespoke relay exists precisely because the
-standard fixture does not challenge unsolicited — which means the only relay
-shape the current engine can complete a NIP-42 round trip against is one built
-for it. This is the exact gap the Canary exists to find, found the first time
+standard fixture does not challenge unsolicited — which meant the only relay
+shape the engine could complete a NIP-42 round trip against was one built for
+it. This is the exact gap the Canary exists to find, found the first time
 an ordinary application drove the surface against a real third-party relay.
 
-**Left red rather than reshaped**, on the principle C17's #1846 phase
-established: the scenario is not weakened until something passes. It is written
-as the scenario that will be green when #1889 closes — the round trip, the
-denial surfacing as `authDenied`, recovery on a fresh session, and re-AUTH
-after a reconnect are all already asserted and all already have their
-preconditions — so closing the gap is what turns it green.
+**Left red rather than reshaped, and that is what closed it.** On the principle
+C17's #1846 phase established, the scenario was not weakened until something
+passed. It was written as the scenario that would be green when #1889 closed —
+the round trip, the denial surfacing as `authDenied`, recovery on a fresh
+session, and re-AUTH after a reconnect all asserted and all with their
+preconditions — so closing the gap is what turned it green.
 
-Falsified twice, each restored and the red state re-confirmed. Because the
-scenario's *result* is a failure, what has to be falsifiable is its
-*preconditions*: pointing `restrictedReadKinds` at a kind the scenario does not
-use made the unauthenticated probe receive no challenge and be served the row
-outright, failing three preconditions with the real captured frames (and,
-usefully, turning the `.public` control green at `finishedStoredEvents`, which
-confirms the auth gate is the only thing holding it at `error`). Turning
-`restrictReadToInvolvedPubkey` off made the wrong-identity probe be served the
-row, failing exactly the one identity-scoping precondition and nothing else.
+Falsified three times, each restored. While it was red, what had to be
+falsifiable were its *preconditions*: pointing `restrictedReadKinds` at a kind
+the scenario does not use made the unauthenticated probe receive no challenge
+and be served the row outright, failing three preconditions with the real
+captured frames (and, usefully, turning the unbound control green at
+`finishedStoredEvents`, which confirmed the auth gate was the only thing
+holding it at `error`); turning `restrictReadToInvolvedPubkey` off made the
+wrong-identity probe be served the row, failing exactly the one identity-scoping
+precondition and nothing else. Now that it is green, the third falsifier is the
+subject scoping itself: emptying the set of AUTH rows the policy requests are
+correlated against turns the negotiation assertions red, which is what proves
+they are reading the subject session's work and not the control's.
 
 **The lab qualification that came first**, and still stands: **strfry can be
 driven through a complete NIP-42 round trip on demand** — a prerequisite for

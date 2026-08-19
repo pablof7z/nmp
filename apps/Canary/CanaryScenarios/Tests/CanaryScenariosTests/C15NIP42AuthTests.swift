@@ -1,9 +1,11 @@
 // C15 (docs/internals/canary.md "Scenario status", #1887): NIP-42 AUTH,
 // driven through NMP.
 //
-// RED, AND THE FAILURE IS THE RESULT: #1889. See the block below the
-// scenario description for the diagnosis and the control that establishes
-// it. This file is not a work in progress -- it is the reproduction.
+// THIS FILE FOUND AND NOW GUARDS #1889. It was committed RED, as the
+// reproduction of a bootstrap deadlock against any relay that challenges in
+// response to a request; #1889 deleted the deadlock and this is now the
+// regression guard. The block below the scenario description keeps the
+// diagnosis, because the control phase that pinned it is still here.
 //
 // THE POINT OF THIS FILE, stated first because C15 already has one wrong
 // answer on the record. `canary.md` previously called C15 "proven live"
@@ -60,37 +62,46 @@
 // key and is served nothing, which is what makes the identity half of the
 // claim falsifiable at all.
 //
-// THIS SCENARIO IS RED, AND IT IS RED ON PURPOSE. Every precondition above
-// passes -- the relay demands AUTH, the challenge is real, the identity
-// scoping is live, the row is retrievable by a client that authenticates.
-// NMP then opens the identity-bound session, reports it under exactly the
-// requested access identity, reaches `awaitingAuth(awaitingChallenge)` and
-// stays there forever. It sends NOTHING: not the AUTH proof, not even the
-// REQ. The installed policy is never consulted, and `AuthDiagnostics`
-// reports the placeholder row an engine emits for a connected protected
-// session with no AUTH session behind it (`policyBound=false`,
-// `signerBound=false`, `challengeDescriptor=nil`).
+// WHAT WAS WRONG, AND WHY THE CONTROL PHASE IS STILL HERE. Every
+// precondition above passed while the scenario was red -- the relay demands
+// AUTH, the challenge is real, the identity scoping is live, the row is
+// retrievable by a client that authenticates. NMP then opened the
+// identity-bound session, reported it under exactly the requested access
+// identity, reached `awaitingAuth(awaitingChallenge)` and stayed there
+// forever. It sent NOTHING: not the AUTH proof, not even the REQ. The
+// installed policy was never consulted.
 //
-// The cause is a bootstrap deadlock, and the control phase below pins it
+// The cause was a bootstrap deadlock, and the control phase below pinned it
 // with a public-API measurement rather than a reading of NMP's source:
 //
-//   - NMP parks every request on a protected session until that session
-//     has completed AUTH, and only creates an AUTH session when an inbound
-//     `["AUTH", challenge]` frame arrives.
+//   - NMP parked every request on a protected session until that session
+//     had completed AUTH, and only created an AUTH session when an inbound
+//     `["AUTH", challenge]` frame arrived.
 //   - strfry only ever emits that frame IN RESPONSE to a request it wants
 //     to gate -- a `restrictedReadKinds` read or a NIP-70 protected write.
 //     It never challenges on bare connect. `canary.md` already records
 //     both of its genuine triggers as "challenge-driven".
 //
-// So NMP waits for a challenge that the relay will only send once NMP
-// sends the request NMP is withholding until it is challenged. Neither
-// side is wrong on its own; together they never exchange a byte.
+// So NMP waited for a challenge that the relay would only send once NMP
+// sent the request NMP was withholding until it was challenged. Neither
+// side was wrong on its own; together they never exchanged a byte.
 //
-// Left failing rather than reshaped, on the same principle C17's #1846
-// phase was left red: the scenario is not weakened until something passes.
-// It is written as the scenario that will be green when the gap closes, so
-// closing the gap is what turns it green. See the finding in
-// `docs/internals/canary.md`.
+// #1889 deleted the withholding: a read session sends its planned REQs
+// whether or not it names an identity, and the relay's `CLOSED
+// auth-required` plus `["AUTH", challenge]` is what answers it. The control
+// observation stays because it is what makes a REGRESSION legible -- if the
+// subject ever stalls again, the same two status histories say so. It also
+// makes an assertion hazard, handled: the control shares this relay, this
+// filter and (through `makeCurrent: true`) this account, so every
+// negotiation assertion below is correlated to the SUBJECT session through
+// the engine's own `AuthDiagnostics.authenticateAs` before it is believed
+// (`subjectPolicyRequests`).
+//
+// Left failing rather than reshaped is what closed it, on the same
+// principle C17's #1846 phase was left red: the scenario is not weakened
+// until something passes. It was written as the scenario that would be
+// green when the gap closed, so closing the gap is what turned it green.
+// See the finding in `docs/internals/canary.md`.
 //
 // Every wait below is a bounded poll on a real condition with the real
 // stuck value reported on timeout -- never a fixed sleep used AS the
@@ -322,6 +333,44 @@ final class C15NIP42AuthTests: XCTestCase {
         }
     }
 
+    /// The subset of `policy.seen` that belongs to the session bound to
+    /// `identityHex`.
+    ///
+    /// `RecordingAuthPolicy` is installed per public key, not per
+    /// observation, so `policy.seen` is engine-global. In this scenario the
+    /// CONTROL observation shares the subject's relay, its filter, and --
+    /// because the account was added with `makeCurrent: true` -- the very
+    /// key the policy is registered under, so a request provoked by the
+    /// control would satisfy every field-level assertion about `relay`,
+    /// `expectedPublicKey` and `challenge` while the identity-bound session
+    /// was still transmitting nothing. That is a test that passes off the
+    /// wrong session's work as the subject's.
+    ///
+    /// `AuthDiagnostics` is the surface that can tell them apart: it names
+    /// the session's frozen `authenticateAs`, and both types carry the
+    /// engine's `(relay, transportGeneration, epochSequence)` epoch
+    /// coordinates. Correlating on those three restores "the SUBJECT
+    /// negotiated" as the claim under test.
+    private func subjectPolicyRequests(
+        boundTo identityHex: String,
+        policy: RecordingAuthPolicy,
+        diagnostics: LatestDiagnostics
+    ) -> [NMPAuthPolicyRequest] {
+        let boundEpochs = Set(
+            diagnostics.allAuthRows()
+                .filter { $0.authenticateAs == identityHex }
+                .compactMap { row -> String? in
+                    guard let sequence = row.epochSequence else { return nil }
+                    return "\(row.relay)|\(row.transportGeneration)|\(sequence)"
+                }
+        )
+        return policy.seen.filter {
+            boundEpochs.contains(
+                "\($0.relay)|\($0.transportGeneration)|\($0.epochSequence)"
+            )
+        }
+    }
+
     @discardableResult
     private func waitUntil(
         timeout: TimeInterval = 30,
@@ -461,18 +510,19 @@ final class C15NIP42AuthTests: XCTestCase {
 
         // --- Control: the SAME query with authenticateAs: nil -------------
         //
-        // Identical relay, identical filter, one field different. A
-        // unbound session is not parked, so its REQ genuinely reaches the
-        // relay -- and the relay answers it with a challenge and a CLOSED,
-        // which NMP surfaces as a failing source. The identity-bound observation
-        // above meanwhile transmits nothing at all and reports
-        // `awaitingAuth(awaitingChallenge)` indefinitely.
+        // Identical relay, identical filter, one field different. The unbound
+        // session's REQ reaches the relay and the relay answers it with a
+        // challenge and a CLOSED, which NMP surfaces as a failing source --
+        // an unbound session declares no identity, so it has nothing to sign
+        // a kind:22242 proof as. The identity-bound observation above
+        // completes the handshake and is served the row.
         //
-        // Two status histories, same relay, same filter: that pair is what
-        // localizes the stall to the protected session's own send path
-        // rather than to the relay, the filter, the account, the policy
-        // installation, or this scenario's setup. RECORDED, NOT ASSERTED --
-        // it is a diagnosis printed alongside a failure, not a contract
+        // Two status histories, same relay, same filter: while #1889 was open
+        // that pair localized the stall to the protected session's own send
+        // path rather than to the relay, the filter, the account, the policy
+        // installation, or this scenario's setup. It is kept because it is
+        // what would localize a REGRESSION the same way. RECORDED, NOT
+        // ASSERTED -- a diagnosis printed alongside a failure, not a contract
         // (C13's `wireSubCount` finding, same treatment).
         let control = try engine.observe(
             .single(
@@ -522,22 +572,40 @@ final class C15NIP42AuthTests: XCTestCase {
         // consulted about the right relay, for the right identity, with a
         // real challenge string. This is the fact the previous
         // controller-driven run could not touch at all.
-        XCTAssertFalse(
-            policy.seen.isEmpty,
-            "NMP never consulted the installed AUTH policy. The relay demands AUTH for this filter "
-                + "(proven above by an NMP-free client), the demand declared "
-                + "`authenticateAs: \(accountHex)`, and a policy was installed for that exact key. "
-                + "The identity-bound observation is \(afterFirst.relayStatus) with history "
-                + "\(afterFirst.statusHistory), while the CONTROL unbound observation over the "
-                + "SAME relay and filter is \(controlState.relayStatus) with history "
-                + "\(controlState.statusHistory) -- so the relay is answering NMP, and the "
-                + "protected session is the one that never transmits.\n"
-                + "This is the bootstrap deadlock described at the top of this file: NMP parks a "
-                + "protected session's requests until AUTH completes and only starts AUTH on an "
-                + "INBOUND challenge, while strfry only challenges IN RESPONSE to a request. "
-                + "Neither side moves first.\n" + policy.describe()
+        // SCOPED TO THE SUBJECT SESSION. Everything below asserts about the
+        // session the demand bound to `accountHex`, never about "some
+        // session NMP happened to negotiate". `policy.seen` alone cannot
+        // make that distinction here -- see `subjectPolicyRequests`.
+        //
+        // The correlation needs the engine's AUTH row for the epoch as well
+        // as the policy request, and those arrive on two independent
+        // streams, so wait for the pair rather than racing it.
+        _ = await waitUntil(timeout: 15) {
+            !self.subjectPolicyRequests(
+                boundTo: accountHex, policy: policy, diagnostics: diagnostics
+            ).isEmpty
+        }
+        let subjectRequests = subjectPolicyRequests(
+            boundTo: accountHex, policy: policy, diagnostics: diagnostics
         )
-        let firstRequest = try XCTUnwrap(policy.seen.first)
+        XCTAssertFalse(
+            subjectRequests.isEmpty,
+            "NMP never consulted the installed AUTH policy for the IDENTITY-BOUND session. The "
+                + "relay demands AUTH for this filter (proven above by an NMP-free client), the "
+                + "demand declared `authenticateAs: \(accountHex)`, and a policy was installed for "
+                + "that exact key. The identity-bound observation is \(afterFirst.relayStatus) with "
+                + "history \(afterFirst.statusHistory), while the CONTROL unbound observation over "
+                + "the SAME relay and filter is \(controlState.relayStatus) with history "
+                + "\(controlState.statusHistory) -- so if the relay is answering the control, "
+                + "the protected session is the one that stopped transmitting.\n"
+                + "That is the #1889 bootstrap deadlock returning: a protected session's requests "
+                + "parked until AUTH completes, while AUTH only starts on an INBOUND challenge and "
+                + "strfry only challenges IN RESPONSE to a request. Neither side moves first.\n"
+                + "(A policy request that could NOT be correlated to an AUTH row bound to "
+                + "\(accountHex) is the control session's, and does not count.)\n"
+                + policy.describe() + "\n" + diagnostics.describeAuth()
+        )
+        let firstRequest = try XCTUnwrap(subjectRequests.first)
         XCTAssertEqual(
             firstRequest.relay, lab.relay.url,
             "the policy was consulted about \(firstRequest.relay), not the relay the demand pinned"
@@ -595,11 +663,13 @@ final class C15NIP42AuthTests: XCTestCase {
         // id to point at. `phase == .ready` is documented as the sole owner
         // of "the relay's OK was correlated"; `authEventID` is the id of the
         // kind:22242 event NMP actually signed.
-        let readyRows = diagnostics.allAuthRows().filter { $0.phase == .ready }
+        let readyRows = diagnostics.allAuthRows().filter {
+            $0.phase == .ready && $0.authenticateAs == accountHex
+        }
         XCTAssertFalse(
             readyRows.isEmpty,
-            "no AUTH session ever reached `.ready` in `observeDiagnostics()`, although the row "
-                + "arrived.\n" + diagnostics.describeAuth()
+            "no AUTH session BOUND TO \(accountHex) ever reached `.ready` in "
+                + "`observeDiagnostics()`, although the row arrived.\n" + diagnostics.describeAuth()
         )
         let ready = try XCTUnwrap(readyRows.first)
         XCTAssertEqual(ready.relay, lab.relay.url)
@@ -829,8 +899,8 @@ final class C15NIP42AuthTests: XCTestCase {
         XCTAssertFalse(
             policy.seen.isEmpty,
             "NMP never consulted the policy, so there was nothing to deny -- the same bootstrap "
-                + "deadlock the round-trip scenario in this file fails on, reached from the other "
-                + "direction. An app cannot refuse a relay it was never asked about. Query "
+                + "deadlock #1889 closed, reached from the other direction. An app cannot refuse "
+                + "a relay it was never asked about. Query "
                 + "history=\(denied.statusHistory)\n" + policy.describe()
         )
         XCTAssertTrue(
@@ -964,11 +1034,11 @@ final class C15NIP42AuthTests: XCTestCase {
                 }
                 # Every inbound frame, in the relay's own log. NOTHING in
                 # this file reads it: no assertion, no oracle. It exists
-                # because this scenario is red on a protocol negotiation
-                # that produces no frames at all, and the first question
-                # anyone picking up #1889 will ask is "what did NMP
-                # actually send". Set CANARY_KEEP_LOGS=1 to keep the work
-                # directory and read it.
+                # because the first question anyone debugging a NIP-42
+                # negotiation asks is "what did NMP actually send", and
+                # while #1889 was open the answer was "nothing at all".
+                # Set CANARY_KEEP_LOGS=1 to keep the work directory and
+                # read it.
                 logging {
                     dumpInAll = true
                 }

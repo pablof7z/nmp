@@ -25,14 +25,14 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
         1,
         "fresh protected demand emits one deduplicated worker-acquisition edge"
     );
-    assert_no_protected_req(&first, &session);
+    assert_req_reaches_the_wire(&first, &session);
 
     let generation_one = RelayHandle {
         slot: 0,
         generation: 1,
     };
     let connected = core.handle(EngineMsg::RelayConnected(generation_one, session.clone()));
-    assert_no_protected_req(&connected, &session);
+    assert_req_reaches_the_wire(&connected, &session);
 
     let second = core.handle_and_flush(EngineMsg::Subscribe(protected_pinned_query(
         &relay,
@@ -50,7 +50,7 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
         0,
         "a demand recompile must not reacquire an already connected protected worker"
     );
-    assert_no_protected_req(&second, &session);
+    assert_req_reaches_the_wire(&second, &session);
 
     let newest_only = core.handle(EngineMsg::Unsubscribe(first_id));
     assert_eq!(
@@ -63,7 +63,17 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
         0,
         "shrinking the parked plan retains the connected protected worker without reacquiring it"
     );
-    assert_no_protected_req(&newest_only, &session);
+    // The withdrawal's CLOSE is on the wire for the same reason the REQ was:
+    // this session transmitted, so there is something to withdraw.
+    assert!(
+        newest_only.iter().any(|effect| match effect {
+            Effect::Wire(delta) => delta.ops.iter().any(|(candidate, ops)| {
+                candidate == &session && ops.iter().any(|op| matches!(op, WireOp::Close(..)))
+            }),
+            _ => false,
+        }),
+        "withdrawing one of two live requests must withdraw it on the wire: {newest_only:?}"
+    );
 
     let ready = authenticate_signer(&mut core, 0, &relay, &signer);
     let replay = ready
@@ -90,7 +100,10 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
         generation: 2,
     };
     let reconnected = core.handle(EngineMsg::RelayConnected(generation_two, session.clone()));
-    assert_no_protected_req(&reconnected, &session);
+    // A fresh generation replays the current plan immediately -- it does not
+    // wait to be challenged first (#1889). The relay's challenge is what
+    // answers this REQ, not what precedes it.
+    assert_req_reaches_the_wire(&reconnected, &session);
     let challenged = core.handle(EngineMsg::RelayFrame(
         generation_two,
         session.clone(),
@@ -109,7 +122,6 @@ fn fresh_protected_read_ensures_one_worker_and_replays_only_current_demand_after
                 && token.epoch.session == session
                 && challenge == "fresh-reconnect-challenge"
     )));
-    assert_no_protected_req(&challenged, &session);
 
     let removed = core.handle(EngineMsg::Unsubscribe(second_id));
     assert!(

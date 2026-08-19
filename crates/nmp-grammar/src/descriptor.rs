@@ -59,14 +59,15 @@ pub enum ReadRouting {
 /// `Some(key)` is a session that authenticates as `key`. `None` is the
 /// ordinary connection, bound to nobody.
 ///
-/// What `None` means TODAY, exactly: such a connection never authenticates.
+/// What `None` means, exactly: such a connection never authenticates.
 /// `CoreState::on_auth_challenge` returns immediately for it, so a relay's
-/// challenge is dropped rather than routed to the installed policy. Making
-/// that challenge reach the policy — so that a connection can acquire an
-/// identity instead of being born with one — is issue #1889, and it is not
-/// done here. Until it is, an identity is only ever supplied up front: by a
-/// write, which knows the key it is publishing as, or by a read that names
-/// an override.
+/// challenge is dropped rather than routed to the installed policy. That is
+/// the rule, not a gap: an identity is DECLARED, never discovered. Routing an
+/// unbound session's challenge to the current account would let a connection
+/// acquire an identity mid-flight and credit the coverage key it was already
+/// accumulating under `None` to that identity. An identity is supplied up
+/// front — by a write, which knows the key it is publishing as, or by a read
+/// that names one.
 ///
 /// One websocket carries at most one NIP-42 identity, which is why this —
 /// and not the URL alone — is the session key: two accounts publishing to
