@@ -23,8 +23,6 @@ mod graph;
 mod types;
 
 mod engine;
-#[cfg(feature = "bench-instrumentation")]
-pub mod ingest_attribution;
 
 pub use engine::{
     CommittedCurrentRow, CommittedMutationResult, CommittedRowChanges, Engine, GraphNodeInfo,

@@ -101,10 +101,6 @@ pub(super) fn flush_due(
     if !state.borrow_mut().take_due(now) || channels.is_empty() {
         return;
     }
-    #[cfg(feature = "bench-instrumentation")]
-    let phase_started = Instant::now();
     fan_out(snapshot_with_pool(core, pool), channels);
-    #[cfg(feature = "bench-instrumentation")]
-    nmp_engine::ingest_attribution::diagnostics_effect(phase_started.elapsed());
 }
 

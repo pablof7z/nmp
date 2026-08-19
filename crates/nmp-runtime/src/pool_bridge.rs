@@ -149,16 +149,6 @@ fn send_relay_batch(
     engine_inbox: &Sender<Cmd>,
 ) -> bool {
     let (applied_tx, applied_rx) = cb::bounded(1);
-    #[cfg(feature = "bench-instrumentation")]
-    {
-        let event_bytes = frames
-            .iter()
-            .filter_map(|(_, _, frame)| encoded_event_upper_bound(frame))
-            .fold(0usize, usize::saturating_add);
-        nmp_engine::ingest_attribution::bridge_batch(frames.len(), event_bytes);
-    }
-    #[cfg(feature = "bench-instrumentation")]
-    let send_started = std::time::Instant::now();
     if engine_inbox
         .send(Cmd::RelayBatch {
             frames,
@@ -168,26 +158,16 @@ fn send_relay_batch(
     {
         return false;
     }
-    #[cfg(feature = "bench-instrumentation")]
-    nmp_engine::ingest_attribution::bridge_send(send_started.elapsed());
-    #[cfg(feature = "bench-instrumentation")]
-    let applied_started = std::time::Instant::now();
     let applied = cb::select_biased! {
         recv(stopping) -> _ => false,
         recv(applied_rx) -> result => result.is_ok(),
     };
-    #[cfg(feature = "bench-instrumentation")]
-    nmp_engine::ingest_attribution::bridge_applied_wait(applied_started.elapsed());
     applied
 }
 
 pub(super) fn encoded_event_upper_bound(frame: &RelayFrame) -> Option<usize> {
     if let RelayFrame::CommittedObservation(hit) = frame {
         return Some(hit.encoded_bytes());
-    }
-    #[cfg(feature = "bench-instrumentation")]
-    if let Some((_, encoded_bytes)) = frame.diagnostic_duplicate_ceiling() {
-        return Some(encoded_bytes);
     }
     let event = frame.event()?;
     let tags = event.tags.iter().fold(0usize, |total, tag| {

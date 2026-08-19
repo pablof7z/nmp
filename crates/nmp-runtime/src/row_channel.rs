@@ -206,10 +206,6 @@ pub(crate) fn rows_channel() -> (RowsSender, RowsReceiver) {
 
 impl RowsSender {
     pub(crate) fn send(&self, (deltas, evidence): RowsMsg) {
-        #[cfg(feature = "bench-instrumentation")]
-        let send_started = std::time::Instant::now();
-        #[cfg(feature = "bench-instrumentation")]
-        let delta_count = deltas.len();
         self.pending.update(|pending| {
             let pending = pending.get_or_insert_with(|| PendingRows::new(evidence.clone()));
             for delta in deltas {
@@ -217,8 +213,6 @@ impl RowsSender {
             }
             pending.evidence = evidence;
         });
-        #[cfg(feature = "bench-instrumentation")]
-        nmp_engine::ingest_attribution::row_channel_send(send_started.elapsed(), delta_count);
     }
 }
 

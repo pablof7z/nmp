@@ -132,10 +132,6 @@ impl EngineClock {
     /// Change the clock value without delivering a tick. Runtime scheduling
     /// benchmarks use this to model a command winning the channel/deadline
     /// race; every other caller uses [`Self::set`] so stated time is acted on.
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn pin_silently(&self, at: Timestamp) {
-        self.pinned.store(at.as_secs(), Ordering::Relaxed);
-    }
 
     /// State what time it is, and let the engine act on it.
     ///
