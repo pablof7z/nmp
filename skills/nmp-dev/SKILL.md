@@ -46,9 +46,8 @@ testing](references/testing/INDEX.md).
   flags](../../docs/internals/conventions/no-hidden-runtime-feature-flags.md).
 - Apply `AGENTS.md`'s standing conventions in proportion to the diff. There is no PR-review checklist to run by eye — the repo deleted that ceremony; the conventions are design-time rules, and a violation is a defect to fix, not a box to check.
 - When behavior shared across layers changes, update every affected layer in
-  the same change: Rust, storage, diagnostics, FFI, Swift, Kotlin, docs, tests,
-  validation scripts, and evidence metadata. Do not keep the old path for
-  compatibility.
+  the same change, and the docs that are now wrong. Do not keep the old path
+  for compatibility.
 - Keep `README.md` and `docs/known-gaps.md` truthful.
 - A crate is a unit of responsibility and authority. Cargo is one way of
   making that boundary structural. Do not refuse a package because both
