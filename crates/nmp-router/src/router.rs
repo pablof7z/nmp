@@ -8,9 +8,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
-use nmp_grammar::{
-    ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey, RoutingEvidence,
-};
+use nmp_grammar::{ConcreteFilter, ContextualAtom, ReadRouting, RelaySessionKey, RoutingEvidence};
 use nmp_store::{coverage_claim_atoms, coverage_key, CoverageKey};
 
 use crate::budget::CompileBudget;
@@ -317,6 +315,557 @@ fn auto_ownership(
     }
 }
 
+/// Everything one compile of a demand set decides, before any of it is
+/// installed into a [`Router`].
+pub(crate) struct CompiledDemand {
+    pub(crate) plan: RelayPlan,
+    pub(crate) replacements: BTreeSet<RequestReplacement>,
+    pub(crate) uncovered_by_demand: BTreeMap<DemandKey, BTreeMap<PublicKey, Shortfall>>,
+    pub(crate) cap_refused_demands: BTreeMap<RelaySessionKey, BTreeSet<DemandKey>>,
+    pub(crate) cap_refused_coverage_assignments: BTreeSet<(DemandKey, PublicKey)>,
+    pub(crate) budget_refused_requests: Vec<(RelaySessionKey, WireReq)>,
+}
+
+/// Route, coalesce and token-assign `demand` into one relay plan.
+///
+/// A pure function of its arguments: it reads no ownership index and writes
+/// none, so nothing it does can be seen by a running [`Router`] until that
+/// router installs the result. That is what lets [`Router::admit`] compile a
+/// cohort against an empty incumbent namespace by passing an empty map,
+/// rather than detaching two dozen live indexes and putting them back.
+///
+/// `incumbent_reqs` is the request namespace this compile may match against:
+/// [`Router::compile`] passes the running plan, so a byte-identical successor
+/// keeps its wire token and an incumbent outranks a newcomer under a
+/// saturated subscription budget. [`Router::admit`] passes an EMPTY map --
+/// that is exactly what "compiled in an empty incumbent namespace" means, and
+/// it is why an admitted request always arrives on a freshly minted token.
+/// `next_token` is the router's monotonic mint counter, threaded in and out
+/// rather than copied, so no compile -- isolated or not -- can rewind it.
+pub(crate) fn compile_demand(
+    rules: &RuleRegistry,
+    next_token: &mut u64,
+    incumbent_reqs: &BTreeMap<RelaySessionKey, Vec<WireReq>>,
+    demand: &BTreeSet<ContextualAtom>,
+    facts: &dyn RoutingFacts,
+    budget: &CompileBudget,
+) -> CompiledDemand {
+    // Step 1: group demand by (Skeleton) / classify
+    // explicit. Classification is by DECLARED `ReadRouting` and nothing
+    // else — never by filter shape. Grouping by authenticated identity
+    // alongside the skeleton keeps the seam ready for a future
+    // present authenticated identity (#8's NIP-42 AUTH) without needing a
+    // second widening later; every atom reaching this branch shares
+    // `routing: Auto` by construction (that's the `classify` arm that
+    // produced it), so it isn't tracked per-group.
+    //
+    // An atom whose selection resolves NO authors joins the SAME group
+    // as its author-bearing siblings, because the skeleton it hashes to
+    // is the same one. That is deliberate — it is one `Auto` path, and
+    // the group records the fact via `unbounded` so the additive lanes
+    // widen back to the bare skeleton instead of narrowing the
+    // unbounded atom to the group's authors.
+    let mut auto_groups: BTreeMap<(Skeleton, Option<PublicKey>), AutoAtomGroup> = BTreeMap::new();
+    // Every `Auto` demand's resolved authors, flat across groups — the
+    // shortfall reduction at the end of this function walks demands, not
+    // groups.
+    let mut auto_authors_by_demand: BTreeMap<DemandKey, BTreeSet<PublicKey>> = BTreeMap::new();
+    // #107: query-declared `ReadRouting::Explicit(relays)` atoms — kept
+    // in their OWN collection, since these must skip every additive lane
+    // (indexer/app/fallback) below, not just the solve.
+    let mut exact_atoms: Vec<(ContextualAtom, BTreeSet<RelayUrl>)> = Vec::new();
+    for atom in demand {
+        match route::classify(&atom.routing) {
+            AtomClass::Auto => {
+                let (skeleton, authors) = Skeleton::of(&atom.filter);
+                let demand = DemandKey::for_atom(atom);
+                auto_authors_by_demand.insert(demand.clone(), authors.clone());
+                let group = auto_groups
+                    .entry((skeleton, atom.authenticate_as))
+                    .or_default();
+                group.demands.insert(demand.clone());
+                group
+                    .authors_by_demand
+                    .insert(demand.clone(), authors.clone());
+                group
+                    .routing_evidence
+                    .extend(atom.routing_evidence.iter().cloned());
+                // UNBOUND, not "resolved to nobody". `Skeleton::of`
+                // reports an empty author set for both `authors: None`
+                // and `authors: Some(∅)`, and those are different
+                // demands: the first asked about everyone, the second
+                // asked about nobody. `coverage_claims` already draws
+                // exactly that line, and the two halves of this change
+                // must not disagree about it.
+                if atom.filter.authors.is_none() {
+                    group.unbounded = true;
+                }
+                for author in authors {
+                    group.authors.insert(author);
+                    group
+                        .evidence_by_author
+                        .entry(author)
+                        .or_default()
+                        .extend(atom.routing_evidence.iter().cloned());
+                }
+            }
+            AtomClass::Exact(relays) => {
+                exact_atoms.push((atom.clone(), relays));
+            }
+        }
+    }
+
+    // Step 2 + 3: route (coverage-solve outbox groups / pinned lookup),
+    // apply the additive indexer/app/fallback lanes OUTSIDE the solve
+    // (Unit B, `routing-and-ownership.md` §2.1/§2.2 — never counted
+    // toward `k`), and materialize each relay's bag of (filter,
+    // context, single-lane provenance, coverage_claims) entries. `coverage_claims` is
+    // the coverage-attribution ruling's per-atom `CoverageKey` (§2):
+    // each entry here is exactly one pre-coalesce demand atom (one
+    // author, for outbox; the full/shortfall author set, for an
+    // additive lane; the pinned atom itself, for pinned), so it
+    // contributes exactly one key, later unioned by `coalesce_with`
+    // alongside provenance as same-skeleton, SAME-CONTEXT atoms merge
+    // (Fable D: equal-context-only).
+    let mut bag: SessionBag = BTreeMap::new();
+    let mut uncovered_by_demand: BTreeMap<DemandKey, BTreeMap<PublicKey, Shortfall>> =
+        BTreeMap::new();
+
+    for ((skeleton, authenticate_as), group) in &auto_groups {
+        let authenticate_as = *authenticate_as;
+        let source = ReadRouting::Auto;
+        let evidence_by_author = &group.evidence_by_author;
+        let authors = &group.authors;
+        let authors_by_group_demand = &group.authors_by_demand;
+        // The filter the additive lanes carry. The group's author union
+        // normally, but the author-erased skeleton whenever some atom
+        // here named no authors: only the bare skeleton covers such an
+        // atom, and it also supersets every author-bearing sibling, so
+        // widening is both necessary and sufficient.
+        let lane_filter = if group.unbounded {
+            skeleton.with_authors(BTreeSet::new())
+        } else {
+            skeleton.with_authors(authors.clone())
+        };
+        let candidates = route::build_candidates(authors, facts);
+        let mut candidates = candidates;
+        route::add_projected_candidates(&mut candidates, evidence_by_author);
+        let coverage = solver::solve(&CoverageInput {
+            candidates: candidates.clone(),
+            k: 2,
+            // Per-skeleton limiting is the defect #20 removes. Build
+            // each skeleton's honest k-cover first; the ONE assembled-
+            // plan ceiling below accounts for every skeleton and every
+            // additive/pinned lane together.
+            //
+            // #505 asked whether threading the real (or a "generous
+            // multiple" of the) whole-demand `cap` in here instead of
+            // `usize::MAX` would bound `solver::solve`'s greedy loop
+            // without changing the assembled plan. It would not, and is
+            // deliberately NOT done:
+            //   1. `solve`'s iteration count is already bounded by
+            //      `sum(per-author ceilings) <= k * authors_in_group`
+            //      (`k` is 2 here) regardless of `cap` -- every
+            //      iteration's selected relay must satisfy at least one
+            //      outstanding (author, slot) need, or the loop exits
+            //      via the "no candidate relay helps" branch. So any
+            //      `cap` at or above `2 * authors_in_group` is a no-op
+            //      (no perf change), and the O(authors^2) cost the
+            //      issue flags is the per-iteration O(authors *
+            //      candidates) rescan, not iteration count.
+            //   2. Any `cap` BELOW that natural bound stops the solve
+            //      before every author reaches `k`, for exactly the
+            //      relay-diverse (low-overlap) follow sets that make
+            //      this slow in the first place -- reintroducing the
+            //      truncation defect #20 removed, since a later skeleton
+            //      or additive lane might have had global-cap headroom
+            //      this skeleton never got to use, changing both the
+            //      shortfall diagnostics and the wire plan.
+            // A real fix would make the per-iteration scores rescan
+            // incremental instead of touching `cap`; out of scope here.
+            cap: usize::MAX,
+        });
+        for demand in &group.demands {
+            let exact: BTreeMap<_, _> = authors_by_group_demand[demand]
+                .iter()
+                .filter_map(|author| {
+                    coverage
+                        .shortfall
+                        .get(author)
+                        .cloned()
+                        .map(|fact| (*author, fact))
+                })
+                .collect();
+            if !exact.is_empty() {
+                uncovered_by_demand.insert(demand.clone(), exact);
+            }
+        }
+
+        // ONE bag entry per (relay, skeleton), carrying every author this
+        // relay was solved for -- not one entry per (author, relay).
+        //
+        // `provenance_for_outbox` deliberately yields one route per
+        // (author, relay) so each route keeps its own provenance, and this
+        // loop used to turn each of those into its own single-author
+        // filter. For an UNLIMITED demand `coalesce_with` re-joined them
+        // downstream and nothing showed. For a LIMITED one it could not --
+        // `neither_limited` refuses any filter carrying a `limit` -- so a
+        // bounded feed reached the wire as one REQ per author: ~351 wanted
+        // subscriptions over a 1055-author follow list, against relay caps
+        // of ~20 (#937).
+        //
+        // Re-joining here rather than relaxing `neither_limited` is the
+        // point. Those atoms were never independent demands competing for
+        // rows; they are ONE demand that routing fanned for provenance,
+        // and a window belongs to the feed rather than to each author in
+        // it (owner ruling, #937). Two genuinely independent limited
+        // watches still meet `neither_limited` downstream and still stay
+        // apart -- that rule is untouched.
+        //
+        // Coverage needs no special handling: a limited filter poisons its
+        // whole EOSE attribution (`attribution.rs`, `limited:
+        // filter.limit.is_some()`), so a bounded fetch records no coverage
+        // merged or unmerged. The per-author keys are still coverage_claims so an
+        // UNLIMITED feed goes on proving coverage for each author it named.
+        let mut by_relay: BTreeMap<RelayUrl, (BTreeSet<PublicKey>, Vec<RouteProvenance>)> =
+            BTreeMap::new();
+        for (relay, prov) in route::provenance_for_coverage(&coverage, &candidates) {
+            let entry = by_relay.entry(relay).or_default();
+            entry.0.extend(prov.covers_authors.iter().cloned());
+            entry.1.push(prov);
+        }
+        for (relay, (relay_authors, provenance)) in by_relay {
+            let filter = skeleton.with_authors(relay_authors.clone());
+            // The narrow per-author keys, one per author this relay
+            // serves. `coverage_key` window-erases and zeroes
+            // `routing_evidence`, so each key is exactly the key the
+            // resolver's own per-author atom hashes to -- which is what
+            // lets one merged REQ absorb them all.
+            let ownership = auto_ownership(
+                skeleton,
+                authenticate_as,
+                group,
+                &relay_authors,
+                &relay_authors,
+                false,
+            );
+            bag.entry(RelaySessionKey::new(relay, authenticate_as))
+                .or_default()
+                .entry(source.clone())
+                .or_default()
+                .push((filter, provenance, ownership));
+        }
+
+        let lane_ownership = auto_ownership(
+            skeleton,
+            authenticate_as,
+            group,
+            authors,
+            &BTreeSet::new(),
+            group.unbounded,
+        );
+
+        // The group's own routing facts, routed DIRECTLY -- but ONLY for
+        // an unbound group.
+        //
+        // Hints reach an author-bearing group already, as per-author
+        // candidates in the solve above (`add_projected_candidates`),
+        // where they compete for the k=2 slots and earn coverage like
+        // any other relay. An unbound group has no authors to key those
+        // candidates on, so its hints have nowhere to enter and would
+        // simply vanish. This lane is that gap and nothing more.
+        //
+        // Running it unconditionally would ADD a lane author-bearing
+        // atoms never had: a hinted relay would get a REQ outside the
+        // solve and outside coverage, `routing_evidence` is unioned
+        // across the group so one member's `nevent` hint would drag
+        // every sibling's filter to that relay, and the durable claim
+        // would cover every author in the group. That is a behaviour
+        // expansion, not a consequence of collapsing two routing values,
+        // so it stays out.
+        if group.unbounded {
+            push_routes(
+                &mut bag,
+                &lane_filter,
+                &source,
+                authenticate_as,
+                route::provenance_for_projected(&group.routing_evidence),
+                &lane_ownership,
+            );
+        }
+
+        // Operator app policy supplements the group's full author set,
+        // and routes every atom including the unbounded ones (closes #7
+        // — the authorless-routing-lane gap).
+        let additive = route::operator_app_routes(facts, authors);
+        push_routes(
+            &mut bag,
+            &lane_filter,
+            &source,
+            authenticate_as,
+            additive,
+            &lane_ownership,
+        );
+
+        // Additive fallback lane: routes exactly the shortfall authors,
+        // iff no appRelay is configured. `Coverage.shortfall` above has
+        // already recorded the shortfall regardless of whether this
+        // lane fires — fallback is a lane, not coverage.
+        let shortfall_authors: BTreeSet<PublicKey> = coverage.shortfall.keys().cloned().collect();
+        let fallback = route::operator_fallback_routes(facts, &shortfall_authors);
+        let fallback_ownership = auto_ownership(
+            skeleton,
+            authenticate_as,
+            group,
+            &shortfall_authors,
+            &BTreeSet::new(),
+            false,
+        );
+        push_routes(
+            &mut bag,
+            &skeleton.with_authors(shortfall_authors),
+            &source,
+            authenticate_as,
+            fallback,
+            &fallback_ownership,
+        );
+    }
+
+    // #107: an explicit, query-declared relay set — route DIRECTLY to
+    // it. NO additive lane (indexer/app/fallback) is ever applied here:
+    // that's the #107 Contract's core guarantee ("Explicit author
+    // filters never contact directory, author-outbox, app, fallback, or
+    // indexer relays").
+    for (atom, relays) in &exact_atoms {
+        let filter = &atom.filter;
+        let authenticate_as = atom.authenticate_as;
+        let source = ReadRouting::Explicit(relays.iter().cloned().collect());
+        let ownership = exact_atom_ownership(atom.clone());
+        for (relay, prov) in route::provenance_for_exact(relays) {
+            bag.entry(RelaySessionKey::new(relay, authenticate_as))
+                .or_default()
+                .entry(source.clone())
+                .or_default()
+                .push((filter.clone(), vec![prov], ownership.clone()));
+        }
+    }
+
+    // Step 4: enforce the ONE whole-demand ceiling over the fully
+    // materialized bag. Nothing removed here can reach coalescing, the
+    // plan, or the wire; its contextual coverage keys remain as exact
+    // local-limit evidence.
+    let RelayCapOutcome {
+        mut limited_demands,
+        mut refused_sessions,
+        refused_demands: cap_refused_demands,
+        refused_coverage_assignments: cap_refused_coverage_assignments,
+    } = apply_global_relay_cap(&mut bag, budget.relay_cap());
+
+    // Step 5 + 6: per relay, PER CONTEXT PARTITION, dedup + widen-only
+    // coalesce (`coalesce.rs` stays pure selection-only, Fable D "locus
+    // fixed" -- partitioning by `ContextKey` here is what makes
+    // coalescing equal-context-only, never a change to the rule
+    // engine itself), then ALLOCATE each survivor's wire token by
+    // matching it against the previous plan's filters for the SAME
+    // partition (`wire_id::assign`, #899).
+    //
+    // Wire ids used to be DERIVED from the filter's author-erased
+    // `Skeleton`. That made author churn free (same skeleton, same id,
+    // one overwriting REQ) but it was not injective: two filters the
+    // coalescer REFUSED to merge -- `neither_limited` poisons every rule
+    // the moment either side carries a `limit`, and `dedup_only()` holds
+    // no author union at all -- minted the SAME id, and `diff_plans`
+    // (keyed by `SubId`) then silently dropped one of them, forever.
+    // Allocation buys back injectivity. The previous plan still tells a
+    // byte-changing successor which request it replaces, but the
+    // successor receives a fresh token and EngineCore offers it before
+    // retiring the predecessor after the exact commit edge.
+    let mut mint_counter = *next_token;
+    let mut reqs: BTreeMap<RelaySessionKey, Vec<WireReq>> = BTreeMap::new();
+    let mut replacements: BTreeSet<RequestReplacement> = BTreeSet::new();
+    let mut subscription_shortfalls: BTreeMap<RelaySessionKey, BudgetShortfall> = BTreeMap::new();
+    let mut budget_refused_requests: Vec<(RelaySessionKey, WireReq)> = Vec::new();
+    for (session, by_source) in bag {
+        let relay = session.relay.clone();
+        let authenticate_as = session.authenticate_as;
+        let mut session_reqs: Vec<WireReq> = Vec::new();
+        for (source, entries) in by_source {
+            let merged = rules.coalesce_with(entries);
+            let filters: Vec<ConcreteFilter> =
+                merged.iter().map(|(filter, _, _)| filter.clone()).collect();
+
+            // The matching partition: this exact relay session AND this
+            // exact declared authority. Reading it back out of
+            // `prev_plan` is what makes the matching state pruned by
+            // construction -- there is no separate table to age out.
+            let priors: Vec<(ConcreteFilter, SubId)> = incumbent_reqs
+                .get(&session)
+                .into_iter()
+                .flatten()
+                .filter(|req| req.routing == source)
+                .map(|req| (req.filter.clone(), req.sub_id.clone()))
+                .collect();
+
+            let assigned = wire_id::assign(&priors, &filters, || {
+                let sub_id = SubId::allocate(relay.clone(), &source, authenticate_as, mint_counter);
+                mint_counter += 1;
+                sub_id
+            });
+
+            session_reqs.extend(merged.into_iter().zip(assigned).map(
+                |((filter, provenance, ownership), assignment)| {
+                    if let Some(prior_sub_id) = assignment.predecessor {
+                        replacements.insert(RequestReplacement {
+                            session: session.clone(),
+                            prior_sub_id,
+                            next_sub_id: assignment.sub_id.clone(),
+                        });
+                    }
+                    let provenance = provenance.into_iter().collect::<BTreeSet<_>>();
+                    WireReq {
+                        sub_id: assignment.sub_id,
+                        filter,
+                        routing: source.clone(),
+                        provenance,
+                        coverage_claims: ownership.coverage_claims,
+                        owner_demands: ownership.owner_demands,
+                        coverage_assignments: ownership.coverage_assignments,
+                    }
+                },
+            ));
+        }
+        session_reqs.sort_by(|a, b| a.sub_id.cmp(&b.sub_id));
+
+        // Step 6b: the PER-RELAY SUBSCRIPTION BUDGET (#931). Enforced
+        // here, after coalescing and after token assignment, because
+        // both of those decide what the count actually IS: the collapse
+        // is what turns a 300-value catalog into one subscription, and
+        // the assignment is what tells an INCUMBENT subscription (one
+        // the previous plan already carried) apart from a newcomer.
+        //
+        // A relay that advertised nothing is unbudgeted -- see
+        // `crate::budget` for why absence is not a number.
+        let planned = session_reqs.len();
+        match budget.max_subscriptions(&relay) {
+            None => {}
+            Some(allowed) if planned <= allowed => {}
+            Some(allowed) => {
+                let refused =
+                    refuse_over_budget(&mut session_reqs, allowed, incumbent_reqs.get(&session));
+                for req in &refused {
+                    limited_demands.extend(req.owner_demands.iter().cloned());
+                }
+                budget_refused_requests.extend(
+                    refused
+                        .iter()
+                        .cloned()
+                        .map(|request| (session.clone(), request)),
+                );
+                subscription_shortfalls.insert(
+                    session.clone(),
+                    BudgetShortfall {
+                        budget: allowed,
+                        planned,
+                        refused: refused.len(),
+                    },
+                );
+                // A relay advertising ZERO concurrent subscriptions
+                // cannot be planned at all. That is a whole-session
+                // refusal, so it takes the same seam the whole-demand
+                // ceiling uses and stays absent from `reqs` -- the
+                // invariant every `refused_sessions` reader relies on.
+                if session_reqs.is_empty() {
+                    refused_sessions.insert(session);
+                    continue;
+                }
+            }
+        }
+
+        reqs.insert(session, session_reqs);
+    }
+    *next_token = mint_counter;
+
+    let selected_assignments: BTreeMap<_, BTreeSet<_>> = reqs
+        .iter()
+        .flat_map(|(session, requests)| {
+            requests.iter().flat_map(move |request| {
+                request
+                    .coverage_assignments
+                    .iter()
+                    .map(move |assignment| (assignment.clone(), session.clone()))
+            })
+        })
+        .fold(BTreeMap::new(), |mut indexed, (assignment, session)| {
+            indexed
+                .entry(assignment)
+                .or_insert_with(BTreeSet::new)
+                .insert(session);
+            indexed
+        });
+    let refused_coverage_assignments: BTreeSet<_> = cap_refused_coverage_assignments
+        .iter()
+        .cloned()
+        .chain(
+            budget_refused_requests
+                .iter()
+                .flat_map(|(_, request)| request.coverage_assignments.iter().cloned()),
+        )
+        .collect();
+    for (demand, authors) in &auto_authors_by_demand {
+        let intrinsic = uncovered_by_demand.remove(demand).unwrap_or_default();
+        let exact: BTreeMap<_, _> = authors
+            .iter()
+            .filter_map(|author| {
+                let assignment = (demand.clone(), *author);
+                let achieved = selected_assignments
+                    .get(&assignment)
+                    .map_or(0, BTreeSet::len);
+                reduce_outbox_shortfall(
+                    intrinsic.get(author).cloned(),
+                    achieved,
+                    refused_coverage_assignments.contains(&assignment),
+                )
+                .map(|fact| (*author, fact))
+            })
+            .collect();
+        if !exact.is_empty() {
+            uncovered_by_demand.insert(demand.clone(), exact);
+        }
+    }
+
+    // The invariant the whole change exists to establish, checked in
+    // RELEASE builds too (a `debug_assert!` compiles out of exactly the
+    // builds that ship). Under allocation it can never fire -- each prior
+    // token is assigned to at most one filter and every mint is unique --
+    // which is precisely what makes it cheap enough to leave in. If it
+    // ever does fire, `diff_plans` would have dropped a `WireReq` that
+    // never reached the wire and never would have.
+    {
+        let mut seen: BTreeSet<&SubId> = BTreeSet::new();
+        for req in reqs.values().flatten() {
+            assert!(
+                seen.insert(&req.sub_id),
+                "wire sub-id injectivity violated: two WireReqs share {:?} -- \
+                 diff_plans keys by SubId, so one of them could never reach the wire",
+                req.sub_id
+            );
+        }
+    }
+    CompiledDemand {
+        plan: RelayPlan {
+            reqs,
+            limited_demands,
+            refused_sessions,
+            subscription_shortfalls,
+        },
+        replacements,
+        uncovered_by_demand,
+        cap_refused_demands,
+        cap_refused_coverage_assignments,
+        budget_refused_requests,
+    }
+}
+
 pub struct Router {
     pub(crate) rules: RuleRegistry,
     pub(crate) prev_plan: RelayPlan,
@@ -326,7 +875,9 @@ pub struct Router {
     /// Deliberately NOT seeded randomly: the whole crate is a pure function of
     /// its inputs and the repo pins that reproducibility, while token
     /// uniqueness only ever has to hold WITHIN one router's wire namespace.
-    next_token: u64,
+    /// Threaded through `compile_demand` by `&mut`, so a cohort compile
+    /// shares the counter without sharing anything else.
+    pub(crate) next_token: u64,
     /// Hoisted chain root for [`SubId::allocate`], so minting costs a handful
     /// of `fold_byte` calls rather than a JSON encode plus BLAKE3 each time.
     /// Carries no filter meaning -- see `SubId::allocate`.
@@ -416,536 +967,39 @@ impl Router {
         budget: impl Into<CompileBudget>,
     ) -> CompileOutcome {
         let budget = budget.into();
-        // Step 1: group demand by (Skeleton) / classify
-        // explicit. Classification is by DECLARED `ReadRouting` and nothing
-        // else — never by filter shape. Grouping by authenticated identity
-        // alongside the skeleton keeps the seam ready for a future
-        // present authenticated identity (#8's NIP-42 AUTH) without needing a
-        // second widening later; every atom reaching this branch shares
-        // `routing: Auto` by construction (that's the `classify` arm that
-        // produced it), so it isn't tracked per-group.
+        let CompiledDemand {
+            plan: mut next_plan,
+            replacements,
+            uncovered_by_demand,
+            cap_refused_demands,
+            cap_refused_coverage_assignments,
+            budget_refused_requests,
+        } = compile_demand(
+            &self.rules,
+            &mut self.next_token,
+            &self.prev_plan.reqs,
+            demand,
+            facts,
+            &budget,
+        );
+        // Everything below installs the compiled plan; `compile_demand`
+        // itself touched none of it. Cohort admission never reaches here at
+        // all -- it takes the compiled plan and appends it -- so these
+        // counters now only ever count a whole-demand recompile.
         //
-        // An atom whose selection resolves NO authors joins the SAME group
-        // as its author-bearing siblings, because the skeleton it hashes to
-        // is the same one. That is deliberate — it is one `Auto` path, and
-        // the group records the fact via `unbounded` so the additive lanes
-        // widen back to the bare skeleton instead of narrowing the
-        // unbounded atom to the group's authors.
-        let mut auto_groups: BTreeMap<(Skeleton, Option<PublicKey>), AutoAtomGroup> = BTreeMap::new();
-        // Every `Auto` demand's resolved authors, flat across groups — the
-        // shortfall reduction at the end of this function walks demands, not
-        // groups.
-        let mut auto_authors_by_demand: BTreeMap<DemandKey, BTreeSet<PublicKey>> = BTreeMap::new();
-        // #107: query-declared `ReadRouting::Explicit(relays)` atoms — kept
-        // in their OWN collection, since these must skip every additive lane
-        // (indexer/app/fallback) below, not just the solve.
-        let mut exact_atoms: Vec<(ContextualAtom, BTreeSet<RelayUrl>)> = Vec::new();
-        for atom in demand {
-            match route::classify(&atom.routing) {
-                AtomClass::Auto => {
-                    let (skeleton, authors) = Skeleton::of(&atom.filter);
-                    let demand = DemandKey::for_atom(atom);
-                    auto_authors_by_demand.insert(demand.clone(), authors.clone());
-                    let group = auto_groups.entry((skeleton, atom.authenticate_as)).or_default();
-                    group.demands.insert(demand.clone());
-                    group.authors_by_demand.insert(demand.clone(), authors.clone());
-                    group
-                        .routing_evidence
-                        .extend(atom.routing_evidence.iter().cloned());
-                    // UNBOUND, not "resolved to nobody". `Skeleton::of`
-                    // reports an empty author set for both `authors: None`
-                    // and `authors: Some(∅)`, and those are different
-                    // demands: the first asked about everyone, the second
-                    // asked about nobody. `coverage_claims` already draws
-                    // exactly that line, and the two halves of this change
-                    // must not disagree about it.
-                    if atom.filter.authors.is_none() {
-                        group.unbounded = true;
-                    }
-                    for author in authors {
-                        group.authors.insert(author);
-                        group
-                            .evidence_by_author
-                            .entry(author)
-                            .or_default()
-                            .extend(atom.routing_evidence.iter().cloned());
-                    }
-                }
-                AtomClass::Exact(relays) => {
-                    exact_atoms.push((atom.clone(), relays));
-                }
-            }
-        }
-
-        // Step 2 + 3: route (coverage-solve outbox groups / pinned lookup),
-        // apply the additive indexer/app/fallback lanes OUTSIDE the solve
-        // (Unit B, `routing-and-ownership.md` §2.1/§2.2 — never counted
-        // toward `k`), and materialize each relay's bag of (filter,
-        // context, single-lane provenance, coverage_claims) entries. `coverage_claims` is
-        // the coverage-attribution ruling's per-atom `CoverageKey` (§2):
-        // each entry here is exactly one pre-coalesce demand atom (one
-        // author, for outbox; the full/shortfall author set, for an
-        // additive lane; the pinned atom itself, for pinned), so it
-        // contributes exactly one key, later unioned by `coalesce_with`
-        // alongside provenance as same-skeleton, SAME-CONTEXT atoms merge
-        // (Fable D: equal-context-only).
-        let mut bag: SessionBag = BTreeMap::new();
-        let mut uncovered_by_demand: BTreeMap<DemandKey, BTreeMap<PublicKey, Shortfall>> =
-            BTreeMap::new();
-
-        for ((skeleton, authenticate_as), group) in &auto_groups {
-            let authenticate_as = *authenticate_as;
-            let source = ReadRouting::Auto;
-            let evidence_by_author = &group.evidence_by_author;
-            let authors = &group.authors;
-            let authors_by_group_demand = &group.authors_by_demand;
-            // The filter the additive lanes carry. The group's author union
-            // normally, but the author-erased skeleton whenever some atom
-            // here named no authors: only the bare skeleton covers such an
-            // atom, and it also supersets every author-bearing sibling, so
-            // widening is both necessary and sufficient.
-            let lane_filter = if group.unbounded {
-                skeleton.with_authors(BTreeSet::new())
-            } else {
-                skeleton.with_authors(authors.clone())
-            };
-            let candidates = route::build_candidates(authors, facts);
-            let mut candidates = candidates;
-            route::add_projected_candidates(&mut candidates, evidence_by_author);
-            let coverage = solver::solve(&CoverageInput {
-                candidates: candidates.clone(),
-                k: 2,
-                // Per-skeleton limiting is the defect #20 removes. Build
-                // each skeleton's honest k-cover first; the ONE assembled-
-                // plan ceiling below accounts for every skeleton and every
-                // additive/pinned lane together.
-                //
-                // #505 asked whether threading the real (or a "generous
-                // multiple" of the) whole-demand `cap` in here instead of
-                // `usize::MAX` would bound `solver::solve`'s greedy loop
-                // without changing the assembled plan. It would not, and is
-                // deliberately NOT done:
-                //   1. `solve`'s iteration count is already bounded by
-                //      `sum(per-author ceilings) <= k * authors_in_group`
-                //      (`k` is 2 here) regardless of `cap` -- every
-                //      iteration's selected relay must satisfy at least one
-                //      outstanding (author, slot) need, or the loop exits
-                //      via the "no candidate relay helps" branch. So any
-                //      `cap` at or above `2 * authors_in_group` is a no-op
-                //      (no perf change), and the O(authors^2) cost the
-                //      issue flags is the per-iteration O(authors *
-                //      candidates) rescan, not iteration count.
-                //   2. Any `cap` BELOW that natural bound stops the solve
-                //      before every author reaches `k`, for exactly the
-                //      relay-diverse (low-overlap) follow sets that make
-                //      this slow in the first place -- reintroducing the
-                //      truncation defect #20 removed, since a later skeleton
-                //      or additive lane might have had global-cap headroom
-                //      this skeleton never got to use, changing both the
-                //      shortfall diagnostics and the wire plan.
-                // A real fix would make the per-iteration scores rescan
-                // incremental instead of touching `cap`; out of scope here.
-                cap: usize::MAX,
-            });
-            for demand in &group.demands {
-                let exact: BTreeMap<_, _> = authors_by_group_demand[demand]
-                    .iter()
-                    .filter_map(|author| {
-                        coverage
-                            .shortfall
-                            .get(author)
-                            .cloned()
-                            .map(|fact| (*author, fact))
-                    })
-                    .collect();
-                if !exact.is_empty() {
-                    uncovered_by_demand.insert(demand.clone(), exact);
-                }
-            }
-
-            // ONE bag entry per (relay, skeleton), carrying every author this
-            // relay was solved for -- not one entry per (author, relay).
-            //
-            // `provenance_for_outbox` deliberately yields one route per
-            // (author, relay) so each route keeps its own provenance, and this
-            // loop used to turn each of those into its own single-author
-            // filter. For an UNLIMITED demand `coalesce_with` re-joined them
-            // downstream and nothing showed. For a LIMITED one it could not --
-            // `neither_limited` refuses any filter carrying a `limit` -- so a
-            // bounded feed reached the wire as one REQ per author: ~351 wanted
-            // subscriptions over a 1055-author follow list, against relay caps
-            // of ~20 (#937).
-            //
-            // Re-joining here rather than relaxing `neither_limited` is the
-            // point. Those atoms were never independent demands competing for
-            // rows; they are ONE demand that routing fanned for provenance,
-            // and a window belongs to the feed rather than to each author in
-            // it (owner ruling, #937). Two genuinely independent limited
-            // watches still meet `neither_limited` downstream and still stay
-            // apart -- that rule is untouched.
-            //
-            // Coverage needs no special handling: a limited filter poisons its
-            // whole EOSE attribution (`attribution.rs`, `limited:
-            // filter.limit.is_some()`), so a bounded fetch records no coverage
-            // merged or unmerged. The per-author keys are still coverage_claims so an
-            // UNLIMITED feed goes on proving coverage for each author it named.
-            let mut by_relay: BTreeMap<RelayUrl, (BTreeSet<PublicKey>, Vec<RouteProvenance>)> =
-                BTreeMap::new();
-            for (relay, prov) in route::provenance_for_coverage(&coverage, &candidates) {
-                let entry = by_relay.entry(relay).or_default();
-                entry.0.extend(prov.covers_authors.iter().cloned());
-                entry.1.push(prov);
-            }
-            for (relay, (relay_authors, provenance)) in by_relay {
-                let filter = skeleton.with_authors(relay_authors.clone());
-                // The narrow per-author keys, one per author this relay
-                // serves. `coverage_key` window-erases and zeroes
-                // `routing_evidence`, so each key is exactly the key the
-                // resolver's own per-author atom hashes to -- which is what
-                // lets one merged REQ absorb them all.
-                let ownership = auto_ownership(
-                    skeleton,
-                    authenticate_as,
-                    group,
-                    &relay_authors,
-                    &relay_authors,
-                    false,
-                );
-                bag.entry(RelaySessionKey::new(relay, authenticate_as))
-                    .or_default()
-                    .entry(source.clone())
-                    .or_default()
-                    .push((filter, provenance, ownership));
-            }
-
-            let lane_ownership = auto_ownership(
-                skeleton,
-                authenticate_as,
-                group,
-                authors,
-                &BTreeSet::new(),
-                group.unbounded,
-            );
-
-            // The group's own routing facts, routed DIRECTLY -- but ONLY for
-            // an unbound group.
-            //
-            // Hints reach an author-bearing group already, as per-author
-            // candidates in the solve above (`add_projected_candidates`),
-            // where they compete for the k=2 slots and earn coverage like
-            // any other relay. An unbound group has no authors to key those
-            // candidates on, so its hints have nowhere to enter and would
-            // simply vanish. This lane is that gap and nothing more.
-            //
-            // Running it unconditionally would ADD a lane author-bearing
-            // atoms never had: a hinted relay would get a REQ outside the
-            // solve and outside coverage, `routing_evidence` is unioned
-            // across the group so one member's `nevent` hint would drag
-            // every sibling's filter to that relay, and the durable claim
-            // would cover every author in the group. That is a behaviour
-            // expansion, not a consequence of collapsing two routing values,
-            // so it stays out.
-            if group.unbounded {
-                push_routes(
-                    &mut bag,
-                    &lane_filter,
-                    &source,
-                    authenticate_as,
-                    route::provenance_for_projected(&group.routing_evidence),
-                    &lane_ownership,
-                );
-            }
-
-            // Operator app policy supplements the group's full author set,
-            // and routes every atom including the unbounded ones (closes #7
-            // — the authorless-routing-lane gap).
-            let additive = route::operator_app_routes(facts, authors);
-            push_routes(
-                &mut bag,
-                &lane_filter,
-                &source,
-                authenticate_as,
-                additive,
-                &lane_ownership,
-            );
-
-            // Additive fallback lane: routes exactly the shortfall authors,
-            // iff no appRelay is configured. `Coverage.shortfall` above has
-            // already recorded the shortfall regardless of whether this
-            // lane fires — fallback is a lane, not coverage.
-            let shortfall_authors: BTreeSet<PublicKey> =
-                coverage.shortfall.keys().cloned().collect();
-            let fallback = route::operator_fallback_routes(facts, &shortfall_authors);
-            let fallback_ownership = auto_ownership(
-                skeleton,
-                authenticate_as,
-                group,
-                &shortfall_authors,
-                &BTreeSet::new(),
-                false,
-            );
-            push_routes(
-                &mut bag,
-                &skeleton.with_authors(shortfall_authors),
-                &source,
-                authenticate_as,
-                fallback,
-                &fallback_ownership,
-            );
-        }
-
-        // #107: an explicit, query-declared relay set — route DIRECTLY to
-        // it. NO additive lane (indexer/app/fallback) is ever applied here:
-        // that's the #107 Contract's core guarantee ("Explicit author
-        // filters never contact directory, author-outbox, app, fallback, or
-        // indexer relays").
-        for (atom, relays) in &exact_atoms {
-            let filter = &atom.filter;
-            let authenticate_as = atom.authenticate_as;
-            let source = ReadRouting::Explicit(relays.iter().cloned().collect());
-            let ownership = exact_atom_ownership(atom.clone());
-            for (relay, prov) in route::provenance_for_exact(relays) {
-                bag.entry(RelaySessionKey::new(relay, authenticate_as))
-                    .or_default()
-                    .entry(source.clone())
-                    .or_default()
-                    .push((filter.clone(), vec![prov], ownership.clone()));
-            }
-        }
-
-        // Step 4: enforce the ONE whole-demand ceiling over the fully
-        // materialized bag. Nothing removed here can reach coalescing, the
-        // plan, or the wire; its contextual coverage keys remain as exact
-        // local-limit evidence.
-        let RelayCapOutcome {
-            mut limited_demands,
-            mut refused_sessions,
-            refused_demands: cap_refused_demands,
-            refused_coverage_assignments: cap_refused_coverage_assignments,
-        } = apply_global_relay_cap(&mut bag, budget.relay_cap());
-
-        // Step 5 + 6: per relay, PER CONTEXT PARTITION, dedup + widen-only
-        // coalesce (`coalesce.rs` stays pure selection-only, Fable D "locus
-        // fixed" -- partitioning by `ContextKey` here is what makes
-        // coalescing equal-context-only, never a change to the rule
-        // engine itself), then ALLOCATE each survivor's wire token by
-        // matching it against the previous plan's filters for the SAME
-        // partition (`wire_id::assign`, #899).
-        //
-        // Wire ids used to be DERIVED from the filter's author-erased
-        // `Skeleton`. That made author churn free (same skeleton, same id,
-        // one overwriting REQ) but it was not injective: two filters the
-        // coalescer REFUSED to merge -- `neither_limited` poisons every rule
-        // the moment either side carries a `limit`, and `dedup_only()` holds
-        // no author union at all -- minted the SAME id, and `diff_plans`
-        // (keyed by `SubId`) then silently dropped one of them, forever.
-        // Allocation buys back injectivity. The previous plan still tells a
-        // byte-changing successor which request it replaces, but the
-        // successor receives a fresh token and EngineCore offers it before
-        // retiring the predecessor after the exact commit edge.
-        let mut mint_counter = self.next_token;
-        let mut reqs: BTreeMap<RelaySessionKey, Vec<WireReq>> = BTreeMap::new();
-        let mut replacements: BTreeSet<RequestReplacement> = BTreeSet::new();
-        let mut subscription_shortfalls: BTreeMap<RelaySessionKey, BudgetShortfall> =
-            BTreeMap::new();
-        let mut budget_refused_requests: Vec<(RelaySessionKey, WireReq)> = Vec::new();
-        for (session, by_source) in bag {
-            let relay = session.relay.clone();
-            let authenticate_as = session.authenticate_as;
-            let mut session_reqs: Vec<WireReq> = Vec::new();
-            for (source, entries) in by_source {
-                let merged = self.rules.coalesce_with(entries);
-                let filters: Vec<ConcreteFilter> =
-                    merged.iter().map(|(filter, _, _)| filter.clone()).collect();
-
-                // The matching partition: this exact relay session AND this
-                // exact declared authority. Reading it back out of
-                // `prev_plan` is what makes the matching state pruned by
-                // construction -- there is no separate table to age out.
-                let priors: Vec<(ConcreteFilter, SubId)> = self
-                    .prev_plan
-                    .reqs
-                    .get(&session)
-                    .into_iter()
-                    .flatten()
-                    .filter(|req| req.routing == source)
-                    .map(|req| (req.filter.clone(), req.sub_id.clone()))
-                    .collect();
-
-                let assigned = wire_id::assign(&priors, &filters, || {
-                    let sub_id =
-                        SubId::allocate(relay.clone(), &source, authenticate_as, mint_counter);
-                    mint_counter += 1;
-                    sub_id
-                });
-
-                session_reqs.extend(merged.into_iter().zip(assigned).map(
-                    |((filter, provenance, ownership), assignment)| {
-                        if let Some(prior_sub_id) = assignment.predecessor {
-                            replacements.insert(RequestReplacement {
-                                session: session.clone(),
-                                prior_sub_id,
-                                next_sub_id: assignment.sub_id.clone(),
-                            });
-                        }
-                        let provenance = provenance.into_iter().collect::<BTreeSet<_>>();
-                        WireReq {
-                            sub_id: assignment.sub_id,
-                            filter,
-                            routing: source.clone(),
-                            provenance,
-                            coverage_claims: ownership.coverage_claims,
-                            owner_demands: ownership.owner_demands,
-                            coverage_assignments: ownership.coverage_assignments,
-                        }
-                    },
-                ));
-            }
-            session_reqs.sort_by(|a, b| a.sub_id.cmp(&b.sub_id));
-
-            // Step 6b: the PER-RELAY SUBSCRIPTION BUDGET (#931). Enforced
-            // here, after coalescing and after token assignment, because
-            // both of those decide what the count actually IS: the collapse
-            // is what turns a 300-value catalog into one subscription, and
-            // the assignment is what tells an INCUMBENT subscription (one
-            // the previous plan already carried) apart from a newcomer.
-            //
-            // A relay that advertised nothing is unbudgeted -- see
-            // `crate::budget` for why absence is not a number.
-            let planned = session_reqs.len();
-            match budget.max_subscriptions(&relay) {
-                None => {}
-                Some(allowed) if planned <= allowed => {}
-                Some(allowed) => {
-                    let refused = refuse_over_budget(
-                        &mut session_reqs,
-                        allowed,
-                        self.prev_plan.reqs.get(&session),
-                    );
-                    for req in &refused {
-                        limited_demands.extend(req.owner_demands.iter().cloned());
-                    }
-                    budget_refused_requests.extend(
-                        refused
-                            .iter()
-                            .cloned()
-                            .map(|request| (session.clone(), request)),
-                    );
-                    subscription_shortfalls.insert(
-                        session.clone(),
-                        BudgetShortfall {
-                            budget: allowed,
-                            planned,
-                            refused: refused.len(),
-                        },
-                    );
-                    // A relay advertising ZERO concurrent subscriptions
-                    // cannot be planned at all. That is a whole-session
-                    // refusal, so it takes the same seam the whole-demand
-                    // ceiling uses and stays absent from `reqs` -- the
-                    // invariant every `refused_sessions` reader relies on.
-                    if session_reqs.is_empty() {
-                        refused_sessions.insert(session);
-                        continue;
-                    }
-                }
-            }
-
-            reqs.insert(session, session_reqs);
-        }
-        self.next_token = mint_counter;
-
-        let selected_assignments: BTreeMap<_, BTreeSet<_>> = reqs
-            .iter()
-            .flat_map(|(session, requests)| {
-                requests.iter().flat_map(move |request| {
-                    request
-                        .coverage_assignments
-                        .iter()
-                        .map(move |assignment| (assignment.clone(), session.clone()))
-                })
-            })
-            .fold(BTreeMap::new(), |mut indexed, (assignment, session)| {
-                indexed
-                    .entry(assignment)
-                    .or_insert_with(BTreeSet::new)
-                    .insert(session);
-                indexed
-            });
-        let refused_coverage_assignments: BTreeSet<_> = cap_refused_coverage_assignments
-            .iter()
-            .cloned()
-            .chain(
-                budget_refused_requests
-                    .iter()
-                    .flat_map(|(_, request)| request.coverage_assignments.iter().cloned()),
-            )
-            .collect();
-        for (demand, authors) in &auto_authors_by_demand {
-            let intrinsic = uncovered_by_demand.remove(demand).unwrap_or_default();
-            let exact: BTreeMap<_, _> = authors
-                .iter()
-                .filter_map(|author| {
-                    let assignment = (demand.clone(), *author);
-                    let achieved = selected_assignments
-                        .get(&assignment)
-                        .map_or(0, BTreeSet::len);
-                    reduce_outbox_shortfall(
-                        intrinsic.get(author).cloned(),
-                        achieved,
-                        refused_coverage_assignments.contains(&assignment),
-                    )
-                    .map(|fact| (*author, fact))
-                })
-                .collect();
-            if !exact.is_empty() {
-                uncovered_by_demand.insert(demand.clone(), exact);
-            }
-        }
-
-        // The invariant the whole change exists to establish, checked in
-        // RELEASE builds too (a `debug_assert!` compiles out of exactly the
-        // builds that ship). Under allocation it can never fire -- each prior
-        // token is assigned to at most one filter and every mint is unique --
-        // which is precisely what makes it cheap enough to leave in. If it
-        // ever does fire, `diff_plans` would have dropped a `WireReq` that
-        // never reached the wire and never would have.
-        {
-            let mut seen: BTreeSet<&SubId> = BTreeSet::new();
-            for req in reqs.values().flatten() {
-                assert!(
-                    seen.insert(&req.sub_id),
-                    "wire sub-id injectivity violated: two WireReqs share {:?} -- \
-                     diff_plans keys by SubId, so one of them could never reach the wire",
-                    req.sub_id
-                );
-            }
-        }
-
-        let mut next_plan = RelayPlan {
-            reqs,
-            limited_demands,
-            refused_sessions,
-            subscription_shortfalls,
-        };
-
         // Physical diffing depends only on session, SubId, and filter. Do it
         // before moving incumbent metadata into the next immutable request.
         // `diff_plans` walks every incumbent request in `self.prev_plan`;
-        // count exactly what it is about to walk. Isolated cohort admission
-        // (`Router::admit`) detaches `prev_plan` to empty first, so this is
-        // 0 there; a full `compile()` runs against the real incumbent plan.
+        // count exactly what it is about to walk.
         //
         // The incumbent `limited_demands` set is counted here too, not at
-        // its point of replacement below: this function's own internal
-        // `mem::take(&mut self.prev_plan)` (for exact-position matching)
-        // empties it before that point regardless of whether the outer
-        // isolation holds, which would make a counter placed there always
-        // read 0 -- a vacuous placement of exactly the kind #1781 was
-        // about. `next_plan.limited_demands` supersedes the incumbent set
-        // wholesale (built only from this call's `demand`, never merged
-        // into it), so what is counted here is genuinely what gets
-        // replaced.
+        // its point of replacement below: the `mem::take(&mut self.prev_plan)`
+        // further down (for exact-position matching) empties it before that
+        // point, which would make a counter placed there always read 0 -- a
+        // vacuous placement of exactly the kind #1781 was about.
+        // `next_plan.limited_demands` supersedes the incumbent set wholesale
+        // (built only from this call's `demand`, never merged into it), so
+        // what is counted here is genuinely what gets replaced.
         self.admission_work.incumbent_plan_requests_visited = self
             .admission_work
             .incumbent_plan_requests_visited

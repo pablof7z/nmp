@@ -73,10 +73,9 @@ impl Router {
         // `rebuild_refusal_indexes` always wipes and rebuilds from this
         // call's own `cap_refused_demands`/`budget_refused_requests`, never
         // merging forward what was already indexed. Count every incumbent
-        // refusal-owner entry about to be discarded this way. Isolated
-        // cohort admission detaches `refusals_by_demand` to empty first, so
-        // this is 0 there; a full `compile()` runs against the real
-        // incumbent set.
+        // refusal-owner entry about to be discarded this way. Only a full
+        // `compile()` reaches here at all: cohort admission compiles through
+        // `compile_demand`, which owns no index to rebuild.
         self.admission_work.incumbent_refusal_entries_visited = self
             .admission_work
             .incumbent_refusal_entries_visited
