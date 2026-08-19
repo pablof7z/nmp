@@ -324,20 +324,32 @@ final class C6DeepWindowingTests: XCTestCase {
             previous: [], step: "page \(Self.initialRows)"
         )
 
-        // --- The FIRST advance: a real defect, deliberately left RED ------
+        // --- The FIRST advance: was a real defect, now FIXED in Rust ------
         //
-        // #1886. `requestRows(atLeast:)` is documented as monotonically
-        // raising the window's row target, with outcomes delivered in
-        // band. The FIRST call that actually raises a window's
-        // target does not raise anything: it delivers `.returned(added: 0)`
-        // and the window stays at `initial` rows indefinitely -- measured at
+        // #1886, and the assertion below has always asserted the CORRECT
+        // behaviour -- it was left red rather than relaxed. The engine-side
+        // cause is fixed: a staged advance attached its wire handles without
+        // arming wire admission (retaining an atom only marks it pending;
+        // admission is what compiles it into a REQ), and the runtime
+        // discarded the staged turn's effects on the success path while
+        // dispatching them on failure. Falsified in Rust by
+        // `crates/nmp/tests/expandable_window_first_advance.rs`, which drives
+        // the production runtime against a relay that reports its own wire
+        // record. This scenario has NOT been re-run since that fix, so treat
+        // it as unverified rather than known-green.
+        //
+        // What was measured, for the record. `requestRows(atLeast:)` is
+        // documented as monotonically raising the window's row target, with
+        // outcomes delivered in band. The FIRST call that actually raised a
+        // window's target raised nothing: it delivered `.returned(added: 0)`
+        // and the window stayed at `initial` rows indefinitely -- measured at
         // 10 rows against a target of 20 after a bounded 45s wait, with the
         // relay up and holding all 150 matching events the whole time. It
-        // never self-heals. Re-issuing the SAME target cannot fix it
+        // never self-healed. Re-issuing the SAME target could not fix it
         // either, because `requestRows` is documented as a no-op at
-        // or below the current target, so an app has no way to ask again
-        // from where it is. Only raising the target AGAIN moves the window,
-        // and that next raise then delivers its own value exactly.
+        // or below the current target, so an app had no way to ask again
+        // from where it was. Only raising the target AGAIN moved the window,
+        // and that next raise then delivered its own value exactly.
         //
         // Reproduced 5/5 across (initial, firstTarget) of (10,11), (10,20),
         // (10,50), (1,2) and (10,10)->(10,11), with 0ms/1s/3s settle beats
@@ -349,14 +361,15 @@ final class C6DeepWindowingTests: XCTestCase {
         // `finishedStoredEvents` -> `error` -> `awaitingRequest` ->
         // `requesting` across this one advance. The relay's own log shows a
         // NIP-77 negentropy session opened, matching all the events, and
-        // closed in exactly that window. So the advance appears to drive a
-        // reconciliation that fails, and NMP's own retry is what makes the
-        // NEXT advance work. The Canary reports the observation; the
-        // engine-side root cause belongs in the issue, not here.
+        // closed in exactly that window. The real mechanism was simpler than
+        // that trace suggested: the second advance's commit supersedes the
+        // first advance's handles, and the withdrawal that follows arms
+        // admission as a side effect -- which is why the NEXT advance always
+        // worked.
         //
-        // In an app this is the first scroll-to-bottom doing nothing. The
-        // assertion is NOT relaxed to match the behaviour and the scenario
-        // is NOT reordered to warm the window up first: per
+        // In an app this was the first scroll-to-bottom doing nothing. The
+        // assertion was NOT relaxed to match the behaviour and the scenario
+        // was NOT reordered to warm the window up first: per
         // docs/internals/canary.md, awkward Canary code is a product bug
         // until shown otherwise, and C17's `distinct` phase is the standing
         // precedent for leaving a measured failure red rather than tuning

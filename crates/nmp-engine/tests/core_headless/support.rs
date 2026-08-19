@@ -552,6 +552,8 @@ fn all_row_deltas(effects: &[Effect]) -> Vec<&RowDelta> {
 mod authentication;
 #[path = "derived_tag_fanout.rs"]
 mod derived_tag_fanout;
+#[path = "expandable_window_advance.rs"]
+mod expandable_window_advance;
 #[path = "live_queries.rs"]
 mod live_queries;
 #[path = "negentropy.rs"]

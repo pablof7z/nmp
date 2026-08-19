@@ -889,8 +889,8 @@ feed. That is consistent with NMP doing mechanics only and leaving display
 policy app-owned, but it means every app doing deletions correctly also has to
 filter kind:5 out of its own rendering.
 
-**C6 is written and RED, and the red is a real finding (#1886), not a scenario
-defect.**
+**C6 was written RED, the red was a real finding (#1886), and the engine-side
+cause is now FIXED. C6 has not been re-run since (see below).**
 `apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C6DeepWindowingTests.swift`
 seeds 150 events one second apart over real `EVENT` frames, opens ONE
 `.expandable(initial: 10, max: 100)` observation and scrolls it to the
@@ -910,24 +910,54 @@ force when it arrived; a request past `max` lands as a delivered
 a live event arriving at an already-full window enters at the head and
 DISPLACES the tail instead of making the window one row bigger.
 
-**FAILING -- the first advance.** `requestRows(atLeast: 20)` on a window
-opened at `initial: 10` delivers `WindowLoad.returned(added: 0)` and leaves
-the window at 10 rows for a bounded 45s, with the relay up and holding all 150
-events. It never self-heals, and re-issuing the SAME target is a documented
-no-op, so an app has no way to ask again from where it is. Only raising the
-target AGAIN moves it -- and that next raise then delivers its own value
-exactly. In an app this is the first scroll-to-bottom of any windowed feed
+**WAS FAILING -- the first advance.** `requestRows(atLeast: 20)` on a window
+opened at `initial: 10` delivered `WindowLoad.returned(added: 0)` and left the
+window at 10 rows for a bounded 45s, with the relay up and holding all 150
+events. It never self-healed, and re-issuing the SAME target is a documented
+no-op, so an app had no way to ask again from where it was. Only raising the
+target AGAIN moved it -- and that next raise then delivered its own value
+exactly. In an app this was the first scroll-to-bottom of any windowed feed
 doing nothing. Deterministic 5/5 across `(initial, firstTarget)` of (10,11),
 (10,20), (10,50), (1,2) and (10,10)->(10,11), with 0ms/1s/3s settle beats
-before the call, so it is neither a race nor a function of step size. The
+before the call, so it was neither a race nor a function of step size. The
 assertion was NOT relaxed and the scenario was NOT reordered to warm the
 window up first; C17's `distinct` phase is the standing precedent.
 
-What the public API shows about the mechanism, printed on every run: the
-query's own `SourceEvidence.status` for the relay walks `finishedStoredEvents`
+What the public API showed about the mechanism, printed on every run: the
+query's own `SourceEvidence.status` for the relay walked `finishedStoredEvents`
 -> `error` -> `awaitingRequest` -> `requesting` across that one advance, and
-the relay's own log shows a NIP-77 negentropy session opened and closed inside
-it. The engine-side root cause is in #1886.
+the relay's own log showed a NIP-77 negentropy session opened and closed inside
+it.
+
+**The fix, and what C6 should now show.** Two omissions, both required:
+`stage_history_advance` attached its tie-second and older-range wire handles
+without arming wire admission, and retaining a wire atom only marks it PENDING
+-- `flush_wire_admission` is what compiles a pending atom into a REQ, and the
+runtime runs it only from the deadline an `Effect::ArmWireAdmission` arms.
+Separately, the runtime's `Cmd::RequestRows` arm dispatched the staged turn's
+effects on the FAILURE path and discarded them on the SUCCESS path, so even an
+armed stage never reached the runtime. The second advance appeared to work
+because its commit supersedes the first advance's handles, and
+`withdraw_wire_demand` arms admission as a side effect of that withdrawal.
+Both are fixed; each was proven independently load-bearing by reverting it
+alone and watching the falsifier redden.
+
+The Rust falsifiers are `crates/nmp-engine/tests/core_headless/
+expandable_window_advance.rs` (the reducer arms admission for a staged
+advance) and `crates/nmp/tests/expandable_window_first_advance.rs` (the
+production runtime thread places the older-range REQ on a real socket, proven
+by the relay's own wire record). The second one matters for how C6 must be
+read: an earlier draft of it let the relay connect AFTER the advance was
+staged, and it passed on unfixed code, because `RelayConnected` runs a full
+recompile that places every pending atom with no admission arm involved. It
+only became a falsifier once the connection was settled before the advance --
+which is exactly the state a real user scrolls from, and exactly what C6's own
+`finishedStoredEvents` precondition establishes.
+
+**C6 itself has NOT been re-run.** It is a macOS XCTest against a real strfry
+process; strfry is not installed in the environment this fix was made in, so
+the claim here is that the engine-side cause is gone and proven gone in Rust,
+not that C6 is green. Re-run it to convert that into a measured pass.
 
 **A correction C6 forced on its own preconditions.** The first draft asserted
 that the relay reporting `finishedStoredEvents` meant the history was local,

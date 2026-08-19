@@ -2789,6 +2789,24 @@ fn engine_loop(
                         );
                         continue;
                     }
+                    // The staged turn's own effects, dispatched BEFORE the
+                    // commit that follows them (#1886). They carry the wire
+                    // admission arm the advance's REQs need and whatever the
+                    // stage itself closed; discarding them on success -- while
+                    // dispatching them on failure -- lost the first advance's
+                    // REQ entirely. Order is the engine's decision order: the
+                    // stage decided these before the commit below decided its
+                    // supersede-closes, and the wire must see them that way.
+                    dispatch_core_effects(
+                        &mut core,
+                        effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &registry,
+                        dispatch_runtime,
+                    );
                     // Commit, then drive the post-commit continuation loop to
                     // convergence (#485): each commit may auto-stage the next
                     // advance (target still unmet, older boundary present,
