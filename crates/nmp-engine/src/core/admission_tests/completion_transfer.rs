@@ -357,7 +357,6 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
 
     let due = core
         .next_deadline()
-        .unwrap()
         .expect("the one accumulated transfer owns one retry deadline");
     core.tick(due);
     assert!(core.pending_request_claim_transfers.is_empty());

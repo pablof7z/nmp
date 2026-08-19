@@ -151,14 +151,14 @@ pub struct RedbStore {
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fail_next_lane_handoff: bool,
     /// One construction-armed event acceptance refusal consumed immediately
-    /// before commit. The real prepared Redb transaction is dropped and the
-    /// real database handle is closed before the typed I/O error is returned.
+    /// before commit. The real prepared Redb transaction is dropped before
+    /// the typed I/O error is returned, so nothing this write staged reaches
+    /// disk. The database handle stays open.
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fail_next_accept_write_before_commit: bool,
     /// One construction-armed event acceptance refusal consumed immediately
-    /// after the real Redb commit. The real database handle is closed before
-    /// the typed I/O error is returned, so recovery must read durable identity
-    /// from a newly opened Redb generation.
+    /// after the real Redb commit, so the durable rows exist and only the
+    /// caller's answer fails. The database handle stays open.
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fail_next_accept_write_after_commit: bool,
     /// One construction-armed relay-observation I/O failure consumed at the
@@ -432,8 +432,8 @@ impl RedbStore {
         Ok(store)
     }
 
-    /// Open a persistent Redb store whose next event acceptance closes the
-    /// real database handle and returns I/O immediately before commit.
+    /// Open a persistent Redb store whose next event acceptance drops its
+    /// prepared transaction and returns I/O immediately before commit.
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub fn open_with_accept_write_precommit_io(
         path: impl AsRef<Path>,
@@ -443,8 +443,8 @@ impl RedbStore {
         Ok(store)
     }
 
-    /// Open a persistent Redb store whose next event acceptance commits,
-    /// closes the real database handle, and then returns I/O.
+    /// Open a persistent Redb store whose next event acceptance commits and
+    /// then returns I/O to the caller.
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub fn open_with_accept_write_commit_then_io(
         path: impl AsRef<Path>,

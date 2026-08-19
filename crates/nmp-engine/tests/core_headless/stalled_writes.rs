@@ -390,7 +390,7 @@ fn reading_the_list_changes_no_scheduler_state() {
         WriteRouting::Explicit(vec![relay.clone()]),
     );
 
-    let deadline_before = core.next_deadline().expect("deadline peek");
+    let deadline_before = core.next_deadline();
     let first = core.diagnostics_snapshot();
     assert!(
         !first.stalled_writes.is_empty(),
@@ -407,7 +407,7 @@ fn reading_the_list_changes_no_scheduler_state() {
     }
 
     assert_eq!(
-        core.next_deadline().expect("deadline peek"),
+        core.next_deadline(),
         deadline_before,
         "reading must not move a wake deadline"
     );

@@ -88,29 +88,18 @@ pub(super) struct RouteAnswer {
     /// True iff nothing is left to learn, so re-executing is pointless and
     /// the `Auto` retires.
     ///
-    /// Always the complement of `author_route_needs` being empty: an answer
-    /// with nothing left to wait on is settled, and an answer that is not
-    /// settled names exactly who it is waiting for. That equivalence is what
-    /// lets [`WriteFact::Destinations`] carry the reason a park exists as
-    /// keys rather than as a rendered sentence (#1236) — the sentence this
-    /// struct used to carry was unbranchable by construction, so it is gone
-    /// rather than reworded.
+    /// A non-empty `author_route_needs` always forces this false — an answer
+    /// still naming who it waits on is not settled — but the converse does
+    /// not hold, and reading it as an equivalence is what would make an audit
+    /// stop looking. Empty needs with `complete == false` is exactly how an
+    /// answer says "settled, and I could not read the parent's canonical
+    /// source this pass"; an `Explicit` route naming no relay says it too.
+    /// What the pair does buy is that when needs ARE the reason,
+    /// [`WriteFact::Destinations`] can carry that reason as keys rather than
+    /// as a rendered sentence (#1236) — the sentence this struct used to
+    /// carry was unbranchable by construction, so it is gone rather than
+    /// reworded.
     pub(super) complete: bool,
-}
-
-/// One strategy pass, including a store-read failure that prevented the
-/// parent-provenance contribution from settling.
-///
-/// The partial answer is still useful: an author/app/recipient lane that is
-/// already known must start immediately even if the canonical parent lookup
-/// hit an I/O failure. `parent_provenance_error` keeps the route open and is
-/// handed to the ordinary store supervisor, so recovery can rerun the same
-/// strategy instead of either blocking known lanes or falsely retiring the
-/// write.
-#[derive(Debug)]
-pub(super) struct RouteResolution {
-    pub(super) answer: RouteAnswer,
-    pub(super) parent_provenance_error: Option<PersistenceError>,
 }
 
 /// Every pubkey this signed event `p`-tags, in tag order, deduplicated.
@@ -1077,7 +1066,7 @@ impl CoreState {
             )
             .is_err()
         {
-                        return false;
+            return false;
         }
         self.remove_active_lane(id, &lane.key.relay);
         true
@@ -1088,8 +1077,10 @@ impl CoreState {
     /// ratified 32-global/1-per-relay caps before committing Started.
     pub(in crate::core) fn schedule_ready(&mut self, now: Timestamp) -> Vec<Effect> {
         let mut effects = Vec::new();
+        // A lane read that fails costs this pass only; the durable rows are
+        // untouched and the next scheduling pass re-reads them.
         let Ok(lanes) = self.recover_all_lanes() else {
-                        return effects;
+            return effects;
         };
 
         let mut in_flight_relays = BTreeSet::new();
@@ -1189,8 +1180,7 @@ impl CoreState {
                         },
                         &mut effects,
                     );
-                } else {
-                                    }
+                }
                 continue;
             }
             if in_flight >= MAX_GLOBAL_ATTEMPTS || in_flight_relays.contains(&lane.key.relay) {
@@ -1289,29 +1279,23 @@ impl CoreState {
     /// event. Before epic #507 finding E5, this ran `recover_all_lanes` (a
     /// full `O(pending)` store re-read) and then filtered down to one
     /// relay, TWICE over per event (once here, once again inside
-    /// `schedule_ready` at the end). The non-degraded path below instead
-    /// narrows via `receipts_by_lane_relay` to exactly the receipts that
-    /// actually own a lane on `session.relay`, re-reading only those
-    /// intents. (`receipts_by_lane_relay`/`PublishQueueLaneKey` stay URL-keyed in the
-    /// store — only the SESSION comparison below, derived per lane from its
-    /// pending write's signing identity, decides whether a lane belongs to
-    /// THIS session.)
+    /// `schedule_ready` at the end). There is one path now: it narrows via
+    /// `receipts_by_lane_relay` to exactly the receipts that actually own a
+    /// lane on `session.relay`, re-reading only those intents.
+    /// (`receipts_by_lane_relay`/`PublishQueueLaneKey` stay URL-keyed in the
+    /// store — only the SESSION comparison in [`Self::apply_relay_wake`],
+    /// derived per lane from its pending write's signing identity, decides
+    /// whether a lane belongs to THIS session.)
     ///
-    /// While the owner reports its lane index degraded, this falls back to
-    /// the OLD full
-    /// scan, unchanged: the index cannot be trusted to be a superset of
-    /// live lanes right now, and guessing wrong here means a lane never
-    /// wakes -- a permanently wedged durable write, the worst bug class in
-    /// this codebase (see the idle-barrier missed-wakeup fix, d755f39, and
-    /// #507's own missed-wakeup finding). A missed wakeup is never an
-    /// acceptable price for narrower reads.
+    /// A per-receipt store read that fails costs this pass only, and no
+    /// wider fallback replaces it: the durable lane rows are untouched, so
+    /// the next connect/auth message for the same session re-reads them.
     pub(in crate::core) fn wake_relay_lanes(
         &mut self,
         session: &RelaySessionKey,
         auth_only: bool,
     ) -> Vec<Effect> {
         let mut effects = Vec::new();
-
 
         // Take the candidate receipt set by value first: the loop below needs
         // a mutable borrow of `self` for its store reads, so it cannot hold a
@@ -1347,19 +1331,17 @@ impl CoreState {
         effects
     }
 
-    /// The exact per-lane wake body `wake_relay_lanes` ran inline before
-    /// epic #507 finding E5, shared now by both its indexed fast path and
-    /// its degraded full-scan fallback so the two are behaviorally
-    /// identical for a given input. `lanes` is assumed pre-sorted by
-    /// `lane.key` (both callers already do this); it need NOT be pre-
-    /// filtered to `session` -- the loop below still filters, since the
-    /// degraded fallback hands it every pending intent's lanes unfiltered
-    /// (exactly as the old, pre-#507 `wake_relay_lanes` body did). A lane
-    /// whose receipt has no pending entry is skipped: without a live pending
-    /// write there is nothing to wake. Since the AUTH-reducer wave (#8 U2)
-    /// the write plane rides the lane's identity-scoped authenticated
-    /// session, so a lane belongs to `RelaySessionKey::new(lane.key.relay,
-    /// Nip42(pending.signing_pubkey))`.
+    /// The per-lane wake body, split out of `wake_relay_lanes` -- its one
+    /// caller -- so the loop reads as one thing. `lanes` is assumed
+    /// pre-sorted by `lane.key`, and pre-filtered to `session.relay` but NOT
+    /// to `session`. The per-lane check below is the identity half, and is
+    /// not redundant with the caller's: the store keys lanes by relay URL
+    /// alone, while since the AUTH-reducer wave (#8 U2) the write plane
+    /// rides the lane's identity-scoped authenticated session, so a lane
+    /// belongs to `RelaySessionKey::new(lane.key.relay,
+    /// Nip42(pending.signing_pubkey))` and two identities on one relay are
+    /// two distinct sessions. A lane whose receipt has no pending entry is
+    /// skipped: without a live pending write there is nothing to wake.
     pub(in crate::core) fn apply_relay_wake(
         &mut self,
         session: &RelaySessionKey,
@@ -1894,18 +1876,15 @@ impl CoreState {
             let revisions = match self.store.recover_route_revisions(intent.intent_id) {
                 Ok(revisions) => revisions,
                 Err(_error) => {
-                    // This intent may already own real persisted lanes from
-                    // before this boot; skipping straight to the next intent
-                    // (as below) means `bootstrap_publish_queue_lanes` never runs
-                    // for it this boot, so the reverse index can never learn
-                    // those lanes -- an unprovable gap, so degrade rather
-                    // than silently under-index (epic #507 finding E5).
-                    // The durable route set is exactly what could not be
-                    // read, so nothing can be held as `uncertain` and the
-                    // projection reports unavailable. Register the gap so a
-                    // later tick can bootstrap this intent for real instead
-                    // of disabling worker reconciliation for the whole
-                    // process (#1000).
+                    // This intent's durable route set is exactly what could
+                    // not be read, so `bootstrap_publish_queue_lanes` cannot
+                    // run for it this boot and the reverse index never learns
+                    // whatever lanes it may already own. Skip it: the intent
+                    // makes no progress until the next boot re-runs recovery
+                    // against rows this one could not read. Nothing durable
+                    // is lost -- the rows are untouched -- and no retry is
+                    // registered, because a store that cannot answer now is
+                    // not made answerable by asking again on a tick.
                     continue;
                 }
             };
@@ -1921,10 +1900,7 @@ impl CoreState {
             // down gets a lane, and a relay the intent already reached is
             // left completely alone.
             if routing_valid {
-                let resolution = self.resolve_routes(&self.pending[&id].routing, &frozen);
-                if let Some(_error) = resolution.parent_provenance_error {
-                }
-                let answer = resolution.answer;
+                let answer = self.resolve_routes(&self.pending[&id].routing, &frozen);
                 let new_routes = answer
                     .relays
                     .difference(&durable_relays)
@@ -2099,16 +2075,20 @@ impl CoreState {
                     // leaving it `WaitingAuth` would strand it forever
                     // (its only wake, `finish_auth_ok`, needs a fresh
                     // client-provoked challenge that boot alone can't cause).
-                    // Fail-safe like the disconnect arm: a swallowed reset
-                    // failure would silently re-strand the lane — exactly
-                    // the missed-wakeup class this guards — so on error mark
-                    // recovery degraded (this function's own untrustworthy-
-                    // recovery signal) rather than warm a connection that
-                    // cannot wake a still-`WaitingAuth` lane.
-                    match self.commit_lane_waiting(&lane.key, lane.revision, false) {
-                        Ok(_) => effects.push(Effect::EnsureWriteRelay(session)),
-                        Err(_error) => {
-                                }
+                    //
+                    // If that reset does not commit, this lane makes no
+                    // progress until the next boot re-runs this same
+                    // recovery: no relay is warmed, since a connection
+                    // cannot wake a row still durably `WaitingAuth`, and no
+                    // retry is registered. That lost progress is the ruled
+                    // price of a failed store write (#1934, #1945) — the
+                    // durable row is exactly as it was, and recovery is
+                    // idempotent, so the next boot resumes from it.
+                    if self
+                        .commit_lane_waiting(&lane.key, lane.revision, false)
+                        .is_ok()
+                    {
+                        effects.push(Effect::EnsureWriteRelay(session));
                     }
                 }
                 PublishQueueLaneState::Terminal { .. } => {}
@@ -4166,7 +4146,7 @@ impl CoreState {
         // that comes up short here parks and is re-executed at every later
         // moment (`resolution-lifecycle.md` §5) rather than killing a
         // durable, already-journaled obligation.
-        let resolution = if semantic_promotion {
+        let answer = if semantic_promotion {
             let member_receipts = self
                 .pending
                 .receipts_for_event(&event.id)
@@ -4176,24 +4156,16 @@ impl CoreState {
                 complete: true,
                 ..RouteAnswer::default()
             };
-            let mut parent_provenance_error = None;
             for receipt in member_receipts {
                 let Some(pending) = self.pending.get(&receipt) else {
                     continue;
                 };
                 let member = self.resolve_routes(&pending.routing, &event);
-                answer.relays.extend(member.answer.relays);
-                answer
-                    .author_route_needs
-                    .extend(member.answer.author_route_needs);
-                answer.complete &= member.answer.complete;
-                parent_provenance_error =
-                    parent_provenance_error.or(member.parent_provenance_error);
+                answer.relays.extend(member.relays);
+                answer.author_route_needs.extend(member.author_route_needs);
+                answer.complete &= member.complete;
             }
-            RouteResolution {
-                answer,
-                parent_provenance_error,
-            }
+            answer
         } else {
             let Some(pending) = self.pending.get(&id) else {
                 return;
@@ -4210,15 +4182,9 @@ impl CoreState {
         // the moment the bytes are final so a LATER resolution's lanes need
         // no second registration step.
         self.pending.index_receipt_under_event(event.id, id);
-        let RouteResolution {
-            answer,
-            parent_provenance_error,
-        } = resolution;
         self.apply_route_answer(id, intent_id, answer, effects);
         if semantic_promotion {
             self.reacquire_semantic_successor_lanes(id, effects);
-        }
-        if let Some(_error) = parent_provenance_error {
         }
         self.resync_route_needs(effects);
     }
@@ -4250,10 +4216,10 @@ impl CoreState {
             return;
         }
         let event_id = self.pending[&id].frozen.id;
-        match self.recover_semantic_generation_lanes(intent_id, event_id) {
-            Ok(lanes) => self.open_fresh_lanes(id, signing_pubkey, lanes, effects),
-            Err(_error) => {
-            }
+        // A failed recovery costs this pass only: the durable lane rows are
+        // untouched, and the next engine message re-reads them.
+        if let Ok(lanes) = self.recover_semantic_generation_lanes(intent_id, event_id) {
+            self.open_fresh_lanes(id, signing_pubkey, lanes, effects);
         }
     }
 
@@ -4513,8 +4479,9 @@ impl CoreState {
     /// neutral inbound relays, and one verified canonical-store source for
     /// the reply parent. A settled `Absent` contributes nothing and blocks
     /// nothing; `Unknown` keeps the obligation live. A parent store-read
-    /// failure returns a partial answer plus the typed failure so already-
-    /// known lanes progress while the route remains open for recovery.
+    /// failure returns the partial answer with `complete == false`, so
+    /// already-known lanes progress while the route stays open for the next
+    /// pass to re-resolve.
     ///
     /// `Explicit` never consults the directory at all: the answer is exactly
     /// the relays the caller named, nothing here adds to them, and it has no
@@ -4528,26 +4495,23 @@ impl CoreState {
         &self,
         routing: &WriteRouting,
         event: &SignedEvent,
-    ) -> RouteResolution {
+    ) -> RouteAnswer {
         match routing {
             WriteRouting::Auto => self.resolve_outbox(event),
-            WriteRouting::Explicit(relays) => RouteResolution {
-                answer: RouteAnswer {
-                    relays: relays.iter().cloned().collect(),
-                    // Verbatim execution reads nothing, so nothing can still be
-                    // unlearned. An accepted `Explicit` is complete the instant
-                    // it resolves, before any relay is contacted.
-                    author_route_needs: BTreeSet::new(),
-                    complete: !relays.is_empty(),
-                },
-                parent_provenance_error: None,
+            WriteRouting::Explicit(relays) => RouteAnswer {
+                relays: relays.iter().cloned().collect(),
+                // Verbatim execution reads nothing, so nothing can still be
+                // unlearned. An accepted `Explicit` is complete the instant
+                // it resolves, before any relay is contacted.
+                author_route_needs: BTreeSet::new(),
+                complete: !relays.is_empty(),
             },
         }
     }
 
     /// The built-in outbox resolver — what `Auto` falls back to when no
     /// registered strategy claims the kind (`docs/internals/routing/outbox.md`).
-    fn resolve_outbox(&self, event: &SignedEvent) -> RouteResolution {
+    fn resolve_outbox(&self, event: &SignedEvent) -> RouteAnswer {
         let mut answer = RouteAnswer::default();
         let mut thin_recipient = false;
         let mut parent_provenance_error = None;
@@ -4644,17 +4608,11 @@ impl CoreState {
                 answer.author_route_needs.insert(author);
                 answer.author_route_needs.extend(recipients);
             }
-            return RouteResolution {
-                answer,
-                parent_provenance_error,
-            };
+            return answer;
         }
 
         answer.complete = answer.author_route_needs.is_empty() && parent_provenance_error.is_none();
-        RouteResolution {
-            answer,
-            parent_provenance_error,
-        }
+        answer
     }
 
     /// Fold one contributing author's three-valued answer into `answer`.
@@ -4831,39 +4789,29 @@ impl CoreState {
             return;
         }
         let intent_id = pending.intent_id;
-        let RouteResolution {
-            answer,
-            parent_provenance_error,
-        } = if semantic {
+        let answer = if semantic {
             let mut answer = RouteAnswer {
                 complete: true,
                 ..RouteAnswer::default()
             };
-            let mut error = None;
             if let Some(receipts) = self.pending.receipts_for_event(&event.id) {
                 for receipt in receipts {
                     let Some(member) = self.pending.get(receipt) else {
                         continue;
                     };
                     let resolved = self.resolve_routes(&member.routing, &event);
-                    answer.relays.extend(resolved.answer.relays);
+                    answer.relays.extend(resolved.relays);
                     answer
                         .author_route_needs
-                        .extend(resolved.answer.author_route_needs);
-                    answer.complete &= resolved.answer.complete;
-                    error = error.or(resolved.parent_provenance_error);
+                        .extend(resolved.author_route_needs);
+                    answer.complete &= resolved.complete;
                 }
             }
-            RouteResolution {
-                answer,
-                parent_provenance_error: error,
-            }
+            answer
         } else {
             self.resolve_routes(&pending.routing, &event)
         };
         self.apply_route_answer(id, intent_id, answer, effects);
-        if let Some(_error) = parent_provenance_error {
-        }
     }
 
     /// Commit one [`RouteAnswer`] against an intent's durable route log and

@@ -195,7 +195,7 @@ mod receipt_allocator_tests {
             nmp_store::sentinel_signature(),
         );
 
-        let answer = core.resolve_routes(&route, &frozen).answer;
+        let answer = core.resolve_routes(&route, &frozen);
         assert_eq!(
             answer.relays,
             BTreeSet::from([a, b]),
@@ -224,7 +224,7 @@ mod receipt_allocator_tests {
             FixtureRoutingFacts::new(),
             10,
         );
-        let unknown = core.resolve_routes(&WriteRouting::Auto, &event).answer;
+        let unknown = core.resolve_routes(&WriteRouting::Auto, &event);
         assert!(
             unknown.relays.is_empty() && !unknown.complete,
             "an unsettled author must park, not terminate: {unknown:?}"
@@ -253,7 +253,7 @@ mod receipt_allocator_tests {
                 facts,
                 10,
             );
-            let answer = core.resolve_routes(&WriteRouting::Auto, &event).answer;
+            let answer = core.resolve_routes(&WriteRouting::Auto, &event);
 
             assert!(
                 answer.relays.is_empty() && answer.complete,
@@ -291,8 +291,7 @@ mod receipt_allocator_tests {
             FixtureRoutingFacts::new().with_outbound_routes(author, [outbox.clone()]),
             10,
         )
-        .resolve_routes(&WriteRouting::Auto, &event)
-        .answer;
+        .resolve_routes(&WriteRouting::Auto, &event);
 
         // One of them settles as a definitive absence. It contributes no
         // relay, so the destination set cannot move.
@@ -303,8 +302,7 @@ mod receipt_allocator_tests {
                 .with_author_absent(settling),
             10,
         )
-        .resolve_routes(&WriteRouting::Auto, &event)
-        .answer;
+        .resolve_routes(&WriteRouting::Auto, &event);
 
         assert_eq!(
             before.relays, after.relays,
@@ -349,8 +347,7 @@ mod receipt_allocator_tests {
         );
 
         let answer = core
-            .resolve_routes(&WriteRouting::Auto, &frozen_note(author))
-            .answer;
+            .resolve_routes(&WriteRouting::Auto, &frozen_note(author));
 
         assert_eq!(answer.relays, BTreeSet::from([app]));
         assert!(
@@ -2335,5 +2332,98 @@ mod checked_shell_tests {
         // THE POINT: not `core.handle(EngineMsg::CancelWrite(receipt))`.
         let (outcome, _) = core.cancel_write(receipt);
         assert_eq!(outcome, Ok(CancelWriteOutcome::Cancelled));
+    }
+}
+
+/// A durable lane's attempt is stamped from command-time truth, never from
+/// the reducer's last maintenance clock.
+///
+/// `features/queries/opening-time-freshness.feature`'s
+/// `QUERIES-FRESHNESS-CLOCK-010` names the test below as its Rust evidence.
+/// It lived in a module #1934 deleted, so it compiled into no binary at all
+/// while the scenario went on claiming it (#1945).
+#[cfg(test)]
+mod lane_attempt_clock_tests {
+    use super::*;
+
+    use nmp_store::RedbStore;
+    use nostr::{Keys, Kind, RelayUrl};
+
+    fn session_for(relay: &RelayUrl, author: &Keys) -> RelaySessionKey {
+        RelaySessionKey::new(relay.clone(), Some(author.public_key()))
+    }
+
+    /// Accept and sign one durable narrow write, returning the effects the
+    /// signer completion produced.
+    fn publish_narrow(
+        core: &mut EngineCore,
+        author: &Keys,
+        relay: &RelayUrl,
+        created_at: u64,
+    ) -> (ReceiptId, Vec<Effect>) {
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        let accepted = core.handle(EngineMsg::Publish(WriteIntent {
+            payload: WritePayload::Event(nmp_grammar::EventBuilder {
+                kind: Kind::TextNote,
+                tags: (Vec::new()).into_iter().collect(),
+                content: format!("attempt clock {created_at}"),
+                created_at: Some(Timestamp::from(created_at)),
+            }),
+            routing: WriteRouting::Explicit(Vec::from([relay.clone()])),
+            identity: Identity::Active,
+        }));
+        let (id, generation, unsigned) = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::RequestSign(id, generation, unsigned) => {
+                    Some((*id, *generation, unsigned.clone()))
+                }
+                _ => None,
+            })
+            .expect("accepted write requests signing");
+        let signed = unsigned.sign_with_keys(author).expect("sign fixture");
+        let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
+        (id, effects)
+    }
+
+    /// A durable lane parked on `WaitingConnection` may wake after a long idle.
+    /// The attempt starts at current command time, without running maintenance.
+    #[test]
+    fn waiting_connection_attempt_is_anchored_to_connect_time_without_maintenance() {
+        let author = Keys::generate();
+        let relay = RelayUrl::parse("wss://waiting-connection-clock.example.com").unwrap();
+        let old_time = Timestamp::from(100u64);
+        let connect_time = Timestamp::from(10_000u64);
+        let store = RedbStore::temporary().expect("temporary Redb store");
+        let mut core = EngineCore::new(store, 10);
+        core.advance_clock(old_time);
+
+        let (receipt, parked) = publish_narrow(&mut core, &author, &relay, 706);
+        assert!(!parked
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+        let intent = core.pending[&receipt].intent_id;
+        let session = session_for(&relay, &author);
+        let handle = TransportRelayHandle {
+            slot: 9,
+            generation: 1,
+        };
+
+        core.advance_clock(connect_time);
+        let connected = core.handle(EngineMsg::RelayConnected(handle, session.clone()));
+        assert!(!connected
+            .iter()
+            .any(|effect| matches!(effect, Effect::PublishEvent(..))));
+        let ready = core.handle(EngineMsg::AuthProbeReleased(handle, session.clone()));
+        assert!(ready.iter().any(
+            |effect| matches!(effect, Effect::PublishEvent(candidate, _, _) if candidate == &session)
+        ));
+        let attempts = core
+            .store
+            .recover_attempt_details(intent)
+            .expect("attempt-detail recovery");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].started_at, Some(connect_time));
+        assert_eq!(core.maintenance_turn_count(), 0);
     }
 }

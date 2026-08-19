@@ -1195,10 +1195,7 @@ fn failed_missing_id_event_commit_poisons_the_original_neg_completion() {
         public_session(&relay),
         eose_frame(&wire_sub_string(&backfill)),
     ));
-    let due = core
-        .next_deadline()
-        .unwrap()
-        .expect("missing-id retry deadline");
+    let due = core.next_deadline().expect("missing-id retry deadline");
     let retried = core.handle(EngineMsg::Tick(due));
     let retry_attempt = wire_attempt_id(
         &retried,

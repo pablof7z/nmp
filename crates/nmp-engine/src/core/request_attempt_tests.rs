@@ -158,7 +158,7 @@ fn repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_
         Effect::EmitObservationEvidence(_, facts)
             if facts.iter().any(|fact| matches!(fact.fact, ObservationFact::RequestDeferred { .. }))
     )));
-    let due_one = core.next_deadline().unwrap().expect("retry deadline");
+    let due_one = core.next_deadline().expect("retry deadline");
     assert_eq!(due_one, Timestamp::from(RETRY_INITIAL_SECS));
     let census = core.bench_ownership_census();
     assert_eq!(census.request_retry_jobs, 1);
@@ -190,7 +190,7 @@ fn repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_
         attempt_id: second_attempt,
         cause: LocalSendRefusal::WorkerAdmissionRefused { handle },
     });
-    let due_two = core.next_deadline().unwrap().expect("second deadline");
+    let due_two = core.next_deadline().expect("second deadline");
     assert_eq!(due_two, due_one + RETRY_INITIAL_SECS * 2);
     assert_eq!(core.bench_ownership_census().request_retry_jobs, 1);
 
@@ -204,10 +204,7 @@ fn repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_
             attempt_id: current_attempt,
             cause: LocalSendRefusal::SessionUnavailable,
         });
-        let due = core
-            .next_deadline()
-            .unwrap()
-            .expect("capped retry deadline");
+        let due = core.next_deadline().expect("capped retry deadline");
         assert_eq!(due, prior_due + unjittered_retry_delay_secs(failure));
         assert_eq!(core.bench_ownership_census().request_retry_jobs, 1);
         let emitted = core.handle(EngineMsg::Tick(due));
