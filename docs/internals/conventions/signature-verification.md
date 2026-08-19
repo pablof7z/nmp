@@ -128,8 +128,8 @@ cache, not re-verification.
 
 ## Signer output is a different act
 
-Three sites verify what a signer just produced — NIP-42 AUTH, sign-only operations,
-and Blossom auth. That is checking a signer's output before use, not re-verifying
+Two sites verify what a signer just produced — NIP-42 AUTH and sign-only
+operations. That is checking a signer's output before use, not re-verifying
 stored data, and it mints no `VerifiedSignature`. These are outside this convention
 and must not be deleted in its name.
 

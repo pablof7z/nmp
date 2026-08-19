@@ -154,10 +154,10 @@ pub(crate) enum CoordinateCoverage {
     /// outstanding on this session. Its terminal answers this caller too;
     /// zero duplicate REQ.
     InFlight { sub_id: SubId },
-    /// This coordinate HAS been asked on this session, by NIP-77's live-first
-    /// barrier: a `limit: 0` REQ that requests no stored event, so its own
-    /// terminal answers nothing. The answer arrives when reconciliation
-    /// finishes and credits coverage (#1683).
+    /// This coordinate HAS been asked on this session, by a `limit: 0` REQ
+    /// that requests no stored event, so its own terminal answers nothing
+    /// (#1683). No engine path currently mints such a request; an app whose
+    /// own live query carries `limit: 0` still reaches this classification.
     ///
     /// Deliberately not folded into [`Self::Uncovered`]. The two are opposite
     /// facts — "asked, answer still coming" versus "nothing has asked" — and
@@ -321,7 +321,6 @@ impl CoreState {
                     CoordinateRequestShape::LiveFirstBarrier,
                 )
             })
-            .or_else(|| self.reconciling_coordinate_session(coordinate, session))
             .map_or(CoordinateCoverage::Uncovered, |sub_id| {
                 CoordinateCoverage::Reconciling { sub_id }
             })
@@ -330,33 +329,6 @@ impl CoreState {
     /// An exact coordinate REQ this reducer has already minted but the
     /// transport has not accepted yet — awaiting handoff, or parked for
     /// retry after a refusal. Opening a second one would duplicate it.
-    /// A Negentropy session already reconciling exactly this coordinate on
-    /// this session.
-    ///
-    /// The barrier hands off to this and is abandoned, so without this the
-    /// state would read as `Uncovered` again one step after the barrier's
-    /// own EOSE — the same window, one moment later.
-    fn reconciling_coordinate_session(
-        &self,
-        coordinate: &Coordinate,
-        session: &RelaySessionKey,
-    ) -> Option<SubId> {
-        // Negentropy runs on the public session only, so it can speak for a
-        // public question and never for a protected one — the same
-        // access-context rule the rest of this module keeps free by carrying
-        // it in the session key.
-        if session.authenticate_as.is_some() {
-            return None;
-        }
-        let mut found = None;
-        for (sub_id, filter) in self.nip77.sessions_on_relay(&session.relay) {
-            if coordinate_request_shape(filter, coordinate).is_some() {
-                found = min_sub_id(found, sub_id);
-            }
-        }
-        found
-    }
-
     fn awaiting_coordinate_request(
         &self,
         coordinate: &Coordinate,
@@ -519,9 +491,8 @@ fn selects_coordinate(filter: &ConcreteFilter, coordinate: &Coordinate) -> bool 
 enum CoordinateRequestShape {
     /// Asks for the stored event, so its terminal is an answer.
     Answerable,
-    /// NIP-77's live-first barrier: `limit: 0` requests no stored event, so
-    /// its own terminal answers nothing and the answer arrives through
-    /// reconciliation instead.
+    /// `limit: 0` requests no stored event, so its own terminal answers
+    /// nothing.
     LiveFirstBarrier,
 }
 

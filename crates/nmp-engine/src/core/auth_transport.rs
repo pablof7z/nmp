@@ -798,10 +798,6 @@ impl CoreState {
         if !same_wire_generation {
             self.abandon_session_subs(&session);
         }
-        // A behaviorally-proven
-        // broad Public request repeats the same live-first NIP-77 handoff as
-        // an ordinary recompile; it must never regress to reconcile-first or
-        // silently change strategy on reconnect (#563).
         // EVERY read session replays its planned REQs at connect time, whether
         // or not it names an identity. A relay that only challenges in
         // response to a request (strfry) never speaks first, so withholding
@@ -811,40 +807,16 @@ impl CoreState {
         // reducer's ready transition (`finish_auth_ok`) replays the full
         // planned set once this exact generation is authenticated.
         if let Some(reqs) = planned_read_reqs.as_ref() {
-            // A new websocket generation has no live subscriptions even
-            // if the previous generation's accepted-wire owner map still
-            // names them. Fresh-generation teardown above retires that
-            // state before this replay is built. NIP-77 state is relay-keyed
-            // and belongs to the unauthenticated socket alone (#8), so a
-            // protected generation never retires it.
-            if !same_wire_generation && session.authenticate_as.is_none() {
-                self.nip77.drop_live_for_relay(&session.relay);
-                self.nip77.take_handoffs_probed_on_relay(&session.relay);
-            }
-
             let mut plain_reqs = Vec::new();
-            let mut handoffs = Vec::new();
             for req in reqs {
                 self.install_plan_execution_metadata(
                     req.sub_id.clone(),
                     req.filter.clone(),
                     req.coverage_claims.clone(),
                     req.owner_demands.clone(),
-                    req.provenance.iter().map(|fact| fact.lane).collect(),
                 );
                 if self.wire_request_is_live(&session, &req.sub_id, &req.filter, handle) {
                     continue;
-                }
-                // The live-first NIP-77 handoff is PUBLIC-session-only (#8):
-                // the probe verdict was earned on the unauthenticated socket
-                // and proves nothing about an authenticated session's view.
-                // `query.rs`'s ordinary-recompile path carries the identical
-                // predicate.
-                if req.filter.limit.is_none() && session.authenticate_as.is_none() {
-                    if let Some(probed) = self.prober.probed(&session.relay) {
-                        handoffs.push((probed, req.sub_id.clone(), req.filter.clone()));
-                        continue;
-                    }
                 }
                 self.record_observed_request(RequestSend {
                     session: &session,
@@ -854,7 +826,6 @@ impl CoreState {
                     owner_demands: req.owner_demands.clone(),
                     lanes: req.provenance.iter().map(|fact| fact.lane).collect(),
                     replay: true,
-                    event_failure_target: EventFailureTarget::ThisSend,
                 });
                 plain_reqs.push(req.clone());
             }
@@ -865,16 +836,10 @@ impl CoreState {
                 session.clone(),
                 self.attempted_replay(&session, plain_reqs),
             ));
-            for (probed, sub_id, filter) in handoffs {
-                self.begin_neg_handoff(probed, sub_id, None, filter, &mut effects);
-            }
         }
         // NIP-11 is one-shot HTTP evidence, not a stream. Resolve it off the
-        // reducer thread before deciding whether a behavioral NIP-77 probe
-        // is useful. Explicit negative advertisement can avoid known-noisy
-        // probes; positive advertisement can NEVER mint `ProbedRelay`.
-        // A connection outside the current read plan has no authority to
-        // create either acquisition or capability-probe work.
+        // reducer thread. A connection outside the current read plan has no
+        // authority to create acquisition work.
         if planned_read_reqs.is_some() {
             effects.push(Effect::FetchRelayInformation(session.relay.clone()));
         }
@@ -932,14 +897,9 @@ impl CoreState {
         url: RelayUrl,
         information: Option<RelayInformationCapabilityEvidence>,
     ) -> Vec<Effect> {
-        let advertises_nip77 = information
-            .as_ref()
-            .and_then(|information| information.supported_nips.as_ref())
-            .map(|nips| nips.contains(&77));
-        // NIP-11/NIP-77 capability evidence belongs to the PUBLIC session
-        // only (#8): the document is unauthenticated HTTP and the probe runs
-        // over the unauthenticated socket, so a URL planned solely under
-        // protected sessions retains no document and probes nothing.
+        // NIP-11 capability evidence belongs to the PUBLIC session only
+        // (#8): the document is unauthenticated HTTP, so a URL planned
+        // solely under protected sessions retains no document.
         let public_session = RelaySessionKey::unauthenticated(url.clone());
         let planned = self.router.plan().reqs.contains_key(&public_session);
         // The PLANNING-relevant projection of this document, before and
@@ -981,36 +941,6 @@ impl CoreState {
             // the same redundant-call shape #1646 deleted from
             // `on_set_active_pubkey`.
             self.recompile(&mut effects);
-        }
-        if self.connected_relays.contains(&public_session)
-            && self.router.plan().reqs.contains_key(&public_session)
-            && advertises_nip77 != Some(false)
-        {
-            if let Some(probe) = self.prober.begin_probe(&url) {
-                let attempt_id = self.attempts.mint(RequestAttemptState {
-                    session: public_session,
-                    sub_id: probe.sub_id.clone(),
-                    filter_hash: probe.filter.hash(),
-                    filter: probe.filter.clone(),
-                    coverage_claims: BTreeSet::new(),
-                    owner_demands: BTreeSet::new(),
-                    // A protocol-support probe is not a routed acquisition:
-                    // no lane asked for it, so it reports none.
-                    lanes: BTreeSet::new(),
-                    replay: false,
-                    event_failure_target: EventFailureTarget::ThisSend,
-                    request_revision: None,
-                    retry_failures: 0,
-                    purpose: RequestAttemptPurpose::Nip77Probe,
-                });
-                effects.push(Effect::StartProbe(
-                    attempt_id,
-                    url,
-                    probe.sub_id,
-                    probe.filter,
-                    probe.initial_message_hex,
-                ));
-            }
         }
         // Capability evidence is itself observable diagnostics state; do
         // not wait for an unrelated query recompile/EOSE to publish it.
@@ -1078,44 +1008,6 @@ impl CoreState {
             self.abandon_session_subs(&session);
             self.abandon_request_replacements_for_session(&session);
             self.suspend_disconnected_lanes(&session, &mut effects);
-            // Negentropy (probe, live reconciliations, one-shot backfills)
-            // is PUBLIC-session-only work (#8), so its teardown fires only
-            // when the session bound to no identity itself dropped -- a protected
-            // session's disconnect must not kill a reconciliation still
-            // healthy on the URL's live Public socket.
-            if session.authenticate_as.is_none() {
-                self.nip77.drop_live_for_relay(&session.relay);
-                // Any reconciliation open against this relay dies with the
-                // connection -- there is nothing left to `NEG-CLOSE` (the
-                // socket is already gone), so this is a silent drop, not a
-                // fallback REQ: the relay's own `Supported` verdict stays
-                // cached, and the NEXT `recompile()`/reconnect naturally
-                // re-opens whatever demand still wants this shape.
-                self.nip77.take_sessions_on_relay(&session.relay);
-                self.nip77.take_handoffs_on_relay(&session.relay);
-
-                // One-shot repair REQs are reducer-owned even though the
-                // router never planned them. Remove their state when the
-                // socket generation dies. The socket is already gone, so the
-                // CLOSE is bookkeeping rather than a wire expectation.
-                let stale_temporary: Vec<SubId> = self
-                    .nip77
-                    .take_backfills_on_relay(&session.relay)
-                    .into_iter()
-                    .map(|(sub_id, _)| sub_id)
-                    .collect();
-                for sub_id in &stale_temporary {
-                    self.abandon_sub(sub_id);
-                }
-                if !stale_temporary.is_empty() {
-                    effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
-                        ops: vec![(
-                            session.clone(),
-                            stale_temporary.into_iter().map(WireOp::Close).collect(),
-                        )],
-                    })));
-                }
-            }
             // Feeds `AcquisitionEvidence.sources[_].status`: this session is
             // no longer connected, but `ever_connected_relays` is untouched
             // -- a subsequent evidence computation reads `Disconnected`,
@@ -1219,7 +1111,6 @@ impl CoreState {
                     req.filter.clone(),
                     req.coverage_claims.clone(),
                     req.owner_demands.clone(),
-                    req.provenance.iter().map(|fact| fact.lane).collect(),
                 );
                 self.record_observed_request(RequestSend {
                     session,
@@ -1229,7 +1120,6 @@ impl CoreState {
                     owner_demands: req.owner_demands.clone(),
                     lanes: req.provenance.iter().map(|fact| fact.lane).collect(),
                     replay: true,
-                    event_failure_target: EventFailureTarget::ThisSend,
                 });
             }
             if !reqs.is_empty() {
@@ -1759,31 +1649,17 @@ impl CoreState {
             }
             RelayMessage::EndOfStoredEvents(sub_id) => {
                 let wire_id = sub_id.as_str();
-                // Resolve before consuming the snapshot. The resolved typed
-                // id routes the same EOSE into the NIP-77 handoff/repair
-                // state machine after ordinary coverage attribution.
-                let resolved = self.attribution.sub_id_for_wire(&session, wire_id);
                 let completed = self
                     .attribution
                     .attribute_eose_detailed(&session, wire_id, self.clock);
                 let completed_send = completed.as_ref().map(CompletedAttribution::send_id);
-                // A `limit:0` live-first EOSE is only the barrier that opens
-                // NIP-77. It terminally answers neither the original
-                // question nor its reconciliation, so exposing it as
-                // `RequestSettled` would let a protocol consumer derive
-                // absence before NEG (and any missing-id backfill) finished.
-                let opens_neg = resolved
-                    .as_ref()
-                    .is_some_and(|sub_id| self.nip77.is_pending_handoff(sub_id));
                 let committed_coverage = completed.and_then(|completed| {
                     self.persist_attributed_completion(completed, &session.relay, &mut effects)
                 });
                 let settled = committed_coverage.is_some();
-                let terminal_demands = if let Some(send) =
-                    completed_send.filter(|_| !opens_neg && settled)
-                {
+                let terminal_demands = if let Some(send) = completed_send.filter(|_| settled) {
                     self.emit_request_settled(send, self.clock, RequestTerminal::Eose, &mut effects)
-                } else if let Some(send) = completed_send.filter(|_| !opens_neg) {
+                } else if let Some(send) = completed_send {
                     self.retire_request_evidence(send)
                 } else {
                     BTreeSet::new()
@@ -1796,90 +1672,6 @@ impl CoreState {
                 );
                 if !committed_coverage.is_empty() {
                     effects.push(Effect::DiagnosticsChanged);
-                }
-
-                if let Some(resolved) = resolved {
-                    let mut nip77_changed = false;
-                    // This exact limited REQ is now proven active. Keep it
-                    // open, overlap-close its predecessor, and only then
-                    // begin Negentropy (#563).
-                    if let Some(handoff) = self.nip77.take_handoff(&resolved) {
-                        nip77_changed = true;
-                        self.abandon_sub(&resolved);
-                        self.activate_live_and_open_neg(handoff, &mut effects);
-                    }
-
-                    // Every repair REQ is one-shot and outside router-owned
-                    // demand. Its EOSE closes it and either unlocks deferred
-                    // NEG coverage or completes a handoff-timeout fallback.
-                    if let Some(request) = self.nip77.take_backfill(&resolved) {
-                        nip77_changed = true;
-                        effects.push(Effect::Wire(self.attempted_wire_delta(WireDelta {
-                            ops: vec![(session.clone(), vec![WireOp::Close(resolved.clone())])],
-                        })));
-                        self.abandon_sub(&resolved);
-                        match request {
-                            TemporaryReq::MissingIds {
-                                plan_sub_id: _,
-                                neg_sub_id,
-                                attribution_send,
-                                completed_at,
-                            } => {
-                                let committed_coverage = self.credit_neg_coverage(
-                                    &neg_sub_id,
-                                    attribution_send,
-                                    completed_at,
-                                    &session.relay,
-                                    &mut effects,
-                                );
-                                let terminal_demands = if committed_coverage.is_some() {
-                                    self.emit_request_settled(
-                                        attribution_send,
-                                        completed_at,
-                                        RequestTerminal::Nip77,
-                                        &mut effects,
-                                    )
-                                } else {
-                                    self.retire_request_evidence(attribution_send)
-                                };
-                                let committed_coverage = committed_coverage.unwrap_or_default();
-                                self.refresh_evidence_for_coverage_and_demand_keys(
-                                    &committed_coverage,
-                                    &terminal_demands,
-                                    &mut effects,
-                                );
-                                if !committed_coverage.is_empty() {
-                                    effects.push(Effect::DiagnosticsChanged);
-                                }
-                                self.abandon_sub(&neg_sub_id);
-                            }
-                            TemporaryReq::Backlog { .. } => {}
-                            TemporaryReq::BacklogActivatesLive {
-                                plan_sub_id,
-                                live_sub_id,
-                                prior_live_sub_id,
-                            } => {
-                                self.abandon_sub(&live_sub_id);
-                                self.nip77.set_live(plan_sub_id, live_sub_id.clone());
-                                if let Some(prior) = prior_live_sub_id {
-                                    if prior != live_sub_id {
-                                        self.abandon_sub(&prior);
-                                        effects.push(Effect::Wire(self.attempted_wire_delta(
-                                            WireDelta {
-                                                ops: vec![(
-                                                    session.clone(),
-                                                    vec![WireOp::Close(prior)],
-                                                )],
-                                            },
-                                        )));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if nip77_changed {
-                        effects.push(Effect::DiagnosticsChanged);
-                    }
                 }
             }
             RelayMessage::Ok {
@@ -1927,56 +1719,6 @@ impl CoreState {
                     .sub_id_for_wire(&session, subscription_id.as_str())
                 {
                     self.close_requests_for_sub(&session, handle, &sub_id, reason, &mut effects);
-                }
-            }
-            RelayMessage::NegMsg {
-                subscription_id,
-                message,
-            } => {
-                // Negentropy is PUBLIC-session-only in this unit (#8): the
-                // probe and every reconciliation were opened on the Public
-                // session, so a NEG frame arriving on a protected session
-                // could only be a foreign/confused reply — it must not
-                // resolve the Public probe or step a Public reconciliation.
-                if session.authenticate_as.is_some() {
-                    return effects;
-                }
-                let wire_id = subscription_id.as_str();
-                if self.prober.on_neg_msg(&session.relay, wire_id).is_some() {
-                    // Capability probe succeeded -- the verdict is now
-                    // cached (`Prober::probed`). Nothing further to do here:
-                    // the NEXT `recompile()` (triggered by any future demand
-                    // change) is what actually routes a broad filter for
-                    // this relay onto negentropy -- see the builder report's
-                    // scoping note on already-open subs at probe time.
-                } else if let Some(sub_id) = self.attribution.sub_id_for_wire(&session, wire_id) {
-                    self.step_neg_session(
-                        sub_id,
-                        session.relay.clone(),
-                        message.as_ref(),
-                        &mut effects,
-                    );
-                }
-                // An unrecognized wire id is an untrusted-network fact
-                // (stale/foreign sub), never a panic -- silently ignored,
-                // same discipline as `handle_write_ack`'s unknown-OK case.
-            }
-            RelayMessage::NegErr {
-                subscription_id, ..
-            } => {
-                // Same PUBLIC-session-only gate as `NegMsg` above (#8): a
-                // protected session's NEG-ERR must not classify the URL as
-                // Unsupported or tear a Public reconciliation down to REQ.
-                if session.authenticate_as.is_some() {
-                    return effects;
-                }
-                let wire_id = subscription_id.as_str();
-                if self.prober.on_neg_unsupported(&session.relay, wire_id) {
-                    // Probe classified Unsupported; cached, never re-probed.
-                } else if let Some(sub_id) = self.attribution.sub_id_for_wire(&session, wire_id) {
-                    if let Some(neg) = self.nip77.take_session(&sub_id) {
-                        self.neg_session_fallback_to_req(sub_id, neg, &mut effects);
-                    }
                 }
             }
             // Closed (non-auth) / Notice / Count remain separate protocol

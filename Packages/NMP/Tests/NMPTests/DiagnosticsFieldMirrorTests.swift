@@ -99,9 +99,6 @@ final class DiagnosticsFieldMirrorTests: XCTestCase {
             nip11DocumentRevision: nil,
             nip11Freshness: nil,
             nip11LastError: nil,
-            nip77Advertisement: "x",
-            nip77Behavior: "x",
-            nip77Handoff: "x"
         )
         assertFullyMirrored(ffi, RelayDiagnostics.init)
     }

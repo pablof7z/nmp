@@ -1,5 +1,4 @@
-//! The mirrored-index mechanism `nip77_sessions.rs` introduced, generalized
-//! over its owner key type (#1606).
+//! The mirrored-index mechanism, generalized over its owner key type (#1606).
 //!
 //! `PlanIndexed` mirrored a map of children keyed by their own wire id against
 //! a reverse index from the router plan (a [`nmp_router::SubId`]) that owned
@@ -12,10 +11,9 @@
 //! one mechanism, disagreeing only on what type names the owner.
 //!
 //! What stays out of here on purpose: every name in this file is about the
-//! index, not about NIP-77 or about replacements. `Nip77Sessions` and
-//! `RequestReplacements` each keep their own vocabulary in their own
-//! lifecycle methods; this module supplies the plumbing underneath both, and
-//! must never grow a "plan" or a "successor" of its own.
+//! index, not about replacements. `RequestReplacements` keeps its own
+//! vocabulary in its own lifecycle methods; this module supplies the plumbing
+//! underneath it, and must never grow a "plan" or a "successor" of its own.
 
 use std::collections::{BTreeSet, HashMap};
 use std::hash::Hash;
@@ -31,9 +29,8 @@ pub(super) trait IndexedChild<Owner> {
 ///
 /// Both maps are private. There is no spelling of "insert into one and forget
 /// the other", in either removal direction. `what` names the owning cluster
-/// for panic text, so a broken mirror in a replacement session and a broken
-/// mirror in a NIP-77 plan fail with different words despite sharing this
-/// code.
+/// for panic text, so a broken mirror in one cluster and a broken mirror in
+/// another fail with different words despite sharing this code.
 pub(super) struct OwnerIndexed<Owner, Child, V> {
     what: &'static str,
     by_child: HashMap<Child, V>,
@@ -123,39 +120,8 @@ where
             .collect()
     }
 
-    /// Remove every child matching `drop`, pruning the reverse index for
-    /// each, and hand back what was removed.
-    pub(super) fn take_where<F: Fn(&Child, &V) -> bool>(&mut self, drop: F) -> Vec<(Child, V)> {
-        let departing: Vec<_> = self
-            .by_child
-            .iter()
-            .filter(|(child, value)| drop(child, value))
-            .map(|(child, _)| child.clone())
-            .collect();
-        departing
-            .into_iter()
-            .filter_map(|child| self.take(&child).map(|value| (child, value)))
-            .collect()
-    }
-
-    pub(super) fn get(&self, child: &Child) -> Option<&V> {
-        self.by_child.get(child)
-    }
-
-    pub(super) fn get_mut(&mut self, child: &Child) -> Option<&mut V> {
-        self.by_child.get_mut(child)
-    }
-
     pub(super) fn contains(&self, child: &Child) -> bool {
         self.by_child.contains_key(child)
-    }
-
-    pub(super) fn children_of(&self, owner: &Owner) -> BTreeSet<Child> {
-        self.by_owner.get(owner).cloned().unwrap_or_default()
-    }
-
-    pub(super) fn iter(&self) -> impl Iterator<Item = (&Child, &V)> {
-        self.by_child.iter()
     }
 
     #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -249,7 +215,7 @@ where
 
 /// `take_owner`'s falsifier.
 ///
-/// Both `Nip77Sessions` and `RequestReplacements` only ever reach `by_child`
+/// `RequestReplacements` only ever reaches `by_child`
 /// and `by_owner` through `insert`/`take`/`take_owner`, which keep the two
 /// maps in lockstep by construction -- production code cannot produce a
 /// reverse edge naming a child the forward map has already lost. That is

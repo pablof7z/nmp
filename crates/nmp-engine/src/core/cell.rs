@@ -46,7 +46,7 @@
 //!   at all -- not even a constructor.
 //!
 //! `CoreState` is temporary scaffolding that shrinks as real owners (Query,
-//! Publish, AUTH, NIP-77) are extracted from it. It is not a subsystem to
+//! Publish, AUTH) are extracted from it. It is not a subsystem to
 //! develop: if it starts acquiring convenience APIs or documentation about
 //! what it "owns", the scaffolding has begun becoming the building.
 
@@ -513,15 +513,6 @@ impl EngineCore {
         now: Timestamp,
     ) -> ObservationOpen<ObservationId, RowsSeed> {
         self.checked("open_observation", |s| s.open_observation(query, now))
-    }
-
-    #[doc(hidden)]
-    pub fn on_nip77_handoff(
-        &mut self,
-        frame: Nip77Frame,
-        outcome: RequestHandoffOutcome,
-    ) -> Vec<Effect> {
-        self.checked("on_nip77_handoff", |s| s.on_nip77_handoff(frame, outcome))
     }
 
     pub fn recover_on_boot(&mut self) -> Vec<Effect> {

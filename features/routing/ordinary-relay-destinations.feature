@@ -16,15 +16,6 @@ Feature: Valid relay URLs are ordinary destinations
     Then the transport attempts that destination like any other relay
     And the real loopback relay acknowledges the write
 
-  # nmp:id=ROUTING-DESTINATIONS-002
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-blossom::loopback_upload_succeeds_without_opt_in
-  # nmp:falsifier=Restore the Blossom literal-host gate; authorization validates but the loopback HTTP server observes no upload.
-  Scenario: A Blossom server on loopback is an ordinary HTTP target
-    Given a valid Blossom server URL names loopback
-    When a correctly authorized upload is sent
-    Then the default Blossom client reaches the server without an opt-in
-
   # nmp:id=ROUTING-DESTINATIONS-003
   # nmp:status=built
   # nmp:evidence=rust:nmp::someone_elses_local_relay_list_row_becomes_a_route_candidate

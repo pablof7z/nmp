@@ -102,9 +102,6 @@ public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
     public let nip11DocumentRevision: String?
     public let nip11Freshness: String?
     public let nip11LastError: String?
-    public let nip77Advertisement: String
-    public let nip77Behavior: String
-    public let nip77Handoff: String
 
     init(_ ffi: FfiRelayDiagnostics) {
         relay = ffi.relay
@@ -123,9 +120,6 @@ public struct RelayDiagnostics: Sendable, Identifiable, Hashable {
         nip11DocumentRevision = ffi.nip11DocumentRevision
         nip11Freshness = ffi.nip11Freshness
         nip11LastError = ffi.nip11LastError
-        nip77Advertisement = ffi.nip77Advertisement
-        nip77Behavior = ffi.nip77Behavior
-        nip77Handoff = ffi.nip77Handoff
     }
 }
 

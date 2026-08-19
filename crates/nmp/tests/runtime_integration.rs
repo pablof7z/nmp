@@ -20,7 +20,7 @@
 use nmp_grammar::RelaySessionKey;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -47,7 +47,7 @@ use nmp_test_support::{
 };
 use nmp_transport::PoolConfig;
 use nostr::{
-    EventId, JsonUtil, Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Tag, Timestamp,
+    EventId, Keys, Kind, RelayUrl, Tag, Timestamp,
     UnsignedEvent,
 };
 
@@ -67,7 +67,6 @@ fn expect_attached(result: ReceiptReattachment) -> FifoReceiver<WriteFact> {
     }
 }
 
-use tungstenite::Message;
 
 /// #765: `LocalKeySigner` now owns its scalar in one canonical zeroizing
 /// allocation and no longer accepts a `nostr::Keys`. These fixtures still
@@ -647,8 +646,6 @@ async fn withdrawing_last_demand_flushes_close_before_worker_retirement() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_requests_are_immutable_and_reconnect_replays_each_once() {
     let relay_config = RelayConfig {
-        // Explicit NIP-11 evidence that NIP-77 is unsupported keeps this
-        // NIP-01 ownership test out of capability-probe handoffs.
         advertised_limits: Some(AdvertisedLimits::default()),
         ..RelayConfig::default()
     };
@@ -826,8 +823,8 @@ async fn accepted_requests_are_immutable_and_reconnect_replays_each_once() {
 // firing `EngineMsg::Tick` on its own, exactly the property #39 asks for.
 
 /// #39 test obligation `no_deadlines_blocks_indefinitely`: an engine thread
-/// with zero subscriptions has no wire demand, hence no expiring content and
-/// no open negentropy session -- `core::EngineCore::next_deadline()` is
+/// with zero subscriptions has no wire demand and hence no expiring content
+/// -- `core::EngineCore::next_deadline()` is
 /// `None` from the moment it is built, so `engine_loop` must be blocking on
 /// a plain `cmd_rx.recv()`, never a hot `recv_timeout(0)` loop (D8). No
 /// `Effect` crosses the wire in this scenario (a spurious tick with nothing
@@ -880,317 +877,6 @@ fn no_deadlines_blocks_indefinitely() {
 
     handle.shutdown();
     engine_thread.join();
-}
-
-/// A minimal, deliberately UNCOOPERATIVE relay: a real `TcpListener` + a
-/// real `tungstenite` WebSocket handshake (the same version `nmp-transport`'s
-/// own production `Pool` speaks on the wire), used only by
-/// [`neg_liveness_deadline_does_not_busy_spin`] below. `LocalRelay`/
-/// `nostr-relay-builder` cannot play this role: it is a fully NIP-77-
-/// compliant relay and would answer/converge a real reconciliation long
-/// before the 30s liveness window is ever reached, so no real session would
-/// ever stay open long enough to exercise the sweep at all.
-///
-/// On connect it immediately pushes one scripted `EVENT` frame (`seed`) --
-/// `EngineCore::on_relay_frame`'s `Event` arm ingests any inbound event
-/// unconditionally, with no sub-id check, so this needs no matching REQ to
-/// have been sent first. It replies to exactly the FIRST `NEG-OPEN` it sees
-/// (the capability probe) with a `NEG-MSG`, answers the live-first
-/// `REQ {limit:0}` with its EOSE barrier, and goes silent for every later
-/// `NEG-OPEN` while holding the TCP connection open
-/// (never closing it, which would just make `EngineCore::on_relay_disconnected`
-/// silently drop the session instead of exercising the liveness sweep at
-/// all). Every text frame it reads is forwarded to `frames_tx` so the test
-/// can observe both halves of the regression: no busy-spin, AND the session
-/// actually getting abandoned (a `NEG-CLOSE` + fallback `REQ`) at the
-/// deadline.
-fn run_uncooperative_neg_relay(
-    listener: TcpListener,
-    seed: nostr::Event,
-    frames_tx: Sender<String>,
-) {
-    let (stream, _) = listener
-        .accept()
-        .expect("accept the engine's one connection");
-    stream.set_nodelay(true).ok();
-    let mut ws = tungstenite::accept(stream).expect("complete the WS handshake");
-
-    let seed_frame = RelayMessage::event(SubscriptionId::new("s"), seed).as_json();
-    ws.send(Message::text(seed_frame))
-        .expect("push the seed EVENT frame");
-
-    let mut neg_open_count = 0u32;
-    loop {
-        match ws.read() {
-            Ok(Message::Text(text)) => {
-                let text = text.as_str().to_string();
-                if text.contains("\"NEG-OPEN\"") {
-                    neg_open_count += 1;
-                    if neg_open_count == 1 {
-                        if let Some(sub_id) = neg_open_sub_id(&text) {
-                            let reply = format!("[\"NEG-MSG\",{sub_id},\"6100\"]");
-                            let _ = ws.send(Message::text(reply));
-                        }
-                    }
-                    // The second (and any further) `NEG-OPEN` is the real
-                    // widened session -- never reply, never close: exactly
-                    // "the relay is slow to answer negentropy", the
-                    // scenario the liveness sweep exists for.
-                }
-                if let Some(sub_id) = limit_zero_req_sub_id(&text) {
-                    let reply = format!("[\"EOSE\",{sub_id}]");
-                    let _ = ws.send(Message::text(reply));
-                }
-                let _ = frames_tx.send(text);
-            }
-            Ok(Message::Close(_)) | Err(_) => break,
-            Ok(_) => {}
-        }
-    }
-}
-
-/// Extract the quoted id from a live-first `REQ` whose filter carries
-/// `limit:0`. Other ordinary/fallback REQs are deliberately ignored.
-fn limit_zero_req_sub_id(text: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    let arr = value.as_array()?;
-    if arr.first()?.as_str()? != "REQ"
-        || !arr
-            .iter()
-            .skip(2)
-            .any(|filter| filter.get("limit").and_then(|value| value.as_u64()) == Some(0))
-    {
-        return None;
-    }
-    serde_json::to_string(arr.get(1)?.as_str()?).ok()
-}
-
-/// Extract `sub_id` (still JSON-quoted, ready to splice straight back into
-/// a reply array) from a `["NEG-OPEN", sub_id, filter, hex]` wire frame.
-fn neg_open_sub_id(text: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    let arr = value.as_array()?;
-    if arr.first()?.as_str()? != "NEG-OPEN" {
-        return None;
-    }
-    serde_json::to_string(arr.get(1)?.as_str()?).ok()
-}
-
-/// Sleep (short increments, not a hot spin) until real wall-clock has JUST
-/// crossed a fresh whole-second boundary, within `margin` of it.
-///
-/// Used only to make [`neg_liveness_deadline_does_not_busy_spin`]'s timing
-/// deterministic. `duration_until` always computes a CLEAN whole-second
-/// `recv_timeout` duration (`deadline.as_secs() - now.as_secs()`, both
-/// floored) -- so sleeping that duration wakes the loop up at very nearly
-/// the SAME sub-second phase it started from (a clean N-second sleep
-/// preserves phase; only scheduler wake-up jitter, a few ms, perturbs it).
-/// That means the fraction of a second left over when a stale negentropy
-/// session's deadline is finally reached -- i.e. how long the pre-fix
-/// busy-spin lasts before wall-clock ticks into the next whole second --
-/// is inherited almost unchanged from whatever phase real wall-clock
-/// happened to be at the moment `open_neg_session` captured `started_at`.
-/// Left uncontrolled, that phase is effectively random each run: the spin
-/// could as easily last 900ms as 10ms, making a fixed CPU-time threshold
-/// flaky in EITHER direction. Aligning to near-zero phase right before the
-/// widen-`subscribe` that opens the session (which itself resolves in low
-/// milliseconds once sent, since the engine thread is parked on a plain
-/// `recv()` with nothing else pending at that point) means a real spin, if
-/// one occurs at all, reliably lasts close to the full ~1 second instead.
-fn align_to_next_second_boundary(margin: Duration) {
-    loop {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock must be past the Unix epoch");
-        let into_current_second = Duration::from_nanos((now.as_nanos() % 1_000_000_000) as u64);
-        if into_current_second <= margin {
-            return;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-}
-
-/// Block until a frame containing `needle` arrives on `frames_rx`, or panic
-/// after `timeout` -- draining (and discarding) every non-matching frame
-/// along the way, same discipline as `nmp-transport`'s own `recv_matching`.
-fn wait_for_frame_containing(frames_rx: &Receiver<String>, timeout: Duration, needle: &str) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        assert!(
-            !remaining.is_zero(),
-            "timed out waiting for a frame containing {needle:?}"
-        );
-        match frames_rx.recv_timeout(remaining) {
-            Ok(text) if text.contains(needle) => return,
-            Ok(_) => {} // non-matching frame -- keep waiting.
-            Err(RecvTimeoutError::Timeout) => panic!("timed out waiting for {needle:?}"),
-            Err(RecvTimeoutError::Disconnected) => {
-                panic!("stub relay's frame channel closed while waiting for {needle:?}")
-            }
-        }
-    }
-}
-
-/// #39 fix-up regression (review finding on PR #42): the neg-liveness
-/// sweep predicate used to compare `now.as_secs().saturating_sub(started_
-/// at.as_secs()) > NEG_LIVENESS_DEADLINE_SECS` (strict `>`, truncated to
-/// whole seconds) against a DIFFERENT threshold than the one `next_deadline`
-/// arms the driver for (the exact `Timestamp` `started_at +
-/// NEG_LIVENESS_DEADLINE_SECS`). At `now == started_at + 30` that mismatch
-/// meant: `next_deadline()` still returns the same deadline, `duration_until`
-/// floors it to `Duration::ZERO`, `recv_timeout(0)` times out immediately,
-/// `tick()` runs, the sweep's strict `>` is still false (`30 > 30` is
-/// false) so the session survives, and the loop goes straight back around
-/// to the identical zero-duration timeout -- a hot `recv_timeout(0)` spin
-/// burning roughly one core until the wall clock ticks over into the NEXT
-/// whole second (`as_secs()` finally reading `31 > 30`). Only a negentropy
-/// session crossing ITS liveness deadline hits this; NIP-40 expiry never did
-/// (`expire_due`'s own `range(..=now)` was already inclusive), which is why
-/// `no_deadlines_blocks_indefinitely` (zero deadlines at all) didn't catch
-/// it. Fixed by comparing the identical threshold both places (`now >=
-/// started_at + NEG_LIVENESS_DEADLINE_SECS`).
-///
-/// An unrelated, short NIP-40 expiry is driven FIRST (the `seed` event
-/// [`run_uncooperative_neg_relay`] pushes on connect) so `EngineCore`'s
-/// internal clock -- which `core::mod`'s `self.clock` shows is ONLY ever
-/// advanced by `tick()`, never by an ordinary ingest/EOSE -- is synced close
-/// to real wall-clock time before the neg session opens. Skip that step and
-/// the very first session any fresh engine ever opens starts from
-/// `started_at == 0` (the `EngineCore::new` default, Unix epoch): its
-/// liveness deadline (`30`) would already be enormously in the past relative
-/// to real time, so `now_real_secs - 0` trivially and identically exceeds
-/// 30 under EITHER the buggy or the fixed predicate -- masking the exact
-/// ~1-second-window regression this test exists to catch.
-#[test]
-fn neg_liveness_deadline_does_not_busy_spin() {
-    let port = free_port();
-    let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind stub relay port");
-
-    let a = Keys::generate();
-    let b = Keys::generate();
-    // Built with this crate's OWN (0.44.4) `nostr` types directly -- unlike
-    // the other tests in this file, this stub speaks the workspace's native
-    // wire format itself (via `RelayMessage::event`, not `nostr-relay-
-    // builder`), so there is no cross-version bridge to cross here.
-    let now_secs = Timestamp::now().as_secs();
-    let seed = nmp_resolver_testkit::expiring_kind1(
-        &a,
-        "syncs EngineCore's clock before the neg session opens",
-        now_secs,
-        now_secs + 2,
-    );
-    let seed_id = seed.id;
-
-    let (frames_tx, frames_rx) = mpsc::channel::<String>();
-    let stub = thread::spawn(move || run_uncooperative_neg_relay(listener, seed, frames_tx));
-
-    let url = RelayUrl::parse(&format!("ws://127.0.0.1:{port}")).expect("parse stub relay url");
-    let dir = FixtureRoutingFacts::new()
-        .with_outbound_routes(a.public_key(), [url.clone()])
-        .with_outbound_routes(b.public_key(), [url]);
-
-    let (engine_thread, handle) = EngineThread::spawn_with_fixture_routing_facts(
-        RedbStore::temporary().expect("temporary Redb store"),
-        dir,
-        10,
-        PoolConfig {
-            // The stub never disconnects and this test never kills it early,
-            // so no reconnect should ever fire -- a long delay just keeps
-            // the default reconnect machinery out of the way.
-            reconnect_delay_initial: Some(Duration::from_secs(3600)),
-            ..PoolConfig::default()
-        },
-    )
-    .expect("test engine thread construction");
-
-    let (_qh_a, rows_rx) = handle
-        .subscribe(literal_kind1(&a.public_key().to_hex()))
-        .expect("test subscription construction");
-
-    // The seed's `Added` then `Removed` (with zero further commands sent --
-    // same proof shape as `expiring_event_retracts_with_no_further_input`)
-    // confirms a real `tick()` has now run at a wall-clock time close to
-    // "now", so `EngineCore`'s internal clock is synced.
-    assert!(
-        wait_for_rows(&rows_rx, Duration::from_secs(10), |rows| rows
-            .iter()
-            .any(|r| r.id.to_hex() == seed_id.to_hex())),
-        "the seed event must arrive as Added first"
-    );
-    assert!(
-        wait_for_rows(&rows_rx, Duration::from_secs(10), |rows| !rows
-            .iter()
-            .any(|r| r.id.to_hex() == seed_id.to_hex())),
-        "the seed event must retract on its own -- this is what syncs \
-         EngineCore's clock close to real wall-clock time"
-    );
-
-    // Align phase (see `align_to_next_second_boundary`'s doc) right before
-    // the widen so `started_at` -- captured a few milliseconds later --
-    // lands close to a fresh whole-second boundary, making a real spin (if
-    // one occurs) last close to the full ~1 second rather than an
-    // unpredictable fraction of one.
-    align_to_next_second_boundary(Duration::from_millis(30));
-
-    // Now open the real live-first handoff: b's kind:1 widens the same
-    // (kind:1) skeleton under the sub-id the capability probe already
-    // proved `Supported` -- same probe-then-widen dance the headless tests
-    // use, just driven over the real wire this time. The stub EOSEs the
-    // intervening `limit:0` REQ before the real NEG session can open.
-    let (_qh_b, _rows_rx_b) = handle
-        .subscribe(literal_kind1(&b.public_key().to_hex()))
-        .expect("test subscription construction");
-    wait_for_frame_containing(&frames_rx, Duration::from_secs(10), "\"NEG-OPEN\"");
-    // The first `NEG-OPEN` (the capability probe) already arrived before
-    // this subscribe -- the second is the real, now-open session this test
-    // holds open. `neg_open_sub_id`'s own count inside the stub thread is
-    // what actually distinguishes them; here we just need real time to have
-    // moved on enough that the widen has landed, which the SECOND
-    // occurrence proves.
-    wait_for_frame_containing(&frames_rx, Duration::from_secs(10), "\"NEG-OPEN\"");
-
-    // The session is now open with `started_at` close to a fresh whole-
-    // second boundary (per the phase alignment above). Count the engine
-    // thread's own wait re-arms across a window that comfortably straddles
-    // its `started_at + 30` liveness deadline either way (#1796): a pre-fix
-    // busy-spin re-arms a zero-length wait as fast as the loop can run for
-    // close to a full second inside this window, while every legitimate
-    // wake-up here -- the deadline itself, the fallback REQ, a handful of
-    // relay frames -- is a small handful of re-arms across 33 seconds.
-    //
-    // Unlike the `getrusage(RUSAGE_SELF)` CPU sample this replaces, the
-    // count is this engine thread's alone: a sibling test running flat out
-    // in the same binary for all 33 seconds cannot add one to it.
-    //
-    // The measured spin-free count here is 3. The bound is three orders of
-    // magnitude above that and still an order of magnitude below the most
-    // pessimistic spin (10k re-arms/second for the ~1 second the pre-fix
-    // off-by-one held a zero-length wait), so neither side of it is tuned to
-    // what happens to run alongside this test.
-    const SPIN_FREE_WAIT_ARMS: u64 = 1_000;
-    let before = engine_thread.wait_arms();
-    thread::sleep(Duration::from_secs(33));
-    let after = engine_thread.wait_arms();
-    assert!(
-        after - before < SPIN_FREE_WAIT_ARMS,
-        "the neg-liveness deadline crossing must not busy-spin -- a \
-         recv_timeout(0) hot loop stuck on the pre-fix off-by-one would \
-         re-arm its wait far more than {SPIN_FREE_WAIT_ARMS} times inside \
-         this window: re-armed {} time(s)",
-        after - before
-    );
-
-    // Companion assertion: the session was actually abandoned at the
-    // deadline (not just "nothing happened at all", which would also show
-    // zero CPU but would be a false pass) -- the fallback-to-REQ effect
-    // closes the negentropy sub-id then reopens it as a plain REQ.
-    wait_for_frame_containing(&frames_rx, Duration::from_secs(5), "\"NEG-CLOSE\"");
-    wait_for_frame_containing(&frames_rx, Duration::from_secs(5), "\"REQ\"");
-
-    handle.shutdown();
-    engine_thread.join();
-    let _ = stub.join();
 }
 
 /// #39 test obligation `expiring_event_retracts_with_no_further_input`:

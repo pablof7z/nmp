@@ -275,8 +275,7 @@ impl HistorySessions {
         // Checked, not wrapping. Exhausting a u64 at one mint per history
         // session is not reachable by this process -- which is an argument
         // for the width, not for silently re-minting an id a still-live
-        // `by_handle` entry could still be addressed to (same rule as
-        // `Nip77Sessions::mint_incarnation`; see its doc comment).
+        // `by_handle` entry could still be addressed to.
         self.next_id = self
             .next_id
             .checked_add(1)
@@ -584,8 +583,7 @@ impl HistorySessions {
 
     /// Put one window into the state an evidence refresh must NOT be able to
     /// serve from its own retained projection, so the falsifier can prove the
-    /// fallback store read happens. A named door for the corruption, like
-    /// `Nip77Sessions::swap_handoff_owners_for_test`: the field it flips is
+    /// fallback store read happens. A named door for the corruption: the field it flips is
     /// private even to `CoreState`, and a test writing it by hand is a test
     /// that also silently depends on nothing else in the window changing.
     pub(super) fn force_projection_incomplete(&mut self, id: HistorySessionId) {

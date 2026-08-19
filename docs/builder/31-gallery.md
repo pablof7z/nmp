@@ -77,17 +77,15 @@ one relay; the app names the relay set once and never passes a host to an
 individual operation. The app selects one entry and hands the exact fields a
 NIP-29 operation needs.
 
-## 6. NIP-68 photo in a NIP-29 group
+## 6. NIP-C7 chat message in a NIP-29 group
 
 ```swift
-let asset = try await blossom.upload(file)
-let photo = try Nip68.buildPhoto(asset)
-let receipt = try group.publish(photo, using: engine)
+let message = NipC7.chat(text)
+let receipt = try group.publish(message, using: engine)
 ```
 
-Three owners compose without a content monopoly: Blossom owns bytes, NIP-68
-owns the photo schema, and NIP-29 adds only group context. Core signs once and
-routes one intent.
+Two owners compose without a content monopoly: NIP-C7 owns the kind:9 schema
+and NIP-29 adds only group context. Core signs once and routes one intent.
 
 ## 7. Podcast identity override
 

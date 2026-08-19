@@ -62,32 +62,6 @@ fn closes_among<'a>(record: &'a WireRecord, ids: &[String]) -> Vec<&'a String> {
     record.closes.iter().filter(|id| ids.contains(id)).collect()
 }
 
-/// Assert that an ordinary NIP-01 plan-replacement scenario did not enter a
-/// NIP-77 live-candidate handoff.
-///
-/// A behaviorally-proven NIP-77 relay opens a distinct `limit:0` candidate,
-/// waits for its exact EOSE, then overlap-closes the predecessor. That CLOSE
-/// is required by the gap-free protocol handoff, not evidence that
-/// `nmp-router` retired a growing/shrinking planned subscription. The
-/// subscription-collapse feature declares NIP-77 unsupported so it can
-/// observe the router invariant directly; this guard makes any future loss of
-/// that isolation fail by cause instead of returning to a timing-dependent
-/// false accusation.
-fn assert_no_nip77_live_candidate(record: &WireRecord, relay: &str) {
-    let candidates: Vec<&WireReq> = record
-        .reqs
-        .iter()
-        .filter(|req| req.is_nip77_live_candidate())
-        .collect();
-    assert!(
-        candidates.is_empty(),
-        "relay {relay:?} entered a NIP-77 live-candidate handoff during a NIP-01 \
-         plan-replacement assertion; the scenario must explicitly advertise NIP-77 \
-         unsupported so a required overlap CLOSE cannot masquerade as router churn: \
-         {candidates:#?}"
-    );
-}
-
 #[then(regex = r#"^relay "([^"]+)" serves every "([a-zA-Z])" watch with (\d+) subscriptions?$"#)]
 async fn relay_serves_tag_with_n_subscriptions(
     w: &mut NmpWorld,
@@ -270,7 +244,6 @@ async fn relay_widened_tag_in_place(w: &mut NmpWorld, relay: String, tag: String
     w.wire_settled().await;
     let tag = parse_tag(&tag);
     let record = w.wire_record(&relay);
-    assert_no_nip77_live_candidate(&record, &relay);
     let ids = record.subscription_ids_naming_tag(tag);
     assert!(
         widened_in_place(&record, &ids),
@@ -285,7 +258,6 @@ async fn relay_widened_tag_in_place(w: &mut NmpWorld, relay: String, tag: String
 async fn relay_widened_authors_in_place(w: &mut NmpWorld, relay: String) {
     w.wire_settled().await;
     let record = w.wire_record(&relay);
-    assert_no_nip77_live_candidate(&record, &relay);
     let ids = record.subscription_ids_naming_authors();
     assert!(
         widened_in_place(&record, &ids),
@@ -301,7 +273,6 @@ async fn relay_closed_no_tag_subscription(w: &mut NmpWorld, relay: String, tag: 
     w.wire_settled().await;
     let tag = parse_tag(&tag);
     let record = w.wire_record(&relay);
-    assert_no_nip77_live_candidate(&record, &relay);
     let ids = record.subscription_ids_naming_tag(tag);
     nothing_to_observe!(
         !ids.is_empty(),
@@ -322,7 +293,6 @@ async fn relay_closed_no_tag_subscription(w: &mut NmpWorld, relay: String, tag: 
 async fn relay_closed_no_author_subscription(w: &mut NmpWorld, relay: String) {
     w.wire_settled().await;
     let record = w.wire_record(&relay);
-    assert_no_nip77_live_candidate(&record, &relay);
     let ids = record.subscription_ids_naming_authors();
     nothing_to_observe!(
         !ids.is_empty(),

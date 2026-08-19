@@ -85,7 +85,7 @@ UX.
 
 ## Protocol features return as opt-in modules, not core bias
 
-NIP-29 groups, NIP-68 media events, NIP-17 messaging, Blossom integration, and
+NIP-29 groups, NIP-17 messaging, and
 other protocol capabilities may each need typed builders, parsers, queries,
 state machines, or semantic operations. They belong in opt-in modules that own
 only their exact protocol surface.

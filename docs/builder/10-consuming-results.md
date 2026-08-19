@@ -100,7 +100,7 @@ a display name, decode arbitrary content into one universal model, rank posts,
 or turn tags into navigation.
 
 An enabled protocol module may parse and validate the exact schema it owns. For
-example, a NIP-68 module may project a raw event into a typed photo value. The
+example, NIP-22 projects a raw kind:1111 event into a typed comment value. The
 app still chooses layout, labels, ordering, and failure presentation.
 
 ## Observation lifetime

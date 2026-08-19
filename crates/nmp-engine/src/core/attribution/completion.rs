@@ -12,7 +12,6 @@ use nostr::Timestamp;
 use super::{
     wire_sub_id_string, AttributionSendId, AttributionSnapshot, AttributionState,
     CompletedAttribution, CompletedCoverageClaim, CoverageAuthority, CoveragePoison,
-    EventFailureTarget,
 };
 
 impl AttributionState {
@@ -27,7 +26,6 @@ impl AttributionState {
         sub_id: &SubId,
         filter: &ConcreteFilter,
         coverage_claims: BTreeSet<CoverageKey>,
-        event_failure_target: EventFailureTarget,
     ) -> AttributionSendId {
         let send_id = AttributionSendId(self.next_send_id);
         self.next_send_id = self.next_send_id.wrapping_add(1);
@@ -36,10 +34,6 @@ impl AttributionState {
         }
         let snapshot = AttributionSnapshot {
             send_id,
-            event_failure_target: match event_failure_target {
-                EventFailureTarget::ThisSend => send_id,
-                EventFailureTarget::Correlated(send_id) => send_id,
-            },
             coverage_claims,
             filter_hash: filter.hash(),
             floor: filter.since.map(Timestamp::from),
@@ -84,7 +78,7 @@ impl AttributionState {
         };
         let targets: BTreeSet<_> = fifo
             .iter()
-            .map(|snapshot| snapshot.event_failure_target)
+            .map(|snapshot| snapshot.send_id)
             .collect();
         for snapshots in self.inflight.values_mut() {
             for snapshot in snapshots {
@@ -99,11 +93,7 @@ impl AttributionState {
 
     /// Resolve a wire subscription-id string back to the `SubId`
     /// `record_send` registered it under, if any (the same map
-    /// `attribute_eose` itself reads at EOSE time). Exposed so `CoreState`
-    /// can route an inbound `NEG-MSG`/`NEG-ERR` (which only ever carries the
-    /// wire string, never a `SubId`) back to the right in-flight negentropy
-    /// session -- the identical lookup `attribute_eose` performs internally
-    /// for EOSE, reused rather than re-implemented (plan §6 E).
+    /// `attribute_eose` itself reads at EOSE time).
     pub(crate) fn sub_id_for_wire(
         &self,
         session: &RelaySessionKey,
@@ -140,15 +130,13 @@ impl AttributionState {
     }
 
     /// Discard every outstanding snapshot and wire lookup for one exact
-    /// internal subscription id. NIP-77 uses this when a reconciliation or
-    /// temporary backlog request is superseded/abandoned before it can earn
-    /// coverage. These ids are role-derived and never shared with the live
-    /// REQ, so removing the whole FIFO is exact rather than a best-effort
+    /// internal subscription id, used when a request is superseded or
+    /// abandoned before it can earn coverage. Removing the whole FIFO is
+    /// exact rather than a best-effort
     /// "pop the newest" convention.
     ///
     /// Dropping the wire mapping outright is only SAFE because no later
-    /// incarnation can re-register the same string (#932): NIP-77 role ids
-    /// carry an engine-minted reincarnation (`core::nip77_role_sub_id`) and
+    /// incarnation can re-register the same string (#932):
     /// planned ids are allocated tokens the router never recycles within a
     /// session (`nmp_router::SubId::allocate`). Were a discarded string ever
     /// re-registered, the FRESH FIFO underneath it would be popped by a
@@ -251,49 +239,6 @@ impl AttributionState {
             self.inflight.remove(&sub_id);
         }
         Some(self.complete_snapshot(sub_id, completed, coverage_authority, result))
-    }
-
-    /// Attribute a completion that is structurally correlated to one exact
-    /// send. This is the NEG counterpart to [`Self::attribute_eose`]: unlike
-    /// an overwritten REQ's ambiguous EOSE, a live `NegSession` retains the
-    /// identity returned by [`Self::record_send`], so later live-tail sends
-    /// sharing its wire subscription id must not narrow the completed NEG's
-    /// coverage window. `completion_time` is captured when NEG finishes,
-    /// even when credit is deferred until a backfill EOSE proves ingestion.
-    pub(crate) fn attribute_correlated_completion(
-        &mut self,
-        session: &RelaySessionKey,
-        wire_sub_id: &str,
-        send_id: AttributionSendId,
-        completion_time: Timestamp,
-    ) -> Option<CompletedAttribution> {
-        let sub_id = self
-            .sub_id_by_wire
-            .get(&(session.clone(), wire_sub_id.to_string()))
-            .cloned()?;
-        let fifo = self.inflight.get_mut(&sub_id)?;
-        let position = fifo
-            .iter()
-            .position(|snapshot| snapshot.send_id == send_id)?;
-        let snapshot = fifo
-            .remove(position)
-            .expect("position came from this exact attribution FIFO");
-        if fifo.is_empty() {
-            self.inflight.remove(&sub_id);
-        }
-        let from = snapshot.floor.unwrap_or_else(|| Timestamp::from(0u64));
-        let through = snapshot
-            .until
-            .map_or(completion_time, |until| completion_time.min(until));
-        let interval = CoverageInterval::new(from, through);
-        let coverage_authority = snapshot.coverage_authority;
-        let claims = snapshot
-            .coverage_claims
-            .iter()
-            .cloned()
-            .map(|key| (key, interval))
-            .collect();
-        Some(self.complete_snapshot(sub_id, snapshot, coverage_authority, claims))
     }
 
     fn complete_snapshot(

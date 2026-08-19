@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use nmp_engine::core::{
     AcquisitionEvidence, AuthCapability, AuthCapabilityInstance, AuthEffect, AuthPolicyOutcome,
     AuthSendCompletion, AuthSendOutcome, AuthSignerOutcome, Effect, EngineCore, EngineMsg,
-    LocalSendRefusal, Nip77Frame, ObservationFact, ObservationId, PublishError, ReceiptId,
-    RequestAttemptId, RequestHandoffOutcome, RequestTerminal, RowDelta, ShortfallFact,
+    ObservationFact, ObservationId, PublishError, ReceiptId,
+    RequestHandoffOutcome, RequestTerminal, RowDelta, ShortfallFact,
     SourceEvidence, SourceStatus,
 };
 use nmp_engine::publish_queue::{
@@ -425,26 +425,6 @@ fn finish_authentication(
     ))
 }
 
-fn nip11_evidence(
-    supported_nips: Option<Vec<u16>>,
-) -> nmp_engine::core::RelayInformationCapabilityEvidence {
-    nip11_evidence_until(supported_nips, u64::MAX)
-}
-
-fn nip11_evidence_until(
-    supported_nips: Option<Vec<u16>>,
-    fresh_until: u64,
-) -> nmp_engine::core::RelayInformationCapabilityEvidence {
-    nmp_engine::core::RelayInformationCapabilityEvidence {
-        supported_nips,
-        max_subscriptions: None,
-        max_subid_length: None,
-        document_revision: "test-revision".to_string(),
-        fresh_until,
-        last_error: None,
-    }
-}
-
 fn mark_written(core: &mut EngineCore, effects: &[Effect], relay: &RelayUrl) -> Vec<Effect> {
     let correlation = effects
         .iter()
@@ -518,13 +498,6 @@ fn eose_frame(sub: &str) -> RelayFrame {
     RelayFrame::from(RelayMessage::eose(SubscriptionId::new(sub)))
 }
 
-fn neg_msg_frame(sub: &str, message_hex: &str) -> RelayFrame {
-    RelayFrame::from(RelayMessage::NegMsg {
-        subscription_id: Cow::Owned(SubscriptionId::new(sub)),
-        message: Cow::Owned(message_hex.to_string()),
-    })
-}
-
 fn find_sign_request(effects: &[Effect]) -> (nmp_engine::core::ReceiptId, u64, UnsignedEvent) {
     effects
         .iter()
@@ -556,8 +529,6 @@ mod derived_tag_fanout;
 mod expandable_window_advance;
 #[path = "live_queries.rs"]
 mod live_queries;
-#[path = "negentropy.rs"]
-mod negentropy;
 // `nip29_group_reads` is deliberately NOT here. It mints every demand through
 // `nmp_nip29::group_demand_at`, on purpose -- its own header says the point is
 // that nothing in it re-implements the door -- and `nmp-nip29` sits ABOVE this

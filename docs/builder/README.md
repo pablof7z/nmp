@@ -109,7 +109,7 @@ current API.
 Core examples use caller-selected kinds and literal or generic derived demand.
 Protocol-aware examples name the opt-in module that owns their meaning. NIP-02
 may provide a reusable follows binding; NIP-29 may provide group operations;
-NIP-68 may build a photo draft. None of those becomes a core content default.
+NIP-C7 may build a chat draft. None of those becomes a core content default.
 
 The engine must remain useful when an app enables none of them.
 

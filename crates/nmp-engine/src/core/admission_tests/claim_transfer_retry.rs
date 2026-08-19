@@ -53,7 +53,6 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
             (session.clone(), sub_id.clone()),
             LiveWireRequest {
                 filter: incumbent.filter.clone(),
-                evidence_sub_id: sub_id.clone(),
                 handle: TransportRelayHandle {
                     slot: 77,
                     generation: 1,
@@ -186,7 +185,6 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
             owner_demands: BTreeSet::from([DemandKey::for_atom(&incumbent)]),
             lanes: BTreeSet::new(),
             replay: false,
-            event_failure_target: EventFailureTarget::ThisSend,
         })
     });
     let first_transport = TransportRelayHandle {
@@ -242,7 +240,6 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
             ]),
             lanes: BTreeSet::new(),
             replay: true,
-            event_failure_target: EventFailureTarget::ThisSend,
         })
     });
     let transport = TransportRelayHandle {

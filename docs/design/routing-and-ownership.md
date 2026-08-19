@@ -80,9 +80,6 @@ Generic request completion is `RequestSettled`, not `RelayEose`.
 
 - Ordinary NIP-01 emits `Eose` only for the exact accepted request after its
   request-scoped facts-before-claims transaction succeeds.
-- Successful NIP-77 emits `Nip77` after reconciliation, deferred until the
-  missing-id backfill EOSE when necessary, and likewise only after the
-  correlated request's facts-before-claims transaction succeeds.
 - Refusal, close, disconnect, timeout, and abandonment settle nothing.
 - A failed EVENT or coverage commit retires the terminal request without
   `RequestSettled`; local data loss can therefore never become protocol

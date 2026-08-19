@@ -176,13 +176,12 @@ own `sources`:
 
 The facade also carries NIP-51 simple-groups lists (`current_account_group_list_demand`
 plus the tolerant parsers, projected as `currentAccountGroupListDemand()` and
-`parseSimpleGroupsListTolerant(_:)`) through the `nip29` product capability,
-alongside Blossom blob storage and exact-byte asset identity. The non-default
-Cargo features are `nip18`, `nip22`, `nip25`, `nip29`, `nip65`, `nipc7`,
-`content`, `asset`, and `blossom`; `blossom` turns on `asset`. Blossom's client verbs are upload,
-mirror, delete and list, each with its own typed error and its own unsigned
-authorization draft the caller signs through the ordinary signing path; the
-client is engine-free and is not a second way to publish. Everything above
+`parseSimpleGroupsListTolerant(_:)`) through the `nip29` product capability.
+The non-default Cargo features are `nip18`, `nip22`, `nip25`, `nip29`,
+`nip65`, `nipc7`, and `content`. There is no blob-storage, media-upload or
+picture-event door on any surface: Blossom, NIP-68 and the staged media
+composition seam were deleted outright, so an app that needs one must add
+that owner from scratch. Everything above
 except NIP-65 reaches both wrappers. NIP-65 relay-list bootstrap
 (`publish_relay_list_bootstrap`, `relay_list_demand`) is direct-Rust only.
 There is no NIP-23 owner at all — no crate, no `Article` type, no decode — so

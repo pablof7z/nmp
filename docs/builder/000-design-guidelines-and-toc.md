@@ -33,7 +33,7 @@ No quickstart, helper catalog, or chapter structure may imply that kind:1, a
 timeline, follows, profiles, or any other content family is the center of NMP.
 
 - Core examples use caller-selected kinds or a clearly app-owned example kind.
-- Protocol examples name their owner, such as NIP-02, NIP-29, or NIP-68.
+- Protocol examples name their owner, such as NIP-02, NIP-29, or NIP-C7.
 - A reusable helper expands to the closed public grammar and is never a hidden
   subscription lifecycle.
 - Every nested `Derived` query names its own source/identity; it never
@@ -96,8 +96,8 @@ exact protocol it owns. It may not add a second store, engine, signer path,
 subscription manager, or app framework.
 
 Composition is immutable. A NIP-29 group operation may add an `h` tag and host
-relay context to a NIP-68 photo draft without claiming ownership of the photo
-kind. Core freezes and signs the final value once.
+relay context to a NIP-C7 chat draft without claiming ownership of the kind:9
+schema. Core freezes and signs the final value once.
 
 Cross-module dependency does not transfer protocol ownership. NIP-51 defines
 kind `10009`; `nmp-nip29` exposes NMP's observational group-list value beside

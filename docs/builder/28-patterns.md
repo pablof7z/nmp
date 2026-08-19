@@ -70,14 +70,6 @@ The snapshot carries rows plus compact per-planned-source acquisition and
 shortfall facts. Apps interpret those facts; NMP exposes no
 `synced`, `syncHealth`, global `complete`, or `authoritativeEmpty` state.
 
-### #8: negentropy requires a proved capability
-
-**Excludes:** sending NIP-77 messages to an unprobed relay.
-
-Only the prober can mint `ProbedRelay`; the negentropy effect requires that
-token. A relay's NIP-11 advertisement is separate evidence and can never mint
-it. Other relays use REQ.
-
 ### #9: durable acceptance is not convergence
 
 **Excludes:** a publish return value being mistaken for relay success.
@@ -140,7 +132,7 @@ Durable cursor resume and a global end verdict are deliberately not offered.
 protocol publishes that draft in a context.
 
 A NIP module owns only its exact schemas. NIP-29 may add its `h` tag and group
-host context to a NIP-68 photo draft without owning the photo kind. Core
+host context to a NIP-C7 chat draft without owning kind:9. Core
 validates the immutable composition and signs once.
 
 ### #15: pending writes use ordinary query semantics

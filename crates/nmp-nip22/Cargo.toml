@@ -6,7 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-# Engine-free by default (the nmp-nip29/nmp-nip68/nmp-blossom discipline,
+# Engine-free by default (the nmp-nip29 discipline,
 # #115/#558): this crate NEVER signs and NEVER touches the engine. Unlike
 # nip29's kind:9 semantic message (#156), `comment_intent` takes its author
 # as an explicit caller-supplied parameter (#572's own design decision) --

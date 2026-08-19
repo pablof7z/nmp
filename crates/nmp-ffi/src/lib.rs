@@ -32,10 +32,6 @@
 //!   function over caller-constructible data and grants no authority; the
 //!   kind:10009 add/remove methods use the ordinary durable receipt. NIP-29
 //!   does not project a fixed content catalog or a kind:9 composer (#838).
-//! - [`blossom`] -- the opt-in Blossom blob projection (#555): kind:24242
-//!   authorization drafts/validation and the blocking BUD-02/04/12 client,
-//!   engine-less like [`entity`]/[`nip29`], with each operation's failure
-//!   taxonomy crossing as its own typed error enum.
 //! - [`nip22`] -- typed NIP-22 comments over NIP-73 external targets
 //!   (#572): root-thread demand and decode as top-level free functions
 //!   (`nmp_nip22` needs no engine dependency at all -- `comment_intent`
@@ -49,21 +45,15 @@
 //! sourced through `nmp`'s own re-exports (#52 Unit B), including the
 //! NIP-22 comment vocabulary, which it reaches by enabling the facade's
 //! `nip22` feature rather than by a second edge to `nmp-nip22`. `nmp-nip29`
-//! (see [`nip29`]'s own doc) and `nmp-blossom` (#555, see [`blossom`]'s) are
-//! the opt-in protocol dependencies projected by this boundary.
+//! (see [`nip29`]'s own doc) is the opt-in protocol dependency projected by
+//! this boundary.
 
-#[cfg(feature = "asset")]
-pub mod asset;
 pub mod auth;
-#[cfg(feature = "blossom")]
-pub mod blossom;
 #[cfg(feature = "content")]
 pub mod content;
 pub mod convert;
 pub mod entity;
 pub mod facade;
-#[cfg(feature = "media")]
-pub mod media;
 #[cfg(feature = "nip02")]
 pub mod nip02;
 #[cfg(feature = "nip22")]

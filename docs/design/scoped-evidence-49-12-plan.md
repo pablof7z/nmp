@@ -392,7 +392,7 @@ reshaped in the same PR; none are optional):
 4. **Engine integration falsifiers** carry semantics, not just types:
    `integration_capstone.rs`'s offline-authoritative-read phases,
    `core_headless.rs` §"per-query CompleteUpTo aggregation",
-   `diagnostics_headless.rs`, `negentropy_live.rs`. Each must be re-expressed
+   `diagnostics_headless.rs`. Each must be re-expressed
    per-source with its underlying invariant preserved (see the watermark/link
    split below — the capstone is why the split is mandatory).
 5. **Prose sweep:** doc comments referencing the deleted vocabulary survive

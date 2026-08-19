@@ -99,13 +99,6 @@ pub struct RelayDiagnosticsSnapshot {
     pub nip11_freshness: Option<&'static str>,
     /// Most recent refresh failure retained beside stale last-good evidence.
     pub nip11_last_error: Option<String>,
-    /// `unknown`, `advertised_supported`, or `advertised_unsupported`.
-    pub nip77_advertisement: &'static str,
-    /// `unknown`, `probing`, `behaviorally_proven`, or
-    /// `behaviorally_rejected`. Kept separate from advertisement evidence.
-    pub nip77_behavior: &'static str,
-    /// Current gap-free live-first handoff phase.
-    pub nip77_handoff: &'static str,
 }
 
 impl RelayDiagnosticsSnapshot {
@@ -130,9 +123,6 @@ impl RelayDiagnosticsSnapshot {
             nip11_document_revision,
             nip11_freshness,
             nip11_last_error,
-            nip77_advertisement,
-            nip77_behavior,
-            nip77_handoff,
         } = value;
         Self {
             relay,
@@ -154,9 +144,6 @@ impl RelayDiagnosticsSnapshot {
             nip11_document_revision,
             nip11_freshness,
             nip11_last_error,
-            nip77_advertisement,
-            nip77_behavior,
-            nip77_handoff,
         }
     }
 }
@@ -487,9 +474,6 @@ mod tests {
                 nip11_document_revision: Some("revision".to_string()),
                 nip11_freshness: Some("fresh"),
                 nip11_last_error: Some("timed out".to_string()),
-                nip77_advertisement: "advertised_supported",
-                nip77_behavior: "behaviorally_proven",
-                nip77_handoff: "reconciling",
             }],
             auth_sessions: vec![engine_auth_session(
                 nmp_engine::core::AuthDiagnosticsPhase::AwaitingRelayAck,
@@ -542,9 +526,6 @@ mod tests {
         assert_eq!(row.nip11_document_revision.as_deref(), Some("revision"));
         assert_eq!(row.nip11_freshness, Some("fresh"));
         assert_eq!(row.nip11_last_error.as_deref(), Some("timed out"));
-        assert_eq!(row.nip77_advertisement, "advertised_supported");
-        assert_eq!(row.nip77_behavior, "behaviorally_proven");
-        assert_eq!(row.nip77_handoff, "reconciling");
 
         assert_eq!(facade.auth_sessions.len(), 1);
         let auth = &facade.auth_sessions[0];

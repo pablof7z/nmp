@@ -26,13 +26,12 @@ mod wire;
 
 pub use wire::wire_sub_id_string;
 
-/// One send-time snapshot (ruling §2): what a single outgoing REQ (or NEG
-/// session) proves, captured at the moment it was sent — never re-derived
+/// One send-time snapshot (ruling §2): what a single outgoing REQ proves,
+/// captured at the moment it was sent — never re-derived
 /// from the sub's CURRENT filter later.
 #[derive(Debug, Clone)]
 struct AttributionSnapshot {
     send_id: AttributionSendId,
-    event_failure_target: AttributionSendId,
     coverage_claims: BTreeSet<CoverageKey>,
     filter_hash: DescriptorHash,
     floor: Option<Timestamp>,
@@ -42,8 +41,7 @@ struct AttributionSnapshot {
 
 /// Opaque identity of one exact send-time attribution snapshot. Ordinary
 /// EOSE is intentionally ambiguous when a subscription id is overwritten,
-/// so it uses FIFO intersection. A NEG completion is correlated to the
-/// exact NEG session that completed and uses this identity instead.
+/// so it uses FIFO intersection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct AttributionSendId(u64);
 
@@ -51,17 +49,6 @@ impl AttributionSendId {
     pub(crate) fn revision(self) -> u64 {
         self.0
     }
-}
-
-/// Which request loses coverage authority if an EVENT delivered under the
-/// send being recorded fails its event-store transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EventFailureTarget {
-    /// Ordinary REQ, backlog REQ, live REQ, and NEG own their own failure.
-    ThisSend,
-    /// A temporary missing-id REQ is only the ingestion tail of the original
-    /// NEG request, so its EVENT failures poison that retained owner.
-    Correlated(AttributionSendId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,10 +368,7 @@ impl AttributionState {
         (had_previous_claims, added, true)
     }
 
-    /// Extend only the exact current send-time snapshot. NIP-77 role
-    /// generations are children of an immutable router-plan request: their
-    /// claim-shape lifetime is owned by the plan record, not by a second
-    /// child-level live-request claim set.
+    /// Extend only the exact current send-time snapshot.
     pub(crate) fn extend_current_send_claims(
         &mut self,
         sub_id: &SubId,
@@ -625,7 +609,7 @@ impl AttributionState {
 ///
 /// It replaces an eleven-element `(usize, ..., usize)` tuple destructured
 /// positionally at the one call site. Every sibling owner (`RequestAttempts`,
-/// `WireOwnership`, `Nip77Sessions`, `HistorySessions`, `RequestReplacements`)
+/// `WireOwnership`, `HistorySessions`, `RequestReplacements`)
 /// already returns a named struct; attribution was the one that did not, and
 /// eleven interchangeable positional `usize`s mean any adjacent pair could be
 /// transposed with the whole suite still green.
@@ -748,7 +732,6 @@ mod tests {
             &sub_id,
             &subscribed.filter,
             BTreeSet::from([coverage_key(&subscribed)]),
-            EventFailureTarget::ThisSend,
         );
         attribution.assert_consistent("one send on its own session");
 
@@ -798,7 +781,6 @@ mod tests {
             &sub_id,
             &subscribed.filter,
             BTreeSet::from([coverage_key(&subscribed)]),
-            EventFailureTarget::ThisSend,
         );
         assert!(attribution.has_inflight(&sub_id));
 

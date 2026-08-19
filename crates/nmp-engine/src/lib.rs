@@ -16,11 +16,6 @@
 //! pure function of its inputs, so the boundary is worth a package.
 //!
 //! - [`mod@core`] — the reducer and durable-state owner.
-//! - [`mod@negentropy`] — the NIP-77 prober FSM, the `ProbedRelay` capability
-//!   token, and the `Reconciler` the reducer drives turn by turn. A module
-//!   rather than its own crate: the reducer holds `Prober` and `Reconciler`
-//!   as its own fields and matches `NegStep` directly, so a crate line would
-//!   move the `negentropy` dependency one hop rather than out.
 //! - [`mod@publish_queue`] — the write-fact/receipt vocabulary the reducer
 //!   mints.
 //! - [`mod@ingest_attribution`] — bench-only ingest counters.
@@ -34,5 +29,4 @@
 pub mod core;
 #[cfg(feature = "bench-instrumentation")]
 pub mod ingest_attribution;
-pub mod negentropy;
 pub mod publish_queue;
