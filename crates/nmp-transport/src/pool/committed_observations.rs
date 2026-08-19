@@ -293,17 +293,11 @@ impl CommittedObservationCache {
         };
         let key = CacheKey { relay, digest };
         let Some(index) = inner.entries.get(&key).copied() else {
-            #[cfg(feature = "bench-instrumentation")]
-            crate::ingest_attribution::committed_observation_lookup(false);
             return Err(raw_text);
         };
         let Some(slot) = inner.slots.get(index).and_then(Option::as_ref) else {
-            #[cfg(feature = "bench-instrumentation")]
-            crate::ingest_attribution::committed_observation_lookup(false);
             return Err(raw_text);
         };
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::committed_observation_lookup(true);
         Ok(CommittedObservationHit {
             raw_text,
             relay,
@@ -345,31 +339,14 @@ impl CommittedObservationCache {
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
-        #[cfg(feature = "bench-instrumentation")]
-        let mut invalidation_count = 0_u64;
         for event_id in invalidated {
             while let Some(index) = inner.by_event.get(&event_id).copied() {
                 let _removed = inner.remove_slot(index);
-                #[cfg(feature = "bench-instrumentation")]
-                {
-                    invalidation_count += _removed as u64;
-                }
             }
         }
-        #[cfg(feature = "bench-instrumentation")]
-        let mut publication_count = 0_u64;
         for publication in published {
             let _inserted = inner.publish(publication);
-            #[cfg(feature = "bench-instrumentation")]
-            {
-                publication_count += _inserted as u64;
-            }
         }
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::committed_observation_update(
-            publication_count,
-            invalidation_count,
-        );
     }
 }
 

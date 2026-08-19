@@ -13,8 +13,6 @@
 //! thread. See those modules' docs for the generation-safety scheme and the
 //! harvest-vs-rewrite breakdown.
 
-#[cfg(feature = "bench-instrumentation")]
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -78,20 +76,6 @@ impl std::fmt::Display for ThreadSpawnError {
 }
 
 impl std::error::Error for ThreadSpawnError {}
-
-#[cfg(feature = "bench-instrumentation")]
-pub fn configure_diagnostic_duplicate_ceiling(capacity: usize, event_payload_only: bool) {
-    frame::configure_diagnostic_duplicate_ceiling(capacity, event_payload_only);
-}
-
-#[cfg(feature = "bench-instrumentation")]
-#[doc(hidden)]
-pub fn configure_diagnostic_preparsed_ceiling(
-    subscription_id: Option<SubscriptionId>,
-    events: Vec<Arc<Event>>,
-) {
-    frame::configure_diagnostic_preparsed_ceiling(subscription_id, events);
-}
 
 /// Safe default for the single engine/transport relay ceiling. Zero is
 /// normalized to this value as well, so legacy/default construction cannot
@@ -300,47 +284,6 @@ impl RelayFrame {
         }
     }
 
-    #[cfg(feature = "bench-instrumentation")]
-    const DIAGNOSTIC_DUPLICATE_CEILING_MARKER: &'static str = "\0nmp-663-ceiling";
-
-    #[cfg(feature = "bench-instrumentation")]
-    pub(crate) fn diagnostic_duplicate_ceiling_token(
-        event_kind: u16,
-        encoded_bytes: usize,
-    ) -> Self {
-        let mut encoded = [0_u8; EventId::LEN];
-        encoded[..2].copy_from_slice(&event_kind.to_be_bytes());
-        encoded[2..10].copy_from_slice(&(encoded_bytes as u64).to_be_bytes());
-        Self::Message(Box::new(RelayMessage::Ok {
-            event_id: EventId::from_byte_array(encoded),
-            status: false,
-            message: Cow::Borrowed(Self::DIAGNOSTIC_DUPLICATE_CEILING_MARKER),
-        }))
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[must_use]
-    pub fn diagnostic_duplicate_ceiling(&self) -> Option<(u16, usize)> {
-        let Self::Message(message) = self else {
-            return None;
-        };
-        let RelayMessage::Ok {
-            event_id,
-            status: false,
-            message,
-        } = message.as_ref()
-        else {
-            return None;
-        };
-        if message.as_ref() != Self::DIAGNOSTIC_DUPLICATE_CEILING_MARKER {
-            return None;
-        }
-        let encoded = event_id.as_bytes();
-        let event_kind = u16::from_be_bytes(encoded[..2].try_into().ok()?);
-        let encoded_bytes = u64::from_be_bytes(encoded[2..10].try_into().ok()?);
-        Some((event_kind, usize::try_from(encoded_bytes).ok()?))
-    }
-
     /// Move an EVENT into the engine, normally without cloning.
     ///
     /// The translator drops every temporary verifier reference before sink
@@ -380,8 +323,6 @@ impl RelayFrame {
             } => Ok((
                 subscription_id,
                 Arc::try_unwrap(event).unwrap_or_else(|event| {
-                    #[cfg(feature = "bench-instrumentation")]
-                    crate::ingest_attribution::event_fallback_clone();
                     event.as_ref().clone()
                 }),
                 observation_candidate,
@@ -424,8 +365,6 @@ impl RelayFrame {
             } => RelayMessage::event(
                 subscription_id,
                 Arc::try_unwrap(event).unwrap_or_else(|event| {
-                    #[cfg(feature = "bench-instrumentation")]
-                    crate::ingest_attribution::event_fallback_clone();
                     event.as_ref().clone()
                 }),
             ),

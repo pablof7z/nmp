@@ -622,8 +622,6 @@ fn translator_loop(
     while let Ok(event) = worker_event_rx.recv() {
         let mut events = vec![event];
         events.extend(worker_event_rx.try_iter().take(max_batch - 1));
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::translator_burst(events.len());
         let Ok(guard) = inner.lock() else { break };
         // Project generation changes in per-worker FIFO order without
         // mutating the real slots (the retirement reaper is a separate
@@ -705,11 +703,7 @@ fn translator_loop(
         // unwrap each frame's Arc<Event> without cloning content or tags.
         drop(verify_events);
         for pool_event in pool_events {
-            #[cfg(feature = "bench-instrumentation")]
-            let delivery_started = std::time::Instant::now();
             sink.on_event(pool_event);
-            #[cfg(feature = "bench-instrumentation")]
-            crate::ingest_attribution::delivery(delivery_started.elapsed());
         }
     }
 }
@@ -730,15 +724,8 @@ fn record_unavailable(health: &mut RelayHealth) {
 /// id-valid, non-stale events. A mutated payload fails here and is
 /// rejected as misbehavior before any schnorr work.
 fn frame_event_id_is_valid(event: &Event) -> bool {
-    #[cfg(feature = "bench-instrumentation")]
-    let id_started = std::time::Instant::now();
-    #[cfg(feature = "bench-instrumentation")]
-    let skip_event_id = crate::ingest_attribution::skip_event_id_validation();
-    #[cfg(not(feature = "bench-instrumentation"))]
     let skip_event_id = false;
     let valid_id = skip_event_id || event.verify_id();
-    #[cfg(feature = "bench-instrumentation")]
-    crate::ingest_attribution::event_id_validation(id_started.elapsed(), skip_event_id);
     valid_id
 }
 

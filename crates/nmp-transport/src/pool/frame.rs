@@ -21,159 +21,6 @@ use super::committed_observations::{
 };
 use super::RelayFrame;
 
-#[cfg(feature = "bench-instrumentation")]
-mod diagnostic_preparsed_ceiling {
-    use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex, OnceLock};
-
-    use super::RelayFrame;
-    use nostr::{Event, SubscriptionId};
-
-    #[derive(Default)]
-    struct Cache {
-        subscription_id: Option<SubscriptionId>,
-        events: VecDeque<Arc<Event>>,
-    }
-
-    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
-    static ENABLED: AtomicBool = AtomicBool::new(false);
-
-    fn cache() -> &'static Mutex<Cache> {
-        CACHE.get_or_init(|| Mutex::new(Cache::default()))
-    }
-
-    pub(super) fn configure(subscription_id: Option<SubscriptionId>, events: Vec<Arc<Event>>) {
-        ENABLED.store(
-            subscription_id.is_some() && !events.is_empty(),
-            Ordering::Release,
-        );
-        *cache().lock().expect("diagnostic preparsed cache lock") = Cache {
-            subscription_id,
-            events: events.into(),
-        };
-    }
-
-    pub(super) fn take() -> Option<RelayFrame> {
-        if !ENABLED.load(Ordering::Acquire) {
-            return None;
-        }
-        let mut cache = cache().lock().expect("diagnostic preparsed cache lock");
-        if cache.events.is_empty() {
-            ENABLED.store(false, Ordering::Release);
-            return None;
-        }
-        let event = cache.events.pop_front();
-        let subscription_id = cache.subscription_id.clone();
-        let frame = event
-            .zip(subscription_id)
-            .map(|(event, subscription_id)| RelayFrame::Event {
-                subscription_id,
-                event,
-                observation_candidate: None,
-            });
-        crate::ingest_attribution::diagnostic_preparsed_ceiling_lookup(frame.is_some());
-        frame
-    }
-}
-
-#[cfg(feature = "bench-instrumentation")]
-mod diagnostic_duplicate_ceiling {
-    use std::collections::{HashMap, VecDeque};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Mutex, OnceLock};
-
-    #[derive(Clone, Copy)]
-    pub(super) struct Entry {
-        pub(super) event_kind: u16,
-        pub(super) encoded_bytes: usize,
-    }
-
-    #[derive(Default)]
-    struct Cache {
-        capacity: usize,
-        entries: HashMap<[u8; 32], Entry>,
-        insertion_order: VecDeque<[u8; 32]>,
-    }
-
-    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
-    static CAPACITY: AtomicUsize = AtomicUsize::new(0);
-    static EVENT_PAYLOAD_ONLY: AtomicBool = AtomicBool::new(false);
-
-    fn cache() -> &'static Mutex<Cache> {
-        CACHE.get_or_init(|| Mutex::new(Cache::default()))
-    }
-
-    pub(super) fn configure(capacity: usize, event_payload_only: bool) {
-        let mut cache = cache()
-            .lock()
-            .expect("diagnostic duplicate ceiling cache lock");
-        *cache = Cache {
-            capacity,
-            entries: HashMap::with_capacity(capacity),
-            insertion_order: VecDeque::with_capacity(capacity),
-        };
-        EVENT_PAYLOAD_ONLY.store(event_payload_only, Ordering::Release);
-        CAPACITY.store(capacity, Ordering::Release);
-    }
-
-    pub(super) fn lookup(text: &str) -> Option<([u8; 32], Option<Entry>)> {
-        if CAPACITY.load(Ordering::Acquire) == 0 {
-            return None;
-        }
-        let bytes = if EVENT_PAYLOAD_ONLY.load(Ordering::Acquire) {
-            event_payload(text).unwrap_or(text).as_bytes()
-        } else {
-            text.as_bytes()
-        };
-        let digest = *blake3::hash(bytes).as_bytes();
-        let entry = cache()
-            .lock()
-            .expect("diagnostic duplicate ceiling cache lock")
-            .entries
-            .get(&digest)
-            .copied();
-        crate::ingest_attribution::diagnostic_duplicate_ceiling_lookup(entry.is_some());
-        Some((digest, entry))
-    }
-
-    pub(super) fn event_payload(text: &str) -> Option<&str> {
-        super::event_payload(text)
-    }
-
-    pub(super) fn insert(digest: [u8; 32], entry: Entry) {
-        let mut cache = cache()
-            .lock()
-            .expect("diagnostic duplicate ceiling cache lock");
-        if cache.capacity == 0 || cache.entries.contains_key(&digest) {
-            return;
-        }
-        if cache.entries.len() == cache.capacity {
-            let evicted = cache
-                .insertion_order
-                .pop_front()
-                .expect("full diagnostic cache has an eviction candidate");
-            cache.entries.remove(&evicted);
-        }
-        cache.entries.insert(digest, entry);
-        cache.insertion_order.push_back(digest);
-        crate::ingest_attribution::diagnostic_duplicate_ceiling_insert();
-    }
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(crate) fn configure_diagnostic_duplicate_ceiling(capacity: usize, event_payload_only: bool) {
-    diagnostic_duplicate_ceiling::configure(capacity, event_payload_only);
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(crate) fn configure_diagnostic_preparsed_ceiling(
-    subscription_id: Option<nostr::SubscriptionId>,
-    events: Vec<std::sync::Arc<nostr::Event>>,
-) {
-    diagnostic_preparsed_ceiling::configure(subscription_id, events);
-}
-
 /// Convert one inbound `tungstenite::Message` into a [`RelayFrame`].
 /// Returns `None` for message kinds the engine never needs to see as a
 /// frame: `Ping`/`Pong` (keepalive-internal — consumed by the worker's
@@ -238,26 +85,7 @@ pub(super) fn classify_text_with_candidate(
     text: &str,
     observation_candidate: Option<CommittedObservationCandidate>,
 ) -> ClassifiedFrame {
-    #[cfg(feature = "bench-instrumentation")]
-    if let Some(frame) = diagnostic_preparsed_ceiling::take() {
-        return ClassifiedFrame::Frame(frame);
-    }
-    #[cfg(feature = "bench-instrumentation")]
-    let diagnostic_digest = match diagnostic_duplicate_ceiling::lookup(text) {
-        Some((_, Some(hit))) => {
-            return ClassifiedFrame::Frame(RelayFrame::diagnostic_duplicate_ceiling_token(
-                hit.event_kind,
-                hit.encoded_bytes,
-            ));
-        }
-        Some((digest, None)) => Some(digest),
-        None => None,
-    };
-    #[cfg(feature = "bench-instrumentation")]
-    let started = std::time::Instant::now();
     let parsed = RelayMessage::from_json(text).ok();
-    #[cfg(feature = "bench-instrumentation")]
-    crate::ingest_attribution::parse(started.elapsed(), parsed.is_some());
     // The one place a relay text frame is genuinely unreadable. Everything
     // below this line decoded, so everything below can say what it was.
     let Some(message) = parsed else {
@@ -268,18 +96,6 @@ pub(super) fn classify_text_with_candidate(
     // no caller any certainty about what the relay returned.
     if matches!(&message, RelayMessage::Auth { challenge } if challenge.is_empty()) {
         return ClassifiedFrame::Consumed;
-    }
-    #[cfg(feature = "bench-instrumentation")]
-    if let (Some(diagnostic_digest), RelayMessage::Event { event, .. }) =
-        (diagnostic_digest, &message)
-    {
-        diagnostic_duplicate_ceiling::insert(
-            diagnostic_digest,
-            diagnostic_duplicate_ceiling::Entry {
-                event_kind: event.kind.as_u16(),
-                encoded_bytes: text.len(),
-            },
-        );
     }
     match message {
         RelayMessage::Event {
