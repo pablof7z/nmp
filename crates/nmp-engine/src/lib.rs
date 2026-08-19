@@ -25,6 +25,4 @@
 //! basement is gone.
 
 pub mod core;
-#[cfg(feature = "bench-instrumentation")]
-pub mod ingest_attribution;
 pub mod publish_queue;

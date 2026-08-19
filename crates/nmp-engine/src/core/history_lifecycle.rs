@@ -1556,8 +1556,6 @@ impl CoreState {
         changes: &CommittedRowChanges,
         effects: &mut Vec<Effect>,
     ) -> bool {
-        #[cfg(feature = "bench-instrumentation")]
-        let phase_started = std::time::Instant::now();
         let Some(state) = self.history.get(id) else {
             return true;
         };
@@ -1650,8 +1648,6 @@ impl CoreState {
                     current.unwrap_or_else(|| {
                         row_from_stored_event(
                             {
-                                #[cfg(feature = "bench-instrumentation")]
-                                crate::ingest_attribution::projection_event_clone();
                                 changed.event.clone()
                             },
                             changed.signature_state,
@@ -1661,11 +1657,6 @@ impl CoreState {
                 );
             }
         }
-
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::history_projection_setup(phase_started.elapsed());
-        #[cfg(feature = "bench-instrumentation")]
-        let phase_started = std::time::Instant::now();
 
         {
             let state = self
@@ -1685,8 +1676,6 @@ impl CoreState {
                 let event_id = row.event.id;
                 let remembered = row_from_stored_event(
                     {
-                        #[cfg(feature = "bench-instrumentation")]
-                        crate::ingest_attribution::projection_event_clone();
                         row.event.clone()
                     },
                     row.signature_state,
@@ -1804,11 +1793,6 @@ impl CoreState {
             }
         }
 
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::history_projection_apply(phase_started.elapsed());
-        #[cfg(feature = "bench-instrumentation")]
-        let phase_started = std::time::Instant::now();
-
         let state = self
             .history
             .get(id)
@@ -1830,22 +1814,10 @@ impl CoreState {
                 (None, None) | (Some(_), Some(_)) => {}
             }
         }
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::history_projection_delta(phase_started.elapsed());
         if deltas.is_empty() {
             return true;
         }
-        #[cfg(feature = "bench-instrumentation")]
-        let batch_started = std::time::Instant::now();
-        #[cfg(feature = "bench-instrumentation")]
-        let delta_count = deltas.len();
         let batch = self.history_batch(id, deltas, WindowLoad::Idle);
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::history_projection_batch(
-            batch_started.elapsed(),
-            delta_count,
-            batch.rows.len(),
-        );
         effects.push(Effect::EmitHistory(id, batch));
         true
     }

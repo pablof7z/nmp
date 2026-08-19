@@ -1539,26 +1539,6 @@ impl CoreState {
     /// The production committed-mutation path reaches the same observations
     /// through [`Self::apply_committed_row_changes`], which prefers the exact
     /// incremental algebra; this is the forced-full-refresh comparison lane.
-    #[cfg(feature = "bench-instrumentation")]
-    pub(in crate::core) fn refresh_observations_of_branches(
-        &mut self,
-        branches: impl IntoIterator<Item = HandleId>,
-        effects: &mut Vec<Effect>,
-    ) {
-        // The resolver also owns internal handles (notably the
-        // self-bootstrap discovery query). They participate in graph
-        // invalidation but belong to no observation here, so they are
-        // filtered out before any store read is opened.
-        let mut ids: Vec<ObservationId> = branches
-            .into_iter()
-            .filter_map(|branch| self.handles.get(&branch).map(|state| state.observation))
-            .collect();
-        ids.sort_unstable();
-        ids.dedup();
-        for id in ids {
-            self.refresh_observation(id, effects);
-        }
-    }
 
     /// Project one governed store mutation after its crash-atomic commit.
     /// Reactive demand changes may alter router/evidence shape and therefore
@@ -1594,10 +1574,6 @@ impl CoreState {
         force_broad_refresh: bool,
         effects: &mut Vec<Effect>,
     ) {
-        #[cfg(feature = "bench-instrumentation")]
-        let total_started = std::time::Instant::now();
-        #[cfg(feature = "bench-instrumentation")]
-        let phase_started = std::time::Instant::now();
         let CommittedMutationResult {
             delta,
             affected_handles,
@@ -1620,11 +1596,7 @@ impl CoreState {
             .iter()
             .filter_map(|handle| self.history.session_for_handle(*handle))
             .collect();
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::committed_projection_prelude(phase_started.elapsed());
 
-        #[cfg(feature = "bench-instrumentation")]
-        let phase_started = std::time::Instant::now();
         if demand_changed {
             for id in &affected {
                 self.reconcile_observation_resolution(*id);
@@ -1634,11 +1606,7 @@ impl CoreState {
         if recompiled {
             self.recompile(effects);
         }
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::committed_projection_recompile(phase_started.elapsed());
 
-        #[cfg(feature = "bench-instrumentation")]
-        let phase_started = std::time::Instant::now();
         if !recompiled {
             if force_broad_refresh {
                 self.refresh_all_observations(effects);
@@ -1646,11 +1614,7 @@ impl CoreState {
                 self.apply_committed_row_changes(affected.iter().copied(), &row_changes, effects);
             }
         }
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::committed_live_projection(phase_started.elapsed());
 
-        #[cfg(feature = "bench-instrumentation")]
-        let phase_started = std::time::Instant::now();
         if !recompiled {
             if force_broad_refresh {
                 self.refresh_all_histories(effects);
@@ -1661,11 +1625,6 @@ impl CoreState {
                     }
                 }
             }
-        }
-        #[cfg(feature = "bench-instrumentation")]
-        {
-            crate::ingest_attribution::committed_history_projection(phase_started.elapsed());
-            crate::ingest_attribution::committed_projection_total(total_started.elapsed());
         }
     }
 
@@ -1799,8 +1758,6 @@ impl CoreState {
                     row.event.id,
                     row_from_stored_event(
                         {
-                            #[cfg(feature = "bench-instrumentation")]
-                            crate::ingest_attribution::projection_event_clone();
                             row.event.clone()
                         },
                         row.signature_state,
@@ -1924,8 +1881,6 @@ impl CoreState {
                 row.event.id,
                 row_from_stored_event(
                     {
-                        #[cfg(feature = "bench-instrumentation")]
-                        crate::ingest_attribution::projection_event_clone();
                         row.event.clone()
                     },
                     row.signature_state,
