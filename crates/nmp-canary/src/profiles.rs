@@ -48,7 +48,7 @@
 //! `decode_nostr_entity` for the paste direction; the encode direction exists
 //! only as `nmp::Mention::render`, a content-composition trait method that
 //! returns `"nostr:npub1..."`. [`npub`] strips the scheme back off. See
-//! `findings` entry 24.
+//! the `findings` entry on the bech32 encode direction.
 //!
 //! ## And then the JSON
 //!

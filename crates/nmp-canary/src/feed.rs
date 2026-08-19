@@ -123,6 +123,26 @@ pub fn follows_feed() -> LiveQuery {
     LiveQuery::single(follows_feed_demand())
 }
 
+/// The same feed WITHOUT kind:5 -- the control for the deletion scenario.
+///
+/// Exists to separate two claims that are easy to conflate: "the app must
+/// subscribe kind:5 for a deletion to arrive from a relay" (a routing claim,
+/// established from the source and NOT measured here, because this app has no
+/// relay) and "a subscribed kind:5 lands in the timeline" (a rendering claim,
+/// measured). Locally the store applies a tombstone inside `insert` no matter
+/// what any query asked for, so this control shows the LOCAL half honestly.
+#[must_use]
+pub fn follows_feed_without_deletions() -> LiveQuery {
+    LiveQuery::single(Demand {
+        selection: Filter {
+            kinds: Some(BTreeSet::from([TEXT_NOTE, REPOST])),
+            authors: Some(follows_minus_mutes()),
+            ..Filter::default()
+        },
+        ..Demand::default()
+    })
+}
+
 /// The same thing as a bare `Demand`, because `profiles::profiles_of_query`
 /// needs the demand and not the query -- a `Derived` binding nests a `Demand`,
 /// while `Engine::observe` takes a `LiveQuery`, so an app that wants both an
@@ -132,7 +152,11 @@ pub fn follows_feed() -> LiveQuery {
 pub fn follows_feed_demand() -> Demand {
     Demand {
         selection: Filter {
-            kinds: Some(BTreeSet::from([TEXT_NOTE, REPOST])),
+            // `with_deletions` adds kind:5. Without it no NIP-09 deletion for
+            // any row in this feed ever arrives, on any relay -- and with it,
+            // deletion events land in the row set and every render pass has to
+            // filter them back out. See `deletions`.
+            kinds: Some(crate::deletions::with_deletions([TEXT_NOTE, REPOST])),
             authors: Some(follows_minus_mutes()),
             ..Filter::default()
         },
@@ -157,9 +181,19 @@ pub struct FollowsFeed {
 impl FollowsFeed {
     /// Open the feed with a starting page size and a hard ceiling.
     pub fn open(engine: &Engine, page: usize, max: usize) -> Result<Self, EngineError> {
+        Self::open_with(engine, follows_feed(), page, max)
+    }
+
+    /// Open a stated declaration, so the deletion control can use the same
+    /// window machinery.
+    pub fn open_with(
+        engine: &Engine,
+        query: LiveQuery,
+        page: usize,
+        max: usize,
+    ) -> Result<Self, EngineError> {
         let initial = NonZeroUsize::new(page.max(1)).expect("max(1) is nonzero");
         let max = NonZeroUsize::new(max.max(page).max(1)).expect("max(1) is nonzero");
-        let query = follows_feed();
         let subscription =
             engine.observe(query.clone(), Some(Window::Expandable { initial, max }))?;
         Ok(Self {
@@ -211,9 +245,20 @@ impl FollowsFeed {
         self.subscription.request_rows(at_least)
     }
 
+    /// Every row the window holds, deletions included.
     #[must_use]
     pub fn rows(&self) -> &[Row] {
         &self.rows
+    }
+
+    /// The rows a timeline draws.
+    ///
+    /// The window's `initial`/`max` bound the RAW set, so this filter makes the
+    /// page size wrong in the same way `notifications`' view-layer predicate
+    /// does: asking for 20 rows can render 17 and there is no way to ask for
+    /// "20 that are not deletions".
+    pub fn display_rows(&self) -> impl Iterator<Item = &Row> {
+        crate::deletions::display_rows(self.rows.iter())
     }
 
     #[must_use]
