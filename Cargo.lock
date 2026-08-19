@@ -1066,7 +1066,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "nmp",
- "nostr 0.44.4",
+ "nostr",
  "serde_json",
  "sha1",
  "tokio",
