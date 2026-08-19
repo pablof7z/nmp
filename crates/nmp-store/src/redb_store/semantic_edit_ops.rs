@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nostr::nips::nip01::Coordinate;
 use nostr::{Event, PublicKey, Timestamp};
-use redb::{ReadableDatabase, ReadableTable};
+use redb::ReadableTable;
 
 use crate::semantic_edit::{
     plan_accept, plan_rematerialize, plan_source_install, recovered, validate_resource_state,
@@ -742,7 +742,7 @@ pub(super) fn accept(
 pub(super) fn required_programs(
     store: &RedbStore,
 ) -> Result<Vec<(crate::ReplayProgramId, crate::ReplayFormatId)>, PersistenceError> {
-    let read = store.database().begin_read().map_err(persist_err)?;
+    let read = store.begin_read()?;
     let operations = match read.open_table(SEMANTIC_OPERATIONS) {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
@@ -761,7 +761,7 @@ pub(super) fn snapshot(
     store: &RedbStore,
     coordinate: &Coordinate,
 ) -> Result<Option<crate::RecoveredSemanticResource>, PersistenceError> {
-    let read = store.database().begin_read().map_err(persist_err)?;
+    let read = store.begin_read()?;
     let resources = match read.open_table(SEMANTIC_RESOURCES) {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),

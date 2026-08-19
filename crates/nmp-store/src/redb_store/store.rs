@@ -102,8 +102,8 @@ impl StoreSigReader {
     /// to schnorr. This door is non-fatal by design.
     pub fn known_signature(&self, id: &EventId) -> Option<Signature> {
         let shared = self.shared.lock().ok()?;
-        let db = shared.as_ref()?;
-        super::event_ops::known_signature_from_db(db, id)
+        let read_txn = shared.as_ref()?.begin_read().ok()?;
+        super::event_ops::known_signature_in_txn(&read_txn, id)
             .ok()
             .flatten()
     }
@@ -517,8 +517,23 @@ impl RedbStore {
         Ok((store, OrderedEventReadPause { entered, release }))
     }
 
-    pub(super) fn database(&self) -> &Database {
-        &self.db
+    /// Open a read transaction on the durable handle.
+    ///
+    /// This and [`begin_write`](Self::begin_write) are the only doors to the
+    /// `Database`, and neither hands the handle back out. That is what makes
+    /// "a shared borrow of the store cannot mutate it" a compiler rule for
+    /// the whole store rather than a convention observed one function at a
+    /// time: `redb::Database::begin_write` takes `&self`, so any accessor
+    /// returning `&Database` from `&self` would let a read-borrow entry
+    /// point open the canonical write door. There is no such accessor.
+    pub(super) fn begin_read(&self) -> Result<redb::ReadTransaction, PersistenceError> {
+        self.db.begin_read().map_err(persist_err)
+    }
+
+    /// Open a write transaction on the durable handle. The exclusive borrow
+    /// is the enforcement described on [`begin_read`](Self::begin_read).
+    pub(super) fn begin_write(&mut self) -> Result<redb::WriteTransaction, PersistenceError> {
+        self.db.begin_write().map_err(persist_err)
     }
 
     /// Share the durable database handle with an out-of-band reader —
@@ -556,7 +571,7 @@ impl RedbStore {
         {
             return Ok(id);
         }
-        let read = self.database().begin_read().map_err(persist_err)?;
+        let read = self.begin_read()?;
         let relay_ids = read
             .open_table(PUBLISH_QUEUE_RELAY_IDS)
             .map_err(persist_err)?;
@@ -600,7 +615,7 @@ impl RedbStore {
         {
             return Ok(relay);
         }
-        let read = self.database().begin_read().map_err(persist_err)?;
+        let read = self.begin_read()?;
         let relays = read.open_table(PUBLISH_QUEUE_RELAYS).map_err(persist_err)?;
         let relay_ids = read
             .open_table(PUBLISH_QUEUE_RELAY_IDS)
@@ -666,7 +681,7 @@ impl RedbStore {
         state: PublishQueueLaneState,
     ) -> Result<PublishQueueLane, PersistenceError> {
         let relay_id = self.publish_queue_relay_id(&key.relay)?;
-        let write_txn = self.database().begin_write().map_err(persist_err)?;
+        let write_txn = self.begin_write()?;
         let lane = {
             let intents = write_txn
                 .open_table(PUBLISH_QUEUE_INTENTS)

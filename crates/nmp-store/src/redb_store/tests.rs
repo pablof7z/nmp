@@ -3116,7 +3116,7 @@ fn ingest_supersession_no_longer_evicts_terminal_receipts() {
     // than `TERMINAL_RECEIPT_MAX_AGE_SECS` (24h) in the past relative to
     // any real wall-clock reading this test can observe.
     let receipt_id = {
-        let write_txn = store.database().begin_write().unwrap();
+        let write_txn = store.begin_write().unwrap();
         let receipt_id = {
             let mut meta = write_txn.open_table(PUBLISH_QUEUE_META).unwrap();
             let mut receipts = write_txn.open_table(PUBLISH_QUEUE_RECEIPTS).unwrap();
@@ -3325,7 +3325,7 @@ fn a_persisted_coverage_row_carries_no_filter_derived_bytes() {
         .expect("record coverage");
 
     let rows: Vec<(String, String)> = {
-        let read_txn = store.database().begin_read().expect("read txn");
+        let read_txn = store.begin_read().expect("read txn");
         let coverage = read_txn.open_table(COVERAGE).expect("open coverage");
         coverage
             .iter()
