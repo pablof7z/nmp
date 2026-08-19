@@ -157,7 +157,7 @@ impl ProbeConfig {
             || self.diagnostic_skip_signature_verification
             || self.diagnostic_preparsed_ceiling
         {
-            return Err("diagnostic validation ceilings require bench-instrumentation".into());
+            return Err("diagnostic validation ceilings are no longer available".into());
         }
         Ok(())
     }
@@ -468,7 +468,7 @@ struct CompletionProfileWindow {
 }
 
 fn monotonic_ns() -> Result<u64, ProbeError> {
-    Err("completion-window-output requires bench-instrumentation".into())
+    Err("completion-window-output is no longer available".into())
 }
 
 fn write_completion_profile_window(
@@ -585,7 +585,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         ReadRouting::Explicit(relay_urls.iter().cloned().collect())
     )?;
     if config.diagnostic_duplicate_ceiling_capacity > 0 {
-        return Err("diagnostic duplicate ceiling requires bench-instrumentation".into());
+        return Err("diagnostic duplicate ceiling is no longer available".into());
     }
     let queue_capacity = config.queue_capacity;
     let verified_cache_capacity = config.verified_cache_capacity;
