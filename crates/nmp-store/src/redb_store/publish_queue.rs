@@ -17,7 +17,7 @@ use super::{
 /// The one place a lane state's deadline is named. A `PUBLISH_QUEUE_DEADLINES`
 /// row exists exactly when this returns `Some`, and its key is
 /// `deadline_key(at, intent, relay)` — which is what makes the lane table its
-/// own by-intent index (see [`intent_deadline_keys`]).
+/// own by-intent index (see [`clear_intent_deadlines`]).
 fn lane_state_deadline(
     state: &PublishQueueLaneState,
 ) -> Option<(Timestamp, PublishQueueDeadlineKind)> {
@@ -43,15 +43,27 @@ pub(super) fn lane_deadline(lane: &PublishQueueLane) -> Option<PublishQueueDeadl
     })
 }
 
-/// Every `PUBLISH_QUEUE_DEADLINES` key one intent currently owns, derived from
-/// that intent's own lane rows.
+/// Drop every `PUBLISH_QUEUE_DEADLINES` row one intent owns.
 ///
 /// A deadline belongs to exactly one lane and its timestamp IS the lane
 /// state's, so the intent-prefixed lane range answers "which deadlines are
 /// this intent's" without a second copy of the same fact in a reverse index
-/// that could disagree with it. Callers that also delete lane rows must call
-/// this BEFORE removing them.
-pub(super) fn intent_deadline_keys(
+/// that could disagree with it. That derivation is only valid while the lane
+/// rows still stand, which is why deriving and deleting are one call rather
+/// than two: no caller can hold a list of deadline keys across a lane
+/// deletion, because no caller is ever handed one.
+pub(super) fn clear_intent_deadlines(
+    lanes: &impl ReadableTable<&'static [u8; 12], &'static [u8]>,
+    deadlines: &mut redb::Table<'_, &'static [u8; 20], &'static [u8]>,
+    intent_id: IntentId,
+) -> Result<(), PersistenceError> {
+    for stale in intent_deadline_keys(lanes, intent_id)? {
+        deadlines.remove(&stale).map_err(persist_err)?;
+    }
+    Ok(())
+}
+
+fn intent_deadline_keys(
     lanes: &impl ReadableTable<&'static [u8; 12], &'static [u8]>,
     intent_id: IntentId,
 ) -> Result<Vec<[u8; 20]>, PersistenceError> {

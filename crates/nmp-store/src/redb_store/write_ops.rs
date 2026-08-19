@@ -9,7 +9,7 @@ use super::mutation::{
     tombstone_refuses,
 };
 use super::publish_queue::{
-    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, intent_deadline_keys, is_suppressed_in_txn,
+    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, clear_intent_deadlines, is_suppressed_in_txn,
     mark_terminal_receipt, remove_addr_claimant_in_txn, remove_claimant_in_txn,
     update_publish_queue_receipt, PublishQueueIntentRecord, PublishQueueReceiptRecord,
     SuppressClaimRecord,
@@ -95,9 +95,6 @@ fn retire_superseded_owners_in_txn(
                 Ok::<_, PersistenceError>((*key.value(), handoff))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        // Read the deadlines the lanes name while the lane rows still
-        // stand: they are removed further down, in the retirement pass.
-        let deadline_keys = intent_deadline_keys(&lanes, owner)?;
         let mut lane_keys = Vec::new();
         let mut lane_started = false;
         let (lane_lower, lane_upper) = lane_range(owner);
@@ -138,7 +135,6 @@ fn retire_superseded_owners_in_txn(
             owner,
             intent.receipt_id,
             lane_keys,
-            deadline_keys,
             attempt_keys,
             attempt_detail_rows
                 .into_iter()
@@ -152,7 +148,6 @@ fn retire_superseded_owners_in_txn(
         owner,
         receipt_id,
         lane_keys,
-        deadline_keys,
         attempt_keys,
         attempt_detail_keys,
         retain_safety_receipt,
@@ -176,6 +171,9 @@ fn retire_superseded_owners_in_txn(
         for attempt_key in attempt_detail_keys {
             attempt_details.remove(attempt_key).map_err(persist_err)?;
         }
+        // The lane rows are what name this intent's deadlines, so the
+        // deadlines go while those rows still stand.
+        clear_intent_deadlines(&lanes, &mut deadlines, *owner)?;
         for lane_key in lane_keys {
             lanes.remove(lane_key).map_err(persist_err)?;
         }
@@ -190,9 +188,6 @@ fn retire_superseded_owners_in_txn(
             route_revisions.remove(&route_key).map_err(persist_err)?;
         }
 
-        for stale in deadline_keys {
-            deadlines.remove(stale).map_err(persist_err)?;
-        }
         if *retain_safety_receipt {
             update_publish_queue_receipt(
                 &mut ingest.publish_queue_receipts,

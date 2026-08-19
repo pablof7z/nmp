@@ -19,7 +19,7 @@ use crate::{
 use super::ingest_txn::{GovernedIngestTxn, GovernedWrite, RedbIngestTxn};
 use super::mutation::{remove_row_in_txn, tombstone_refuses};
 use super::publish_queue::{
-    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, intent_deadline_keys, mark_terminal_receipt,
+    alloc_intent_id_in_txn, alloc_receipt_id_in_txn, clear_intent_deadlines, mark_terminal_receipt,
     PublishQueueIntentRecord, PublishQueueIntentRecordWork, PublishQueueMaterializationRecord,
     PublishQueueReceiptRecord,
 };
@@ -91,9 +91,7 @@ fn install_successor_delivery_lanes(
     for member in &previous.members {
         // The predecessor's lanes still stand here; they are what names the
         // deadlines it owns, and they are rewritten only below.
-        for stale in intent_deadline_keys(&lanes, *member)? {
-            deadlines.remove(&stale).map_err(persist_err)?;
-        }
+        clear_intent_deadlines(&lanes, &mut deadlines, *member)?;
 
         let (lane_lower, lane_upper) = lane_range(*member);
         let lane_rows = lanes
@@ -929,9 +927,7 @@ pub(super) fn close_cohort(
             .open_table(PUBLISH_QUEUE_LANES)
             .map_err(persist_err)?;
         for (member, intent, mut receipt, evidence_bytes) in member_records {
-            for stale in intent_deadline_keys(&member_lanes, member)? {
-                deadlines.remove(&stale).map_err(persist_err)?;
-            }
+            clear_intent_deadlines(&member_lanes, &mut deadlines, member)?;
             ingest
                 .publish_queue_intents
                 .remove(&intent_key(member))

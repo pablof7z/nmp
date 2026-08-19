@@ -1,6 +1,6 @@
 use super::commit::commit_prepared;
 use super::publish_queue::{
-    alloc_counter_in_txn, alloc_receipt_id_in_txn, intent_deadline_keys, lane_deadline,
+    alloc_counter_in_txn, alloc_receipt_id_in_txn, clear_intent_deadlines, lane_deadline,
     mark_terminal_receipt, read_meta_u64, remove_terminal_receipt_index, replace_lane_in_txn,
     update_publish_queue_receipt, PublishQueueReceiptRecord,
 };
@@ -1622,17 +1622,14 @@ fn close_intent(
                     ReceiptState::NoDestination,
                 )?;
             }
-            let stale_deadlines = {
-                let lanes_table = write_txn
-                    .open_table(PUBLISH_QUEUE_LANES)
-                    .map_err(persist_err)?;
-                intent_deadline_keys(&lanes_table, intent_id)?
-            };
             let mut deadlines = write_txn
                 .open_table(PUBLISH_QUEUE_DEADLINES)
                 .map_err(persist_err)?;
-            for stale in stale_deadlines {
-                deadlines.remove(&stale).map_err(persist_err)?;
+            {
+                let lanes_table = write_txn
+                    .open_table(PUBLISH_QUEUE_LANES)
+                    .map_err(persist_err)?;
+                clear_intent_deadlines(&lanes_table, &mut deadlines, intent_id)?;
             }
             intents.remove(&intent_key_value).map_err(persist_err)?;
             drop(deadlines);
@@ -2038,9 +2035,12 @@ fn remove_publish_queue_entry_in_txn(
             let mut lanes = write_txn
                 .open_table(PUBLISH_QUEUE_LANES)
                 .map_err(persist_err)?;
-            // Read the lanes' deadline keys BEFORE the lane rows go: the lane
-            // table is what says which deadlines this intent owns.
-            let deadline_victims = intent_deadline_keys(&lanes, intent_id)?;
+            let mut deadlines = write_txn
+                .open_table(PUBLISH_QUEUE_DEADLINES)
+                .map_err(persist_err)?;
+            // The lane rows are what name this intent's deadlines, so the
+            // deadlines go while those rows still stand.
+            clear_intent_deadlines(&lanes, &mut deadlines, intent_id)?;
             let mut lane_victims: Vec<[u8; 12]> = Vec::new();
             for row in lanes
                 .range::<&[u8; 12]>(&lane_lower..=&lane_upper)
@@ -2066,12 +2066,6 @@ fn remove_publish_queue_entry_in_txn(
             }
             for key in &route_victims {
                 routes.remove(key).map_err(persist_err)?;
-            }
-            let mut deadlines = write_txn
-                .open_table(PUBLISH_QUEUE_DEADLINES)
-                .map_err(persist_err)?;
-            for ordered in deadline_victims {
-                deadlines.remove(&ordered).map_err(persist_err)?;
             }
         }
         Ok(crate::RemoveQueueEntryOutcome::Removed)
