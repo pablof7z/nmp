@@ -44,8 +44,6 @@ impl IndexedChild<RelaySessionKey> for RequestReplacement {
     }
 }
 
-/// The census contribution, so the root counts this owner's state without
-/// naming its maps.
 #[cfg(feature = "bench-instrumentation")]
 pub(super) struct RequestReplacementCounts {
     pub(super) jobs: usize,

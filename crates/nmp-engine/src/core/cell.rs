@@ -190,12 +190,6 @@ impl EngineCore {
         self.state.assert_owner_consistency(at)
     }
 
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_ownership_census(&self) -> CoreOwnershipCensus {
-        self.state.bench_ownership_census()
-    }
-
     #[cfg(any(
         test,
         feature = "bench-instrumentation",
@@ -268,64 +262,6 @@ impl EngineCore {
         self.checked("seed_stale_relay_open_failure_for_test", |s| {
             s.seed_stale_relay_open_failure_for_test(session, reason)
         })
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_reset_lifecycle_work(&self) {
-        self.state.bench_reset_lifecycle_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_lifecycle_work(&self) -> (u64, u64, u64) {
-        self.state.bench_lifecycle_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_admission_local_work(&self) -> (u64, u64, u64) {
-        self.state.bench_admission_local_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_reset_admission_work(&mut self) {
-        self.checked("bench_reset_admission_work", |s| {
-            s.bench_reset_admission_work()
-        })
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_admission_work(&self) -> CoreAdmissionWork {
-        self.state.bench_admission_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_reset_freshness_work(&self) {
-        self.state.bench_reset_freshness_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_freshness_work(&self) -> CoreFreshnessWork {
-        self.state.bench_freshness_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_reset_withdrawal_work(&mut self) {
-        self.checked("bench_reset_withdrawal_work", |s| {
-            s.bench_reset_withdrawal_work()
-        })
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_withdrawal_work(&self) -> CoreWithdrawalWork {
-        self.state.bench_withdrawal_work()
     }
 
     #[cfg(feature = "bench-instrumentation")]

@@ -233,17 +233,8 @@ impl CoreState {
     /// newly-sent REQs' attribution snapshots, and push `Effect::Wire` for
     /// whatever op actually changed on the wire.
     pub(in crate::core) fn recompile(&mut self, effects: &mut Vec<Effect>) {
-        #[cfg(feature = "bench-instrumentation")]
-        self.router_compiles
-            .set(self.router_compiles.get().saturating_add(1));
         self.rebuild_wire_ownership();
         let demand = self.wire_demand();
-        #[cfg(feature = "bench-instrumentation")]
-        self.attribution_atoms_rebuilt.set(
-            self.attribution_atoms_rebuilt
-                .get()
-                .saturating_add(demand.len() as u64),
-        );
         self.flush_author_outbox_route_need_changes(effects);
         let outcome = self
             .router
@@ -288,9 +279,6 @@ impl CoreState {
             return Vec::new();
         }
 
-        #[cfg(feature = "bench-instrumentation")]
-        self.router_compiles
-            .set(self.router_compiles.get().saturating_add(1));
         let budget = self.compile_budget();
         let outcome = self.router.admit(&pending, &self.routing_facts, budget);
         let mut effects = Vec::new();
@@ -333,23 +321,11 @@ impl CoreState {
         let mut transferred_claims = BTreeSet::new();
         for update in updates {
             self.extend_plan_execution_metadata(update);
-            #[cfg(feature = "bench-instrumentation")]
-            self.request_owner_entries_examined.set(
-                self.request_owner_entries_examined
-                    .get()
-                    .saturating_add(update.added_owner_demands.len() as u64),
-            );
             self.extend_current_request_owner_demands(
                 &update.session,
                 &update.sub_id,
                 update.filter_hash,
                 &update.added_owner_demands,
-            );
-            #[cfg(feature = "bench-instrumentation")]
-            self.request_claim_entries_examined.set(
-                self.request_claim_entries_examined
-                    .get()
-                    .saturating_add(update.added_coverage_claims.len() as u64),
             );
             let (had_previous_claims, added, extended_current) =
                 self.attribution.extend_current_request_claims(
@@ -397,23 +373,11 @@ impl CoreState {
                         .retain(|demand| !removal.removed_owner_demands.contains(demand));
                 }
             }
-            #[cfg(feature = "bench-instrumentation")]
-            self.request_owner_entries_examined.set(
-                self.request_owner_entries_examined
-                    .get()
-                    .saturating_add(removal.removed_owner_demands.len() as u64),
-            );
             self.remove_current_request_owner_demands(
                 &removal.session,
                 &removal.sub_id,
                 removal.filter_hash,
                 &removal.removed_owner_demands,
-            );
-            #[cfg(feature = "bench-instrumentation")]
-            self.request_claim_entries_examined.set(
-                self.request_claim_entries_examined
-                    .get()
-                    .saturating_add(removal.removed_coverage_claims.len() as u64),
             );
             self.attribution
                 .release_live_request_claims_delta(&removal.sub_id, &detachable_claims);
@@ -549,16 +513,6 @@ impl CoreState {
         let Some(mut pending) = self.pending_request_claim_transfers.remove(key) else {
             return BTreeSet::new();
         };
-        #[cfg(feature = "bench-instrumentation")]
-        {
-            self.request_claim_transfer_attempts
-                .set(self.request_claim_transfer_attempts.get().saturating_add(1));
-            self.request_claim_transfer_claims_attempted.set(
-                self.request_claim_transfer_claims_attempted
-                    .get()
-                    .saturating_add(pending.claims.len() as u64),
-            );
-        }
         let batch: Vec<_> = pending
             .claims
             .iter()
@@ -566,19 +520,12 @@ impl CoreState {
             .map(|key| (key, pending.session.clone(), pending.interval))
             .collect();
         if let Err(_error) = self.record_request_coverage_batch(&batch) {
-            #[cfg(feature = "bench-instrumentation")]
-            self.request_claim_transfer_failures
-                .set(self.request_claim_transfer_failures.get().saturating_add(1));
             pending.failures = pending.failures.saturating_add(1);
             pending.due = self.clock + unjittered_retry_delay_secs(pending.failures);
             self.pending_request_claim_transfers
                 .insert(key.clone(), pending);
             return BTreeSet::new();
         }
-
-        #[cfg(feature = "bench-instrumentation")]
-        self.request_claim_transfer_commits
-            .set(self.request_claim_transfer_commits.get().saturating_add(1));
 
         let committed = pending.claims.clone();
         let still_current = self
@@ -899,12 +846,6 @@ impl CoreState {
                 .flatten()
                 .copied(),
         );
-        #[cfg(feature = "bench-instrumentation")]
-        self.evidence_candidates_examined.set(
-            self.evidence_candidates_examined
-                .get()
-                .saturating_add(candidates.len() as u64),
-        );
         let mut observations = BTreeSet::new();
         let mut histories = BTreeSet::new();
         for handle in candidates {
@@ -978,12 +919,6 @@ impl CoreState {
         &mut self,
         atom: &ContextualAtom,
     ) -> Option<ContextualAtom> {
-        #[cfg(feature = "bench-instrumentation")]
-        self.routing_evidence_owner_keys_touched.set(
-            self.routing_evidence_owner_keys_touched
-                .get()
-                .saturating_add(1),
-        );
         let released = self.wire.release(atom);
         if matches!(released, AtomReleased::Unowned) {
             return None;
@@ -1043,9 +978,6 @@ impl CoreState {
     pub(in crate::core) fn detach_wire_handle(&mut self, id: HandleId) -> Vec<ContextualAtom> {
         let mut closing = Vec::new();
         self.deactivate_request_targets_for_handle(id);
-        #[cfg(feature = "bench-instrumentation")]
-        self.withdrawal_handle_detaches
-            .set(self.withdrawal_handle_detaches.get().saturating_add(1));
         for atom in self.wire.unindex_handle(id) {
             if let Some(final_atom) = self.release_wire_atom_owner(&atom) {
                 closing.push(final_atom);
@@ -1063,12 +995,6 @@ impl CoreState {
     /// resolver handle disappeared before core ran that detach. Reverse edges
     /// remove only owners of the reported atom; no sibling census is needed.
     pub(in crate::core) fn consume_resolver_delta(&mut self, delta: DemandDelta) {
-        #[cfg(feature = "bench-instrumentation")]
-        self.resolver_delta_ops_consumed.set(
-            self.resolver_delta_ops_consumed
-                .get()
-                .saturating_add(delta.ops.len() as u64),
-        );
         for op in delta.ops {
             let DemandOp::Close(atom) = op else {
                 continue;
@@ -1083,12 +1009,6 @@ impl CoreState {
                 if !removal.removed {
                     continue;
                 }
-                #[cfg(feature = "bench-instrumentation")]
-                self.resolver_owner_keys_touched.set(
-                    self.resolver_owner_keys_touched
-                        .get()
-                        .saturating_add(1 + removal.claims_examined as u64),
-                );
                 released_owners += 1;
                 if removal.demand_released {
                     self.deactivate_request_targets_for_handle_demand(handle, key.clone());
@@ -1158,22 +1078,10 @@ impl CoreState {
             .filter(|(key, _)| self.router.admission_incomplete(key.clone()))
             .map(|(key, atom)| (key, atom.clone()))
             .collect();
-        #[cfg(feature = "bench-instrumentation")]
-        self.pending_atoms_rebuilt.set(
-            self.pending_atoms_rebuilt
-                .get()
-                .saturating_add(self.wire.live_demands().count() as u64),
-        );
         self.wire.replace_pending(pending);
     }
 
     fn reconcile_pending_wire_cohort(&mut self, cohort: &BTreeSet<ContextualAtom>) {
-        #[cfg(feature = "bench-instrumentation")]
-        self.pending_cohort_atoms_reconciled.set(
-            self.pending_cohort_atoms_reconciled
-                .get()
-                .saturating_add(cohort.len() as u64),
-        );
         for atom in cohort {
             let key = nmp_router::DemandKey::for_atom(atom);
             if !self.router.plan().limited_demands.contains(&key) {
@@ -1203,29 +1111,6 @@ impl CoreState {
         let preview =
             self.router
                 .preview_admission(&demand, &self.routing_facts, self.compile_budget());
-        #[cfg(feature = "bench-instrumentation")]
-        {
-            self.freshness_candidate_atoms.set(
-                self.freshness_candidate_atoms
-                    .get()
-                    .saturating_add(preview.work.candidate_atoms),
-            );
-            self.freshness_incumbent_demand_edges_visited.set(
-                self.freshness_incumbent_demand_edges_visited
-                    .get()
-                    .saturating_add(preview.work.incumbent_demand_edges_visited),
-            );
-            self.freshness_plan_request_entries_visited.set(
-                self.freshness_plan_request_entries_visited
-                    .get()
-                    .saturating_add(preview.work.incumbent_request_entries_visited),
-            );
-            self.freshness_coalesce_pair_attempts.set(
-                self.freshness_coalesce_pair_attempts
-                    .get()
-                    .saturating_add(preview.work.coalesce_pair_attempts),
-            );
-        }
         preview.plan
     }
 
@@ -2450,9 +2335,6 @@ impl CoreState {
         let row_limit = effective_row_limit(&root_atoms);
         let mut by_id: BTreeMap<EventId, Row> = BTreeMap::new();
         for atom in &root_atoms {
-            #[cfg(feature = "bench-instrumentation")]
-            self.projection_store_queries
-                .set(self.projection_store_queries.get().saturating_add(1));
             let filter = atom.to_nostr();
             let rows = match row_limit {
                 Some(limit) => self.store.query_newest(&filter, limit)?,

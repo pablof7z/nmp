@@ -30,15 +30,6 @@ pub(super) struct HistorySessions {
     next_id: u64,
 }
 
-/// The census contribution, so the root counts this owner's state without
-/// naming its maps. `pub(super)`, and deliberately not nested into the flat
-/// `pub CoreOwnershipCensus`.
-///
-/// Two censuses read this owner and they want different things:
-/// `observation_ownership_census` wants the two counts below,
-/// `ownership_census` also wants retained freshness edges. The second lives
-/// in its own bench-gated method rather than as a third field here, so the
-/// struct has no field that is dead in the shape the first one builds under.
 #[cfg(any(
     test,
     feature = "bench-instrumentation",
@@ -1405,9 +1396,6 @@ impl CoreState {
             };
             for mut atom in self.resolver.root_atoms(*live) {
                 atom.limit = None;
-                #[cfg(feature = "bench-instrumentation")]
-                self.history_store_queries
-                    .set(self.history_store_queries.get().saturating_add(1));
                 let filter = atom.to_nostr();
                 // Taking the window target from EVERY branch is exact: a row
                 // outside one branch's newest `target_rows` already has that
@@ -1511,9 +1499,6 @@ impl CoreState {
             };
             for mut atom in self.resolver.root_atoms(*live) {
                 atom.limit = None;
-                #[cfg(feature = "bench-instrumentation")]
-                self.history_store_queries
-                    .set(self.history_store_queries.get().saturating_add(1));
                 let filter = atom.to_nostr();
                 let rows = match pinned_relays.as_ref() {
                     Some(relays) => self
@@ -1780,9 +1765,6 @@ impl CoreState {
         if visible_removals > 0 {
             let boundary =
                 original_boundary.expect("a visible removal implies a prior canonical boundary");
-            #[cfg(feature = "bench-instrumentation")]
-            self.history_store_queries
-                .set(self.history_store_queries.get().saturating_add(1));
             let queried = match pinned_relays.as_ref() {
                 Some(relays) => self.store.query_newest_before_any_under_pin(
                     &filters,

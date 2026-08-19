@@ -77,9 +77,6 @@ pub(super) struct PendingWrites {
     receipts_by_lane_relay: HashMap<RelayUrl, BTreeSet<ReceiptId>>,
 }
 
-/// The census contribution, so `bench_ownership_census` counts this owner's
-/// state without naming its maps. Deliberately `pub(super)` and NOT nested
-/// into `CoreOwnershipCensus`, which stays a flat `pub` struct.
 #[cfg(feature = "bench-instrumentation")]
 pub(super) struct PendingWriteCounts {
     pub(super) obligations: usize,

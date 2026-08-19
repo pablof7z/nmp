@@ -138,9 +138,6 @@ pub(super) struct HandleAtomRemoval {
     pub(super) claims_examined: usize,
 }
 
-/// The census contribution, so the root counts this owner's state without
-/// naming its maps. Deliberately flat scalars: the census is a bench/test
-/// observable, and giving it the maps back would undo the boundary.
 #[cfg(feature = "bench-instrumentation")]
 pub(super) struct WireOwnershipCounts {
     pub(super) pending_atoms: usize,

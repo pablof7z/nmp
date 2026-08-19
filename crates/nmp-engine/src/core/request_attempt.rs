@@ -108,9 +108,6 @@ pub(super) struct RequestAttempts {
     retries_by_session: HashMap<RelaySessionKey, BTreeSet<RequestRetryKey>>,
 }
 
-/// The census contribution, so `bench_ownership_census` counts this owner's
-/// state without naming its maps. Deliberately `pub(super)` and NOT nested
-/// into `CoreOwnershipCensus`, which stays a flat `pub` struct.
 #[cfg(feature = "bench-instrumentation")]
 pub(super) struct RequestAttemptCounts {
     pub(super) attempts: usize,

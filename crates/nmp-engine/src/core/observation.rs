@@ -213,19 +213,6 @@ impl CoreState {
         owner_demands: &BTreeSet<nmp_router::DemandKey>,
     ) -> BTreeSet<super::ObservationId> {
         let (targets, _walk) = self.request_targets.live_targets_for_demands(owner_demands);
-        #[cfg(feature = "bench-instrumentation")]
-        {
-            self.request_target_demand_keys_touched.set(
-                self.request_target_demand_keys_touched
-                    .get()
-                    .saturating_add(_walk.demand_keys_touched),
-            );
-            self.request_target_candidates_examined.set(
-                self.request_target_candidates_examined
-                    .get()
-                    .saturating_add(_walk.candidates_examined),
-            );
-        }
         targets
             .into_iter()
             .filter_map(|id| self.branch_observation(id))

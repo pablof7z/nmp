@@ -375,15 +375,6 @@ impl AttributionState {
     }
 }
 
-/// The three numbers `CoreOwnershipCensus` carries for this owner, named.
-///
-/// It replaces an eleven-element `(usize, ..., usize)` tuple destructured
-/// positionally at the one call site. Every sibling owner (`RequestAttempts`,
-/// `WireOwnership`, `HistorySessions`, `RequestReplacements`)
-/// already returns a named struct; attribution was the one that did not, and
-/// eleven interchangeable positional `usize`s mean any adjacent pair could be
-/// transposed with the whole suite still green. Eight of the eleven counted
-/// the shape registry and its three refcount mirrors, all deleted with it.
 #[cfg(feature = "bench-instrumentation")]
 pub(super) struct AttributionCounts {
     pub(super) inflight_subs: usize,
