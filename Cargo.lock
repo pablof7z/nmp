@@ -1761,9 +1761,12 @@ version = "0.1.0"
 dependencies = [
  "nmp",
  "nmp-grammar",
+ "nmp-outbox",
  "nmp-store",
+ "nmp-test-support",
  "nostr 0.44.4",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -1823,6 +1826,7 @@ dependencies = [
  "nostr 0.44.4",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -1868,25 +1872,6 @@ dependencies = [
  "nmp-nip65",
  "nmp-router",
  "nostr 0.44.4",
-]
-
-[[package]]
-name = "nmp-parity"
-version = "0.1.0"
-dependencies = [
- "nmp",
- "nmp-content",
- "nmp-ffi",
- "nmp-grammar",
- "nmp-nip02",
- "nmp-nip22",
- "nmp-nip29",
- "nmp-outbox",
- "nmp-store",
- "nmp-test-support",
- "nostr 0.44.4",
- "tempfile",
- "tokio",
 ]
 
 [[package]]
