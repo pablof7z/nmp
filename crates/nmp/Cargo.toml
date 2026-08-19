@@ -67,10 +67,6 @@ required-features = ["bench-instrumentation"]
 name = "local_mutation_delta_bench"
 required-features = ["bench-instrumentation"]
 
-[[test]]
-name = "acceptance"
-path = "tests/acceptance/main.rs"
-
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
