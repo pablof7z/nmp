@@ -39,7 +39,26 @@
 //! needs it, with every unhandled case recorded as a fault rather than
 //! skipped.
 //!
-//! # A scenario
+//! # Scenarios, not tests
+//!
+//! This crate ships **scenarios in a binary**. Run them:
+//!
+//! ```text
+//! cargo run -p nmp-relay-lab --bin lab                # every scenario
+//! cargo run -p nmp-relay-lab --bin lab -- truncation  # one of them
+//! cargo run -p nmp-relay-lab --bin lab -- list
+//! cargo run -p nmp-relay-lab --bin lab -- mutate      # prove they can fail
+//! ```
+//!
+//! `mutate` is the falsification mode: every scenario declares the deliberate
+//! weakenings of its own script that MUST break it, and a mutation that
+//! leaves its scenario green is reported as a failure OF THE SCENARIO. That
+//! is how the mid-frame truncation case was caught being structurally immune,
+//! its truncated frame naming a subscription the client had never opened.
+//! Add `--features external-relay` for the two that need a real third-party
+//! relay binary.
+//!
+//! # A scenario, as a caller writes one
 //!
 //! ```no_run
 //! # async fn scenario() {
@@ -135,6 +154,9 @@
 #![forbid(unsafe_code)]
 
 pub mod clock;
+pub mod fixtures;
+pub mod scenario;
+pub mod scenarios;
 #[cfg(feature = "external-relay")]
 pub mod external;
 pub mod probe;

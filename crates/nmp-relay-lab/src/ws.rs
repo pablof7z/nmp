@@ -21,9 +21,19 @@ const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 /// The `Sec-WebSocket-Accept` value for a client's `Sec-WebSocket-Key`.
 #[must_use]
 pub fn accept_key(client_key: &str) -> String {
+    accept_key_with_guid(client_key, WS_GUID)
+}
+
+/// [`accept_key`] against a stated GUID.
+///
+/// Exists so the `framing` scenario can MUTATE the constant and watch its own
+/// check go red. The transposition it applies is the one that actually
+/// happened here, and the reason that check is worth running at all.
+#[must_use]
+pub fn accept_key_with_guid(client_key: &str, guid: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(client_key.as_bytes());
-    hasher.update(WS_GUID.as_bytes());
+    hasher.update(guid.as_bytes());
     base64::engine::general_purpose::STANDARD.encode(hasher.finalize())
 }
 
@@ -282,128 +292,4 @@ pub fn close_frame(code: u16, reason: &str) -> Vec<u8> {
 #[must_use]
 pub fn pong_frame(payload: &[u8]) -> Vec<u8> {
     encode(0xa, payload)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn masked_text(payload: &str) -> Vec<u8> {
-        let mask = [0xa1u8, 0x0b, 0xc3, 0x5d];
-        let bytes = payload.as_bytes();
-        let mut frame = vec![0x81];
-        if bytes.len() < 126 {
-            frame.push(0x80 | bytes.len() as u8);
-        } else {
-            frame.push(0x80 | 126);
-            frame.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-        }
-        frame.extend_from_slice(&mask);
-        frame.extend(bytes.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
-        frame
-    }
-
-    /// The RFC 6455 §1.3 worked example, and it earns its place.
-    ///
-    /// This test caught a transposed character in [`WS_GUID`] that no amount
-    /// of cross-checking the ARITHMETIC would have found: sha1 and base64 are
-    /// easy to verify against three implementations, and all three agree with
-    /// each other while being fed the same wrong input. Only a constant with
-    /// an external oracle catches a wrong constant.
-    ///
-    /// The end-to-end falsifier is that NMP's own `tungstenite` client
-    /// rejects a wrong accept key, but its symptom is remote from its cause:
-    /// the relay completes the HTTP exchange, logs nothing wrong, and then
-    /// reads EOF.
-    #[test]
-    fn the_handshake_accept_key_matches_the_rfc_worked_example() {
-        assert_eq!(
-            accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
-            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
-        );
-    }
-
-    /// Fed one byte at a time -- every reassembly boundary exercised -- the
-    /// decoder must still recover both whole messages, in order.
-    #[test]
-    fn masked_client_frames_decode_across_arbitrary_byte_boundaries() {
-        let mut decoder = Decoder::default();
-        let mut stream = masked_text(r#"["REQ","a",{"kinds":[1]}]"#);
-        stream.extend(masked_text(r#"["CLOSE","a"]"#));
-
-        let mut messages = Vec::new();
-        for byte in stream {
-            decoder.push(&[byte]);
-            loop {
-                match decoder.take_message() {
-                    Decoded::Message(frame) => {
-                        messages.push(String::from_utf8(frame.payload).expect("text"));
-                    }
-                    Decoded::Incomplete => break,
-                    Decoded::Fault(fault) => panic!("unexpected fault: {fault}"),
-                }
-            }
-        }
-        assert_eq!(
-            messages,
-            vec![
-                r#"["REQ","a",{"kinds":[1]}]"#.to_string(),
-                r#"["CLOSE","a"]"#.to_string()
-            ]
-        );
-    }
-
-    /// A fragmented message must be rejoined, not lost and not split into two
-    /// half-messages that decode as neither.
-    #[test]
-    fn a_fragmented_text_message_is_reassembled() {
-        let mask = [0u8; 4];
-        let mut decoder = Decoder::default();
-        // First fragment: text, FIN clear.
-        let mut first = vec![0x01, 0x80 | 3];
-        first.extend_from_slice(&mask);
-        first.extend_from_slice(b"[\"R");
-        // Continuation: opcode 0x0, FIN set.
-        let tail = b"EQ\",\"a\",{}]";
-        let mut rest = vec![0x80, 0x80 | tail.len() as u8];
-        rest.extend_from_slice(&mask);
-        rest.extend_from_slice(tail);
-
-        decoder.push(&first);
-        assert!(matches!(decoder.take_message(), Decoded::Incomplete));
-        decoder.push(&rest);
-        match decoder.take_message() {
-            Decoded::Message(frame) => {
-                assert_eq!(String::from_utf8(frame.payload).unwrap(), r#"["REQ","a",{}]"#);
-            }
-            other => panic!("fragmented message was not reassembled: {other:?}"),
-        }
-    }
-
-    /// An unmasked client frame is an RFC violation; reporting it as a fault
-    /// is what keeps a scenario from counting frames off a corrupt stream.
-    #[test]
-    fn an_unmasked_client_frame_is_a_fault_not_a_message() {
-        let mut decoder = Decoder::default();
-        decoder.push(&[0x81, 0x02, b'h', b'i']);
-        assert!(matches!(decoder.take_message(), Decoded::Fault(_)));
-    }
-
-    /// Round trip through the server encoder at each of the three length
-    /// forms, since a wrong length byte desynchronises the client forever.
-    #[test]
-    fn server_frames_encode_at_every_length_form() {
-        for len in [10usize, 200, 70_000] {
-            let payload = "x".repeat(len);
-            let frame = text_frame(&payload);
-            let header = match len {
-                0..=125 => 2,
-                126..=65535 => 4,
-                _ => 10,
-            };
-            assert_eq!(frame.len(), header + len, "length form for {len}");
-            assert_eq!(frame[0], 0x81);
-            assert_eq!(&frame[header..], payload.as_bytes());
-        }
-    }
 }

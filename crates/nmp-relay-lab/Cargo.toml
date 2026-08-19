@@ -34,7 +34,10 @@ external-relay = []
 [dependencies]
 nostr.workspace = true
 serde_json.workspace = true
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+# The scenarios ARE this crate's product, so the engine they drive is a real
+# dependency rather than a dev one. There is no test target here to hide it in.
+nmp.workspace = true
 # The websocket server handshake is `base64(sha1(key + RFC6455 GUID))` and
 # nothing else. Both are already resolved at these exact versions through
 # `tungstenite` (which `nmp-transport`'s production client links); naming them
@@ -43,10 +46,3 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "
 sha1 = "0.10"
 base64 = "0.22"
 
-[[test]]
-name = "external_relay"
-required-features = ["external-relay"]
-
-[dev-dependencies]
-nmp.workspace = true
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

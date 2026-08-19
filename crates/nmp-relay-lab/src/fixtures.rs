@@ -1,23 +1,29 @@
-//! Shared scenario vocabulary. `mod support;` from each test file.
-#![allow(dead_code)]
+//! The vocabulary every scenario is written in: keys, notes, queries, engines
+//! and a raw socket.
+//!
+//! Library code rather than a test-support module, because the scenarios that
+//! use it are library code too. There is no test target here to hide a
+//! fixture in.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use nmp::{
-    Binding, Demand, Engine, EngineConfig, Filter, LiveQuery, ReadRouting, Row, RowDelta,
-    Subscription,
+    AuthPolicy, AuthPolicyOp, AuthPolicyRequest, Binding, Demand, Engine, EngineConfig, Filter,
+    LiveQuery, ReadRouting, Row, RowDelta, Subscription,
 };
-use nmp_relay_lab::RelayLab;
 use nostr::{Event, EventBuilder, Keys, RelayUrl, Timestamp};
 
-/// How long a scenario waits for the engine to do something it should do
-/// promptly. Generous, because the assertion is never "it was fast".
+use crate::RelayLab;
+
+/// How long a scenario waits for something that should happen promptly. The
+/// claim is never "it was fast", so this is generous.
 pub const SETTLE: Duration = Duration::from_secs(20);
-/// How long the wire must stay silent before a count off it is settled.
+/// How long the wire must stay silent before a count taken off it is settled.
 pub const QUIET: Duration = Duration::from_millis(250);
 
 /// A signed kind:1 note at a stated instant.
+#[must_use]
 pub fn note(author: &Keys, content: &str, created_at: u64) -> Event {
     EventBuilder::text_note(content)
         .custom_created_at(Timestamp::from_secs(created_at))
@@ -26,6 +32,7 @@ pub fn note(author: &Keys, content: &str, created_at: u64) -> Event {
 }
 
 /// `n` notes by one author, one second apart, oldest first.
+#[must_use]
 pub fn notes(author: &Keys, n: usize, from: u64) -> Vec<Event> {
     (0..n)
         .map(|i| note(author, &format!("note {i}"), from + i as u64))
@@ -33,6 +40,7 @@ pub fn notes(author: &Keys, n: usize, from: u64) -> Vec<Event> {
 }
 
 /// An engine whose only relay is this one.
+#[must_use]
 pub fn engine_against(relay: &RelayLab) -> Engine {
     Engine::new(EngineConfig {
         app_relays: vec![relay.url().to_string()],
@@ -41,20 +49,59 @@ pub fn engine_against(relay: &RelayLab) -> Engine {
     .expect("an engine with one app relay builds")
 }
 
-/// A literal `kinds:[1], authors:[author]` live query, PINNED to one relay.
+/// An engine holding this key, ready to publish.
+#[must_use]
+pub fn publishing_engine(relay: &RelayLab, keys: &Keys) -> Engine {
+    let engine = engine_against(relay);
+    engine
+        .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
+        .expect("the account and its local provider register");
+    engine
+}
+
+/// An [`AuthPolicy`] that consents to every challenge.
 ///
-/// Explicit rather than `ReadRouting::Auto`, and that is not incidental: an
-/// engine built from an `EngineConfig` naming this relay in `app_relays`
-/// sends it writes but issues no READ against it for a query like this one --
-/// the socket is never even opened. Every read scenario here therefore pins
-/// its relay, the same way `crates/nmp/tests/finished_stored_events.rs` and
-/// `integration_capstone.rs` do. See this crate's report: it is a finding
-/// about the routing surface, not a property of the harness.
-pub fn kind1_by_on(author: &Keys, relay: &RelayUrl) -> LiveQuery {
+/// NMP will not authenticate without one, which is the right default -- proving
+/// an identity to a stranger is the app's decision. It does mean a scenario
+/// that registers an account and stops there gets silence, and the silence
+/// looks exactly like a client that ignores challenges.
+pub struct AllowAnyChallenge;
+
+impl AuthPolicy for AllowAnyChallenge {
+    fn evaluate(&self, _request: AuthPolicyRequest) -> AuthPolicyOp {
+        AuthPolicyOp::allow()
+    }
+}
+
+/// An engine that holds `reader`'s key AND consents to authenticate with it.
+#[must_use]
+pub fn authenticating_engine(relay: &RelayLab, reader: &Keys) -> Engine {
+    let engine = engine_against(relay);
+    engine
+        .add_private_key_account(&reader.secret_key().to_secret_bytes(), true)
+        .expect("the account and its local provider register");
+    // Leaked deliberately: dropping the registration withdraws the policy, and
+    // every scenario wants it to outlive the call that installed it.
+    std::mem::forget(
+        engine
+            .add_auth_policy(reader.public_key(), AllowAnyChallenge)
+            .expect("the auth policy registers"),
+    );
+    engine
+}
+
+/// A literal one-kind, one-author query PINNED to `relay`.
+///
+/// Explicit rather than `ReadRouting::Auto`, and not incidentally: an engine
+/// whose `EngineConfig` names this relay in `app_relays` sends it writes but
+/// issues no READ against it for a query like this -- the socket is never
+/// opened. Every read scenario pins its relay.
+#[must_use]
+pub fn kind_by_on(author: &Keys, relay: &RelayUrl, kind: u16) -> LiveQuery {
     LiveQuery::single(
         Demand::new(
             Filter {
-                kinds: Some(BTreeSet::from([1u16])),
+                kinds: Some(BTreeSet::from([kind])),
                 authors: Some(Binding::Literal(BTreeSet::from([author
                     .public_key()
                     .to_hex()]))),
@@ -66,30 +113,19 @@ pub fn kind1_by_on(author: &Keys, relay: &RelayUrl) -> LiveQuery {
     )
 }
 
-/// A literal one-kind, one-author query pinned to `relay`.
-pub fn kind_by_on(author: &Keys, relay: &RelayLab, kind: u16) -> LiveQuery {
-    LiveQuery::single(
-        Demand::new(
-            Filter {
-                kinds: Some(BTreeSet::from([kind])),
-                authors: Some(Binding::Literal(BTreeSet::from([author
-                    .public_key()
-                    .to_hex()]))),
-                ..Filter::default()
-            },
-            ReadRouting::Explicit(vec![relay.url().clone()]),
-        )
-        .expect("a one-relay pinned set is nonempty"),
-    )
+/// [`kind_by_on`] for kind:1 against the relay the scenario is driving.
+#[must_use]
+pub fn kind1_by(author: &Keys, relay: &RelayLab) -> LiveQuery {
+    kind_by_on(author, relay.url(), 1)
 }
 
-/// [`kind_by_on`], pinned to a read session that authenticates as `reader`.
+/// [`kind1_by`], pinned to a read session that authenticates as `reader`.
 ///
-/// `Demand::authenticate_as` is what makes a PROTECTED read session exist at
-/// all. Left `None` -- the default -- the reads ride the connection bound to
-/// nobody, which is documented as never authenticating, so a relay that gates
-/// reads simply never gets an answer. A scenario about NIP-42 on the read
-/// path has to say who is asking.
+/// `Demand::authenticate_as` is what makes a PROTECTED read session exist.
+/// Left `None` -- the default -- the reads ride the connection bound to
+/// nobody, which never authenticates, so a relay that gates reads never gets
+/// an answer.
+#[must_use]
 pub fn kind1_by_as(author: &Keys, relay: &RelayLab, reader: &Keys) -> LiveQuery {
     let mut demand = Demand::new(
         Filter {
@@ -106,18 +142,28 @@ pub fn kind1_by_as(author: &Keys, relay: &RelayLab, reader: &Keys) -> LiveQuery 
     LiveQuery::single(demand)
 }
 
-/// [`kind1_by_on`] against the relay the scenario is driving.
-pub fn kind1_by(author: &Keys, relay: &RelayLab) -> LiveQuery {
-    kind1_by_on(author, relay.url())
+/// A kind:1 write intent whose destination NMP resolves itself.
+pub fn publish_note(engine: &Engine, content: &str) -> nmp::ReceiptStream {
+    engine
+        .publish(nmp::WriteIntent {
+            payload: nmp::WritePayload::Event(nmp::EventBuilder {
+                kind: nostr::Kind::TextNote,
+                tags: Vec::new(),
+                content: content.to_string(),
+                created_at: None,
+            }),
+            routing: nmp::WriteRouting::Auto,
+            identity: nmp::Identity::Active,
+        })
+        .expect("the write is accepted")
 }
 
-/// Drain the subscription until `budget` elapses, returning every row the app
-/// was ever shown, newest state per event id, in first-seen order.
+/// Drain the whole budget and return every row the app was shown.
 ///
-/// Deliberately drains the WHOLE budget rather than stopping at a count: a
-/// scenario about silent truncation is asserting the app was shown no more,
-/// and stopping as soon as the expected number arrived would make that
-/// assertion unfalsifiable.
+/// Deliberately drains all of it rather than stopping at a count: a scenario
+/// about silent truncation asserts the app was shown NO MORE, and stopping as
+/// soon as the expected number arrived makes that unfalsifiable.
+#[must_use]
 pub fn rows_within(subscription: &Subscription, budget: Duration) -> Vec<Row> {
     let deadline = Instant::now() + budget;
     let mut rows: Vec<Row> = Vec::new();
@@ -143,56 +189,9 @@ pub fn rows_within(subscription: &Subscription, budget: Duration) -> Vec<Row> {
     }
 }
 
-/// Drain until at least `want` distinct rows have arrived, or `budget`
-/// elapses. For the scenarios where the count is a floor, not a ceiling.
-pub fn rows_until(subscription: &Subscription, want: usize, budget: Duration) -> Vec<Row> {
-    let deadline = Instant::now() + budget;
-    let mut rows: Vec<Row> = Vec::new();
-    while rows.len() < want {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return rows;
-        }
-        let Ok(frame) = subscription.recv_timeout(remaining) else {
-            return rows;
-        };
-        for delta in frame.deltas {
-            if let RowDelta::Added(row) = delta {
-                rows.push(row);
-            }
-        }
-    }
-    rows
-}
-
-/// An engine with a local account, ready to publish.
-pub fn publishing_engine(relay: &RelayLab, keys: &Keys) -> Engine {
-    let engine = engine_against(relay);
-    engine
-        .add_private_key_account(&keys.secret_key().to_secret_bytes(), true)
-        .expect("the account and its local provider register");
-    engine
-}
-
-/// A kind:1 write intent whose destination NMP resolves itself.
-pub fn publish_note(engine: &Engine, content: &str) -> nmp::ReceiptStream {
-    engine
-        .publish(nmp::WriteIntent {
-            payload: nmp::WritePayload::Event(nmp::EventBuilder {
-                kind: nostr::Kind::TextNote,
-                tags: Vec::new(),
-                content: content.to_string(),
-                created_at: None,
-            }),
-            routing: nmp::WriteRouting::Auto,
-            identity: nmp::Identity::Active,
-        })
-        .expect("the write is accepted")
-}
-
-/// Drain a receipt until one relay fact for this relay is terminal, or the
-/// budget runs out. Returns every fact seen, so a failure reports the whole
-/// history rather than "timed out".
+/// Drain a receipt until one relay fact is terminal, or the budget runs out.
+/// Returns every fact seen, so a failure reports the history.
+#[must_use]
 pub fn relay_facts(
     receipts: &nmp::FifoReceiver<nmp::WriteFact>,
     budget: Duration,
@@ -227,8 +226,8 @@ pub fn relay_facts(
 ///
 /// The relay's own validation has to be provable independently of NMP: a
 /// fixture that accepts an unbound AUTH response makes every AUTH scenario
-/// pass without the client binding to anything, and NMP cannot be used to
-/// demonstrate that because it always binds correctly.
+/// pass without the client binding to anything, and NMP cannot demonstrate
+/// that because it always binds correctly.
 pub struct RawSession {
     socket: tokio::net::TcpStream,
     buf: Vec<u8>,
@@ -280,9 +279,7 @@ impl RawSession {
             .expect("the frame is writable");
     }
 
-    /// Every complete server frame that arrives within `budget`, decoded.
-    /// Server frames are unmasked, so this decoder is the short half of the
-    /// one in `nmp_relay_lab::ws`.
+    /// Every complete server frame arriving within `budget`, decoded.
     pub async fn read_messages(&mut self, budget: Duration) -> Vec<serde_json::Value> {
         use tokio::io::AsyncReadExt;
         let deadline = Instant::now() + budget;
@@ -336,34 +333,10 @@ impl RawSession {
     }
 }
 
-/// An [`nmp::AuthPolicy`] that consents to every challenge.
-///
-/// NMP will not authenticate to a relay without one. That is deliberate and
-/// it is the right default -- proving an identity to a stranger is the app's
-/// decision, not the engine's -- but it means an AUTH scenario that registers
-/// an account and stops there gets silence, and the silence looks exactly
-/// like a client that ignores challenges.
-pub struct AllowAnyChallenge;
-
-impl nmp::AuthPolicy for AllowAnyChallenge {
-    fn evaluate(&self, _request: nmp::AuthPolicyRequest) -> nmp::AuthPolicyOp {
-        nmp::AuthPolicyOp::allow()
-    }
-}
-
-/// An engine that holds `reader`'s key AND consents to authenticate with it.
-pub fn authenticating_engine(relay: &RelayLab, reader: &Keys) -> Engine {
-    let engine = engine_against(relay);
-    engine
-        .add_private_key_account(&reader.secret_key().to_secret_bytes(), true)
-        .expect("the account and its local provider register");
-    // The registration handle is deliberately leaked rather than dropped:
-    // dropping it would withdraw the policy, and every scenario here wants it
-    // to outlive the call that installed it.
-    std::mem::forget(
-        engine
-            .add_auth_policy(reader.public_key(), AllowAnyChallenge)
-            .expect("the auth policy registers"),
-    );
-    engine
+/// A scratch path for a durable relay store, unique to this process.
+#[must_use]
+pub fn store_path(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("nmp-relay-lab-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("the scenario's own directory");
+    dir.join("relay.jsonl")
 }
