@@ -41,7 +41,7 @@ impl GovernedWrite {
     /// exclusive borrow is what makes "a shared borrow of the store cannot
     /// mutate it" a compiler rule rather than a convention.
     pub(super) fn begin(store: &mut RedbStore) -> Result<Self, PersistenceError> {
-        let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+        let write_txn = store.database().begin_write().map_err(persist_err)?;
         #[cfg(feature = "bench-instrumentation")]
         let mut write_txn = write_txn;
         #[cfg(feature = "bench-instrumentation")]

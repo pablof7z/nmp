@@ -76,22 +76,15 @@ pub fn assert_materializer_entry_has_no_open_transaction(store: &mut RedbStore) 
             .expect("shared database cell poisoned");
         shared.take();
     }
-    let database = store
-        .db
-        .as_mut()
-        .and_then(Arc::get_mut)
+    let database = Arc::get_mut(&mut store.db)
         .expect("the materializer-entry probe requires an exclusive open Redb handle");
     let integrity = database.check_integrity();
     {
-        let handle = store
-            .db
-            .as_ref()
-            .expect("the probe left the database handle open");
         let mut shared = store
             .shared_db
             .lock()
             .expect("shared database cell poisoned");
-        *shared = Some(Arc::clone(handle));
+        *shared = Some(Arc::clone(&store.db));
     }
     match integrity {
         Ok(true) => {}
@@ -353,12 +346,7 @@ mod materializer_entry_transaction_probe_tests {
     fn probe_refuses_a_live_read_transaction() {
         let mut store = RedbStore::temporary().expect("temporary Redb store");
         let _probe = arm_materializer_entry_transaction_probe(&mut store, 1);
-        let read = store
-            .db
-            .as_ref()
-            .expect("open Redb handle")
-            .begin_read()
-            .expect("read transaction");
+        let read = store.db.begin_read().expect("read transaction");
 
         let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             assert_materializer_entry_has_no_open_transaction(&mut store);
@@ -371,12 +359,7 @@ mod materializer_entry_transaction_probe_tests {
     fn probe_refuses_a_live_write_transaction() {
         let mut store = RedbStore::temporary().expect("temporary Redb store");
         let _probe = arm_materializer_entry_transaction_probe(&mut store, 1);
-        let write = store
-            .db
-            .as_ref()
-            .expect("open Redb handle")
-            .begin_write()
-            .expect("write transaction");
+        let write = store.db.begin_write().expect("write transaction");
 
         let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             assert_materializer_entry_has_no_open_transaction(&mut store);

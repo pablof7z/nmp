@@ -110,11 +110,10 @@ impl StoreSigReader {
 }
 
 pub struct RedbStore {
-    /// `None` means the redb handle is gone while `_ownership` still fences
-    /// this canonical pathname. Nothing reopens it: every door reached
-    /// afterwards returns `Err`, and the durable rows are read back by the
-    /// next process that opens the file.
-    pub(super) db: Option<Arc<Database>>,
+    /// The live redb handle. Open for exactly this store's lifetime: it is
+    /// installed once at construction and never taken, so no door has to
+    /// answer for a handle that went missing.
+    pub(super) db: Arc<Database>,
     /// The verify gate's durable-dedup read seam (#1677). A shared cell of the
     /// live `Arc<Database>`, cloned into every `StoreSigReader`. The store
     /// installs the handle here on open; the verifier reads through it under
@@ -343,10 +342,8 @@ impl Drop for RedbStore {
         // drain explicit and timed so a no-fsync foreground ceiling cannot
         // hide persistence work after the measurement window.
         let started = std::time::Instant::now();
-        let Some(db) = self.db.as_ref() else {
-            return;
-        };
-        let checkpoint = db
+        let checkpoint = self
+            .db
             .begin_write()
             .expect("redb benchmark durability checkpoint begin");
         checkpoint
@@ -520,10 +517,8 @@ impl RedbStore {
         Ok((store, OrderedEventReadPause { entered, release }))
     }
 
-    pub(super) fn database(&self) -> Result<&Database, PersistenceError> {
-        self.db
-            .as_deref()
-            .ok_or_else(|| PersistenceError::new("durable database handle is closed"))
+    pub(super) fn database(&self) -> &Database {
+        &self.db
     }
 
     /// Share the durable database handle with an out-of-band reader —
@@ -539,11 +534,12 @@ impl RedbStore {
         })
     }
 
+    /// The unguarded handle, for tests that deliberately corrupt or inspect
+    /// the file behind the store's back. `#[cfg(test)]`: no shipping build
+    /// compiles it.
     #[cfg(test)]
     pub(super) fn raw_database(&self) -> &Database {
-        self.db
-            .as_deref()
-            .expect("test inspected a store while its database handle was closed")
+        &self.db
     }
 
     pub(super) fn publish_queue_relay_id(
@@ -560,7 +556,7 @@ impl RedbStore {
         {
             return Ok(id);
         }
-        let read = self.database()?.begin_read().map_err(persist_err)?;
+        let read = self.database().begin_read().map_err(persist_err)?;
         let relay_ids = read
             .open_table(PUBLISH_QUEUE_RELAY_IDS)
             .map_err(persist_err)?;
@@ -604,7 +600,7 @@ impl RedbStore {
         {
             return Ok(relay);
         }
-        let read = self.database()?.begin_read().map_err(persist_err)?;
+        let read = self.database().begin_read().map_err(persist_err)?;
         let relays = read.open_table(PUBLISH_QUEUE_RELAYS).map_err(persist_err)?;
         let relay_ids = read
             .open_table(PUBLISH_QUEUE_RELAY_IDS)
@@ -670,7 +666,7 @@ impl RedbStore {
         state: PublishQueueLaneState,
     ) -> Result<PublishQueueLane, PersistenceError> {
         let relay_id = self.publish_queue_relay_id(&key.relay)?;
-        let write_txn = self.database()?.begin_write().map_err(persist_err)?;
+        let write_txn = self.database().begin_write().map_err(persist_err)?;
         let lane = {
             let intents = write_txn
                 .open_table(PUBLISH_QUEUE_INTENTS)
@@ -915,7 +911,7 @@ impl RedbStore {
         }
         let db = Arc::new(db);
         let mut store = Self {
-            db: Some(Arc::clone(&db)),
+            db: Arc::clone(&db),
             shared_db: Arc::new(Mutex::new(Some(db))),
             _ownership: ownership,
             temporary_directory: None,

@@ -143,7 +143,7 @@ pub(super) fn known_signature(
     store: &RedbStore,
     id: &EventId,
 ) -> Result<Option<Signature>, PersistenceError> {
-    known_signature_from_db(store.database()?, id)
+    known_signature_from_db(store.database(), id)
 }
 
 /// Shared-handle variant: the [`StoreSigReader`] holds its own
@@ -199,7 +199,7 @@ pub(super) fn query(
     {
         return Ok(Vec::new());
     }
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     // Fast path: exact ids resolve through the raw-id -> surrogate-key
     // table, bounded by `|ids|` regardless of table size (issue #17).
     if let Some(ids) = filter.ids.as_ref().filter(|ids| !ids.is_empty()) {
@@ -297,7 +297,7 @@ pub(super) fn query_newest(
         return Ok(rows);
     }
 
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
 
     let plan = plan_ordered_query(filter);
     store.query_ordered(&read_txn, &plan, filter, None, Some(limit), None)
@@ -325,7 +325,7 @@ pub(super) fn query_newest_ids(
             .collect());
     }
 
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let plan = plan_ordered_query(filter);
     store.query_ordered_ids(&read_txn, &plan, filter, limit)
 }
@@ -358,7 +358,7 @@ pub(super) fn query_newest_under_pin(
         return Ok(rows);
     }
 
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let plan = plan_ordered_query(filter);
     store.query_ordered(&read_txn, &plan, filter, None, Some(limit), Some(pinned))
 }
@@ -403,7 +403,7 @@ pub(super) fn query_newest_before(
         return Ok(rows);
     }
 
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let plan = plan_ordered_query(filter);
     store.query_ordered(&read_txn, &plan, filter, Some(before), Some(limit), None)
 }
@@ -441,7 +441,7 @@ pub(super) fn query_newest_before_under_pin(
         return Ok(rows);
     }
 
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let plan = plan_ordered_query(filter);
     store.query_ordered(
         &read_txn,
@@ -571,7 +571,7 @@ pub(super) fn expire_due(
 /// [`expiration_key_timestamp`] proves the width at compile time and leaves
 /// no panic branch to reach.
 pub(super) fn next_expiration(store: &RedbStore) -> Result<Option<Timestamp>, PersistenceError> {
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let expiration_index = read_txn.open_table(EXPIRATION_INDEX).map_err(persist_err)?;
     let Some((key, _value)) = expiration_index.first().map_err(persist_err)? else {
         return Ok(None);
@@ -586,7 +586,7 @@ pub(super) fn record_coverage(
     if claims.is_empty() {
         return Ok(());
     }
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let write_txn = store.database().begin_write().map_err(persist_err)?;
     {
         let mut coverage = write_txn.open_table(COVERAGE).map_err(persist_err)?;
         for (atom, session, proven) in claims {
@@ -653,7 +653,7 @@ pub(super) fn get_coverage(
     ))]
     store.coverage_reads.fetch_add(1, Ordering::Relaxed);
     let row_key = RedbStore::coverage_row_key(&key, session);
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let coverage = read_txn.open_table(COVERAGE).map_err(persist_err)?;
     coverage
         .get(row_key.as_str())

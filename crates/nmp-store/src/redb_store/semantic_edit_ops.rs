@@ -742,7 +742,7 @@ pub(super) fn accept(
 pub(super) fn required_programs(
     store: &RedbStore,
 ) -> Result<Vec<(crate::ReplayProgramId, crate::ReplayFormatId)>, PersistenceError> {
-    let read = store.database()?.begin_read().map_err(persist_err)?;
+    let read = store.database().begin_read().map_err(persist_err)?;
     let operations = match read.open_table(SEMANTIC_OPERATIONS) {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
@@ -761,7 +761,7 @@ pub(super) fn snapshot(
     store: &RedbStore,
     coordinate: &Coordinate,
 ) -> Result<Option<crate::RecoveredSemanticResource>, PersistenceError> {
-    let read = store.database()?.begin_read().map_err(persist_err)?;
+    let read = store.database().begin_read().map_err(persist_err)?;
     let resources = match read.open_table(SEMANTIC_RESOURCES) {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),

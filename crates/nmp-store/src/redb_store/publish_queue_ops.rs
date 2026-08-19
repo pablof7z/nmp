@@ -49,7 +49,7 @@ use redb::{ReadableDatabase, ReadableTable};
 pub(super) fn recover_publish_queue(
     store: &RedbStore,
 ) -> Result<Vec<PublishQueueIntent>, PersistenceError> {
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let publish_queue_intents = read_txn
         .open_table(PUBLISH_QUEUE_INTENTS)
         .map_err(persist_err)?;
@@ -118,7 +118,7 @@ pub(super) fn reattach_receipt(
     // NOT a Q4 "always empty" door: retention (not crash-survival) is
     // the contract — `PUBLISH_QUEUE_RECEIPTS` rows are never deleted by this
     // unit, so this is an ordinary durable read.
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let publish_queue_receipts = read_txn
         .open_table(PUBLISH_QUEUE_RECEIPTS)
         .map_err(persist_err)?;
@@ -186,7 +186,7 @@ pub(super) fn record_route_revision(
     intent_id: IntentId,
     relays: BTreeSet<RelayUrl>,
 ) -> Result<PublishQueueRouteRevision, PersistenceError> {
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let write_txn = store.database().begin_write().map_err(persist_err)?;
     let revision = {
         let intents = write_txn
             .open_table(PUBLISH_QUEUE_INTENTS)
@@ -269,7 +269,7 @@ pub(super) fn recover_route_revisions(
     store: &RedbStore,
     intent_id: IntentId,
 ) -> Result<Vec<PublishQueueRouteRevision>, PersistenceError> {
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let revisions = read_txn
         .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
         .map_err(persist_err)?;
@@ -311,7 +311,7 @@ pub(super) fn recover_attempts(
     store: &RedbStore,
     intent_id: IntentId,
 ) -> Result<Vec<PublishQueueAttempt>, PersistenceError> {
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let attempts = read_txn
         .open_table(PUBLISH_QUEUE_ATTEMPTS)
         .map_err(persist_err)?;
@@ -380,7 +380,7 @@ pub(super) fn bootstrap_publish_queue_lanes(
     store: &mut RedbStore,
     intent_id: IntentId,
 ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let write_txn = store.database().begin_write().map_err(persist_err)?;
     let mut staged = false;
     let prepared = {
         let intents = write_txn
@@ -624,7 +624,7 @@ pub(super) fn recover_publish_queue_lanes(
     store
         .publish_queue_lane_recovery_reads
         .fetch_add(1, Ordering::Relaxed);
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let lanes = read_txn
         .open_table(PUBLISH_QUEUE_LANES)
         .map_err(persist_err)?;
@@ -665,7 +665,7 @@ pub(super) fn due_publish_queue_deadlines(
     if limit > 1_024 {
         return Err(PersistenceError::new("deadline read limit exceeds 1024"));
     }
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let deadlines = read_txn
         .open_table(PUBLISH_QUEUE_DEADLINES)
         .map_err(persist_err)?;
@@ -726,7 +726,7 @@ pub(super) fn due_publish_queue_deadlines(
 pub(super) fn next_publish_queue_deadline(
     store: &RedbStore,
 ) -> Result<Option<Timestamp>, PersistenceError> {
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let deadlines = read_txn
         .open_table(PUBLISH_QUEUE_DEADLINES)
         .map_err(persist_err)?;
@@ -825,7 +825,7 @@ pub(super) fn set_lane_transient(
         ));
     }
     let relay_id = store.publish_queue_relay_id(&key.relay)?;
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let write_txn = store.database().begin_write().map_err(persist_err)?;
     let lane = {
         let mut lanes = write_txn
             .open_table(PUBLISH_QUEUE_LANES)
@@ -907,7 +907,7 @@ pub(super) fn suspend_lane_attempt(
         ));
     }
     let relay_id = store.publish_queue_relay_id(&key.relay)?;
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let write_txn = store.database().begin_write().map_err(persist_err)?;
     let lane = {
         let mut lanes = write_txn
             .open_table(PUBLISH_QUEUE_LANES)
@@ -978,7 +978,7 @@ pub(super) fn start_lane_attempt(
     started_at: Timestamp,
 ) -> Result<(PublishQueueAttempt, PublishQueueLane), PersistenceError> {
     let intent = {
-        let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+        let read_txn = store.database().begin_read().map_err(persist_err)?;
         let intents = read_txn
             .open_table(PUBLISH_QUEUE_INTENTS)
             .map_err(persist_err)?;
@@ -1024,7 +1024,7 @@ pub(super) fn start_lane_attempt(
         ));
     }
     let relay_id = store.publish_queue_relay_id(&key.relay)?;
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let write_txn = store.database().begin_write().map_err(persist_err)?;
     let (attempt, lane) = {
         let mut attempts = write_txn
             .open_table(PUBLISH_QUEUE_ATTEMPTS)
@@ -1127,7 +1127,7 @@ pub(super) fn record_lane_handoff(
         ));
     }
     let relay_id = store.publish_queue_relay_id(&key.relay)?;
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let write_txn = store.database().begin_write().map_err(persist_err)?;
     let lane = {
         let mut details = write_txn
             .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
@@ -1250,7 +1250,7 @@ pub(super) fn finish_lane_attempt(
     }
     let lane_outcome = PublishQueueTerminalOutcome::from_attempt(outcome.clone())?;
     let relay_id = store.publish_queue_relay_id(&key.relay)?;
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let write_txn = store.database().begin_write().map_err(persist_err)?;
     let lane = {
         let mut details = write_txn
             .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
@@ -1349,7 +1349,7 @@ pub(super) fn deny_lane_auth(
         ));
     }
     let relay_id = store.publish_queue_relay_id(&key.relay)?;
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let write_txn = store.database().begin_write().map_err(persist_err)?;
     let lane = {
         let mut lanes = write_txn
             .open_table(PUBLISH_QUEUE_LANES)
@@ -1412,7 +1412,7 @@ pub(super) fn recover_attempt_details(
     store: &RedbStore,
     intent_id: IntentId,
 ) -> Result<Vec<PublishQueueAttemptDetails>, PersistenceError> {
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let details = read_txn
         .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
         .map_err(persist_err)?;
@@ -1532,7 +1532,7 @@ fn close_intent(
     intent_id: IntentId,
     shape: LaneShape,
 ) -> Result<CloseIntentOutcome, PersistenceError> {
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let write_txn = store.database().begin_write().map_err(persist_err)?;
     let result = {
         let mut intents = write_txn
             .open_table(PUBLISH_QUEUE_INTENTS)
@@ -1654,7 +1654,7 @@ pub(super) fn accept_refused(
     // Receipt-ONLY and terminal at birth: touches `PUBLISH_QUEUE_RECEIPTS`
     // (+ `PUBLISH_QUEUE_META` for the id allocation) alone — no `EVENTS` row,
     // no `PUBLISH_QUEUE_INTENTS` row, `intent_id: None` (nothing backs it).
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let write_txn = store.database().begin_write().map_err(persist_err)?;
     let receipt_id = {
         let mut publish_queue_meta = write_txn
             .open_table(PUBLISH_QUEUE_META)
@@ -1703,7 +1703,7 @@ pub(super) fn accept_refused(
 pub(super) fn enumerate_publish_queue_receipts(
     store: &RedbStore,
 ) -> Result<Vec<crate::PublishQueueReceipt>, PersistenceError> {
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let receipts = match read_txn.open_table(PUBLISH_QUEUE_RECEIPTS) {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
@@ -1737,7 +1737,7 @@ pub(super) fn publish_queue_receipts_after(
     if limit == 0 || after == Some(u64::MAX) {
         return Ok(Vec::new());
     }
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let receipts = match read_txn.open_table(PUBLISH_QUEUE_RECEIPTS) {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
@@ -1772,7 +1772,7 @@ pub(crate) fn maintain_terminal_receipts_at(
     if !terminal_retention_due(store, now, limits)? {
         return Ok(Vec::new());
     }
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let write_txn = store.database().begin_write().map_err(persist_err)?;
     let candidates = maintain_terminal_receipts_in_txn(&write_txn, now, limits)?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::TerminalRetentionBeforeCommit);
@@ -1867,7 +1867,7 @@ fn terminal_retention_due(
     now: Timestamp,
     limits: TerminalRetentionLimits,
 ) -> Result<bool, PersistenceError> {
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
+    let read_txn = store.database().begin_read().map_err(persist_err)?;
     let meta = read_txn
         .open_table(PUBLISH_QUEUE_META)
         .map_err(persist_err)?;
@@ -1921,7 +1921,7 @@ pub(super) fn remove_publish_queue_entry(
     store: &mut RedbStore,
     receipt_id: u64,
 ) -> Result<crate::RemoveQueueEntryOutcome, PersistenceError> {
-    let write_txn = store.database()?.begin_write().map_err(persist_err)?;
+    let write_txn = store.database().begin_write().map_err(persist_err)?;
     let outcome = remove_publish_queue_entry_in_txn(&write_txn, receipt_id)?;
     commit_prepared(write_txn, outcome)
 }
