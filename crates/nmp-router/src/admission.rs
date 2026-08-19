@@ -17,6 +17,7 @@ use crate::ownership::{
 };
 use crate::plan::{BudgetShortfall, DemandKey, WireDelta, WireOp};
 use crate::route;
+use crate::router::compile_demand;
 use crate::{AdmissionOutcome, Router};
 
 mod metadata;
@@ -97,82 +98,23 @@ impl Router {
             }
         }
 
-        // Reuse the one canonical routing/coalescing compiler with an empty
-        // incumbent view. The running indexes are detached wholesale, not
-        // rebuilt: candidate compilation can visit only `pending`, while the
-        // monotonic token counter remains shared and therefore never rewinds.
-        let running_plan = std::mem::take(&mut self.prev_plan);
-        let running_diag = std::mem::take(&mut self.last_diag);
-        let running_active_demands = std::mem::take(&mut self.active_demands);
-        let running_requests_by_demand = std::mem::take(&mut self.requests_by_demand);
-        let running_active_by_request = std::mem::take(&mut self.active_by_request);
-        let running_request_coverage_by_key = std::mem::take(&mut self.request_coverage_by_key);
-        let running_request_position_by_key = std::mem::take(&mut self.request_position_by_key);
-        let running_request_by_exact_filter = std::mem::take(&mut self.request_by_exact_filter);
-        let running_physical_claims_by_request =
-            std::mem::take(&mut self.physical_claims_by_request);
-        let running_requests_by_physical_claim =
-            std::mem::take(&mut self.requests_by_physical_claim);
-        let running_physical_contributions_by_request =
-            std::mem::take(&mut self.physical_contributions_by_request);
-        let running_requests_by_physical_demand =
-            std::mem::take(&mut self.requests_by_physical_demand);
-        let running_request_owner_contributions =
-            std::mem::take(&mut self.request_owner_contributions);
-        let running_request_claim_owner_counts =
-            std::mem::take(&mut self.request_claim_owner_counts);
-        let running_request_provenance_owner_counts =
-            std::mem::take(&mut self.request_provenance_owner_counts);
-        let running_request_demand_coverage_owner_counts =
-            std::mem::take(&mut self.request_demand_coverage_owner_counts);
-        let running_coverage_assignment_requests =
-            std::mem::take(&mut self.coverage_assignment_requests);
-        let running_refused_coverage_assignments_by_demand =
-            std::mem::take(&mut self.refused_coverage_assignments_by_demand);
-        let running_active_outbox_authors = std::mem::take(&mut self.active_outbox_authors);
-        let running_diagnostic_author_refs = std::mem::take(&mut self.diagnostic_author_refs);
-        let running_uncovered_by_demand = std::mem::take(&mut self.uncovered_by_demand);
-        let running_uncovered_owners_by_author =
-            std::mem::take(&mut self.uncovered_owners_by_author);
-        let running_refusals_by_demand = std::mem::take(&mut self.refusals_by_demand);
-        let running_refused_request_owner_counts =
-            std::mem::take(&mut self.refused_request_owner_counts);
-        let running_refused_owner_counts_by_session =
-            std::mem::take(&mut self.refused_owner_counts_by_session);
-        let _ = self.compile(&pending, facts, CompileBudget::with_relay_cap(usize::MAX));
-        let mut candidate = std::mem::take(&mut self.prev_plan);
-        let _candidate_diag = std::mem::take(&mut self.last_diag);
-        let candidate_uncovered_by_demand = std::mem::take(&mut self.uncovered_by_demand);
-        self.request_owner_contributions.clear();
-        self.request_claim_owner_counts.clear();
-        self.request_provenance_owner_counts.clear();
-        self.request_demand_coverage_owner_counts.clear();
-        self.prev_plan = running_plan;
-        self.last_diag = running_diag;
-        self.active_demands = running_active_demands;
-        self.requests_by_demand = running_requests_by_demand;
-        self.active_by_request = running_active_by_request;
-        self.request_coverage_by_key = running_request_coverage_by_key;
-        self.request_position_by_key = running_request_position_by_key;
-        self.request_by_exact_filter = running_request_by_exact_filter;
-        self.physical_claims_by_request = running_physical_claims_by_request;
-        self.requests_by_physical_claim = running_requests_by_physical_claim;
-        self.physical_contributions_by_request = running_physical_contributions_by_request;
-        self.requests_by_physical_demand = running_requests_by_physical_demand;
-        self.request_owner_contributions = running_request_owner_contributions;
-        self.request_claim_owner_counts = running_request_claim_owner_counts;
-        self.request_provenance_owner_counts = running_request_provenance_owner_counts;
-        self.request_demand_coverage_owner_counts = running_request_demand_coverage_owner_counts;
-        self.coverage_assignment_requests = running_coverage_assignment_requests;
-        self.refused_coverage_assignments_by_demand =
-            running_refused_coverage_assignments_by_demand;
-        self.active_outbox_authors = running_active_outbox_authors;
-        self.diagnostic_author_refs = running_diagnostic_author_refs;
-        self.uncovered_by_demand = running_uncovered_by_demand;
-        self.uncovered_owners_by_author = running_uncovered_owners_by_author;
-        self.refusals_by_demand = running_refusals_by_demand;
-        self.refused_request_owner_counts = running_refused_request_owner_counts;
-        self.refused_owner_counts_by_session = running_refused_owner_counts_by_session;
+        // Reuse the one canonical routing/coalescing compiler, in an empty
+        // incumbent namespace: `compile_demand` is a free function over
+        // (rules, mint counter, incumbent requests, demand), so a cohort
+        // compile can neither read nor write a single running index and
+        // there is nothing to detach. Passing no incumbent requests is what
+        // makes candidate compilation visit only `pending`, while the
+        // monotonic token counter stays shared and therefore never rewinds.
+        let compiled = compile_demand(
+            &self.rules,
+            &mut self.next_token,
+            &BTreeMap::new(),
+            &pending,
+            facts,
+            &CompileBudget::with_relay_cap(usize::MAX),
+        );
+        let mut candidate = compiled.plan;
+        let candidate_uncovered_by_demand = compiled.uncovered_by_demand;
 
         // A byte-identical incumbent already performs this physical work.
         // Attach all new local metadata before same-session owner pruning:

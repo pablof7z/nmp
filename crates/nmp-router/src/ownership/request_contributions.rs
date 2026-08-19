@@ -202,11 +202,10 @@ impl Router {
 
     pub(crate) fn reconcile_active_demands(&mut self, next: BTreeMap<DemandKey, ContextualAtom>) {
         // Every incumbent active-demand entry is dereferenced here to decide
-        // whether `next` still owns it. When admission isolates a pending
-        // cohort (`Router::admit`), `self.active_demands` is detached to
-        // empty before this runs, so a later cohort visits none of it; a
-        // full `compile()` runs this against the real incumbent set. Either
-        // way the count is exact, not a proxy.
+        // whether `next` still owns it. Only a full `compile()` reaches
+        // here: cohort admission (`Router::admit`) maintains its own active
+        // entries and never recompiles the incumbent set. The count is
+        // exact, not a proxy.
         let mut removed = Vec::new();
         for demand in self.active_demands.keys().cloned() {
             self.admission_work.incumbent_active_entries_visited = self
