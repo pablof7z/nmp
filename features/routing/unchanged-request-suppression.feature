@@ -7,16 +7,7 @@ Feature: An accepted unchanged request is not sent twice
   Background:
     Given I am logged in as my own account
     And relay "hub" is the relay I watch directly
-    # This feature isolates the ordinary NIP-01 router plan. A behaviorally
-    # proven NIP-77 relay deliberately opens a distinct `limit:0` live
-    # candidate, waits for its EOSE, and only then overlap-closes the prior
-    # REQ.
-    And relay "hub" advertises that NIP-77 is unsupported
 
-  # nmp:id=ROUTING-SUBSCRIPTIONCOLLAPSE-020
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::accepted_requests_are_immutable_and_reconnect_replays_each_once
-  # nmp:falsifier=forcing the exact accepted-request predicate false makes the independent relay witness observe a byte-identical duplicate
   Scenario: Nothing already asked for is asked for again
     # `EngineCore` owns the exact accepted request on one transport generation.
     # A byte-identical request therefore mints neither another request

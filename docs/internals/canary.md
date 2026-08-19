@@ -282,7 +282,7 @@ app holds the post-state resurrect neither. API finding: the app must subscribe
 kind 5 itself — NMP will not add it — and must then filter kind:5 rows out of
 its own display.
 
-### C6 — deep windowing: PARTIAL, first advance FAILING (#1886)
+### C6 — deep windowing: first advance FIXED (#1886), one open defect
 
 Every window advance but the first behaves correctly: exact prefix, extends
 rather than rewrites, no duplicates, the `.atBound` fact, live arrival

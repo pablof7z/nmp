@@ -60,7 +60,6 @@ fn split_request_pieces_commit_wide_coverage_only_after_every_piece_finishes() {
                 owner_demands: BTreeSet::from([owner.clone()]),
                 lanes: BTreeSet::new(),
                 replay: false,
-                event_failure_target: EventFailureTarget::ThisSend,
             })
         });
         accept_request(core, &session, &sub_id, piece.filter.hash(), transport);
@@ -190,7 +189,6 @@ fn replacement_and_close_cancel_the_exact_pending_post_eose_transfer() {
                 (session.clone(), sub_id.clone()),
                 LiveWireRequest {
                     filter: incumbent.filter.clone(),
-                    evidence_sub_id: sub_id.clone(),
                     handle: TransportRelayHandle {
                         slot: 78,
                         generation: 1,
@@ -294,7 +292,6 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
             (session.clone(), sub_id.clone()),
             LiveWireRequest {
                 filter: incumbent.filter.clone(),
-                evidence_sub_id: sub_id.clone(),
                 handle: TransportRelayHandle {
                     slot: 79,
                     generation: 1,

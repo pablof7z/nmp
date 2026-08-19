@@ -44,10 +44,6 @@ Feature: Asking what a write would compute to, before committing to anything
 
   # ---- a preview is a question, not an act ------------------------------
 
-  # nmp:id=WRITES-PREVIEW-001
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario: Asking what a note would route to writes nothing
     Given I am logged in as my own account
     When I ask what a note saying "hello" would route to
@@ -56,10 +52,6 @@ Feature: Asking what a write would compute to, before committing to anything
     And no receipt was created
     And nothing durable was recorded
 
-  # nmp:id=WRITES-PREVIEW-002
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario: A thousand questions leave the write plane as they found it
     # The compose screen previews on every keystroke. If preview cost anything
     # durable, the cheapest possible app behaviour would be the most expensive
@@ -73,10 +65,6 @@ Feature: Asking what a write would compute to, before committing to anything
   # ---- preview and real routing cannot disagree -------------------------
 
   @ledger-3
-  # nmp:id=WRITES-PREVIEW-003
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario: An outbox preview names what the publish then uses
     # THE safety property of this feature, and both halves are read from the
     # same run: what the preview said, and where the write was actually sent.
@@ -87,10 +75,6 @@ Feature: Asking what a write would compute to, before committing to anything
     Then the note goes to exactly the destinations the preview named
 
   @ledger-3
-  # nmp:id=WRITES-PREVIEW-004
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario: An explicitly addressed preview names what the publish then uses
     # Nothing to resolve at all here, which is exactly why it is worth
     # pinning: the trivial case must go through the same one derivation. It
@@ -102,10 +86,6 @@ Feature: Asking what a write would compute to, before committing to anything
     Then the note goes to exactly the destinations the preview named
 
   @ledger-3
-  # nmp:id=WRITES-PREVIEW-005
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario: A destination the preview could not name is not conjured at publish
     # The other direction of the same property, and the one that actually
     # burns an app: previewing blocked, sending anyway, and the write quietly
@@ -123,10 +103,6 @@ Feature: Asking what a write would compute to, before committing to anything
 
   # ---- what a preview reports when it does not know ---------------------
 
-  # nmp:id=WRITES-PREVIEW-006
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario: What is known so far is reported even while something is unknown
     # Half an answer is worth rendering. The app can show "will go to my relay
     # and Alice's" while the third recipient is still resolving, and that is a
@@ -139,10 +115,6 @@ Feature: Asking what a write would compute to, before committing to anything
     And the preview names "wss://alice.example"
     And the preview reports a destination still unknown for Carol
 
-  # nmp:id=WRITES-PREVIEW-007
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario: An unknown destination is not the same as no destination
     # Unknown is temporary and blocked is permanent, and an app renders them
     # differently: "still working it out" versus "this person cannot be
@@ -153,10 +125,6 @@ Feature: Asking what a write would compute to, before committing to anything
     Then the preview reports a destination still unknown for Bob
     And the preview does not report Bob as having no reachable destination
 
-  # nmp:id=WRITES-PREVIEW-008
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario: A recipient with no relay list is unreachable, not unknown
     # The settled negative. The indexers were asked and they finished
     # answering: Bob has never published a relay list. That is knowledge,
@@ -169,10 +137,6 @@ Feature: Asking what a write would compute to, before committing to anything
     And the reason names Bob's missing relay list
     And the preview reports nothing still unknown
 
-  # nmp:id=WRITES-PREVIEW-009
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario: A relay that has not answered yet does not make the preview lie
     # Why one-shot is enough. A preview does not report "unknown" because a
     # response is merely in flight -- it settles when the discovery sources
@@ -195,10 +159,6 @@ Feature: Asking what a write would compute to, before committing to anything
 
   # ---- the call site this exists for ------------------------------------
 
-  # nmp:id=WRITES-PREVIEW-010
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario Outline: The app can decide whether to allow a send at all
     # Pablo's example, spelled out as the three-way decision an app actually
     # makes. NMP does not own the policy -- it owns the evidence -- but the
@@ -219,10 +179,6 @@ Feature: Asking what a write would compute to, before committing to anything
 
   # ---- asking the question starts producing the answer ------------------
 
-  # nmp:id=WRITES-PREVIEW-011
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario: A preview that could not answer has set the answer in motion
     # The deliberate impurity, and the whole reason one-shot is livable.
     # Opening a compose screen previews in order to render the button, and
@@ -238,10 +194,6 @@ Feature: Asking what a write would compute to, before committing to anything
     And the preview reports nothing still unknown
     And no write was accepted by either question
 
-  # nmp:id=WRITES-PREVIEW-012
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario: Previewing only ever widens what is being sought
     # Widen-only, because preview is called constantly and from screens that
     # come and go. A preview that could narrow the discovery set would let
@@ -254,10 +206,6 @@ Feature: Asking what a write would compute to, before committing to anything
 
   # ---- a preview needs nobody in particular -----------------------------
 
-  # nmp:id=WRITES-PREVIEW-013
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario: A preview works before anyone has signed in
     # "What will this compute to" must be answerable on a screen that exists
     # before an identity does -- and it is, because routing derives from the
@@ -269,10 +217,6 @@ Feature: Asking what a write would compute to, before committing to anything
     And no identity was resolved
     And no write was accepted
 
-  # nmp:id=WRITES-PREVIEW-014
-  # nmp:status=specified
-  # nmp:gap=implementation
-  # nmp:issue=#978
   Scenario: Previewing never asks a signer for anything
     # A preview of an unsigned draft must not be the thing that pops a
     # hardware signer prompt, or apps will stop previewing.

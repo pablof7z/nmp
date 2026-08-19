@@ -23,9 +23,6 @@ related:
   - docs/internals/routing/resolvers.md
   - docs/internals/routing/preview-and-observability.md
   - docs/internals/nip29/group-publication.md
-  - docs/internals/conventions/no-backwards-compatibility.md
-  - docs/internals/conventions/bech32-boundary.md
-  - docs/internals/conventions/naming-no-invented-categories.md
 issues:
   - "#47 identity override — the semantics this type inherits and restates"
 ---
@@ -80,7 +77,7 @@ pub enum Identity {
 
 ships at `crates/nmp-grammar/src/write.rs:311-326`, having replaced
 `identity_override: Option<PublicKey>` on `WriteIntent` outright — no wrapper,
-no alias, per `conventions/no-backwards-compatibility.md`. The
+no alias. The
 enum is not `Option` renamed: `Active` is a positive statement ("resolve the
 current account at acceptance and pin it"), not the absence of one, and the
 name shows up in receipts, diagnostics, and app code where `None` would say
@@ -201,7 +198,7 @@ type"):
 
 So `Identity::Explicit(PublicKey)` — a real key type, never a string, never
 bech32. The full statement of the rule and its other consequences live in
-`conventions/bech32-boundary.md`; what this document owns is the concrete
+; what this document owns is the concrete
 casualty on the identity surface.
 
 **The casualty:** `FfiWriteIntent.identity_override` used to accept hex OR

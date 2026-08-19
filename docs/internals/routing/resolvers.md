@@ -15,7 +15,6 @@ related:
   - docs/internals/routing/preview-and-observability.md
   - docs/internals/writes/event-builder.md
   - docs/internals/nip29/group-publication.md
-  - docs/internals/conventions/naming-no-invented-categories.md
 issues:
   - "a kind-1059 under Auto with no nip17 resolver routes by outbox rules — accepted, §3"
   - "the h-under-Auto refusal dies with the table — accepted, §3"

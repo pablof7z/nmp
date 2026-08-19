@@ -9,9 +9,8 @@
 //! ```
 //!
 //! [`FfiRelayScope`] wraps [`nmp_nip29::RelayScope`] and [`FfiGroup`] wraps
-//! [`nmp_nip29::Group`] -- both opaque UniFFI objects (the same idiom
-//! [`crate::blossom::FfiBlossomAuthorization`] uses for a proven Rust value
-//! carried across the boundary), never a second mirrored copy of NIP-29's
+//! [`nmp_nip29::Group`] -- both opaque UniFFI objects carrying a proven Rust
+//! value across the boundary, never a second mirrored copy of NIP-29's
 //! own vocabulary. Neither type exposes its retained hosts or group id back
 //! out: exactly like the Rust door, there is no spelling for composing an
 //! event under one group and routing it as though it came from another.

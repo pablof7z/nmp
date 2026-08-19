@@ -22,9 +22,8 @@
 //   receipt.status.collect { ... }
 //
 // `NMPRelayScope`/`NMPGroup`/`NMPGroupPredicate`/`NMPGroupIds` wrap the opaque
-// `FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`FfiGroupIds` UniFFI objects exactly like
-// `BlossomAuthorization` wraps `FfiBlossomAuthorization` in Blossom.kt -- a
-// proven Rust value carried across the boundary, never a second mirrored
+// `FfiRelayScope`/`FfiGroup`/`FfiGroupPredicate`/`FfiGroupIds` UniFFI objects --
+// a proven Rust value carried across the boundary, never a second mirrored
 // copy of NIP-29's own vocabulary. Neither type exposes its retained hosts
 // or group id back out through an accessor, and no door hands back an
 // unpublished intent that would yield them (#1292).

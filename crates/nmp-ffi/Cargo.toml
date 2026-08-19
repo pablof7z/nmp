@@ -23,11 +23,11 @@ default = []
 # feature manifest. Each key only forwards into its real Cargo dependency;
 # Cargo remains the sole dependency graph.
 #
-# #1707: nip18/nip22/nip25/nipc7/asset/blossom/content used to forward into
+# #1707: nip18/nip22/nip25/nipc7/content used to forward into
 # `nmp/<feature>` -- `nmp` re-exporting each as a pure door with no engine
-# coupling. `nmp` no longer does (those eight doors are deleted, #1707), so
+# coupling. `nmp` no longer does (those doors are deleted, #1707), so
 # each key now pulls its own capability crate directly, same shape NIP-02
-# and media already use.
+# already uses.
 nip02 = ["dep:nmp-nip02", "nip65"]
 nip18 = ["dep:nmp-nip18"]
 nip22 = ["dep:nmp-nip22", "nip65"]
@@ -41,16 +41,7 @@ nip29 = ["dep:nmp-nip29", "nip65"]
 # be a different crate on this line and nothing else.
 nip65 = ["dep:nmp-outbox"]
 nipc7 = ["dep:nmp-nipc7"]
-asset = ["dep:nmp-asset"]
-blossom = ["dep:nmp-blossom", "asset"]
 content = ["dep:nmp-content"]
-# #971: the one-shot engine-authorized Blossom upload. Needs `blossom` for
-# the client/authorization vocabulary and `dep:nmp-media` for the exact-bytes
-# prepare/upload seam this call composes internally -- the ordinary shape
-# every capability now has (#1707): `nmp` never re-exports a capability's
-# implementation, so `nmp-ffi` binds it directly, the same edge every native
-# app already uses to reach `nmp-media` directly.
-media = ["dep:nmp-media", "blossom"]
 
 # `cargo run -p nmp-ffi --bin uniffi-bindgen generate --library <staticlib> \
 #   --language swift --out-dir gen/` (M4 plan §3 step 3, library mode -- reads
@@ -67,7 +58,7 @@ nostr.workspace = true
 # `nmp` facade below, gated by the matching feature. But `nmp` deliberately
 # does not and must not re-export a capability's own implementation or
 # meaning -- that lives only in the capability's own crate under #1707 --
-# so this crate binds `nmp-nip02`/`nmp-nip29`/`nmp-media`/every other
+# so this crate binds `nmp-nip02`/`nmp-nip29`/every other
 # capability crate directly, the same edge a direct-Rust app already uses to
 # reach them. Neither shape is an exception to the other; a Swift/Kotlin app
 # reaches a capability exactly the way a direct-Rust app does, just through
@@ -85,30 +76,17 @@ nmp-nip02 = { workspace = true, optional = true }
 nmp-nip29 = { workspace = true, optional = true }
 # The author-route provider this artifact installs when `nip65` is selected.
 nmp-outbox = { workspace = true, optional = true }
-# #1707: same reason, for the media composition seam.
-nmp-media = { workspace = true, optional = true }
-# #1707: these eight used to be pure re-export doors in `nmp` (no engine
+# #1707: these used to be pure re-export doors in `nmp` (no engine
 # coupling forced them there); now each is bound directly, same reason as
 # `nmp-nip02` above.
 nmp-nip18 = { workspace = true, optional = true }
 nmp-nip22 = { workspace = true, optional = true }
 nmp-nip25 = { workspace = true, optional = true }
 nmp-nipc7 = { workspace = true, optional = true }
-nmp-asset = { workspace = true, optional = true }
-nmp-blossom = { workspace = true, optional = true }
 nmp-content = { workspace = true, optional = true }
 uniffi = { workspace = true, features = ["cli"] }
 zeroize = "1"
 k256 = { version = "0.13.4", default-features = false }
-# #555: `FfiBlossomAuthorization::validate_signed_event` reassembles an
-# `FfiSignedEvent` record into canonical event JSON for nostr's strict
-# `Event::from_json` parser (typed refusal on malformed id/sig hex).
-serde_json.workspace = true
-# #555: `FfiBlossomClient`'s blocking methods each drive the async
-# `nmp-blossom` client on a per-call current-thread runtime (the engine's
-# `relay_information.rs` `http_runtime()` discipline). Same production
-# feature set as nmp-engine's own tokio dependency, minus `sync`.
-tokio = { version = "1", features = ["rt", "time", "net"] }
 
 # #99/#920: store-owned test-instrumentation fixtures corrupt the exact
 # retained receipt and create the markerless schema witness without exposing
@@ -125,10 +103,6 @@ tokio = { version = "1", features = ["rt", "time", "net"] }
 nmp-grammar.workspace = true
 nmp-test-support.workspace = true
 nmp-store = { workspace = true, features = ["test-instrumentation"] }
-# #971: `upload_blossom.rs` computes the fixture's expected sha256 to assert
-# against the returned descriptor. Test-only, same discipline as `nmp-grammar`
-# above: `cargo build -p nmp-ffi` cannot resolve `nmp_asset::` at all.
-nmp-asset.workspace = true
 tempfile = "3"
 tungstenite = "0.29"
 url = "2"

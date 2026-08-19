@@ -47,9 +47,9 @@ internal fun FfiEventBuilder.toPayload(): WritePayload =
  * One piece of a message body.
  *
  * Bech32 appears in what a reader SEES and nowhere else -- that is the user
- * boundary (`docs/internals/conventions/bech32-boundary.md`). Every input here
- * is the decoded form: [Person.pubkey] is 64-char hex like every other key in
- * this package, and [Quote] names the [Row] the app is already holding. The
+ * boundary. Every input here is the decoded form: [Person.pubkey] is 64-char
+ * hex like every other key in this package, and [Quote] names the [Row] the
+ * app is already holding. The
  * `nostr:npub1...`/`nostr:nevent1...` token is produced from those, which is
  * exactly the pairing this type exists to keep honest.
  */

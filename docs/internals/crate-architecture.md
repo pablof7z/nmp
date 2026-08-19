@@ -64,7 +64,7 @@ sides declare the same dependencies.
      capability N+1 is a new crate, and `nmp` must not name it.
    - a **protocol mechanism** is wire or session machinery every app rides
      whether or not it knows the number — NIP-11 relay information, NIP-42
-     AUTH, NIP-77 negentropy. There is no per-app extension surface here;
+     AUTH. There is no per-app extension surface here;
      `nmp` and `nmp-runtime` need these internally regardless.
 
    So the facade may re-export NIP-11's values, and an app reaches relay
@@ -1211,7 +1211,7 @@ the value types — `PendingWrite` owning its own transitions rather than
   An `nmp-nip51` crate would be a category Nostr does not have, holding
   unrelated kinds together for an editorial reason rather than a semantic
   one — the same defect as any other invented category
-  (`conventions/naming-no-invented-categories.md`), applied to crate
+  (), applied to crate
   boundaries instead of type names. **Do not "fix" the absence**, and do not
   let an architecture diagram draw a single NIP-51 box; the absence reads
   like an omission to anyone scanning the crate list, and someone will

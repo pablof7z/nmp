@@ -105,7 +105,7 @@ not to decoding. A generic event loader can choose exact id/coordinate
 selection, can name relays or say nothing about them, and can choose its cache
 mode. There is no menu of acquisition authorities to pick from — "public",
 "author-outbox" and "pinned" were invented categories and are deleted, not
-renamed (`docs/internals/conventions/naming-no-invented-categories.md` §3). If
+renamed. If
 it promotes authored relay hints, it also owns their URL
 validation, safety filtering, bounds, and scoped evidence.
 

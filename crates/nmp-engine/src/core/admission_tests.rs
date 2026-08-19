@@ -423,8 +423,6 @@ mod author_route_needs_rebuild_agreement;
 mod claim_detach;
 #[path = "admission_tests/claim_transfer_retry.rs"]
 mod claim_transfer_retry;
-#[path = "admission_tests/clock.rs"]
-mod clock;
 #[path = "admission_tests/cohort.rs"]
 mod cohort;
 #[path = "admission_tests/completion_transfer.rs"]
@@ -435,8 +433,6 @@ mod diagnostics_scale;
 mod execution_targets;
 #[path = "admission_tests/lifecycle.rs"]
 mod lifecycle;
-#[path = "admission_tests/plan_index_mirror.rs"]
-mod plan_index_mirror;
 #[path = "admission_tests/request_filter_sharing.rs"]
 mod request_filter_sharing;
 #[path = "admission_tests/resolver_delta.rs"]

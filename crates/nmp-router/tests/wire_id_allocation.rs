@@ -713,16 +713,15 @@ fn the_allocated_token_stays_within_nip01s_subscription_id_cap() {
         let wire = sub_id.1.to_string();
         // NIP-01 caps `subscription_id` at 64 characters. The token is
         // ALLOCATED, not a digest, so this is a CEILING rather than an exact
-        // width -- a mint counter with an optional role/incarnation suffix
-        // is nowhere near it. Asserting exactly 64 would only be asserting
-        // that the id is still a hex digest.
+        // width -- a mint counter is nowhere near it. Asserting exactly 64
+        // would only be asserting that the id is still a hex digest.
         assert!(
             !wire.is_empty() && wire.len() <= 64,
             "wire id must be non-empty and within NIP-01's 64-char cap: {wire}"
         );
         assert!(
-            wire.chars().all(|c| c.is_ascii_digit() || c == '-'),
-            "an allocated token is decimal digits with optional role/incarnation: {wire}"
+            wire.chars().all(|c| c.is_ascii_digit()),
+            "an allocated token is decimal digits: {wire}"
         );
     }
 }

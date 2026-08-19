@@ -12,11 +12,6 @@ Feature: The app never names the host, the route, or the context tag
     And my relay list names "wss://alice-write.example" as my write relay
     And a relay "wss://bystander.example" exists that nothing references
 
-  # nmp:id=PROTOCOL-WHATTHEAPPNEVERDOES-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_group_write_routes_explicitly_to_the_whole_scope_and_never_to_the_author_outbox
-  # nmp:evidence=rust:nmp::a_multi_host_write_preserves_exact_per_host_outcomes_without_touching_anything_outside_the_scope
-  # nmp:falsifier=having any group operation contact, fall back to, or additionally route through a relay outside the scope's own retained host set (the author's discovered outbox, or a bystander relay nothing references) makes a_group_write_routes_explicitly_to_the_whole_scope_and_never_to_the_author_outbox see contact where the test proves none, and makes a_multi_host_write_preserves_exact_per_host_outcomes_without_touching_anything_outside_the_scope see relays_named_by(...) diverge from exactly the scope's hosts
   @nip29 @must-never
   Scenario: Every relay a group write touches traces back to the group's own identity
     When I publish an event of kind 9 with content "first light" through the group
@@ -26,8 +21,6 @@ Feature: The app never names the host, the route, or the context tag
     And the app supplied no relay anywhere in that run
     And relay "wss://bystander.example" received no connection at all
 
-  # nmp:id=PROTOCOL-WHATTHEAPPNEVERDOES-002
-  # nmp:status=built
   @nip29 @must-never
   Scenario: There is no way to name a relay on a group write
     When I inspect the group's write surface
@@ -35,12 +28,6 @@ Feature: The app never names the host, the route, or the context tag
     And no group write operation accepts a routing value
     And a group write cannot be redirected to a relay other than its host
 
-  # nmp:id=PROTOCOL-WHATTHEAPPNEVERDOES-003
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-nip29::caller_supplied_own_h_is_refused_before_signing_or_routing
-  # nmp:evidence=rust:nmp-nip29::caller_supplied_other_group_h_is_refused_the_same_way
-  # nmp:evidence=rust:nmp-nip29::draft_kind_and_schema_survive_except_for_appended_h
-  # nmp:evidence=rust:nmp-grammar::the_ordinary_builder_accepts_an_h_shaped_tag_with_no_validation
   @nip29 @must-never
   Scenario: There is no way to set the h tag through the group
     When I inspect the group's write surface
@@ -48,10 +35,6 @@ Feature: The app never names the host, the route, or the context tag
     And an event that arrives carrying its own h is refused
     And the group id given at construction is the only source of the h tag
 
-  # nmp:id=PROTOCOL-WHATTHEAPPNEVERDOES-004
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_group_write_routes_explicitly_to_the_whole_scope_and_never_to_the_author_outbox
-  # nmp:falsifier=a_group_write_routes_explicitly_to_the_whole_scope_and_never_to_the_author_outbox first proves the author's real outbox is reachable (an ordinary Auto-routed publish resolves to it) so its absence from a group write's contacted relays cannot be explained by the outbox being unreachable; having the group write additionally contact, or fall back to, that same proven-real outbox makes its relays_named_by(...) assertion see it
   @nip29 @must-never
   Scenario: A group write never enters the author's outbox lane
     When I publish an event of kind 9 with content "first light" through the group
@@ -59,10 +42,6 @@ Feature: The app never names the host, the route, or the context tag
     And diagnostics show no outbox resolution for that write
     And no relay list of mine was read for that write
 
-  # nmp:id=PROTOCOL-WHATTHEAPPNEVERDOES-005
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox
-  # nmp:falsifier=a_group_read_never_widens_beyond_its_pinned_host_to_a_discovered_author_outbox first proves the author's outbox is a real, resolvable routing fact for the active identity (FixtureRoutingFacts::with_outbound_routes), so its absence from the group read cannot be explained by the fact not existing; having the group subscription's wire sessions or acquisition evidence include that outbox relay, or any relay beyond the group's pinned host, makes its session-set or evidence-source assertions see it
   @nip29 @must-never
   Scenario: A group read is pinned by the group, never widened by what the engine learns
     Given a filter selecting kind 9

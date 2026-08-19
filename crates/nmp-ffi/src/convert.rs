@@ -2041,8 +2041,8 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteFact {
             complete: *complete,
             // Hex, never bech32: an `npub` exists to be shown to a person or
             // pasted by one, and this crosses to an app that will decide what
-            // to do with the key (`conventions/bech32-boundary.md`). The
-            // BTreeSet's key order survives into the vector, so two reads of
+            // to do with the key. The BTreeSet's key order survives into
+            // the vector, so two reads of
             // the same park compare equal.
             awaiting_author_routes: awaiting_author_routes
                 .iter()
@@ -2201,9 +2201,6 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
         nip11_document_revision,
         nip11_freshness,
         nip11_last_error,
-        nip77_advertisement,
-        nip77_behavior,
-        nip77_handoff,
     } = r;
     FfiRelayDiagnostics {
         relay: relay.to_string(),
@@ -2237,9 +2234,6 @@ fn relay_diagnostics_to_ffi(r: RelayDiagnosticsSnapshot) -> FfiRelayDiagnostics 
         nip11_document_revision,
         nip11_freshness: nip11_freshness.map(str::to_string),
         nip11_last_error,
-        nip77_advertisement: nip77_advertisement.to_string(),
-        nip77_behavior: nip77_behavior.to_string(),
-        nip77_handoff: nip77_handoff.to_string(),
     }
 }
 
@@ -2703,9 +2697,8 @@ pub fn parse_event_id(hex: &str) -> Result<EventId, FfiError> {
 /// module-wide [`parse_pubkey`] rule verbatim and nothing else: a bech32
 /// `npub` is REFUSED here, however well-formed, because "which encodings
 /// does this field take" must have one answer for every pubkey-shaped input
-/// rather than one answer per field
-/// (`docs/internals/conventions/bech32-boundary.md`). An app holding a
-/// display form decodes it with `decode_nostr_entity` at the boundary where
+/// rather than one answer per field. An app holding a display form decodes
+/// it with `decode_nostr_entity` at the boundary where
 /// the user pasted it. A malformed string is a typed
 /// [`FfiError::InvalidPublicKey`] naming the offending input,
 /// synchronously, BEFORE any engine call.
@@ -3091,9 +3084,6 @@ mod tests {
                 nip11_document_revision: Some("revision".to_string()),
                 nip11_freshness: Some("fresh"),
                 nip11_last_error: None,
-                nip77_advertisement: "advertised_supported",
-                nip77_behavior: "behaviorally_proven",
-                nip77_handoff: "reconciling",
             }],
             uncovered_author_count: 7,
             dropped_merge_rules: vec!["limit"],
@@ -3143,7 +3133,6 @@ mod tests {
             })
         );
         assert_eq!(ffi.relays[0].coverage[1].coverage, None);
-        assert_eq!(ffi.relays[0].nip77_handoff, "reconciling");
         // Every stalled-write field crosses whole, in order, with the exact
         // stage each row was built with and a `u64` instant that survives the
         // 32-bit boundary a narrower carrier would have silently truncated.

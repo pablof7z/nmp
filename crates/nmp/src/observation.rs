@@ -63,8 +63,7 @@ fn identity_string(authenticate_as: Option<nostr::PublicKey>) -> String {
 /// comma-separated list. Canonically ordered (the set already is), so a
 /// trace assertion never depends on iteration order. Empty renders as
 /// `"none"` rather than an empty string, so "no lane asked for this" is a
-/// statement rather than a missing value — that is the honest answer for a
-/// NIP-77 probe or reconciliation step, which carry no route of their own.
+/// statement rather than a missing value.
 fn lanes_string(lanes: &std::collections::BTreeSet<nmp_router::Lane>) -> String {
     if lanes.is_empty() {
         return "none".to_owned();
@@ -203,7 +202,6 @@ impl ObservationEvidence {
                         "terminal",
                         match terminal {
                             nmp_engine::core::RequestTerminal::Eose => "eose",
-                            nmp_engine::core::RequestTerminal::Nip77 => "nip77",
                         },
                     ),
                 ];

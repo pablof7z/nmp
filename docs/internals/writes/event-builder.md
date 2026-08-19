@@ -20,9 +20,6 @@ related:
   - docs/internals/routing/resolvers.md
   - docs/internals/routing/preview-and-observability.md
   - docs/internals/nip29/group-publication.md
-  - docs/internals/conventions/no-backwards-compatibility.md
-  - docs/internals/conventions/bech32-boundary.md
-  - docs/internals/conventions/naming-no-invented-categories.md
 issues:
   - "#47 identity override — its fail-closed mismatch check becomes structurally unnecessary on this path"
   - "#838 removed NIP-29's author-deriving composer; this is the universal home for that capability"
@@ -116,9 +113,8 @@ that already went through a signer — which is what `WritePayload::Signed`
 exists for. A caller holding a signed event uses that path; a builder is by
 definition the pre-signature half of the lifecycle.
 
-Per `conventions/no-backwards-compatibility.md`, `Unsigned` and the word
-"draft" are deleted in the same change that lands the builder. No alias, no
-deprecation window, no second way to say one thing.
+`Unsigned` and the word "draft" are deleted in the same change that lands the
+builder. No alias, no deprecation window, no second way to say one thing.
 
 ## 3. The load-bearing decision: the builder is a VALUE — DESIGNED
 

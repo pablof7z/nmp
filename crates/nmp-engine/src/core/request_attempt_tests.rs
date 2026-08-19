@@ -239,41 +239,6 @@ fn repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_
 }
 
 #[test]
-fn nip77_candidate_status_projects_its_role_id_to_the_live_plan_request() {
-    let relay = RelayUrl::parse("wss://request-attempt-nip77.example").unwrap();
-    let session = RelaySessionKey::unauthenticated(relay.clone());
-    let handle = TransportRelayHandle {
-        slot: 97,
-        generation: 1,
-    };
-    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-    core.white_box("prober.force_supported_for_test", |s| {
-        s.prober.force_supported_for_test(relay.clone())
-    });
-    core.handle(EngineMsg::RelayConnected(handle, session.clone()));
-    let opened = core.handle(EngineMsg::Subscribe(live_query(&relay)));
-    let observation = observation_id(&opened);
-
-    let flushed = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
-    let (_, candidate_sub_id, _, attempt_id) = only_request(&flushed);
-    let plan_sub_id = core.router.plan().reqs[&session][0].sub_id.clone();
-    assert_ne!(candidate_sub_id, plan_sub_id);
-    assert!(statuses(&flushed).contains(&SourceStatus::AwaitingRequest));
-    assert!(!statuses(&flushed).contains(&SourceStatus::Error));
-
-    let accepted =
-        core.on_wire_request_handoff(RequestHandoffOutcome::Accepted { attempt_id, handle });
-    assert!(statuses(&accepted).contains(&SourceStatus::Requesting));
-    assert!(!statuses(&accepted).contains(&SourceStatus::Error));
-
-    core.handle(EngineMsg::Unsubscribe(observation));
-    assert_eq!(
-        core.bench_ownership_census(),
-        CoreOwnershipCensus::default()
-    );
-}
-
-#[test]
 fn dynamic_full_recompile_publishes_awaiting_request_before_wire_dispatch() {
     let relay = RelayUrl::parse("wss://request-recompile-order.example").unwrap();
     let session = RelaySessionKey::unauthenticated(relay.clone());
@@ -314,8 +279,6 @@ fn dynamic_full_recompile_publishes_awaiting_request_before_wire_dispatch() {
     );
 }
 
-#[path = "request_attempt_tests/nip77_status.rs"]
-mod nip77_status;
 #[path = "request_attempt_tests/protected.rs"]
 mod protected;
 #[path = "request_attempt_tests/replacement.rs"]

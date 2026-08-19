@@ -23,10 +23,6 @@ use crate::route::RouteProvenance;
 ///   forward across recompiles by structural-signature matching
 ///   ([`crate::wire_id`]). It is NOT a function of the filter, and nothing may
 ///   reconstruct it from one.
-/// - For an id DERIVED outside the plan — the negentropy prober
-///   (`nmp-engine::negentropy`) and the NIP-77 role ids folded off a plan
-///   token — it is still a content hash, in its own namespace.
-///
 /// The name is historical. It used to be exactly what it says: the hash of
 /// the filter's author-erased [`Skeleton`], which is precisely why two filters
 /// differing only in `authors` collided onto one subscription (#899).
@@ -42,31 +38,17 @@ use crate::route::RouteProvenance;
 pub struct WireToken {
     /// The router's monotonic mint counter. Sole source of uniqueness.
     pub mint: u64,
-    /// NIP-77 role, 0 for an ordinary REQ. Carried as a FIELD rather than
-    /// folded into a digest, so the wire id can be read back.
-    pub role: u8,
-    /// NIP-77 reconciliation incarnation, 0 for an ordinary REQ.
-    pub incarnation: u64,
 }
 
 impl WireToken {
     pub fn new(mint: u64) -> Self {
-        Self { mint, role: 0, incarnation: 0 }
-    }
-
-    /// A role-scoped sibling of this token. Same mint, distinct wire id.
-    pub fn with_role(self, role: u8, incarnation: u64) -> Self {
-        Self { mint: self.mint, role, incarnation }
+        Self { mint }
     }
 }
 
 impl std::fmt::Display for WireToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.role == 0 && self.incarnation == 0 {
-            write!(f, "{}", self.mint)
-        } else {
-            write!(f, "{}-{}-{}", self.mint, self.role, self.incarnation)
-        }
+        write!(f, "{}", self.mint)
     }
 }
 

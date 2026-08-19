@@ -5,7 +5,7 @@
 //! and nothing else in that half -- no mechanism crate, and not even
 //! `nostr` directly. `nmp` never re-exports a capability's own meaning
 //! (#1707), so every capability -- `nmp-nip02`, `nmp-nip18`, `nmp-nip22`,
-//! `nmp-nip25`, `nmp-nipc7`, `nmp-content`, `nmp-asset`, `nmp-blossom` --
+//! `nmp-nip25`, `nmp-nipc7`, `nmp-content` --
 //! is its own SEPARATE, EXPLICIT dependency line below, not a facade
 //! feature. If a generic engine noun ever needs a second `use` line naming
 //! a mechanism crate or `nostr` itself, the facade's re-export inventory
@@ -41,11 +41,11 @@
 //!   absorption of the comment vocabulary into this facade).
 //! - every other protocol/content family #1239 once retrofitted onto the
 //!   facade ([`compose_every_retrofitted_family`]) -- NIP-C7 chat, NIP-18
-//!   reposts, NIP-25 reactions, content parsing, exact-byte asset identity
-//!   and Blossom -- each reachable the same way: its own explicit
-//!   `nmp-nip18`/`nmp-nipc7`/`nmp-nip25`/`nmp-content`/`nmp-asset`/
-//!   `nmp-blossom` dependency line, not a facade feature (#1707 deleted
-//!   each of these eight pure re-export doors -- no engine coupling, so
+//!   reposts, NIP-25 reactions and content parsing -- each reachable the
+//!   same way: its own explicit
+//!   `nmp-nip18`/`nmp-nipc7`/`nmp-nip25`/`nmp-content`
+//!   dependency line, not a facade feature (#1707 deleted
+//!   each of these pure re-export doors -- no engine coupling, so
 //!   nothing forced them into `nmp` in the first place).
 //! - NIP-02 follow/unfollow ([`follow_someone`]) -- reachable through
 //!   `nmp-nip02`, an EXPLICIT second dependency (#1707 reversed #1143's
@@ -53,11 +53,6 @@
 //!   what a kind:3 contact list or a follow/unfollow edit means). The
 //!   `#[cfg(test)]` module below drives it against a real `Engine`, proving
 //!   usable, not just nameable, from the two-crate combination.
-//! - media composition is deliberately ABSENT from this crate (#1707
-//!   reversed #1563's absorption of `nmp-media` into the facade): `nmp` must
-//!   not contain any capability's implementation, and the seam itself never
-//!   needed the engine. A picture-composing app depends on `nmp-media`
-//!   directly, whose own `tests/composition.rs` proves it end to end.
 //!
 //! The `#[cfg(test)]` module below additionally drives a real `Engine`
 //! end-to-end (construct, `add_private_key_account`, `observe`, `publish`,
@@ -222,7 +217,7 @@ pub fn build_comment_intent(
 ///
 /// This is deliberately one function rather than several: every family here
 /// is usable in combination, not just individually nameable. `nmp-nip18`/
-/// `nmp-nipc7`/`nmp-nip25`/`nmp-content`/`nmp-asset`/`nmp-blossom` are each
+/// `nmp-nipc7`/`nmp-nip25`/`nmp-content` are each
 /// an explicit dependency line (#1707: none of these needed engine coupling,
 /// so nothing forced them into `nmp` as re-export doors in the first place).
 /// `nmp-nip29` is the same shape for a different reason: its Group/
@@ -260,15 +255,6 @@ pub fn compose_every_retrofitted_family(target: &Event, source: Option<RelayUrl>
         .into_iter()
         .map(|occurrence: &nmp_content::ReferenceOccurrence| &occurrence.target)
         .collect();
-    // Exact-byte identity and the Blossom vocabulary built on it
-    // (`nmp_asset`, `nmp_blossom`).
-    let digest: nmp_asset::Sha256Hash = nmp_asset::Sha256Hash::of(target.content.as_bytes());
-    let verbs = [
-        nmp_blossom::BlossomVerb::Upload,
-        nmp_blossom::BlossomVerb::Delete,
-        nmp_blossom::BlossomVerb::List,
-    ];
-
     vec![
         format!("chat {:?}", chat.kind),
         format!(
@@ -290,8 +276,6 @@ pub fn compose_every_retrofitted_family(target: &Event, source: Option<RelayUrl>
             references.len(),
             document.blocks.len()
         ),
-        digest.to_hex(),
-        format!("{verbs:?}"),
     ]
 }
 

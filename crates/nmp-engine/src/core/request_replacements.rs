@@ -3,10 +3,9 @@
 //! own admission settles, plus which relay session each pending transition
 //! belongs to.
 //!
-//! ## Reusing `nip77_sessions.rs`'s mechanism
+//! ## The mirrored-index mechanism
 //!
-//! This is the identical shape to `Nip77Sessions`'s `PlanIndexed` maps: a
-//! forward map of children keyed by their own wire id (here, the successor
+//! A forward map of children keyed by their own wire id (here, the successor
 //! `SubId`), and a reverse index from the thing that owns them (here, a
 //! `RelaySessionKey`, not a plan `SubId`). Before writing this file, the
 //! insert/take/teardown rules were checked against `PlanIndexed`'s rather
@@ -86,10 +85,6 @@ impl RequestReplacements {
         self.pending.take(successor)
     }
 
-    pub(super) fn get(&self, successor: &SubId) -> Option<&RequestReplacement> {
-        self.pending.get(successor)
-    }
-
     pub(super) fn contains(&self, successor: &SubId) -> bool {
         self.pending.contains(successor)
     }
@@ -116,10 +111,5 @@ impl RequestReplacements {
             session_keys: self.pending.owner_keys(),
             session_edges: self.pending.owner_edges(),
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
-        self.pending.len()
     }
 }

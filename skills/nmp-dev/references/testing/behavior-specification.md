@@ -23,11 +23,9 @@ the internal mechanism without an app noticing, it does not need a scenario;
 prove it as an owner test or headless engine scenario instead (see
 [`test-placement.md`](test-placement.md)).
 
-Required tests behind a `built` scenario use protocol-real events and
-deterministic infrastructure: scripted relays, signers, and clocks. Never
-live internet relays or uncontrolled data — an opt-in live check is a
-separate, supplemental locator (see
-[Evidence and traceability](evidence-and-traceability.md)).
+A test behind a scenario uses protocol-real events and deterministic
+infrastructure: scripted relays, signers, and clocks. Never live internet
+relays or uncontrolled data.
 
 ## Show exactly what changed
 
@@ -49,47 +47,6 @@ separate witness such as a relay log.
 
 Ask: **is this input a cause, or the conclusion being proved?**
 
-## Metadata
-
-Place one adjacent comment block above each scenario that uses NMP metadata:
-
-```gherkin
-# nmp:id=ROUTING-DISCOVERY-003
-# nmp:status=built
-# nmp:evidence=rust:nmp::self_bootstrap_discovers_write_relay
-# nmp:falsifier=Disable relay-list ingestion; the content relay is not contacted.
-@acceptance
-Scenario: An author relay is discovered without an app-supplied route
-```
-
-Required:
-
-- `nmp:id=<DOMAIN>-<CONTEXT>-<NNN>`: unique and stable;
-- `nmp:status=built|specified|known-violation`.
-
-Additional fields:
-
-| Status | Required |
-|---|---|
-| `built` | Evidence locator(s) and one `nmp:falsifier` |
-| `specified` | `nmp:gap=implementation|evidence|fixture|platform`, open `nmp:issue=#N` |
-| `known-violation` | Open `nmp:issue=#N` |
-
-`nmp:falsifier` describes a small deliberate break that the linked evidence
-must catch. See [Evidence and traceability](evidence-and-traceability.md).
-
-`@acceptance` marks a built scenario that is also tested through the public
-Rust `nmp` API. It is not a status. Files using this metadata reject `@wip`,
-`@designed`, and `@requires-*` tags that try to express incomplete work in a
-second way.
-
-Keep an ID while refining one promise. Split IDs when one scenario contains
-several promises. Never reuse a deleted ID.
-
-Once one scenario in a file has `nmp:*`, every scenario in that file must have
-the required metadata. Add it to older scenarios before deleting or replacing
-them; do not use deletion to avoid the metadata rules.
-
 ## Correct existing behavior
 
 When a correction conflicts with existing feature text:
@@ -97,7 +54,7 @@ When a correction conflicts with existing feature text:
 1. Correct wrong text in place.
 2. Split situations that should produce different results.
 3. Add the example that demonstrates the difference.
-4. Update status, evidence locators, `nmp:falsifier`, and issue.
+4. Delete the claim the correction replaced.
 
 Do not leave the old claim intact in an appendix or second feature.
 

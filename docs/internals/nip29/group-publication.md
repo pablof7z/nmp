@@ -17,8 +17,6 @@ related:
   - docs/internals/routing/resolvers.md
   - docs/internals/writes/event-builder.md
   - docs/internals/writes/identity.md
-  - docs/internals/conventions/no-backwards-compatibility.md
-  - docs/internals/conventions/naming-no-invented-categories.md
 issues:
   - "#838 deleted group_content_demand, groupMessageIntent, and publishComposed — the precedents this design obeys"
   - "#827 folded nmp-engine into nmp; private composition layer exists"
@@ -41,8 +39,7 @@ citations. §10 records PR #1011's original single-host implementation; #1033
 superseded that single-host shape with a multi-relay one, recorded in §11 with
 current-tree anchors. **Read §11 for the present-tense shape** — every code
 example in §§1–9 and §10 illustrates the single-host `Group::new(host, id)`
-door, which no longer exists (no alias, per
-`docs/internals/conventions/no-backwards-compatibility.md`); they are kept
+door, which no longer exists (no alias); they are kept
 verbatim as the reasoning record that led to the door §11 now describes, not
 as usable current-day API.
 
@@ -260,9 +257,8 @@ exported at `crates/nmp-nip29/src/lib.rs:30`) and the ownership check still
 half of the old world: `contextualize_group_event` returns
 `GroupPublication { host, event }` and nothing in the workspace can route it.
 Under this design their duties move inside `Group`, the free function and the
-carrier struct are deleted in the same change (see
-`docs/internals/conventions/no-backwards-compatibility.md` — no alias, no
-deprecation window), and the gate is revised in that change, not evaded. What
+carrier struct are deleted in the same change (no alias, no deprecation
+window), and the gate is revised in that change, not evaded. What
 survives them: the `h`-before-signing property, the schema-preservation
 falsifier (`draft_kind_and_schema_survive_except_for_appended_h`,
 `crates/nmp-nip29/src/publication.rs:98`), and the no-`previous` rule.

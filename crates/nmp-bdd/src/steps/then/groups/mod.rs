@@ -110,15 +110,3 @@ fn assert_no_parameter(surface: &crate::world::GroupSurface, forbidden: &[&str],
         }
     }
 }
-
-/// Neither the pure door nor its engine binding may grow a read verb.
-fn assert_no_read_door(surface: &crate::world::GroupSurface) {
-    for source in [&surface.door, &surface.binding] {
-        for forbidden in ["fn observe", "fn subscribe", "fn stream"] {
-            assert!(
-                !source.contains(forbidden),
-                "the one read door is Engine::observe; a group must not declare {forbidden:?}"
-            );
-        }
-    }
-}

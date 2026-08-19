@@ -12,10 +12,6 @@ Feature: A group publishes every kind identically
     And I am logged in as "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce"
     And my relay list names "wss://alice-write.example" as my write relay
 
-  # nmp:id=PROTOCOL-KINDBLINDNESS-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-nip29::contextualize_takes_the_identical_path_for_every_kind_familiar_or_not
-  # nmp:evidence=rust:nmp-nip29::a_read_branch_imposes_no_kind_catalogue_over_arbitrary_app_selections
   #
   # #1245 added the one selection the read door does refuse: NIP-29's three
   # relay-signed records, which do not carry an h row at all and so cannot
@@ -40,13 +36,6 @@ Feature: A group publishes every kind identically
       | 7     | +                    |
       | 31337 | exposure f/8, 1/125  |
 
-  # nmp:id=PROTOCOL-KINDBLINDNESS-002
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-nip29::draft_kind_and_schema_survive_except_for_appended_h
-  # nmp:evidence=rust:nmp-nip29::caller_supplied_own_h_is_refused_before_signing_or_routing
-  # nmp:evidence=rust:nmp-nip29::caller_supplied_other_group_h_is_refused_the_same_way
-  # nmp:evidence=rust:nmp::a_caller_supplied_context_never_reaches_the_door
-  # nmp:falsifier=having contextualize drop, reorder, or mutate any caller-supplied field or tag other than appending the owned h row makes draft_kind_and_schema_survive_except_for_appended_h see a changed kind, content, created_at, or tag list; silently overwriting a caller-supplied h instead of refusing it makes caller_supplied_own_h_is_refused_before_signing_or_routing and caller_supplied_other_group_h_is_refused_the_same_way return Ok instead of CallerSuppliedContext, and makes a_caller_supplied_context_never_reaches_the_door see a receipt where none should exist
   @nip29
   Scenario: The group's only contribution to the event is the h tag
     Given an unsigned event of kind 31337 with content "exposure f/8, 1/125"
@@ -57,19 +46,12 @@ Feature: A group publishes every kind identically
     And its kind, content and created_at survive unchanged
     And every tag I supplied survives unchanged and in the order I gave it
 
-  # nmp:id=PROTOCOL-KINDBLINDNESS-003
-  # nmp:status=built
   @nip29
   Scenario: Kind 9 is not the group's kind
     When I publish an event of kind 9 with content "first light" through the group
     Then the group contributed no part of the kind 9 schema
     And the group exposes no composer for kind 9
 
-  # nmp:id=PROTOCOL-KINDBLINDNESS-004
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-nip29::contextualize_takes_the_identical_path_for_every_kind_familiar_or_not
-  # nmp:evidence=rust:nmp::an_unfamiliar_kind_is_published_not_questioned
-  # nmp:falsifier=refusing, classifying, or special-casing kind 44815 (defined by no known NIP) anywhere on the unsigned contextualization path makes contextualize_takes_the_identical_path_for_every_kind_familiar_or_not see a refusal or a different tag set for that row alone; the same refusal at the supported-facade publish door makes an_unfamiliar_kind_is_published_not_questioned's expect() panic instead of returning a receipt stream
   @nip29
   Scenario: An unfamiliar kind is published, not questioned
     When I publish an event of kind 44815 with content "whatever this is" through the group

@@ -1067,10 +1067,7 @@ fn limited_fetch_never_records_coverage() {
 /// all -- it cannot pop the reopened request's attribution snapshot, and no
 /// coverage watermark is claimed before the reopened request has been served.
 /// The reopened request's own EOSE then earns its coverage normally.
-///
-/// The relay here is connected but never behaviorally proven for NIP-77, so
-/// the demand takes the ordinary planned-REQ path rather than the role-derived
-/// repair path the same defect survived on until #932.
+
 #[test]
 fn a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose() {
     let a = Keys::generate();

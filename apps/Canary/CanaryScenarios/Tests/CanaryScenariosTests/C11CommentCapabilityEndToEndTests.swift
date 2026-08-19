@@ -8,10 +8,8 @@
 // WHY THIS SCENARIO IS NAMED WHAT IT IS (#1875). C11 was listed as
 // "semantic capability", a phrase that appeared exactly once in the whole
 // repository -- in the line that listed it -- with no definition, no
-// matching public API and no protocol category by that name. Standing
-// convention 3 (`docs/internals/conventions/naming-no-invented-categories.md`)
-// forbids exactly that, so the slot was renamed to what it means and the
-// name was taken from the public surface: "capability" is
+// matching public API and no protocol category by that name, so the slot was
+// renamed to what it means and the name was taken from the public surface: "capability" is
 // `docs/internals/crate-architecture.md` rule 2's own word (a capability
 // owns its meaning in its own crate) and `nmp-ffi`'s own feature keys, and
 // "NIP-22 comments" is the protocol's name and the name of

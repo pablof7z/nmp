@@ -5,12 +5,10 @@ automatically in the crate being edited. Organize feature files by user
 behavior. Organize executable tests by the component and kind of proof they
 need.
 
-## Three layers
+## Three kinds of test
 
-Tests prove behavior at three layers. The layers are complementary: a
-public-API system scenario does not replace the owner and headless-engine
-tests underneath it, and E2E coverage never substitutes for unit coverage of
-the invariant it depends on.
+Three kinds of test are available. Each answers a different question well;
+pick the one that answers the question you have.
 
 ### Owner tests
 
@@ -44,7 +42,7 @@ actually calls, not an internal shortcut.
 | One crate working with real collaborators | That crate's integration tests |
 | A complete promise of the public Rust API | `crates/nmp/tests/` through `nmp` |
 | A readable example across several layers | Canonical feature plus `@acceptance`, when the example adds understanding |
-| FFI or native-platform behavior | Shared parity tests plus native Swift and Kotlin tests |
+| FFI or native-platform behavior | A shared parity test, or a native Swift or Kotlin test |
 | Compatibility with a public provider or network | Opt-in live check |
 
 Do not list every possible input combination in Gherkin or use public
@@ -68,14 +66,11 @@ insert or inspect the resolved route directly.
 
 ## Internal proof and public example
 
-Important public behavior may need two tests when each proves something
-different:
-
-1. an internal property, model, or integration test that covers the rule; and
-2. one test through the public API that proves the result an app sees.
-
-Neither replaces the other. Do not keep Rust, shell, and Cucumber copies of the
-same path when they prove nothing different.
+Two tests are worth writing only when each proves something different: an
+internal property, model, or integration test that covers the rule, and one
+test through the public API that proves the result an app sees. Do not keep
+Rust, shell, and Cucumber copies of the same path when they prove nothing
+different.
 
 ## Avoid
 

@@ -739,9 +739,6 @@ private final class DiagnosticsRaceState: @unchecked Sendable {
                     nip11DocumentRevision: nil,
                     nip11Freshness: nil,
                     nip11LastError: nil,
-                    nip77Advertisement: "unknown",
-                    nip77Behavior: "unknown",
-                    nip77Handoff: "none"
                 )
             ]
         } else {

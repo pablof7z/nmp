@@ -8,14 +8,13 @@ Put each kind of information in one place:
 - Design docs and `docs/builder/28-patterns.md` explain why the architecture
   exists and which classes of bugs it prevents.
 
-Do not copy the same rule into several places. Current BDD syntax, status, and
-runner rules live in [`behavior-specification.md`](behavior-specification.md).
+Do not copy the same rule into several places. Current BDD syntax and runner
+rules live in [`behavior-specification.md`](behavior-specification.md).
 
-## Three layers
+## Three kinds of test
 
-Tests prove behavior at three layers. The layers are complementary — a
-public-API system scenario does not replace the owner or headless-engine test
-underneath it:
+Three kinds of test are available. Each is good at something different; none
+is owed:
 
 - **Owner tests** prove exact local invariants inside the crate that owns the
   state.
@@ -24,7 +23,7 @@ underneath it:
 - **Public-API system scenarios** prove restart and complete query/write flows
   through the supported `nmp::Engine` API.
 
-See [`test-placement.md`](test-placement.md) for what each layer must cover.
+See [`test-placement.md`](test-placement.md) for what each is good for.
 
 ## User corrections
 
@@ -33,12 +32,8 @@ When a user correction changes the meaning of a behavior:
 1. Find the owning feature and `Rule`.
 2. Fix inaccurate text. Add one contrasting example that shows when the result
    should differ.
-3. Set truthful status.
-4. Put executable proof in the smallest component responsible for the
+3. Put executable proof in the smallest component responsible for the
    behavior.
-5. Deliberately reintroduce the named bug or remove its protection. Confirm the
-   linked evidence fails.
-6. Link unfinished work to an issue.
 
 Never leave the correction only in chat, a PR, or a test name.
 
@@ -46,8 +41,7 @@ Never leave the correction only in chat, a PR, or a test name.
 
 | Need | Read |
 |---|---|
-| Feature meaning, metadata, or corrections | [`behavior-specification.md`](behavior-specification.md) |
-| Status, test links, or deliberate-break checks | [`evidence-and-traceability.md`](evidence-and-traceability.md) |
+| Feature meaning or corrections | [`behavior-specification.md`](behavior-specification.md) |
 | Where a test belongs | [`test-placement.md`](test-placement.md) |
 | Routing, identity, source, or request context | [`routing-and-context.md`](routing-and-context.md) |
 | Restart, faults, timing, ambiguity | [`distributed-systems.md`](distributed-systems.md) |
@@ -55,13 +49,9 @@ Never leave the correction only in chat, a PR, or a test name.
 
 ## Done
 
-- Feature meaning and status are accurate.
-- Executable proof sits with the component responsible for the behavior and
-  fails when the named bug is reintroduced.
+- Feature meaning is accurate.
+- Whatever proof was written sits with the component responsible for the
+  behavior.
 - Test setup provides inputs instead of inserting the expected result.
-- Tests cover every request context, restart, failure, and platform condition
-  needed by the claim.
-- Every evidence locator resolves to a real check that a reviewer actually ran by hand. There is no CI to run it for them.
-- All required checks pass. A live check supplements repeatable evidence; it
-  does not replace it.
-- Remaining work has one issue.
+- The checks that were written pass. There is no CI, so a check is worth only
+  what running it by hand showed.

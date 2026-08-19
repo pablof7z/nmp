@@ -114,9 +114,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel as cb;
-use nmp_grammar::ConcreteFilter;
 use nmp_grammar::LiveQuery;
-use nmp_router::{SubId, WireOp};
+use nmp_router::WireOp;
 use nmp_signer::{SignerOp, SigningCapability};
 #[cfg(test)]
 use nmp_signer::{SignerPublicKey, SignerSignedEvent, SignerUnsignedEvent};
@@ -124,7 +123,7 @@ use nmp_store::RedbStore;
 #[cfg(test)]
 use nostr::RelayMessage;
 use nostr::{
-    ClientMessage, EventId, JsonUtil, PublicKey, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent,
+    ClientMessage, EventId, JsonUtil, PublicKey, RelayUrl, Timestamp, UnsignedEvent,
 };
 
 use nmp_transport::{
@@ -140,10 +139,9 @@ use crate::session::{
 pub use nmp_engine::core::ReceiptReplayCursor;
 use nmp_engine::core::{
     self, AcquisitionEvidence, AuthorRouteProvider, DiagnosticsSnapshot, Effect, EngineCore,
-    EngineMsg, HistoryAdvanceError, HistoryQuery, HistorySessionId, LocalSendRefusal, Nip77Frame,
+    EngineMsg, HistoryAdvanceError, HistoryQuery, HistorySessionId,
     ObservationEvidence, ObservationId, ObservationOpen, ProviderReroot, PublishError,
-    PublishPreparation, ReattachOutcome, ReceiptId, RequestAttemptId, RequestHandoffOutcome,
-    RowDelta,
+    PublishPreparation, ReattachOutcome, ReceiptId, RowDelta,
 };
 #[cfg(test)]
 use nmp_engine::core::{HistoryBatch, Row};
@@ -2789,6 +2787,24 @@ fn engine_loop(
                         );
                         continue;
                     }
+                    // The staged turn's own effects, dispatched BEFORE the
+                    // commit that follows them (#1886). They carry the wire
+                    // admission arm the advance's REQs need and whatever the
+                    // stage itself closed; discarding them on success -- while
+                    // dispatching them on failure -- lost the first advance's
+                    // REQ entirely. Order is the engine's decision order: the
+                    // stage decided these before the commit below decided its
+                    // supersede-closes, and the wire must see them that way.
+                    dispatch_core_effects(
+                        &mut core,
+                        effects,
+                        &pool,
+                        &mut row_channels,
+                        &mut history_channels,
+                        &mut diag_channels,
+                        &registry,
+                        dispatch_runtime,
+                    );
                     // Commit, then drive the post-commit continuation loop to
                     // convergence (#485): each commit may auto-stage the next
                     // advance (target still unmet, older boundary present,
@@ -3795,132 +3811,7 @@ fn dispatch_effect(
             // `PublishTracked` consumes this typed pre-receipt failure for
             // its synchronous reply. There is no receipt stream to fan out.
         }
-        Effect::StartProbe(attempt_id, url, sub_id, filter, initial_hex) => {
-            let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
-            let outcome = nip77_send(pool, attempt_id, &url, text);
-            let followups = core.on_nip77_handoff(Nip77Frame::Probe, outcome);
-            dispatch_effects(
-                core,
-                followups,
-                pool,
-                row_channels,
-                history_channels,
-                diag_channels,
-                registry,
-                runtime,
-            );
-        }
-        Effect::NegOpen(attempt_id, probed, sub_id, filter, initial_hex) => {
-            let relay = probed.url().clone();
-            let text = neg_open_frame_text(&sub_id, &filter, initial_hex);
-            let outcome = nip77_send(pool, attempt_id, &relay, text);
-            let followups = core.on_nip77_handoff(Nip77Frame::Open, outcome);
-            dispatch_effects(
-                core,
-                followups,
-                pool,
-                row_channels,
-                history_channels,
-                diag_channels,
-                registry,
-                runtime,
-            );
-        }
-        Effect::NegMsg(attempt_id, relay, sub_id, message_hex) => {
-            let text = neg_msg_frame_text(&sub_id, message_hex);
-            let outcome = nip77_send(pool, attempt_id, &relay, text);
-            let followups = core.on_nip77_handoff(Nip77Frame::Continue, outcome);
-            dispatch_effects(
-                core,
-                followups,
-                pool,
-                row_channels,
-                history_channels,
-                diag_channels,
-                registry,
-                runtime,
-            );
-        }
-        Effect::NegClose(relay, sub_id) => {
-            let Ok(handle) = pool.ensure_open(&relay) else {
-                return;
-            };
-            let text = neg_close_frame_text(&sub_id);
-            let _ = pool.send(handle, WireFrame::Text(text));
-        }
     }
-}
-
-/// What placing one NIP-77 frame on the session bound to no identity for `relay` actually
-/// achieved, for `EngineCore::on_nip77_handoff` (issue #775).
-///
-/// A NIP-77 frame returns the same closed [`RequestHandoffOutcome`] fact as an
-/// ordinary REQ. The reducer consumes it through a door of its own rather than
-/// letting the runtime decide anything.
-/// Place `text` on `relay`'s session bound to no identity and report the exact outcome.
-///
-/// The two local refusals are kept distinct because they are different facts
-/// about this process: no session could be opened at all, versus a worker that
-/// exists and refused the frame at admission because its finite outbound
-/// envelope is full (#506/#1331). Neither is ever a statement about the relay.
-fn nip77_send(
-    pool: &Pool,
-    attempt_id: RequestAttemptId,
-    relay: &RelayUrl,
-    text: String,
-) -> RequestHandoffOutcome {
-    let Ok(handle) = pool.ensure_open(relay) else {
-        return RequestHandoffOutcome::Refused {
-            attempt_id,
-            cause: LocalSendRefusal::SessionUnavailable,
-        };
-    };
-    if pool.send(handle, WireFrame::Text(text)) {
-        RequestHandoffOutcome::Accepted { attempt_id, handle }
-    } else {
-        RequestHandoffOutcome::Refused {
-            attempt_id,
-            cause: LocalSendRefusal::WorkerAdmissionRefused { handle },
-        }
-    }
-}
-
-/// The wire `["NEG-OPEN", sub_id, filter, initial_message]` text for
-/// `sub_id`/`filter`. It uses the same stable literal rendering helper as
-/// REQ (`core::wire_sub_id_string`), while NIP-77 explicitly defines a
-/// protocol namespace separate from REQ. The reducer supplies role-derived
-/// ids so both can stay open concurrently, and `core::mod` resolves either
-/// protocol by the exact rendered string it recorded at send time.
-fn neg_open_frame_text(
-    sub_id: &SubId,
-    filter: &ConcreteFilter,
-    initial_message_hex: String,
-) -> String {
-    let wire_id = SubscriptionId::new(core::wire_sub_id_string(sub_id));
-    ClientMessage::neg_open(wire_id, filter.to_nostr(), initial_message_hex).as_json()
-}
-
-/// The wire `["NEG-MSG", sub_id, message]` text for `sub_id` -- `nostr`
-/// 0.44.4 exposes no `ClientMessage::neg_msg` constructor helper (only
-/// `neg_open`/`req`/`close`/etc.), so the variant is built directly; its
-/// fields are public on the public `ClientMessage` enum.
-fn neg_msg_frame_text(sub_id: &SubId, message_hex: String) -> String {
-    let wire_id = SubscriptionId::new(core::wire_sub_id_string(sub_id));
-    ClientMessage::NegMsg {
-        subscription_id: std::borrow::Cow::Owned(wire_id),
-        message: std::borrow::Cow::Owned(message_hex),
-    }
-    .as_json()
-}
-
-/// The wire `["NEG-CLOSE", sub_id]` text for `sub_id` (same wire-id
-/// convention as [`neg_open_frame_text`]/[`neg_msg_frame_text`]).
-fn neg_close_frame_text(sub_id: &SubId) -> String {
-    let wire_id = SubscriptionId::new(core::wire_sub_id_string(sub_id));
-    ClientMessage::NegClose {
-        subscription_id: std::borrow::Cow::Owned(wire_id),
-    }
-    .as_json()
 }
 
 /// The app-facing handle to a live diagnostics stream (returned by

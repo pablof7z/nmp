@@ -120,7 +120,7 @@ closed query helpers, semantic write operations, and typed source/routing
 context defined by that protocol.
 
 Composition stays immutable. A NIP-29 group can add its `h` tag and host relay
-context to a NIP-68 photo draft without owning the photo kind. Core freezes the
+context to a NIP-C7 chat draft without owning kind:9. Core freezes the
 final draft, selects one signer, signs once, maintains one canonical row, and
 publishes one intent.
 

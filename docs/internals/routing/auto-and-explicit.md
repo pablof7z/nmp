@@ -18,9 +18,8 @@ related:
   - docs/internals/routing/preview-and-observability.md
   - docs/internals/writes/event-builder.md
   - docs/internals/nip29/group-publication.md
-  - docs/internals/conventions/no-backwards-compatibility.md
 issues:
-  - "the current three `WriteRouting` variants (`AuthorOutbox`, `PrivateNarrow`, `RelayListBootstrap`) were deleted with no aliases, per conventions/no-backwards-compatibility.md; see migration commit 0b6996bb (#1105/#1163)"
+  - "the current three `WriteRouting` variants (`AuthorOutbox`, `PrivateNarrow`, `RelayListBootstrap`) were deleted with no aliases; see migration commit 0b6996bb (#1105/#1163)"
 ---
 
 # Write routing: Auto and Explicit
@@ -65,7 +64,7 @@ build it directly.
 Three earlier variants — `AuthorOutbox`, `PrivateNarrow(PrivateRoute)`, and
 `RelayListBootstrap(RelayListBootstrapAuthority)` — are gone. No trace of any
 of the three remains in `crates/`. There was no migration, no alias, and no
-deprecation window — see `conventions/no-backwards-compatibility.md`, and
+deprecation window —, and
 Pablo's ruling that put this in motion:
 
 > no backwards compatibility!!!! I told you this so many times!!!

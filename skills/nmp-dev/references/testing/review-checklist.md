@@ -6,14 +6,10 @@ Use only relevant sections.
 
 - [ ] User corrections and contrasts are in the owning feature/`Rule`.
 - [ ] Each scenario states one product promise using app or Nostr terms.
-- [ ] Status and metadata match reality. Unfinished work links one open issue.
 - [ ] Requested behavior runs normally without an unrequested runtime flag.
 
-## Layers
+## Kinds of test
 
-- [ ] The change is proven at every layer it touches: owner invariant,
-      headless engine scenario, and public-API system scenario, as
-      applicable. No layer stands in for another.
 - [ ] Owner tests cover both directions of every mirrored index, replacement,
       teardown, and rejection of states production cannot reach.
 - [ ] Headless engine scenarios use no sockets and no wall-clock timing.
@@ -33,10 +29,8 @@ Use only relevant sections.
 - [ ] Rules across many inputs or operation orders use property or model tests.
 - [ ] Public-API and native-platform tests are kept only when they prove an
       additional result.
-- [ ] Every non-live evidence locator names one enabled test or validation
-      script that a reviewer actually ran. There is no CI; nothing runs it
-      for them.
-- [ ] Every live locator names one enabled supplemental live job.
+- [ ] Every check named in the PR was actually run by hand. There is no CI;
+      nothing runs it for anyone.
 
 ## Fixtures
 
@@ -78,12 +72,9 @@ Use only relevant sections.
 
 - [ ] Feature files describe behavior, issues track unfinished work, design docs
       explain architecture, and tests provide proof. None duplicates another.
-- [ ] Tests use existing targets when possible. Redundant harnesses and duplicate
-      tests or evidence locators are removed.
+- [ ] Tests use existing targets when possible. Redundant harnesses and
+      duplicate tests are removed.
 - [ ] The focused check, changed-crate tests, and required public-API or fault
       checks pass.
-- [ ] Required parity and native-platform tests pass.
 - [ ] `cargo test --workspace` and `cargo fmt --all --check` pass, run by hand — there is no CI to run them.
 - [ ] Unrun live or platform checks are stated.
-- [ ] A future agent can recover the exact distinction, linked test, and
-      deliberate-break check from feature metadata without reading chat.

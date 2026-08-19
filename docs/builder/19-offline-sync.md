@@ -34,15 +34,12 @@ diagnostics.
 
 Evidence changes may emit a new snapshot without a row change.
 
-## Negentropy is capability-gated
+## Acquisition is always an ordinary REQ
 
-NIP-77 reconciliation is used only after that relay has proved support. The
-capability token has no app constructor; an unprobed or unsupported relay uses
-ordinary REQ acquisition.
-
-Limited filters also require care because relay-side limits do not compose
-freely with set reconciliation or coverage attribution. NMP chooses the safe
-wire mechanism; the app declares the selection.
+NMP has no set-reconciliation mechanism; every read is a plain NIP-01 REQ.
+Limited filters require care because relay-side limits do not compose freely
+with coverage attribution. NMP chooses the safe wire mechanism; the app
+declares the selection.
 
 ## Reconnect restores demand, not app subscriptions
 

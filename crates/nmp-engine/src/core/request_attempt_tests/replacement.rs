@@ -1,4 +1,4 @@
-//! Fresh-id request replacement and NIP-77 transition ownership.
+//! Fresh-id request replacement transition ownership.
 
 use nmp_grammar::RelaySessionKey;
 use super::*;
@@ -115,104 +115,6 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
         CoreOwnershipCensus::default()
     );
     assert_ne!(first_filter, second_filter);
-}
-
-#[test]
-fn nip77_replacement_keeps_old_child_through_local_accept_and_commits_at_candidate_eose() {
-    let relay = RelayUrl::parse("wss://fresh-nip77-id.example").unwrap();
-    let session = RelaySessionKey::unauthenticated(relay.clone());
-    let handle = TransportRelayHandle {
-        slot: 83,
-        generation: 1,
-    };
-    let first = atom(&relay, &"33".repeat(32));
-    let second = atom(&relay, &"44".repeat(32));
-    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 8);
-    core.white_box("slot_to_relay.insert", |s| {
-        s.slot_to_relay
-            .insert(handle.slot, (handle, session.clone()))
-    });
-    core.white_box("connected_relays.insert", |s| {
-        s.connected_relays.insert(session.clone())
-    });
-    core.white_box("ever_connected_relays.insert", |s| {
-        s.ever_connected_relays.insert(session.clone())
-    });
-
-    let opened = apply_compile(&mut core, BTreeSet::from([first.clone()]));
-    let (_, first_plan_sub, first_filter, first_attempt) = only_request(&opened);
-    core.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
-        attempt_id: first_attempt,
-        handle,
-    });
-
-    core.white_box("prober.force_supported_for_test", |s| {
-        s.prober.force_supported_for_test(relay.clone())
-    });
-    let probed = core.prober.probed(&relay).unwrap();
-    let mut handoff_effects = Vec::new();
-    core.white_box("begin_neg_handoff", |s| {
-        s.begin_neg_handoff(
-            probed,
-            first_plan_sub.clone(),
-            Some(first_plan_sub.clone()),
-            first_filter,
-            &mut handoff_effects,
-        )
-    });
-    let (_, old_child, _, old_child_attempt) = only_request(&handoff_effects);
-    core.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
-        attempt_id: old_child_attempt,
-        handle,
-    });
-    core.white_box("on_relay_frame", |s| {
-        s.on_relay_frame(
-            handle,
-            session.clone(),
-            RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
-                nostr::SubscriptionId::new(wire_sub_id_string(&old_child)),
-            ))),
-        )
-    });
-    assert_eq!(core.nip77.live_for_plan(&first_plan_sub), Some(&old_child));
-
-    let replacement = apply_compile(&mut core, BTreeSet::from([second]));
-    let (_, second_plan_child, _, second_attempt) = only_request(&replacement);
-    assert_ne!(old_child, second_plan_child);
-    assert!(wire_ops(&replacement)
-        .iter()
-        .all(|op| !matches!(op, WireOp::Close(sub_id) if sub_id == &old_child)));
-    assert_eq!(core.bench_ownership_census().request_replacement_jobs, 1);
-    assert_eq!(core.nip77.live_for_plan(&first_plan_sub), Some(&old_child));
-
-    let accepted = core.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
-        attempt_id: second_attempt,
-        handle,
-    });
-    assert!(wire_ops(&accepted)
-        .iter()
-        .all(|op| !matches!(op, WireOp::Close(sub_id) if sub_id == &old_child)));
-    assert_eq!(core.nip77.live_for_plan(&first_plan_sub), Some(&old_child));
-    assert_eq!(core.bench_ownership_census().request_replacement_jobs, 1);
-
-    let promoted = core.white_box("on_relay_frame", |s| {
-        s.on_relay_frame(
-            handle,
-            session.clone(),
-            RelayFrame::from_message(RelayMessage::EndOfStoredEvents(Cow::Owned(
-                nostr::SubscriptionId::new(wire_sub_id_string(&second_plan_child)),
-            ))),
-        )
-    });
-    assert_eq!(
-        wire_ops(&promoted)
-            .iter()
-            .filter(|op| matches!(op, WireOp::Close(sub_id) if sub_id == &old_child))
-            .count(),
-        1
-    );
-    assert_eq!(core.nip77.live_for_plan(&first_plan_sub), None);
-    assert_eq!(core.bench_ownership_census().request_replacement_jobs, 0);
 }
 
 fn wire_ops(effects: &[Effect]) -> Vec<&WireOp> {

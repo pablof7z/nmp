@@ -7,7 +7,7 @@ use super::*;
 mod relay_session_key_tests {
     use super::*;
     use nmp_store::{coverage_key, CoverageInterval, RedbStore};
-    use nostr::{Keys, SubscriptionId};
+    use nostr::Keys;
 
     fn relay() -> RelayUrl {
         RelayUrl::parse("wss://session.example.com").unwrap()
@@ -40,7 +40,6 @@ mod relay_session_key_tests {
             &sub_id,
             &filter,
             BTreeSet::from([key]),
-            EventFailureTarget::ThisSend,
         );
         let wire_id = wire_sub_id_string(&sub_id);
 
@@ -52,76 +51,6 @@ mod relay_session_key_tests {
                 .attribute_eose(&session_a, &wire_id, Timestamp::from(10u64))
                 .len(),
             1
-        );
-    }
-
-    #[test]
-    fn correlated_completion_uses_exact_send_shape_and_completion_cap() {
-        let relay = relay();
-        let session = RelaySessionKey::unauthenticated(relay.clone());
-        let filter = ConcreteFilter {
-            kinds: Some(BTreeSet::from([1])),
-            until: Some(150),
-            ..ConcreteFilter::default()
-        };
-        let atom = ContextualAtom {
-            filter: filter.clone(),
-            routing: ReadRouting::Auto,
-            authenticate_as: None,
-            routing_evidence: BTreeSet::new(),
-        };
-        let key = coverage_key(&atom);
-        let sub_id = SubId::allocate(relay, &ReadRouting::Auto, None, 1001);
-        let mut attribution = AttributionState::new();
-        attribution.observe_atom(&atom);
-        let completed_send = attribution.record_send(
-            &session,
-            &sub_id,
-            &filter,
-            BTreeSet::from([key.clone()]),
-            EventFailureTarget::ThisSend,
-        );
-        let replay_filter = ConcreteFilter {
-            since: Some(100),
-            ..filter.clone()
-        };
-        let replay_sub_id = SubId::allocate(session.relay.clone(), &ReadRouting::Auto, None, 1002);
-        assert_ne!(sub_id, replay_sub_id, "changed bytes require a fresh id");
-        attribution.record_send(
-            &session,
-            &replay_sub_id,
-            &replay_filter,
-            BTreeSet::from([key.clone()]),
-            EventFailureTarget::ThisSend,
-        );
-
-        assert_eq!(
-            attribution
-                .attribute_correlated_completion(
-                    &session,
-                    &wire_sub_id_string(&sub_id),
-                    completed_send,
-                    Timestamp::from(200u64),
-                )
-                .expect("correlated completion")
-                .eligible_claims()
-                .expect("eligible completion"),
-            vec![(
-                key.clone(),
-                nmp_store::CoverageInterval::new(Timestamp::from(0u64), Timestamp::from(150u64),),
-            )]
-            .as_slice()
-        );
-        assert_eq!(
-            attribution.attribute_eose(
-                &session,
-                &wire_sub_id_string(&replay_sub_id),
-                Timestamp::from(200u64),
-            ),
-            vec![(
-                key,
-                nmp_store::CoverageInterval::new(Timestamp::from(100u64), Timestamp::from(150u64),),
-            )]
         );
     }
 
@@ -168,7 +97,6 @@ mod relay_session_key_tests {
                 &sub_a,
                 &filter_a,
                 BTreeSet::from([key_a.clone()]),
-                EventFailureTarget::ThisSend,
             );
         }
         attribution.record_send(
@@ -176,7 +104,6 @@ mod relay_session_key_tests {
             &sub_b,
             &filter_b,
             BTreeSet::from([key_b.clone()]),
-            EventFailureTarget::ThisSend,
         );
 
         attribution.poison_event_commit_failure(&public_session, &wire_a);
@@ -185,7 +112,6 @@ mod relay_session_key_tests {
             &sub_a,
             &filter_a,
             BTreeSet::from([key_a.clone()]),
-            EventFailureTarget::ThisSend,
         );
 
         for _ in 0..2 {
@@ -225,7 +151,6 @@ mod relay_session_key_tests {
             &sub_a,
             &filter_a,
             BTreeSet::from([key_a.clone()]),
-            EventFailureTarget::ThisSend,
         );
         attribution.poison_event_commit_failure(&public_session, &wire_a);
         attribution.clear_session(&public_session);
@@ -238,62 +163,10 @@ mod relay_session_key_tests {
             &sub_a,
             &filter_a,
             BTreeSet::from([key_a]),
-            EventFailureTarget::ThisSend,
         );
         attribution.discard_sub(&sub_a);
         assert!(attribution
             .attribute_eose_detailed(&public_session, &wire_a, Timestamp::from(10u64))
-            .is_none());
-    }
-
-    #[test]
-    fn missing_id_event_failure_poisons_the_original_neg_send() {
-        let relay = relay();
-        let session = RelaySessionKey::unauthenticated(relay.clone());
-        let filter = ConcreteFilter {
-            kinds: Some(BTreeSet::from([1])),
-            ..ConcreteFilter::default()
-        };
-        let atom = ContextualAtom {
-            filter: filter.clone(),
-            routing: ReadRouting::Auto,
-            authenticate_as: None,
-            routing_evidence: BTreeSet::new(),
-        };
-        let key = coverage_key(&atom);
-        let neg_sub = SubId::allocate(relay.clone(), &ReadRouting::Auto, None, 1005);
-        let backfill_filter = ConcreteFilter {
-            ids: Some(BTreeSet::from(["01".repeat(32)])),
-            ..ConcreteFilter::default()
-        };
-        let backfill_sub = SubId::allocate(relay, &ReadRouting::Auto, None, 1006);
-        let mut attribution = AttributionState::new();
-        let neg_send = attribution.record_send(
-            &session,
-            &neg_sub,
-            &filter,
-            BTreeSet::from([key]),
-            EventFailureTarget::ThisSend,
-        );
-        attribution.record_send(
-            &session,
-            &backfill_sub,
-            &backfill_filter,
-            BTreeSet::new(),
-            EventFailureTarget::Correlated(neg_send),
-        );
-
-        attribution.poison_event_commit_failure(&session, &wire_sub_id_string(&backfill_sub));
-
-        assert!(attribution
-            .attribute_correlated_completion(
-                &session,
-                &wire_sub_id_string(&neg_sub),
-                neg_send,
-                Timestamp::from(10u64),
-            )
-            .expect("original NEG completion")
-            .eligible_claims()
             .is_none());
     }
 
@@ -333,125 +206,6 @@ mod relay_session_key_tests {
         assert!(core.connected_relays.contains(&unauthenticated));
         assert!(!core.connected_relays.contains(&session_a));
         assert!(core.connected_relays.contains(&session_b));
-    }
-
-    #[test]
-    fn protected_neg_frames_cannot_resolve_the_public_probe_or_inherit_its_diagnostics() {
-        let relay = relay();
-        let unauthenticated = RelaySessionKey::unauthenticated(relay.clone());
-        let protected = RelaySessionKey::new(
-            relay.clone(),
-            Some(Keys::generate().public_key()),
-        );
-        let filter = ConcreteFilter {
-            kinds: Some(BTreeSet::from([1])),
-            ..ConcreteFilter::default()
-        };
-        let atoms = BTreeSet::from([
-            ContextualAtom {
-                filter: filter.clone(),
-                routing: ReadRouting::Explicit(vec![relay.clone()]),
-                authenticate_as: None,
-                routing_evidence: BTreeSet::new(),
-            },
-            ContextualAtom {
-                filter,
-                routing: ReadRouting::Explicit(vec![relay.clone()]),
-                authenticate_as: protected.authenticate_as,
-                routing_evidence: BTreeSet::new(),
-            },
-        ]);
-        let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
-        core.white_box("router.compile", |s| {
-            s.router.compile(&atoms, &s.routing_facts, s.cap)
-        });
-        let unauthenticated_handle = TransportRelayHandle {
-            slot: 5,
-            generation: 1,
-        };
-        let protected_handle = TransportRelayHandle {
-            slot: 6,
-            generation: 1,
-        };
-        core.handle(EngineMsg::RelayConnected(unauthenticated_handle, unauthenticated.clone()));
-        core.handle(EngineMsg::RelayConnected(
-            protected_handle,
-            protected.clone(),
-        ));
-        let probe = core.white_box("prober.begin_probe", |s| {
-            s.prober.begin_probe(&relay).unwrap()
-        });
-        let wire_id = wire_sub_id_string(&probe.sub_id);
-
-        let protected_neg_msg = RelayFrame::from(RelayMessage::NegMsg {
-            subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(wire_id.clone())),
-            message: std::borrow::Cow::Owned("6100".to_string()),
-        });
-        assert!(core
-            .handle(EngineMsg::RelayFrame(
-                protected_handle,
-                protected.clone(),
-                protected_neg_msg,
-            ))
-            .is_empty());
-        let protected_neg_err = RelayFrame::from(RelayMessage::NegErr {
-            subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(wire_id.clone())),
-            message: std::borrow::Cow::Owned("blocked: unsupported".to_string()),
-        });
-        assert!(core
-            .handle(EngineMsg::RelayFrame(
-                protected_handle,
-                protected.clone(),
-                protected_neg_err,
-            ))
-            .is_empty());
-        assert_eq!(
-            core.prober.state(&relay),
-            crate::negentropy::ProbeState::Probing
-        );
-
-        let probing = core.diagnostics_snapshot();
-        let public_diagnostics = probing
-            .relays
-            .iter()
-            .find(|entry| entry.authenticate_as.is_none())
-            .unwrap();
-        let protected_diagnostics = probing
-            .relays
-            .iter()
-            .find(|entry| entry.authenticate_as == protected.authenticate_as)
-            .unwrap();
-        assert_eq!(public_diagnostics.nip77_behavior, "probing");
-        assert_eq!(protected_diagnostics.nip77_behavior, "unknown");
-
-        let public_neg_msg = RelayFrame::from(RelayMessage::NegMsg {
-            subscription_id: std::borrow::Cow::Owned(SubscriptionId::new(wire_id)),
-            message: std::borrow::Cow::Owned("6100".to_string()),
-        });
-        core.handle(EngineMsg::RelayFrame(unauthenticated_handle, unauthenticated, public_neg_msg));
-        assert_eq!(
-            core.prober.state(&relay),
-            crate::negentropy::ProbeState::Supported
-        );
-        let resolved = core.diagnostics_snapshot();
-        assert_eq!(
-            resolved
-                .relays
-                .iter()
-                .find(|entry| entry.authenticate_as.is_none())
-                .unwrap()
-                .nip77_behavior,
-            "behaviorally_proven"
-        );
-        assert_eq!(
-            resolved
-                .relays
-                .iter()
-                .find(|entry| entry.authenticate_as == protected.authenticate_as)
-                .unwrap()
-                .nip77_behavior,
-            "unknown"
-        );
     }
 
     #[test]

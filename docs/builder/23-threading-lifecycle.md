@@ -95,7 +95,7 @@ typed terminal result, cancels platform DNS or HTTP body work, and drains the
 task even if a cloned engine handle, live subscription, or cancellation token
 survives.
 The independent 250 ms capability-decision grace remains an engine-loop
-deadline, so a slow HTTP endpoint cannot hold the WebSocket NIP-77 fallback.
+deadline, so a slow HTTP endpoint cannot hold up WebSocket work.
 
 The public Swift acquisition path is runtime-qualified on macOS and an actual
 iOS Simulator process. Host XCTest executes a local-hostname NIP-11 fetch through

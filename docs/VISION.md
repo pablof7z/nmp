@@ -126,7 +126,7 @@ A query snapshot contains:
 - explicit local shortfall or limit evidence when applicable.
 
 NMP never reports `synced`, `syncHealth`, global `complete`, or an
-"authoritative empty" interpretation. EOSE, negentropy reconciliation, cached
+"authoritative empty" interpretation. EOSE, cached
 watermarks, connection failures, and AUTH challenges are facts about particular
 planned sources. They cannot prove that no unknown or private relay has more
 matching events.
@@ -232,15 +232,13 @@ that content is published into a group.
 Composition uses immutable unsigned drafts:
 
 ```text
-blob  = Blossom.upload(file)
-photo = Nip68.buildPhoto(blob)
-receipt = group.publish(photo)
+message = NipC7.chat(text)
+receipt = group.publish(message)
 ```
 
 The schema module builds the draft. A contextual module adds only its
 protocol-defined contribution, such as NIP-29's `h` tag and host-relay
 constraint. The core validates the combined value, signs once, and publishes.
-Blossom upload failure and Nostr publication failure remain separate outcomes.
 No app closure or module registration callback enters the decision path.
 
 ### 4.1 Semantic edits: a capability owns meaning, the core owns execution

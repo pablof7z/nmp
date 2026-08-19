@@ -11,8 +11,8 @@
 //! WebSocket relay that requires a fresh, exactly validated NIP-42 handshake
 //! before either protected reads or writes may cross the wire.
 //!
-//! Same version-shadowing precaution as `runtime_integration.rs`/
-//! `negentropy_live.rs`: never `use nostr_relay_builder::prelude::*` (it
+//! Same version-shadowing precaution as `runtime_integration.rs`:
+//! never `use nostr_relay_builder::prelude::*` (it
 //! re-exports a DIFFERENT `nostr` than this workspace's pinned `0.44.4`);
 //! every cross-version value is bridged by explicit hex/id round-trip.
 
@@ -926,9 +926,8 @@ async fn watermark_cold_start_offline() {
     let url = RelayUrl::parse(&relay.url().await.to_string()).expect("parse relay url");
 
     // Seed 3 of `a`'s own posts directly into the relay's database BEFORE
-    // anyone subscribes -- the plain REQ/EOSE round trip (not negentropy;
-    // this relay is not yet known `Supported`, same bootstrap-ordering note
-    // as `negentropy_live.rs`) must fetch and prove all 3.
+    // anyone subscribes -- the plain REQ/EOSE round trip must fetch and
+    // prove all 3.
     let posts: Vec<RelayEvent> = (0..3)
         .map(|i| {
             RelayEventBuilder::text_note(format!("cold-start post #{i}"))

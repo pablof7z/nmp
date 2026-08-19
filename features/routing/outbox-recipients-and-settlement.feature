@@ -27,10 +27,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
 
   # ---- the worked example ------------------------------------------------
 
-  # nmp:id=ROUTING-OUTBOXSETTLEMENT-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::three_recipients_with_one_relay_list_between_them_retire_the_obligation
-  # nmp:falsifier=Keep the obligation open for a recipient whose lookup settled without a relay list; the owner's three-p-tag example never retires.
   Scenario: Three recipients, one relay list between them, and the outbox is consumed
     # Pablo's example, transcribed step for step. Bob has a kind:10002; Carol
     # and Dave definitively do not, and the indexers finishing their stored
@@ -45,10 +41,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     Then the note is routed to exactly "author-write-1", "author-write-2", "app-indexer", and "bob-inbox"
     And routing is complete
 
-  # nmp:id=ROUTING-OUTBOXSETTLEMENT-002
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_settled_absent_recipient_adds_no_relay_and_delays_nothing
-  # nmp:falsifier=Fold a settled absence into ignorance; it declares a route need, the answer never completes and the two states stop being distinguishable.
   Scenario: A settled-absent recipient neither adds a relay nor delays anything
     # The unit version of the rule above. "Settled absent" is a resolved
     # input: it contributes nothing to the route AND blocks nothing, which is
@@ -62,10 +54,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
 
   # ---- unknown keeps it live ---------------------------------------------
 
-  # nmp:id=ROUTING-OUTBOXSETTLEMENT-003
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_unlooked_up_recipient_keeps_the_answer_open_while_known_relays_are_used_now
-  # nmp:falsifier=Read an unlooked-up recipient as having no inbox; the answer completes on a cold cache and the note is silently under-routed on every first run.
   Scenario: A recipient nobody has looked up yet keeps the routing open
     # The distinction that earns the three-valued model. Carol has not been
     # looked up, so her inbox is unknown -- not empty. Treating that as "she
@@ -81,11 +69,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     And routing is not complete
     And the publish has not failed
 
-  # nmp:id=ROUTING-OUTBOXSETTLEMENT-004
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_recipients_arriving_relay_list_completes_the_route_it_was_holding_open
-  # nmp:evidence=rust:nmp::fresh_and_recovered_auto_writes_share_one_later_author_route
-  # nmp:falsifier=Resolve the route once at acceptance instead of re-executing the strategy when the missing relay list lands; the late inbox never joins and the app would have to publish again.
   Scenario: When the unknown settles, the route finishes without the app asking again
     # The wake. The app published once and holds one receipt; it never
     # re-submits, never polls, and never learns that a lookup was outstanding.
@@ -98,10 +81,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     Then the note is routed to exactly "author-write-1", "author-write-2", "app-indexer", "bob-inbox", and "carol-inbox"
     And routing is complete
 
-  # nmp:id=ROUTING-OUTBOXSETTLEMENT-005
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_unknown_that_settles_absent_finishes_the_route_without_adding_a_relay
-  # nmp:falsifier=Retire an obligation only when a settlement names a relay; every note to someone without a relay list stays routed forever.
   Scenario: An unknown that settles as absent finishes the route just as well
     # The other settlement outcome, and the one that makes retirement
     # reachable at all. Nothing new is added to the route; what changes is
@@ -115,10 +94,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     Then the note is routed to exactly "author-write-1", "author-write-2", "app-indexer", and "bob-inbox"
     And routing is complete
 
-  # nmp:id=ROUTING-OUTBOXSETTLEMENT-006
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::one_unlooked_up_recipient_among_settled_ones_keeps_the_answer_open
-  # nmp:falsifier=Complete the answer once most recipients have settled; the one unanswered addressee is dropped without anyone being told.
   Scenario: One unknown among many settled recipients is enough to keep it open
     # Completion is a property of the whole recipient set, not a majority of
     # it. Four of five are answered; the fifth alone holds the obligation
@@ -135,10 +110,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
 
   # ---- the author's own list ---------------------------------------------
 
-  # nmp:id=ROUTING-OUTBOXSETTLEMENT-007
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_author_who_declared_no_write_relays_is_settled_not_unknown
-  # nmp:falsifier=Read a present relay list whose write half is empty as not-yet-known; a published "I write nowhere in particular" parks the write on an answer that already arrived.
   Scenario: An author whose relay list declares zero write relays is known, not unknown
     # A published kind:10002 that names no write relays is an ANSWER. The
     # author said, on the record, "I write nowhere in particular" -- and the
@@ -153,10 +124,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     Then the note is routed to exactly "app-indexer"
     And routing is complete
 
-  # nmp:id=ROUTING-OUTBOXSETTLEMENT-008
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_author_whose_entries_are_all_inbound_has_a_settled_empty_outbox
-  # nmp:falsifier=Fall back to the author's inbound entries when their outbound half is empty; an all-read-marked list routes their own note to the relays they collect mail at.
   Scenario: A relay list that is all read-marked is the same known-empty case
     # The shape this actually turns up as in the wild: someone's list has
     # entries, all of them read-marked, so their WRITE set is empty while
@@ -167,11 +134,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     And the note is never routed to "author-read-only"
     And routing is complete
 
-  # nmp:id=ROUTING-OUTBOXSETTLEMENT-009
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_unlooked_up_author_parks_the_route_and_keeps_the_operator_relay_it_has
-  # nmp:evidence=rust:nmp::fresh_and_recovered_auto_writes_share_one_later_author_route
-  # nmp:falsifier=Fail the resolution when the directory knows no write relays for the author yet; the first publish of a fresh install dies permanently on a signed, journalled event.
   Scenario: Publishing before my own relay list has ever been fetched waits, and does not die
     # The cold start, and the defect it rules out: a resolution that could
     # ERROR when the directory knew no write relays, composed with a routing
@@ -190,11 +152,6 @@ Feature: An outbox can finish -- unknown recipients keep it open, absent ones do
     And routing is not complete
     And the publish has not failed
 
-  # nmp:id=ROUTING-OUTBOXSETTLEMENT-010
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_authors_arriving_relay_list_completes_the_route_that_waited_on_it
-  # nmp:evidence=rust:nmp::fresh_and_recovered_auto_writes_share_one_later_author_route
-  # nmp:falsifier=Journal the resolved relay set instead of the Auto strategy; a relay list that arrives after acceptance never reaches the parked write.
   Scenario: My own relay list arriving finishes a route that was waiting on it
     # The author arm of the wake. Same one receipt, same event, no
     # re-submission by the app.

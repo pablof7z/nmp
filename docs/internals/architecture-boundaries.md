@@ -1,8 +1,7 @@
 # Architecture boundaries
 
 Where a decision ends, where a commit begins, and what is allowed to happen
-before that commit. This is the map `AGENTS.md`'s fifth standing convention
-assumes you have.
+before that commit.
 
 It is not a style guide and not a review step. Nothing here is a question you
 answer in a PR description.
@@ -122,8 +121,7 @@ Keep transaction orchestration direct and narrow; extract the calculation
 ## Ownership rules
 
 - **One owner per lifecycle, retry, queue, resource and connection.** Two owners
-  of one property is a design defect, not a style preference (`AGENTS.md`
-  standing conventions).
+  of one property is a design defect, not a style preference.
 - **The runtime executes; the semantic owner decides.** The runtime owns
   threads, sessions, cancellation, scheduling and delivery. It does not acquire
   policy merely because data passes through it.

@@ -26,8 +26,6 @@
 - **Addressable event:** a replaceable event keyed by kind, author, and `d` tag.
 - **NIP-65 outbox model:** discovery of an author's declared write relays, used
   to acquire that author's events or route their publication.
-- **Negentropy:** NIP-77 set reconciliation that identifies which event ids one
-  side is missing without replaying the entire set.
 - **AUTH:** NIP-42 relay challenge/response. The identity used can change what
   one source returns, so it participates in authenticated identity.
 - **npub / nsec / hex:** public-key, secret-key, and raw encodings. Secret
@@ -48,10 +46,8 @@
   projection vocabulary used by `Derived`. Tag projection accepts arbitrary
   event tag names; it is not limited to indexed filter keys.
 - **Read routing:** whether the app named relays or said nothing. Nothing
-  else, and no name for any lane NMP then uses — see
-  `docs/internals/conventions/naming-no-invented-categories.md` §3 for why
-  "source authority", "public" and "author outboxes" were all deleted rather
-  than renamed.
+  else, and no name for any lane NMP then uses: "source authority", "public"
+  and "author outboxes" were all deleted rather than renamed.
 - **Access context:** typed identity/visibility context that may change a
   source's answer.
 - **Query snapshot:** current canonical local rows plus cache, acquisition, and

@@ -43,21 +43,12 @@ Feature: A write publishes as the current account unless it names someone else
 
   # ---- the default -------------------------------------------------------
 
-  # nmp:id=IDENTITY-WRITE-SELECTION-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::sign_event_uses_the_current_account_without_publishing
-  # nmp:falsifier=Resolve the default identity from anything except the current account; the exact authored event no longer matches the selected account.
   Scenario: A write that names no identity publishes as the current account
     Given "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90" is the current account
     When I compose an event of kind 1 saying "hello" and publish it naming no identity
     Then the published event is authored by "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90"
     And it was signed by that account's signer
 
-  # nmp:id=IDENTITY-WRITE-SELECTION-002
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::current_account_and_external_kind3_changes_emit_only_real_resolution_changes
-  # nmp:evidence=rust:nmp::removing_or_clearing_session_never_retargets_or_discards_accepted_writes
-  # nmp:falsifier=Cache the first selected account as the default for later writes, or rewrite the first accepted write when selection changes; the resolution or frozen-obligation proof fails.
   Scenario: The default follows the current account, it does not remember the first one
     # "Whoever is current at acceptance" resolved twice, against two different
     # answers. This is what distinguishes a resolution instruction from a
@@ -71,10 +62,6 @@ Feature: A write publishes as the current account unless it names someone else
 
   # ---- naming an identity ------------------------------------------------
 
-  # nmp:id=IDENTITY-WRITE-SELECTION-003
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_explicit_identity_publishes_as_a_secondary_without_moving_the_current_account
-  # nmp:falsifier=Require an explicit identity to become current or sign its write with the selected account; the secondary-identity proof observes a moved selection or wrong author.
   Scenario: A write can name an identity that is not the current account
     # The podcast case. Publishing as one identity must not require making it
     # the current one, because changing the current account affects everything else
@@ -85,10 +72,6 @@ Feature: A write publishes as the current account unless it names someone else
     And it was signed by the podcast identity's signer
     And "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90" is still the current account
 
-  # nmp:id=IDENTITY-WRITE-SELECTION-004
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_explicit_identity_publishes_as_a_secondary_without_moving_the_current_account
-  # nmp:falsifier=Make explicit identity resolution depend on a current account; the explicit-author path fails while selection is absent.
   Scenario: A named identity publishes while no account is current
     # Naming a key is self-sufficient: the author is known, the signer is
     # registered, and nothing about the write needs a session. An app that
@@ -101,11 +84,6 @@ Feature: A write publishes as the current account unless it names someone else
 
   # ---- the pin -----------------------------------------------------------
 
-  # nmp:id=IDENTITY-WRITE-SELECTION-005
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::removing_or_clearing_session_never_retargets_or_discards_accepted_writes
-  # nmp:evidence=rust:nmp::an_explicit_identity_publishes_as_a_secondary_without_moving_the_current_account
-  # nmp:falsifier=Read mutable selection after acceptance instead of the frozen public key; changing the current account retargets the pending explicit write.
   Scenario: Switching accounts never retargets a write that was already accepted
     # The named-identity half. The switch happens while the write is still in
     # flight, and it changes nothing about it -- not the author, not which
@@ -120,10 +98,6 @@ Feature: A write publishes as the current account unless it names someone else
     When the podcast identity's signing provider answers
     Then the published event is authored by "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
 
-  # nmp:id=IDENTITY-WRITE-SELECTION-006
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::removing_or_clearing_session_never_retargets_or_discards_accepted_writes
-  # nmp:falsifier=Leave Identity.Active unresolved after acceptance; changing selection changes the pending write's public key instead of preserving its frozen author.
   Scenario: A current-account write is pinned to whoever was current when it was accepted
     # The half that only exists because of this design, and the one most
     # likely to regress. The app never named a key, so nothing in the
@@ -139,10 +113,6 @@ Feature: A write publishes as the current account unless it names someone else
     When the first account's signing provider answers
     Then the published event is authored by "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90"
 
-  # nmp:id=IDENTITY-WRITE-SELECTION-007
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::removing_or_clearing_session_never_retargets_or_discards_accepted_writes
-  # nmp:falsifier=Recover Identity.Active instead of its accepted public key; a different restored current account silently changes the write author.
   Scenario: A restart does not re-resolve an accepted write against the new session
     # The pin has to survive the process, not just the switch. Replay from
     # the journal must reload a decided identity, never re-run the
@@ -157,10 +127,6 @@ Feature: A write publishes as the current account unless it names someone else
 
   # ---- failing closed ----------------------------------------------------
 
-  # nmp:id=IDENTITY-WRITE-SELECTION-008
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::sign_event_without_a_current_account_fails_closed
-  # nmp:falsifier=Accept Identity.Active with no current account; a receipt or write obligation exists without any concrete public key.
   Scenario: No current account and no named identity fails before acceptance
     # Nothing is pinned, so nothing may park. "Whoever is current" with nobody
     # current names no one, and there is no key to wait for -- so this is a
@@ -176,11 +142,6 @@ Feature: A write publishes as the current account unless it names someone else
 
   # ---- bech32 stops at the app's boundary --------------------------------
 
-  # nmp:id=IDENTITY-WRITE-SELECTION-009
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-grammar::decodes_a_bare_npub
-  # nmp:evidence=rust:nmp-ffi::an_explicit_identity_round_trips_as_the_parsed_pubkey
-  # nmp:falsifier=Pass the human npub representation through the internal write identity instead of its decoded public key; the boundary or round-trip proof no longer has one exact typed value.
   Scenario: An app that holds an npub decodes it before it reaches the write plane
     # The intended path, and the reason the refusal below costs apps nothing.
     # The decode happens where the display form actually arrived -- the paste
@@ -191,10 +152,6 @@ Feature: A write publishes as the current account unless it names someone else
     And I compose an event of kind 1 saying "episode 15 is up" and publish it naming that identity
     Then the published event is authored by "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
 
-  # nmp:id=IDENTITY-WRITE-SELECTION-010
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-ffi::a_bech32_npub_identity_is_refused_however_well_formed
-  # nmp:falsifier=Let the internal explicit-identity parser accept npub as an alternate representation; the exact boundary refusal proof succeeds instead of failing closed.
   Scenario: An identity given in bech32 is refused, however well-formed it is
     # Not a parsing failure -- a boundary rule. The string is a perfectly
     # valid npub for an identity that really is registered here, and it is

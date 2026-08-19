@@ -108,37 +108,17 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   determined through the public API — `DiagnosticsSnapshot` exposes no
   retained-bookkeeping or memory fact at all. C17's `distinct` phase is red
   until this is answered.
-- **A cold start never reconciles over NIP-77; it always refetches (#1888).**
-  `begin_neg_handoff` is only reachable when the relay already carries a
-  behaviorally-minted probe verdict at the moment a request is placed, and the
-  probe is asynchronous — a fresh engine sends its query's REQ as soon as the
-  socket is up and learns the relay supports NIP-77 just too late to use it.
-  Nothing re-plans the in-flight request. Canary C14 measured a first-run
-  cold start refetching all 70 events with `nip77Behavior` reporting
-  `behaviorally_proven` and `nip77Handoff` never leaving `none`;
-  reconciliation engages on the NEXT request (a reconnect replay), where the
-  same divergence costs 10 events instead of 70.
-- **Negentropy has no app-facing door, and the owner ruled it should have
-  one.** Asked on 2026-08-17 whether apps should be able to use negentropy
-  explicitly, he answered *"meaning if apps should be able to use negentropy
-  explicitly? yes, they should"*. Today NIP-77 surfaces to an app only as
-  three diagnostics string fields and one terminal request variant; nothing
-  is app-constructible. This is a ruling on direction, not a design — and
-  whatever the door turns out to be has to survive the two facts recorded
-  directly above and below it: a cold start never reconciles, and nothing
-  distinguishes reconciled from refetched per query. Exposing today's
-  behaviour as-is would hand an app a door that silently does a full refetch
-  on first use. Related: #1806 owns extracting NIP-77 out of the core, which
-  is a different question from whether an app can drive it.
-
-- **NIP-77 reconciliation is invisible per query (#1888).** Negentropy
-  coverage is attributed through the same `attribute_eose` path as an ordinary
-  EOSE, so `SourceEvidence.reconciledThrough` and `SourceStatus` are identical
-  whether a result was reconciled or refetched. The only public distinguisher
-  is the engine-global, per-relay
-  `RelayDiagnostics.nip77Advertisement`/`nip77Behavior`/`nip77Handoff` triple,
-  and `nip77Handoff` is a transient an app must accumulate from
-  `observeDiagnostics()` to see at all.
+- **NMP does not reconcile at all; every read is a plain REQ.** NIP-77
+  negentropy was deleted on the owner's instruction. It never engaged on a
+  cold start (the behavioral probe resolved after the first REQ was already
+  placed, so the first run always refetched in full), it had no app-facing
+  door — three diagnostics strings and one terminal request variant, none of
+  it app-constructible — and per query it was indistinguishable from a
+  refetch, because its coverage was attributed through the same
+  `attribute_eose` path. The prober, the reconciler, the four role
+  subscriptions, the liveness sweep, the `nip77Advertisement`/`nip77Behavior`/
+  `nip77Handoff` diagnostics triple and `RequestTerminal::Nip77` are all gone.
+  Whatever replaces it, if anything does, starts from a clean surface.
 
 - **Two of NIP-22's three root shapes cannot be read back through the
   capability's own demand (#1876).** `commentThreadDemand(root:)` binds the
@@ -161,25 +141,15 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   each and compare. Recorded by Canary C11, which asserts the demand equality
   and prints both values rather than freezing either shape.
 
-- **The FIRST `requestRows` on a window is dropped (#1886).** Canary C6
-  measured a window opened at `initial: 10` staying at 10 rows for a bounded
-  45s after `requestRows(atLeast: 20)`, with the relay up and holding 150
-  matching events, and the advance delivering `WindowLoad.returned(added: 0)`.
-  It never self-heals, and re-issuing the SAME target is a documented no-op,
-  so an app has no way to ask again from where it is — in a real feed this is
-  the first scroll-to-bottom doing nothing. Deterministic 5/5 across
-  `(initial, firstTarget)` of (10,11), (10,20), (10,50), (1,2) and
-  (10,10)→(10,11), with 0ms/1s/3s settle beats, so it is neither a race nor a
-  function of step size. Every LATER advance reaches its target exactly. Root
-  cause is in the issue: `stage_history_advance` attaches wire handles without
-  arming admission, and the runtime drops the stage turn's effects on the
-  success path, so the advance's REQ never reaches the wire; the second
-  advance only works because its commit supersedes the first advance's handle
-  and `withdraw_wire_demand` arms admission as a side effect. C6's first-advance
-  phase is red until this is fixed. A second, related fact recorded there:
-  `WindowLoad.returned(added:)` is not a usable progress signal — across runs
-  the same advance reported `added: 20` and `added: 0`, with the rows arriving
-  in a later `.idle` batch.
+- **`WindowLoad.returned(added:)` is not a usable progress signal.** Canary C6
+  recorded the SAME advance reporting `added: 20` on one run and `added: 0` on
+  another, with the rows arriving in a later `.idle` batch. `added` counts what
+  one commit projected from the local store, which says nothing about what the
+  advance will end up holding once the relay answers, so an app cannot use it
+  to decide whether a scroll made progress. Wait on the delivered row count
+  instead. (The FIRST-advance drop C6 also recorded, #1886, is fixed: a staged
+  advance now arms wire admission and the runtime dispatches the staged turn's
+  effects on the success path.)
 
 - **A derived binding is proven to GROW; nothing proves it retracts.** Canary
   C4 (#1871) drives `NMPBinding.derived` end to end against a real relay: a
@@ -289,18 +259,12 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   `nmp-nip65` ships engine-free plus an installable routing provider and native
   facade assembly, but the explicit kind:10002 bootstrap-publication helper has
   no native projection; native apps must not hand-roll that separate operation.
-- **`nmp-blossom` covers the BUD verbs and their FFI/Swift/Kotlin projection,
-  but not the composition layers (epic #216).** The `get`/`media` endpoints,
-  NIP-68 `imeta` picture events, and the upload-then-publish composition seam
-  are tracked follow-ups (#545/#551/#555).
-- **`nmp-nip68` owns kind:20 build/decode with `imeta` provenance, but not the
-  composition, FFI/Swift/Kotlin projection, or richer tag layers (#558, epic
-  #216).**
-- **`nmp-media` provides the standalone staged composition seam
-  (prepare → upload → compose) with separated failure domains, but not the
-  durable upload, the FFI projection, or BUD-03 server-list placement (#559,
-  #562, epic #216).** The upload half is not crash-durable; the
-  engine-integrated durable-upload obligation is the additive #562.
+- **No blob-storage or media-composition capability.** Blossom blob upload
+  (`nmp-blossom`), NIP-68 kind:20 picture events (`nmp-nip68`), the staged
+  upload-then-publish seam (`nmp-media`) and the exact-byte asset identity
+  they shared (`nmp-asset`) were all deleted on the owner's instruction: none
+  had an application consumer. NMP has no media door on any surface, and epic
+  #216 is not being pursued.
 - **No general protocol-composer catalog; no kind:1-first core catalog.**
   Composition is selectively built: modules claim only exact NIP-defined
   schemas and typed contextual operations may add their own tags/route facts
@@ -340,6 +304,18 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   evidence refresh it protects only fires when a covered-atom reattach
   transfers request metadata, and nothing produces transferred claims today.
   Enforced only by a `debug_assert!` precondition, not a behavioural test.
+- **`CoordinateCoverage::Reconciling` no longer has a falsifier.** The
+  `limit: 0` coordinate request that state names was only ever minted by the
+  NIP-77 live-first barrier, and its falsifier
+  (`a_live_first_barrier_never_publishes_over_an_unread_base`) drove that
+  barrier through a real publish. NIP-77 is deleted, so the test could no
+  longer reach the state and went with it. The classification itself is
+  KEPT and is still correct: `coordinate_request_shape` reads the filter, not
+  NIP-77 state, so an application live query carrying `limit: 0` over exactly
+  one coordinate still lands on `LiveFirstBarrier`/`Reconciling` and still
+  parks the semantic publish gate rather than publishing over an unread base.
+  What is gone is the proof that it does. Re-establishing it needs a fixture
+  that reaches the gate through an app-driven `limit: 0` query.
 - **`abandon_sub` call-site asymmetry — reframed, not audited.** The question
   "does every path that retires a subscription go through one door" stops being
   askable once the retiring field cluster (`active_request_evidence`,

@@ -62,11 +62,6 @@ async fn relay_publishes_nothing(w: &mut NmpWorld, name: String) {
     w.publish_no_relay_document(&name);
 }
 
-#[given(regex = r#"^relay "([^"]+)" advertises that NIP-77 is unsupported$"#)]
-async fn relay_advertises_nip77_unsupported(w: &mut NmpWorld, name: String) {
-    w.advertise_nip77_unsupported(&name);
-}
-
 #[given(regex = r#"^relay "([^"]+)" accepts subscription names of at most (\d+) characters$"#)]
 async fn relay_accepts_subid_length(w: &mut NmpWorld, name: String, max: u64) {
     w.advertise_subid_length(&name, max);

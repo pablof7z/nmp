@@ -457,7 +457,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
 /// ack must still fan out to both co-owners, not just whichever one owns the
 /// lane the ack physically arrived on.
 ///
-/// nmp:falsifier=An ack for an event two co-owners share reaches both
+/// An ack for an event two co-owners share reaches both
 /// receipts after a restart, exactly as it does in-process.
 #[test]
 fn a_shared_events_ack_reaches_every_co_owner_after_a_restart() {

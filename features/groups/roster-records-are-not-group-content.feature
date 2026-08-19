@@ -20,11 +20,6 @@ Feature: Asking for a group's roster through the wrong door says no
   Background:
     Given a group hosted by one relay
 
-  # nmp:id=GROUPS-RECORDSNOTCONTENT-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-nip29::a_read_selection_naming_the_relay_signed_records_is_refused_not_answered
-  # nmp:evidence=rust:nmp::a_roster_read_through_the_content_door_is_refused_not_silently_empty
-  # nmp:falsifier=Verified red-then-green in `nmp_nip29::group_demand_at` by removing the refusal and scoping the read by the group-context row anyway: `assertion left == right failed: the door must say no; a door that returns nothing forever is worse -- left: None, right: Some(Context(RecordsAreNotContextScoped { kinds: {39001, 39002} }))`. That is the shipped defect exactly: the read returns Ok, the subscription opens, no record can match, and the app sees an empty roster it cannot distinguish from a real one.
   @nip29
   Scenario Outline: A content read that asks for a relay-signed record is refused
     When the app asks to read <records> through the group's content door
@@ -39,10 +34,6 @@ Feature: Asking for a group's roster through the wrong door says no
       | the member list                  |
       | the admin list and the member list |
 
-  # nmp:id=GROUPS-RECORDSNOTCONTENT-002
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-nip29::a_read_selection_naming_the_relay_signed_records_is_refused_not_answered
-  # nmp:falsifier=Refuse only when the whole selection is relay-signed records, letting a mixed selection through with the unmatchable part silently dropped; the app would receive the chat messages it asked for and quietly nothing at all for the roster it asked for in the same breath, which is the original silent failure wearing a partial success.
   @nip29
   Scenario: Asking for chat and the roster together is still refused
     When the app asks to read chat messages and the member list in one go
@@ -50,21 +41,12 @@ Feature: Asking for a group's roster through the wrong door says no
     And the refusal names the member list
     And the chat messages are not delivered separately as a consolation
 
-  # nmp:id=GROUPS-RECORDSNOTCONTENT-003
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-nip29::the_records_refusal_names_both_tag_axes
-  # nmp:falsifier=Refuse without saying why; the app author is told their read is invalid and is given nothing to act on -- and the natural next move, from the same evidence, is to conclude the roster is simply unreadable through NMP and go back to parsing raw tags, which is the outcome #1233 exists to end.
   @nip29
   Scenario: The refusal says enough to find the right door
     When the app asks to read the member list through the group's content door
     Then the refusal explains that these records identify themselves differently
     And it names which record was asked for
 
-  # nmp:id=GROUPS-RECORDSNOTCONTENT-004
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::ordinary_group_content_still_reads_through_the_content_door
-  # nmp:evidence=rust:nmp-nip29::a_read_branch_imposes_no_kind_catalogue_over_arbitrary_app_selections
-  # nmp:falsifier=Widen the refusal from "these three records identify themselves by a different row" to a catalogue of what may live in a group; a chat message, a reaction, a moderation action or an application's own event type would start being refused or privileged by the group door, which is the fixed content catalogue that was removed once already (#838) coming back in a new spelling.
   @nip29
   Scenario Outline: Everything that really is in the group still reads normally
     When the app asks to read <content> through the group's content door
@@ -79,10 +61,6 @@ Feature: Asking for a group's roster through the wrong door says no
       | events another spec defines          |
       | an event type nothing defines        |
 
-  # nmp:id=GROUPS-RECORDSNOTCONTENT-005
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_empty_record_selection_is_refused_rather_than_observed
-  # nmp:falsifier=Open the observation anyway when the app named no record; it would deliver a permanently empty state forever, indistinguishable from a group nothing has been published about -- the same silent failure this feature exists to close, reintroduced on the door that replaced it.
   @nip29
   Scenario: Watching no records at all is refused too
     When the app asks to watch the group's records but names none of them

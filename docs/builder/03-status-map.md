@@ -16,8 +16,8 @@ repository today?
   coalesces compatible wire filters, and caps fan-out.
 - The store applies id dedup, provenance merge, replaceable/addressable winner
   semantics, NIP-09 deletion, NIP-40 expiry, coverage persistence, and GC rules.
-- Transport connects to real relays, verifies inbound events, replays demand on
-  reconnect, and supports probed negentropy.
+- Transport connects to real relays, verifies inbound events, and replays
+  demand on reconnect.
 - Caller-supplied signed writes are verified at the engine acceptance boundary
   before `Accepted` or relay publication (#56).
 - Durable and at-most-once writes are atomically accepted as one canonical

@@ -1,4 +1,4 @@
-use nmp_grammar::RelaySessionKey;
+use nmp_grammar::{ReadRouting, RelaySessionKey};
 use super::canonical::{decode_observed_at, fold_seen_at};
 use super::commit::commit_prepared;
 use super::postings::Family;
@@ -679,8 +679,7 @@ impl RedbStore {
     /// adoption, alias, drain, or destructive-reset path. Continuing requires
     /// deliberate discard and recreation: relay-backed cache rows can be
     /// reacquired, but accepted unpublished writes and the rest of their
-    /// publish queue evidence are permanently lost
-    /// (`docs/internals/conventions/schema-epoch-discard.md`).
+    /// publish queue evidence are permanently lost.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RedbStoreOpenError> {
         Self::open_inner(path, |path| {
             let backend = RequiredLockedFileBackend::open(path)?;
@@ -1032,9 +1031,13 @@ impl RedbStore {
     pub(crate) fn coverage_row_key(key: &CoverageKey, session: &RelaySessionKey) -> String {
         use std::fmt::Write as _;
 
-        // The atom's canonical encoding, hex-encoded. NOT a digest: the key
-        // is derived from the thing itself, so it can be decoded, compared
-        // and reasoned about rather than only equality-checked.
+        // The atom's canonical encoding, hex-encoded. NOT a digest (#1911):
+        // the key is derived from the thing itself, so rows for one selection
+        // sort together and an operator dumping the table can read what a row
+        // is about. No READER parses a key back — every consumer of this
+        // function only inserts, gets, or compares whole keys — so treat the
+        // format as opaque bytes with a pinned spelling, never as a
+        // round-trippable encoding.
         let encoded = nmp_grammar::canonical_encoding(&key.atom().filter);
         let mut hex = String::with_capacity(encoded.len() * 2);
         for byte in &encoded {
@@ -1042,7 +1045,29 @@ impl RedbStore {
         }
         // Routing is part of coverage identity (#106): the same selection
         // fetched under different routing is a different acquisition.
-        let _ = write!(hex, ":{:?}", key.atom().routing);
+        //
+        // An exhaustive match writing a fixed tag per variant, NEVER `{:?}`.
+        // `ReadRouting` is a public `nmp-grammar` enum that apps and protocol
+        // crates match on, so renaming or reordering a variant is an ordinary
+        // refactor — and deriving a DURABLE key from its `Debug` output made
+        // that refactor silently re-key every coverage row in every existing
+        // database. The failure was not an error: a missing row reads as "not
+        // covered", so it degraded to a full refetch, quietly. Adding a
+        // variant is a compile error here instead.
+        //
+        // `Explicit`'s relay set is LENGTH-PREFIXED per URL: without it, one
+        // relay whose URL contained the separator could spell the same
+        // segment as two relays, merging two acquisitions into one row.
+        match &key.atom().routing {
+            ReadRouting::Auto => hex.push_str(":r0"),
+            ReadRouting::Explicit(relays) => {
+                hex.push_str(":r1");
+                for relay in relays {
+                    let url = relay.as_str();
+                    let _ = write!(hex, ",{}:{url}", url.len());
+                }
+            }
+        }
         // The atom's OWN declared identity is part of coverage identity too
         // (#106): two demands naming different identities are different
         // acquisitions even before a session discovers one.

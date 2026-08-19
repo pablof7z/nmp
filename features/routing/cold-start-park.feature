@@ -41,10 +41,6 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
 
   Rule: Not looked up yet parks, and delivers when the answer arrives
 
-    # nmp:id=ROUTING-COLDSTART-001
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Terminate a write whose relay-list lookup has not settled; a user who was merely offline on first run loses a message NMP never proved undeliverable.
     Scenario: The very first publish of a fresh install parks and then delivers
@@ -59,10 +55,6 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
       When my relay list arrives naming "outbox-a" as my write relay
       Then the note is delivered to "outbox-a"
 
-    # nmp:id=ROUTING-COLDSTART-002
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Let recovery and a fresh publish reach different states from the same unsettled directory; a crash survivor would outlive the exact condition that ends a fresh write.
     Scenario: A young directory treats a fresh write and a recovered one alike
@@ -76,10 +68,6 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
       Then the note saying "from before" is delivered to "outbox-a"
       And the note saying "from now" is delivered to "outbox-a"
 
-    # nmp:id=ROUTING-COLDSTART-003
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Drop the park across a restart; an app that reattaches to a persisted receipt id is told nothing, which is indistinguishable from data loss.
     Scenario: The park survives a restart
@@ -91,10 +79,6 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
       Then the same receipt can be reattached by its stable id
       And the receipt reports it is still determining destinations
 
-    # nmp:id=ROUTING-COLDSTART-004
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Expire an unsettled park after any elapsed time; NMP would be deciding a relay list will never arrive, which it cannot prove.
     Scenario: Nothing gives up on an unsettled lookup
@@ -109,10 +93,6 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
 
   Rule: Looked up and found nothing is terminal, and says why
 
-    # nmp:id=ROUTING-COLDSTART-005
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Park a write whose relay-list lookup finished and found nothing; the user watches a message sit in "sending" forever while the app has everything it needs to tell them they have no relays configured.
     Scenario: A settled lookup that found no relay list ends the write
@@ -128,10 +108,6 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
       And the receipt reports the write as having no destination
       And the write is never reported as settled
 
-    # nmp:id=ROUTING-COLDSTART-006
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Park a write when nothing can ever resolve it; with no app relay and no indexer there is no source that could change the answer, so waiting is waiting on nobody.
     Scenario: No app relay and no indexer is nowhere to go
@@ -143,10 +119,6 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
       Then the publish is accepted
       And the receipt reports the write as having no destination
 
-    # nmp:id=ROUTING-COLDSTART-007
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Leave a no-destination write's open work behind; the entry cannot be removed (removal refuses an open intent), cannot be cancelled once signed, and is replayed on every boot -- a leak on the FIRST publish of a fresh install.
     Scenario: A write with nowhere to go is readable in the queue and removable
@@ -161,10 +133,6 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
       When I remove that entry from my publish queue
       Then my publish queue no longer holds that entry
 
-    # nmp:id=ROUTING-COLDSTART-008
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Report the same destination fact before and after the lookup settles; the two states have opposite correct app behaviour and collapsing them is the defect this whole file is about.
     Scenario: Settling turns a park into a terminal answer
@@ -178,10 +146,6 @@ Feature: A write made before we knew anything waits; a write with nowhere to go 
 
   Rule: A partial answer is never rounded up into a complete one
 
-    # nmp:id=ROUTING-COLDSTART-009
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Report routing complete while a recipient is still unresolved; a message delivered to two of its five destinations and called sent is a privacy failure, not a delivery one.
     Scenario: A cold start does not silently under-route

@@ -59,9 +59,6 @@ mod history_lifecycle;
 #[cfg(test)]
 mod history_lifecycle_tests;
 mod lane_projection;
-#[cfg(test)]
-mod nip77_metadata_tests;
-mod nip77_sessions;
 mod observation;
 #[cfg(test)]
 mod outbox_tests;
@@ -140,7 +137,6 @@ use nmp_transport::{
     RelayHandle as TransportRelayHandle, RelayHealth,
 };
 
-use crate::negentropy::{NegStep, ProbedRelay, Prober, Reconciler};
 use crate::publish_queue::{
     AuthDenialSource, CancelWriteError, CancelWriteOutcome, NotSentReason, PublishQueueEntry,
     RelayState, RelayWaiting, RemoveQueueEntryError, RetryCause, SigningState, WriteFact,
@@ -153,23 +149,6 @@ type AttributedRelayObservation = (
     Option<CommittedObservationCandidate>,
     Option<(RelaySessionKey, String)>,
 );
-
-/// The liveness deadline (plan §4/harvest `nmp-nip77`) past which an open
-/// negentropy session with no reply is abandoned in favor of a plain REQ
-/// (never left to hang forever, and never silently re-tried as negentropy
-/// again on the same generation -- `tick`'s own staleness sweep is the only
-/// caller of this constant).
-const NEG_LIVENESS_DEADLINE_SECS: u64 = 30;
-
-// Internal wire-id roles for the gap-free NIP-77 handoff (#563). They are
-// folded onto the router-owned plan id plus the exact full filter hash, so a
-// live candidate, NEG session, missing-id fetch, and ordinary fallback can
-// coexist on one websocket without aliasing either NIP-01's or NIP-77's
-// subscription namespace.
-const NIP77_LIVE_ROLE: u8 = 0x71;
-const NIP77_NEG_ROLE: u8 = 0x72;
-const NIP77_MISSING_ROLE: u8 = 0x73;
-const NIP77_FALLBACK_ROLE: u8 = 0x74;
 
 /// The engine's private, in-memory implementation of the router's read-only
 /// neutral fact view. There is no persistence door for `authors`, so
@@ -314,50 +293,6 @@ mod routing_fact_store_tests {
     }
 }
 
-/// Derive the wire id for one NIP-77 role subscription, in the ENGINE's own
-/// per-connection wire-string namespace.
-///
-/// `incarnation` is what makes each derivation a FRESH string (#932), and it
-/// is the whole point of this signature. Role + plan id + filter hash alone
-/// are content-derived, so closing a role subscription and later re-deriving
-/// it for the same plan id and the same filter reproduced the SAME 64-hex
-/// wire string. `AttributionState::discard_sub` drops the closed
-/// incarnation's inflight FIFO and its wire mapping, so the re-derived string
-/// re-registered with a FRESH FIFO -- and a straggler EOSE for the
-/// pre-Close REQ then popped the NEW snapshot and minted durable coverage for
-/// a request the relay had not finished serving. Coverage is what
-/// `plan_is_fresh_for` trusts, so that over-claimed acquisition outright.
-///
-/// This is the derived-namespace counterpart of what #899/#912 did for
-/// PLANNED subscriptions, whose ids are allocated tokens the router never
-/// recycles within a session (`nmp_router::SubId::allocate`). It deliberately
-/// lives here rather than in `AttributionState::record_send`: the plan path
-/// must NOT be incarnated, because `Effect::Replay` ships `WireReq`s straight
-/// out of the router's plan and `on_wire_request_handoff` keys on
-/// `(session, sub_id)` -- a blanket mint at send time would break that
-/// router-to-engine correspondence. Only ids the engine both mints and
-/// stores itself can carry an incarnation, and these four roles are exactly
-/// those ids.
-///
-/// The incarnation is FOLDED INTO the digest, never appended to it: a
-/// `SubId`'s wire string is the hex `Display` of this hash, fixed at 64
-/// characters, which is exactly NIP-01's `subscription_id` cap. Real relays
-/// that declare `max_subid_length` sit at 71 and most declare nothing, so 64
-/// is the ceiling to respect and an incarnation marker has to fit inside the
-/// existing hash rather than extend it.
-fn nip77_role_sub_id(
-    plan_sub_id: &SubId,
-    role: u8,
-    _filter: &ConcreteFilter,
-    incarnation: u64,
-) -> SubId {
-    SubId(
-        plan_sub_id.0.clone(),
-        plan_sub_id.1.with_role(role, incarnation),
-        plan_sub_id.2,
-    )
-}
-
 const RETRY_INITIAL_SECS: u64 = 3;
 const RETRY_MAX_SECS: u64 = 300;
 const RETRY_JITTER_MAX_SECS: u64 = 5;
@@ -430,7 +365,7 @@ fn classify_relay_ack(status: bool, message: &str) -> RelayAckClass {
     }
 }
 
-use attribution::{AttributionSendId, AttributionState, CompletedAttribution, EventFailureTarget};
+use attribution::{AttributionSendId, AttributionState, CompletedAttribution};
 use author_route_needs::AuthorRouteNeeds;
 pub use diagnostics::{
     AuthDiagnosticsPhase, AuthDiagnosticsSnapshot, DiagnosticsSnapshot, FilterCoverageEntry,
@@ -441,9 +376,6 @@ pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessio
 use history_lifecycle::{HistoryRows, HistorySessions};
 #[cfg(test)]
 use history_lifecycle::WindowProjection;
-#[cfg(test)]
-use nip77_sessions::RepairPhase;
-use nip77_sessions::{Nip77Sessions, PlanRepairWithdrawal, PlanRole};
 use observation::{
     ActiveRequestEvidence, LiveWireRequest, ObservationExecutionState, PendingRequestEvidence,
 };
@@ -451,9 +383,8 @@ pub use observation::{
     ObservationEvidence, ObservationFact, RequestTerminal, ResolutionCause, ResolvedBindingValue,
 };
 use pending_writes::PendingWrites;
-pub use query::Nip77Frame;
 pub use request_attempt::{LocalSendRefusal, RequestAttemptId, RequestHandoffOutcome};
-use request_attempt::{RequestAttemptPurpose, RequestAttemptState, RequestAttempts, RequestSend};
+use request_attempt::{RequestAttemptState, RequestAttempts, RequestSend};
 pub use request_effects::{AttemptedReplay, AttemptedWireDelta};
 use request_replacements::RequestReplacements;
 use request_targets::{ActiveRequestTarget, RequestTargets};
@@ -1025,7 +956,6 @@ pub struct CoreWithdrawalWork {
     pub physical_coverage_edges_released: u64,
     pub diagnostic_refreshes: u64,
     pub diagnostic_requests_visited: u64,
-    pub nip77_plan_children_touched: u64,
 }
 
 /// Deterministic pending-admission work counters for incumbent-isolation
@@ -1152,16 +1082,6 @@ pub struct CoreOwnershipCensus {
     pub plan_execution_metadata: usize,
     pub plan_execution_claims: usize,
     pub plan_execution_owner_demands: usize,
-    pub active_nip77_live: usize,
-    pub pending_neg_handoffs: usize,
-    pub pending_neg_plan_keys: usize,
-    pub pending_neg_plan_edges: usize,
-    pub neg_sessions: usize,
-    pub neg_session_plan_keys: usize,
-    pub neg_session_plan_edges: usize,
-    pub pending_backfills: usize,
-    pub pending_backfill_plan_keys: usize,
-    pub pending_backfill_plan_edges: usize,
     pub router_active_demands: usize,
     pub router_request_demand_keys: usize,
     pub router_request_demand_edges: usize,
@@ -1260,23 +1180,6 @@ pub enum Effect {
     /// after its ordered initial-read edge is applied, or required AUTH
     /// completes.
     ReleaseInitialRead(TransportRelayHandle),
-    /// Place a capability-probing `NEG-OPEN` on the wire (`negentropy::
-    /// Prober::begin_probe`'s output, carried in full since the runtime has
-    /// no negentropy-protocol knowledge of its own): the sub-id, the
-    /// throwaway probe filter, and the hex initial message.
-    StartProbe(RequestAttemptId, RelayUrl, SubId, ConcreteFilter, String),
-    /// Place a real `NEG-OPEN` after the live-first EOSE barrier for
-    /// `filter` against a PROVEN-supported relay (guarantee #8's compile-fence:
-    /// the first field can only ever be a `ProbedRelay`), under its own
-    /// NIP-77 `sub_id`, with the initial message built from the local store.
-    NegOpen(RequestAttemptId, ProbedRelay, SubId, ConcreteFilter, String),
-    /// Continue an open reconciliation: place this hex payload as the next
-    /// outbound `NEG-MSG` for `sub_id` on `relay`.
-    NegMsg(RequestAttemptId, RelayUrl, SubId, String),
-    /// Release `sub_id` on `relay` (`NEG-CLOSE`) -- reconciliation finished,
-    /// was abandoned (liveness deadline / `NEG-ERR`), or is being converted
-    /// back to a plain REQ.
-    NegClose(RelayUrl, SubId),
     /// One observation's merged row transition plus its per-BRANCH
     /// acquisition evidence, indexed by canonical branch order (#1108). A
     /// single-branch live query carries exactly one entry; nothing here is
@@ -1705,82 +1608,14 @@ struct PendingWrite {
     route_needs: BTreeSet<PublicKey>,
 }
 
-/// A live, CoreState-owned negentropy reconciliation in progress for
-/// `sub_id` (plan §6 E). `filter` is already window-erased (since/until/
-/// limit cleared) -- ruling §2: "NEG runs unfloored/unlimited"; recording an
-/// attribution snapshot straight off this field is therefore always the
-/// correct floor:None/until:None/limited:false snapshot the ruling
-/// requires, with no separate bookkeeping to keep in sync.
-struct NegSession {
-    /// Router-owned semantic subscription this reconciliation repairs.
-    plan_sub_id: SubId,
-    relay: RelayUrl,
-    filter: ConcreteFilter,
-    attribution_send: AttributionSendId,
-    started_at: Timestamp,
-    reconciler: Reconciler,
-}
-
-/// A live candidate REQ has been sent with `limit:0`; no Negentropy work is
-/// allowed to begin until this exact candidate's EOSE arrives on the exact
-/// current transport generation. The previously-active live sub stays open
-/// until that barrier, making replacement overlap safe.
-struct PendingNegHandoff {
-    probed: ProbedRelay,
-    plan_sub_id: SubId,
-    live_sub_id: SubId,
-    prior_live_sub_id: Option<SubId>,
-    filter: ConcreteFilter,
-    started_at: Timestamp,
-}
-
 /// Current logical ownership attached to one immutable router-plan request.
 ///
-/// NIP-77 role requests retain only `plan_sub_id`; every candidate, NEG, and
-/// fallback generation snapshots this one record when it is sent. A later
-/// byte-identical router metadata update mutates this record once and extends
-/// the exact live child generations through the plan-to-role reverse indexes.
+/// A later byte-identical router metadata update mutates this one record.
 #[derive(Clone)]
 struct PlanExecutionMetadata {
     filter: ConcreteFilter,
     coverage_claims: BTreeSet<CoverageKey>,
     owner_demands: BTreeSet<nmp_router::DemandKey>,
-    /// Which routing lanes put this plan request on the wire. Retained so
-    /// every REQ derived from it — retries, and the NIP-77 roles — reports
-    /// the same reason the original did.
-    lanes: BTreeSet<nmp_router::Lane>,
-}
-
-enum TemporaryReq {
-    /// Missing ids proven by a completed Negentropy exchange. Coverage for
-    /// `neg_sub_id` is deferred until this request's EOSE.
-    MissingIds {
-        plan_sub_id: SubId,
-        neg_sub_id: SubId,
-        attribution_send: AttributionSendId,
-        completed_at: Timestamp,
-    },
-    /// Plain unlimited backlog fallback after NEG failure/timeout. Its own
-    /// attribution snapshot earns coverage directly at EOSE.
-    Backlog { plan_sub_id: SubId },
-    /// The live candidate never produced EOSE. A later full-backlog EOSE is
-    /// also an ordered proof that the earlier candidate REQ was processed;
-    /// only then may the prior live sub be retired.
-    BacklogActivatesLive {
-        plan_sub_id: SubId,
-        live_sub_id: SubId,
-        prior_live_sub_id: Option<SubId>,
-    },
-}
-
-impl TemporaryReq {
-    fn plan_sub_id(&self) -> &SubId {
-        match self {
-            Self::MissingIds { plan_sub_id, .. }
-            | Self::Backlog { plan_sub_id }
-            | Self::BacklogActivatesLive { plan_sub_id, .. } => plan_sub_id,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -1842,7 +1677,7 @@ struct PendingRequestClaimTransfer {
 ///
 /// This is temporary scaffolding that SHRINKS. Every owner extracted from
 /// here (`RequestTargets`, `WireOwnership`, `HistorySessions`,
-/// `RequestAttempts`, `AuthorRouteNeeds`, `Nip77Sessions`, `PendingWrites` so
+/// `RequestAttempts`, `AuthorRouteNeeds`, `PendingWrites` so
 /// far) removes fields and decisions from it. It is not the semantic owner of engine
 /// state and must not become one -- that is the god object this
 /// decomposition exists to dissolve.
@@ -1896,7 +1731,7 @@ pub struct CoreState {
     /// Every accepted-open-before-close transition still waiting on its
     /// successor's admission, keyed by successor and mirrored by owning
     /// session (#774, #1606). Private maps in `request_replacements.rs`,
-    /// reusing the mirrored-index mechanism `nip77_sessions.rs` introduced.
+    /// reusing the same mirrored-index mechanism.
     request_replacements: RequestReplacements,
     active_request_evidence: HashMap<u64, ActiveRequestEvidence>,
     active_request_revisions_by_sub: HashMap<(RelaySessionKey, SubId), BTreeSet<u64>>,
@@ -2015,24 +1850,16 @@ pub struct CoreState {
     /// `stalled_write_census.rs`, so the cache can never drift from the
     /// census it is a projection of.
     stalled_writes: StalledWriteCensus,
-    /// The negentropy capability-probe cache (plan §6 E).
-    prober: Prober,
     /// Latest provenance-bearing NIP-11 advertisement for relays in the
     /// current read plan. Recompile pruning and completion-time plan checks
-    /// prevent historical relay churn from becoming a shadow cache. This is
-    /// kept separate from `prober`: advertisement is evidence, never proof.
+    /// prevent historical relay churn from becoming a shadow cache.
     nip11_information: HashMap<RelayUrl, RelayInformationCapabilityEvidence>,
     /// Exact shadow of router sessions used by incremental plan housekeeping.
     planned_read_sessions: BTreeSet<RelaySessionKey>,
     planned_read_session_counts_by_relay: BTreeMap<RelayUrl, usize>,
-    /// Router plan request -> current logical metadata used by every NIP-77
-    /// role generation derived from that immutable physical request.
+    /// Router plan request -> current logical metadata for that immutable
+    /// physical request.
     plan_execution_metadata: HashMap<SubId, PlanExecutionMetadata>,
-    /// Every child subscription a router plan currently owns, plus which live
-    /// REQ serves that plan's tail. Three (map, reverse index) pairs that had
-    /// six verbatim-copied insert/take functions between them are one
-    /// `PlanIndexed` in `nip77_sessions.rs`.
-    nip77: Nip77Sessions,
     /// The diagnostic surface's own counter (M5 plan §1.2 step 1) — events
     /// actually RECEIVED, per SESSION per kind. Bumped in the
     /// `RelayMessage::Event` arms of `on_relay_frame`/`on_relay_frames`;
@@ -2162,7 +1989,6 @@ pub struct CoreState {
     #[cfg(any(test, feature = "bench-instrumentation"))]
     diagnostic_snapshots_built: Cell<u64>,
     #[cfg(any(test, feature = "bench-instrumentation"))]
-    nip77_plan_children_touched: Cell<u64>,
     #[cfg(any(test, feature = "bench-instrumentation"))]
     routing_evidence_owner_keys_touched: Cell<u64>,
     #[cfg(test)]
@@ -2270,12 +2096,10 @@ impl CoreState {
             pending: PendingWrites::default(),
             last_author_route_needs: BTreeSet::new(),
             stalled_writes: StalledWriteCensus::default(),
-            prober: Prober::new(),
             nip11_information: HashMap::new(),
             planned_read_sessions: BTreeSet::new(),
             planned_read_session_counts_by_relay: BTreeMap::new(),
             plan_execution_metadata: HashMap::new(),
-            nip77: Nip77Sessions::default(),
             events_by_session_kind: HashMap::new(),
             next_attempt_correlation: Some(0),
             attempt_correlations: HashMap::new(),
@@ -2335,7 +2159,6 @@ impl CoreState {
             #[cfg(any(test, feature = "bench-instrumentation"))]
             diagnostic_snapshots_built: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
-            nip77_plan_children_touched: Cell::new(0),
             #[cfg(any(test, feature = "bench-instrumentation"))]
             routing_evidence_owner_keys_touched: Cell::new(0),
             #[cfg(test)]
@@ -2434,8 +2257,8 @@ impl CoreState {
     /// production path that does, so a reconstruction would silently
     /// collapse two genuinely-distinct atoms (same selection, different
     /// context) that the resolver correctly tracks as two independent
-    /// entries into one. Widened rather than patched with an assertion,
-    /// per the repo's no-compat-alias convention -- this mirrors
+    /// entries into one. Widened rather than patched with an assertion, and
+    /// no alias kept for the old spelling -- this mirrors
     /// `nmp_resolver::Engine::active_demand()` exactly.
     pub(in crate::core) fn active_demand(&self) -> BTreeSet<ContextualAtom> {
         self.wire_demand()
@@ -2459,7 +2282,7 @@ impl CoreState {
     /// was added. A campaign against hand-maintained mirrors should not
     /// carry one in its own doc comment.
     ///
-    /// Not covered, and known: `Prober` (`states`/`pending` have a real
+    /// Not covered, and known: (`states`/`pending` have a real
     /// cross-map invariant) and `auth_ready_sessions` mirroring
     /// `auth_sessions[s].phase == Ready`. Both are live mirrors outside this
     /// check. `AttributionState` was a third such omission until #1850 — the
@@ -2472,7 +2295,6 @@ impl CoreState {
         self.wire.assert_consistent(at);
         self.author_outbox_route_needs.assert_consistent(at);
         self.request_targets.assert_consistent(at);
-        self.nip77.assert_consistent(at);
         self.request_replacements.assert_consistent(at);
         self.attempts.assert_consistent(at);
         self.pending.assert_consistent(at);
@@ -2496,7 +2318,6 @@ impl CoreState {
         let wire = self.wire.counts();
         let author_outbox = self.author_outbox_route_needs.counts();
         let targets = self.request_targets.counts();
-        let nip77 = self.nip77.counts();
         let replacements = self.request_replacements.counts();
         let writes = self.pending.counts();
         CoreOwnershipCensus {
@@ -2601,16 +2422,6 @@ impl CoreState {
                 .values()
                 .map(|metadata| metadata.owner_demands.len())
                 .sum(),
-            active_nip77_live: nip77.live,
-            pending_neg_handoffs: nip77.handoffs,
-            pending_neg_plan_keys: nip77.handoff_plan_keys,
-            pending_neg_plan_edges: nip77.handoff_plan_edges,
-            neg_sessions: nip77.sessions,
-            neg_session_plan_keys: nip77.session_plan_keys,
-            neg_session_plan_edges: nip77.session_plan_edges,
-            pending_backfills: nip77.backfills,
-            pending_backfill_plan_keys: nip77.backfill_plan_keys,
-            pending_backfill_plan_edges: nip77.backfill_plan_edges,
             router_active_demands: router.active_demands,
             router_request_demand_keys: router.requests_by_demand_keys,
             router_request_demand_edges: router.requests_by_demand_edges,
@@ -2845,9 +2656,8 @@ impl CoreState {
         snapshot.stalled_writes = self.stalled_writes.rows().to_vec();
         snapshot.stalled_write_totals = self.stalled_writes.totals();
         for relay in &mut snapshot.relays {
-            // NIP-11 advertisement and the NIP-77 behavioral probe are both
-            // earned on the connection bound to no identity (#8): the
-            // one-shot HTTP document and the probe run outside/over that
+            // NIP-11 advertisement is earned on the connection bound to no
+            // identity (#8): the one-shot HTTP document runs outside that
             // socket, so an identity-bound session's row must never inherit
             // them — its capability facts stay honestly "unknown".
             if relay.authenticate_as.is_some() {
@@ -2863,51 +2673,15 @@ impl CoreState {
                 });
                 relay.nip11_last_error = information.last_error.clone();
             }
-            relay.nip77_advertisement = match relay
-                .nip11_supported_nips
-                .as_ref()
-                .map(|nips| nips.contains(&77))
-            {
-                Some(true) => "advertised_supported",
-                Some(false) => "advertised_unsupported",
-                None => "unknown",
-            };
-            relay.nip77_behavior = match self.prober.state(&relay.relay) {
-                crate::negentropy::ProbeState::Unknown => "unknown",
-                crate::negentropy::ProbeState::Probing => "probing",
-                crate::negentropy::ProbeState::Supported => "behaviorally_proven",
-                crate::negentropy::ProbeState::Unsupported => "behaviorally_rejected",
-            };
-            relay.nip77_handoff = if self.nip77.has_backlog_fallback_on_relay(&relay.relay) {
-                "fallback_backlog"
-            } else if self.nip77.has_missing_ids_backfill_on_relay(&relay.relay) {
-                "backfilling"
-            } else if self.nip77.has_reconciling_session_on_relay(&relay.relay) {
-                "reconciling"
-            } else if self.nip77.has_pending_handoff_on_relay(&relay.relay) {
-                "awaiting_live_eose"
-            } else if self.nip77.has_live_on_relay(&relay.relay)
-                && self
-                    .connected_relays
-                    .contains(&RelaySessionKey::unauthenticated(relay.relay.clone()))
-            {
-                "live"
-            } else {
-                "none"
-            };
         }
         snapshot
     }
 
     /// A pure clock update plus the owned deadline sweeps: failed
-    /// post-settlement request-claim transfers, NIP-40 expiry
+    /// post-settlement request-claim transfers and NIP-40 expiry
     /// (retraction-and-negative-deltas.md §3.2 — drains `store.expire_due`
-    /// and retracts every row past its deadline) and the negentropy
-    /// liveness-deadline sweep (plan §6 E, harvest `nmp-nip77`'s "30s
-    /// liveness-deadline REQ fallback"): any reconciliation session open
-    /// longer than [`NEG_LIVENESS_DEADLINE_SECS`] against `now` is
-    /// abandoned in favor of a plain REQ for the same (unfloored/unlimited)
-    /// filter. Claim-transfer retry records retain the exact request revision,
+    /// and retracts every row past its deadline).
+    /// Claim-transfer retry records retain the exact request revision,
     /// committed interval, and atom payload through capped backoff. The same
     /// tick also consumes every due durable-lane retry/ACK deadline through
     /// the one delivery scheduler.
@@ -2965,35 +2739,6 @@ impl CoreState {
             Ok(_) => {}
             Err(_e) => {},
         }
-        // `>=` against the EXACT `Timestamp` threshold `next_deadline()`
-        // arms for (`started_at + NEG_LIVENESS_DEADLINE_SECS`) -- not the
-        // `as_secs()`-truncated, strictly-greater subtraction this used to
-        // be. Those two must reference the identical expression: the
-        // runtime driver's `recv_timeout` wakes AT the deadline it was
-        // armed for (`duration_until` floors an already-reached deadline to
-        // zero), so a strict `>` here left the sweep still false at that
-        // exact `now`, `next_deadline()` still returning the same
-        // deadline, and `duration_until` still flooring to zero -- a
-        // `recv_timeout(0)` busy-spin until the wall clock ticked over into
-        // the NEXT whole second (`as_secs()` finally reading `31 > 30`).
-        // `>=` clears the session in the very tick that reaches its
-        // deadline, so `next_deadline()` recomputes without it and the loop
-        // parks -- see #39's fix-up review and the regression test this
-        // predicate exists to satisfy.
-        let stale_handoffs = self
-            .nip77
-            .take_stale_handoffs(now, NEG_LIVENESS_DEADLINE_SECS);
-        for (_, handoff) in stale_handoffs {
-            self.handoff_fallback_to_req(handoff, &mut effects);
-        }
-
-        let stale_neg = self
-            .nip77
-            .take_stale_sessions(now, NEG_LIVENESS_DEADLINE_SECS);
-        for (sub_id, session) in stale_neg {
-            self.neg_session_fallback_to_req(sub_id, session, &mut effects);
-        }
-
         effects
     }
 
@@ -3021,9 +2766,8 @@ impl CoreState {
     /// The earliest wall-clock instant at which [`Self::tick`] must run for
     /// something to actually happen (retraction-and-negative-deltas.md
     /// §3.2): the min over every deadline source this reducer currently
-    /// tracks -- NIP-40 expiry (`store.next_expiration()`, index-backed),
-    /// open negentropy sessions' liveness deadlines (`started_at +
-    /// NEG_LIVENESS_DEADLINE_SECS`), and request-claim transfer backoff.
+    /// tracks -- NIP-40 expiry (`store.next_expiration()`, index-backed)
+    /// and request-claim transfer backoff.
     /// `None` means no timer needs to fire at
     /// all right now: `runtime::engine_loop`'s `recv_timeout` driver (§3.3)
     /// sleeps forever on the plain `recv()` in that case, exactly matching
@@ -3041,9 +2785,6 @@ impl CoreState {
     /// boot's recovery does not rebuild from those same rows.
     pub(in crate::core) fn next_deadline(&self) -> Option<Timestamp> {
         let expiry = self.store.next_expiration().ok().flatten();
-        let neg_liveness = self
-            .nip77
-            .earliest_liveness_deadline(NEG_LIVENESS_DEADLINE_SECS);
         let delivery = self.store.next_publish_queue_deadline().ok().flatten();
         let request_claim_transfer = self
             .pending_request_claim_transfers
@@ -3053,7 +2794,6 @@ impl CoreState {
         let request_retry = self.attempts.next_retry_due();
         [
             expiry,
-            neg_liveness,
             delivery,
             request_claim_transfer,
             request_retry,
@@ -3444,7 +3184,6 @@ impl CoreState {
         self.attribution_atoms_rebuilt.set(0);
         self.evidence_candidates_examined.set(0);
         self.diagnostic_snapshots_built.set(0);
-        self.nip77_plan_children_touched.set(0);
         self.routing_evidence_owner_keys_touched.set(0);
         self.router.reset_withdrawal_work();
     }
@@ -3468,7 +3207,6 @@ impl CoreState {
             physical_coverage_edges_released: router.physical_coverage_edges_released,
             diagnostic_refreshes: router.diagnostic_rebuilds,
             diagnostic_requests_visited: router.diagnostic_requests_visited,
-            nip77_plan_children_touched: self.nip77_plan_children_touched.get(),
         }
     }
 

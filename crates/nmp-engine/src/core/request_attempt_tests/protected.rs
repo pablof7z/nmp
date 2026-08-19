@@ -42,7 +42,6 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
             filter.clone(),
             claims.clone(),
             owners.clone(),
-            BTreeSet::new(),
         )
     });
     core.white_box("slot_to_relay.insert", |s| {
@@ -58,7 +57,6 @@ fn protected_retry_cannot_cross_to_a_fresh_unauthenticated_transport_generation(
             owner_demands: owners,
             lanes: BTreeSet::new(),
             replay: false,
-            event_failure_target: EventFailureTarget::ThisSend,
         })
     });
     let attempt_id = core.pending_request_evidence[&(session.clone(), sub_id.clone())]

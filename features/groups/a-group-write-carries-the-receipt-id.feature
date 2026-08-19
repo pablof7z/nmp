@@ -23,12 +23,6 @@ Feature: A group publication carries the store-issued receipt id
     Given the group "photographers" hosted by relay "wss://relay.groups.example"
     And I am logged in as "a1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1cea1ce"
 
-  # nmp:id=PROTOCOL-GROUPWRITERECEIPTID-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_group_write_hands_back_the_store_issued_receipt_id
-  # nmp:evidence=swift:NMP::testAGroupWriteCarriesTheStoreIssuedReceiptID
-  # nmp:evidence=kotlin:NMPKotlin::groupWriteFactStreamDeliversOrdinaryWriteFacts
-  # nmp:falsifier=Making Group::publish return only the ReceiptStream's statuses -- discarding the store-issued id the way the deleted untracked engine door did -- makes a_group_write_hands_back_the_store_issued_receipt_id lose the id it matches against publish_queue(), and makes the Swift and Kotlin assertions on Receipt.id fail to compile or to find a nonzero id.
   @nip29
   Scenario: A group publication carries the store-issued receipt id
     When I publish an event of kind 9 with content "first light" through the group

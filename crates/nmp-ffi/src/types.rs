@@ -700,9 +700,9 @@ pub struct FfiEventBuilder {
 /// cannot, because the part IS the argument.
 ///
 /// **Bech32 appears in the rendered content and nowhere else** -- that is the
-/// user boundary (`docs/internals/conventions/bech32-boundary.md`). Every
-/// input here is the decoded form: [`Person::pubkey`](Self::Person) is 64-char
-/// hex like every other key at this boundary, and [`Quote`](Self::Quote) names
+/// user boundary. Every input here is the decoded form:
+/// [`Person::pubkey`](Self::Person) is 64-char hex like every other key at
+/// this boundary, and [`Quote`](Self::Quote) names
 /// the row the app is already holding. The `nostr:npub1…` / `nostr:nevent1…`
 /// a reader sees is produced from those, which is exactly the pairing this
 /// type exists to keep honest.
@@ -827,9 +827,8 @@ pub enum FfiIdentity {
     /// A bech32 `npub` is REFUSED, however well-formed -- bech32 is
     /// outward-facing decoration an app decodes at its own boundary (with
     /// `decode_nostr_entity`) at the moment a human pasted it, not an
-    /// encoding the write plane accepts
-    /// (`docs/internals/conventions/bech32-boundary.md`). A malformed
-    /// string is a typed synchronous
+    /// encoding the write plane accepts. A malformed string is a typed
+    /// synchronous
     /// [`crate::convert::FfiError::InvalidPublicKey`] before any engine
     /// call.
     ///
@@ -934,9 +933,6 @@ pub struct FfiRelayDiagnostics {
     pub nip11_document_revision: Option<String>,
     pub nip11_freshness: Option<String>,
     pub nip11_last_error: Option<String>,
-    pub nip77_advertisement: String,
-    pub nip77_behavior: String,
-    pub nip77_handoff: String,
 }
 
 /// One bounded exact-session AUTH diagnostics record. `relay + access`

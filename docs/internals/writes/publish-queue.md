@@ -15,7 +15,6 @@ owns:
 related:
   - docs/design/durable-write-signing-and-retry.md
   - docs/internals/writes/relay-worker-demand.md
-  - docs/internals/conventions/schema-epoch-discard.md
 issues:
   - https://github.com/pablof7z/nmp/issues/903
   - https://github.com/pablof7z/nmp/issues/1027
@@ -64,8 +63,8 @@ the receipt stream.
 Durable table names carry no version suffix. `SCHEMA_VERSION` is the single
 epoch authority for the whole durable model; a per-table `_v1`/`_v6`/`_v8`
 marker advertised a coexistence that has never existed and that nothing
-reads or branches on. `crates/nmp-store/tests/publish_queue_schema_contract.rs`
-holds the full 40-name inventory and fails on any suffix.
+reads or branches on. `RedbStore::open` rejects a store whose publish-queue
+codec does not match `PUBLISH_QUEUE_CODEC_VERSION`.
 
 The authority for this cut is the repository owner’s wording:
 

@@ -15,9 +15,9 @@ publish.workspace = true
 # one capability's meaning.
 #
 # Every capability below is a SEPARATE, EXPLICIT dependency line, not a
-# facade feature: #1707 finished what #1143's NIP-02 reversal and #1563's
-# media reversal started -- `nmp` must not contain a single capability's own
-# meaning, re-export door or not (NIP-22/25/18/NIP-C7/content/asset/blossom
+# facade feature: #1707 finished what #1143's NIP-02 reversal started --
+# `nmp` must not contain a single capability's own
+# meaning, re-export door or not (NIP-22/25/18/NIP-C7/content
 # were pure re-export doors with no engine coupling at all; NIP-29's own
 # Group/group-list-write door genuinely needed the engine, but that need
 # runs `nmp-nip29 -> nmp`, not the reverse, same as every other capability
@@ -42,5 +42,3 @@ nmp-nip25.workspace = true
 nmp-nip29.workspace = true
 nmp-nipc7.workspace = true
 nmp-content.workspace = true
-nmp-asset.workspace = true
-nmp-blossom.workspace = true

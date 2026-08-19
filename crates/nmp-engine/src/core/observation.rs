@@ -11,7 +11,7 @@ use super::coordinate_coverage::RequestReturnEvidence;
 use super::request_targets::ActiveRequestTarget;
 use super::{
     AttributionSendId, CoreState, Effect, LocalSendRefusal, RequestAttemptId,
-    RequestAttemptPurpose, RequestAttemptState, RequestHandoffOutcome, RequestSend,
+    RequestAttemptState, RequestHandoffOutcome, RequestSend,
 };
 
 /// Ordered execution evidence for one live observation.
@@ -41,7 +41,6 @@ pub enum ResolutionCause {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestTerminal {
     Eose,
-    Nip77,
 }
 
 /// One exact value already resolved by the query graph.
@@ -201,10 +200,6 @@ pub(super) struct ActiveRequestEvidence {
 #[derive(Debug, Clone)]
 pub(super) struct LiveWireRequest {
     pub(super) filter: ConcreteFilter,
-    /// Router-plan identity used only by acquisition evidence. NIP-77 roles
-    /// keep their distinct physical `SubId` in the map key and every wire
-    /// owner while projecting the semantic request they execute here.
-    pub(super) evidence_sub_id: SubId,
     pub(super) handle: TransportRelayHandle,
     pub(super) stored_events: StoredEvents,
     /// What this relay actually returned under this request, for the
@@ -293,23 +288,29 @@ impl CoreState {
         &mut self,
         request: RequestSend<'_>,
     ) -> AttributionSendId {
-        self.record_observed_request_with_purpose(request, RequestAttemptPurpose::Ordinary)
-            .0
+        self.record_observed_request_detailed(request).0
     }
 
-    pub(in crate::core) fn record_observed_request_with_purpose(
+    /// The retry dispatcher needs the minted attempt id back; every other
+    /// caller only needs the attribution send.
+    pub(in crate::core) fn record_observed_request_attempt(
         &mut self,
         request: RequestSend<'_>,
-        purpose: RequestAttemptPurpose,
+    ) -> RequestAttemptId {
+        self.record_observed_request_detailed(request).1
+    }
+
+    fn record_observed_request_detailed(
+        &mut self,
+        request: RequestSend<'_>,
     ) -> (AttributionSendId, RequestAttemptId) {
-        // Every outgoing REQ this engine ever places -- planned, replayed,
-        // NIP-77 live candidate, backlog and backfill alike -- passes through
+        // Every outgoing REQ this engine ever places -- planned and replayed
+        // alike -- passes through
         let send = self.attribution.record_send(
             request.session,
             request.sub_id,
             request.filter,
             request.coverage_claims.clone(),
-            request.event_failure_target,
         );
         let attempt_id = self.attempts.mint(RequestAttemptState {
             session: request.session.clone(),
@@ -320,10 +321,8 @@ impl CoreState {
             owner_demands: request.owner_demands.clone(),
             lanes: request.lanes.clone(),
             replay: request.replay,
-            event_failure_target: request.event_failure_target,
             request_revision: Some(send.revision()),
             retry_failures: 0,
-            purpose,
         });
         self.pending_request_evidence
             .entry((request.session.clone(), request.sub_id.clone()))
@@ -478,15 +477,8 @@ impl CoreState {
         let request = queue
             .remove(position)
             .expect("position came from pending request queue");
-        let mut evidence_demands = request.owner_demands.clone();
-        if let Some(plan_sub_id) = attempt.purpose.plan_sub_id() {
-            if let Some(metadata) = self.plan_execution_metadata.get(plan_sub_id) {
-                evidence_demands.extend(metadata.owner_demands.iter().cloned());
-            }
-        }
-        let evidence_sub_id = attempt.purpose.evidence_sub_id(&request.sub_id);
-        let replacement_successor = matches!(attempt.purpose, RequestAttemptPurpose::Ordinary)
-            .then(|| attempt.sub_id.clone());
+        let evidence_demands = request.owner_demands.clone();
+        let replacement_successor = Some(attempt.sub_id.clone());
         debug_assert_eq!(attempt.filter_hash, request.filter.hash());
         debug_assert_eq!(attempt.request_revision, Some(request.request_revision));
         if queue.is_empty() {
@@ -519,7 +511,6 @@ impl CoreState {
                     (request.session.clone(), request.sub_id.clone()),
                     LiveWireRequest {
                         filter: request.filter.clone(),
-                        evidence_sub_id,
                         handle,
                         stored_events: StoredEvents::Streaming {
                             request_revision: request.request_revision,
@@ -679,14 +670,14 @@ impl CoreState {
         self.live_wire_requests
             .iter()
             .filter(|(_, live)| matches!(live.stored_events, StoredEvents::Finished { .. }))
-            .map(|((session, _), live)| (session.clone(), live.evidence_sub_id.clone()))
+            .map(|((session, sub_id), _)| (session.clone(), sub_id.clone()))
             .collect()
     }
 
     pub(in crate::core) fn placed_request_keys(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
         self.live_wire_requests
-            .iter()
-            .map(|((session, _), live)| (session.clone(), live.evidence_sub_id.clone()))
+            .keys()
+            .cloned()
             .collect()
     }
 

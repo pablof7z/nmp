@@ -20,16 +20,14 @@ that later decides engine behavior.
 Illustrative, deliberately non-binding syntax:
 
 ```text
-asset   = Blossom.upload(file)
-photo   = Nip68.buildPhoto(asset)
-grouped = nip29.group(groupId, hostRelay).compose(photo)
+message = NipC7.chat(text)
+grouped = nip29.group(groupId, hostRelay).compose(message)
 receipt = engine.publish(grouped)
 ```
 
 Responsibilities remain separate:
 
-- Blossom uploads bytes, verifies them, and returns an asset reference.
-- NIP-68 constructs the photo draft and owns that event schema.
+- NIP-C7 constructs the kind:9 chat draft and owns that event schema.
 - NIP-29 adds only group context required by NIP-29, including the correct `h`
   tag and host-relay constraint.
 - Core validates the final draft, resolves the chosen signer, signs exactly
@@ -43,9 +41,8 @@ group's host) -- and hands the intent to the same `Engine::publish` door every
 other write uses (#977, #1011). The illustration above is not literal API
 syntax, but the composition proof it stood in for is complete.
 
-Upload failure and Nostr publication failure are distinct results. NIP-29's
-contextual publication does not transfer schema ownership of the photo to
-NIP-29.
+NIP-29's contextual publication does not transfer schema ownership of the
+chat message to NIP-29.
 
 NIP-29 therefore owns its group metadata, administrator, membership, and
 moderation event schemas. It does not own a photo, article, podcast episode, or
@@ -102,22 +99,20 @@ So the shape is:
 a second way, or applies policy the primitive does not, the two forms drift
 and the capability has two definitions of its own event.
 
-Deleting the primitive was wrong because four shipping things go through it
+Deleting the primitive was wrong because three shipping things go through it
 and cannot be expressed without it:
 
 1. **Composition inside a NIP-29 group.** `react()` produces an event; the
    group door contextualizes it with the `h` tag and the group's own route.
    With no primitive nothing reaches that door — no reacting, chatting,
    reposting or replying inside a group.
-2. **Blossom kind:24242 authorizations** (`crates/nmp-blossom/src/auth.rs`)
-   are signed and base64'd into an HTTP `Authorization` header. They never go
-   to a relay at all: primitive only, no wrapper.
-3. **Republishing someone else's already-signed event** to a personal archive
+2. **Republishing someone else's already-signed event** to a personal archive
    relay — the owner's own worked example, and the reason
    `WritePayload::Signed` exists (`docs/internals/routing/auto-and-explicit.md`
    §4).
-4. **`nmp-nip68::build_picture`**, which returns an unsigned event for the
-   caller's own signer.
+3. **`nmp-nip22::comment_intent`**, which returns an unsigned `WriteIntent`
+   for the caller's own signer, taking its author and time as explicit
+   parameters rather than an engine.
 
 Neither form resolves the author. Both inherit the one mechanism that does —
 `docs/internals/writes/identity.md` §7.

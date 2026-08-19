@@ -275,8 +275,7 @@ impl HistorySessions {
         // Checked, not wrapping. Exhausting a u64 at one mint per history
         // session is not reachable by this process -- which is an argument
         // for the width, not for silently re-minting an id a still-live
-        // `by_handle` entry could still be addressed to (same rule as
-        // `Nip77Sessions::mint_incarnation`; see its doc comment).
+        // `by_handle` entry could still be addressed to.
         self.next_id = self
             .next_id
             .checked_add(1)
@@ -584,8 +583,7 @@ impl HistorySessions {
 
     /// Put one window into the state an evidence refresh must NOT be able to
     /// serve from its own retained projection, so the falsifier can prove the
-    /// fallback store read happens. A named door for the corruption, like
-    /// `Nip77Sessions::swap_handoff_owners_for_test`: the field it flips is
+    /// fallback store read happens. A named door for the corruption: the field it flips is
     /// private even to `CoreState`, and a test writing it by hand is a test
     /// that also silently depends on nothing else in the window changing.
     pub(super) fn force_projection_incomplete(&mut self, id: HistorySessionId) {
@@ -1086,6 +1084,20 @@ impl CoreState {
             }
         };
         debug_assert!(added <= needed);
+        // #1886: attaching a handle only marks its atoms PENDING. Admission
+        // is the transition that compiles a pending atom into a wire REQ, and
+        // the runtime runs it only from the deadline this effect arms. Every
+        // other `attach_wire_handle` caller arms here; the staged advance did
+        // not, so the tie-second and older-range REQs it built sat pending
+        // until some unrelated demand change happened to arm admission --
+        // which, on a plain scroll, is the NEXT advance's commit withdrawing
+        // this one's superseded handles. Hence "the first advance does
+        // nothing". Armed on the success path only: both failure paths above
+        // return through `on_rollback_history_load`, whose
+        // `withdraw_wire_demand` arms for whatever the detach left pending.
+        if self.wire_admission_needed() {
+            effects.push(Effect::ArmWireAdmission);
+        }
         effects.push(Effect::HistoryLoadResult(id, Ok(())));
         effects
     }
