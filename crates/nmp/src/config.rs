@@ -19,7 +19,7 @@ pub struct EngineConfig {
     /// reopened across restarts makes THIS replica's already-ingested rows
     /// readable cold, offline. This is local availability, not a claim of
     /// global completeness -- a query snapshot only proves what this store
-    /// has acquired, never `synced`/`authoritativeEmpty` (ledger #7 is
+    /// has acquired, never `synced`/`authoritativeEmpty` (guarantee #7 is
     /// still TARGET).
     pub store_path: Option<String>,
     /// Operator app relay set (`Lane::OperatorApp`). Default empty.

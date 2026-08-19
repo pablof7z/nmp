@@ -17,7 +17,7 @@
 //!   deliberately independent of the engine's own `DiagnosticsSnapshot`: a
 //!   `must-never` scenario asserting "no relay outside the plan was ever
 //!   contacted" must not take the engine's self-report as its only witness,
-//!   or a diagnostics bug could silently make the ledger scenario
+//!   or a diagnostics bug could silently make the guarantee scenario
 //!   un-falsifiable. `wait_contacted` is the same log's BOUNDED-WAIT half
 //!   (#60): a freshly rebound relay instance (`start_on_port`, used by the
 //!   reconnect scenario) starts its own count at zero, so blocking on its
@@ -67,7 +67,7 @@ pub struct RelayConfig {
     pub reject_writes: Option<String>,
     /// Approximates "never confirms end of stored events": the relay
     /// refuses the query outright (`CLOSED`, never `EOSE`), which yields the
-    /// same app-observable consequence the ledger scenario cares about --
+    /// same app-observable consequence the guarantee scenario cares about --
     /// this relay's coverage for any query touching it never resolves out
     /// of `Unknown`. See the module doc's contacted-log note for why this
     /// is a deliberate, documented approximation rather than a true

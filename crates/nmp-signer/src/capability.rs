@@ -93,7 +93,7 @@ pub trait SigningCapability {
     fn sign(&self, unsigned: SignerUnsignedEvent) -> SignerOp<SignerSignedEvent>;
 }
 
-/// Co-located with the signer because the KEY LIVES IN THE ENGINE (ledger
+/// Co-located with the signer because the KEY LIVES IN THE ENGINE (guarantee
 /// #12, M0 amendment: identity-as-input otherwise breaks). Emits decrypted
 /// RAW tokens — still zero presentation. Step 0: signature only.
 pub trait CryptoCapability {

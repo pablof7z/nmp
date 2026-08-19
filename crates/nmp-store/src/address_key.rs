@@ -1,4 +1,4 @@
-//! The replaceable/addressable keying rule (bug-class ledger #1 harvested
+//! The replaceable/addressable keying rule (guarantee #1 harvested
 //! semantics, M1 plan §2.2): replaceable kinds `{0,3,10000..=19999}` are
 //! keyed `(pubkey,kind)`; addressable kinds `{30000..=39999}` are keyed
 //! `(pubkey,kind,d-tag)`. Everything else has no address (a "regular"

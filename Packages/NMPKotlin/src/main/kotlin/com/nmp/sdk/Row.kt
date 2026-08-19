@@ -1,5 +1,5 @@
 // The read noun's delivered value types, in ergonomic Kotlin shape.
-// RAW TOKENS ONLY (VISION ledger #12, inherited from `FfiRow`'s own
+// RAW TOKENS ONLY (guarantee #12, inherited from `FfiRow`'s own
 // contract) -- this layer adds no formatting, no display concept
 // whatsoever; that stays app-owned. Mirrors Row.swift.
 

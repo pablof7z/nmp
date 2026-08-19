@@ -550,7 +550,7 @@ fn has_request_terminal(effects: &[Effect], terminal: RequestTerminal) -> bool {
     })
 }
 
-/// Test 3 (ledger #8) first half: an unprobed relay (never even connected,
+/// Test 3 (guarantee #8) first half: an unprobed relay (never even connected,
 /// so its `Prober` state stays `Unknown`) must never see `Effect::NegOpen`
 /// -- only a plain REQ.
 #[test]
@@ -780,7 +780,7 @@ fn connected_relay_outside_the_compiled_plan_emits_no_read_wire_effect() {
     );
 }
 
-/// Test 3 (ledger #8) second half + test 10's routing half: drives the
+/// Test 3 (guarantee #8) second half + test 10's routing half: drives the
 /// Prober FSM to a real `Supported` verdict via a scripted NEG-MSG (exactly
 /// what a real relay's probe response looks like from `EngineCore`'s point
 /// of view), then proves a broad/unlimited demand change on that relay
@@ -1074,7 +1074,7 @@ fn probed_relay_routes_broad_demand_to_negentropy_but_limited_demand_stays_on_re
     );
 
     // A LIMITED (small-exact-result) query on the SAME relay stays on plain
-    // REQ even though the relay is Supported -- ledger #8's REQ-fallback
+    // REQ even though the relay is Supported -- guarantee #8's REQ-fallback
     // selection rule (a different skeleton -- kind:7 -- so it is a brand
     // new, independent sub-id, unaffected by kind:1's negentropy routing).
     let limited = LiveQuery::single(Demand {
@@ -1319,7 +1319,7 @@ fn relay_that_rejects_the_probe_is_classified_unsupported_and_stays_on_req() {
     );
 }
 
-// Ledger #8's "not a runtime `if`" used to be checked here, by reading
+// Guarantee #8's "not a runtime `if`" used to be checked here, by reading
 // `core/mod.rs`'s source text and asserting it never spells `ProbedRelay(`.
 // That scan saw one file: a construction in `core/query.rs` or
 // `core/auth_transport.rs` would have passed it. `ProbedRelay`'s field is

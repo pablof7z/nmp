@@ -68,7 +68,7 @@ pub struct NmpEngineConfig {
     /// `None` -> an engine-owned temporary Redb store (nothing survives the
     /// engine's lifetime). `Some(path)` -> a persistent `RedbStore` opened at that path (the same file
     /// reopened across restarts is what preserves source-scoped evidence for
-    /// a cold, offline read -- ledger #7).
+    /// a cold, offline read -- guarantee #7).
     pub store_path: Option<String>,
     /// Operator app relay set (`Lane::OperatorApp`). Default empty.
     pub app_relays: Vec<String>,
@@ -435,7 +435,7 @@ impl NmpEngine {
 
     /// Enqueue a write (#680). The returned [`NmpReceiptStream`] exposes the
     /// stable receipt id ([`NmpReceiptStream::id`]) and streams every
-    /// `WriteFact` this intent ever reaches (ledger #9 -- enqueue is not
+    /// `WriteFact` this intent ever reaches (guarantee #9 -- enqueue is not
     /// converged; the first value is never a terminal for a durable/
     /// at-most-once intent) via `async fn next()`. A caller-supplied `Signed`
     /// payload that fails verification is no longer a synchronous error here

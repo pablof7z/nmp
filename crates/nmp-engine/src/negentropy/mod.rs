@@ -19,7 +19,7 @@
 //! the external crate as `::negentropy::Foo` (leading `::`) wherever E
 //! wraps its `Reconciler`.
 //!
-//! ## Ledger #8, structural (not a runtime `if`)
+//! ## Guarantee #8, structural (not a runtime `if`)
 //!
 //! [`ProbedRelay`]'s inner field is PRIVATE to this module and this module
 //! hands out NO constructor for it: the ONLY place a `ProbedRelay` is ever
@@ -74,7 +74,7 @@ pub enum ProbeState {
     Unsupported,
 }
 
-/// Capability TOKEN (ledger #8): constructible ONLY from a `Supported`
+/// Capability TOKEN (guarantee #8): constructible ONLY from a `Supported`
 /// cache entry (see the module doc's "structural, not a runtime `if`"
 /// section). `NegOpen`/negentropy-sync effects take a `ProbedRelay`, never
 /// a bare `RelayUrl` — an unprobed relay cannot reach the negentropy path;
@@ -166,7 +166,7 @@ impl Prober {
             .unwrap_or(ProbeState::Unknown)
     }
 
-    /// The capability TOKEN (ledger #8): `Some` iff `relay` has been proven
+    /// The capability TOKEN (guarantee #8): `Some` iff `relay` has been proven
     /// to support NIP-77. The ONLY function in this crate that constructs a
     /// `ProbedRelay` from an already-cached verdict (see [`Self::on_neg_msg`]
     /// for the other, "just learned it" construction site).

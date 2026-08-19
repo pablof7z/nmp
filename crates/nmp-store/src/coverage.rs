@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(coverage_key(&a), coverage_key(&a));
     }
 
-    /// #106's store-side anti-alias (Fable's C refinement, ledger #18's
+    /// #106's store-side anti-alias (Fable's C refinement, guarantee #18's
     /// twin of the resolver-side `ContextualAtom` fix): the IDENTICAL
     /// selection under different `ReadRouting` must never share a
     /// coverage row.

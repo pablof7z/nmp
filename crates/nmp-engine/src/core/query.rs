@@ -287,7 +287,7 @@ impl CoreState {
     /// behaviorally-proven NIP-77 relay becomes a gap-free handoff: first a
     /// distinct live candidate REQ with `limit:0`, then (only after that
     /// candidate's exact EOSE) Negentropy while the live REQ stays open.
-    /// Ledger #8 remains structural: only a `ProbedRelay` token can enter
+    /// Guarantee #8 remains structural: only a `ProbedRelay` token can enter
     /// [`Self::begin_neg_handoff`].
     pub(in crate::core) fn recompile(&mut self, effects: &mut Vec<Effect>) {
         #[cfg(any(test, feature = "bench-instrumentation"))]
@@ -2220,7 +2220,7 @@ impl CoreState {
     /// ordinary REQ/EOSE/ingest pipeline. The live NIP-01 subscription was
     /// opened before reconciliation and deliberately remains untouched.
     ///
-    /// Evidence crediting (ledger #7) is NOT immediate when a backfill is
+    /// Evidence crediting (guarantee #7) is NOT immediate when a backfill is
     /// needed: recording a reconciled watermark before the backfilled events
     /// are actually ingested would attach evidence to a store
     /// that is still, transiently, missing precisely the events negentropy
@@ -3371,7 +3371,7 @@ impl CoreState {
     /// never exceeding N), and retracting a top-N member pulls the next-newest
     /// in. `limit: None` is unchanged -- every match, no ordering imposed.
     /// Row truncation NEVER touches `evidence` below (coverage is about what
-    /// was acquired, not how many rows are shown -- ledger #17): a limited
+    /// was acquired, not how many rows are shown -- guarantee #17): a limited
     /// query still records no coverage watermark.
     ///
     /// Rows are computed over `root_atoms` alone (delivery

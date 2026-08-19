@@ -1662,7 +1662,7 @@ pub fn demand_to_ffi(d: GDemand) -> FfiDemand {
     }
 }
 
-/// Raw tokens only (ledger #12) -- no formatted field is ever built here.
+/// Raw tokens only (guarantee #12) -- no formatted field is ever built here.
 /// `sources` (#105) is likewise raw: the row's relay-observation set,
 /// verbatim URLs, sorted (the caller's `BTreeSet<RelayUrl>` iteration order).
 pub fn row_to_ffi_row(row: &Row) -> FfiRow {

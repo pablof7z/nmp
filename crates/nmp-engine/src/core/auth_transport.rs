@@ -1141,7 +1141,7 @@ impl CoreState {
                 }
                 DisconnectReason::Closed => {
                     // An INTENTIONAL close (`Pool::close`) must never
-                    // resurrect the session (#8/ledger #18): the runtime's
+                    // resurrect the session (#8/guarantee #18): the runtime's
                     // exact worker reconciliation just released it on
                     // purpose, and an unconditional `EnsureRelay` here would
                     // re-dial a still-planned session the instant it was

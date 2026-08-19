@@ -208,7 +208,7 @@ impl SigningCapability for LocalKeySigner {
 }
 
 /// Co-located with the signer because the KEY LIVES IN THE ENGINE (M0
-/// amendment, ledger #12): decrypting gift-wrap/private-list ciphertext
+/// amendment, guarantee #12): decrypting gift-wrap/private-list ciphertext
 /// requires the same secret material `sign` uses, so this capability lives
 /// on the same type rather than behind a separate app-facing door.
 impl CryptoCapability for LocalKeySigner {

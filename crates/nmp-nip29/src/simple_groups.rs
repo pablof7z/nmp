@@ -83,7 +83,7 @@ pub fn parse_simple_groups_list_tolerant(event: &Event) -> SimpleGroupsList {
 
 /// The same tolerant parse, over raw `[tag_name, values...]` string arrays
 /// rather than a `nostr::Event` -- the shape `nmp-ffi`'s `FfiRow.tags`
-/// already carries (a delivered row's raw tokens, ledger #12). Sharing this
+/// already carries (a delivered row's raw tokens, guarantee #12). Sharing this
 /// core with [`parse_simple_groups_list_tolerant`] (which just adapts a real
 /// `Event`'s `Tag`s into the same `&[String]` shape via `Tag::as_slice`)
 /// means the FFI boundary never needs to reconstruct a full signed

@@ -4003,7 +4003,7 @@ impl CoreState {
 
     /// Shared by the pre-signed (`on_publish`) and signer-completed paths:
     /// `Signed` -> resolve `WriteRouting` -> `Routed` -> `PublishEvent` per
-    /// relay -> `Sent` per relay. Route failure (ledger #6) is a whole-
+    /// relay -> `Sent` per relay. Route failure (guarantee #6) is a whole-
     /// intent `Failed` with NO `PublishEvent` emitted for any relay —
     /// structurally, an unroutable private recipient cannot reach the wire
     /// here because `relays` is never bound in that branch. Every borrow of
@@ -4486,7 +4486,7 @@ impl CoreState {
     /// `Explicit` never consults the directory at all: the answer is exactly
     /// the relays the caller named, nothing here adds to them, and it has no
     /// inputs and therefore no unknowns — the rewriter's fixed point,
-    /// complete at its first resolution. That is ledger #6's fail-closed
+    /// complete at its first resolution. That is guarantee #6's fail-closed
     /// discipline, kept structurally rather than by convention. The empty
     /// case is unreachable from acceptance (`on_publish` refuses it at the
     /// door); it is spelled out here only so the fail-closed answer is the

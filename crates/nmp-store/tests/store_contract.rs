@@ -1,6 +1,6 @@
 //! The `RedbStore` contract suite. Every test runs against an isolated
 //! filesystem-backed Redb store. Covers M1's dedup/supersession semantics
-//! (preserved unchanged), provenance merge (ledger #5, plan §5 test 8),
+//! (preserved unchanged), provenance merge (guarantee #5, plan §5 test 8),
 //! coverage record/get/merge (the Fable ruling), and claim-based GC with
 //! watermark-lowering (plan §5 test 13).
 //!
@@ -730,7 +730,7 @@ fn query_newest_before_handles_zero_empty_and_filter_window_intersection() {
 }
 
 // ---------------------------------------------------------------------
-// Provenance merge (ledger #5, plan §5 test 8)
+// Provenance merge (guarantee #5, plan §5 test 8)
 // ---------------------------------------------------------------------
 
 #[test]

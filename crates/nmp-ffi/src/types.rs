@@ -6,7 +6,7 @@
 //! is the only place that ever bridges between the two.
 //!
 //! `FfiRow` carries RAW tokens only -- hex pubkey/id/sig, unix timestamp,
-//! verbatim tag arrays, verbatim content (VISION ledger #12: no formatted
+//! verbatim tag arrays, verbatim content (guarantee #12: no formatted
 //! field may ever cross this boundary; `nmp-ffi` has no `display::`
 //! anything).
 
@@ -397,7 +397,7 @@ pub struct FfiFrame {
     pub evidence: Vec<FfiAcquisitionEvidence>,
 }
 
-/// One delivered row -- RAW tokens only (ledger #12). Mirrors
+/// One delivered row -- RAW tokens only (guarantee #12). Mirrors
 /// `nostr::Event`'s wire shape, never a formatted/localized field, plus
 /// `nmp::Row::sources` (#105): the sorted, deduplicated relay-observation
 /// set for this exact event id -- not a formatted/display field either,
@@ -762,7 +762,7 @@ pub enum FfiReaction {
 /// The event payload of a write intent (`nmp::WritePayload` mirror). VISION
 /// P: signing and publishing are ORTHOGONAL stages -- `Event` describes an
 /// event the engine stamps, freezes and signs internally ("the key lives in
-/// the engine", ledger #12); `Signed` (#32, the M5 unlock) is a caller that
+/// the engine", guarantee #12); `Signed` (#32, the M5 unlock) is a caller that
 /// already holds a validly-signed event -- an external signer provider, or
 /// a verbatim republish of somebody else's note to an archive relay -- and
 /// hands its fields across as-is. `Signed`'s

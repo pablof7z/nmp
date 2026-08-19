@@ -126,7 +126,7 @@ impl Engine {
     /// wire/ack, but its return value is not fire-and-forget: the returned
     /// [`ReceiptStream`] is the caller's one way to observe how the intent
     /// resolved, and every `WriteFact` it ever reaches streams through it
-    /// (ledger #9 -- enqueue is not converged). Returning `Ok` IS
+    /// (guarantee #9 -- enqueue is not converged). Returning `Ok` IS
     /// acceptance, so there is no acceptance fact on the stream. A tampered
     /// `WritePayload::Signed` cannot resolve, so it is refused by this call
     /// itself and nothing is taken into custody -- see the parent facade

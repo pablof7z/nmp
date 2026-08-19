@@ -581,7 +581,7 @@ mod tests {
     /// Below the bound nothing is compressed, so a consumer that keeps up
     /// still observes every intermediate state in order. This is what makes
     /// superseding delivery safe for the guarantees the receipt stream
-    /// documents (ledger #9's "the first value is never a terminal", and
+    /// documents (guarantee #9's "the first value is never a terminal", and
     /// per-relay `Sent` evidence).
     #[tokio::test]
     async fn below_the_bound_every_intermediate_state_survives() {

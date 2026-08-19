@@ -2,7 +2,7 @@
 //! `docs/design/query-demand-and-evidence.md`): `selection + routing +
 //! authenticated identity`, not filter-only. Two queries with the same [`Filter`] but
 //! different intended routing must never collapse to the same atom/
-//! refcount/coverage/attribution identity — that collapse (bug-class ledger
+//! refcount/coverage/attribution identity — that collapse (guarantee
 //! #18) is exactly what conflating "what rows match" with "where reads come
 //! from" caused.
 //!
@@ -358,7 +358,7 @@ mod tests {
         assert_eq!(my_follows.routing, ReadRouting::Auto);
     }
 
-    /// Bug-class ledger #18 survives the collapse: the source axis still
+    /// guarantee #18 survives the collapse: the source axis still
     /// participates in identity, so one selection under `Auto` and under
     /// `Explicit` remains TWO atoms. What the collapse removed is a choice
     /// the app no longer makes, not the axis itself.

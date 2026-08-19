@@ -1,4 +1,4 @@
-//! Generational relay handles (M3 plan §3.2, ledger #2/#3/#4).
+//! Generational relay handles (M3 plan §3.2, guarantee #2/#3/#4).
 
 /// A generational handle to a pooled relay connection. A handle tagged
 /// with a superseded generation is structurally rejected by [`crate::Pool`]:

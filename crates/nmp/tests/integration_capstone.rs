@@ -1,8 +1,8 @@
 //! M3 Step F — the integration capstone: the full falsifier suite driven
 //! against a live in-process relay, headlined by [`watermark_cold_start_offline`]
 //! (M3 plan §5 test 9, THE M3
-//! pass criterion — ledger #7, "cache-miss treated as empty"). The other
-//! three tests here round out the LIVE tier of the remaining ledger
+//! pass criterion — guarantee #7, "cache-miss treated as empty"). The other
+//! three tests here round out the LIVE tier of the remaining guarantee
 //! falsifiers that weren't already exercised end-to-end: #5 (provenance/
 //! dedup across two relays), #9 (enqueue != converged, per-relay ack split),
 //! and the depth-2 grammar (`SetOp(Diff, …)`, M1 contract test 9's shape)
@@ -876,7 +876,7 @@ fn public_engine_nested_strict_cache_uses_independent_relay_witnesses_before_lim
 }
 
 // ===========================================================================
-// THE FLAGSHIP: watermark_cold_start_offline (plan §5 test 9, ledger #7)
+// THE FLAGSHIP: watermark_cold_start_offline (plan §5 test 9, guarantee #7)
 // ===========================================================================
 
 /// Phase 1 (online): subscribe against a real relay, wait for the plain
@@ -908,7 +908,7 @@ fn public_engine_nested_strict_cache_uses_independent_relay_witnesses_before_lim
 /// hold, offline, distinguishing a genuine unknown from a proven-empty
 /// watermark. If either half regresses (offline reads unproven when it
 /// should be proven, or a never-reconciled shape reads proven when it should
-/// be unproven), ledger #7 is not real and this assertion fails loudly
+/// be unproven), guarantee #7 is not real and this assertion fails loudly
 /// rather than being softened.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watermark_cold_start_offline() {
@@ -1032,7 +1032,7 @@ async fn watermark_cold_start_offline() {
             "offline cold read must retain source-scoped evidence: a proven \
              reconciled_through for this relay, serving the 3 cached rows with zero network, \
              coexisting with a Connecting link status -- if reconciled_through is None, \
-             ledger #7 is not real"
+             guarantee #7 is not real"
         );
 
         // Control: b's shape has no coverage row anywhere and must read an
@@ -1057,7 +1057,7 @@ async fn watermark_cold_start_offline() {
 }
 
 // ===========================================================================
-// Ledger #5 (live corroboration) -- the SAME event, delivered by TWO real
+// Guarantee #5 (live corroboration) -- the SAME event, delivered by TWO real
 // relays, surfaces as exactly one row (dedup, never a duplicate read).
 // ===========================================================================
 
@@ -1160,12 +1160,12 @@ async fn same_event_from_two_relays_surfaces_as_exactly_one_row() {
 }
 
 // ===========================================================================
-// Ledger #9 (live) -- enqueue != converged, per-relay ack split.
+// Guarantee #9 (live) -- enqueue != converged, per-relay ack split.
 // ===========================================================================
 
 /// Plan §5 test 11, live tier: publish a `Durable` intent to TWO real
 /// relays, one of which accepts and one of which is configured to reject
-/// every event. Asserts the FULL shape of ledger #9: the first status is
+/// every event. Asserts the FULL shape of guarantee #9: the first status is
 /// never a terminal, both relays are individually `Sent` to, and the two
 /// relays resolve to DIFFERENT per-relay terminals (`Published` vs
 /// `Rejected`) -- there is no way to read "is it sent" except by observing
