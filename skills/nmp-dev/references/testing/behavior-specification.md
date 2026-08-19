@@ -23,11 +23,9 @@ the internal mechanism without an app noticing, it does not need a scenario;
 prove it as an owner test or headless engine scenario instead (see
 [`test-placement.md`](test-placement.md)).
 
-Required tests behind a `built` scenario use protocol-real events and
-deterministic infrastructure: scripted relays, signers, and clocks. Never
-live internet relays or uncontrolled data — an opt-in live check is a
-separate, supplemental locator (see
-[Evidence and traceability](evidence-and-traceability.md)).
+A test behind a scenario uses protocol-real events and deterministic
+infrastructure: scripted relays, signers, and clocks. Never live internet
+relays or uncontrolled data.
 
 ## Show exactly what changed
 

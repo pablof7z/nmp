@@ -10,11 +10,11 @@ It answers, continuously and empirically:
 > Can a normal application actually use NMP to read, publish, recover,
 > reconnect, and remain fast and understandable under realistic conditions?
 
-It exists because every other layer — owner tests, headless falsifiers, BDD,
-SDK tests — can be green while the public API is awkward, an advertised flow
-does not work end to end, restart breaks only with real resources, relay work
-explodes, resources are pathological, a capability needs app-side lifecycle
-hacks, or an internal concern leaks into application state.
+It exists because a green test suite can coexist with an awkward public API,
+an advertised flow that does not work end to end, restart that breaks only
+with real resources, exploding relay work, pathological resource use, a
+capability that needs app-side lifecycle hacks, or an internal concern leaking
+into application state.
 
 It lives at `apps/Canary`, evolved from `apps/Falsifier` rather than built
 beside it. That decision and its evidence are in [Why Falsifier became the
@@ -1508,6 +1508,5 @@ relay".
   spelled out command by command, including both prerequisites.
 - `docs/known-gaps.md` — unproven scenarios and unexplained failures stay
   visible there until resolved.
-- `skills/nmp-dev/references/testing/` — the three-layer testing model the
-  Canary is the third layer of. A green result at one layer never substitutes
-  for a missing layer.
+- `skills/nmp-dev/references/testing/` — the other kinds of test available,
+  and what each is good for.
