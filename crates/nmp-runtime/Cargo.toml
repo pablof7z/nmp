@@ -20,7 +20,6 @@ test-instrumentation = [
     "nmp-store/test-instrumentation",
     "nmp-nip11/test-instrumentation",
 ]
-unstable-mechanism = ["dep:nmp-router-testkit", "nmp-engine/unstable-mechanism"]
 
 # This is the crate that is ALLOWED to own threads and a runtime -- that is
 # what it is for. The split is what makes the reducer's manifest meaningful:
@@ -37,7 +36,6 @@ nmp-transport.workspace = true
 nmp-signer.workspace = true
 nmp-local-signer.workspace = true
 nmp-nip11.workspace = true
-nmp-router-testkit = { workspace = true, optional = true }
 crossbeam-channel = "0.5"
 # #704: the engine owns ONE multi-thread tokio runtime (2 workers) that hosts
 # every adapter task (NIP-11 fetches, signer/AUTH completion awaits, optional
@@ -48,19 +46,3 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sy
 libc = { version = "0.2", optional = true }
 # The opaque session payload's secret bytes are wiped on drop.
 zeroize = "1"
-
-[dev-dependencies]
-nmp-runtime = { path = ".", features = ["test-instrumentation", "unstable-mechanism"] }
-# Dev-only: the loop's provider-driving falsifiers need a REAL provider to
-# drive, and the NIP-65 outbox algorithm is the one this workspace ships.
-# Not a production edge — this crate names no routing protocol.
-nmp-outbox.workspace = true
-nmp-store = { workspace = true, features = ["test-instrumentation"] }
-nmp-router-testkit.workspace = true
-nmp-resolver-testkit.workspace = true
-nmp-test-support.workspace = true
-tempfile = "3"
-# The AUTH driver's in-crate test drives a raw websocket peer directly.
-tungstenite = "0.29"
-# The session payload test asserts on the exact hex encoding it stores.
-hex = "0.4"

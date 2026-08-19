@@ -296,7 +296,7 @@ impl RelayInformationSnapshot {
             .map(|nips| nips.contains(&nip))
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(crate) fn payload_identity_value(&self) -> usize {
         Arc::as_ptr(&self.inner.payload) as usize
     }

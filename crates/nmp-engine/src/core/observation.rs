@@ -423,7 +423,7 @@ impl CoreState {
         owner_demands: &BTreeSet<nmp_router::DemandKey>,
     ) -> Vec<(HandleId, String, u64)> {
         let (targets, _walk) = self.request_targets.live_targets_for_demands(owner_demands);
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         {
             self.request_target_demand_keys_touched.set(
                 self.request_target_demand_keys_touched

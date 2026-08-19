@@ -55,7 +55,7 @@ pub struct EngineThread {
     /// count unconditionally — a falsifier that only holds for a specially
     /// built loop proves nothing about the shipped one — and only this
     /// reader's end of the `Arc` is gated.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     wait_arms: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -188,30 +188,6 @@ impl EngineThread {
         )
     }
 
-    /// Spawn a headless runtime over a static fact snapshot.
-    ///
-    /// This exists for deterministic falsifiers. Production assembly owns
-    /// the private mutable fact store and uses [`Self::spawn`].
-    #[cfg(feature = "unstable-mechanism")]
-    #[doc(hidden)]
-    pub fn spawn_with_fixture_routing_facts(
-        store: RedbStore,
-        facts: nmp_router_testkit::FixtureRoutingFacts,
-        cap: usize,
-        pool_config: PoolConfig,
-    ) -> Result<(Self, Handle), EngineThreadError> {
-        Self::spawn_with_fixture_routing_facts_and_runtime_config(
-            store,
-            facts,
-            cap,
-            pool_config,
-            RuntimeConfig::default(),
-            RestoredSession::empty(),
-            Vec::new(),
-            None,
-        )
-    }
-
     pub fn spawn_with_runtime_config(
         store: RedbStore,
         cap: usize,
@@ -258,32 +234,6 @@ impl EngineThread {
         Self::spawn_with_facts(
             store,
             routing_facts,
-            cap,
-            pool_config,
-            runtime_config,
-            initial_session,
-            capabilities,
-            route_provider,
-        )
-    }
-
-    /// The fixture door (#52 Q3). Takes the fixture crate's own public type
-    /// and builds the engine's store from it here, for the same reason.
-    #[cfg(feature = "unstable-mechanism")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn spawn_with_fixture_routing_facts_and_runtime_config(
-        store: RedbStore,
-        facts: nmp_router_testkit::FixtureRoutingFacts,
-        cap: usize,
-        pool_config: PoolConfig,
-        runtime_config: RuntimeConfig,
-        initial_session: RestoredSession,
-        capabilities: Vec<nmp_grammar::ReplaceableMaterializerSpec>,
-        route_provider: Option<Box<dyn AuthorRouteProvider>>,
-    ) -> Result<(Self, Handle), EngineThreadError> {
-        Self::spawn_with_facts(
-            store,
-            nmp_engine::core::RoutingFactStore::from_fixture(facts),
             cap,
             pool_config,
             runtime_config,
@@ -492,7 +442,7 @@ impl EngineThread {
                 drain_inbox: cmd_tx.clone(),
                 runtime,
                 clock,
-                #[cfg(any(test, feature = "test-instrumentation"))]
+                #[cfg(feature = "test-instrumentation")]
                 wait_arms,
             },
             Handle {
@@ -518,7 +468,7 @@ impl EngineThread {
     /// Reading it is a plain relaxed atomic load: it sends no command and
     /// wakes nothing, so sampling cannot itself disturb the parked wait it is
     /// measuring.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     #[doc(hidden)]
     #[must_use]
     pub fn wait_arms(&self) -> u64 {

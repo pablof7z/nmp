@@ -66,7 +66,7 @@ pub(super) struct DemandWalk {
 
 /// The census contribution, so the root counts this owner's state without
 /// naming its maps.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 pub(super) struct RequestTargetCounts {
     pub(super) handles: usize,
     pub(super) demand_keys: usize,
@@ -255,7 +255,7 @@ impl RequestTargets {
         (targets.into_iter().collect(), walk)
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn counts(&self) -> RequestTargetCounts {
         RequestTargetCounts {
             handles: self.by_handle.len(),
@@ -291,7 +291,7 @@ impl RequestTargets {
 /// is a freshness answer supplied from outside — so the check verifies that
 /// every live target traces back to a declaration, and that the reverse index
 /// is exactly the merge, rather than merely the same size as it.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 impl RequestTargets {
     pub(super) fn assert_consistent(&self, at: &str) {
         let mut expected_by_demand: BTreeMap<DemandKey, BTreeMap<RequestTarget, usize>> =

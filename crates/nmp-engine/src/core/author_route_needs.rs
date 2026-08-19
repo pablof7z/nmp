@@ -92,7 +92,7 @@ use nostr::PublicKey;
 /// naming its maps. `wire_rebuild_agreement.rs` compares this census across
 /// a rebuild the same way it compares `WireOwnership`'s; without these
 /// fields that comparison is blind to everything this owner holds.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 pub(super) struct AuthorRouteNeedsCounts {
     pub(super) wire_owner_keys: usize,
     pub(super) wire_owner_refs: usize,
@@ -193,7 +193,7 @@ impl AuthorRouteNeeds {
     /// is recorded as needing a provider (same `needs.len()`, wrong member)
     /// fails the second assertion even though every count and every set size
     /// stays right.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (author, count) in &self.wire_owner_counts {
             assert!(
@@ -210,7 +210,7 @@ impl AuthorRouteNeeds {
         }
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn counts(&self) -> AuthorRouteNeedsCounts {
         AuthorRouteNeedsCounts {
             wire_owner_keys: self.wire_owner_counts.len(),

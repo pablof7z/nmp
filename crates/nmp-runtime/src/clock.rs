@@ -94,7 +94,7 @@ impl EngineClock {
     /// Change the clock value without delivering a tick. Runtime scheduling
     /// tests use this to model a command winning the channel/deadline race;
     /// production harnesses must use [`Self::set`] so stated time is acted on.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn pin_silently(&self, at: Timestamp) {
         self.pinned.store(at.as_secs(), Ordering::Relaxed);
     }

@@ -276,13 +276,13 @@ enum Cmd {
         id: ReceiptId,
         registration: ReceiptDeliveryRegistration,
     },
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     ObservationOwnershipCensus {
         reply: Sender<ObservationOwnershipCensus>,
     },
     /// Hold the reducer inside one command turn so a test can observe whether
     /// a simultaneously-due core deadline ran before command dispatch.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     DeadlineRaceProbe {
         at: Timestamp,
         entered: Sender<()>,
@@ -386,7 +386,7 @@ enum Cmd {
     Shutdown,
 }
 
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[doc(hidden)]
 pub struct ObservationOwnershipCensus {
@@ -783,7 +783,7 @@ fn engine_loop(
                 Err(RecvTimeoutError::Disconnected) => break,
             },
         };
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         if let Cmd::DeadlineRaceProbe { at, .. } = &cmd {
             // Model the exact boundary where the command and an armed core
             // deadline become ready together. The ordinary clock setter
@@ -920,7 +920,7 @@ fn engine_loop(
                 Cmd::DetachReceiptDelivery { id, registration } => {
                     receipt_deliveries.borrow_mut().detach(id, &registration);
                 }
-                #[cfg(any(test, feature = "bench-instrumentation"))]
+                #[cfg(feature = "bench-instrumentation")]
                 Cmd::ObservationOwnershipCensus { reply } => {
                     let core_census = core.observation_ownership_census();
                     let _ = reply.send(ObservationOwnershipCensus {
@@ -960,7 +960,7 @@ fn engine_loop(
                 Cmd::ExemptSignEventDrain(op_id) => {
                     active_sign_events.exempt_from_shutdown_drain(op_id);
                 }
-                #[cfg(any(test, feature = "bench-instrumentation"))]
+                #[cfg(feature = "bench-instrumentation")]
                 Cmd::DeadlineRaceProbe { .. } => {}
                 Cmd::Engine(_)
                 | Cmd::RelayInformationFetched { .. }
@@ -1530,7 +1530,7 @@ fn engine_loop(
             Cmd::DetachReceiptDelivery { id, registration } => {
                 receipt_deliveries.borrow_mut().detach(id, &registration);
             }
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             Cmd::ObservationOwnershipCensus { reply } => {
                 let core_census = core.observation_ownership_census();
                 let _ = reply.send(ObservationOwnershipCensus {
@@ -1547,7 +1547,7 @@ fn engine_loop(
                     history_channels: history_channels.len(),
                 });
             }
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             Cmd::DeadlineRaceProbe {
                 entered, release, ..
             } => {
@@ -2924,10 +2924,10 @@ impl std::error::Error for AddSignerError {}
 /// #827: the facade's own retention falsifier used to reach this across the
 /// `nmp-engine` crate boundary, which is why the feature exists at all. Now
 /// that the caller is in THIS crate's `#[cfg(test)]` build, `test` is added
-/// to the gate -- the same `#[cfg(any(test, feature = "test-instrumentation"))]`
+/// to the gate -- the same `#[cfg(feature = "test-instrumentation")]`
 /// spelling the NIP-11 service itself already uses. Production builds are
 /// unchanged: neither cfg is on.
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 #[doc(hidden)]
 pub fn relay_information_retention_census(
     handle: &Handle,
@@ -3353,7 +3353,7 @@ impl Handle {
         )
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     #[doc(hidden)]
     pub fn observation_ownership_census(&self) -> ObservationOwnershipCensus {
         let (reply_tx, reply_rx) = mpsc::channel();

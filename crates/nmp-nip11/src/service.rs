@@ -58,7 +58,7 @@ struct Shared {
 /// Caller-held snapshots share the cached payload. They are outside this
 /// census; only service-owned cache and flight state are counted.
 #[doc(hidden)]
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelayInformationRetentionCensus {
     pub cached_entries: usize,
@@ -554,7 +554,7 @@ impl RelayInformationService {
         )
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn retention_census(&self) -> RelayInformationRetentionCensus {
         let state = self
             .shared

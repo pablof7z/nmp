@@ -163,16 +163,6 @@ impl EngineCore {
         Self::checked_new(CoreState::new(store, cap))
     }
 
-    #[cfg(feature = "unstable-mechanism")]
-    #[doc(hidden)]
-    pub fn new_with_fixture_routing_facts(
-        store: RedbStore,
-        facts: nmp_router_testkit::FixtureRoutingFacts,
-        cap: usize,
-    ) -> Self {
-        Self::checked_new(CoreState::new_with_fixture_routing_facts(store, facts, cap))
-    }
-
     pub fn new_with_routing_facts(
         store: RedbStore,
         routing_facts: RoutingFactStore,
@@ -205,12 +195,12 @@ impl EngineCore {
         self.state.active_demand()
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub fn assert_owner_consistency(&self, at: &str) {
         self.state.assert_owner_consistency(at)
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     #[doc(hidden)]
     pub fn bench_ownership_census(&self) -> CoreOwnershipCensus {
         self.state.bench_ownership_census()
@@ -241,7 +231,7 @@ impl EngineCore {
         self.checked("tick", |s| s.tick(now))
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn maintenance_turn_count(&self) -> u64 {
         self.state.maintenance_turn_count()
     }
@@ -266,19 +256,19 @@ impl EngineCore {
         self.state.active_pubkey()
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     #[doc(hidden)]
     pub fn reset_publish_queue_lane_recovery_reads(&self) {
         self.state.reset_publish_queue_lane_recovery_reads()
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     #[doc(hidden)]
     pub fn publish_queue_lane_recovery_reads(&self) -> u64 {
         self.state.publish_queue_lane_recovery_reads()
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     #[doc(hidden)]
     pub fn seed_stale_relay_open_failure_for_test(
         &mut self,

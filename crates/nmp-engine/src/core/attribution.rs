@@ -502,7 +502,7 @@ impl AttributionState {
     /// from. Only the structural clauses (no zero counts, no counts without
     /// demand) apply to it. Recomputing it would require retaining the atoms,
     /// which is state added to prove state.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (sub_id, claims) in &self.live_request_claims {
             assert!(
@@ -577,7 +577,7 @@ impl AttributionState {
         }
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn counts(&self) -> AttributionCounts {
         AttributionCounts {
             inflight_subs: self.inflight.len(),
@@ -603,7 +603,7 @@ impl AttributionState {
 /// already returns a named struct; attribution was the one that did not, and
 /// eleven interchangeable positional `usize`s mean any adjacent pair could be
 /// transposed with the whole suite still green.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 pub(super) struct AttributionCounts {
     pub(super) inflight_subs: usize,
     pub(super) wire_keys: usize,

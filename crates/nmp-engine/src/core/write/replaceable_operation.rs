@@ -106,7 +106,7 @@ impl CoreState {
         &mut self,
         call: ReplaceableMaterializationCall,
     ) -> ReplaceableMaterializationOutcome {
-        #[cfg(any(test, feature = "test-instrumentation"))]
+        #[cfg(feature = "test-instrumentation")]
         nmp_store::testing::assert_materializer_entry_has_no_open_transaction(&mut self.store);
         call.execute()
     }

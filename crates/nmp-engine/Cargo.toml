@@ -18,12 +18,6 @@ bench-instrumentation = [
 ]
 test-instrumentation = ["nmp-store/test-instrumentation"]
 
-# #1665/#1667: the gated fixture constructors every headless reducer test
-# seeds an `EngineCore` through. `nmp-router-testkit` is the fixture-facts
-# crate they take -- optional and pulled in ONLY by this feature, so a
-# default-features consumer never links a test-fixture crate.
-unstable-mechanism = ["dep:nmp-router-testkit"]
-
 # THE DEPENDENCY LIST IS THE POINT OF THIS CRATE.
 #
 # `EngineCore` is a synchronous reducer: `handle(EngineMsg) -> Vec<Effect>`,
@@ -46,20 +40,7 @@ nmp-router.workspace = true
 nmp-resolver.workspace = true
 nmp-transport.workspace = true
 nmp-signer.workspace = true
-nmp-router-testkit = { workspace = true, optional = true }
 blake3.workspace = true
 # The durable relay-set encoding in `core/write.rs` is lowercase hex.
 hex = "0.4"
 libc = { version = "0.2", optional = true }
-
-[dev-dependencies]
-nmp-engine = { path = ".", features = [
-    "test-instrumentation",
-    "unstable-mechanism",
-] }
-nmp-store = { workspace = true, features = ["test-instrumentation"] }
-nmp-router-testkit.workspace = true
-nmp-resolver-testkit.workspace = true
-nmp-test-support.workspace = true
-# A throwaway on-disk `RedbStore` per reducer test run.
-tempfile = "3"

@@ -28,7 +28,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nmp_grammar::{ContextualAtom, RelaySessionKey};
@@ -63,7 +63,7 @@ use crate::{
 mod postings;
 mod postings_store;
 mod schema;
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 #[path = "testing_tests.rs"]
 pub mod testing;
 pub(crate) mod publish_queue;
@@ -75,7 +75,7 @@ mod query;
 mod ingest_txn;
 mod mutation;
 mod store;
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 pub use store::OrderedEventReadPause;
 pub use store::{RedbStore, StoreSigReader};
 mod event_ops;

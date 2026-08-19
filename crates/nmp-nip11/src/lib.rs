@@ -24,7 +24,7 @@
 mod service;
 mod value;
 
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 pub use service::RelayInformationRetentionCensus;
 pub use service::RelayInformationService;
 pub use value::{

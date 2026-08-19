@@ -105,9 +105,9 @@ pub use coverage::{coverage_key, CoverageInterval, CoverageKey, GcReport, GcRete
 pub use coverage_claims::coverage_claim_atoms;
 pub use persistence_failure::PersistenceError;
 pub use persistent_store_lifetime::{RedbStoreOpenError, RedbStoreResetError};
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 pub use redb_store::testing;
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 pub use redb_store::OrderedEventReadPause;
 pub use redb_store::{RedbStore, StoreSigReader};
 pub use semantic_edit::{

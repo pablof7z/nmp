@@ -388,7 +388,7 @@ impl CoreState {
             authenticate_as: session.authenticate_as,
             ..demand
         };
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         self.coordinate_reuse_new_reqs
             .set(self.coordinate_reuse_new_reqs.get().saturating_add(1));
         let opened = self.on_subscribe(LiveQuery::single(demand));

@@ -46,7 +46,7 @@ impl IndexedChild<RelaySessionKey> for RequestReplacement {
 
 /// The census contribution, so the root counts this owner's state without
 /// naming its maps.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 pub(super) struct RequestReplacementCounts {
     pub(super) jobs: usize,
     pub(super) session_keys: usize,
@@ -99,12 +99,12 @@ impl RequestReplacements {
         self.pending.take_owner(session)
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn assert_consistent(&self, at: &str) {
         self.pending.assert_consistent(at);
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn counts(&self) -> RequestReplacementCounts {
         RequestReplacementCounts {
             jobs: self.pending.len(),

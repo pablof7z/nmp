@@ -80,7 +80,7 @@ pub(super) struct PendingWrites {
 /// The census contribution, so `bench_ownership_census` counts this owner's
 /// state without naming its maps. Deliberately `pub(super)` and NOT nested
 /// into `CoreOwnershipCensus`, which stays a flat `pub` struct.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 pub(super) struct PendingWriteCounts {
     pub(super) obligations: usize,
     pub(super) intent_keys: usize,
@@ -438,7 +438,7 @@ impl PendingWrites {
 
     // -- proofs -----------------------------------------------------------
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn counts(&self) -> PendingWriteCounts {
         PendingWriteCounts {
             obligations: self.pending.len(),
@@ -474,7 +474,7 @@ impl PendingWrites {
     ///   live work on those bytes. Only what it can still get wrong is
     ///   checked -- naming a receipt that is not live, or keeping an empty set
     ///   that claims unowned bytes are owned.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (id, pending) in &self.pending {
             let owner = self

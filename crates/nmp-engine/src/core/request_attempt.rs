@@ -117,7 +117,7 @@ pub(super) struct RequestAttempts {
 /// The census contribution, so `bench_ownership_census` counts this owner's
 /// state without naming its maps. Deliberately `pub(super)` and NOT nested
 /// into `CoreOwnershipCensus`, which stays a flat `pub` struct.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 pub(super) struct RequestAttemptCounts {
     pub(super) attempts: usize,
     pub(super) sub_keys: usize,
@@ -384,7 +384,7 @@ impl RequestAttempts {
             .retry_failures = failures;
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn counts(&self) -> RequestAttemptCounts {
         RequestAttemptCounts {
             attempts: self.attempts.len(),
@@ -409,7 +409,7 @@ impl RequestAttempts {
     /// `assert_consistent` doc makes the same point). Four mirrors are
     /// checked in both directions: `by_sub`, `by_session`,
     /// `retry_by_sub`, `retries_by_session`.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (attempt_id, attempt) in &self.attempts {
             let ids = self.by_sub.get(&attempt.sub_id).unwrap_or_else(|| {

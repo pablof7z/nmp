@@ -343,5 +343,3 @@ pub use nmp_signer::{
 // explicitly unstable"). `Engine::from_parts` needs `PoolConfig` in a
 // caller's signature. This is an in-workspace/test exception (`nmp-bdd`), not
 // a supported application extension point.
-#[cfg(feature = "unstable-mechanism")]
-pub use nmp_transport::PoolConfig;

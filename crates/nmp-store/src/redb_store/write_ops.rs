@@ -650,14 +650,14 @@ pub(super) fn accept_write(
         wall_clock_now(),
         TerminalRetentionLimits::PRODUCTION,
     )?;
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_accept_write_before_commit) {
         drop(write);
         return Err(PersistenceError::new(
             "injected acceptance failed before commit",
         ));
     }
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_accept_write_after_commit) {
         return super::testing::commit_acceptance_then_return_io(store, write, outcome);
     }
@@ -1197,7 +1197,7 @@ pub(super) fn compensate_write_with_state(
         wall_clock_now(),
         TerminalRetentionLimits::PRODUCTION,
     )?;
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_compensation_with_state) {
         return Err(PersistenceError::new("injected compensation failure"));
     }

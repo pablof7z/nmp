@@ -134,14 +134,14 @@ pub(super) struct HandleAtomRemoval {
     /// caller owns deactivating that handle's request targets for it.
     pub(super) demand_released: bool,
     /// Coverage claim keys this removal had to examine, for the bench census.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) claims_examined: usize,
 }
 
 /// The census contribution, so the root counts this owner's state without
 /// naming its maps. Deliberately flat scalars: the census is a bench/test
 /// observable, and giving it the maps back would undo the boundary.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 pub(super) struct WireOwnershipCounts {
     pub(super) pending_atoms: usize,
     pub(super) pending_resolver_closes: usize,
@@ -400,7 +400,7 @@ impl WireOwnership {
         if demand_released {
             discard_edge(&mut self.handles_by_demand, &key, handle);
         }
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         let claims_examined = departing_claims.len();
         for claim_key in departing_claims {
             let released = release_ref.clone()(
@@ -421,7 +421,7 @@ impl WireOwnership {
         HandleAtomRemoval {
             removed,
             demand_released,
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             claims_examined,
         }
     }
@@ -524,7 +524,7 @@ impl WireOwnership {
 
     // -- census -------------------------------------------------------------
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn counts(&self) -> WireOwnershipCounts {
         WireOwnershipCounts {
             pending_atoms: self.pending_atoms.len(),
@@ -590,7 +590,7 @@ impl WireOwnership {
 ///   pending key is a live demand).
 /// - `pending_resolver_closes` names demands that became ownerless, so its
 ///   keys must be disjoint from the live ones.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 impl WireOwnership {
     pub(super) fn assert_consistent(&self, at: &str) {
         let mut expected_demand_refs: HashMap<HandleId, BTreeMap<DemandKey, usize>> =

@@ -225,7 +225,7 @@ impl HistoryRows {
     /// I5, checked: one membership, and every key carrying its own row's
     /// timestamp. Lives with the fields it constrains rather than in the
     /// session owner above, which cannot see them.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     fn assert_consistent(&self, at: &str, id: HistorySessionId) {
         assert_eq!(
             self.rows.len(),
@@ -397,7 +397,7 @@ impl HistorySessions {
     /// Membership/order is I5 and lives on [`HistoryRows`], which owns both
     /// collections; this walk delegates to it per session rather than
     /// restating it, because the fields it constrains are private there.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (id, state) in &self.sessions {
             state.rows.assert_consistent(at, *id);
@@ -462,7 +462,7 @@ impl HistorySessions {
     /// Opening-evidence source edges every frozen branch acquisition still
     /// retains, for the bench census's retained-freshness total. Separate
     /// from [`Self::counts`] because only that census reads it.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn freshness_source_edges(&self) -> usize {
         self.sessions
             .values()
@@ -1405,7 +1405,7 @@ impl CoreState {
             };
             for mut atom in self.resolver.root_atoms(*live) {
                 atom.limit = None;
-                #[cfg(any(test, feature = "bench-instrumentation"))]
+                #[cfg(feature = "bench-instrumentation")]
                 self.history_store_queries
                     .set(self.history_store_queries.get().saturating_add(1));
                 let filter = atom.to_nostr();
@@ -1511,7 +1511,7 @@ impl CoreState {
             };
             for mut atom in self.resolver.root_atoms(*live) {
                 atom.limit = None;
-                #[cfg(any(test, feature = "bench-instrumentation"))]
+                #[cfg(feature = "bench-instrumentation")]
                 self.history_store_queries
                     .set(self.history_store_queries.get().saturating_add(1));
                 let filter = atom.to_nostr();
@@ -1780,7 +1780,7 @@ impl CoreState {
         if visible_removals > 0 {
             let boundary =
                 original_boundary.expect("a visible removal implies a prior canonical boundary");
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             self.history_store_queries
                 .set(self.history_store_queries.get().saturating_add(1));
             let queried = match pinned_relays.as_ref() {

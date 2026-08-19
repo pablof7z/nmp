@@ -21,7 +21,7 @@ use super::schema::{
     PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
 use super::store::RedbStore;
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 use super::Ordering;
 use super::{
     AuthDenial, BTreeMap, BTreeSet, CloseIntentOutcome, Event, EventId, IntentId, IntentSigState,
@@ -250,7 +250,7 @@ pub(super) fn record_route_revision(
             relays,
         }
     };
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if store.fail_route_revision_writes {
         return Err(PersistenceError::new("injected route revision failure"));
     }
@@ -583,7 +583,7 @@ pub(super) fn bootstrap_publish_queue_lanes(
         write_txn.abort().map_err(persist_err)?;
         return Ok(prepared);
     }
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_lane_bootstrap) {
         return Err(PersistenceError::new("injected lane bootstrap failure"));
     }
@@ -594,7 +594,7 @@ pub(super) fn recover_publish_queue_lanes(
     store: &RedbStore,
     intent_id: IntentId,
 ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     store
         .publish_queue_lane_recovery_reads
         .fetch_add(1, Ordering::Relaxed);
@@ -1068,7 +1068,7 @@ pub(super) fn start_lane_attempt(
         )?;
         (attempt, advanced)
     };
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if store.failed_lane_start_relays.contains(&key.relay) {
         return Err(PersistenceError::new("injected attempt start failure"));
     }
@@ -1196,7 +1196,7 @@ pub(super) fn record_lane_handoff(
             .map_err(persist_err)?;
         lane
     };
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_lane_handoff) {
         return Err(PersistenceError::new("injected lane handoff failure"));
     }
@@ -1294,7 +1294,7 @@ pub(super) fn finish_lane_attempt(
             )?
         }
     };
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_lane_attempt_finish) {
         return Err(PersistenceError::new("injected attempt finish failure"));
     }
