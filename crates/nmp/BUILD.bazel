@@ -117,6 +117,20 @@ rust_test(
 )
 
 rust_test(
+    name = "expandable_window_first_advance",
+    srcs = ["tests/expandable_window_first_advance.rs"],
+    edition = crate_edition(),
+    aliases = aliases(normal_dev=True, proc_macro_dev=True),
+    deps = all_crate_deps(normal=True, normal_dev=True) + ["//crates/nmp-engine:lib_test", "//crates/nmp-grammar:lib_test", "//crates/nmp-local-signer:lib_test", "//crates/nmp-nip11:lib_test", "//crates/nmp-router:lib_test", "//crates/nmp-router-testkit:lib_test", "//crates/nmp-runtime:lib_test", "//crates/nmp-signer:lib_test", "//crates/nmp-store:lib_test", "//crates/nmp-transport:lib_test", ":lib_test", "//crates/nmp-nip29:lib_test", "//crates/nmp-outbox:lib_test", "//crates/nmp-resolver:lib_test", "//crates/nmp-resolver-testkit:lib_test", "//crates/nmp-test-support:lib_test"],
+    proc_macro_deps = all_crate_deps(proc_macro=True, proc_macro_dev=True),
+    rustc_flags = ["--cfg", 'feature="test-instrumentation"', "--cfg", 'feature="unstable-mechanism"'],
+    compile_data = ["Cargo.toml"],
+    rustc_env = {"CARGO_MANIFEST_DIR": "./crates/nmp"},
+    data = ["//:first_party_sources", "//:workspace_data"],
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
     name = "finished_stored_events",
     srcs = ["tests/finished_stored_events.rs"],
     edition = crate_edition(),
