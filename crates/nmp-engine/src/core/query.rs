@@ -26,7 +26,7 @@ impl CoreState {
     /// commits one request-scoped batch atomically through this door.
     fn record_request_coverage_batch(
         &mut self,
-        batch: &[(ContextualAtom, RelaySessionKey, CoverageInterval)],
+        batch: &[(CoverageKey, RelaySessionKey, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
         self.store.record_coverage(batch)
     }
@@ -260,14 +260,6 @@ impl CoreState {
                 .saturating_add(demand.len() as u64),
         );
         self.flush_author_outbox_route_need_changes(effects);
-        // Finding E3 (epic #507): install `demand` as the current logical
-        // demand and prune `shape_by_key` against it plus every key still
-        // `coverage_claims` by an outstanding attribution snapshot (see
-        // `set_active_demand`'s own doc for why the latter is required) --
-        // mirrors the `nip11_information.retain(..)` a few lines below, in
-        // the same function, against the same kind of "current authoritative
-        // set" (`planned`/`demand`) recompile just established.
-        self.attribution.set_active_demand(demand.iter());
         let outcome = self
             .router
             .compile(&demand, &self.routing_facts, self.compile_budget());
@@ -530,13 +522,7 @@ impl CoreState {
         else {
             return BTreeSet::new();
         };
-        let Some(claims): Option<BTreeMap<_, _>> = added
-            .iter()
-            .map(|key| self.attribution.claim_shape(key.clone()).map(|atom| (key.clone(), atom)))
-            .collect()
-        else {
-            return BTreeSet::new();
-        };
+        let claims = added.clone();
         let key = (session.clone(), sub_id.clone());
         let should_attempt =
             if let Some(pending) = self.pending_request_claim_transfers.get_mut(&key) {
@@ -590,9 +576,9 @@ impl CoreState {
         }
         let batch: Vec<_> = pending
             .claims
-            .values()
+            .iter()
             .cloned()
-            .map(|atom| (atom, pending.session.clone(), pending.interval))
+            .map(|key| (key, pending.session.clone(), pending.interval))
             .collect();
         if let Err(_error) = self.record_request_coverage_batch(&batch) {
             #[cfg(feature = "bench-instrumentation")]
@@ -609,7 +595,7 @@ impl CoreState {
         self.request_claim_transfer_commits
             .set(self.request_claim_transfer_commits.get().saturating_add(1));
 
-        let committed: BTreeSet<_> = pending.claims.keys().cloned().collect();
+        let committed = pending.claims.clone();
         let still_current = self
             .live_wire_requests
             .get(&(pending.session.clone(), pending.sub_id.clone()))
@@ -990,7 +976,6 @@ impl CoreState {
         self.router.activate(effective_atom.clone());
         let mut metadata_diagnostics_changed = false;
         if first_owner {
-            self.attribution.observe_atom(&effective_atom);
             self.wire.clear_deferred_close(&key);
             if let Some(outcome) = self.router.reactivate_covered_atom(&effective_atom) {
                 let transferred =
@@ -1027,10 +1012,7 @@ impl CoreState {
         }
         self.release_author_outbox_wire_owner(atom);
         match released {
-            AtomReleased::Ownerless { final_atom, .. } => {
-                self.attribution.release_atom(&final_atom);
-                Some(final_atom)
-            }
+            AtomReleased::Ownerless { final_atom, .. } => Some(final_atom),
             AtomReleased::Survived {
                 key,
                 effective_atom,
@@ -1585,7 +1567,7 @@ impl CoreState {
 
         let mut batch = Vec::with_capacity(claims.len());
         for claim in &claims {
-            batch.push((claim.atom.clone(), session.clone(), claim.interval));
+            batch.push((claim.key.clone(), session.clone(), claim.interval));
         }
 
         if let Err(_error) = self.record_request_coverage_batch(&batch) {
@@ -1632,7 +1614,7 @@ impl CoreState {
         };
         let superseded = pending.filter_hash == filter_hash
             && request_revision > pending.request_revision
-            && pending.claims.keys().all(|key| {
+            && pending.claims.iter().all(|key| {
                 completed_claims.iter().any(|claim| {
                     claim.key == *key
                         && claim.interval.from <= pending.interval.from
@@ -1657,10 +1639,8 @@ impl CoreState {
                 )
         });
         if still_current {
-            self.attribution.retain_added_live_request_claims(
-                sub_id,
-                &pending.claims.keys().cloned().collect(),
-            );
+            self.attribution
+                .retain_added_live_request_claims(sub_id, &pending.claims);
         }
     }
 

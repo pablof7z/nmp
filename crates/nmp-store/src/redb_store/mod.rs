@@ -31,7 +31,7 @@ use std::path::Path;
 #[cfg(feature = "test-instrumentation")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use nmp_grammar::{ContextualAtom, RelaySessionKey};
+use nmp_grammar::RelaySessionKey;
 // Only the test modules below still name a `ConcreteFilter` directly: nothing
 // on the durable path handles a filter any more (#1849).
 use nostr::secp256k1::schnorr::Signature;
@@ -41,9 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_wins};
 use crate::binary_event::{self, decode_hex_32, IndexedMatch, PreparedFilter, StoredEventView};
-use crate::coverage::{
-    coverage_key as compute_coverage_key, merge_interval, shrink_after_eviction, GcVictimIndex,
-};
+use crate::coverage::{merge_interval, shrink_after_eviction, GcVictimIndex};
 use crate::persistent_store_lifetime::{
     acquire_for_open, reset_store, RedbStoreOpenError, RequiredLockedFileBackend, StoreOwnership,
 };
@@ -308,16 +306,21 @@ impl RedbStore {
     }
 
     /// Atomically record every coverage claim earned by one completed
-    /// request. Each tuple is `(atom, relay, proven interval)`. The coverage
-    /// identity is the full [`ContextualAtom`], never a bare
-    /// `ConcreteFilter`; the caller that owns request attribution supplies
-    /// the complete batch. A successful return makes every merged claim
-    /// visible, while an error may make none or the entire batch visible but
-    /// never a prefix. Merge-only: no public lowering path exists outside
-    /// `gc`.
+    /// request. Each tuple is `(key, relay, proven interval)`. The coverage
+    /// identity is the [`CoverageKey`] itself — a context-inclusive hash of a
+    /// [`nmp_grammar::ContextualAtom`], computed by [`crate::coverage_key`] at the one
+    /// place the atom is still in hand. Nothing here needs the atom: this
+    /// door used to take one and immediately recompute a key its caller
+    /// already held, and that single demand forced the engine to keep a
+    /// `CoverageKey -> ContextualAtom` reverse map alive purely so it could
+    /// answer it at EOSE time. The caller that owns request attribution
+    /// supplies the complete batch. A successful return makes every merged
+    /// claim visible, while an error may make none or the entire batch
+    /// visible but never a prefix. Merge-only: no public lowering path exists
+    /// outside `gc`.
     pub fn record_coverage(
         &mut self,
-        claims: &[(ContextualAtom, RelaySessionKey, CoverageInterval)],
+        claims: &[(CoverageKey, RelaySessionKey, CoverageInterval)],
     ) -> Result<(), PersistenceError> {
         event_ops::record_coverage(self, claims)
     }
