@@ -19,9 +19,6 @@
 | Tier | Public addition/change | Ownership/teardown | Deliberate gap |
 |---|---|---|---|
 | Rust | | | |
-| FFI | | | |
-| Swift | | | |
-| Kotlin | | | |
 
 ## Persistence and diagnostics
 

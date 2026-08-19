@@ -6,35 +6,15 @@ Use these as starting shapes, then verify exact declarations for the selected pl
 
 Goal: one live feed whose author set follows the current account.
 
-1. Construct one engine at the application/service boundary, with a persistent `storePath` when restart cache and receipts matter. On Apple platforms use durable Application Support storage, not a purgeable Caches location.
-2. The reactive feed may open signed out and reroot when `engine.session.makeCurrent(account)` changes selection. Restore/select the account first only when the product should avoid a signed-out intermediate state.
-3. Build a filter for the content kinds with authors bound through the current-account/follows graph supplied by the selected tier. If locally accepted posts should appear even when the user does not follow themselves, union the reactive current pubkey into the author binding. If the ergonomic facade does not project the required graph, stop and report the gap; do not query a contact list in the app and manually reopen a second author subscription.
-4. Observe once at the feature-model boundary. Swift owns one eager `NMPQuery`; Kotlin collects one cold flow and shares it with `stateIn` or `shareIn` if several consumers need it.
-5. Replace the model's canonical input with every delivered native `RowBatch`. Apply ranking, mute policy, deduped UI sections, and pagination windows downstream.
+1. Construct one engine at the application/service boundary, with a persistent `store_path` when restart cache and receipts matter.
+2. The reactive feed may open signed out and reroot when `engine.make_current_account(public_key)` changes selection. Restore/select the account first only when the product should avoid a signed-out intermediate state.
+3. Build a filter for the content kinds with authors bound through the current-account/follows graph. The followed-authors set is expressed with the core grammar directly: a `Binding::Derived` whose `inner` demand selects kind:3 by the reactive current pubkey and whose `project` is `Selector::Tag("p")`, unioned (`SetOp::Union`) with the reactive current pubkey itself so locally accepted posts appear even when the user does not follow themselves. If the ergonomic facade does not project a ready-made follows binding, stop and report the gap; do not query a contact list in the app and manually reopen a second author subscription.
+4. Observe once at the feature-model boundary; share the subscription across consumers deliberately rather than opening a second query.
+5. Replace the model's canonical input with every delivered `Frame`. Apply ranking, mute policy, deduped UI sections, and pagination windows downstream.
 6. Render cache rows immediately. Describe evidence per planned source: connecting, reconciled-through, disconnected, shortfall. Never convert it to global `synced`.
 7. Cancel/release the query when the feature no longer exists. NMP withdraws demand and reconnects still-live demand itself.
 
-Before promising this recipe cross-platform, check the exact follows binding/helper. A Swift-only following action does not imply a Kotlin following API.
-
-The current Swift graph for followed authors is a derived contact-list query, projected through its `p` tags:
-
-```swift
-let followed = NMPBinding.derived(
-    inner: NMPDemand(
-        selection: NMPFilter(
-            kinds: [3],
-            authors: .reactive(.activePubkey)
-        )
-    ),
-    project: .tag("p")
-)
-let homeAuthors = NMPBinding.setOp(
-    .union,
-    [.reactive(.activePubkey), followed]
-)
-```
-
-Use `homeAuthors` in the content filter with `.auto`. The self-union is product semantics, not an NMP default.
+Use the resulting union binding in the content filter with `ReadRouting::Auto`. The self-union is product semantics, not an NMP default.
 
 ## Profile screen with live content
 
@@ -42,7 +22,7 @@ Goal: show identity metadata and authored content without creating an app cache 
 
 1. Decode the route input with the platform's public Nostr-entity decoder when it may be `npub`, `nprofile`, or a `nostr:` URI. Reject unsupported entity shapes explicitly. That decode is the user boundary and the only place these spellings appear: what crosses into NMP is the decoded key, and no filter field, demand, engine argument, or app model below the boundary holds a bech32 string. Re-encode only to show a human.
 2. Open a replaceable metadata query and the content query as separate live demands. Each owns its source evidence and cancellation.
-3. Parse row content with `parseNostrContent` when you want source ranges and resolved locators; otherwise parse raw event content in app-owned presentation code. Parsing is pure and owns nothing.
+3. Parse row content with `nmp_content::parse_content` when you want source ranges and resolved locators; otherwise parse raw event content in app-owned presentation code. Parsing is pure and owns nothing.
 4. Keep one current profile projection for display, but do not persist it as an authority beside NMP's canonical store.
 5. If a nested reference must be live, open an ordinary query for its resolved locator and keep that query in the view-model or feature owner, with ordinary cancellation.
 6. Test profile replacement and removal as live snapshot changes, not one-shot fetch completion.
@@ -58,31 +38,36 @@ A group can live on more than one relay, so the app names its relay set once
 and narrows it to a group:
 
 ```text
-let scope = nip29::on(hosts)?          // RelayScopeError::EmptyRelaySet if empty
-let group = scope.group(groupId)       // same hosts, narrowed to one group
+let scope = nmp_nip29::on(hosts)?      // RelayScopeError::EmptyRelaySet if empty
+let group = scope.group(group_id)      // same hosts, narrowed to one group
 
 // Who is in these groups, and what are they called: the relay-signed records.
 let watching = scope.observe(&engine, predicate, [Metadata, Admins, Members], None)?;
 while let Some(snapshots) = watching.next().await? { /* GroupSnapshot per group */ }
 
 // A directory: every room this relay advertises, 250 per host.
-let browsing = scope.observe(&engine, nip29::all(), [Metadata], Some(250))?;
+let browsing = scope.observe(&engine, nmp_nip29::all(), [Metadata], Some(250))?;
 
 // One known room, no predicate and no id lookup:
-let room = nip29::group(hosts, group_id)?.observe(&engine, [Metadata, Members])?;
+let room = nmp_nip29::group(hosts, group_id)?.observe(&engine, [Metadata, Members])?;
 
 // This group's CONTENT stays an ordinary live query through the one door.
-engine.observe(group.read(contentFilter)?, None)?
+engine.observe(group.read(content_filter)?, None)?
 ```
 
 Remembering the selected group is a separate typed semantic write. Its host is
 event data, never a destination:
 
 ```text
-let receipt = engine.addGroupToList("research", selectedHost, "Research")
-engine.removeGroupFromList("research", selectedHost)
-engine.addRelayInUse(selectedHost)
-engine.removeRelayInUse(selectedHost)
+let writes = nmp_nip29::group_list_writes();
+let receipt = nmp_nip29::add_group_to_list(&engine, &writes, SimpleGroupEntry {
+    group_id: "research".into(),
+    host_relay: selected_host.clone(),
+    name: Some("Research".into()),
+})?;
+nmp_nip29::remove_group_from_list(&engine, &writes, "research".into(), selected_host.clone())?;
+nmp_nip29::add_relay_in_use(&engine, &writes, selected_host.clone())?;
+nmp_nip29::remove_relay_in_use(&engine, &writes, selected_host)?;
 ```
 
 Each call returns the ordinary receipt, freezes the selected author, survives
@@ -179,23 +164,23 @@ Rules:
   appearance -- per-host, on that host's own acceptance, is the correct and
   intentional behavior.
 
-For rich rendering, parse row content with `parseNostrContent` and open ordinary queries for the locators you actually need live, bounded to a visible-plus-prefetch window keyed by stable event id. There is no content session, no claim, and no permit budget to manage — the budget is whatever query ownership the app imposes on itself. Swift's `NMPUI` builds `observeWhileVisible` components over the same idea, but `NMPUI` is not in the prepared-product catalog — it lives in this repository's qualification package, so an app writes that visibility scoping itself today.
+For rich rendering, parse row content with `nmp_content::parse_content` and open ordinary queries for the locators you actually need live, bounded to a visible-plus-prefetch window keyed by stable event id. There is no content session, no claim, and no permit budget to manage — the budget is whatever query ownership the app imposes on itself; the app writes that visibility scoping itself.
 
 ## Follow button and relationship state
 
 Goal: make a follow control reflect canonical contact-list state rather than optimistic local state.
 
-Swift has `observeFollowing`, `follow`, `unfollow`, and the `NMPFollowing` resource. The action:
+`nmp-nip02` provides `observe_following(engine, target)` and `set_following(engine, &follow_writes(), target, change)`. The write:
 
 - freezes the selected author and submits one durable operation immediately;
 - uses the best cached contact list, or NIP-02's complete empty first value;
 - preserves fields and tags it does not own;
 - reapplies the operation when newer relay truth arrives; and
-- projects the ordinary receipt facts.
+- projects the ordinary receipt facts through the returned `ReceiptStream`.
 
-Do not set `isFollowing = true` on tap. Render action progress separately until the live following snapshot changes. Observation availability is source evidence, not permission to write: a known cached relationship and the explicit no-list state are actionable. The no-list case creates one complete kind:3 under NIP-02's capability policy; it is not a global relay-absence claim.
+Do not set a local "following" flag on tap. Render action progress separately until the live following snapshot changes. Observation availability is source evidence, not permission to write: a known cached relationship and the explicit no-list state are actionable. The no-list case creates one complete kind:3 under NIP-02's capability policy; it is not a global relay-absence claim.
 
-With the `nip02` ("following") capability in the app's `.nmp.toml`, Swift exposes `observeFollowing`/`follow`/`unfollow` on `NMPEngine`; Kotlin exposes top-level `observeFollowing(engine, target)` / `follow(engine, target)` / `unfollow(engine, target)` functions. Without the capability the whole family is absent at compile time. Only the Combine `NMPFollowing` `ObservableObject` is Swift-specific, and it ships with that same capability. The `NMPFollowButton` view over it is `NMPUI`, which is repo-only. Successful actions carry only ordinary receipt facts. Immediate `FollowActionFailure` is limited to malformed target, signed-out state, engine closure, and receipt unavailability. Do not import generated FFI types or reproduce contact-list editing in application code.
+`set_following`/`observe_following` are refused before custody unless `follow_capability()` was supplied to `Engine::new_with_capabilities` at construction. Successful actions carry only ordinary receipt facts; `set_following`'s only failures are `FollowActionFailure::SignedOut`, `EngineClosed`, and `PublishRefused { reason }`. Do not import internal crates or reproduce contact-list editing in application code.
 
 ## Durable publishing and restart
 
@@ -205,11 +190,11 @@ Goal: accept a post offline, show honest delivery, and resume after process loss
 2. Construct an unsigned `WriteIntent` with deliberate durability and routing.
 3. Publish and persist `receipt.id` in app-owned durable state immediately.
 4. Observe write facts independently from the query that renders the canonical row. The row is not an optimistic overlay created from the draft. Before `SigningState::Signed { event_id }` the public row exposes no intent/receipt id, so delivery UI must remain receipt-centric; correlate to a feed row only after the signed event id exists.
-5. On restart, reopen the same NMP store, restore the same signer identity, then page `publishQueue(afterReceiptID:limit:)` to see what is outstanding and `reattachReceipt(id:)` / `reattachReceipt(correlation:)` to resume the ones you care about. `limit` is a required `UInt8` and `afterReceiptID` is the exclusive cursor, so enumeration is a loop, never one call. Writes parked on a missing signer end only by `cancel` followed by `removePublishQueueEntry`.
+5. On restart, reopen the same NMP store, restore the same signer identity, then page `publish_queue(after, limit)` to see what is outstanding and `reattach_receipt(id)` to resume the ones you care about. `limit` is a `u8` and `after` is the exclusive cursor, so enumeration is a loop, never one call. Writes parked on a missing signer end only by `cancel` followed by `remove_publish_queue_entry`.
 6. Distinguish attached, not found, and retained-but-unreadable. Reattachment traverses the durable `WriteFact` history in finite pages before streaming onward; stream lag is the typed `FactStreamLagged`, not silent loss.
 7. Remove the app's receipt pointer only under explicit product retention policy after terminal evidence has been handled.
 
-`Ok` from `publish` is acceptance, so a returned id names a write actually in custody. Process loss before you persist the id is recoverable three ways: mint a `correlation` token and persist it *before* publishing, then reattach by token; page the whole queue with `publishQueue(afterReceiptID:limit:)`; or, when a rendered row is what you have, join from its event id with `publishQueue(forEventID:afterReceiptID:limit:)` (Kotlin: `publishQueueForEvent`). That join is paged rather than single-valued on purpose — more than one receipt can own identical event bytes, and choosing one would hide the rest. Do not blindly publish a replacement for an obligation you have not looked for first.
+`Ok` from `publish` is acceptance, so a returned id names a write actually in custody. Process loss before you persist the id is recoverable two ways: page the whole queue with `publish_queue(after, limit)`; or, when a rendered row is what you have, join from its event id with `publish_queue_for_event(event_id, after, limit)`. That join is paged rather than single-valued on purpose — more than one receipt can own identical event bytes, and choosing one would hide the rest. Do not blindly publish a replacement for an obligation you have not looked for first.
 
 ## Relay-debug sheet
 
@@ -217,13 +202,13 @@ Goal: explain why one query is partial without inventing a health score.
 
 Show three sections:
 
-- Query evidence: planned sources, each source status and reconciled-through value, plus explicit shortfalls. This is `RowBatch.evidence` — one entry per canonical query branch, in branch order, never collapsed across branches.
+- Query evidence: planned sources, each source status and reconciled-through value, plus explicit shortfalls. This is `Frame.evidence` — one entry per canonical query branch, in branch order, never collapsed across branches.
 - Engine diagnostics, per relay session: relay URL, the frozen access identity, exact wire filters, wire subscription count, authors served, lane counts, events by kind, per-filter coverage intervals, the NIP-11 evidence fields, and — snapshot-wide — dropped merge rules, uncovered-author count, and transport degradation.
-- Stuck writes: `DiagnosticsSnapshot.stalledWrites` is every durable obligation that cannot progress, answerable for an app holding no receipt at all, bounded to `stalledWriteTotals.detailLimit` rows in deterministic display order. Render the totals (`unroutable`/`unsignable`/`undeliverable`/`omittedDetails`) beside the detail rows: a bound on displayed rows must never read as a claim about how much is stuck. Reading it changes nothing.
+- Stuck writes: `DiagnosticsSnapshot.stalled_writes` is every durable obligation that cannot progress, answerable for an app holding no receipt at all, bounded to `stalled_write_totals.detail_limit` rows in deterministic display order. Render the totals (`unroutable`/`unsignable`/`undeliverable`/`omitted_details`) beside the detail rows: a bound on displayed rows must never read as a claim about how much is stuck. Reading it changes nothing.
 
-Correlate by `(relay, access)`, not by relay URL alone — one URL hosts distinct sessions (`.public` versus a `.nip42` identity), each with its own diagnostics row, and merging them would credit one identity's coverage to another. Then compare the semantic demand with diagnostics' wire-filter JSON. There is no public stable query/filter identifier joining one evidence row to one exact diagnostic filter, and Swift's filter encoder is internal. Useful questions are: Was a source planned? Does the observed wire shape match the demand? Did events arrive? Is coverage present? Was a local cap reported?
+Correlate by `(relay, access)`, not by relay URL alone — one URL hosts distinct sessions (public versus a NIP-42 identity), each with its own diagnostics row, and merging them would credit one identity's coverage to another. Then compare the semantic demand with diagnostics' wire-filter JSON. There is no public stable query/filter identifier joining one evidence row to one exact diagnostic filter. Useful questions are: Was a source planned? Does the observed wire shape match the demand? Did events arrive? Is coverage present? Was a local cap reported?
 
-Do not display `100% synced`, infer zero from missing coverage, or promise native fields for counters that stop short of your platform: `sessions_refused_by_subscription_budget` is reachable only from direct Rust, and `sessions_rejected_over_cap` stops at the raw UniFFI layer. Do not plan a local-store health indicator at all: no tier reports one, because a durable-store failure has no observable state — the operation fails, the engine carries on, and what was lost was progress, not an accepted write. `SourceStatus.awaitingAuth`/`authDenied`, `AuthPhase` and `DiagnosticsSnapshot.authSessions` are populated on both the WRITE path and a protected READ. Either one reaches AUTH the same way — the connect-time probe finds a challenge, or the transmitted request/event provokes one — and constructs real per-session state: policy consulted, signer bound, `authDenied` reachable. The hardcoded placeholder row — `epoch_sequence: None`, `challenge_hash: None`, `phase: AwaitingChallenge`, `policy_bound: false`, `signer_bound: false` — is only what a protected session reads as between connecting and its first challenge (#1889).
+Do not display `100% synced` or infer zero from missing coverage. Do not plan a local-store health indicator at all: no field reports one, because a durable-store failure has no observable state — the operation fails, the engine carries on, and what was lost was progress, not an accepted write. `SourceStatus::AwaitingAuth`/`AuthDenied`, `AuthPhase` and `DiagnosticsSnapshot.auth_sessions` are populated on both the WRITE path and a protected READ. Either one reaches AUTH the same way — the connect-time probe finds a challenge, or the transmitted request/event provokes one — and constructs real per-session state: policy consulted, signer bound, `AuthDenied` reachable. The hardcoded placeholder row — `epoch_sequence: None`, `challenge_hash: None`, `phase: AwaitingChallenge`, `policy_bound: false`, `signer_bound: false` — is only what a protected session reads as between connecting and its first challenge (#1889).
 
 ## Cache-first bounded list
 
