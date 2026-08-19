@@ -16,6 +16,19 @@ real resources, relay work explodes, resources are pathological, a capability
 needs app-side lifecycle hacks, or an internal concern leaks into application
 state.
 
+It lives at `crates/nmp-canary`: a NIP-29 rooms client where the people in
+rooms are portable identities you can follow off them. That shape was chosen
+because it puts two contradicting routing authorities inside one app — a
+NIP-29 event is pinned to its host relay by protocol, a kind:1 is routed by
+NIP-65 outbox to a discovered relay set — and sometimes inside one composed
+draft. `src/bin/canary.rs` is the exerciser.
+
+**The findings are the deliverable.** Each module opens with what the author
+wanted to write and what they had to write instead, and `findings` carries the
+same content as ranked data so the exerciser can print it and nothing has to be
+taken on trust. Where a suspicion turned out to be false, the module records
+that too, with the code that refutes it.
+
 ## Non-negotiable realism
 
 The app uses: the supported public `nmp` facade; the real runtime; the real
@@ -30,6 +43,23 @@ decide whether the app is correct, privileged commands a production
 application cannot issue, or any test-only constructor that bypasses normal
 lifecycle rules.
 
+The dependency list is itself evidence. `crates/nmp-canary` depends on `nmp`
+plus one line per capability, as intended, and deliberately does **not** depend
+on `nostr` or `nmp-grammar`. Every place where naming one of them would have
+been easier is recorded as a finding instead. The two dependencies that are
+neither — `serde_json` to read a kind:0 profile, `tokio` to await a group
+observation — are recorded as findings too rather than waved through.
+
+The exerciser is a binary and not a test, and that is load-bearing. It spawns
+and SIGKILLs child processes because several scenarios cannot be expressed any
+other way: a restart is only a restart if the writing process exited, since a
+second `Engine` over one store in one address space still holds the redb pages,
+the allocator and every decoded row; a crash is only a crash under SIGKILL,
+with no `shutdown` and no `Drop`; descriptors, threads and resident size are
+properties of a process; "the process exited" and "teardown returned" are
+different signals; and two processes contending for one store is not a function
+call.
+
 The app must not know whether NMP internally uses a query engine, a publish
 engine, request attempts, coverage maps, or lanes. **If a flow cannot be
 implemented without that knowledge, that is an NMP API finding, not an app
@@ -40,6 +70,17 @@ helper abstractions inside the app to conceal an awkward NMP API. A little
 duplication is preferable to hiding evidence.
 
 ## The relay lab
+
+**Outstanding.** `crates/nmp-canary` currently runs against a real `nmp::Engine`
+with a local store and **no reachable relay**: every write settles as
+`NoDestination` and every read is served from the canonical local store. That
+is enough to exercise the surface, which is what the crate exists to measure so
+far, and the crate says so in its own header. The relay half is a separate
+harness that does not exist yet — `ls crates/ | grep -i relay` returns nothing,
+and `grep -rni strfry crates/nmp-canary/` returns 0.
+
+The rest of this section is the standing requirement that harness must meet,
+not a description of something running today.
 
 The deterministic local lab launches real relay binaries as child processes
 with isolated temporary data directories. The app talks to them only over real
@@ -131,34 +172,34 @@ successful skip.
 
 ## The scenarios
 
-Seventeen scenarios, each covering one thing an ordinary app has to survive:
+`cargo run -p nmp-canary --bin canary [scenario]`, where the scenario is one of
+`surfaces`, `deletions`, `routing`, `restart`, `crash`, `contend`, `teardown`,
+`findings`, or `all` (the default). The `child-*` forms are spawned by the
+supervisors and are not meant to be typed.
 
-C1 cold start and live feed; C2 cache then offline restart; C3 multi-relay
-dedup and provenance; C4 reactive derived query; C5 replaceable, deletion and
-stale redelivery; C6 deep windowing; C7 normal publish; C8 publish while
-relays fail; C9 crash/restart during publication; C10 offline write then
-convergence; C11 capability end to end (NIP-22 comments); C12 identity
-freeze; C13 relay disconnect/reconnect; C15 NIP-42 AUTH; C16 slow consumer
-and backpressure; C17 repeated lifecycle churn; C18 clean shutdown.
+**The numbers live in the scenarios, not here.** Timings, byte counts and run
+counts are deliberately kept out of this document: repeated in prose they drift
+away from the assertion, lose the caveat that made them honest, and read as
+evidence when they are a recollection. Run the scenario.
 
-There is no C14. It was NIP-77 negentropy reconciliation, and negentropy was
-deleted from the tree (`72df7f96`); the numbering is not reassigned, because
-the scenario labels appear in issue history.
+### The C-numbered roster is history
 
-C11 was renamed (#1875). It was listed as "semantic capability" — a phrase
-that appeared exactly once in this entire repository, introduced by the commit
-that created the app. No definition anywhere, no matching public API, and no
-protocol category by that name. The name now comes from the public surface:
-"capability" is the engine's own feature-key word, and "NIP-22 comments" is the
-protocol's name.
+The deleted Swift application had a different plan — eighteen numbered
+scenarios, C1 through C18 — and the numbers still appear in issue history, so
+they are worth being able to resolve. Two things about that roster were
+recorded wrongly and are corrected here rather than carried forward:
 
-**The numbers live in the scenario files, not here.** Each scenario states its
-corpus size, cadence, cycle counts and committed bounds, and several state what
-their bound cannot resolve — a churn bound roughly three times the measured
-noise floor cannot see a smaller leak, and should say so. Timings, byte counts
-and run counts are deliberately kept out of this document: repeated in prose
-they drift away from the assertion, lose the caveat that made them honest, and
-read as evidence when they are a recollection. Run the scenario.
+- It claimed all eighteen scenario files existed. Seventeen did:
+  `git ls-tree fd839931^ apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/`
+  lists C1–C13 and C15–C18.
+- There was a C14, for NIP-77 negentropy reconciliation, whose subject was
+  deleted from the tree in `72df7f96`. `grep -ril 'nip77\|negentropy' crates/`
+  returns 0 against a control of 6 for `nip42`.
+
+C11 was also renamed (#1875) off "semantic capability" — a phrase that appeared
+exactly once in the repository, introduced by the commit that created the app,
+with no definition, no matching public API and no protocol category by that
+name.
 
 ## What the reference app must not become
 

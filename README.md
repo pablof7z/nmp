@@ -138,7 +138,8 @@ Tags: ✅ built · 🧪 experimental / partial · ⛔ not yet
 ## Status / maturity
 
 - **Pre-1.0, pre-v2.** The v2 *public API is freezing*; public names and shapes are provisional.
-- **Rust-only.** The Swift, Kotlin, Android, UniFFI/FFI and native-packaging estate was deleted; NMP is one Rust workspace with `crates/nmp` as its facade. A Rust reference application is being built against that facade — its charter is [`docs/internals/reference-app.md`](docs/internals/reference-app.md).
+- **Rust-only.** The Swift, Kotlin, Android, UniFFI/FFI and native-packaging estate was deleted; NMP is one Rust workspace with `crates/nmp` as its facade.
+- **The reference application is `crates/nmp-canary`** — a NIP-29 rooms client written against the public surface, whose job is to keep the API honest. Its findings are the deliverable, printed as ranked data by `cargo run -p nmp-canary --bin canary findings`. It exercises every surface against a real engine and a real store; the relay half is a separate harness that does not exist yet. Charter: [`docs/internals/reference-app.md`](docs/internals/reference-app.md).
 - **Pending:** several guarantees remain active work — see [`docs/known-gaps.md`](docs/known-gaps.md) (honest built-vs-missing record) and the [structural guarantees](docs/builder/28-patterns.md) (what the design excludes, and how).
 - The ownership boundary and behavioral invariants are the stable frame; the app-facing spelling is not.
 - **Headline (merged):** history is no longer a second noun — `observe(query, window)` makes windowing a policy on the one read noun, delivery mode derives from boundedness, and the #486 per-advance relay-REQ leak is fixed (deep scroll now holds O(1) live subscriptions per relay). Closes [#474](https://github.com/pablof7z/nmp/issues/474)/[#485](https://github.com/pablof7z/nmp/issues/485)/[#486](https://github.com/pablof7z/nmp/issues/486) — [#531](https://github.com/pablof7z/nmp/pull/531).
