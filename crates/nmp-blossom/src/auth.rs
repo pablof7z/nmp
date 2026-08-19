@@ -208,11 +208,17 @@ pub fn list_authorization_draft(
     )
 }
 
-/// What a caller is about to use an authorization FOR. `blob` is `Some`
-/// for verbs that bind a concrete blob (upload/delete); validation then
-/// requires that exact hash among the event's `x` tags.
+/// What a caller is about to use an authorization FOR, and WHOSE it must
+/// be. `author` is the identity the caller believes the authorization
+/// speaks for -- the same key handed to the draft builder; validation
+/// refuses any event whose signer is someone else
+/// ([`AuthValidationError::AuthorMismatch`]), because a BUD-11 server
+/// attributes the request to whoever signed, not to whoever drafted.
+/// `blob` is `Some` for verbs that bind a concrete blob (upload/delete);
+/// validation then requires that exact hash among the event's `x` tags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExpectedAuthorization {
+    pub author: PublicKey,
     pub verb: BlossomVerb,
     pub blob: Option<Sha256Hash>,
 }
@@ -225,6 +231,15 @@ pub struct ExpectedAuthorization {
 pub enum AuthValidationError {
     /// Not kind 24242.
     WrongKind { found: u16 },
+    /// The event was signed by an identity other than the expected author.
+    /// The signature itself is valid -- it is simply someone else's, so
+    /// [`Self::BadSignature`] cannot catch this. A BUD-11 server reads the
+    /// event's own pubkey as the acting identity, so an authorization
+    /// signed by the wrong account would be honored under that account.
+    AuthorMismatch {
+        expected: PublicKey,
+        found: PublicKey,
+    },
     /// The Schnorr signature (or event id) does not verify.
     BadSignature { reason: String },
     /// No `t` tag with a value at all.
@@ -263,6 +278,12 @@ impl std::fmt::Display for AuthValidationError {
             Self::WrongKind { found } => {
                 write!(f, "authorization event kind {found} is not 24242")
             }
+            Self::AuthorMismatch { expected, found } => write!(
+                f,
+                "authorization is signed by {} but was expected to speak for {}",
+                found.to_hex(),
+                expected.to_hex()
+            ),
             Self::BadSignature { reason } => {
                 write!(f, "authorization event signature is invalid: {reason}")
             }
@@ -312,10 +333,15 @@ pub struct SignedAuthorization {
 
 impl SignedAuthorization {
     /// Fail-closed BUD-11 validation. Check order (each failure its own
-    /// typed variant): kind, signature, `t` verb, `x` blob binding (when
-    /// `expected.blob` is `Some`; multiple `x` tags are allowed by spec but
-    /// the expected hash MUST be among them), `expiration` presence,
-    /// `expiration > now`, `created_at <= now`.
+    /// typed variant): kind, signature, author, `t` verb, `x` blob binding
+    /// (when `expected.blob` is `Some`; multiple `x` tags are allowed by
+    /// spec but the expected hash MUST be among them), `expiration`
+    /// presence, `expiration > now`, `created_at <= now`.
+    ///
+    /// The author check follows the signature check deliberately. Before
+    /// `verify()` the event's `pubkey` field is an unproven claim, so
+    /// refusing on it would report an identity nothing established;
+    /// afterwards `found` names the key that demonstrably signed.
     pub fn validate(
         event: Event,
         expected: &ExpectedAuthorization,
@@ -331,6 +357,12 @@ impl SignedAuthorization {
             .map_err(|error| AuthValidationError::BadSignature {
                 reason: error.to_string(),
             })?;
+        if event.pubkey != expected.author {
+            return Err(AuthValidationError::AuthorMismatch {
+                expected: expected.author,
+                found: event.pubkey,
+            });
+        }
         let (verb_value, extra_verb) = {
             let mut verb_tags = event
                 .tags
@@ -444,6 +476,7 @@ mod tests {
             .build(keys.public_key());
         let event = unsigned.sign_with_keys(&keys).expect("test signing");
         let expected = ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(blob),
         };
@@ -473,6 +506,7 @@ mod tests {
             .build(keys.public_key());
         let event = unsigned.sign_with_keys(&keys).expect("test signing");
         let expected = ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(blob),
         };
@@ -504,6 +538,7 @@ mod tests {
             .build(keys.public_key());
         let event = unsigned.sign_with_keys(&keys).expect("test signing");
         let expected = ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(blob),
         };
@@ -608,6 +643,7 @@ mod tests {
             .build(keys.public_key());
         let event = unsigned.sign_with_keys(&keys).expect("test signing");
         let expected = ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(blob),
         };
@@ -634,6 +670,7 @@ mod tests {
         .expect("expiration after created_at");
         let event = unsigned.sign_with_keys(&keys).expect("test signing");
         let expected = ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(blob),
         };
@@ -642,6 +679,48 @@ mod tests {
         assert_eq!(
             err,
             AuthValidationError::CreatedAtInFuture { created_at, now }
+        );
+    }
+
+    /// Invariant: an otherwise-perfect authorization drafted for author A
+    /// but signed by account B is refused as `AuthorMismatch`. Nothing
+    /// else can catch it -- the signature is genuinely valid for B, so
+    /// `BadSignature` cannot fire, and the verb, blob binding and clock
+    /// checks all pass. Without this variant the event ships as a
+    /// well-formed BUD-11 header acting as B while the caller believes it
+    /// speaks for A.
+    #[test]
+    fn an_authorization_signed_by_another_account_is_refused() {
+        let declared = nostr::Keys::generate();
+        let actual_signer = nostr::Keys::generate();
+        let blob = Sha256Hash::of(b"blob");
+        let now = Timestamp::from(1_700_000_000u64);
+        let unsigned = upload_authorization_draft(
+            actual_signer.public_key(),
+            blob,
+            Timestamp::from(now.as_secs() - 5),
+            Timestamp::from(now.as_secs() + 600),
+            "upload a blob",
+        )
+        .expect("expiration after created_at");
+        let event = unsigned
+            .sign_with_keys(&actual_signer)
+            .expect("test signing");
+        event.verify().expect("the signature is genuinely valid");
+
+        let expected = ExpectedAuthorization {
+            author: declared.public_key(),
+            verb: BlossomVerb::Upload,
+            blob: Some(blob),
+        };
+        let err = SignedAuthorization::validate(event, &expected, now)
+            .expect_err("an authorization signed by a different account must be refused");
+        assert_eq!(
+            err,
+            AuthValidationError::AuthorMismatch {
+                expected: declared.public_key(),
+                found: actual_signer.public_key(),
+            }
         );
     }
 }

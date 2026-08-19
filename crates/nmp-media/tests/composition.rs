@@ -45,6 +45,7 @@ fn sign_prepared(prepared: &PreparedUpload, keys: &Keys, now: Timestamp) -> Sign
     SignedAuthorization::validate(
         event,
         &ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(prepared.sha256()),
         },
@@ -235,6 +236,7 @@ async fn held_bytes_cannot_be_substituted() {
     let auth_b = SignedAuthorization::validate(
         event_b,
         &ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(hash_b),
         },

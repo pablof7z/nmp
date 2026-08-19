@@ -206,9 +206,15 @@ impl NmpEngine {
             }
         };
 
+        // `author` was read from the session BEFORE the signer ran, and
+        // `sign_event` freezes its own author from whatever account is
+        // current WHEN it runs. An account switch across that window would
+        // otherwise ship this upload under the new identity while the
+        // draft named the old one; the author expectation refuses it.
         let auth = nmp_blossom::SignedAuthorization::validate(
             signed,
             &nmp_blossom::ExpectedAuthorization {
+                author,
                 verb: nmp_blossom::BlossomVerb::Upload,
                 blob: Some(prepared.sha256()),
             },

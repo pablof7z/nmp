@@ -11,6 +11,12 @@ private func sha256Hex(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
+/// Lowercase hex of raw bytes -- test-only, so asserting a pubkey does not
+/// depend on any NMP-owned encoding path.
+private func hexString(_ data: Data) -> String {
+    data.map { String(format: "%02x", $0) }.joined()
+}
+
 /// A minimal scripted HTTP/1.1 loopback server for `uploadBlossom`'s real
 /// `PUT /upload` round trip (#971) -- reads the FULL request (headers AND
 /// the `Content-Length` body) before replying, mirroring the Rust-side
@@ -196,5 +202,67 @@ final class UploadBlossomTests: XCTestCase {
         } catch let error as UploadBlossomError {
             XCTAssertEqual(error, .signedOut)
         }
+    }
+
+    /// FALSIFIER (author binding): the typed refusal survives to Swift. A
+    /// draft composed for account A, signed by the engine while account B
+    /// is current, is refused as `.authorMismatch` -- the signature is
+    /// genuinely valid for B, so `.badSignature` cannot fire and every
+    /// other BUD-11 check passes. Without this the SDK hands back an
+    /// authorization acting as B while the caller believes it speaks for A.
+    @MainActor
+    func testEngineSignedAuthorizationUnderADifferentAccountIsRefused() async throws {
+        let engine = try NMPEngine(config: NMPConfig())
+        defer { engine.shutdown() }
+
+        let declared = try engine.session.add(privateKey: .generate())
+        let signing = try engine.session.add(privateKey: .generate(), makeCurrent: true)
+        let declaredHex = hexString(declared.publicKey.bytes)
+        let signingHex = hexString(signing.publicKey.bytes)
+        XCTAssertNotEqual(declaredHex, signingHex)
+
+        let blobHex = sha256Hex(Data("swift author-binding blob".utf8))
+        let now = UInt64(Date().timeIntervalSince1970)
+        let draft = try blossomUploadAuthorizationDraft(
+            authorPubkeyHex: declaredHex,
+            blobSha256Hex: blobHex,
+            createdAt: now - 5,
+            expiration: now + 600,
+            description: "upload as the declared account"
+        )
+        XCTAssertEqual(draft.authorPubkeyHex, declaredHex)
+
+        // `signEvent` freezes the author from the CURRENT account, which
+        // here is not the one the draft was composed for.
+        let signed = try await engine.signEvent(draft.signRequest)
+        XCTAssertEqual(signed.pubkey, signingHex)
+
+        do {
+            _ = try BlossomAuthorization.validate(
+                signedEvent: signed,
+                authorPubkeyHex: draft.authorPubkeyHex,
+                verb: .upload,
+                blobSha256Hex: blobHex,
+                now: now
+            )
+            XCTFail("an authorization signed by another account must never validate")
+        } catch let error as BlossomAuthError {
+            XCTAssertEqual(
+                error,
+                .authorMismatch(expectedPubkeyHex: declaredHex, foundPubkeyHex: signingHex)
+            )
+        }
+
+        // The refusal is about identity, not a blanket rejection: the same
+        // signed event validates under the account that actually signed it.
+        let auth = try BlossomAuthorization.validate(
+            signedEvent: signed,
+            authorPubkeyHex: signingHex,
+            verb: .upload,
+            blobSha256Hex: blobHex,
+            now: now
+        )
+        XCTAssertEqual(auth.verb, .upload)
+        XCTAssertEqual(auth.blobSha256Hex, blobHex)
     }
 }

@@ -44,6 +44,7 @@ fn signed_upload_auth(keys: &Keys, blob: Sha256Hash, now: Timestamp) -> SignedAu
     SignedAuthorization::validate(
         event,
         &ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(blob),
         },
@@ -66,6 +67,7 @@ fn signed_delete_auth(keys: &Keys, blob: Sha256Hash, now: Timestamp) -> SignedAu
     SignedAuthorization::validate(
         event,
         &ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Delete,
             blob: Some(blob),
         },
@@ -87,6 +89,7 @@ fn signed_list_auth(keys: &Keys, now: Timestamp) -> SignedAuthorization {
     SignedAuthorization::validate(
         event,
         &ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::List,
             blob: None,
         },
@@ -228,6 +231,7 @@ async fn delete_authorization_binds_exactly_one_blob() {
     let auth_widened = SignedAuthorization::validate(
         two_blob_event,
         &ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Delete,
             blob: Some(hash_a),
         },
@@ -353,6 +357,7 @@ async fn verb_confusion_is_refused_client_side() {
     let err = SignedAuthorization::validate(
         upload_event,
         &ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::List,
             blob: None,
         },

@@ -43,6 +43,7 @@ fn signed_upload_auth(keys: &Keys, blob: &[u8], now: Timestamp) -> SignedAuthori
     SignedAuthorization::validate(
         event,
         &ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(hash),
         },
@@ -162,6 +163,7 @@ async fn upload_authorization_binds_exact_sha256_verb_and_expiration() {
     let err = SignedAuthorization::validate(
         bound_to_other,
         &ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(hash),
         },
@@ -185,6 +187,7 @@ async fn upload_authorization_binds_exact_sha256_verb_and_expiration() {
     let err = SignedAuthorization::validate(
         delete_auth,
         &ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(hash),
         },
@@ -213,6 +216,7 @@ async fn upload_authorization_binds_exact_sha256_verb_and_expiration() {
     let err = SignedAuthorization::validate(
         no_expiration,
         &ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(hash),
         },
@@ -236,6 +240,7 @@ async fn upload_authorization_binds_exact_sha256_verb_and_expiration() {
     let err = SignedAuthorization::validate(
         expired_auth,
         &ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(hash),
         },
@@ -267,6 +272,7 @@ async fn upload_authorization_binds_exact_sha256_verb_and_expiration() {
     let err = SignedAuthorization::validate(
         tampered,
         &ExpectedAuthorization {
+            author: keys.public_key(),
             verb: BlossomVerb::Upload,
             blob: Some(hash),
         },
@@ -540,4 +546,54 @@ async fn oversized_descriptor_response_is_bounded() {
         .expect_err("an oversized body must be bounded");
     assert_eq!(err, UploadError::ResponseTooLarge { limit_bytes: 256 });
     mock.join();
+}
+
+/// FALSIFIER (author binding): an authorization DECLARING author A but
+/// SIGNED by account B must be refused. The signature is genuinely valid
+/// (for B), so `BadSignature` cannot fire; without an author check the
+/// event validates and ships as a BUD-11 header attributed to B while the
+/// caller believes it speaks for A.
+#[test]
+fn an_authorization_signed_by_a_different_account_is_refused() {
+    let declared = Keys::generate();
+    let actual_signer = Keys::generate();
+    let hash = Sha256Hash::of(b"author-binding blob");
+    let now = Timestamp::from(1_700_000_000u64);
+
+    let draft = upload_authorization_draft(
+        declared.public_key(),
+        hash,
+        Timestamp::from(now.as_secs() - 5),
+        Timestamp::from(now.as_secs() + 600),
+        "upload as A",
+    )
+    .expect("a future expiration");
+
+    // The engine sign-only path: the author is frozen from the CURRENT
+    // account, which here is not the one the draft declared.
+    let event = EventBuilder::new(draft.kind, draft.content.clone())
+        .tags(draft.tags.clone().to_vec())
+        .custom_created_at(draft.created_at)
+        .sign_with_keys(&actual_signer)
+        .expect("test signing");
+    assert_eq!(event.pubkey, actual_signer.public_key());
+    assert_ne!(event.pubkey, declared.public_key());
+
+    let err = SignedAuthorization::validate(
+        event,
+        &ExpectedAuthorization {
+            author: declared.public_key(),
+            verb: BlossomVerb::Upload,
+            blob: Some(hash),
+        },
+        now,
+    )
+    .expect_err("an authorization signed by an account other than the declared author");
+    assert_eq!(
+        err,
+        AuthValidationError::AuthorMismatch {
+            expected: declared.public_key(),
+            found: actual_signer.public_key(),
+        }
+    );
 }

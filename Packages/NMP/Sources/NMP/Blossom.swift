@@ -10,14 +10,16 @@
 //   let draft = try blossomUploadAuthorizationDraft(
 //       authorPubkeyHex: currentAccount, blobSha256Hex: hash,
 //       createdAt: now, expiration: now + 300, description: "upload")
-//   // Engine sign-only path (the author is frozen from the ACTIVE
-//   // ACCOUNT, so `authorPubkeyHex` must be that account's pubkey):
+//   // Engine sign-only path (`signEvent` freezes the author from whatever
+//   // account is current when it runs, so validation is handed the draft's
+//   // own author and refuses a signature by anyone else):
 //   let signed = try await engine.signEvent(draft.signRequest)
 //   let auth = try BlossomAuthorization.validate(
-//       signedEvent: signed, verb: .upload, blobSha256Hex: hash, now: now)
+//       signedEvent: signed, authorPubkeyHex: draft.authorPubkeyHex,
+//       verb: .upload, blobSha256Hex: hash, now: now)
 //   // External signers instead sign `draft.unsignedEventJSON` and pass the
 //   // signed event's canonical JSON to `BlossomAuthorization.validate(
-//   // signedEventJSON:verb:blobSha256Hex:now:)`.
+//   // signedEventJSON:authorPubkeyHex:verb:blobSha256Hex:now:)`.
 //
 // THREADING: the underlying FFI client methods BLOCK for up to the request
 // deadline. `BlossomClient`'s async methods dispatch them onto a global
@@ -144,6 +146,11 @@ public enum BlossomAuthError: Error, Sendable, Hashable {
     case invalidEventJson(reason: String)
     case expirationNotAfterCreatedAt(createdAt: UInt64, expiration: UInt64)
     case wrongKind(found: UInt16)
+    /// The event was signed by an identity other than the expected author.
+    /// The signature is valid, just someone else's, so `.badSignature`
+    /// cannot catch it -- this is what refuses an authorization drafted
+    /// for one account and signed by whichever account is current.
+    case authorMismatch(expectedPubkeyHex: String, foundPubkeyHex: String)
     case badSignature(reason: String)
     case missingVerb
     case multipleVerbs
@@ -161,6 +168,9 @@ public enum BlossomAuthError: Error, Sendable, Hashable {
         case .ExpirationNotAfterCreatedAt(let createdAtSecs, let expirationSecs):
             self = .expirationNotAfterCreatedAt(createdAt: createdAtSecs, expiration: expirationSecs)
         case .WrongKind(let found): self = .wrongKind(found: found)
+        case .AuthorMismatch(let expectedPubkeyHex, let foundPubkeyHex):
+            self = .authorMismatch(
+                expectedPubkeyHex: expectedPubkeyHex, foundPubkeyHex: foundPubkeyHex)
         case .BadSignature(let reason): self = .badSignature(reason: reason)
         case .MissingVerb: self = .missingVerb
         case .MultipleVerbs: self = .multipleVerbs
@@ -475,8 +485,15 @@ extension NMPEngine {
 /// An UNSIGNED kind:24242 authorization draft (`FfiBlossomAuthDraft`
 /// mirror). Sign it via the engine (`signRequest` ->
 /// `NMPEngine.signEvent`) or hand `unsignedEventJSON` to an external
-/// signer; nothing in this SDK holds keys.
+/// signer; nothing in this SDK holds keys. Either signer decides the
+/// author, so pass `authorPubkeyHex` back to `BlossomAuthorization.
+/// validate`: a signature by any other identity is refused as
+/// `.authorMismatch`.
 public struct BlossomAuthorizationDraft: Sendable, Hashable {
+    /// The identity this draft was composed for. Hand it to
+    /// `BlossomAuthorization.validate` -- that is what binds the signature
+    /// to the identity the caller meant.
+    public let authorPubkeyHex: String
     /// The draft as canonical unsigned-event JSON, for external signers.
     public let unsignedEventJSON: String
     /// The blob this draft binds via its `x` tag (`nil` for `list`).
@@ -489,6 +506,7 @@ public struct BlossomAuthorizationDraft: Sendable, Hashable {
     public let content: String
 
     init(_ ffi: FfiBlossomAuthDraft) {
+        authorPubkeyHex = ffi.authorPubkeyHex
         unsignedEventJSON = ffi.unsignedEventJson
         blobSha256Hex = ffi.blobSha256Hex
         verb = BlossomVerb(ffi.verb)
@@ -499,8 +517,8 @@ public struct BlossomAuthorizationDraft: Sendable, Hashable {
     }
 
     /// The engine sign-only request for this exact draft. `NMPEngine.
-    /// signEvent` freezes the author from the CURRENT ACCOUNT, so the
-    /// draft's `authorPubkeyHex` must be that account's pubkey.
+    /// signEvent` freezes the author from whichever account is current
+    /// when it runs; validation compares that against `authorPubkeyHex`.
     public var signRequest: NMPUnsignedEvent {
         NMPUnsignedEvent(createdAt: createdAt, kind: kind, tags: tags, content: content)
     }
@@ -591,13 +609,17 @@ public final class BlossomAuthorization: @unchecked Sendable {
     }
 
     /// Fail-closed BUD-11 validation of a signed event supplied as
-    /// canonical event JSON (the external-signer path). `verb` is what the
+    /// canonical event JSON (the external-signer path). `authorPubkeyHex`
+    /// is the identity the authorization must speak for -- pass
+    /// `BlossomAuthorizationDraft.authorPubkeyHex`; a signature by any
+    /// other account is `.authorMismatch`. `verb` is what the
     /// caller is ABOUT to use the authorization for; `blobSha256Hex` binds
     /// the exact blob for verbs that grant one (`upload`/`delete`; mirror
     /// validates under `.upload`); `now` is the caller's clock (unix
     /// seconds).
     public static func validate(
         signedEventJSON: String,
+        authorPubkeyHex: String,
         verb: BlossomVerb,
         blobSha256Hex: String?,
         now: UInt64
@@ -606,6 +628,7 @@ public final class BlossomAuthorization: @unchecked Sendable {
             blossomAuthRethrowing {
                 try FfiBlossomAuthorization.validate(
                     signedEventJson: signedEventJSON,
+                    authorPubkeyHex: authorPubkeyHex,
                     verb: verb.toFfi(),
                     blobSha256Hex: blobSha256Hex,
                     nowSecs: now
@@ -616,9 +639,13 @@ public final class BlossomAuthorization: @unchecked Sendable {
 
     /// Fail-closed BUD-11 validation of the exact value
     /// `NMPEngine.signEvent` returns (the engine sign-only path) -- the
-    /// same checks as `validate(signedEventJSON:...)`.
+    /// same checks as `validate(signedEventJSON:...)`. `signEvent` signs
+    /// with whichever account the engine currently holds, which need not
+    /// be the one the draft was built for; that divergence surfaces here
+    /// as `.authorMismatch`.
     public static func validate(
         signedEvent: NMPSignedEvent,
+        authorPubkeyHex: String,
         verb: BlossomVerb,
         blobSha256Hex: String?,
         now: UInt64
@@ -636,6 +663,7 @@ public final class BlossomAuthorization: @unchecked Sendable {
             blossomAuthRethrowing {
                 try FfiBlossomAuthorization.validateSignedEvent(
                     event: event,
+                    authorPubkeyHex: authorPubkeyHex,
                     verb: verb.toFfi(),
                     blobSha256Hex: blobSha256Hex,
                     nowSecs: now
